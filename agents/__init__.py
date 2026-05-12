@@ -1,0 +1,4 @@
+# Phase 36: Agents module
+from .shared_reasoning_substrate import SharedReasoningSubstrate
+from .distributed_cognition_exchange import DistributedCognitionExchange
+from .persistent_agent_ecosystem import PersistentAgentEcosystem

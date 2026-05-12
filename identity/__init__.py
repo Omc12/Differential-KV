@@ -1,0 +1,4 @@
+# Phase 36: Identity module
+from .persistent_cognitive_identity import PersistentCognitiveIdentity
+from .manifold_fingerprint_engine import ManifoldFingerprintEngine
+from .reasoning_signature_tracker import ReasoningSignatureTracker
