@@ -53,6 +53,13 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     n, d = deltas.shape
     rank = min(rank, n, d)
 
+    if deltas.numel() == 0:
+        return LowRankDelta(
+            U=torch.zeros(n, rank, dtype=torch.float16),
+            V=torch.zeros(rank, d, dtype=torch.float32),
+            shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0
+        )
+
     scale = deltas.abs().max().item()
     if scale < 1e-9:
         return LowRankDelta(

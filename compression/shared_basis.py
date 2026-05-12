@@ -27,6 +27,7 @@ class SharedBasisDelta:
     basis_id: str
     scale: float
     shape: tuple             # (n, feat_dim)
+    rank: int                # Added rank field
     sparse_indices: Optional[torch.Tensor] = None # [k] int32
     sparse_values: Optional[torch.Tensor] = None  # [k] float16
 
@@ -64,12 +65,18 @@ class SharedBasisManager:
         self, 
         deltas: torch.Tensor, 
         basis_id: str, 
+        rank: Optional[int] = None,
         sparse_ratio: float = 0.0,
         scale: float = 1.0
     ) -> SharedBasisDelta:
         """Projects deltas onto a shared basis."""
         basis = self.get_basis(basis_id)
-        V = basis.V.to(deltas.device)
+        
+        # Use provided rank or full basis rank
+        r = rank if rank is not None else basis.rank
+        r = min(r, basis.rank)
+        
+        V = basis.V[:r, :].to(deltas.device)
         
         # Project: U = Deltas @ V.T
         # deltas: [n, d], V: [r, d] -> U: [n, r]
@@ -78,6 +85,7 @@ class SharedBasisManager:
         
         s_idx, s_val = None, None
         if sparse_ratio > 0:
+            # Reconstruct to compute residual for sparse repair
             recon = (U_fp16.float() @ V) * scale
             residual = deltas - recon
             
@@ -85,6 +93,8 @@ class SharedBasisManager:
             k = int(n * d * sparse_ratio)
             if k > 0:
                 flat_res = residual.abs().view(-1)
+                # Ensure we don't take more than available elements
+                k = min(k, flat_res.numel())
                 values, indices = torch.topk(flat_res, k)
                 s_val = residual.view(-1)[indices].to(torch.float16)
                 s_idx = indices.to(torch.int32)
@@ -93,6 +103,7 @@ class SharedBasisManager:
             U=U_fp16,
             basis_id=basis_id,
             scale=scale,
+            rank=r,
             sparse_indices=s_idx,
             sparse_values=s_val,
             shape=deltas.shape
@@ -101,12 +112,14 @@ class SharedBasisManager:
     def decompress_block(self, sbd: SharedBasisDelta) -> torch.Tensor:
         """Reconstruct deltas from coefficients and shared basis."""
         basis = self.get_basis(sbd.basis_id)
-        V = basis.V.to(sbd.U.device)
+        # Use only the rank specified in the delta
+        V = basis.V[:sbd.rank, :].to(sbd.U.device)
         
         recon = (sbd.U.float() @ V) * sbd.scale
         
         if sbd.sparse_indices is not None and sbd.sparse_indices.numel() > 0:
             flat_recon = recon.view(-1)
+            # scatter_add_ to handle sparse repair
             flat_recon.scatter_add_(0, sbd.sparse_indices.long(), sbd.sparse_values.float())
             recon = flat_recon.view(sbd.shape)
             
