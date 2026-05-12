@@ -145,6 +145,32 @@ class DiffKVHFWrapper:
                 token_indices=list(range(len(tokens))),
                 mode="int8"
             )
+        elif self.mode == "shared_basis":
+            # Determine if we need a new basis
+            # For simplicity, we'll use a Layer-Shared basis: 
+            # The first block of the layer defines the basis for all subsequent blocks.
+            basis_id = 0 # Default basis ID
+            if basis_id not in self.manager.basis_cache.get(layer_idx, {}):
+                # Extract basis from this block
+                V = extract_basis(deltas_flat.float(), self.rank)
+                self.manager.add_basis(layer_idx, basis_id, V)
+            else:
+                V = self.manager.basis_cache[layer_idx][basis_id]
+            
+            # Compress using shared basis
+            sb = compress_shared_basis(deltas_flat.float(), V, basis_id, sparse_ratio=self.config.get("sparse_ratio", 0.0))
+            
+            block = KVBlock(
+                anchor_idx=0,
+                anchor_kv=anchor.squeeze(0),
+                U=sb.U,
+                basis_id=sb.basis_id,
+                scale=sb.scale,
+                sparse_indices=sb.sparse_indices,
+                sparse_values=sb.sparse_values,
+                token_indices=list(range(len(tokens))),
+                mode="shared_basis"
+            )
         elif self.mode == "fp16":
             # Store everything as raw deltas (simulated)
             block = KVBlock(

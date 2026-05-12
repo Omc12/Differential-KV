@@ -26,6 +26,7 @@ class KVBlock:
     token_indices: List[int] = None
     mode: str = "lowrank" # lowrank, int8, periodic
     q_deltas: Optional[torch.Tensor] = None # For int8 mode
+    basis_id: Optional[int] = None # For shared basis
     
     @property
     def is_compressed(self) -> bool:
@@ -48,11 +49,17 @@ class KVRuntimeManager:
         
         # storage: layer_idx -> list of KVBlock
         self.cache: Dict[int, List[KVBlock]] = {}
+        self.basis_cache: Dict[int, Dict[int, torch.Tensor]] = {} # layer_idx -> {basis_id: V}
         
     def add_block(self, layer_idx: int, block: KVBlock):
         if layer_idx not in self.cache:
             self.cache[layer_idx] = []
         self.cache[layer_idx].append(block)
+        
+    def add_basis(self, layer_idx: int, basis_id: int, V: torch.Tensor):
+        if layer_idx not in self.basis_cache:
+            self.basis_cache[layer_idx] = {}
+        self.basis_cache[layer_idx][basis_id] = V
         
     def reconstruct_layer(self, layer_idx: int, target_dtype: torch.dtype = torch.float16) -> torch.Tensor:
         """
@@ -77,11 +84,15 @@ class KVRuntimeManager:
             curr_idx += 1
             
             # Deltas
-            if block.mode == "lowrank" or block.mode == "lowrank_sparse":
-                if block.U is not None:
+            if block.mode in ["lowrank", "lowrank_sparse", "shared_basis"]:
+                V = block.V
+                if block.mode == "shared_basis" and block.basis_id is not None:
+                    V = self.basis_cache.get(layer_idx, {}).get(block.basis_id)
+                
+                if block.U is not None and V is not None:
                     recon_deltas = TritonDiffKV.reconstruct_lowrank_sparse(
                         block.U,
-                        block.V,
+                        V,
                         block.anchor_kv.reshape(-1),
                         block.sparse_indices,
                         block.sparse_values,
@@ -129,5 +140,6 @@ class KVRuntimeManager:
         return total_bytes
 
     def clear(self):
-        """Clear all cached blocks."""
+        """Clear all cached blocks and bases."""
         self.cache = {}
+        self.basis_cache = {}
