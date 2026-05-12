@@ -67,7 +67,7 @@ def run_stability_experiment():
     # 1. Layer-wise Drift Rates
     print(f"\n--- Layer-wise Drift Rates ---")
     layer_analyzer = LayerAnalyzer()
-    kv_layers = layer_analyzer.generate_synthetic_layers(num_layers=12, seq_len=1024)
+    kv_layers = layer_analyzer.generate_synthetic_layers(num_layers=12, seq_len=1024, num_heads=32, head_dim=128)
     layer_drifts = {}
     for li, lkv in kv_layers.items():
         wins = []

@@ -102,8 +102,9 @@ def plot_headwise_analysis(results_path: Path, output_dir: Path):
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.set_title("Head-Wise Compressibility (Rank required for 90% Energy)")
     
-    heads = [h["head_idx"] for h in data]
-    ranks = [h["rank_90"] for h in data]
+    stats = data["head_stats"]
+    heads = [h["head_idx"] for h in stats]
+    ranks = [h["rank_90"] for h in stats]
     
     colors = plt.cm.plasma(np.array(ranks) / max(ranks))
     ax.bar(heads, ranks, color=colors, edgecolor="#0D1117")

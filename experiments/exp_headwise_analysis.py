@@ -17,6 +17,7 @@ from typing import List, Dict
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.kv_generator import KVGenerator
+from compression.lowrank import compress_lowrank, decompress_lowrank
 from analysis.lowrank_analyzer import LowRankAnalyzer
 
 # Config
