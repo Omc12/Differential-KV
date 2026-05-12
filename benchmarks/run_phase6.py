@@ -284,33 +284,57 @@ class Phase6Runner:
         self.generate_report(all_metrics)
 
     def generate_plots(self, metrics):
-        # 1. VRAM Efficiency Plot
+        # 1. VRAM Usage vs Rank (scaling efficiency)
         plt.figure(figsize=(10, 6))
         for mode in SHARING_MODES:
             subset = [m for m in metrics if m["mode"] == mode and m["seq_len"] == self.args.seq_lens[-1]]
+            if not subset: continue
             ranks = [m["rank"] for m in subset]
             mems = [m["theoretical_mb"] for m in subset]
             plt.plot(ranks, mems, marker='o', label=mode)
         
-        plt.title(f"Theoretical VRAM Usage vs Rank (SeqLen={self.args.seq_lens[-1]})")
+        plt.title(f"VRAM Scaling Efficiency (SeqLen={self.args.seq_lens[-1]})")
         plt.xlabel("Rank")
-        plt.ylabel("VRAM (MB)")
+        plt.ylabel("Theoretical VRAM (MB)")
         plt.legend()
         plt.grid(True, alpha=0.3)
+        plt.savefig(self.results_dir / "basis_scaling_efficiency.png")
         plt.savefig(self.results_dir / "shared_basis_vram.png")
         plt.close()
 
-        # 2. Quality vs Sharing Mode
+        # 2. Quality vs Sharing Mode (RMSE)
         plt.figure(figsize=(10, 6))
-        for rank in [16]:
-            subset = [m for m in metrics if m["rank"] == rank and m["seq_len"] == self.args.seq_lens[-1]]
+        latest_sl = self.args.seq_lens[-1]
+        for rank in RANK_CHOICES:
+            subset = [m for m in metrics if m["rank"] == rank and m["seq_len"] == latest_sl]
+            if not subset: continue
             modes = [m["mode"] for m in subset]
             rmses = [m["rmse"] for m in subset]
-            plt.bar(modes, rmses, alpha=0.7, label=f"Rank {rank}")
+            plt.plot(modes, rmses, marker='s', label=f"Rank {rank}")
         
-        plt.title("Reconstruction RMSE by Sharing Mode")
+        plt.title("Reconstruction Quality: Local vs Shared Low-Rank")
         plt.ylabel("RMSE")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.savefig(self.results_dir / "shared_basis_quality.png")
+        plt.savefig(self.results_dir / "shared_vs_local_lowrank.png")
+        plt.close()
+
+        # 3. Bandwidth / Throughput Estimates
+        plt.figure(figsize=(10, 6))
+        for mode in SHARING_MODES:
+            subset = [m for m in metrics if m["mode"] == mode and m["seq_len"] == latest_sl]
+            if not subset: continue
+            ranks = [m["rank"] for m in subset]
+            latencies = [m["recon_ms_per_block"] for m in subset]
+            plt.plot(ranks, latencies, marker='^', label=mode)
+        
+        plt.title("Reconstruction Latency (Bandwidth Proxy)")
+        plt.xlabel("Rank")
+        plt.ylabel("Latency (ms/block)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(self.results_dir / "bandwidth_shared_basis.png")
         plt.close()
 
     def generate_report(self, metrics):
