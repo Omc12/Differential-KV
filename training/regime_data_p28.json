@@ -1,0 +1,3902 @@
+[
+    {
+        "features": {
+            "latent_drift": 0.6202374071155322,
+            "curvature": 0.7790524363550928,
+            "entropy_growth": 0.1911468583528974,
+            "resonance_coherence": 0.9039150613205608,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1543575908879773,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10644500355093639
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6773410485788773,
+            "curvature": 0.947421613391431,
+            "entropy_growth": 0.15168656667109046,
+            "resonance_coherence": 0.814758357291968,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13201638891384315,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2947522361317254
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6314692055057819,
+            "curvature": 0.8863902358839777,
+            "entropy_growth": 0.2477821844351411,
+            "resonance_coherence": 0.9244688471141771,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15290918811355814,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14012161974462908
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6110066405293235,
+            "curvature": 0.9512988021653013,
+            "entropy_growth": 0.24661711827242505,
+            "resonance_coherence": 0.8328690599911296,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2787645109027247,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21439680807211833
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7588888051605509,
+            "curvature": 0.8664699523640355,
+            "entropy_growth": 0.10339078884020224,
+            "resonance_coherence": 0.8451262431925043,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.26640300692939356,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10943954843379917
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4960494656208896,
+            "curvature": 0.9690645979669763,
+            "entropy_growth": 0.19793131413034404,
+            "resonance_coherence": 0.85284770329031,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15921213231598935,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14428014370783182
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5064756155867643,
+            "curvature": 0.9476782792510776,
+            "entropy_growth": 0.12197277480788911,
+            "resonance_coherence": 0.8507958488684363,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11714282597026059,
+            "recursion_depth": 0,
+            "token_acceleration": 0.25879491670534316
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7203474526899335,
+            "curvature": 0.9105126120784166,
+            "entropy_growth": 0.26691967005778117,
+            "resonance_coherence": 0.9133466266678535,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20951575382599336,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1432262405417643
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6769009546366487,
+            "curvature": 0.813956934947614,
+            "entropy_growth": 0.19101206402303578,
+            "resonance_coherence": 0.8683981163035912,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22361573780764277,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10737508180052933
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5534279042788954,
+            "curvature": 0.73205536762649,
+            "entropy_growth": 0.27276272246675004,
+            "resonance_coherence": 0.9929412432837996,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20070543857103182,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21134465161853727
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5633738428910997,
+            "curvature": 0.9539547109547051,
+            "entropy_growth": 0.23584443564451524,
+            "resonance_coherence": 0.9455699283890165,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18340338437294035,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14266751445008297
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6054102374839508,
+            "curvature": 0.9818326230957762,
+            "entropy_growth": 0.23982611035546367,
+            "resonance_coherence": 0.9316781229016604,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2576202461291326,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2396063391230004
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43741467833208714,
+            "curvature": 0.8673988562700532,
+            "entropy_growth": 0.14799688347294948,
+            "resonance_coherence": 0.8361049356441176,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2188757739165844,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1345700045083869
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5211276597082549,
+            "curvature": 0.7705289616357699,
+            "entropy_growth": 0.17365138634262328,
+            "resonance_coherence": 0.9461120299430316,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.188313040374543,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12870422271386084
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.41092858875155763,
+            "curvature": 0.764264440599732,
+            "entropy_growth": 0.1988667733173679,
+            "resonance_coherence": 0.8801134312212312,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.28206873867123045,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10472283601207465
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6701474257342577,
+            "curvature": 0.9841978638786918,
+            "entropy_growth": 0.16585857693867762,
+            "resonance_coherence": 0.9180564545034231,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.26994228907948764,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10627020644915086
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5848539204189102,
+            "curvature": 0.870697512136283,
+            "entropy_growth": 0.22622593699476004,
+            "resonance_coherence": 0.8620896393375419,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2088236083151958,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20357679144143365
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.48283132523669364,
+            "curvature": 0.9363005340316032,
+            "entropy_growth": 0.14943366343845638,
+            "resonance_coherence": 0.9730652441920326,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.28601286633837875,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1794626211017199
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6475186122455242,
+            "curvature": 0.7435867191455332,
+            "entropy_growth": 0.12964382171643302,
+            "resonance_coherence": 0.8144422332314264,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12325440635292156,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2068867390277127
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4208457035649359,
+            "curvature": 0.8451443628049149,
+            "entropy_growth": 0.15774043702515864,
+            "resonance_coherence": 0.8223825059469487,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2527999864641455,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14163386257857125
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5275890190835455,
+            "curvature": 0.7538771040836016,
+            "entropy_growth": 0.15624041057156557,
+            "resonance_coherence": 0.9693892765567196,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2710951753829398,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10163351345325532
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7095773683192657,
+            "curvature": 0.7914349526384095,
+            "entropy_growth": 0.1713472684232819,
+            "resonance_coherence": 0.8931915494463905,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16475922921105096,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18440689469632754
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5451182325762824,
+            "curvature": 0.8132284321905401,
+            "entropy_growth": 0.14763574298510107,
+            "resonance_coherence": 0.8341283503453334,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1817961311085772,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21518424406468034
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5912784544015133,
+            "curvature": 0.8339967462524737,
+            "entropy_growth": 0.17368041500925677,
+            "resonance_coherence": 0.9599300709647993,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.141468979406362,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18445026017551466
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.48621891860236155,
+            "curvature": 0.9300600037253861,
+            "entropy_growth": 0.2265588710674727,
+            "resonance_coherence": 0.9870340804118081,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13900664637153118,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1818198673643162
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.597747219270171,
+            "curvature": 0.9461808363985412,
+            "entropy_growth": 0.16532342491879568,
+            "resonance_coherence": 0.8206433271274298,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18602349295689075,
+            "recursion_depth": 0,
+            "token_acceleration": 0.15375009119483138
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6036352762154137,
+            "curvature": 0.8213500592391421,
+            "entropy_growth": 0.27352618961606273,
+            "resonance_coherence": 0.921865307709277,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.24803709176923575,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22973120994771506
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6434919912718006,
+            "curvature": 0.9998806501179642,
+            "entropy_growth": 0.17647353919170763,
+            "resonance_coherence": 0.8376303002768255,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.190497878612309,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13336466509805286
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5507547991179429,
+            "curvature": 0.8304845036806979,
+            "entropy_growth": 0.2900310938100068,
+            "resonance_coherence": 0.9161382727661226,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.14195000912202504,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20740926196335707
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4688445380170662,
+            "curvature": 0.8897912298818329,
+            "entropy_growth": 0.2580989569678388,
+            "resonance_coherence": 0.9975778299011795,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15361967348118313,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1875684183197095
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.46659654052644317,
+            "curvature": 0.8403481961080318,
+            "entropy_growth": 0.14837273968124137,
+            "resonance_coherence": 0.8967436178466176,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1994818110086568,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17304274395278615
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4585097049285376,
+            "curvature": 0.9908409006044795,
+            "entropy_growth": 0.15624888793492359,
+            "resonance_coherence": 0.8614714283758703,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2791189153722994,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11499087556796446
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.681706384582235,
+            "curvature": 0.9615313102903009,
+            "entropy_growth": 0.2662951541533628,
+            "resonance_coherence": 0.900003113440216,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.26682417236299033,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17934488872756743
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.443736237209722,
+            "curvature": 0.9352427621206612,
+            "entropy_growth": 0.24367298050409283,
+            "resonance_coherence": 0.8469319039500738,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11994339110376691,
+            "recursion_depth": 0,
+            "token_acceleration": 0.278034277867331
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.656499234623952,
+            "curvature": 0.7594942069604653,
+            "entropy_growth": 0.24115339208607428,
+            "resonance_coherence": 0.8726316278986508,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.150612398806905,
+            "recursion_depth": 0,
+            "token_acceleration": 0.25396773497644753
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.44821436210304294,
+            "curvature": 0.8208182218124092,
+            "entropy_growth": 0.2925378306455521,
+            "resonance_coherence": 0.8773052611762089,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.25635708351457065,
+            "recursion_depth": 0,
+            "token_acceleration": 0.26266714746269926
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5188347867278253,
+            "curvature": 0.724315949767832,
+            "entropy_growth": 0.2064803508594722,
+            "resonance_coherence": 0.9096024134899743,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1460160327537738,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22655280576379638
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5579915247151094,
+            "curvature": 0.9807587163150846,
+            "entropy_growth": 0.14227598698820737,
+            "resonance_coherence": 0.9000380026766686,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2611977605630812,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1167233628501603
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6944844076117749,
+            "curvature": 0.7019920113185083,
+            "entropy_growth": 0.1508520768087078,
+            "resonance_coherence": 0.9366787839861226,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12957541090949326,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22435754691794796
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6087682733989067,
+            "curvature": 0.9427804416260299,
+            "entropy_growth": 0.21496536635271712,
+            "resonance_coherence": 0.9012864333723889,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.23241909187457102,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12606460985083084
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.42810903080551377,
+            "curvature": 0.8061231982668378,
+            "entropy_growth": 0.1457946333994446,
+            "resonance_coherence": 0.9962066392986082,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18701252018202205,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13810727579561438
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5422181096715177,
+            "curvature": 0.7521225872877237,
+            "entropy_growth": 0.11432415250846942,
+            "resonance_coherence": 0.8410585072886672,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.285145070345344,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22345123459931665
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7102541778172331,
+            "curvature": 0.7088700280303186,
+            "entropy_growth": 0.12615678358102414,
+            "resonance_coherence": 0.9700932947835227,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.21845051116693415,
+            "recursion_depth": 0,
+            "token_acceleration": 0.27092075903915624
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5902584911425648,
+            "curvature": 0.9274151204647404,
+            "entropy_growth": 0.17743129256189383,
+            "resonance_coherence": 0.8167820273465933,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13288593464640325,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2392463519050026
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6785469335570162,
+            "curvature": 0.7998755360208855,
+            "entropy_growth": 0.18352661249510133,
+            "resonance_coherence": 0.8209051568927577,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2444514785562806,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1282564478449536
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.652784476833147,
+            "curvature": 0.7210085246449,
+            "entropy_growth": 0.10413957439691471,
+            "resonance_coherence": 0.9355298046639926,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27155041337854213,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10774478093611217
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6338237009582854,
+            "curvature": 0.7569136066914063,
+            "entropy_growth": 0.14892473864326647,
+            "resonance_coherence": 0.9526463485908491,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27440898399698144,
+            "recursion_depth": 0,
+            "token_acceleration": 0.259839657772886
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5492910267922371,
+            "curvature": 0.8484175104291402,
+            "entropy_growth": 0.23496621737130602,
+            "resonance_coherence": 0.8480302850330323,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2122360607847053,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14120493415927243
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5568246998351216,
+            "curvature": 0.9564453624758353,
+            "entropy_growth": 0.2585554735591177,
+            "resonance_coherence": 0.9869244633455393,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15539319220045328,
+            "recursion_depth": 0,
+            "token_acceleration": 0.29244742855043504
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6389664867508648,
+            "curvature": 0.8761982313566979,
+            "entropy_growth": 0.2673331260493555,
+            "resonance_coherence": 0.8640871575675567,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2673364840204574,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12093975096165605
+        },
+        "label": "mathematical_reasoning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5644535860718325,
+            "curvature": 0.2330775566426221,
+            "entropy_growth": 0.10979720161716185,
+            "resonance_coherence": 0.6727910442114033,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5105456556322371,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20426195055270718
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6003882273851258,
+            "curvature": 0.2783646768118625,
+            "entropy_growth": 0.1483787400364606,
+            "resonance_coherence": 0.5725005398881525,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7017495852980646,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2007929129467534
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43262869002655335,
+            "curvature": 0.25326649856537586,
+            "entropy_growth": 0.15397806371111544,
+            "resonance_coherence": 0.6921554342203237,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5600981436323139,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20444511319542852
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.42116831322319376,
+            "curvature": 0.2545746329562467,
+            "entropy_growth": 0.23609979341037607,
+            "resonance_coherence": 0.4216384683733523,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7233577058138235,
+            "recursion_depth": 0,
+            "token_acceleration": 0.15516311916824588
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5085977295075752,
+            "curvature": 0.24655589918929163,
+            "entropy_growth": 0.2571206690318234,
+            "resonance_coherence": 0.6185551240755768,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8470825073794519,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13197880064457077
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6965283858713363,
+            "curvature": 0.30889518886532347,
+            "entropy_growth": 0.2760250324799297,
+            "resonance_coherence": 0.6139147418606339,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6080252628062877,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13764433127740344
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5334140106582207,
+            "curvature": 0.28465064191202044,
+            "entropy_growth": 0.14881616929474858,
+            "resonance_coherence": 0.5776193991215189,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5397199401953385,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1596414827148793
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5837753892942807,
+            "curvature": 0.15497358044835732,
+            "entropy_growth": 0.1031461554808343,
+            "resonance_coherence": 0.6400302411001771,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.717994093853388,
+            "recursion_depth": 0,
+            "token_acceleration": 0.28582574125602933
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.44075843692391686,
+            "curvature": 0.28462817216457226,
+            "entropy_growth": 0.2975380009530658,
+            "resonance_coherence": 0.6718208590682664,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6395763426278037,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16813689900332304
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6383139521883767,
+            "curvature": 0.15878499736969504,
+            "entropy_growth": 0.1777117981454556,
+            "resonance_coherence": 0.49130957500750333,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8568395991946465,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24808377530412654
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4330011783403383,
+            "curvature": 0.14329399863597403,
+            "entropy_growth": 0.28514924212014137,
+            "resonance_coherence": 0.4518139114136235,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5981224779440294,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22668942551936613
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4425275817102876,
+            "curvature": 0.22587283582808726,
+            "entropy_growth": 0.17973130380207597,
+            "resonance_coherence": 0.4273803825796689,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8959549812703023,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14585419229503915
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7057830711059147,
+            "curvature": 0.17169542771406782,
+            "entropy_growth": 0.19858417922123414,
+            "resonance_coherence": 0.5686380262169852,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8138474474915673,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22913748237568846
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7949790419101397,
+            "curvature": 0.2330073929151058,
+            "entropy_growth": 0.2812629366756799,
+            "resonance_coherence": 0.5407185690818208,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8999770813436035,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10558757234409377
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4329874358596662,
+            "curvature": 0.18787456903064523,
+            "entropy_growth": 0.2222662090066499,
+            "resonance_coherence": 0.6673803318152407,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5669213403262565,
+            "recursion_depth": 0,
+            "token_acceleration": 0.26276985528002383
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7011740574131926,
+            "curvature": 0.276074821250009,
+            "entropy_growth": 0.17423518784633693,
+            "resonance_coherence": 0.4364247329934453,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.852434967470845,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2870389181668272
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.47722565504680425,
+            "curvature": 0.26704255644111774,
+            "entropy_growth": 0.1114545979509868,
+            "resonance_coherence": 0.5373596574181592,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8195499084155631,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20232948570960424
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6095653446483276,
+            "curvature": 0.25839021593594436,
+            "entropy_growth": 0.12077918909528498,
+            "resonance_coherence": 0.45291699361593124,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8602887218139472,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1784777627145269
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7514360826834257,
+            "curvature": 0.33940165990239424,
+            "entropy_growth": 0.25205626250520746,
+            "resonance_coherence": 0.4467466607372344,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8202162990558297,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1329634717621654
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7415359983671743,
+            "curvature": 0.19224722387748283,
+            "entropy_growth": 0.10135836971829522,
+            "resonance_coherence": 0.6112469750214756,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8793256177109733,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16456224523940702
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7282326249266033,
+            "curvature": 0.3770863708905954,
+            "entropy_growth": 0.279240402880388,
+            "resonance_coherence": 0.5758997233320111,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7267420899613974,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21925393643520913
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.42807145496914645,
+            "curvature": 0.10909997802450717,
+            "entropy_growth": 0.20182424733932192,
+            "resonance_coherence": 0.6712803201051292,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5523524845667847,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16386314286968617
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7032309170691959,
+            "curvature": 0.1265044936316367,
+            "entropy_growth": 0.23403941495490457,
+            "resonance_coherence": 0.6109806234372195,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7509791907290524,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14197097857598048
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4365952920686736,
+            "curvature": 0.3449808444338324,
+            "entropy_growth": 0.24846731622928186,
+            "resonance_coherence": 0.6183409128771653,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8930453939195162,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2789847605952728
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6118107190264488,
+            "curvature": 0.271940934243448,
+            "entropy_growth": 0.2081401422583052,
+            "resonance_coherence": 0.4709697787630718,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7978681044728753,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11941622842895089
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6341682524158752,
+            "curvature": 0.2940073104438708,
+            "entropy_growth": 0.23517681833684487,
+            "resonance_coherence": 0.5781844926624595,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8709151975633245,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23296575785516485
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.651814633956681,
+            "curvature": 0.12144225980944552,
+            "entropy_growth": 0.1996306649452882,
+            "resonance_coherence": 0.5981074329907479,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5886375864738258,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19432360530751058
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5455747152669497,
+            "curvature": 0.2049635487235577,
+            "entropy_growth": 0.15873605766988297,
+            "resonance_coherence": 0.6058389076151159,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6073168460097849,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21712403853626921
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.668395921011935,
+            "curvature": 0.13117630379555822,
+            "entropy_growth": 0.15153635808961258,
+            "resonance_coherence": 0.6115050575905498,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5178857209424871,
+            "recursion_depth": 0,
+            "token_acceleration": 0.26618684583214003
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5855886989274619,
+            "curvature": 0.36122238341835644,
+            "entropy_growth": 0.12634770466437195,
+            "resonance_coherence": 0.6564021337818982,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8050034474090456,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12546315775167602
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.659601311861401,
+            "curvature": 0.1644092554466317,
+            "entropy_growth": 0.10904900014884392,
+            "resonance_coherence": 0.557620543115212,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5469289579180512,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14443181486519774
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5278516266594706,
+            "curvature": 0.17439407897680226,
+            "entropy_growth": 0.16378708605023945,
+            "resonance_coherence": 0.6827302552049003,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6448321277867887,
+            "recursion_depth": 0,
+            "token_acceleration": 0.27911407516445863
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7974976266825488,
+            "curvature": 0.18554958611274253,
+            "entropy_growth": 0.19701939069209048,
+            "resonance_coherence": 0.5398294026201333,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5164046085250709,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2046550064063445
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4757677553355676,
+            "curvature": 0.37106185136987013,
+            "entropy_growth": 0.25145336845256044,
+            "resonance_coherence": 0.6737425893117528,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8730433701046985,
+            "recursion_depth": 0,
+            "token_acceleration": 0.28776035541424144
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7580085045196765,
+            "curvature": 0.1711248955244553,
+            "entropy_growth": 0.276907380979308,
+            "resonance_coherence": 0.5700185877398162,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8507836834926905,
+            "recursion_depth": 0,
+            "token_acceleration": 0.27365661500058913
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7489696278917535,
+            "curvature": 0.12945245651026838,
+            "entropy_growth": 0.13096228006490404,
+            "resonance_coherence": 0.42175587696327926,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.807220566765995,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21637077241193103
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.506353717914402,
+            "curvature": 0.2195750097550827,
+            "entropy_growth": 0.17218577003084912,
+            "resonance_coherence": 0.4552835982122346,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.758536314665768,
+            "recursion_depth": 0,
+            "token_acceleration": 0.15793027049822558
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7873675350370489,
+            "curvature": 0.330997495938015,
+            "entropy_growth": 0.16636486480656104,
+            "resonance_coherence": 0.5391129058075197,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5062039912953731,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17254300864833064
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4696236490046533,
+            "curvature": 0.18531380084427435,
+            "entropy_growth": 0.25479512969613016,
+            "resonance_coherence": 0.5684708166366808,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6048396047089487,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12513698528603692
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5746145667503254,
+            "curvature": 0.2775780658451713,
+            "entropy_growth": 0.16605242270119086,
+            "resonance_coherence": 0.42993614813494074,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8472126294676017,
+            "recursion_depth": 0,
+            "token_acceleration": 0.29722666547967913
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.64237407619379,
+            "curvature": 0.2431615053995469,
+            "entropy_growth": 0.2754406801181466,
+            "resonance_coherence": 0.6872944311010506,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.8691195544845822,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1733332333643272
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.787094611691222,
+            "curvature": 0.3846277938022349,
+            "entropy_growth": 0.2804959655611352,
+            "resonance_coherence": 0.4704665866712992,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7054688526298338,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17085994091682247
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6894237417331095,
+            "curvature": 0.33540046019322645,
+            "entropy_growth": 0.11419226981956179,
+            "resonance_coherence": 0.6931775346298321,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.794172709309956,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14626388817000133
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6969592352894904,
+            "curvature": 0.2908749801901263,
+            "entropy_growth": 0.2441287683675361,
+            "resonance_coherence": 0.5150206167771956,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5933644649667901,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17157531358779848
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7428959379291286,
+            "curvature": 0.35652469960911815,
+            "entropy_growth": 0.29532048284973766,
+            "resonance_coherence": 0.47653521906380597,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.899709330775327,
+            "recursion_depth": 0,
+            "token_acceleration": 0.15333862541338275
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.40444159803471075,
+            "curvature": 0.37688675543593997,
+            "entropy_growth": 0.1819602826996333,
+            "resonance_coherence": 0.613038301076039,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5769616494907506,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23501321137378478
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6496909825992647,
+            "curvature": 0.22688789666965276,
+            "entropy_growth": 0.16559472663540603,
+            "resonance_coherence": 0.4928839988203355,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.7094215640073384,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24038098906839014
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.42623624824371836,
+            "curvature": 0.22406314323733612,
+            "entropy_growth": 0.16168155067583256,
+            "resonance_coherence": 0.5870155733662388,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5826124535866865,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11564855732309352
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.47150987406663303,
+            "curvature": 0.30322758557970764,
+            "entropy_growth": 0.17996571519702764,
+            "resonance_coherence": 0.4112205839830669,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.6219073885124287,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1864949638654731
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.41072028887810463,
+            "curvature": 0.14822787982990202,
+            "entropy_growth": 0.2523131544691689,
+            "resonance_coherence": 0.5570723666802114,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.5898906143065783,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13221401059419033
+        },
+        "label": "code_generation"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6947873437097842,
+            "curvature": 0.15776267978421804,
+            "entropy_growth": 0.29851717082801,
+            "resonance_coherence": 0.8961823717838147,
+            "branch_factor": 3.4258018019271748,
+            "attention_fragmentation": 0.21568571536470527,
+            "recursion_depth": 5,
+            "token_acceleration": 0.15345268028813805
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.560581670329997,
+            "curvature": 0.36057784685714767,
+            "entropy_growth": 0.1432214383202594,
+            "resonance_coherence": 0.8336473513772504,
+            "branch_factor": 4.812035353307281,
+            "attention_fragmentation": 0.1928666188252974,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2989823638415691
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5968509915492122,
+            "curvature": 0.3923628363315852,
+            "entropy_growth": 0.12751259772640613,
+            "resonance_coherence": 0.8906142279463509,
+            "branch_factor": 4.240384965557031,
+            "attention_fragmentation": 0.11796803200452262,
+            "recursion_depth": 5,
+            "token_acceleration": 0.27346071928898236
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6837141596949472,
+            "curvature": 0.3525046960770123,
+            "entropy_growth": 0.28958128360564717,
+            "resonance_coherence": 0.9592034598113683,
+            "branch_factor": 3.873378239391122,
+            "attention_fragmentation": 0.10027113980111763,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2498449248024082
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6133208441231592,
+            "curvature": 0.10752884180247152,
+            "entropy_growth": 0.16909616483496465,
+            "resonance_coherence": 0.844499548862635,
+            "branch_factor": 4.048530035796015,
+            "attention_fragmentation": 0.24518021052543146,
+            "recursion_depth": 5,
+            "token_acceleration": 0.13813098005636096
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4426973397804287,
+            "curvature": 0.1896556804170515,
+            "entropy_growth": 0.18095309699707757,
+            "resonance_coherence": 0.9736324816916864,
+            "branch_factor": 2.838351816184497,
+            "attention_fragmentation": 0.23767280086079287,
+            "recursion_depth": 5,
+            "token_acceleration": 0.17962918425625068
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5830867536984194,
+            "curvature": 0.32887827083764537,
+            "entropy_growth": 0.16026648377683014,
+            "resonance_coherence": 0.8372519897108821,
+            "branch_factor": 2.0162006816619567,
+            "attention_fragmentation": 0.11227373574568691,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2201799679051662
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4045248581804107,
+            "curvature": 0.3482148033577249,
+            "entropy_growth": 0.14818313626153296,
+            "resonance_coherence": 0.8990665204507613,
+            "branch_factor": 3.0905773182633585,
+            "attention_fragmentation": 0.1416753034072499,
+            "recursion_depth": 5,
+            "token_acceleration": 0.20284894436405737
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7040239631061257,
+            "curvature": 0.34222514029061063,
+            "entropy_growth": 0.22232103177525683,
+            "resonance_coherence": 0.9689825432162141,
+            "branch_factor": 4.81141635079078,
+            "attention_fragmentation": 0.19957333892730186,
+            "recursion_depth": 5,
+            "token_acceleration": 0.10160947166695718
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5177124887409827,
+            "curvature": 0.17135476203074657,
+            "entropy_growth": 0.10020517910642823,
+            "resonance_coherence": 0.8434342935997919,
+            "branch_factor": 3.578887641597611,
+            "attention_fragmentation": 0.29393022611537256,
+            "recursion_depth": 5,
+            "token_acceleration": 0.20623952295672615
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7036126496552702,
+            "curvature": 0.16120730777040204,
+            "entropy_growth": 0.21309592866233737,
+            "resonance_coherence": 0.9819287881364804,
+            "branch_factor": 4.038128721380238,
+            "attention_fragmentation": 0.2717266600553969,
+            "recursion_depth": 5,
+            "token_acceleration": 0.21553049194968407
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7582389808603326,
+            "curvature": 0.1925659733066666,
+            "entropy_growth": 0.20484728071801778,
+            "resonance_coherence": 0.9704979568103911,
+            "branch_factor": 4.882617194218275,
+            "attention_fragmentation": 0.20336803008984225,
+            "recursion_depth": 5,
+            "token_acceleration": 0.16757475193770693
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.40861924284797174,
+            "curvature": 0.21631780473280499,
+            "entropy_growth": 0.28154283562087656,
+            "resonance_coherence": 0.8831385174301226,
+            "branch_factor": 2.9647907504041275,
+            "attention_fragmentation": 0.24522725313461705,
+            "recursion_depth": 5,
+            "token_acceleration": 0.26876930522380216
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6167258120863922,
+            "curvature": 0.22416201836650473,
+            "entropy_growth": 0.1974391486607776,
+            "resonance_coherence": 0.8084993282175382,
+            "branch_factor": 4.918241191471727,
+            "attention_fragmentation": 0.17212118905358686,
+            "recursion_depth": 5,
+            "token_acceleration": 0.1480141047394769
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4202569402943882,
+            "curvature": 0.2876765352881906,
+            "entropy_growth": 0.20596581564436353,
+            "resonance_coherence": 0.8117025979391098,
+            "branch_factor": 4.8092024539784095,
+            "attention_fragmentation": 0.24738605105844935,
+            "recursion_depth": 5,
+            "token_acceleration": 0.19782906164916503
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6299257819138635,
+            "curvature": 0.16475138812580487,
+            "entropy_growth": 0.2081853234932402,
+            "resonance_coherence": 0.8816973510279398,
+            "branch_factor": 3.401296161429425,
+            "attention_fragmentation": 0.1504592817646641,
+            "recursion_depth": 5,
+            "token_acceleration": 0.13560262115041744
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6838192959218754,
+            "curvature": 0.31704504309717474,
+            "entropy_growth": 0.24070738806885153,
+            "resonance_coherence": 0.8379200709517066,
+            "branch_factor": 4.384716926407439,
+            "attention_fragmentation": 0.13753476486447996,
+            "recursion_depth": 5,
+            "token_acceleration": 0.1271761650723467
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6543477220983496,
+            "curvature": 0.30676568232799517,
+            "entropy_growth": 0.29432709296314774,
+            "resonance_coherence": 0.8702432632801091,
+            "branch_factor": 2.567084853788866,
+            "attention_fragmentation": 0.18575435687590525,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2160458317908433
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6644360399019738,
+            "curvature": 0.21752283811094436,
+            "entropy_growth": 0.13173470388950398,
+            "resonance_coherence": 0.878182154286913,
+            "branch_factor": 2.5243063866598314,
+            "attention_fragmentation": 0.22679930884996316,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2937176046933579
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7185513440530293,
+            "curvature": 0.18927657197068007,
+            "entropy_growth": 0.24528727743379947,
+            "resonance_coherence": 0.9623128203192701,
+            "branch_factor": 2.4673245364154837,
+            "attention_fragmentation": 0.12449186724847117,
+            "recursion_depth": 5,
+            "token_acceleration": 0.27460354309355384
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.49634333115050716,
+            "curvature": 0.372662517779647,
+            "entropy_growth": 0.19268139823199704,
+            "resonance_coherence": 0.8372158606047397,
+            "branch_factor": 4.722059036596388,
+            "attention_fragmentation": 0.20583507860068206,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2271440694002185
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5437709742458615,
+            "curvature": 0.37993956982393373,
+            "entropy_growth": 0.17659507918191142,
+            "resonance_coherence": 0.9215986928510937,
+            "branch_factor": 3.596703714901687,
+            "attention_fragmentation": 0.21962515392175894,
+            "recursion_depth": 5,
+            "token_acceleration": 0.10015400281908704
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4232662632902635,
+            "curvature": 0.3073766195835652,
+            "entropy_growth": 0.16592578915339756,
+            "resonance_coherence": 0.8246260646879512,
+            "branch_factor": 2.3873698583940945,
+            "attention_fragmentation": 0.2602340461034739,
+            "recursion_depth": 5,
+            "token_acceleration": 0.17786810336266307
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7367913935002492,
+            "curvature": 0.3917114844379852,
+            "entropy_growth": 0.15710115027543975,
+            "resonance_coherence": 0.9889356989502791,
+            "branch_factor": 3.2965389550384088,
+            "attention_fragmentation": 0.2341074938195284,
+            "recursion_depth": 5,
+            "token_acceleration": 0.11425226426276916
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6356700032509861,
+            "curvature": 0.39924175539723494,
+            "entropy_growth": 0.29514353832270496,
+            "resonance_coherence": 0.9006649056080187,
+            "branch_factor": 3.046023801792308,
+            "attention_fragmentation": 0.2359143101568089,
+            "recursion_depth": 5,
+            "token_acceleration": 0.28534912275837326
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5641786373305243,
+            "curvature": 0.1089023174418163,
+            "entropy_growth": 0.15122277803720122,
+            "resonance_coherence": 0.9686788625865072,
+            "branch_factor": 2.045637336456429,
+            "attention_fragmentation": 0.21073914833528928,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2480275705068132
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7788451194575833,
+            "curvature": 0.3095432607180446,
+            "entropy_growth": 0.27783178042723455,
+            "resonance_coherence": 0.9791882945611101,
+            "branch_factor": 2.716781705167987,
+            "attention_fragmentation": 0.1693414442486308,
+            "recursion_depth": 5,
+            "token_acceleration": 0.29863646558088175
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.46788073164690785,
+            "curvature": 0.27733935436166646,
+            "entropy_growth": 0.2633323213412414,
+            "resonance_coherence": 0.902948914774041,
+            "branch_factor": 3.634541137291792,
+            "attention_fragmentation": 0.27036562441939854,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2826315667004617
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.70667495546475,
+            "curvature": 0.3025448998270628,
+            "entropy_growth": 0.12806185213672688,
+            "resonance_coherence": 0.8359522965727602,
+            "branch_factor": 4.628955371790986,
+            "attention_fragmentation": 0.10071243493099591,
+            "recursion_depth": 5,
+            "token_acceleration": 0.22782178902548805
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6479970062581789,
+            "curvature": 0.21752009689027363,
+            "entropy_growth": 0.14381863499534903,
+            "resonance_coherence": 0.849091877035054,
+            "branch_factor": 2.759569745111746,
+            "attention_fragmentation": 0.20034484733002617,
+            "recursion_depth": 5,
+            "token_acceleration": 0.1917771912887297
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7358469249854962,
+            "curvature": 0.20686112748953844,
+            "entropy_growth": 0.2499757071062032,
+            "resonance_coherence": 0.9730465858354129,
+            "branch_factor": 4.703244825350002,
+            "attention_fragmentation": 0.10961999801032002,
+            "recursion_depth": 5,
+            "token_acceleration": 0.18905281699213694
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.442064127102316,
+            "curvature": 0.2846676017500842,
+            "entropy_growth": 0.2844886986017421,
+            "resonance_coherence": 0.8714014005433356,
+            "branch_factor": 2.1832598064236834,
+            "attention_fragmentation": 0.26599234785108294,
+            "recursion_depth": 5,
+            "token_acceleration": 0.10936403806427247
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7501899245570685,
+            "curvature": 0.25799145921558664,
+            "entropy_growth": 0.2551659600459461,
+            "resonance_coherence": 0.906691321125234,
+            "branch_factor": 4.731094309922382,
+            "attention_fragmentation": 0.10026904518674684,
+            "recursion_depth": 5,
+            "token_acceleration": 0.27163733599292333
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7380956699049347,
+            "curvature": 0.16326874815201783,
+            "entropy_growth": 0.18139824826007261,
+            "resonance_coherence": 0.9850990806031332,
+            "branch_factor": 2.0848404186845193,
+            "attention_fragmentation": 0.20653351359275696,
+            "recursion_depth": 5,
+            "token_acceleration": 0.21309258185999164
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6389702752859189,
+            "curvature": 0.29433672784128995,
+            "entropy_growth": 0.14357858500944368,
+            "resonance_coherence": 0.8807922474535693,
+            "branch_factor": 2.0092640007698312,
+            "attention_fragmentation": 0.2455971162973906,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2940243623568284
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5897801437000914,
+            "curvature": 0.27853047363272004,
+            "entropy_growth": 0.1831660910021449,
+            "resonance_coherence": 0.8899027304460251,
+            "branch_factor": 4.104929354192738,
+            "attention_fragmentation": 0.18690331044289307,
+            "recursion_depth": 5,
+            "token_acceleration": 0.11245345987552886
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5403514929191942,
+            "curvature": 0.3291971643114323,
+            "entropy_growth": 0.19307456469062,
+            "resonance_coherence": 0.9541157915072267,
+            "branch_factor": 4.483304357538223,
+            "attention_fragmentation": 0.2906612936095542,
+            "recursion_depth": 5,
+            "token_acceleration": 0.14278979798099306
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.47706824579073415,
+            "curvature": 0.3191353718534936,
+            "entropy_growth": 0.2771001544652642,
+            "resonance_coherence": 0.9090304007276727,
+            "branch_factor": 3.6423616467904147,
+            "attention_fragmentation": 0.14244937405906244,
+            "recursion_depth": 5,
+            "token_acceleration": 0.29965375697745367
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.504461197231,
+            "curvature": 0.1252316010346712,
+            "entropy_growth": 0.2549384837863962,
+            "resonance_coherence": 0.8647876944421174,
+            "branch_factor": 4.35458673866782,
+            "attention_fragmentation": 0.11630297518938132,
+            "recursion_depth": 5,
+            "token_acceleration": 0.16798980537899838
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5726601833023706,
+            "curvature": 0.2878586588908314,
+            "entropy_growth": 0.23988434845625184,
+            "resonance_coherence": 0.8748875874954969,
+            "branch_factor": 2.5134012453097863,
+            "attention_fragmentation": 0.17403934328874007,
+            "recursion_depth": 5,
+            "token_acceleration": 0.19187435975889267
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5485618196313029,
+            "curvature": 0.2515263923109585,
+            "entropy_growth": 0.2783652006614333,
+            "resonance_coherence": 0.8979981545992104,
+            "branch_factor": 3.676786661980016,
+            "attention_fragmentation": 0.10259190506828271,
+            "recursion_depth": 5,
+            "token_acceleration": 0.21730037791488005
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.48732394114218003,
+            "curvature": 0.16202682473581026,
+            "entropy_growth": 0.15646334353285798,
+            "resonance_coherence": 0.8487849860092151,
+            "branch_factor": 2.3055576642111655,
+            "attention_fragmentation": 0.11655542566142862,
+            "recursion_depth": 5,
+            "token_acceleration": 0.15692523037283773
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5448025194139506,
+            "curvature": 0.38918661949049294,
+            "entropy_growth": 0.18919644748859749,
+            "resonance_coherence": 0.9973327980486727,
+            "branch_factor": 4.011607911668909,
+            "attention_fragmentation": 0.23455248279470578,
+            "recursion_depth": 5,
+            "token_acceleration": 0.2263284653557663
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.667546035906561,
+            "curvature": 0.27205936196572233,
+            "entropy_growth": 0.24459406896634545,
+            "resonance_coherence": 0.891157520117458,
+            "branch_factor": 2.4074207363976283,
+            "attention_fragmentation": 0.25216389897498026,
+            "recursion_depth": 5,
+            "token_acceleration": 0.15046850364722109
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7739718887609426,
+            "curvature": 0.1882578380007361,
+            "entropy_growth": 0.1278646037543967,
+            "resonance_coherence": 0.8370381472580979,
+            "branch_factor": 3.465806905278846,
+            "attention_fragmentation": 0.14792722133412056,
+            "recursion_depth": 5,
+            "token_acceleration": 0.20362769498630917
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7482932832979909,
+            "curvature": 0.3766863197071132,
+            "entropy_growth": 0.14059799219137556,
+            "resonance_coherence": 0.8313056641036967,
+            "branch_factor": 3.6608281261817233,
+            "attention_fragmentation": 0.22173361148855952,
+            "recursion_depth": 5,
+            "token_acceleration": 0.13227357197254389
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.49498097085953746,
+            "curvature": 0.13875071991484778,
+            "entropy_growth": 0.2839903144756133,
+            "resonance_coherence": 0.905001293291667,
+            "branch_factor": 3.7530980907072737,
+            "attention_fragmentation": 0.21099860294023914,
+            "recursion_depth": 5,
+            "token_acceleration": 0.10452303897638292
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7305121096930296,
+            "curvature": 0.36274788114605805,
+            "entropy_growth": 0.17782003178523126,
+            "resonance_coherence": 0.8095365985095262,
+            "branch_factor": 3.5993686231137394,
+            "attention_fragmentation": 0.24901432822829278,
+            "recursion_depth": 5,
+            "token_acceleration": 0.23890992386908996
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.47792191085779917,
+            "curvature": 0.14867099202652934,
+            "entropy_growth": 0.20016244815941037,
+            "resonance_coherence": 0.8527261566630336,
+            "branch_factor": 3.8734122453939204,
+            "attention_fragmentation": 0.22693469184973572,
+            "recursion_depth": 5,
+            "token_acceleration": 0.12631271495626512
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7581341319665534,
+            "curvature": 0.19468081038886953,
+            "entropy_growth": 0.2938365856106408,
+            "resonance_coherence": 0.8620966007385663,
+            "branch_factor": 3.4737875637608853,
+            "attention_fragmentation": 0.2504764832603312,
+            "recursion_depth": 5,
+            "token_acceleration": 0.29818543048218943
+        },
+        "label": "recursive_planning"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5391321363526423,
+            "curvature": 0.2799102319201833,
+            "entropy_growth": 0.11473821654282473,
+            "resonance_coherence": 0.49041452479708897,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2785042380872158,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7259291564934465
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5773557042824551,
+            "curvature": 0.173654684094729,
+            "entropy_growth": 0.12122341074299575,
+            "resonance_coherence": 0.5110567551771124,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2257029495505416,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6027469625977832
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5176767558697966,
+            "curvature": 0.24447819341260785,
+            "entropy_growth": 0.21378163772301056,
+            "resonance_coherence": 0.6591559614157058,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19565394477085538,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6269137903670273
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5775236538597642,
+            "curvature": 0.10544428309327802,
+            "entropy_growth": 0.23169412563549055,
+            "resonance_coherence": 0.5533366858142577,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.23961383296297653,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7506160848285879
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.594248713468662,
+            "curvature": 0.22409410463360174,
+            "entropy_growth": 0.1976216609044778,
+            "resonance_coherence": 0.5372286869447894,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15776938290104844,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8847363591840143
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7811839635066344,
+            "curvature": 0.29078519079492093,
+            "entropy_growth": 0.11264559867534998,
+            "resonance_coherence": 0.6459741431404886,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2885061163228153,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9063993944073856
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6102646271525002,
+            "curvature": 0.3598822781972232,
+            "entropy_growth": 0.19286234731343166,
+            "resonance_coherence": 0.4397916028108657,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22673364853948544,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7535875926933853
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7428384667552751,
+            "curvature": 0.2703721386269484,
+            "entropy_growth": 0.1935716583566821,
+            "resonance_coherence": 0.43516454783634906,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1322500345992136,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7894471105615648
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5325723784415899,
+            "curvature": 0.2814948400337659,
+            "entropy_growth": 0.24796985737450133,
+            "resonance_coherence": 0.6584198059195969,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17811042917432168,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9693137250635263
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43287280974027476,
+            "curvature": 0.25463440844162716,
+            "entropy_growth": 0.16406403052444074,
+            "resonance_coherence": 0.47724217355509574,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1950839923690125,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7883302284272169
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7054329232527647,
+            "curvature": 0.39512109167554177,
+            "entropy_growth": 0.11638363504947831,
+            "resonance_coherence": 0.6018906696945044,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11656272895155938,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8951592505235062
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7975839379010711,
+            "curvature": 0.19804961747281274,
+            "entropy_growth": 0.11827892967116456,
+            "resonance_coherence": 0.5926233905746566,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13258632631649953,
+            "recursion_depth": 0,
+            "token_acceleration": 0.798562834328548
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5009835352925761,
+            "curvature": 0.244510958712602,
+            "entropy_growth": 0.16702718610332717,
+            "resonance_coherence": 0.5815888347803625,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13634411296008803,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7587869657254156
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6381117293893106,
+            "curvature": 0.21146758205044064,
+            "entropy_growth": 0.2623129821078932,
+            "resonance_coherence": 0.4449256655354391,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27989732249225185,
+            "recursion_depth": 0,
+            "token_acceleration": 0.742563071068809
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4675337937475637,
+            "curvature": 0.3102839925528226,
+            "entropy_growth": 0.11367580167884168,
+            "resonance_coherence": 0.4307988927460962,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2955594469302844,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6862166037237822
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.587427860043686,
+            "curvature": 0.20489561224031283,
+            "entropy_growth": 0.16496412966705856,
+            "resonance_coherence": 0.4315019767478655,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11770710148109427,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6343515608365348
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5488944390232725,
+            "curvature": 0.16265010729024082,
+            "entropy_growth": 0.10996890201924994,
+            "resonance_coherence": 0.5264800340617949,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2556998491658725,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8416044620189098
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.453144601280611,
+            "curvature": 0.20777897658503702,
+            "entropy_growth": 0.1678734432908623,
+            "resonance_coherence": 0.565536022824494,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18588515375332493,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9509115161912872
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7557055418316417,
+            "curvature": 0.30208624387958366,
+            "entropy_growth": 0.23778138041902266,
+            "resonance_coherence": 0.6379348612568665,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20321156706161692,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7414761331307282
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.41707625741451415,
+            "curvature": 0.21639648510124718,
+            "entropy_growth": 0.22195553085220654,
+            "resonance_coherence": 0.5329278206494584,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1715342376713591,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7771726051201611
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7896571379426797,
+            "curvature": 0.2760151573530182,
+            "entropy_growth": 0.14063204378455876,
+            "resonance_coherence": 0.6363904862428038,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19435348510212186,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9653401265989202
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.433978219422857,
+            "curvature": 0.22925785965537415,
+            "entropy_growth": 0.11665706949219119,
+            "resonance_coherence": 0.4306734553702479,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19505626916255892,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7651186372895197
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6548808516658726,
+            "curvature": 0.26118710814498775,
+            "entropy_growth": 0.26569461385698345,
+            "resonance_coherence": 0.6636823362435684,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.166597471719392,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6140152611557435
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4510473327170356,
+            "curvature": 0.3708231844054004,
+            "entropy_growth": 0.20066819501331917,
+            "resonance_coherence": 0.6494828344046912,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17993863522036474,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6943568546021819
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.536039988350924,
+            "curvature": 0.14247035114773063,
+            "entropy_growth": 0.15819514614074542,
+            "resonance_coherence": 0.6617081204026509,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1711084266276863,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6486604037442814
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4280339673038349,
+            "curvature": 0.15965848083377837,
+            "entropy_growth": 0.15486388542346916,
+            "resonance_coherence": 0.41676990743895387,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.289481559311057,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7290063478234465
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6166622109670309,
+            "curvature": 0.1327859817225853,
+            "entropy_growth": 0.12199353730974714,
+            "resonance_coherence": 0.5722701154602206,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13834967156520359,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6843898746296089
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4268295690922091,
+            "curvature": 0.2807327298361205,
+            "entropy_growth": 0.1868506743575158,
+            "resonance_coherence": 0.6465218231451523,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19001394526938187,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9158425709147713
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.58849380378926,
+            "curvature": 0.2739555738828107,
+            "entropy_growth": 0.1697878403299058,
+            "resonance_coherence": 0.560542904626858,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18796815919705617,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8150040425993935
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43215068485761077,
+            "curvature": 0.2015505177957836,
+            "entropy_growth": 0.274458856055653,
+            "resonance_coherence": 0.40791878533075315,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2478536608776164,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8567362327949574
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4348122758043189,
+            "curvature": 0.10304815858450944,
+            "entropy_growth": 0.1523752096075566,
+            "resonance_coherence": 0.4094833294001657,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22595698108538462,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6587607525944525
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7712562676208227,
+            "curvature": 0.2577775112465691,
+            "entropy_growth": 0.2017107087734083,
+            "resonance_coherence": 0.6810751879063374,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.23083227740685094,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8325049386830535
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6271785584746121,
+            "curvature": 0.2040702839733394,
+            "entropy_growth": 0.21442528764785496,
+            "resonance_coherence": 0.4627898403638565,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13710457091246328,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6562873116037188
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4308839767364365,
+            "curvature": 0.30555916826629004,
+            "entropy_growth": 0.27422462077615595,
+            "resonance_coherence": 0.4960081577815695,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2865128245953476,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6251052677435418
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6969806513122916,
+            "curvature": 0.2723073697782349,
+            "entropy_growth": 0.25028736815990527,
+            "resonance_coherence": 0.5223036425900577,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19158375947894443,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9253912422724212
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5880059261746021,
+            "curvature": 0.20824488529149898,
+            "entropy_growth": 0.16056105002186502,
+            "resonance_coherence": 0.5702136301810392,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27264781558010254,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6531388293581034
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4499423669403402,
+            "curvature": 0.29153377933872004,
+            "entropy_growth": 0.2036838049769717,
+            "resonance_coherence": 0.5363062472001312,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.29948909559297904,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9769490126503737
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.49632308187346963,
+            "curvature": 0.19745113829565852,
+            "entropy_growth": 0.21895531487612463,
+            "resonance_coherence": 0.6826127887469742,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16297548120664523,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8893444443103579
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6975593113918983,
+            "curvature": 0.21603451245622488,
+            "entropy_growth": 0.2805978669110367,
+            "resonance_coherence": 0.4231594376942775,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10130747248989432,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8579335302429907
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5225352913406857,
+            "curvature": 0.21411172125398906,
+            "entropy_growth": 0.23064848054306358,
+            "resonance_coherence": 0.4612665618820987,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17439268591227503,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6174378727118851
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5980846289798916,
+            "curvature": 0.19100034826644768,
+            "entropy_growth": 0.16406104909724992,
+            "resonance_coherence": 0.47878840302111547,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19911564132507675,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7322849180393411
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.44847531261813256,
+            "curvature": 0.3799419713306119,
+            "entropy_growth": 0.2817985472660266,
+            "resonance_coherence": 0.5534948452186066,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1292547124600035,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6506345746407268
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6605211058075589,
+            "curvature": 0.3202677104499442,
+            "entropy_growth": 0.2620833217736341,
+            "resonance_coherence": 0.5923665418496067,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2589574694659531,
+            "recursion_depth": 0,
+            "token_acceleration": 0.83907652022913
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5108034161012979,
+            "curvature": 0.3174062441291275,
+            "entropy_growth": 0.19075956434257252,
+            "resonance_coherence": 0.5636321164119649,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1228458956829138,
+            "recursion_depth": 0,
+            "token_acceleration": 0.7809365590886301
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7067911301267618,
+            "curvature": 0.13404702890516756,
+            "entropy_growth": 0.11237234447005105,
+            "resonance_coherence": 0.6925487848091618,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20893181067405128,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8443946558073507
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.519288770889166,
+            "curvature": 0.3271804410626725,
+            "entropy_growth": 0.2648684888659284,
+            "resonance_coherence": 0.40249061585256574,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15686973433559248,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6427255185555462
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7832729267851563,
+            "curvature": 0.26303049441307447,
+            "entropy_growth": 0.18835827077419007,
+            "resonance_coherence": 0.5014800447901209,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16279099993688734,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9066917242862607
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.40963678335832754,
+            "curvature": 0.25258328654356754,
+            "entropy_growth": 0.21676026477771798,
+            "resonance_coherence": 0.618162349717203,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1026740125105899,
+            "recursion_depth": 0,
+            "token_acceleration": 0.8531889568560498
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6859243865317327,
+            "curvature": 0.11825382737813772,
+            "entropy_growth": 0.13089848284777234,
+            "resonance_coherence": 0.6944177170300287,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16077925132988363,
+            "recursion_depth": 0,
+            "token_acceleration": 0.6612027863656224
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5642621447117462,
+            "curvature": 0.30763019959903576,
+            "entropy_growth": 0.25577580989248283,
+            "resonance_coherence": 0.4798880580995084,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2587709709412541,
+            "recursion_depth": 0,
+            "token_acceleration": 0.9710033016118518
+        },
+        "label": "tool_use_chains"
+    },
+    {
+        "features": {
+            "latent_drift": 0.12071355033868927,
+            "curvature": 0.22622232005874854,
+            "entropy_growth": 0.21670862118979536,
+            "resonance_coherence": 0.646189965574897,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2563221552244983,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1027800641017465
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.21010044378701798,
+            "curvature": 0.33886502788375195,
+            "entropy_growth": 0.13912381050108996,
+            "resonance_coherence": 0.5006694650252443,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10409067757710178,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24346291316572835
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.19856670138400628,
+            "curvature": 0.2240868547956386,
+            "entropy_growth": 0.199078316409319,
+            "resonance_coherence": 0.4901472005656757,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.26680780053362213,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1960273038682587
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2460529097826698,
+            "curvature": 0.1825271850968838,
+            "entropy_growth": 0.27462360309606954,
+            "resonance_coherence": 0.43629704178582995,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1989660729523287,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17731336654955876
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.19133053699134273,
+            "curvature": 0.14862066227020543,
+            "entropy_growth": 0.11116981576640268,
+            "resonance_coherence": 0.6032250850439766,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2531739367501712,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2022646449625497
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.16642700191284715,
+            "curvature": 0.20019791623933464,
+            "entropy_growth": 0.10486456123044596,
+            "resonance_coherence": 0.682638923964066,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.14751634928945737,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11298943267467083
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.14853167980423856,
+            "curvature": 0.28203460609523845,
+            "entropy_growth": 0.2250737616208475,
+            "resonance_coherence": 0.43643616912314825,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.24257616063203286,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2147574172047497
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.24584652470058066,
+            "curvature": 0.39818729253235174,
+            "entropy_growth": 0.2905960513599013,
+            "resonance_coherence": 0.557654868063687,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17308094719248007,
+            "recursion_depth": 0,
+            "token_acceleration": 0.15944710511589671
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.24198769702830972,
+            "curvature": 0.16823559289433887,
+            "entropy_growth": 0.19982767431891219,
+            "resonance_coherence": 0.6476549084003229,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.28079630507638365,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19324815171453125
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.10937494214384934,
+            "curvature": 0.151141672506584,
+            "entropy_growth": 0.1531121487286784,
+            "resonance_coherence": 0.5017465124705737,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27143762619240325,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2831880340623454
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.23040617589951826,
+            "curvature": 0.11845798349699,
+            "entropy_growth": 0.12624352154978707,
+            "resonance_coherence": 0.5769456089353229,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2242116455498574,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12423287098734115
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2658273980476205,
+            "curvature": 0.18378686194025884,
+            "entropy_growth": 0.10309715144479902,
+            "resonance_coherence": 0.40713996425462556,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2802079008010806,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10734237250085824
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.20907594452841458,
+            "curvature": 0.364477187946157,
+            "entropy_growth": 0.22541347964434624,
+            "resonance_coherence": 0.41579854323926313,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2170995153460903,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23134562109491125
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.270667843132951,
+            "curvature": 0.36247087599129446,
+            "entropy_growth": 0.24463902001119717,
+            "resonance_coherence": 0.4335855102620721,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1088524915541626,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14701796312158166
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.13963982273724299,
+            "curvature": 0.36809167623686434,
+            "entropy_growth": 0.209577712396189,
+            "resonance_coherence": 0.6057715598638673,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15095165974613875,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21729995803978264
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.21860790866136293,
+            "curvature": 0.3745923911696887,
+            "entropy_growth": 0.21952622497944127,
+            "resonance_coherence": 0.4167847414835544,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12204605727707252,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14353050413546029
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.1885806876641381,
+            "curvature": 0.2279299073382777,
+            "entropy_growth": 0.2960864452052125,
+            "resonance_coherence": 0.41007052249793,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12208452891398258,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12429870059274102
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.26412298944673385,
+            "curvature": 0.10675386944757725,
+            "entropy_growth": 0.21472153064299748,
+            "resonance_coherence": 0.4041419689781776,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.29390769455190313,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2952871740990253
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.10198447506635676,
+            "curvature": 0.16995302933874484,
+            "entropy_growth": 0.20889343079655004,
+            "resonance_coherence": 0.6914037223344065,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16843651469206283,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19322203684546546
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.12790134156703867,
+            "curvature": 0.3899497688138476,
+            "entropy_growth": 0.16255144839731453,
+            "resonance_coherence": 0.47619811806569157,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19900495608851854,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11258525772867199
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.18053599709120988,
+            "curvature": 0.11472276320852651,
+            "entropy_growth": 0.15597337943236553,
+            "resonance_coherence": 0.427847546107874,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2793207512227761,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18936429531523957
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.17403786780273622,
+            "curvature": 0.2666169650696103,
+            "entropy_growth": 0.2572682812391922,
+            "resonance_coherence": 0.6462754463906218,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2986641115612788,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24525706458746283
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.23444927233219706,
+            "curvature": 0.2714519547005838,
+            "entropy_growth": 0.18237332091762265,
+            "resonance_coherence": 0.4007460304368608,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2933865053167942,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2119263659579321
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.22603317015078103,
+            "curvature": 0.10239602848438623,
+            "entropy_growth": 0.29277245369349114,
+            "resonance_coherence": 0.4050332472490589,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13931000501681462,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10665796303025524
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2683213253152482,
+            "curvature": 0.28110487413857654,
+            "entropy_growth": 0.10169387502230265,
+            "resonance_coherence": 0.4707917321035272,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2949168078831751,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2003848938120829
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.25374393363878145,
+            "curvature": 0.3007225034841242,
+            "entropy_growth": 0.19092314885920844,
+            "resonance_coherence": 0.5448948193693335,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2112260959508825,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2147023363681223
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.19884401578786826,
+            "curvature": 0.32762823480371334,
+            "entropy_growth": 0.2424351831359212,
+            "resonance_coherence": 0.6971116640936805,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22257685127001645,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17402190657154343
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2550547270459697,
+            "curvature": 0.2227576306906912,
+            "entropy_growth": 0.168395562921608,
+            "resonance_coherence": 0.6542238408193827,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19433747886169678,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22778498796411953
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.12520365046373064,
+            "curvature": 0.38828066151176166,
+            "entropy_growth": 0.2871881815899736,
+            "resonance_coherence": 0.4953177424623407,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2731660375221692,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1095313410996872
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.25194414416261623,
+            "curvature": 0.36595507982424513,
+            "entropy_growth": 0.15048578830832787,
+            "resonance_coherence": 0.486856308638248,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11173389796458547,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10323630183235169
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.267495412902793,
+            "curvature": 0.23439655921954167,
+            "entropy_growth": 0.2763320552861217,
+            "resonance_coherence": 0.6344662666819447,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.21394987772358814,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1361526563280951
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.29473076748482885,
+            "curvature": 0.2776382133403478,
+            "entropy_growth": 0.11345858484416388,
+            "resonance_coherence": 0.5388411467398821,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20352308274463912,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23577332245859278
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.18612572732902727,
+            "curvature": 0.16257092236378068,
+            "entropy_growth": 0.22712556373353374,
+            "resonance_coherence": 0.48750025956280896,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.28262056296702787,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18224958162201824
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.19993066061907022,
+            "curvature": 0.10372447693586662,
+            "entropy_growth": 0.1833807955194367,
+            "resonance_coherence": 0.5829581022462598,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27187129388505593,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2642737786946183
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.27476317832643177,
+            "curvature": 0.1801805909371464,
+            "entropy_growth": 0.2780682842810101,
+            "resonance_coherence": 0.48291978504146005,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22629046789578192,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2826057254515639
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.11094793474096815,
+            "curvature": 0.135203685503453,
+            "entropy_growth": 0.23878749717807263,
+            "resonance_coherence": 0.6905913966502614,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1720720037659243,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21611210213688087
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2857755006079239,
+            "curvature": 0.19029118777315285,
+            "entropy_growth": 0.24932291806208787,
+            "resonance_coherence": 0.5648543260034856,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27927287663180766,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20228842129936114
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.11489973613765919,
+            "curvature": 0.28417717853424984,
+            "entropy_growth": 0.2602450885230616,
+            "resonance_coherence": 0.5151832550277828,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.21866108975641574,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11682216648875102
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.13365482277277932,
+            "curvature": 0.12274777435653758,
+            "entropy_growth": 0.22708573706026516,
+            "resonance_coherence": 0.6613989708569035,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.24837945545254744,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17362883865783402
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.16108006526138335,
+            "curvature": 0.24888474786423728,
+            "entropy_growth": 0.16416436015428124,
+            "resonance_coherence": 0.5284556775943718,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17616250636080424,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10696922900692261
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.21433229127500952,
+            "curvature": 0.2842041144467925,
+            "entropy_growth": 0.12857745521772632,
+            "resonance_coherence": 0.6186447935549173,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12208006543686285,
+            "recursion_depth": 0,
+            "token_acceleration": 0.10167187631252853
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.29315185845235114,
+            "curvature": 0.3716341403525688,
+            "entropy_growth": 0.1302654613155418,
+            "resonance_coherence": 0.49578011006209516,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20090770794172336,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14823958987639438
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.14206865454622125,
+            "curvature": 0.10423161065909914,
+            "entropy_growth": 0.2285923922505938,
+            "resonance_coherence": 0.5817443654641938,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.24343267819809752,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16240054840887558
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.22904336210442441,
+            "curvature": 0.35346864934767663,
+            "entropy_growth": 0.2012287998037497,
+            "resonance_coherence": 0.6534233488803027,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20946555680474582,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12751444259838818
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.1320844652033894,
+            "curvature": 0.3623962463358392,
+            "entropy_growth": 0.13563565621786977,
+            "resonance_coherence": 0.5951104847825996,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19467665918828925,
+            "recursion_depth": 0,
+            "token_acceleration": 0.20411332475400168
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2140182955784044,
+            "curvature": 0.11431374659165994,
+            "entropy_growth": 0.1508469415250743,
+            "resonance_coherence": 0.6272499215865419,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.25573177444070194,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1511429161204291
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2737373929024458,
+            "curvature": 0.19685527464221586,
+            "entropy_growth": 0.23495587474614066,
+            "resonance_coherence": 0.44830040134315013,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.19245375326650202,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14077173348953903
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.2764248490832494,
+            "curvature": 0.13382244789310477,
+            "entropy_growth": 0.16249283078163806,
+            "resonance_coherence": 0.6527629927667837,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11965806637095017,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1306716171963538
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.28519149006987354,
+            "curvature": 0.18642331775601106,
+            "entropy_growth": 0.23279378348880758,
+            "resonance_coherence": 0.5151002077939547,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2545716086831465,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12902849244859665
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.13820878607148196,
+            "curvature": 0.3205917480891286,
+            "entropy_growth": 0.2689006533914804,
+            "resonance_coherence": 0.6814843527370479,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12878653210115204,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2523530671245971
+        },
+        "label": "retrieval_heavy"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4491244355598998,
+            "curvature": 0.20110083637467374,
+            "entropy_growth": 0.7192932058522161,
+            "resonance_coherence": 0.46566292823175914,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1464299339849702,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2195268123393282
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5489602495161316,
+            "curvature": 0.32379634950209174,
+            "entropy_growth": 0.651013183931447,
+            "resonance_coherence": 0.4119163481831144,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11743045686238629,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2747246584688551
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7418946732458072,
+            "curvature": 0.39860443601924844,
+            "entropy_growth": 0.7283013788990659,
+            "resonance_coherence": 0.5311783947628138,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16512563562536628,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16530705842929033
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6116737012518464,
+            "curvature": 0.14813097520800625,
+            "entropy_growth": 0.869548676220286,
+            "resonance_coherence": 0.5443651414234887,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.25424541564100145,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13317198764980598
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6496444149965697,
+            "curvature": 0.27839510905081877,
+            "entropy_growth": 0.754762123159095,
+            "resonance_coherence": 0.5348215189097532,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1537435142505216,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2510074984510856
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6346743187278627,
+            "curvature": 0.3447627358533542,
+            "entropy_growth": 0.6960156973714976,
+            "resonance_coherence": 0.5994359638814516,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.14775344972077448,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19930980426746364
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6186199250511721,
+            "curvature": 0.18632500140886105,
+            "entropy_growth": 0.8886873275880571,
+            "resonance_coherence": 0.6328302420976982,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.29916659201267926,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13809787871332077
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6351727460240002,
+            "curvature": 0.24349829786176105,
+            "entropy_growth": 0.7766176478649047,
+            "resonance_coherence": 0.44908610898086176,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.287489754903715,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23697979787947324
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4725409316635271,
+            "curvature": 0.33275479475241226,
+            "entropy_growth": 0.8965610879187811,
+            "resonance_coherence": 0.6474840884437759,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16414380745777124,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14142349687532202
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5628836960546996,
+            "curvature": 0.18171646949716486,
+            "entropy_growth": 0.6917490264390157,
+            "resonance_coherence": 0.5628625972195316,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.17585342212365762,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13416850956624754
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4189415376493582,
+            "curvature": 0.12234696239039133,
+            "entropy_growth": 0.6028385697221348,
+            "resonance_coherence": 0.6925417376902212,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.291151286167885,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1986733186959629
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7960236988041387,
+            "curvature": 0.3290032279598693,
+            "entropy_growth": 0.925003435237423,
+            "resonance_coherence": 0.6133354700666254,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.26033938795799316,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1670650130333335
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5049823554417384,
+            "curvature": 0.3809787834655295,
+            "entropy_growth": 0.7318137157319611,
+            "resonance_coherence": 0.5335488540591169,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1258971125737363,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14469462168601768
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.42462947310032007,
+            "curvature": 0.20984210809864845,
+            "entropy_growth": 0.9287040506700289,
+            "resonance_coherence": 0.5974990667132969,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.24460829848367646,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18005260314721763
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7715936089123152,
+            "curvature": 0.21279246052091594,
+            "entropy_growth": 0.8848311816311916,
+            "resonance_coherence": 0.6059718787060547,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15703144613209039,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14920786705303513
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7984754532781312,
+            "curvature": 0.3810555718473798,
+            "entropy_growth": 0.6547892081394332,
+            "resonance_coherence": 0.4682582633021196,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.27147193258249913,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22446308033322582
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5771484413780675,
+            "curvature": 0.19313188495803496,
+            "entropy_growth": 0.6628983881572678,
+            "resonance_coherence": 0.6003442289178751,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2728728127240605,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2619494964290986
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6477469399382808,
+            "curvature": 0.21287437244347152,
+            "entropy_growth": 0.6524863725230209,
+            "resonance_coherence": 0.6218778276496391,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20072069032032275,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1667777955992382
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.770153872534458,
+            "curvature": 0.39356039213462723,
+            "entropy_growth": 0.6107688065275919,
+            "resonance_coherence": 0.4982020735431683,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1378201049856612,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14439707359946108
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5457636883571254,
+            "curvature": 0.1596082111447619,
+            "entropy_growth": 0.9277025319751118,
+            "resonance_coherence": 0.5153120979013764,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.29169075372203246,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23259409383343266
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7089369848921385,
+            "curvature": 0.32177837762836836,
+            "entropy_growth": 0.8186548123687064,
+            "resonance_coherence": 0.4722767030253411,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2861755355525134,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1532479482023438
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7031454930061841,
+            "curvature": 0.3570566237225725,
+            "entropy_growth": 0.659823855069732,
+            "resonance_coherence": 0.6754294512295465,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.22828365749631468,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24282257134970386
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.48041645531066357,
+            "curvature": 0.3165095093795318,
+            "entropy_growth": 0.9762622842170211,
+            "resonance_coherence": 0.45655061493529403,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2401631399818463,
+            "recursion_depth": 0,
+            "token_acceleration": 0.24226037444910772
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43147307152245484,
+            "curvature": 0.2632611667482959,
+            "entropy_growth": 0.8522189768391546,
+            "resonance_coherence": 0.5908368103864751,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13501140300896808,
+            "recursion_depth": 0,
+            "token_acceleration": 0.18907932148691217
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7612323669933978,
+            "curvature": 0.1562296223486148,
+            "entropy_growth": 0.7140996528130314,
+            "resonance_coherence": 0.4509267983764296,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20037165710595517,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19426877177829194
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7350401082644048,
+            "curvature": 0.12214846188491554,
+            "entropy_growth": 0.94720603150297,
+            "resonance_coherence": 0.6575368206693207,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2050305683776263,
+            "recursion_depth": 0,
+            "token_acceleration": 0.29952578525981455
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6779649171632705,
+            "curvature": 0.20083148506166004,
+            "entropy_growth": 0.6282199178283424,
+            "resonance_coherence": 0.5847537441687932,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.215852406889622,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22988339570630556
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43821579502229074,
+            "curvature": 0.16660830210295513,
+            "entropy_growth": 0.898203682385778,
+            "resonance_coherence": 0.5196840993119475,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2411364244916924,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14893165982974707
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6786476730590338,
+            "curvature": 0.3164042088544371,
+            "entropy_growth": 0.6688694372896927,
+            "resonance_coherence": 0.43428783341803656,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.18086208535182896,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1889202664609529
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7729402149392848,
+            "curvature": 0.32861922020452683,
+            "entropy_growth": 0.7711059353748155,
+            "resonance_coherence": 0.45499714141011055,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.23937915235115412,
+            "recursion_depth": 0,
+            "token_acceleration": 0.22703784687406223
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7591053352194039,
+            "curvature": 0.2932866376818898,
+            "entropy_growth": 0.7655469560689605,
+            "resonance_coherence": 0.5562085757314741,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20603896544771125,
+            "recursion_depth": 0,
+            "token_acceleration": 0.26410082320076467
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.41549241544432935,
+            "curvature": 0.225325634288974,
+            "entropy_growth": 0.9095567588103648,
+            "resonance_coherence": 0.593020017083526,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.16354998599567913,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14777388558034593
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.46330995293743515,
+            "curvature": 0.22564257418041797,
+            "entropy_growth": 0.6465587732352254,
+            "resonance_coherence": 0.42770790579487333,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.253560084853771,
+            "recursion_depth": 0,
+            "token_acceleration": 0.19225473263085024
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6944704977828486,
+            "curvature": 0.23099210829807515,
+            "entropy_growth": 0.6117225306515223,
+            "resonance_coherence": 0.631224666250535,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.12962331799632082,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1928317695985664
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4289544718421019,
+            "curvature": 0.32437650926496064,
+            "entropy_growth": 0.7100165445792826,
+            "resonance_coherence": 0.5462718409770541,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10719074555779357,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11557522996100696
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.43516685273341094,
+            "curvature": 0.2196850054049379,
+            "entropy_growth": 0.7043452182724872,
+            "resonance_coherence": 0.6371293034854292,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10238224523349451,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2968023067180232
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7632398008307021,
+            "curvature": 0.38889983496708824,
+            "entropy_growth": 0.8902197657368875,
+            "resonance_coherence": 0.5603308264935325,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1659106193002443,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2692089489329339
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6571662737615811,
+            "curvature": 0.2913506019045757,
+            "entropy_growth": 0.8846877034204937,
+            "resonance_coherence": 0.4401923082941258,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.13809200001489721,
+            "recursion_depth": 0,
+            "token_acceleration": 0.12045075584115073
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.47030536688510927,
+            "curvature": 0.273298240789024,
+            "entropy_growth": 0.8697205412126763,
+            "resonance_coherence": 0.5052581660879019,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15196421388214748,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14972872542613974
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5486202108913086,
+            "curvature": 0.2971039031061623,
+            "entropy_growth": 0.7538306185653794,
+            "resonance_coherence": 0.5330572196808938,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10039421131970389,
+            "recursion_depth": 0,
+            "token_acceleration": 0.14500591916280164
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7995722502520018,
+            "curvature": 0.2775246092589298,
+            "entropy_growth": 0.8585773011297568,
+            "resonance_coherence": 0.46231413050124337,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2886138276177428,
+            "recursion_depth": 0,
+            "token_acceleration": 0.13628118193403788
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.4348015591598921,
+            "curvature": 0.37868088402553546,
+            "entropy_growth": 0.6005409570931034,
+            "resonance_coherence": 0.4893205989738796,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10592069399016678,
+            "recursion_depth": 0,
+            "token_acceleration": 0.21892591006048384
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7195893109942711,
+            "curvature": 0.18955522495493995,
+            "entropy_growth": 0.7997832843109955,
+            "resonance_coherence": 0.6582212320761753,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.11336667811565433,
+            "recursion_depth": 0,
+            "token_acceleration": 0.1474790303317648
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5541551533552835,
+            "curvature": 0.2647990107645387,
+            "entropy_growth": 0.767734556849301,
+            "resonance_coherence": 0.4603547076995713,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15042450469857438,
+            "recursion_depth": 0,
+            "token_acceleration": 0.16446799503873444
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.40037815033726976,
+            "curvature": 0.2589349972427732,
+            "entropy_growth": 0.943078504517192,
+            "resonance_coherence": 0.6067553822854939,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.1606203112386288,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2657263407901759
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7598953423902658,
+            "curvature": 0.1825494493954411,
+            "entropy_growth": 0.86028412811449,
+            "resonance_coherence": 0.685471256046292,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10553321337299329,
+            "recursion_depth": 0,
+            "token_acceleration": 0.11555399543995165
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6739887629976575,
+            "curvature": 0.2834283660516662,
+            "entropy_growth": 0.9381142288045901,
+            "resonance_coherence": 0.4592734562756766,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.20679280189983112,
+            "recursion_depth": 0,
+            "token_acceleration": 0.2523749994885248
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.5482310590788475,
+            "curvature": 0.11100650074496123,
+            "entropy_growth": 0.8825155370132687,
+            "resonance_coherence": 0.655384131717514,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.2974968352572025,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17921841086829668
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.7127157297456547,
+            "curvature": 0.27106970302345024,
+            "entropy_growth": 0.9769616837402754,
+            "resonance_coherence": 0.45107097958011017,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.10220303345975634,
+            "recursion_depth": 0,
+            "token_acceleration": 0.23444325816270128
+        },
+        "label": "narrative_dialogue"
+    },
+    {
+        "features": {
+            "latent_drift": 0.6966452416429938,
+            "curvature": 0.1668997902116724,
+            "entropy_growth": 0.6185511056780896,
+            "resonance_coherence": 0.5285567470361798,
+            "branch_factor": 1.0,
+            "attention_fragmentation": 0.15803151837279522,
+            "recursion_depth": 0,
+            "token_acceleration": 0.17845649436648656
+        },
+        "label": "narrative_dialogue"
+    }
+]
