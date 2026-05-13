@@ -8,9 +8,12 @@ class RuntimeTruthLogger:
     """
     Strict empirical logger that saves raw telemetry without projections.
     """
-    def __init__(self, run_id: str, base_dir: str = "results/reconstruction_6_5"):
+    def __init__(self, run_id: str, base_dir: str = "results/reconstruction_6_5", log_dir: str = None):
         self.run_id = run_id
-        self.log_dir = os.path.join(base_dir, run_id)
+        if log_dir:
+            self.log_dir = log_dir
+        else:
+            self.log_dir = os.path.join(base_dir, run_id)
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_file = os.path.join(self.log_dir, "raw_telemetry.json")
         self.entries = []
