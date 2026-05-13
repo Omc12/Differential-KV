@@ -1,7 +1,7 @@
 # Differential KV Cache — Research Prototype
 
-> **Status:** Phase 9.75 — Metric Reconciliation & Distributed Patch Hardening (MRDPH) COMPLETED  
-> **Goal:** Patch and harden the distributed runtime, reconcile inconsistent metrics, and enforce trace-backed hardware claims.
+> **Status:** Phase 10 — Real-World Inference Validation & Hardware Grounding (RIVHG) COMPLETED  
+> **Goal:** Transition Differential KV into an empirically and scientifically defensible runtime under real workloads.
 
 ---
 
@@ -24,6 +24,8 @@ This project has reached **Phase 9.75**, focusing on:
 | Trace Enforcement | PATCHED | Mandatory hardware-trace backing for occupancy. |
 | Sync Hardening | STABLE | Burst-reduction and jitter-aware synchronization. |
 | Queue Stability | VERIFIED | Backpressure-controlled scaling up to 32 workers. |
+| Real-World Inference| VERIFIED | End-to-end serving validation with real prompts. |
+| Hardware Grounding | GROUNDED | Claims backed by physical CUDA traces and counters. |
 
 ---
 
@@ -32,8 +34,11 @@ This project has reached **Phase 9.75**, focusing on:
 ```
 differential-kv/
 ├── distributed/         # Patched sync logic and backpressure control
-├── validation/          # Semantic reconcilers and trace enforcers
-├── results/reconstruction_9_75/ # Patched validation reports and logs
+├── validation/          # Real inference harness and reproducibility tools
+├── profiling/           # Hardware grounding and CUDA trace captures
+├── benchmarks/          # Standardized long-context and multi-user suites
+├── results/reconstruction_10/ # Real-world validation logs and traces
+├── reports/             # Phase 10 validation and grounding reports
 ```
 
 ---
@@ -42,7 +47,8 @@ differential-kv/
 
 ```bash
 # Execute Phase 9.75 Reconciliation & Patch Stack
-python run_phase_9_75_validation.py
+# Execute Phase 10 Real-World Validation & Grounding
+python run_phase_10_validation.py
 ```
 
 Check `results/reconstruction_9_75/` for patched markdown summaries.
