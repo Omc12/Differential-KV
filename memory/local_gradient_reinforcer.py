@@ -1,0 +1,2 @@
+class LocalGradientReinforcer:
+    pass

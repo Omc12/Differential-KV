@@ -1,0 +1,2 @@
+class TraversalDecayPredictor:
+    pass

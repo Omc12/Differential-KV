@@ -1,0 +1,1 @@
+class GlobalIdentitySnapshots: pass

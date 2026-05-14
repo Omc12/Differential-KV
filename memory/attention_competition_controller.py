@@ -1,0 +1,1 @@
+class AttentionCompetitionController: pass

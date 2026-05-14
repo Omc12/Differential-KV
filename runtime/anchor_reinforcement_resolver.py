@@ -57,7 +57,8 @@ class AnchorReinforcementResolver(PersistentRelevanceResolver):
             
             # Use a finite but extremely large value relative to current magnitudes
             max_val = torch.max(self.geometry.accumulated_importance).item()
-            pin_value = max(1e4, max_val * 10.0)
+            dtype_max = torch.finfo(self.geometry.accumulated_importance.dtype).max
+            pin_value = min(dtype_max, max(1e4, max_val * 10.0))
             
             # A. Protect Reinforced Spans (Capsules)
             for start, end in reinforced_spans:

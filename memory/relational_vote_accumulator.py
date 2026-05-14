@@ -1,0 +1,1 @@
+class RelationalVoteAccumulator: pass

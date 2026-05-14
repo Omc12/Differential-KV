@@ -1,0 +1,2 @@
+class ResonanceActivationController:
+    pass

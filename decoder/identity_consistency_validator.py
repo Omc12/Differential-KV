@@ -1,0 +1,1 @@
+class IdentityConsistencyValidator: pass
