@@ -45,28 +45,30 @@ class ELFResolver(KRXResolver):
         pruned_pkv, indices = super().resolve_and_prune(past_key_values, hidden_states, chunk_input_ids, attention_probs)
         
         # 2. ELF: Locality Fusion
-        # Create a sparse mask from indices
-        seq_len = hidden_states.shape[1]
-        device = hidden_states.device
-        mask = torch.zeros(1, 1, seq_len, device=device)
-        mask[0, 0, indices] = 1.0
-        
-        # Fuse neighboring pathways
-        fused_mask = self.fuser.fuse_pathways(mask)
-        
-        # Update hotpaths
-        self.hotpath_manager.update_hotpaths(fused_mask, self.current_step if hasattr(self, 'current_step') else 0)
+        if indices is not None:
+            # Create a sparse mask from indices
+            # Ensure seq_len covers all indices (avoid out-of-bounds during generation)
+            max_idx = indices.max().item() if indices.numel() > 0 else 0
+            seq_len = max(hidden_states.shape[1], int(max_idx) + 1)
+            device = hidden_states.device
+            mask = torch.zeros(1, 1, seq_len, device=device)
+            mask[0, 0, indices] = 1.0
+            
+            # Fuse neighboring pathways
+            fused_mask = self.fuser.fuse_pathways(mask)
+            
+            # Update hotpaths
+            self.hotpath_manager.update_hotpaths(fused_mask, self.current_step if hasattr(self, 'current_step') else 0)
+            
+            # Locality-aware prefetching
+            self.locality_prefetcher.predict_locality_clusters(fused_mask)
+            
+            # Integrity Guard
+            mock_output = torch.randn_like(hidden_states)
+            self.integrity_guard.validate_fusion(mask > 0.5, fused_mask, mock_output)
         
         # Reduce synchronization barriers
         self.barrier_reducer.optimize_barrier()
-        
-        # Locality-aware prefetching
-        self.locality_prefetcher.predict_locality_clusters(fused_mask)
-        
-        # Integrity Guard
-        # (Mock output for validation)
-        mock_output = torch.randn_like(hidden_states)
-        self.integrity_guard.validate_fusion(mask > 0.5, fused_mask, mock_output)
         
         # Update metrics
         self._update_elf_metrics()

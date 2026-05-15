@@ -27,6 +27,15 @@ class PersistentHotpathManager:
         
         if path_id not in self.hotpath_cache:
             self.hotpath_cache[path_id] = torch.zeros_like(active_indices, dtype=torch.float)
+        
+        # Ensure shape matches (seq_len grows during generation)
+        if self.hotpath_cache[path_id].shape != active_indices.shape:
+            # Simple resize/pad to match current active_indices
+            new_cache = torch.zeros_like(active_indices, dtype=torch.float)
+            # Copy old data where possible (truncated if smaller, padded if larger)
+            min_L = min(self.hotpath_cache[path_id].shape[-1], active_indices.shape[-1])
+            new_cache[..., :min_L] = self.hotpath_cache[path_id][..., :min_L]
+            self.hotpath_cache[path_id] = new_cache
             
         # Accumulate activation frequency
         self.hotpath_cache[path_id] = self.hotpath_cache[path_id] * self.decay_rate + active_indices.float()
