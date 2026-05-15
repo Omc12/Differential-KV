@@ -12,7 +12,7 @@ class Qwen7BRealLoader:
         self.model_id = model_id
 
     def load(self, local_path: str = None, attn_implementation: str = "sdpa"):
-        print(f"[PHASE 18.1A] Loading REAL Checkpoint: {self.model_id}")
+        print(f"[PHASE 18.1A] Loading REAL Checkpoint: {self.model_id} (Attn: {attn_implementation})")
         
         quant_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -22,13 +22,13 @@ class Qwen7BRealLoader:
         )
         
         try:
-            # Note: local_files_only=True ensures we don't accidentally pull a proxy if offline
             model = AutoModelForCausalLM.from_pretrained(
                 local_path if local_path else self.model_id,
                 quantization_config=quant_config,
-                device_map="cuda", # Force to GPU
-                torch_dtype=torch.float16,
+                device_map="cuda",
+                torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
+                attn_implementation=attn_implementation,
                 local_files_only=True if not local_path else False
             )
             
@@ -37,5 +37,4 @@ class Qwen7BRealLoader:
             
         except Exception as e:
             print(f"[CRITICAL FAILURE] Phase 18.1 load failed: {e}")
-            print("Ensure that model weights are fully downloaded and not .incomplete.")
             raise e

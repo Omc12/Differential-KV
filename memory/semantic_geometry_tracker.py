@@ -31,6 +31,10 @@ class SemanticGeometryKVManager:
         # Use L2-norm as base importance
         current_imp = torch.norm(hidden_states, p=2, dim=-1)
         
+        # Safety check: Ensure no NaNs enter the importance buffer
+        if torch.isnan(current_imp).any():
+            current_imp = torch.nan_to_num(current_imp, nan=0.0)
+        
         if self.accumulated_importance is None:
             self.accumulated_importance = current_imp
             self.absolute_indices = torch.arange(q_len, device=device).unsqueeze(0).expand(batch_size, -1)
@@ -45,6 +49,7 @@ class SemanticGeometryKVManager:
                 self.absolute_indices = torch.cat([self.absolute_indices, new_indices.unsqueeze(0).expand(batch_size, -1)], dim=1)
             
             # Update the tail with current importance
+            # Use q_len which is the size of the current hidden_states
             self.accumulated_importance[:, -q_len:] = torch.max(self.accumulated_importance[:, -q_len:], current_imp)
 
     def prune_kv(self, past_key_values, hidden_states=None):
@@ -75,11 +80,13 @@ class SemanticGeometryKVManager:
         
         # 3. Neighborhood Expansion & Protection
         mask = torch.zeros((batch_size, seq_len), device=device, dtype=torch.bool)
-        mask[:, :self.instruction_lane_size] = True
-        mask[:, -self.local:] = True
+        mask[:, :min(seq_len, self.instruction_lane_size)] = True
+        mask[:, -min(seq_len, self.local):] = True
         
         for i in range(-self.neighborhood, self.neighborhood + 1):
             neighbor_indices = torch.clamp(top_indices + i, 0, seq_len - 1)
+            # Defensive: ensure neighbor_indices is long
+            neighbor_indices = neighbor_indices.long()
             mask.scatter_(1, neighbor_indices, True)
             
         # 4. Final Budget Enforcement
@@ -88,6 +95,9 @@ class SemanticGeometryKVManager:
         final_indices, _ = torch.sort(final_indices, dim=-1)
         
         # 5. Sync State and Prune KV
+        # Defensive: ensure final_indices are valid for gather
+        final_indices = torch.clamp(final_indices, 0, self.accumulated_importance.shape[1] - 1).long()
+        
         self.accumulated_importance = torch.gather(self.accumulated_importance, 1, final_indices)
         self.absolute_indices = torch.gather(self.absolute_indices, 1, final_indices)
 
@@ -95,9 +105,18 @@ class SemanticGeometryKVManager:
         for layer_k, layer_v in past_key_values:
             num_heads = layer_k.shape[1]
             head_dim = layer_k.shape[3]
-            idx_expanded = final_indices.view(batch_size, 1, -1, 1).expand(-1, num_heads, -1, head_dim)
+            # Verify layer_k shape against indices
+            # layer_k shape: [batch, heads, seq_len, dim]
+            current_kv_len = layer_k.shape[2]
+            layer_indices = torch.clamp(final_indices, 0, current_kv_len - 1).long()
+            
+            idx_expanded = layer_indices.view(batch_size, 1, -1, 1).expand(-1, num_heads, -1, head_dim)
             pruned_k = torch.gather(layer_k, 2, idx_expanded)
             pruned_v = torch.gather(layer_v, 2, idx_expanded)
             new_pkv.append((pruned_k, pruned_v))
+            
+        # Hard sync to catch kernel failures immediately
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
             
         return tuple(new_pkv), final_indices
