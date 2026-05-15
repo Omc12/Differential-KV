@@ -37,7 +37,7 @@ class AttentionEnergyCompressor:
             
         # Re-inject into non-symbolic mass (which remains untouched or slightly suppressed)
         final_mass = attention_mass.clone()
-        final_mass[symbolic_mask > 0] = compressed_mass
+        final_mass[symbolic_mask > 0] = compressed_mass.to(final_mass.dtype)
         
         return final_mass
 
