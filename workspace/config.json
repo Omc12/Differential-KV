@@ -1,0 +1,10 @@
+{
+    "model_path": "models/qwen-7b",
+    "sparse_mode": "lowrank_sparse",
+    "block_size": 64,
+    "device": "cuda",
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8000
+    }
+}
