@@ -11,4 +11,5 @@ uvicorn
 pydantic
 sse-starlette
 psutil
+pyyaml
 
