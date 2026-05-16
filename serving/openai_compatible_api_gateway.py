@@ -45,12 +45,9 @@ class OpenAICompatibleAPIGateway:
             request_id = f"chatcmpl-{uuid.uuid4()}"
             created_time = int(time.time())
             
-            # Prepare prompt
-            prompt = "\n".join([f"{m.role}: {m.content}" for m in request.messages])
-            prompt += "\nassistant: "
-            
             payload = {
-                "prompt": prompt,
+                "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+                "prompt": "", # fallback
                 "max_tokens": request.max_tokens or 100,
                 "temperature": request.temperature
             }
@@ -80,6 +77,26 @@ class OpenAICompatibleAPIGateway:
             return {
                 "scheduler": self.scheduler.get_serving_metrics(),
                 "recovery": self.recovery_engine.get_recovery_metrics()
+            }
+
+        @self.app.get("/v1/models")
+        async def list_models():
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "diffkv-qwen2.5-0.5b",
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "differential-kv"
+                    },
+                    {
+                        "id": "diffkv-qwen2.5-7b",
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "differential-kv"
+                    }
+                ]
             }
 
     async def _stream_generator(self, session_id, request_id, created, model, payload):

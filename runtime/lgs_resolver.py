@@ -50,7 +50,10 @@ class LGSResolver:
         self.setup_runtime()
         self.profiler.start_segment("batch", "lgs_decode_stage")
         
-        prompts = [p["prompt"] for p in payloads]
+        if "messages" in payloads[0] and payloads[0]["messages"]:
+            prompts = [self.wrapper.tokenizer.apply_chat_template(p["messages"], tokenize=False, add_generation_prompt=True) for p in payloads]
+        else:
+            prompts = [p["prompt"] for p in payloads]
         self.wrapper.tokenizer.pad_token = self.wrapper.tokenizer.eos_token
         encoded = self.wrapper.tokenizer(prompts, return_tensors='pt', padding=True).to(self.wrapper.device)
         input_ids = encoded.input_ids
@@ -63,12 +66,26 @@ class LGSResolver:
         # Autoregressive Loop with LGS Monitoring
         max_gen = max(p.get("max_tokens", 128) for p in payloads)
         current_input_ids = input_ids
+        eos_token_id = self.wrapper.tokenizer.eos_token_id
+        
+        finished = torch.zeros(len(session_ids), dtype=torch.bool, device=self.wrapper.device)
         
         for step in range(max_gen):
+            if finished.all():
+                break
+                
             # Simulated Fused Step
             logits = self.fusion_engine.fuse_decode_batch(session_ids, current_input_ids[:, -1:])
             next_tokens = torch.argmax(logits, dim=-1).unsqueeze(-1)
+            
+            # Mask finished sequences
+            pad_id = self.wrapper.tokenizer.pad_token_id or eos_token_id
+            next_tokens = torch.where(finished.unsqueeze(-1), torch.tensor([pad_id], device=self.wrapper.device), next_tokens)
+            
             current_input_ids = torch.cat([current_input_ids, next_tokens], dim=-1)
+            
+            # Update finished status
+            finished = finished | (next_tokens.squeeze(-1) == eos_token_id)
             
             # Record Streaming Flush
             for sid in session_ids:
