@@ -1,0 +1,12 @@
+{
+    "included_components": [
+        "tokenizer", "logits", "sampling", "embeddings", 
+        "triton_kernels", "kv_virtualization", "batching",
+        "concurrency", "serving_overhead", "streaming",
+        "queueing", "serialization"
+    ],
+    "excluded_components": [
+        "mock_tps_engine", "synthetic_token_generator"
+    ],
+    "sparse_participation_ratio": 0.99
+}

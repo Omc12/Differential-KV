@@ -40,9 +40,8 @@ class HeavyConcurrentDecodeEngine:
             input_ids = self.wrapper.tokenizer(prompt, return_tensors='pt').input_ids.to(self.wrapper.device)
             
             with torch.no_grad():
-                # Perform a single step of decode
-                outputs = self.wrapper.model(input_ids=input_ids)
-                logits = outputs.logits[:, -1, :]
+                # Perform a single step of decode using the REAL sparse path
+                logits = self.wrapper.forward_step(input_ids)
                 
                 # Real sampling
                 probs = torch.softmax(logits, dim=-1)

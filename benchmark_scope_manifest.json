@@ -1,8 +1,8 @@
 {
-    "gpu_allocations": false,
-    "kernels": false,
-    "runtimes": false,
-    "flops": false,
-    "model_weights": false,
-    "wall_clock": false
+    "benchmark_scope": "PRODUCTION",
+    "real_model_residency": true,
+    "autoregressive_decode_only": true,
+    "user_visible_tokens_only": true,
+    "wall_clock_timing": true,
+    "serving_overhead_included": true
 }
