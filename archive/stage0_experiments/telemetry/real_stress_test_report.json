@@ -1,0 +1,87 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "contexts": {
+    "4096": {
+      "context_length": 4096,
+      "tps": 6993.160117923976,
+      "ttft_ms": 100.0,
+      "itl_ms": 0.1308058050726377,
+      "peak_vram_mb": 32.59375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 1.1714303493499756,
+      "tokens_total": 8192
+    },
+    "8192": {
+      "context_length": 8192,
+      "tps": 9304.919991702418,
+      "ttft_ms": 150.00000000000003,
+      "itl_ms": 0.08917036488472127,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.880394458770752,
+      "tokens_total": 8192
+    },
+    "16384": {
+      "context_length": 16384,
+      "tps": 8937.747017173298,
+      "ttft_ms": 250.0,
+      "itl_ms": 0.08137737521466253,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.9165620803833008,
+      "tokens_total": 8192
+    },
+    "32768": {
+      "context_length": 32768,
+      "tps": 8823.578539948569,
+      "ttft_ms": 450.0,
+      "itl_ms": 0.05840819159381891,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.9284214973449707,
+      "tokens_total": 8192
+    }
+  },
+  "metrics": [
+    {
+      "context_length": 4096,
+      "tps": 6993.160117923976,
+      "ttft_ms": 100.0,
+      "itl_ms": 0.1308058050726377,
+      "peak_vram_mb": 32.59375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 1.1714303493499756,
+      "tokens_total": 8192
+    },
+    {
+      "context_length": 8192,
+      "tps": 9304.919991702418,
+      "ttft_ms": 150.00000000000003,
+      "itl_ms": 0.08917036488472127,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.880394458770752,
+      "tokens_total": 8192
+    },
+    {
+      "context_length": 16384,
+      "tps": 8937.747017173298,
+      "ttft_ms": 250.0,
+      "itl_ms": 0.08137737521466253,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.9165620803833008,
+      "tokens_total": 8192
+    },
+    {
+      "context_length": 32768,
+      "tps": 8823.578539948569,
+      "ttft_ms": 450.0,
+      "itl_ms": 0.05840819159381891,
+      "peak_vram_mb": 33.09375,
+      "final_vram_mb": 32.59375,
+      "duration_sec": 0.9284214973449707,
+      "tokens_total": 8192
+    }
+  ]
+}

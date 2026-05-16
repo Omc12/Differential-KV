@@ -1,0 +1,4 @@
+# Phase 36: Regulation module
+from .manifold_identity_anchors import ManifoldIdentityAnchors
+from .cognitive_integrity_monitor import CognitiveIntegrityMonitor
+from .identity_drift_controller import IdentityDriftController

@@ -1,0 +1,20 @@
+{
+  "contexts": {
+    "8192": {
+      "vram_active_mb": 34.25,
+      "evicted_blocks": 64,
+      "residency_ratio": 0.5
+    },
+    "16384": {
+      "vram_active_mb": 68.5,
+      "evicted_blocks": 128,
+      "residency_ratio": 0.5
+    },
+    "32768": {
+      "vram_active_mb": 137.0,
+      "evicted_blocks": 256,
+      "residency_ratio": 0.5
+    }
+  },
+  "summary": {}
+}

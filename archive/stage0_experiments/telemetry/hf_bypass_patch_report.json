@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "target": "runtime/hf_diffkv_wrapper.py",
+  "patches_applied": [
+    "replace_generate_loop"
+  ],
+  "decode_owner": "diffkv"
+}

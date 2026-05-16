@@ -1,0 +1,34 @@
+{
+    "benchmark_classification": "PRODUCTION",
+    "included_components": [
+        "batching",
+        "concurrency",
+        "embeddings",
+        "kv_virtualization",
+        "logits",
+        "sampling",
+        "serving_overhead",
+        "streaming",
+        "tokenizer",
+        "triton_kernels"
+    ],
+    "excluded_components": [
+        "cuda_graphs",
+        "hf_dispatch",
+        "mlp",
+        "sparse_attention"
+    ],
+    "telemetry_scope": {
+        "gpu_allocations": false,
+        "kernels": false,
+        "runtimes": false,
+        "flops": false,
+        "model_weights": false,
+        "wall_clock": false
+    },
+    "serving_overhead_included": true,
+    "runtime_participation": {
+        "sparse_map": true,
+        "dense_fallbacks_detected": false
+    }
+}

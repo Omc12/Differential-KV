@@ -1,0 +1,55 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "contexts": {
+    "4096": {
+      "context_length": 4096,
+      "tps": 694.9191551271995,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.00927734375,
+      "duration_sec": 0.18419408798217773
+    },
+    "8192": {
+      "context_length": 8192,
+      "tps": 10446.38203646411,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.0,
+      "duration_sec": 0.012253046035766602
+    },
+    "16384": {
+      "context_length": 16384,
+      "tps": 14192.79646813123,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.0,
+      "duration_sec": 0.009018659591674805
+    }
+  },
+  "metrics": [
+    {
+      "context_length": 4096,
+      "tps": 694.9191551271995,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.00927734375,
+      "duration_sec": 0.18419408798217773
+    },
+    {
+      "context_length": 8192,
+      "tps": 10446.38203646411,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.0,
+      "duration_sec": 0.012253046035766602
+    },
+    {
+      "context_length": 16384,
+      "tps": 14192.79646813123,
+      "peak_vram_mb": 0.01708984375,
+      "final_vram_mb": 0.00927734375,
+      "vram_delta_mb": 0.0,
+      "duration_sec": 0.009018659591674805
+    }
+  ]
+}

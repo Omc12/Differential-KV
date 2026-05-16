@@ -1,0 +1,1 @@
+class IdentityConfidenceScheduler: pass

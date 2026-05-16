@@ -1,0 +1,2 @@
+class ContextualEnergyAllocator:
+    pass

@@ -1,0 +1,14 @@
+model_name: qwen2.5-7b-sparse
+observability:
+  enable_prometheus: true
+  metrics_port: 9090
+runtime:
+  device: cuda
+  max_context: 32768
+  sparse_budget: 0.15
+  vram_limit_gb: 12
+serving:
+  concurrency: 4
+  host: 0.0.0.0
+  max_sessions: 10
+  port: 8000

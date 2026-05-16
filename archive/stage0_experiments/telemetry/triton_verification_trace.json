@@ -1,0 +1,46 @@
+[
+  {
+    "timestamp": 1778881672.4051785,
+    "category": "triton",
+    "event_type": "launch",
+    "data": {
+      "kernel": "lowrank_recon_kernel",
+      "shape": [
+        32,
+        16
+      ]
+    },
+    "vram_allocated": 5632
+  },
+  {
+    "timestamp": 1778881672.516879,
+    "category": "kernels",
+    "event_type": "custom_kernel_success",
+    "data": {
+      "kernel": "triton_lowrank"
+    },
+    "vram_allocated": 13824
+  },
+  {
+    "timestamp": 1778881672.5172777,
+    "category": "triton",
+    "event_type": "launch",
+    "data": {
+      "kernel": "lowrank_recon_kernel",
+      "shape": [
+        32,
+        16
+      ]
+    },
+    "vram_allocated": 14848
+  },
+  {
+    "timestamp": 1778881672.5174217,
+    "category": "kernels",
+    "event_type": "custom_kernel_success",
+    "data": {
+      "kernel": "triton_lowrank"
+    },
+    "vram_allocated": 23040
+  }
+]

@@ -1,0 +1,1 @@
+class CompressedConfidenceState: pass

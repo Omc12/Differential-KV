@@ -1,0 +1,38 @@
+[
+  {
+    "context": 4096,
+    "runtime": "transformers",
+    "tps": 21.540132591734608,
+    "vram_gb": 5.3211164474487305,
+    "duration": 23.76958441734314,
+    "tokens": 512,
+    "latency_ms_per_token": 46.42496956512332
+  },
+  {
+    "context": 8192,
+    "runtime": "transformers",
+    "tps": 22.087552247358442,
+    "vram_gb": 5.321528911590576,
+    "duration": 23.180477142333984,
+    "tokens": 512,
+    "latency_ms_per_token": 45.27436941862106
+  },
+  {
+    "context": 16384,
+    "runtime": "transformers",
+    "tps": 21.9005139220358,
+    "vram_gb": 5.320769786834717,
+    "duration": 23.37844681739807,
+    "tokens": 512,
+    "latency_ms_per_token": 45.66102894023061
+  },
+  {
+    "context": 32768,
+    "runtime": "transformers",
+    "tps": 21.984657612174257,
+    "vram_gb": 8.485471248626709,
+    "duration": 23.288968563079834,
+    "tokens": 512,
+    "latency_ms_per_token": 45.4862667247653
+  }
+]

@@ -1,0 +1,2 @@
+class AttentionEnergyRestorer:
+    pass

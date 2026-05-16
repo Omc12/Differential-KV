@@ -1,0 +1,46 @@
+{
+  "status": "SUCCESS",
+  "capabilities": {
+    "cuda_available": true,
+    "gpu_count": 1,
+    "nccl_available": false,
+    "peer_access": false,
+    "cuda_graph_supported": true,
+    "fast_fp16": true
+  },
+  "active_optimizations": [
+    "cuda_graph_replay",
+    "runtime_kernel_fusion",
+    "hbm_traffic_optimization",
+    "deterministic_microbatching",
+    "sparse_scheduling"
+  ],
+  "checks": {
+    "crmp_active": true,
+    "cuda_graphs": true,
+    "kernel_fusion": true,
+    "distributed_dormant": true,
+    "deterministic": true
+  },
+  "environment": {
+    "DIFFKV_USE_CUDA_GRAPHS": "1",
+    "DIFFKV_GRAPH_PERSISTENCE": "1",
+    "DIFFKV_FUSE_KERNELS": "1",
+    "DIFFKV_TRITON_AUTO_TUNE": "1",
+    "DIFFKV_HBM_OPTIMIZATION": "1",
+    "DIFFKV_OCCUPANCY_STABILIZATION": "1",
+    "DIFFKV_DETERMINISTIC_MICROBATCH": "1",
+    "DIFFKV_SPARSE_SCHEDULING": "1",
+    "DIFFKV_DISTRIBUTED_KV_FABRIC_ACTIVE": "0",
+    "DIFFKV_DISTRIBUTED_KV_FABRIC_DORMANT": "1",
+    "DIFFKV_CROSS_GPU_SYNC_ACTIVE": "0",
+    "DIFFKV_CROSS_GPU_SYNC_DORMANT": "1",
+    "DIFFKV_NCCL_ORCHESTRATION_ACTIVE": "0",
+    "DIFFKV_NCCL_ORCHESTRATION_DORMANT": "1",
+    "DIFFKV_P2P_TRANSFER_MANAGER_ACTIVE": "0",
+    "DIFFKV_P2P_TRANSFER_MANAGER_DORMANT": "1",
+    "DIFFKV_DISTRIBUTED_RESONANCE_RUNTIME_ACTIVE": "0",
+    "DIFFKV_DISTRIBUTED_RESONANCE_RUNTIME_DORMANT": "1",
+    "DIFFKV_CRMP_ACTIVE": "1"
+  }
+}

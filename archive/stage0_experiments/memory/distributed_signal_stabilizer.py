@@ -1,0 +1,1 @@
+class DistributedSignalStabilizer: pass

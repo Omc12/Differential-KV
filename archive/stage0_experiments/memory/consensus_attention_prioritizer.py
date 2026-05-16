@@ -1,0 +1,1 @@
+class ConsensusAttentionPrioritizer: pass

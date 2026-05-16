@@ -1,0 +1,9 @@
+{
+  "triton_launches": 2,
+  "kernel_successes": 2,
+  "fallback_events": 0,
+  "active_kernels": [
+    "lowrank_recon_kernel"
+  ],
+  "fallback_details": []
+}
