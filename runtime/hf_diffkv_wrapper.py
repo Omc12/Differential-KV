@@ -58,6 +58,8 @@ class DiffKVHFWrapper:
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 50):
+        if not hasattr(self, "session_kvs"):
+            self.session_kvs = {}
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
         input_ids = inputs.input_ids
         generated = input_ids[0].tolist()
@@ -71,7 +73,7 @@ class DiffKVHFWrapper:
             generated.append(next_token_id.item())
             input_ids = next_token_id.unsqueeze(0)
             
-            outputs = self.model(input_ids=input_ids, use_cache=True)
+            outputs = self.model(input_ids=input_ids, past_key_values=outputs.past_key_values, use_cache=True)
             logits = outputs.logits[:, -1, :]
             self._update_manager(outputs.past_key_values)
             
@@ -85,11 +87,16 @@ class DiffKVHFWrapper:
         self.active_session = session_id
 
     def forward_step(self, input_ids: torch.Tensor, session_id: Optional[str] = None) -> torch.Tensor:
+        if not hasattr(self, "session_kvs"):
+            self.session_kvs = {}
+            
         if session_id:
             self.switch_session(session_id)
             
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, use_cache=True)
+            past = self.session_kvs.get(session_id, None)
+            outputs = self.model(input_ids=input_ids, past_key_values=past, use_cache=True)
+            self.session_kvs[session_id] = outputs.past_key_values
             self._update_manager(outputs.past_key_values, session_id)
             return outputs.logits[:, -1, :]
 

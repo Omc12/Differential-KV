@@ -56,8 +56,9 @@ class LGSResolver:
         input_ids = encoded.input_ids
         
         # Prefill
-        with torch.no_grad():
-            self.wrapper.model(input_ids=input_ids, attention_mask=encoded.attention_mask, use_cache=True)
+        for i, sid in enumerate(session_ids):
+            # Process prefill using forward_step to preserve KV state per session
+            self.wrapper.forward_step(input_ids[i:i+1], session_id=sid)
         
         # Autoregressive Loop with LGS Monitoring
         max_gen = max(p.get("max_tokens", 128) for p in payloads)

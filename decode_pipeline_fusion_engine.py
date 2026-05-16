@@ -31,16 +31,13 @@ class DecodePipelineFusionEngine:
                 # FUSE: Reconstruct all blocks for all sessions in this layer at once
                 self.wrapper.manager.reconstruct_layer(layer_idx)
             
-            # Batch forward pass
-            if input_ids.shape[0] > 1:
-                # Real batch forward
-                outputs = self.wrapper.model(input_ids=input_ids, use_cache=True)
-                # MUST update manager to keep sparse state alive
-                self.wrapper._update_manager(outputs.past_key_values)
-                logits = outputs.logits[:, -1, :]
-            else:
-                # Single (but part of fused loop)
-                logits = self.wrapper.forward_step(input_ids)
+            # Batch forward pass (simulated via individual calls to preserve separate KV states)
+            logits_list = []
+            for i, sid in enumerate(session_ids):
+                # Call forward step with proper session ID to maintain KV cache
+                logit = self.wrapper.forward_step(input_ids[i:i+1], session_id=sid)
+                logits_list.append(logit)
+            logits = torch.cat(logits_list, dim=0)
                 
         return logits
 
