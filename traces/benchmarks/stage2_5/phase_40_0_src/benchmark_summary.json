@@ -1,0 +1,13 @@
+{
+    "latest_run": "20260517_032755_qwen2_5-0_5b-instruct",
+    "domain_metrics": {
+        "active_ablation": "disable_predictive_scheduling",
+        "ablation_fidelities": {
+            "none": 0.9556,
+            "disable_adaptive_zoning": 0.1461,
+            "disable_predictive_scheduling": 0.15,
+            "disable_semantic_repair": 0.1427,
+            "disable_equilibrium_control": 0.1496
+        }
+    }
+}
