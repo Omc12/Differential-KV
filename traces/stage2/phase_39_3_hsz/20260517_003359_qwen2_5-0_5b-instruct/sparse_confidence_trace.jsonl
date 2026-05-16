@@ -1,0 +1,13 @@
+{"ts":1778958245.0152981,"step":0,"layer_idx":0,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.045426,"step":0,"layer_idx":1,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.0767114,"step":0,"layer_idx":2,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.109816,"step":0,"layer_idx":3,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.1434815,"step":0,"layer_idx":4,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.1744509,"step":0,"layer_idx":5,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.205465,"step":0,"layer_idx":6,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.2355685,"step":0,"layer_idx":7,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.271703,"step":0,"layer_idx":8,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.3085225,"step":0,"layer_idx":9,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.3448842,"step":0,"layer_idx":10,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.382213,"step":0,"layer_idx":11,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}
+{"ts":1778958245.423167,"step":0,"layer_idx":12,"gate_score":0.85,"window_hit_rate":0.92,"fallback_rate":0.05,"seq_len":0,"mode":"hybrid","confidence":0.85,"phase":"39.0-SAG"}

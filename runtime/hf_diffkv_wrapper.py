@@ -25,7 +25,8 @@ class DiffKVHFWrapper:
         model_id: str,
         config: Dict[str, Any],
         device: str = "cuda",
-        quantization_config: Any = None
+        quantization_config: Any = None,
+        torch_dtype: torch.dtype = torch.float16
     ):
         self.model_id = model_id
         self.config = config
@@ -34,11 +35,11 @@ class DiffKVHFWrapper:
         self.block_size = config.get("block_size", 64)
         self.rank = config.get("rank", 16)
         
-        print(f"Loading model {model_id}...")
+        print(f"Loading model {model_id} (dtype={torch_dtype})...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, 
-            torch_dtype=torch.float16, 
+            torch_dtype=torch_dtype, 
             device_map=device,
             trust_remote_code=True,
             quantization_config=quantization_config

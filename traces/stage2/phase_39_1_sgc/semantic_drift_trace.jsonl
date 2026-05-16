@@ -1,0 +1,4 @@
+{"ts": 1778955124.8198476, "step": 20, "kl_divergence": 9.7109375, "preservation_score": 0.0}
+{"ts": 1778955126.0584002, "step": 40, "kl_divergence": 13.140625, "preservation_score": 0.0}
+{"ts": 1778955127.2830815, "step": 80, "kl_divergence": 11.265625, "preservation_score": 0.0}
+{"ts": 1778955128.528883, "step": 120, "kl_divergence": 5.17578125, "preservation_score": 0.0}

@@ -1,0 +1,6 @@
+{"ts": 1778955226.235889, "step": 20, "tokens_match": false, "sparse_token": 656, "dense_token": 12}
+{"ts": 1778955227.4596617, "step": 40, "tokens_match": false, "sparse_token": 1008, "dense_token": 5671}
+{"ts": 1778955228.7028294, "step": 60, "tokens_match": false, "sparse_token": 624, "dense_token": 785}
+{"ts": 1778955229.9486952, "step": 80, "tokens_match": false, "sparse_token": 656, "dense_token": 12}
+{"ts": 1778955231.1893096, "step": 100, "tokens_match": false, "sparse_token": 1008, "dense_token": 5043}
+{"ts": 1778955232.4563482, "step": 120, "tokens_match": false, "sparse_token": 624, "dense_token": 641}

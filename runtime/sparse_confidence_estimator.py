@@ -34,7 +34,7 @@ import os
 
 
 class _JsonlWriter:
-    def __init__(self, path: str, buffer_size: int = 128):
+    def __init__(self, path: str, buffer_size: int = 1):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._path = path
         self._buffer: List[Dict] = []
@@ -94,7 +94,7 @@ class SparseConfidenceEstimator:
     ):
         self.num_layers = num_layers
         self._writer = _JsonlWriter(trace_path)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock() # Use RLock for re-entrant access
 
         # Per-layer sliding windows of real signals
         self._gate_history:    Dict[int, Deque[float]] = {}

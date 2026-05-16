@@ -81,6 +81,8 @@ class SATRunManager:
         block_size: int = 64,
         rank: int = 16,
         run_id: Optional[str] = None,
+        phase: str = PHASE,
+        stage: str = STAGE,
     ):
         self.model_id = model_id
         self.concurrency = concurrency
@@ -88,16 +90,18 @@ class SATRunManager:
         self.quantization = quantization
         self.block_size = block_size
         self.rank = rank
+        self.phase = phase
+        self.stage = stage
 
         # Stable, sortable run identifier  (UTC)
         self.run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-        # Root paths (relative to project root — caller's CWD must be project root)
-        self._trace_root    = Path("traces")   / STAGE / PHASE / self.run_id
-        self._telemetry_root= Path("telemetry")/ STAGE / PHASE / self.run_id
-        self._report_root   = Path("reports")  / STAGE / PHASE / self.run_id
-        self._benchmark_root= Path("benchmarks")/ STAGE / PHASE / self.run_id
-        self._manifest_root = Path("manifests")/ STAGE / PHASE / self.run_id
+        # Root paths (relative to project root)
+        self._trace_root    = Path("traces")   / self.stage / self.phase / self.run_id
+        self._telemetry_root= Path("telemetry")/ self.stage / self.phase / self.run_id
+        self._report_root   = Path("reports")  / self.stage / self.phase / self.run_id
+        self._benchmark_root= Path("benchmarks")/ self.stage / self.phase / self.run_id
+        self._manifest_root = Path("manifests")/ self.stage / self.phase / self.run_id
 
         self._run_start_ts: Optional[float] = None
         self._shutdown_callbacks: List[Callable[[], None]] = []

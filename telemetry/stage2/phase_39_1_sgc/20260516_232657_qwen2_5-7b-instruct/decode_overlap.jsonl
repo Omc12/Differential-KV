@@ -1,0 +1,4 @@
+{"timestamp": 1778954229.2421026, "event": "ADMISSION", "session_id": "sgc-20260516_232657_qwen2_5-7b-instruct-00", "active_count": 1}
+{"timestamp": 1778954229.3845446, "event": "ADMISSION", "session_id": "sgc-20260516_232657_qwen2_5-7b-instruct-01", "active_count": 2}
+{"timestamp": 1778954246.549097, "event": "COMPLETION", "session_id": "sgc-20260516_232657_qwen2_5-7b-instruct-00", "active_count": 1}
+{"timestamp": 1778954246.5529718, "event": "COMPLETION", "session_id": "sgc-20260516_232657_qwen2_5-7b-instruct-01", "active_count": 0}

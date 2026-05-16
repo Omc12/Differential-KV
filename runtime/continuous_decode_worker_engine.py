@@ -60,10 +60,9 @@ class ContinuousDecodeWorkerEngine:
             "output_queue": output_queue,
             "finished": False
         }
-        self.logger.debug(f"Session {session_id} added to CDBE worker.")
+        print(f"DEBUG: Session {session_id} added to CDBE worker.", flush=True)
 
     async def _persistent_decode_loop(self):
-        """The core continuous execution window."""
         while self._is_running:
             if not self.active_sessions:
                 self.is_busy = False
@@ -90,8 +89,13 @@ class ContinuousDecodeWorkerEngine:
             
             # 2. Fused Execution Window
             # Use the fusion engine to perform the actual GPU work
+            import sys
+            # sys.stderr.write(f"DEBUG: Worker starting batch for {session_ids}\n")
+            # sys.stderr.flush()
             logits = self.fusion_engine.fuse_decode_batch(session_ids, batch_input)
             next_tokens = torch.argmax(logits, dim=-1)
+            sys.stderr.write(f".") # Dot per token for visual progress
+            sys.stderr.flush()
             
             # 3. Post-processing & Streaming Distribution
             decode_complete_ts = time.time()
@@ -114,12 +118,14 @@ class ContinuousDecodeWorkerEngine:
                 # Prepare token payload
                 token_text = self.wrapper.tokenizer.decode(token_id, skip_special_tokens=False)
                 
-                # Async send to output queue (non-blocking)
+                # Async send to output payload (including logits for semantic validation)
                 payload = {
                     "session_id": sid,
                     "token_text": token_text,
                     "decode_complete_ts": decode_complete_ts,
-                    "is_final": is_eos or is_max
+                    "is_final": is_eos or is_max,
+                    "logits": logits[i:i+1].detach().clone(), # Cloned for safety
+                    "input_ids": session["input_ids"].detach().clone()
                 }
                 
                 # We use put_nowait because we assume the consumer is fast enough or has a large buffer

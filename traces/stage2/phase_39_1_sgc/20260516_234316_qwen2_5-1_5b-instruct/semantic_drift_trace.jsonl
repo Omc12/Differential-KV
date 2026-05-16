@@ -1,0 +1,6 @@
+{"ts": 1778955203.4296844, "step": 20, "kl_divergence": 12.6328125, "preservation_score": 0.0}
+{"ts": 1778955204.8681288, "step": 40, "kl_divergence": 12.1015625, "preservation_score": 0.0}
+{"ts": 1778955206.313092, "step": 60, "kl_divergence": 0.91650390625, "preservation_score": 0.0}
+{"ts": 1778955207.7397888, "step": 80, "kl_divergence": 8.234375, "preservation_score": 0.0}
+{"ts": 1778955209.1834748, "step": 100, "kl_divergence": 17.765625, "preservation_score": 0.0}
+{"ts": 1778955210.6377013, "step": 120, "kl_divergence": 14.4296875, "preservation_score": 0.0}

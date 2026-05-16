@@ -1,0 +1,33 @@
+{
+    "phase": "38.9-SAT",
+    "run_id": "20260517_010201_qwen2_5-0_5b-instruct",
+    "status": "RUN_IN_PROGRESS",
+    "timestamp_utc": "2026-05-16T19:32:01.406331+00:00",
+    "hostname": "DESKTOP-DNVCJF5",
+    "python_version": "3.13.13 (tags/v3.13.13:01104ce, Apr  7 2026, 19:25:48) [MSC v.1944 64 bit (AMD64)]",
+    "git_commit": "ae24df6",
+    "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "quantization": "4bit_nf4",
+    "block_size": 64,
+    "rank": 16,
+    "concurrency": 1,
+    "duration_sec": 45,
+    "gpu": "NVIDIA GeForce RTX 4070 SUPER (11GB, SM 8.9)",
+    "cuda_version": "13.0",
+    "paths": {
+        "traces": "traces\\stage2\\phase_39_3_hsz\\20260517_010201_qwen2_5-0_5b-instruct",
+        "telemetry": "telemetry\\stage2\\phase_39_3_hsz\\20260517_010201_qwen2_5-0_5b-instruct",
+        "reports": "reports\\stage2\\phase_39_3_hsz\\20260517_010201_qwen2_5-0_5b-instruct",
+        "manifests": "manifests\\stage2\\phase_39_3_hsz\\20260517_010201_qwen2_5-0_5b-instruct"
+    },
+    "trace_files": [
+        "sparse_attention_trace.jsonl",
+        "dense_reconstruction_trace.jsonl",
+        "kv_residency_trace.jsonl",
+        "execution_mode_trace.jsonl",
+        "sparse_participation_trace.jsonl"
+    ],
+    "telemetry_files": [
+        "raw_nvidia_smi_dmon.log"
+    ]
+}

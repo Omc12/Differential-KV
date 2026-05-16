@@ -69,5 +69,7 @@ class ChunkedTokenStreamingLayer:
             "token_count": len(buffer),
             "decode_complete_ts": last_payload["decode_complete_ts"],
             "is_final": last_payload["is_final"],
+            "logits": last_payload.get("logits"),
+            "input_ids": last_payload.get("input_ids"),
             "chunk_size": len(buffer)
         }

@@ -85,6 +85,7 @@ class AdaptiveHybridSuppressionLayer:
         gate_score: float,
         fallback_rate: float,
         step: int,
+        safety_signals: Dict[str, float] = None,
     ) -> "AdaptiveHybridSuppressionLayer.Decision":
         ts = time.time()
 
@@ -96,23 +97,40 @@ class AdaptiveHybridSuppressionLayer:
 
             if proposed_mode == "hybrid" and not self._layer_disengaged[layer_idx]:
                 threshold = self._suppression_threshold(layer_idx)
+                
+                if safety_signals:
+                    threshold *= safety_signals.get("layer_safety_margin", 1.0)
+                    drift_pressure = safety_signals.get("semantic_drift_pressure", 0.0)
+                    is_anchor_safe = safety_signals.get("anchor_stability", 1.0) >= 0.8
+                    is_repair_safe = safety_signals.get("repair_confidence", 1.0) >= 0.8
+                else:
+                    drift_pressure = 0.0
+                    is_anchor_safe = True
+                    is_repair_safe = True
 
-                if self._sparse_persist_rem[layer_idx] > 0:
-                    resolved_mode = "sparse"
-                    suppressed = True
-                    suppression_reason = f"persistence={self._sparse_persist_rem[layer_idx]}"
-                    self._sparse_persist_rem[layer_idx] -= 1
-                    self._prevented_escalations += 1
-                    self._layer_prevented[layer_idx] += 1
-                elif confidence >= threshold:
-                    resolved_mode = "sparse"
-                    suppressed = True
-                    suppression_reason = (
-                        f"conf={confidence:.3f}>={threshold:.3f} gate={gate_score:.3f}"
-                    )
-                    self._sparse_persist_rem[layer_idx] = self._SPARSE_PERSISTENCE_STEPS
-                    self._prevented_escalations += 1
-                    self._layer_prevented[layer_idx] += 1
+                # 1. Check Drift Pressure Override
+                if drift_pressure > 0.05:
+                    resolved_mode = "hybrid"
+                    self._sparse_persist_rem[layer_idx] = 0
+                else:
+                    # 2. Check Persistence & Semantic Safety
+                    if self._sparse_persist_rem[layer_idx] > 0 and is_anchor_safe:
+                        resolved_mode = "sparse"
+                        suppressed = True
+                        suppression_reason = f"persistence={self._sparse_persist_rem[layer_idx]}, anchor_safe"
+                        self._sparse_persist_rem[layer_idx] -= 1
+                        self._prevented_escalations += 1
+                        self._layer_prevented[layer_idx] += 1
+                    # 3. Check Confidence & Semantic Safety
+                    elif confidence >= threshold and is_anchor_safe and is_repair_safe:
+                        resolved_mode = "sparse"
+                        suppressed = True
+                        suppression_reason = (
+                            f"conf={confidence:.3f}>={threshold:.3f} anchor={is_anchor_safe}"
+                        )
+                        self._sparse_persist_rem[layer_idx] = self._SPARSE_PERSISTENCE_STEPS
+                        self._prevented_escalations += 1
+                        self._layer_prevented[layer_idx] += 1
 
         self._writer.write({
             "ts": ts, "step": step, "layer_idx": layer_idx,
