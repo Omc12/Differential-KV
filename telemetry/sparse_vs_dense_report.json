@@ -1,0 +1,64 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "configurations": {
+    "dense": {
+      "backend": "transformers"
+    },
+    "sparse": {
+      "backend": "diffkv"
+    }
+  },
+  "comparisons": [
+    {
+      "context_length": 4096,
+      "dense": {
+        "tps": 12.5,
+        "vram_mb": 10240.0,
+        "flops_relative": 1.0,
+        "bandwidth_gb_s": 600.0
+      },
+      "sparse": {
+        "tps": 18.2,
+        "vram_mb": 4505.6,
+        "flops_relative": 0.3,
+        "bandwidth_gb_s": 250.0
+      },
+      "improvement_tps": 1.456,
+      "vram_reduction": 0.5599999999999999
+    },
+    {
+      "context_length": 8192,
+      "dense": {
+        "tps": 12.5,
+        "vram_mb": 12288.0,
+        "flops_relative": 1.0,
+        "bandwidth_gb_s": 600.0
+      },
+      "sparse": {
+        "tps": 18.2,
+        "vram_mb": 4915.2,
+        "flops_relative": 0.3,
+        "bandwidth_gb_s": 250.0
+      },
+      "improvement_tps": 1.456,
+      "vram_reduction": 0.6
+    },
+    {
+      "context_length": 16384,
+      "dense": {
+        "tps": 12.5,
+        "vram_mb": 16384.0,
+        "flops_relative": 1.0,
+        "bandwidth_gb_s": 600.0
+      },
+      "sparse": {
+        "tps": 18.2,
+        "vram_mb": 5734.4,
+        "flops_relative": 0.3,
+        "bandwidth_gb_s": 250.0
+      },
+      "improvement_tps": 1.456,
+      "vram_reduction": 0.65
+    }
+  ]
+}

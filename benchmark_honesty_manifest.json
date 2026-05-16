@@ -1,0 +1,30 @@
+{
+    "mode": "PRODUCTION",
+    "timestamp": "2026-05-16T12:24:15.862340",
+    "included": [
+        "batching",
+        "concurrency",
+        "embeddings",
+        "kv_virtualization",
+        "logits",
+        "mlp",
+        "sampling",
+        "tokenizer",
+        "triton_kernels"
+    ],
+    "excluded": [
+        "cuda_graphs",
+        "hf_dispatch",
+        "serving_overhead",
+        "sparse_attention",
+        "streaming"
+    ],
+    "scope": {
+        "gpu_allocations": true,
+        "kernels": true,
+        "runtimes": false,
+        "flops": false,
+        "model_weights": true,
+        "wall_clock": true
+    }
+}

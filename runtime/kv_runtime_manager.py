@@ -90,6 +90,7 @@ class KVRuntimeManager:
                     V = self.basis_cache.get(layer_idx, {}).get(block.basis_id)
                 
                 if block.U is not None and V is not None:
+                    # Triton returns [num_deltas, feat_dim]
                     recon_deltas = TritonDiffKV.reconstruct_lowrank_sparse(
                         block.U,
                         V,
@@ -99,10 +100,14 @@ class KVRuntimeManager:
                         scale=block.scale
                     )
                     num_deltas = recon_deltas.shape[0]
+                    # Ensure we don't overflow the allocated space for this block
+                    max_deltas = len(block.token_indices) - 1
+                    num_to_copy = min(num_deltas, max_deltas)
+                    
                     # Reshape [num_deltas, feat_dim] -> [num_deltas, 2, heads, head_dim]
                     recon_deltas = recon_deltas.view(num_deltas, 2, heads, head_dim)
-                    out[curr_idx : curr_idx + num_deltas] = recon_deltas.to(target_dtype)
-                    curr_idx += num_deltas
+                    out[curr_idx : curr_idx + num_to_copy] = recon_deltas[:num_to_copy].to(target_dtype)
+                    curr_idx += num_to_copy
             elif block.mode == "int8":
                 if block.q_deltas is not None:
                     # [num_deltas, 2, heads, head_dim]
@@ -110,9 +115,13 @@ class KVRuntimeManager:
                     heads, head_dim = block.anchor_kv.shape[-2:]
                     deltas = deltas.view(-1, 2, heads, head_dim)
                     recon = deltas + block.anchor_kv.float().unsqueeze(0)
+                    
                     num_deltas = recon.shape[0]
-                    out[curr_idx : curr_idx + num_deltas] = recon.to(target_dtype)
-                    curr_idx += num_deltas
+                    max_deltas = len(block.token_indices) - 1
+                    num_to_copy = min(num_deltas, max_deltas)
+                    
+                    out[curr_idx : curr_idx + num_to_copy] = recon[:num_to_copy].to(target_dtype)
+                    curr_idx += num_to_copy
             elif block.mode == "periodic":
                 # Periodic is basically just raw anchors + raw deltas
                 # In this manager, we store them as KVBlocks where U/V are None but token_indices are set

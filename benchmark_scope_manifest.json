@@ -1,0 +1,8 @@
+{
+    "gpu_allocations": true,
+    "kernels": true,
+    "runtimes": false,
+    "flops": false,
+    "model_weights": true,
+    "wall_clock": true
+}
