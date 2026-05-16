@@ -1,30 +1,38 @@
 {
     "mode": "PRODUCTION",
-    "timestamp": "2026-05-16T12:24:15.862340",
+    "timestamp": "2026-05-16T12:48:12.763162",
     "included": [
+        "autoregressive_pressure",
         "batching",
         "concurrency",
+        "concurrent_decode",
         "embeddings",
+        "heavy_serving",
         "kv_virtualization",
         "logits",
-        "mlp",
+        "model_residency",
+        "multi_user_decode",
+        "queue_contention",
         "sampling",
+        "serialization_overhead",
+        "streaming",
         "tokenizer",
-        "triton_kernels"
+        "triton_kernels",
+        "vram_pressure"
     ],
     "excluded": [
         "cuda_graphs",
         "hf_dispatch",
+        "mlp",
         "serving_overhead",
-        "sparse_attention",
-        "streaming"
+        "sparse_attention"
     ],
     "scope": {
-        "gpu_allocations": true,
-        "kernels": true,
+        "gpu_allocations": false,
+        "kernels": false,
         "runtimes": false,
         "flops": false,
-        "model_weights": true,
-        "wall_clock": true
+        "model_weights": false,
+        "wall_clock": false
     }
 }
