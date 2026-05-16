@@ -1,0 +1,13 @@
+{"timestamp": 1778942309.493839, "event": "ADMISSION", "session_id": "session-12", "active_count": 1}
+{"timestamp": 1778942314.8398948, "event": "ADMISSION", "session_id": "session-1", "active_count": 2}
+{"timestamp": 1778942322.9993002, "event": "ADMISSION", "session_id": "session-2", "active_count": 3}
+{"timestamp": 1778942326.6893373, "event": "ADMISSION", "session_id": "session-13", "active_count": 4}
+{"timestamp": 1778942334.688333, "event": "ADMISSION", "session_id": "session-8", "active_count": 5}
+{"timestamp": 1778942339.0144756, "event": "ADMISSION", "session_id": "session-7", "active_count": 6}
+{"timestamp": 1778942357.780521, "event": "ADMISSION", "session_id": "session-10", "active_count": 7}
+{"timestamp": 1778942428.9114363, "event": "ADMISSION", "session_id": "session-15", "active_count": 1}
+{"timestamp": 1778942445.2466772, "event": "ADMISSION", "session_id": "session-13", "active_count": 2}
+{"timestamp": 1778942776.4838774, "event": "ADMISSION", "session_id": "session-2", "active_count": 1}
+{"timestamp": 1778942776.484414, "event": "ADMISSION", "session_id": "session-3", "active_count": 2}
+{"timestamp": 1778942776.4858835, "event": "ADMISSION", "session_id": "session-0", "active_count": 3}
+{"timestamp": 1778942776.4921677, "event": "ADMISSION", "session_id": "session-1", "active_count": 4}
