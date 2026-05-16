@@ -1,8 +1,10 @@
-import asyncio
 import time
+import asyncio
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import torch
+
+from latency_aware_batch_controller import LatencyAwareBatchController
 
 @dataclass(order=True)
 class SparseRequest:
@@ -22,6 +24,7 @@ class SparseRequestScheduler:
         self.microbatch_size = microbatch_size
         self.is_running = False
         self.processing_task = None
+        self.batch_controller = LatencyAwareBatchController(base_microbatch_size=microbatch_size)
         self.stats = {
             "processed_requests": 0,
             "batches_executed": 0,
@@ -53,19 +56,26 @@ class SparseRequestScheduler:
                 await asyncio.sleep(0.01)
                 continue
 
-            batch = []
             # Collect a microbatch
+            batch = []
             try:
-                # Get the first item
+                # 1. Determine optimal batch size
+                avg_lat = self.stats["average_latency"] * 1000
+                target_batch_size = self.batch_controller.get_adaptive_batch_size(
+                    self.queue.qsize(), avg_lat
+                )
+                
+                # 2. Collect items
                 request = await self.queue.get()
                 batch.append(request)
                 
-                # Try to get more up to microbatch_size without blocking too long
-                while len(batch) < self.microbatch_size and not self.queue.empty():
+                while len(batch) < target_batch_size and not self.queue.empty():
                     request = self.queue.get_nowait()
                     batch.append(request)
-            except asyncio.QueueEmpty:
-                pass
+                        
+            except Exception as e:
+                import logging
+                logging.getLogger("Scheduler").error(f"Error in batch selection: {e}")
 
             if batch:
                 await self._execute_batch(batch, runtime_executor_fn)

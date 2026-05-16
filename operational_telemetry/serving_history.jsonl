@@ -1,0 +1,2 @@
+{"timestamp": 1778924983.966439, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 405.2007675170899}}
+{"timestamp": 1778925008.9908314, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 403.2961368560791}}

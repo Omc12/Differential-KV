@@ -27,6 +27,8 @@ class RealEndToEndProfiler:
         key = (session_id, segment)
         if key in self.start_times:
             duration = (time.perf_counter() - self.start_times[key]) * 1000
+            if segment not in self.timings:
+                self.timings[segment] = []
             self.timings[segment].append(duration)
             del self.start_times[key]
 
