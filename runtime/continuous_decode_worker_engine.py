@@ -26,6 +26,16 @@ class ContinuousDecodeWorkerEngine:
         self.last_batch_size = 0
         self.is_busy = False
 
+        # DQO Instrumentation (Optional)
+        self.continuity_monitor = None
+        self.throughput_tracker = None
+        self.efficiency_instrumentation = None
+
+    def set_dqo_instrumentation(self, continuity_monitor, throughput_tracker, efficiency_instrumentation):
+        self.continuity_monitor = continuity_monitor
+        self.throughput_tracker = throughput_tracker
+        self.efficiency_instrumentation = efficiency_instrumentation
+
     async def start(self):
         """Starts the persistent decode loop."""
         if self._is_running:
@@ -68,6 +78,9 @@ class ContinuousDecodeWorkerEngine:
             current_batch_size = len(session_ids)
             self.last_batch_size = current_batch_size
             
+            if self.continuity_monitor:
+                self.continuity_monitor.record_step_start(current_batch_size)
+            
             # Prepare tensors for fused decode
             batch_last_tokens = []
             for sid in session_ids:
@@ -90,6 +103,9 @@ class ContinuousDecodeWorkerEngine:
                 # Update session state
                 session["input_ids"] = torch.cat([session["input_ids"], token_id.unsqueeze(0)], dim=-1)
                 session["tokens_generated"] += 1
+                
+                if self.throughput_tracker:
+                    self.throughput_tracker.record_tokens(sid, 1)
                 
                 # Check for EOS or Max Tokens
                 is_eos = token_id.item() == self.wrapper.tokenizer.eos_token_id
@@ -114,6 +130,21 @@ class ContinuousDecodeWorkerEngine:
                     del self.active_sessions[sid]
             
             self.step_counts += 1
+            step_end = time.time()
+            
+            if self.continuity_monitor:
+                self.continuity_monitor.record_step_finish()
+            
+            if self.efficiency_instrumentation:
+                # We need queue depth here. For now we use the engine's view if available, 
+                # but we'll assume it's passed or tracked elsewhere.
+                # Since the worker doesn't see the aggregator's queue directly, we might need to adjust.
+                self.efficiency_instrumentation.record_batch_step(
+                    current_batch_size, 
+                    len(self.pending_queue), # This might be internal queue
+                    len(self.active_sessions),
+                    step_end - step_start
+                )
             
             # Minimal yielding to allow asyncio to handle other tasks (e.g., networking)
             # but we want to stay on the GPU as much as possible.
