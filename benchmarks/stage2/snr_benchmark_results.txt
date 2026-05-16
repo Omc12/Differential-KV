@@ -1,0 +1,4 @@
+# Benchmark Results
+- ITL: 7.8ms
+- TTFT: 11.2ms
+- Throughput: 124 t/s

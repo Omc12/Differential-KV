@@ -1,0 +1,3 @@
+# Execution Trace Placeholder
+- Trace ID: snr_trace_001
+- Status: Captured
