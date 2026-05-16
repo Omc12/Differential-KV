@@ -1,0 +1,5 @@
+RUN_COMPLETE
+run_id=20260516_154342
+ts=2026-05-16T16:25:24.725114+00:00
+sealed_by=seal_sat_run.py
+note=Data fully collected; sealed post-crash.

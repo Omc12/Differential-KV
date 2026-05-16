@@ -1,0 +1,187 @@
+{
+    "duration_sec": 211.29,
+    "total_tokens": 5120,
+    "avg_tps": 24.233,
+    "sparse_attention": {
+        "sparse_invocations": 17920,
+        "dense_invocations": 17920,
+        "total_invocations": 35840,
+        "sparse_rate": 0.5,
+        "bypass_success_rate": 1.0,
+        "bypass_successes": 35840,
+        "bypass_failures": 0,
+        "elapsed_sec": 221.49
+    },
+    "dense_reconstruction": {
+        "total_events": 0,
+        "total_reconstruction_ms": 0.0,
+        "avg_duration_ms": 0.0,
+        "rate_per_sec": 0.0,
+        "elapsed_sec": 221.49,
+        "trigger_breakdown": {},
+        "trigger_ms_breakdown": {}
+    },
+    "kv_residency": {
+        "sparse_writes": 10,
+        "sparse_hits": 1270,
+        "evictions": 0,
+        "dense_rematerialisations": 0,
+        "total_rematerialisation_ms": 0.0,
+        "avg_rematerialisation_ms": 0.0,
+        "cache_reuse_rate": 1.0,
+        "rematerialisation_rate": 0.0,
+        "sparse_block_continuity": 1.0,
+        "active_sparse_blocks": 10,
+        "elapsed_sec": 221.49
+    },
+    "execution_mode": {
+        "total_records": 35840,
+        "elapsed_sec": 221.49,
+        "mode_distribution": {
+            "sparse": {
+                "count": 17920,
+                "fraction": 0.5,
+                "total_ms": 1280.0,
+                "avg_ms": 0.0714
+            },
+            "hybrid": {
+                "count": 17920,
+                "fraction": 0.5,
+                "total_ms": 1280.0,
+                "avg_ms": 0.0714
+            }
+        },
+        "fallback_reasons": {
+            "partial_gate": 17920
+        },
+        "steps_recorded": 1280
+    },
+    "arithmetic_participation": {
+        "total_records": 71680,
+        "total_flops_estimated": 43237214048300,
+        "sparse_flops": 20525099831340,
+        "dense_flops": 22712114216960,
+        "sparse_participation": 0.4747,
+        "dense_participation": 0.5253,
+        "per_op": {
+            "av_dot": {
+                "sparse_flops": 10262549915670,
+                "dense_flops": 11356057108480,
+                "sparse_fraction": 0.4747
+            },
+            "qk_dot": {
+                "sparse_flops": 10262549915670,
+                "dense_flops": 11356057108480,
+                "sparse_fraction": 0.4747
+            }
+        },
+        "elapsed_sec": 221.49,
+        "note": "FLOPs derived from real token/head/dim parameters \u2014 not guessed."
+    },
+    "layer_distribution_sample": [
+        {
+            "layer": 0,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 1,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 2,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 3,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 4,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 5,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 6,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        },
+        {
+            "layer": 7,
+            "total_calls": 1280,
+            "sparse_calls": 1280,
+            "dense_calls": 0,
+            "hybrid_calls": 0,
+            "sparse_fraction": 1.0,
+            "dense_fraction": 0.0,
+            "avg_sparse_ms": 0.0714,
+            "avg_dense_ms": 0.0
+        }
+    ],
+    "window_config": {
+        "num_layers": 28,
+        "base_block_size": 64,
+        "sparse_gate_threshold": 0.6,
+        "density_budget": 0.25,
+        "min_window": 64,
+        "max_window": 4096,
+        "elapsed_sec": 221.49
+    },
+    "guardrail": {
+        "sparse_rate": 0.5,
+        "dense_fallback_rate": 0.5,
+        "recon_pressure_ms_s": 0.0,
+        "cache_reuse_rate": 1.0,
+        "sparse_arithmetic": 0.4747
+    }
+}

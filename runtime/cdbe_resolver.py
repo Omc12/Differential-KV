@@ -55,15 +55,18 @@ class CDBEResolver:
         max_tokens = payload.get("max_tokens", 128)
         
         # 1. Prepare Inputs
+        self.logger.info(f"[{session_id}] Preparing inputs...")
         prompt = self.wrapper.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         encoded = self.wrapper.tokenizer(prompt, return_tensors='pt').to(self.wrapper.device)
         input_ids = encoded.input_ids
         
-        # 2. Prefill (Non-blocking to maintain loop continuity)
-        await asyncio.to_thread(self.wrapper.forward_step, input_ids, session_id=session_id)
+        # 2. Prefill (Synchronous on loop to prevent CUDA thread contention)
+        self.logger.info(f"[{session_id}] Running GPU prefill...")
+        self.wrapper.forward_step(input_ids, session_id=session_id)
         
         # 3. Schedule for continuous decode
         token_queue = await self.scheduler.schedule(session_id, input_ids, max_tokens)
+        self.logger.info(f"[{session_id}] Session active in CDBE scheduler.")
         
         # 4. Wrap in chunked streaming layer
         streamer = ChunkedTokenStreamingLayer(token_queue, chunk_size=4, timeout_ms=50)

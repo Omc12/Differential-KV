@@ -1,0 +1,106 @@
+{
+    "phase": "38.9",
+    "codename": "SAT",
+    "title": "Sparse Attention Transition",
+    "stage": 2,
+    "status": "implemented",
+    "goal": "Reduce remaining hidden dense-transformer behaviour inside the actual attention execution path. Optimising transformer execution semantics, not serving infrastructure.",
+    "components": {
+        "sparse_attention_path_auditor": {
+            "path": "runtime/sparse_attention_path_auditor.py",
+            "tracks": [
+                "dense attention invocations",
+                "sparse attention invocations",
+                "fallback frequency",
+                "sparse bypass success rate",
+                "layer-level execution mode"
+            ],
+            "trace": "traces/stage2/phase_38_9_sat/sparse_attention_trace.jsonl"
+        },
+        "dense_reconstruction_trace_monitor": {
+            "path": "runtime/dense_reconstruction_trace_monitor.py",
+            "tracks": [
+                "exact dense reconstruction events",
+                "reconstruction duration",
+                "triggering conditions",
+                "affected layers",
+                "affected token ranges"
+            ],
+            "trace": "traces/stage2/phase_38_9_sat/dense_reconstruction_trace.jsonl"
+        },
+        "sparse_kv_residency_verifier": {
+            "path": "runtime/sparse_kv_residency_verifier.py",
+            "tracks": [
+                "sparse KV residency persistence",
+                "dense KV rematerialisation frequency",
+                "cache reuse effectiveness",
+                "sparse block continuity"
+            ],
+            "trace": "traces/stage2/phase_38_9_sat/kv_residency_trace.jsonl"
+        },
+        "sparse_attention_window_controller": {
+            "path": "runtime/sparse_attention_window_controller.py",
+            "provides": [
+                "sparse-first routing",
+                "adaptive sparse attention windows",
+                "token-locality awareness",
+                "layer-aware sparse gating"
+            ]
+        },
+        "transformer_execution_mode_trace": {
+            "path": "runtime/transformer_execution_mode_trace.py",
+            "tracks": [
+                "per-layer execution mode (sparse / dense / hybrid)",
+                "fallback reason",
+                "execution duration",
+                "step-level mode distribution"
+            ],
+            "trace": "traces/stage2/phase_38_9_sat/execution_mode_trace.jsonl"
+        },
+        "sparse_arithmetic_participation_meter": {
+            "path": "runtime/sparse_arithmetic_participation_meter.py",
+            "tracks": [
+                "sparse-native vs dense-derived arithmetic participation",
+                "per-op FLOPs from real token/head/dim parameters",
+                "per-layer sparse fraction"
+            ],
+            "note": "No guessed percentages. All ratios derived from real execution traces.",
+            "trace": "traces/stage2/phase_38_9_sat/sparse_participation_trace.jsonl"
+        },
+        "validation_harness": {
+            "path": "runtime/validation/run_sat_attention_validation.py",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "concurrency": 10,
+            "duration_sec": 360,
+            "quantisation": "4-bit NF4",
+            "live_output": true,
+            "telemetry": "telemetry/stage2/phase_38_9_sat/raw_nvidia_smi_dmon.log",
+            "report": "reports/stage2/phase_38_9_sat/sat_validation_report.json"
+        }
+    },
+    "success_conditions": {
+        "primary": [
+            "sparse arithmetic dominance",
+            "lower dense fallback frequency",
+            "lower reconstruction pressure",
+            "stronger sparse KV persistence",
+            "transformer-native sparse execution"
+        ],
+        "failure_if": [
+            "dense reconstruction dominates",
+            "sparse participation collapses",
+            "hidden dense paths remain primary",
+            "sparse windows rarely activate",
+            "transformer execution remains mostly dense-derived"
+        ]
+    },
+    "important_guardrail": "Do NOT claim fully sparse-native transformer unless dense fallback becomes genuinely rare AND attention execution traces support it. Observe first. Interpret carefully afterward.",
+    "directories": {
+        "reports": "reports/stage2/phase_38_9_sat/",
+        "telemetry": "telemetry/stage2/phase_38_9_sat/",
+        "benchmarks": "benchmarks/stage2/phase_38_9_sat/",
+        "traces": "traces/stage2/phase_38_9_sat/",
+        "manifests": "manifests/stage2/phase_38_9_sat/"
+    },
+    "created_at": "2026-05-16"
+}
