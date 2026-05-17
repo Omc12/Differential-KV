@@ -78,61 +78,16 @@ class ThermalPowerStabilityProfiler:
                     "slowdown_factor": 2475.0 / max(100.0, self.clock_mhz)
                 }
             except Exception as e:
-                self.logger.warning(f"Error querying live nvidia-smi, falling back to simulator: {e}")
+                self.logger.warning(f"Error querying live nvidia-smi: {e}")
+                raise RuntimeError(
+                    "[FALLBACK_VIOLATION] "
+                    "Synthetic telemetry path triggered."
+                )
 
-        # --- RTX 4070 SUPER Physical Thermodynamic Simulator ---
-        # 1. Electrical Power Draw Model
-        # Base power: 15W. Max power: 220W. Dynamic oscillation for coil whine/vibration.
-        concurrency_load = min(1.0, active_batch_size / 8.0)
-        power_demand = 15.0 + (concurrency_load * 180.0) + (tensor_core_pct * 25.0)
-        # Dynamic sine-wave load oscillation to represent memory access bursts
-        oscillation = 8.0 * random.uniform(-0.5, 0.5)
-        self.power_watts = max(12.0, min(220.0, power_demand + oscillation))
-        
-        # 2. Thermodynamic Temperature Model
-        # Core heating: dT_core/dt = thermal_resistance * P - cooling_constant * (T_core - T_ambient)
-        fan_efficiency = self.fan_speed_pct / 100.0
-        cooling = self.cooling_constant * (1.0 + fan_efficiency) * (self.t_core - self.t_ambient)
-        heating = self.thermal_resistance * self.power_watts
-        
-        # Thermal inertia step
-        dt = 0.5 # 500ms time step
-        self.t_core += dt * (heating - cooling)
-        self.t_core = max(30.0, min(85.0, self.t_core))
-        
-        # Hotspot thermal lag delta
-        hotspot_delta = self.hotspot_delta_base + (self.power_watts * 0.05) + random.uniform(-0.5, 0.5)
-        self.t_hotspot = self.t_core + hotspot_delta
-        
-        # 3. Clock Frequency and Thermal Throttling Logic
-        # Standard RTX 4070 SUPER thermal throttle begins around 83 C hotspot
-        if self.t_hotspot > 81.0:
-            self.is_throttling = True
-            throttle_depth = min(0.3, (self.t_hotspot - 81.0) * 0.03) # Up to 30% frequency drop
-            self.clock_mhz = 2475.0 * (1.0 - throttle_depth)
-            # Fan speed spins up aggressively to cool down
-            self.fan_speed_pct = min(100.0, self.fan_speed_pct + 12.0 * dt)
-        else:
-            self.is_throttling = False
-            self.clock_mhz = max(2100.0, min(2475.0, self.clock_mhz + 15.0 * dt))
-            # Relax fan speed slowly
-            self.fan_speed_pct = max(30.0, self.fan_speed_pct - 1.5 * dt)
-
-        # Dynamic SM occupancy drift
-        sm_util = 25.0 + (concurrency_load * 65.0) + random.uniform(-3.0, 3.0)
-        sm_util = max(10.0, min(100.0, sm_util))
-
-        return {
-            "source": "thermodynamic_simulator",
-            "gpu_temp_c": round(self.t_core, 2),
-            "hotspot_temp_c": round(self.t_hotspot, 2),
-            "power_watts": round(self.power_watts, 2),
-            "clock_mhz": round(self.clock_mhz, 1),
-            "sm_utilization_pct": round(sm_util, 2),
-            "tensor_core_pct": round(tensor_core_pct, 2),
-            "is_throttling": self.is_throttling,
-            "slowdown_factor": round(2475.0 / self.clock_mhz, 4)
-        }
+        raise RuntimeError(
+            "[FALLBACK_VIOLATION] "
+            "Synthetic telemetry path triggered."
+        )
 
     def persist_trace(self, step: int, telemetry: Dict[str, Any]):
         """

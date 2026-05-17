@@ -1,0 +1,32 @@
+{"step": 0, "emitted_token_id": 71794, "emitted_token_str": " Sparse", "top_predicted_id": 71794, "exact_match": true, "logit_value": 18.65625, "is_valid_logit": true}
+{"step": 1, "emitted_token_id": 730, "emitted_token_str": " K", "top_predicted_id": 730, "exact_match": true, "logit_value": 24.859375, "is_valid_logit": true}
+{"step": 2, "emitted_token_id": 19625, "emitted_token_str": "-V", "top_predicted_id": 19625, "exact_match": true, "logit_value": 25.234375, "is_valid_logit": true}
+{"step": 3, "emitted_token_id": 6500, "emitted_token_str": " cache", "top_predicted_id": 6500, "exact_match": true, "logit_value": 26.53125, "is_valid_logit": true}
+{"step": 4, "emitted_token_id": 13617, "emitted_token_str": " layers", "top_predicted_id": 13617, "exact_match": true, "logit_value": 24.421875, "is_valid_logit": true}
+{"step": 5, "emitted_token_id": 323, "emitted_token_str": " and", "top_predicted_id": 323, "exact_match": true, "logit_value": 27.859375, "is_valid_logit": true}
+{"step": 6, "emitted_token_id": 27950, "emitted_token_str": " dense", "top_predicted_id": 27950, "exact_match": true, "logit_value": 32.15625, "is_valid_logit": true}
+{"step": 7, "emitted_token_id": 3078, "emitted_token_str": " aut", "top_predicted_id": 3078, "exact_match": true, "logit_value": 29.84375, "is_valid_logit": true}
+{"step": 8, "emitted_token_id": 460, "emitted_token_str": "ore", "top_predicted_id": 460, "exact_match": true, "logit_value": 32.0, "is_valid_logit": true}
+{"step": 9, "emitted_token_id": 46719, "emitted_token_str": "gressive", "top_predicted_id": 46719, "exact_match": true, "logit_value": 39.0, "is_valid_logit": true}
+{"step": 10, "emitted_token_id": 6529, "emitted_token_str": " attention", "top_predicted_id": 6529, "exact_match": true, "logit_value": 30.46875, "is_valid_logit": true}
+{"step": 11, "emitted_token_id": 10010, "emitted_token_str": " blocks", "top_predicted_id": 10010, "exact_match": true, "logit_value": 33.0, "is_valid_logit": true}
+{"step": 12, "emitted_token_id": 525, "emitted_token_str": " are", "top_predicted_id": 525, "exact_match": true, "logit_value": 31.6875, "is_valid_logit": true}
+{"step": 13, "emitted_token_id": 2176, "emitted_token_str": " both", "top_predicted_id": 2176, "exact_match": true, "logit_value": 28.25, "is_valid_logit": true}
+{"step": 14, "emitted_token_id": 12538, "emitted_token_str": " techniques", "top_predicted_id": 12538, "exact_match": true, "logit_value": 20.265625, "is_valid_logit": true}
+{"step": 15, "emitted_token_id": 1483, "emitted_token_str": " used", "top_predicted_id": 1483, "exact_match": true, "logit_value": 31.65625, "is_valid_logit": true}
+{"step": 16, "emitted_token_id": 576, "emitted_token_str": " The", "top_predicted_id": 576, "exact_match": true, "logit_value": 21.5625, "is_valid_logit": true}
+{"step": 17, "emitted_token_id": 729, "emitted_token_str": " function", "top_predicted_id": 729, "exact_match": true, "logit_value": 26.828125, "is_valid_logit": true}
+{"step": 18, "emitted_token_id": 1265, "emitted_token_str": " should", "top_predicted_id": 1265, "exact_match": true, "logit_value": 32.4375, "is_valid_logit": true}
+{"step": 19, "emitted_token_id": 9468, "emitted_token_str": " initialize", "top_predicted_id": 9468, "exact_match": true, "logit_value": 22.109375, "is_valid_logit": true}
+{"step": 20, "emitted_token_id": 264, "emitted_token_str": " a", "top_predicted_id": 264, "exact_match": true, "logit_value": 28.265625, "is_valid_logit": true}
+{"step": 21, "emitted_token_id": 1614, "emitted_token_str": " model", "top_predicted_id": 1614, "exact_match": true, "logit_value": 19.359375, "is_valid_logit": true}
+{"step": 22, "emitted_token_id": 11, "emitted_token_str": ",", "top_predicted_id": 11, "exact_match": true, "logit_value": 27.96875, "is_valid_logit": true}
+{"step": 23, "emitted_token_id": 3271, "emitted_token_str": " move", "top_predicted_id": 3271, "exact_match": true, "logit_value": 19.921875, "is_valid_logit": true}
+{"step": 24, "emitted_token_id": 432, "emitted_token_str": " it", "top_predicted_id": 432, "exact_match": true, "logit_value": 31.546875, "is_valid_logit": true}
+{"step": 25, "emitted_token_id": 311, "emitted_token_str": " to", "top_predicted_id": 311, "exact_match": true, "logit_value": 32.9375, "is_valid_logit": true}
+{"step": 26, "emitted_token_id": 264, "emitted_token_str": " a", "top_predicted_id": 264, "exact_match": true, "logit_value": 24.65625, "is_valid_logit": true}
+{"step": 27, "emitted_token_id": 5189, "emitted_token_str": " specified", "top_predicted_id": 5189, "exact_match": true, "logit_value": 23.578125, "is_valid_logit": true}
+{"step": 28, "emitted_token_id": 3671, "emitted_token_str": " device", "top_predicted_id": 3671, "exact_match": true, "logit_value": 30.5, "is_valid_logit": true}
+{"step": 29, "emitted_token_id": 11, "emitted_token_str": ",", "top_predicted_id": 11, "exact_match": true, "logit_value": 32.0, "is_valid_logit": true}
+{"step": 30, "emitted_token_id": 323, "emitted_token_str": " and", "top_predicted_id": 323, "exact_match": true, "logit_value": 27.171875, "is_valid_logit": true}
+{"step": 31, "emitted_token_id": 2736, "emitted_token_str": " perform", "top_predicted_id": 2736, "exact_match": true, "logit_value": 23.796875, "is_valid_logit": true}

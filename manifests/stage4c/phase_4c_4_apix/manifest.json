@@ -1,0 +1,16 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "total_tokens_decoded": 192,
+  "timestamp": 1779026189.3729572,
+  "worker_summary": {
+    "mean_utilization": 73.2,
+    "total_recovery_events": 0.0,
+    "mean_isolation": 99.11666666666667
+  },
+  "reload_summary": {
+    "mean_latency": 2.1,
+    "mean_continuity": 99.0,
+    "mean_preservation": 100.0
+  }
+}

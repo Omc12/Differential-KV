@@ -1,0 +1,11 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen2.5-7B-Instruct",
+  "contexts": [
+    "4K",
+    "8K"
+  ],
+  "duration_sec": 10,
+  "total_tokens_decoded": 3300,
+  "timestamp": 1779020213.428787
+}

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -2788,6 +2789,2065 @@ class ScalingIntegrityGuard:
 
         self.logger.info("RPI Integrity Guard: PASS — Physical Hardware reality verified at the highest standard.")
         return True
+
+    def validate_lco_run(self, trace_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4A.0 — LCO (Latency Collapse Optimization) Integrity Guard.
+        
+        Validation FAILS if:
+        - latency clipping detected
+        - fake tail suppression detected
+        - synchronization traces absent
+        - decode bubbles unrealistically zero
+        - queue pressure absent
+        - latency distributions unnaturally flat
+        - launch reuse impossible
+        - decode continuity unrealistic
+        - occupancy inconsistent with latency
+        
+        This phase MUST preserve REALISTIC imperfections.
+        """
+        self.logger.info("LCO Integrity Guard: Beginning Stage 4A.0 latency collapse validation audit...")
+        
+        required_traces = [
+            "synchronization_trace.jsonl",
+            "decode_bubble_trace.jsonl",
+            "token_latency_trace.jsonl",
+            "queue_pressure_trace.jsonl",
+            "persistent_decode_trace.jsonl",
+            "tail_latency_trace.jsonl",
+            "launch_reuse_trace.jsonl",
+            "decode_continuity_trace.jsonl",
+            "emission_smoothness_trace.jsonl",
+            "synchronization_stall_trace.jsonl",
+        ]
+        
+        # 1. Verify all synchronization & latency traces are present and non-empty
+        for fname in required_traces:
+            p = trace_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"LCO INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        # Helper to load a trace file
+        def load_trace(fname: str) -> list:
+            records = []
+            with open(trace_dir / fname, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        records.append(json.loads(line))
+                    except:
+                        pass
+            return records
+
+        # 2. Check synchronization traces for stalls and stalls being not artificially zero
+        sync_records = load_trace("synchronization_trace.jsonl")
+        sync_stall_records = load_trace("synchronization_stall_trace.jsonl")
+        
+        if not sync_records or not sync_stall_records:
+            self.logger.error("LCO INTEGRITY FAIL: Synchronization or synchronization stall traces are empty!")
+            return False
+            
+        sync_frequencies = [r.get("sync_frequency", 0.0) for r in sync_records]
+        sync_stalls = [r.get("sync_stall_pct", 0.0) for r in sync_stall_records]
+        
+        if all(f == 0.0 for f in sync_frequencies) or all(s == 0.0 for s in sync_stalls):
+            self.logger.error("LCO INTEGRITY FAIL: Synchronization stalls or frequencies are unrealistically zero! Realistic synchronization overhead must be present.")
+            return False
+
+        # 3. Check for decode bubbles being unrealistically zero
+        bubble_records = load_trace("decode_bubble_trace.jsonl")
+        if not bubble_records:
+            self.logger.error("LCO INTEGRITY FAIL: Decode bubble trace is empty!")
+            return False
+        
+        bubble_percentages = [r.get("idle_gap_pct", 0.0) for r in bubble_records]
+        if all(pct == 0.0 for pct in bubble_percentages):
+            self.logger.error("LCO INTEGRITY FAIL: Decode bubbles / idle gap % are unrealistically zero! Perfect GPU feeding is impossible in reality.")
+            return False
+
+        # 4. Check queue pressure is present and has variance (not absent or constant)
+        qp_records = load_trace("queue_pressure_trace.jsonl")
+        if not qp_records:
+            self.logger.error("LCO INTEGRITY FAIL: Queue pressure trace is empty!")
+            return False
+            
+        queue_depths = [r.get("queue_depth", 0) for r in qp_records]
+        if len(set(queue_depths)) <= 1:
+            self.logger.error("LCO INTEGRITY FAIL: Queue pressure / depth is completely absent or static (no variance)!")
+            return False
+
+        # 5. Check for latency clipping / fake tail suppression / unnaturally flat latency
+        token_latency_records = load_trace("token_latency_trace.jsonl")
+        tail_records = load_trace("tail_latency_trace.jsonl")
+        
+        if not token_latency_records or not tail_records:
+            self.logger.error("LCO INTEGRITY FAIL: Token latency or tail latency trace is empty!")
+            return False
+            
+        latencies = [r.get("inter_token_latency_ms", 0.0) for r in token_latency_records]
+        p99_lats = [r.get("p99_latency_ms", 0.0) for r in tail_records]
+        p50_lats = [r.get("p50_latency_ms", 0.0) for r in tail_records]
+        max_lats = [r.get("max_latency_ms", 0.0) for r in tail_records]
+
+        # Check for unnaturally flat latency
+        import numpy as np
+        if np.std(latencies) < 0.01:
+            self.logger.error("LCO INTEGRITY FAIL: Inter-token latency distribution is unnaturally flat (std < 0.01ms)!")
+            return False
+        if np.std(p99_lats) < 0.01:
+            self.logger.error("LCO INTEGRITY FAIL: Tail latency (p99) distribution is unnaturally flat (std < 0.01ms)!")
+            return False
+
+        # Check for latency clipping
+        if len(set(max_lats)) <= 1 and max_lats[0] > 0.0:
+            self.logger.error("LCO INTEGRITY FAIL: Latency clipping detected! Max latency is perfectly flat and capped.")
+            return False
+
+        # Check for fake tail suppression
+        if all(p99 == p50 for p99, p50 in zip(p99_lats, p50_lats)):
+            self.logger.error("LCO INTEGRITY FAIL: Fake tail suppression detected! p99 is identical to p50.")
+            return False
+
+        # 6. Launch reuse check (impossible to be 100% or static 1.0/0.0)
+        launch_records = load_trace("launch_reuse_trace.jsonl")
+        if not launch_records:
+            self.logger.error("LCO INTEGRITY FAIL: Launch reuse trace is empty!")
+            return False
+            
+        reuse_ratios = [r.get("launch_reuse_ratio", 0.0) for r in launch_records]
+        if all(r == 1.0 for r in reuse_ratios) or len(set(reuse_ratios)) <= 1:
+            self.logger.error("LCO INTEGRITY FAIL: Launch reuse is physically impossible or unnaturally constant!")
+            return False
+
+        # 7. Decode continuity check (cannot be perfectly 100% or 0% and static)
+        continuity_records = load_trace("decode_continuity_trace.jsonl")
+        if not continuity_records:
+            self.logger.error("LCO INTEGRITY FAIL: Decode continuity trace is empty!")
+            return False
+            
+        continuities = [r.get("decode_continuity_pct", 0.0) for r in continuity_records]
+        if all(c == 100.0 for c in continuities) or all(c == 0.0 for c in continuities) or len(set(continuities)) <= 1:
+            self.logger.error("LCO INTEGRITY FAIL: Decode continuity is unrealistic (perfectly flat 100% or 0%)!")
+            return False
+
+        # 8. Check occupancy inconsistent with latency
+        gpu_util_trace = trace_dir / "nvml_telemetry_trace.jsonl"
+        if gpu_util_trace.exists():
+            utils = []
+            with open(gpu_util_trace, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        utils.append(json.loads(line).get("sm_util", 0.0))
+                    except:
+                        pass
+            if utils and np.std(utils) < 0.01:
+                self.logger.error("LCO INTEGRITY FAIL: GPU utilization has zero variance, inconsistent with dynamic latency!")
+                return False
+
+        # --- NVH Hardening Auditing ---
+        telemetry_text = ""
+        for folder in [trace_dir, telemetry_dir]:
+            for p in folder.glob("*"):
+                if p.is_file():
+                    try:
+                        telemetry_text += p.read_text(encoding="utf-8")
+                    except:
+                        pass
+
+        if "FALLBACK_VIOLATION" in telemetry_text:
+            raise RuntimeError(
+                "Integrity failure: synthetic telemetry fallback detected."
+            )
+
+        if '"gpu_util_percent": 0' in telemetry_text:
+            raise RuntimeError(
+                "Integrity failure: invalid GPU telemetry."
+            )
+
+        if '"is_synthetic": true' in telemetry_text:
+            raise RuntimeError(
+                "Integrity failure: synthetic telemetry fallback detected."
+            )
+
+        # Variance validation on hardware traces
+        nvml_records = load_trace("nvml_telemetry_trace.jsonl")
+        if nvml_records:
+            utils = [r.get("sm_util", 0.0) for r in nvml_records]
+            temps = [r.get("gpu_temp_c", 0.0) for r in nvml_records]
+            
+            corr_records = load_trace("hardware_correlation_trace.jsonl")
+            powers = [r.get("power_watts", 0.0) for r in corr_records]
+            clocks = [r.get("gpu_clock_graphics", 0.0) for r in corr_records]
+            
+            if utils and np.std(utils) < 0.01:
+                raise RuntimeError("Integrity failure: GPU utilization has zero variance, inconsistent with dynamic latency!")
+            if temps and np.std(temps) < 0.01:
+                raise RuntimeError("Integrity failure: Thermal variance absent.")
+            if powers and np.std(powers) < 0.01:
+                raise RuntimeError("Integrity failure: Power variance absent.")
+            if clocks and np.std(clocks) < 0.01:
+                raise RuntimeError("Integrity failure: Clocks unrealistically constant.")
+
+        self.logger.info("LCO Integrity Guard: PASS — Latency Collapse Optimization reality verified.")
+        return True
+
+    def validate_slx_run(self, trace_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4A.1 — SLX: Synchronization & Latency Extinction Integrity Guard.
+        
+        Validation FAILS if:
+        - synchronization unrealistically absent
+        - latency distributions unnaturally flat
+        - replay reuse impossible
+        - queue turbulence absent
+        - GPU occupancy inconsistent
+        - fake tail collapse detected
+        - graph replay traces absent
+        - launch amortization impossible
+        - decode continuity unrealistic
+        """
+        import numpy as np
+        self.logger.info("SLX Integrity Guard: Beginning Stage 4A.1 SLX execution validation audit...")
+        
+        required_traces = [
+            "cuda_sync_trace.jsonl",
+            "decode_feed_trace.jsonl",
+            "token_emission_trace.jsonl",
+            "queue_turbulence_trace.jsonl",
+            "cuda_graph_residency_trace.jsonl",
+            "tail_latency_trace.jsonl",
+            "replay_amortization_trace.jsonl",
+            "decode_continuity_trace.jsonl",
+            "stream_overlap_trace.jsonl",
+            "launch_fusion_trace.jsonl",
+        ]
+        
+        # 1. Verify all traces are present and non-empty
+        for fname in required_traces:
+            p = trace_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"SLX INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        def load_trace(fname: str) -> list:
+            records = []
+            with open(trace_dir / fname, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        records.append(json.loads(line))
+                    except:
+                        pass
+            return records
+
+        # 2. Check synchronization unrealistically absent
+        sync_records = load_trace("cuda_sync_trace.jsonl")
+        if not sync_records:
+            self.logger.error("SLX INTEGRITY FAIL: CUDA sync trace is empty!")
+            return False
+            
+        durations = [r.get("sync_duration_ms", 0.0) for r in sync_records]
+        if all(d == 0.0 for d in durations):
+            self.logger.error("SLX INTEGRITY FAIL: CUDA sync duration is unrealistically zero!")
+            return False
+
+        # 3. Check latency distributions are not flat
+        emission_records = load_trace("token_emission_trace.jsonl")
+        if not emission_records:
+            self.logger.error("SLX INTEGRITY FAIL: Token emission trace is empty!")
+            return False
+        
+        latencies = [r.get("inter_token_latency", 0.0) for r in emission_records]
+        if len(latencies) > 1 and np.std(latencies) < 0.01:
+            self.logger.error("SLX INTEGRITY FAIL: Latency distribution is unnaturally flat!")
+            return False
+
+        # 4. Check replay reuse impossible / graph replay traces absent
+        graph_records = load_trace("cuda_graph_residency_trace.jsonl")
+        if not graph_records:
+            self.logger.error("SLX INTEGRITY FAIL: CUDA Graph residency trace is empty!")
+            return False
+            
+        reuse_rates = [r.get("replay_reuse_pct", 0.0) for r in graph_records]
+        if all(rate == 100.0 for rate in reuse_rates) or all(rate == 0.0 for rate in reuse_rates):
+            self.logger.error("SLX INTEGRITY FAIL: CUDA graph replay reuse rate is physically impossible!")
+            return False
+
+        # 5. Check queue turbulence absent
+        queue_records = load_trace("queue_turbulence_trace.jsonl")
+        if not queue_records:
+            self.logger.error("SLX INTEGRITY FAIL: Queue turbulence trace is empty!")
+            return False
+            
+        depths = [r.get("queue_depth", 0) for r in queue_records]
+        if len(set(depths)) <= 1:
+            self.logger.error("SLX INTEGRITY FAIL: Queue turbulence / depth has zero variance!")
+            return False
+
+        # 6. Check decode continuity unrealistic
+        continuity_records = load_trace("decode_continuity_trace.jsonl")
+        if not continuity_records:
+            self.logger.error("SLX INTEGRITY FAIL: Decode continuity trace is empty!")
+            return False
+            
+        pcts = [r.get("decode_continuity_pct", 0.0) for r in continuity_records]
+        if all(p == 100.0 for p in pcts) or all(p == 0.0 for p in pcts):
+            self.logger.error("SLX INTEGRITY FAIL: Decode continuity is unrealistic!")
+            return False
+
+        # 7. Check GPU occupancy inconsistent
+        gpu_util_trace = trace_dir / "nvml_telemetry_trace.jsonl"
+        if gpu_util_trace.exists():
+            utils = []
+            with open(gpu_util_trace, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        utils.append(json.loads(line).get("sm_util", 0.0))
+                    except:
+                        pass
+            if utils and np.std(utils) < 0.01:
+                self.logger.error("SLX INTEGRITY FAIL: GPU utilization has zero variance!")
+                return False
+
+        # 8. Check fake tail collapse detected
+        tail_records = load_trace("tail_latency_trace.jsonl")
+        if not tail_records:
+            self.logger.error("SLX INTEGRITY FAIL: Tail latency trace is empty!")
+            return False
+            
+        p99_lats = [r.get("p99", 0.0) for r in tail_records]
+        p50_lats = [r.get("p50", 0.0) for r in tail_records]
+        max_lats = [r.get("max_latency", 0.0) for r in tail_records]
+        
+        if all(p99 == p50 for p99, p50 in zip(p99_lats, p50_lats)):
+            self.logger.error("SLX INTEGRITY FAIL: Fake tail collapse detected (p99 == p50)!")
+            return False
+            
+        if len(set(max_lats)) <= 1 and max_lats[0] > 0.0:
+            self.logger.error("SLX INTEGRITY FAIL: Fake tail collapse detected (constant max latency)!")
+            return False
+
+        # 9. Check launch amortization impossible
+        amortization_records = load_trace("replay_amortization_trace.jsonl")
+        if not amortization_records:
+            self.logger.error("SLX INTEGRITY FAIL: Replay amortization trace is empty!")
+            return False
+            
+        am_pcts = [r.get("launch_amortization_pct", 0.0) for r in amortization_records]
+        if all(a == 100.0 for a in am_pcts) or all(a == 0.0 for a in am_pcts):
+            self.logger.error("SLX INTEGRITY FAIL: Launch amortization is unrealistic!")
+            return False
+
+        self.logger.info("SLX Integrity Guard: PASS — Stage 4A.1 SLX execution verified.")
+        return True
+
+    def validate_prl_run(self, trace_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4A.2 — PRL: Persistent Replay & Launch Collapse Integrity Guard.
+        
+        Validation FAILS if:
+        - replay reuse unrealistically perfect
+        - graph invalidations absent
+        - launch counts implausibly low
+        - queue turbulence absent
+        - latency unrealistically flat
+        - shape volatility absent
+        - replay residency impossible
+        - launch fusion unrealistic
+        - replay cache behavior inconsistent
+        """
+        import numpy as np
+        self.logger.info("PRL Integrity Guard: Beginning Stage 4A.2 PRL execution validation audit...")
+        
+        required_traces = [
+            "replay_residency_trace.jsonl",
+            "replay_invalidation_trace.jsonl",
+            "launch_fragmentation_trace.jsonl",
+            "launch_fusion_trace.jsonl",
+            "shape_stability_trace.jsonl",
+            "replay_queue_trace.jsonl",
+            "decode_residency_trace.jsonl",
+            "replay_cache_trace.jsonl",
+            "replay_affinity_trace.jsonl",
+            "tail_stability_trace.jsonl",
+        ]
+        
+        # 1. Verify all traces are present and non-empty
+        for fname in required_traces:
+            p = trace_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"PRL INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        def load_trace(fname: str) -> list:
+            records = []
+            with open(trace_dir / fname, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        records.append(json.loads(line))
+                    except:
+                        pass
+            return records
+
+        # 2. Check replay reuse unrealistically perfect
+        res_records = load_trace("replay_residency_trace.jsonl")
+        if not res_records:
+            self.logger.error("PRL INTEGRITY FAIL: Replay residency trace is empty!")
+            return False
+            
+        reuses = [r.get("replay_reuse_pct", 0.0) for r in res_records]
+        if all(r == 100.0 for r in reuses) or all(r == 0.0 for r in reuses):
+            self.logger.error("PRL INTEGRITY FAIL: Replay reuse rate is unrealistically perfect or absent!")
+            return False
+
+        # 3. Check graph invalidations absent
+        invalidation_records = load_trace("replay_invalidation_trace.jsonl")
+        if not invalidation_records:
+            self.logger.error("PRL INTEGRITY FAIL: Replay invalidation trace is empty!")
+            return False
+            
+        inv_counts = [r.get("invalidation_count", 0) for r in invalidation_records]
+        if all(c == 0 for c in inv_counts):
+            self.logger.error("PRL INTEGRITY FAIL: Replay invalidation events are unrealistically absent!")
+            return False
+
+        # 4. Check launch counts implausibly low
+        frag_records = load_trace("launch_fragmentation_trace.jsonl")
+        if not frag_records:
+            self.logger.error("PRL INTEGRITY FAIL: Launch fragmentation trace is empty!")
+            return False
+            
+        counts = [r.get("launch_count", 0) for r in frag_records]
+        if max(counts) < 10:
+            self.logger.error("PRL INTEGRITY FAIL: Launch counts are implausibly low!")
+            return False
+
+        # 5. Check queue turbulence absent
+        queue_records = load_trace("replay_queue_trace.jsonl")
+        if not queue_records:
+            self.logger.error("PRL INTEGRITY FAIL: Replay queue trace is empty!")
+            return False
+            
+        efficiencies = [r.get("replay_scheduling_efficiency", 0.0) for r in queue_records]
+        if len(set(efficiencies)) <= 1:
+            self.logger.error("PRL INTEGRITY FAIL: Replay queue scheduling efficiency has zero variance!")
+            return False
+
+        # 6. Check latency unrealistically flat
+        tail_records = load_trace("tail_stability_trace.jsonl")
+        if not tail_records:
+            self.logger.error("PRL INTEGRITY FAIL: Tail stability trace is empty!")
+            return False
+            
+        p95s = [r.get("p95", 0.0) for r in tail_records]
+        if len(p95s) > 1 and np.std(p95s) < 0.01:
+            self.logger.error("PRL INTEGRITY FAIL: Tail latency distribution is unnaturally flat!")
+            return False
+
+        # 7. Check shape volatility absent
+        shape_records = load_trace("shape_stability_trace.jsonl")
+        if not shape_records:
+            self.logger.error("PRL INTEGRITY FAIL: Shape stability trace is empty!")
+            return False
+            
+        volatilities = [r.get("shape_volatility", 0.0) for r in shape_records]
+        if len(volatilities) > 1 and np.std(volatilities) < 0.001:
+            self.logger.error("PRL INTEGRITY FAIL: Shape volatility is unrealistically absent!")
+            return False
+
+        # 8. Check replay residency impossible
+        durations = [r.get("replay_residency_duration", 0.0) for r in res_records]
+        if len(durations) > 1 and np.std(durations) < 0.001:
+            self.logger.error("PRL INTEGRITY FAIL: Replay residency durations have zero dynamic drift!")
+            return False
+
+        # 9. Check launch fusion unrealistic
+        fusion_records = load_trace("launch_fusion_trace.jsonl")
+        if not fusion_records:
+            self.logger.error("PRL INTEGRITY FAIL: Launch fusion trace is empty!")
+            return False
+            
+        ratios = [r.get("launch_fusion_ratio", 0.0) for r in fusion_records]
+        if len(ratios) > 1 and np.std(ratios) < 0.001:
+            self.logger.error("PRL INTEGRITY FAIL: Launch fusion ratio has zero variance!")
+            return False
+
+        # 10. Check replay cache behavior inconsistent
+        cache_records = load_trace("replay_cache_trace.jsonl")
+        if not cache_records:
+            self.logger.error("PRL INTEGRITY FAIL: Replay cache trace is empty!")
+            return False
+            
+        hits = [r.get("cache_hits", 0) for r in cache_records]
+        if len(set(hits)) <= 1:
+            self.logger.error("PRL INTEGRITY FAIL: Replay cache hit behavior is static!")
+            return False
+
+        self.logger.info("PRL Integrity Guard: PASS — Stage 4A.2 PRL execution verified.")
+        return True
+
+    def validate_pea_run(self, trace_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4A.3 — PEA: Persistent Execution & Allocator Collapse Integrity Guard.
+        
+        Validation FAILS if:
+        - allocator fragmentation unrealistically absent
+        - allocation reuse impossibly perfect
+        - replay invalidations absent
+        - pointer stability unrealistically constant
+        - latency distributions unnaturally flat
+        - allocator churn absent
+        - stream affinity impossible
+        - warm-start reuse unrealistic
+        - tensor residency impossible
+        """
+        import numpy as np
+        self.logger.info("PEA Integrity Guard: Beginning Stage 4A.3 PEA execution validation audit...")
+        
+        required_traces = [
+            "tensor_residency_trace.jsonl",
+            "allocator_fragmentation_trace.jsonl",
+            "allocation_reuse_trace.jsonl",
+            "replay_memory_trace.jsonl",
+            "pointer_stability_trace.jsonl",
+            "stream_affinity_trace.jsonl",
+            "warm_start_trace.jsonl",
+            "allocation_pressure_trace.jsonl",
+            "allocator_tail_trace.jsonl",
+            "replay_invalidation_memory_trace.jsonl",
+        ]
+        
+        # 1. Verify all traces are present and non-empty
+        for fname in required_traces:
+            p = trace_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"PEA INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        def load_trace(fname: str) -> list:
+            records = []
+            with open(trace_dir / fname, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        records.append(json.loads(line))
+                    except:
+                        pass
+            return records
+
+        # 2. Check allocator fragmentation unrealistically absent
+        frag_records = load_trace("allocator_fragmentation_trace.jsonl")
+        if not frag_records:
+            self.logger.error("PEA INTEGRITY FAIL: Allocator fragmentation trace is empty!")
+            return False
+            
+        scores = [r.get("fragmentation_score", 0.0) for r in frag_records]
+        if len(scores) > 1 and np.std(scores) < 0.001:
+            self.logger.error("PEA INTEGRITY FAIL: Allocator fragmentation score is unrealistically flat!")
+            return False
+
+        # 3. Check allocation reuse impossibly perfect
+        reuse_pcts = [r.get("allocation_reuse_pct", 0.0) for r in frag_records]
+        if all(p == 100.0 for p in reuse_pcts) or all(p == 0.0 for p in reuse_pcts):
+            self.logger.error("PEA INTEGRITY FAIL: Allocation reuse percentage is impossibly perfect or absent!")
+            return False
+
+        # 4. Check replay invalidations absent
+        mem_inv_records = load_trace("replay_invalidation_memory_trace.jsonl")
+        if not mem_inv_records:
+            self.logger.error("PEA INTEGRITY FAIL: Replay invalidation memory trace is empty!")
+            return False
+            
+        invs = [r.get("invalidation_count", 0) for r in mem_inv_records]
+        if all(c == 0 for c in invs):
+            self.logger.error("PEA INTEGRITY FAIL: Memory replay invalidations are absent!")
+            return False
+
+        # 5. Check pointer stability unrealistically constant
+        rep_mem_records = load_trace("replay_memory_trace.jsonl")
+        if not rep_mem_records:
+            self.logger.error("PEA INTEGRITY FAIL: Replay memory trace is empty!")
+            return False
+            
+        stabilities = [r.get("pointer_stability_pct", 0.0) for r in rep_mem_records]
+        if all(s == 100.0 for s in stabilities) or all(s == 0.0 for s in stabilities):
+            self.logger.error("PEA INTEGRITY FAIL: Pointer stability percentage is unrealistically constant!")
+            return False
+
+        # 6. Check latency distributions unnaturally flat
+        tail_records = load_trace("allocator_tail_trace.jsonl")
+        if not tail_records:
+            self.logger.error("PEA INTEGRITY FAIL: Allocator tail trace is empty!")
+            return False
+            
+        p95s = [r.get("p95", 0.0) for r in tail_records]
+        if len(p95s) > 1 and np.std(p95s) < 0.01:
+            self.logger.error("PEA INTEGRITY FAIL: Tail latency distribution is unnaturally flat!")
+            return False
+
+        # 7. Check allocator churn absent
+        churns = [r.get("allocator_churn_pct", 0.0) for r in frag_records]
+        if all(c == 0.0 for c in churns):
+            self.logger.error("PEA INTEGRITY FAIL: Allocator churn is unrealistically absent!")
+            return False
+
+        # 8. Check stream affinity impossible
+        affinity_records = load_trace("stream_affinity_trace.jsonl")
+        if not affinity_records:
+            self.logger.error("PEA INTEGRITY FAIL: Stream affinity trace is empty!")
+            return False
+            
+        affinities = [r.get("stream_affinity_pct", 0.0) for r in affinity_records]
+        if all(a == 100.0 for a in affinities) or all(a == 0.0 for a in affinities):
+            self.logger.error("PEA INTEGRITY FAIL: Stream affinity percentage is unrealistically perfect or flat!")
+            return False
+
+        # 9. Check warm-start reuse unrealistic
+        warm_records = load_trace("warm_start_trace.jsonl")
+        if not warm_records:
+            self.logger.error("PEA INTEGRITY FAIL: Warm start trace is empty!")
+            return False
+            
+        warm_hits = [r.get("warm_start_hit_pct", 0.0) for r in warm_records]
+        if all(w == 100.0 for w in warm_hits) or all(w == 0.0 for w in warm_hits):
+            self.logger.error("PEA INTEGRITY FAIL: Warm start hit rate is unrealistically perfect or flat!")
+            return False
+
+        # 10. Check tensor residency impossible
+        res_records = load_trace("tensor_residency_trace.jsonl")
+        if not res_records:
+            self.logger.error("PEA INTEGRITY FAIL: Tensor residency trace is empty!")
+            return False
+            
+        t_reuses = [r.get("tensor_reuse_pct", 0.0) for r in res_records]
+        if all(t == 100.0 for t in t_reuses) or all(t == 0.0 for t in t_reuses):
+            self.logger.error("PEA INTEGRITY FAIL: Tensor reuse percentage is flat or impossible!")
+            return False
+
+        self.logger.info("PEA Integrity Guard: PASS — Stage 4A.3 PEA execution verified.")
+        return True
+
+    def validate_gfp_run(self, trace_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4B.0 — GFP (Generative Fidelity Preservation) Integrity Guard.
+        
+        Validation FAILS if:
+        - any of the 10 raw physical JSONL traces are missing or empty
+        - outputs truncate prematurely (continuation recovery < 80.0%)
+        - narrative continuity collapses (continuity < 80.0%)
+        - explanation depth degenerates (< 5.0)
+        - extractive collapse rate exceeds threshold (extractive rate >= 35.0% or 0.35)
+        - abstractive richness declines (< 70.0% or 0.70)
+        - decode exploration collapses (mean entropy < 1.5 or entropy variance is flat/zero)
+        - output verbosity collapses (length ratio < 0.75)
+        - semantic richness collapses (< 0.70)
+        - any metrics are perfectly flat or synthetic (zero variance detected in dynamic metrics)
+        """
+        import numpy as np
+        self.logger.info("GFP Integrity Guard: Beginning Stage 4B.0 Generative Fidelity Preservation audit...")
+
+        required_traces = [
+            "eos_trace.jsonl",
+            "continuation_trace.jsonl",
+            "narrative_flow_trace.jsonl",
+            "abstractive_synthesis_trace.jsonl",
+            "decode_exploration_trace.jsonl",
+            "verbosity_trace.jsonl",
+            "semantic_richness_trace.jsonl",
+            "continuation_entropy_trace.jsonl",
+            "semantic_depth_trace.jsonl",
+            "extractive_collapse_trace.jsonl"
+        ]
+
+        # 1. Verify existence and size of all 10 raw traces
+        for fname in required_traces:
+            p = trace_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"GFP INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        # Helper to load traces
+        def load_trace(fname: str) -> list:
+            records = []
+            with open(trace_dir / fname, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        records.append(json.loads(line))
+                    except:
+                        pass
+            return records
+
+        # 2. Load and verify EOS stability
+        eos_records = load_trace("eos_trace.jsonl")
+        if not eos_records:
+            self.logger.error("GFP INTEGRITY FAIL: EOS stability trace is empty!")
+            return False
+            
+        recovery_pcts = [r.get("continuation_recovery_pct", 0.0) for r in eos_records]
+        mean_recovery = np.mean(recovery_pcts) if recovery_pcts else 0.0
+        if mean_recovery < 80.0:
+            self.logger.error(f"GFP INTEGRITY FAIL: Premature EOS termination detected! Continuation recovery is inadequate ({mean_recovery:.2f}% < 80.0%)")
+            return False
+
+        # 3. Load and verify Narrative Continuity & Explanation Depth
+        cont_records = load_trace("continuation_trace.jsonl")
+        if not cont_records:
+            self.logger.error("GFP INTEGRITY FAIL: Continuation trace is empty!")
+            return False
+            
+        continuities = [r.get("narrative_continuity_pct", 0.0) for r in cont_records]
+        depths = [r.get("explanation_depth", 0.0) for r in cont_records]
+        
+        mean_continuity = np.mean(continuities) if continuities else 0.0
+        mean_depth = np.mean(depths) if depths else 0.0
+        
+        if mean_continuity < 80.0:
+            self.logger.error(f"GFP INTEGRITY FAIL: Narrative continuity has collapsed ({mean_continuity:.2f}% < 80.0%)")
+            return False
+            
+        if mean_depth < 5.0:
+            self.logger.error(f"GFP INTEGRITY FAIL: Explanation depth has degenerated into summaries ({mean_depth:.2f} < 5.0)")
+            return False
+
+        # 4. Load and verify Abstractive Synthesis & Extractive Collapse
+        synth_records = load_trace("abstractive_synthesis_trace.jsonl")
+        if not synth_records:
+            self.logger.error("GFP INTEGRITY FAIL: Abstractive synthesis trace is empty!")
+            return False
+            
+        richness_vals = [r.get("abstractive_richness", 0.0) for r in synth_records]
+        collapse_rates = [r.get("extractive_collapse_rate", 1.0) for r in synth_records]
+        
+        mean_richness = np.mean(richness_vals) if richness_vals else 0.0
+        mean_collapse = np.mean(collapse_rates) if collapse_rates else 1.0
+        
+        if mean_richness < 0.70:
+            self.logger.error(f"GFP INTEGRITY FAIL: Abstractive richness is inadequate ({mean_richness:.2f} < 0.70)")
+            return False
+            
+        if mean_collapse > 0.35:
+            self.logger.error(f"GFP INTEGRITY FAIL: Extractive collapse detected! Verbatim copying is excessive ({mean_collapse:.2f} >= 0.35)")
+            return False
+
+        # 5. Load and verify Decode Exploration Entropy & Branching
+        expl_records = load_trace("decode_exploration_trace.jsonl")
+        if not expl_records:
+            self.logger.error("GFP INTEGRITY FAIL: Decode exploration trace is empty!")
+            return False
+            
+        entropies = [r.get("decode_entropy", 0.0) for r in expl_records]
+        mean_entropy = np.mean(entropies) if entropies else 0.0
+        std_entropy = np.std(entropies) if entropies else 0.0
+        
+        if mean_entropy < 1.5:
+            self.logger.error(f"GFP INTEGRITY FAIL: Decode entropy is abnormally low ({mean_entropy:.2f} < 1.5), indicating generative collapse.")
+            return False
+            
+        if std_entropy < 0.01:
+            self.logger.error(f"GFP INTEGRITY FAIL: Decode entropy lacks dynamic variance ({std_entropy:.6f} < 0.01), indicating synthetic telemetry fallback!")
+            return False
+
+        # 6. Load and verify Verbosity & Length Parity
+        verb_records = load_trace("verbosity_trace.jsonl")
+        if not verb_records:
+            self.logger.error("GFP INTEGRITY FAIL: Verbosity trace is empty!")
+            return False
+            
+        length_ratios = [r.get("output_length_ratio", 0.0) for r in verb_records]
+        mean_ratio = np.mean(length_ratios) if length_ratios else 0.0
+        
+        if mean_ratio < 0.75:
+            self.logger.error(f"GFP INTEGRITY FAIL: Verbosity parity is compressed. Output length ratio: {mean_ratio:.2f} < 0.75")
+            return False
+
+        # 7. Load and verify Semantic Richness
+        rich_records = load_trace("semantic_richness_trace.jsonl")
+        if not rich_records:
+            self.logger.error("GFP INTEGRITY FAIL: Semantic richness trace is empty!")
+            return False
+            
+        semantic_richnesses = [r.get("semantic_richness", 0.0) for r in rich_records]
+        mean_richness_score = np.mean(semantic_richnesses) if semantic_richnesses else 0.0
+        
+        if mean_richness_score < 0.70:
+            self.logger.error(f"GFP INTEGRITY FAIL: Semantic richness has collapsed ({mean_richness_score:.2f} < 0.70)")
+            return False
+
+        # 8. Multi-variance / Telemetry Authenticity Auditing (FAIL if perfectly flat metrics)
+        dynamic_metrics = [
+            continuities, depths, richness_vals, collapse_rates, 
+            entropies, length_ratios, semantic_richnesses
+        ]
+        
+        for idx, metric in enumerate(dynamic_metrics):
+            if len(metric) > 5:
+                variance = np.var(metric)
+                if variance < 1e-6:
+                    self.logger.error(f"GFP INTEGRITY FAIL: Telemetry metric at index {idx} has zero variance ({variance:.8f}). Artificially flattened metrics are strictly forbidden!")
+                    return False
+
+        self.logger.info("GFP Integrity Guard: PASS — Stage 4B.0 Generative Fidelity Preservation successfully verified.")
+        return True
+
+    def validate_tpo_run(self, traces_dir: Any, telemetry_dir: Any) -> bool:
+        """
+        Stage 4B.1 TPO: Validates and audits Throughput Optimization profiles.
+        Ensures physical authenticity and compliance under high-throughput workloads.
+        """
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        self.logger.info(f"TPO Guard: Initiating Scaling Integrity audit on traces at {traces_dir}")
+
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Load and verify Throughput
+        tp_records = load_trace("throughput_trace.jsonl")
+        if not tp_records:
+            self.logger.error("TPO INTEGRITY FAIL: Throughput trace is empty or missing!")
+            return False
+        tps_vals = [r.get("sustained_tps", 0.0) for r in tp_records]
+        mean_tps = np.mean(tps_vals) if tps_vals else 0.0
+        if mean_tps < 100.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: Sustained TPS is too low ({mean_tps:.2f} < 100.0 tps)")
+            return False
+            
+        # 2. Load and verify Occupancy
+        occ_records = load_trace("occupancy_trace.jsonl")
+        if not occ_records:
+            self.logger.error("TPO INTEGRITY FAIL: Occupancy trace is empty!")
+            return False
+        sm_occs = [r.get("sm_occupancy_pct", 0.0) for r in occ_records]
+        mean_sm = np.mean(sm_occs) if sm_occs else 0.0
+        if mean_sm < 70.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: SM Occupancy is insufficient ({mean_sm:.2f}% < 70.0%)")
+            return False
+
+        # 3. Load and verify Replay Amplification
+        replay_records = load_trace("replay_amplification_trace.jsonl")
+        if not replay_records:
+            self.logger.error("TPO INTEGRITY FAIL: Replay amplification trace is empty!")
+            return False
+        reuse_pcts = [r.get("replay_reuse_pct", 0.0) for r in replay_records]
+        mean_reuse = np.mean(reuse_pcts) if reuse_pcts else 0.0
+        if mean_reuse < 75.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: CUDA Graph replay reuse is insufficient ({mean_reuse:.2f}% < 75.0%)")
+            return False
+
+        # 4. Load and verify Microbatch
+        mb_records = load_trace("microbatch_trace.jsonl")
+        if not mb_records:
+            self.logger.error("TPO INTEGRITY FAIL: Microbatch trace is empty!")
+            return False
+        mb_effs = [r.get("microbatch_efficiency_pct", 0.0) for r in mb_records]
+        mean_eff = np.mean(mb_effs) if mb_effs else 0.0
+        if mean_eff < 75.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: Microbatch efficiency is insufficient ({mean_eff:.2f}% < 75.0%)")
+            return False
+
+        # 5. Load and verify Token Cadence
+        cad_records = load_trace("token_cadence_trace.jsonl")
+        if not cad_records:
+            self.logger.error("TPO INTEGRITY FAIL: Token cadence trace is empty!")
+            return False
+        cad_var = [r.get("cadence_variance", 0.0) for r in cad_records]
+        mean_var = np.mean(cad_var) if cad_var else 0.0
+        if mean_var > 10.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: Streaming latency cadence jitter is too high ({mean_var:.2f} > 10.0)")
+            return False
+
+        # 6. Load and verify Fairness
+        fair_records = load_trace("fairness_trace.jsonl")
+        if not fair_records:
+            self.logger.error("TPO INTEGRITY FAIL: Fairness trace is empty!")
+            return False
+        fair_pcts = [r.get("throughput_fairness_pct", 0.0) for r in fair_records]
+        mean_fair = np.mean(fair_pcts) if fair_pcts else 0.0
+        if mean_fair < 80.0:
+            self.logger.error(f"TPO INTEGRITY FAIL: Throughput optimization destroyed fairness ({mean_fair:.2f}% < 80.0%)")
+            return False
+
+        # 7. Auditing Telemetry Authenticity (Strict Non-flat Variance check)
+        latencies = [r.get("inter_token_latency", 0.0) for r in cad_records]
+        tc_records = load_trace("tensorcore_utilization_trace.jsonl")
+        tc_utils = [r.get("tensor_core_utilization_pct", 0.0) for r in tc_records]
+
+        dynamic_metrics = [
+            tps_vals, sm_occs, reuse_pcts, mb_effs, latencies, tc_utils
+        ]
+
+        for idx, metric in enumerate(dynamic_metrics):
+            if len(metric) > 5:
+                variance = np.var(metric)
+                if variance < 1e-6:
+                    self.logger.error(f"TPO INTEGRITY FAIL: Telemetry metric at index {idx} has zero variance ({variance:.8f}). Artificially flattened metrics are strictly forbidden!")
+                    return False
+
+        self.logger.info("TPO Integrity Guard: PASS — Stage 4B.1 Throughput Optimization successfully verified.")
+        return True
+
+    def validate_rta_run(self, traces_dir: Any, telemetry_dir: Any) -> bool:
+        """
+        Stage 4B.1.5 RTA: Validates and audits Real Throughput Audit profiles.
+        Ensures strict reality compliance, physical bounds verification, and honest timings.
+        """
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        self.logger.info(f"RTA Guard: Initiating Real Throughput Reality audit on traces at {traces_dir}")
+
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Load and verify emitted token counts
+        tok_records = load_trace("emitted_token_trace.jsonl")
+        if not tok_records:
+            self.logger.error("RTA INTEGRITY FAIL: Emitted token trace is empty or missing!")
+            return False
+
+        # 2. Load and verify Wall Clock Reality Timer records
+        wc_records = load_trace("wallclock_trace.jsonl")
+        if not wc_records:
+            self.logger.error("RTA INTEGRITY FAIL: Wallclock trace is empty!")
+            return False
+
+        # 3. Load and verify TTFT records
+        ttft_records = load_trace("ttft_trace.jsonl")
+        if not ttft_records:
+            self.logger.error("RTA INTEGRITY FAIL: TTFT trace is empty!")
+            return False
+        ttfts = [r.get("ttft_ms", 0.0) for r in ttft_records]
+        mean_ttft = np.mean(ttfts) if ttfts else 0.0
+        if mean_ttft < 10.0 or mean_ttft > 8000.0:
+            self.logger.error(f"RTA INTEGRITY FAIL: Monotonic TTFT is physically implausible ({mean_ttft:.2f} ms)")
+            return False
+
+        # 4. Load and verify Real Generation Throughput
+        gen_records = load_trace("real_generation_trace.jsonl")
+        if not gen_records:
+            self.logger.error("RTA INTEGRITY FAIL: Real generation trace is empty!")
+            return False
+        real_tps_vals = [r.get("real_tps", 0.0) for r in gen_records]
+        mean_real_tps = np.mean(real_tps_vals) if real_tps_vals else 0.0
+
+        # Physical limit check: RTX 4070 SUPER running Qwen2.5-7B FP16 at full decode density
+        # Autoregressive FP16 decode cannot exceed 45.0 TPS physically due to VRAM bandwidth constraints.
+        if mean_real_tps > 45.0:
+            self.logger.error(f"RTA INTEGRITY FAIL: TPS exceeds physical limitations of 4070 Super ({mean_real_tps:.2f} tps > 45.0 tps). Synthetic metric inflation is strictly forbidden!")
+            return False
+        if mean_real_tps < 1.0:
+            self.logger.error(f"RTA INTEGRITY FAIL: Real token throughput has collapsed ({mean_real_tps:.2f} tps)")
+            return False
+
+        # 5. Load and verify Replay vs Real
+        rep_records = load_trace("replay_vs_real_trace.jsonl")
+        if not rep_records:
+            self.logger.error("RTA INTEGRITY FAIL: Replay vs Real trace is empty!")
+            return False
+
+        # 6. Load and verify Scheduler vs Real
+        sched_records = load_trace("scheduler_vs_real_trace.jsonl")
+        if not sched_records:
+            self.logger.error("RTA INTEGRITY FAIL: Scheduler vs Real trace is empty!")
+            return False
+
+        # 7. Auditing Telemetry Authenticity (Non-flat Variance check)
+        latencies = [r.get("latency_ms", 0.0) for r in load_trace("intertoken_trace.jsonl")]
+        
+        dynamic_metrics = [
+            ttfts, real_tps_vals, latencies
+        ]
+
+        for idx, metric in enumerate(dynamic_metrics):
+            if len(metric) > 5:
+                variance = np.var(metric)
+                if variance < 1e-6:
+                    self.logger.error(f"RTA INTEGRITY FAIL: Telemetry metric at index {idx} has zero variance ({variance:.8f}). Artificially flattened metrics are strictly forbidden!")
+                    return False
+
+        self.logger.info("RTA Integrity Guard: PASS — Stage 4B.1.5 Real Throughput Audit successfully verified.")
+        return True
+
+    def validate_erca_run(self, traces_dir: Any, telemetry_dir: Any) -> bool:
+        """
+        STAGE 4B.1.6 — ERCA (Execution Reality Correlation Audit) Integrity Guard.
+        Validates all 10 physical traces and telemetry to prove that:
+        1. Emitted tokens correlate exactly with raw logit lineages.
+        2. Transformer forward passes and CUDA kernel matmuls are physically active on "cuda".
+        3. Real 7B base FP16 VRAM residency limits (>= 13.0 GB) are met.
+        4. CPU fallbacks are strictly absent.
+        5. Thermal and power profiles show natural physical variance (std dev of power > 0.05W).
+        """
+        import numpy as np
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        self.logger.info(f"ERCA Guard: Initiating Execution Reality Correlation Audit at {traces_dir}")
+
+        required_traces = [
+            "full_transformer_execution_trace.jsonl",
+            "layer_timing_trace.jsonl",
+            "cuda_kernel_launch_trace.jsonl",
+            "operator_correlation_trace.jsonl",
+            "vram_residency_trace.jsonl",
+            "parameter_placement_trace.jsonl",
+            "power_draw_trace.jsonl",
+            "nvml_telemetry_trace.jsonl",
+            "logits_lineage_trace.jsonl",
+            "token_reality_trace.jsonl"
+        ]
+
+        # 1. Verify existence of all 10 raw traces
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"ERCA INTEGRITY FAIL: Physical trace missing or empty — {fname}")
+                return False
+
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            pass
+            return records
+
+        # 2. Check GPU VRAM residency limits (Expected >= 13.0 GB)
+        vram_records = load_trace("vram_residency_trace.jsonl")
+        if not vram_records:
+            self.logger.error("ERCA INTEGRITY FAIL: VRAM residency trace is empty!")
+            return False
+        
+        allocated_vrams = [r.get("torch_allocated_vram_mb", 0.0) for r in vram_records]
+        mean_allocated_vram = np.mean(allocated_vrams) if allocated_vrams else 0.0
+        if mean_allocated_vram < 13000.0:
+            self.logger.error(f"ERCA INTEGRITY FAIL: VRAM residency is too low ({mean_allocated_vram:.2f} MB). Base parameter load requires >= 13000.0 MB for 7B FP16.")
+            return False
+
+        # 3. Check for CPU Fallback or invalid precision parameters
+        param_records = load_trace("parameter_placement_trace.jsonl")
+        if not param_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Parameter placement trace is empty!")
+            return False
+            
+        latest_param = param_records[-1]
+        if latest_param.get("cpu_parameters", 0) > 0:
+            self.logger.error(f"ERCA INTEGRITY FAIL: CPU fallback parameters detected! ({latest_param.get('cpu_parameters')} params found on CPU)")
+            return False
+            
+        if latest_param.get("cuda_ratio", 0.0) < 0.999:
+            self.logger.error(f"ERCA INTEGRITY FAIL: CUDA parameter ratio too low ({latest_param.get('cuda_ratio'):.4f})")
+            return False
+            
+        if latest_param.get("fp16_ratio", 0.0) < 0.999:
+            self.logger.error(f"ERCA INTEGRITY FAIL: Precision mismatch. FP16 parameter ratio too low ({latest_param.get('fp16_ratio'):.4f})")
+            return False
+
+        # Check full execution trace for cpu fallback in hidden states
+        exec_records = load_trace("full_transformer_execution_trace.jsonl")
+        if not exec_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Full transformer execution trace is empty!")
+            return False
+            
+        for r in exec_records:
+            if r.get("cpu_fallback_detected", False):
+                self.logger.error("ERCA INTEGRITY FAIL: CPU fallback detected in transformer execution layer path!")
+                return False
+            if not r.get("dtype_matches", True):
+                self.logger.error("ERCA INTEGRITY FAIL: Hidden states data type mismatch (not FP16) in transformer path!")
+                return False
+
+        # 4. Check that Emitted Tokens correlate exactly with raw forward passes
+        token_records = load_trace("token_reality_trace.jsonl")
+        if not token_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Token reality trace is empty!")
+            return False
+            
+        total_tokens = len(token_records)
+        latest_exec = exec_records[-1]
+        forward_passes = latest_exec.get("forward_passes", 0)
+        
+        # In causal LM auto-regressive generation, each generated token requires exactly 1 completed forward pass.
+        # So completed forward passes must be >= emitted token count
+        if forward_passes < total_tokens:
+            self.logger.error(f"ERCA INTEGRITY FAIL: Forward passes count {forward_passes} is less than emitted token count {total_tokens}! This represents impossible token generation without execution lineage.")
+            return False
+
+        # 5. Verify CUDA kernel launches and shapes are present
+        kernel_records = load_trace("cuda_kernel_launch_trace.jsonl")
+        if not kernel_records:
+            self.logger.error("ERCA INTEGRITY FAIL: CUDA kernel launch trace is empty!")
+            return False
+            
+        latest_kernel = kernel_records[-1]
+        launches = latest_kernel.get("kernel_launches", 0)
+        if launches < total_tokens * 20: # 7B model has 28 layers, each layer has multiple linear projection matmuls
+            self.logger.error(f"ERCA INTEGRITY FAIL: Kernel launches count {launches} is implausibly low! Expected at least 20 matmuls per token generated.")
+            return False
+
+        # Check active hidden state dimensions (hidden dimension of Qwen2.5-7B is 3584)
+        layer_records = load_trace("layer_timing_trace.jsonl")
+        if not layer_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Layer timing trace is empty!")
+            return False
+            
+        for r in layer_records:
+            shape = r.get("shape", [])
+            # For Qwen2.5-7B, final dimension should be 3584
+            if shape and shape[-1] != 3584:
+                self.logger.error(f"ERCA INTEGRITY FAIL: Hidden state dimension mismatch! Shape is {shape}, final dimension must be 3584 for Qwen2.5-7B.")
+                return False
+
+        # 6. Verify Power Draw physical dynamic variance (std dev > 0.05W)
+        power_records = load_trace("power_draw_trace.jsonl")
+        if not power_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Power draw trace is empty!")
+            return False
+            
+        latest_power = power_records[-1]
+        std_power = latest_power.get("std_power_watts", 0.0)
+        if std_power < 0.05:
+            self.logger.error(f"ERCA INTEGRITY FAIL: Power draw shows zero physical variance (std dev {std_power:.6f} W < 0.05 W). Synthetic telemetry fallback detected!")
+            return False
+
+        # 7. Check Logits Lineage correlation ratio (expecting 100% exact matches under greedy)
+        logits_records = load_trace("logits_lineage_trace.jsonl")
+        if not logits_records:
+            self.logger.error("ERCA INTEGRITY FAIL: Logits lineage trace is empty!")
+            return False
+            
+        latest_logits = logits_records[-1]
+        match_ratio = latest_logits.get("match_ratio", 0.0)
+        if match_ratio < 0.999: # Causal greedy matching must be perfect 100%
+            self.logger.error(f"ERCA INTEGRITY FAIL: Logits argmax matching ratio is too low ({match_ratio:.4f} < 100%). Token emission is desynchronized from GPU math.")
+            return False
+
+        self.logger.info("ERCA Integrity Guard: PASS — Stage 4B.1.6 Execution Reality Correlation Audit successfully verified.")
+        return True
+
+    def validate_ssp_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate SSP (Semantic Synthesis Preservation) trace records.
+        """
+        self.logger.info("SSP Integrity Guard: Beginning Stage 4B.2 Semantic Synthesis Preservation verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify semantic_continuity
+        continuity = load_trace("semantic_continuity_trace.jsonl")
+        if not continuity:
+            self.logger.error("SSP INTEGRITY FAIL: semantic_continuity trace is missing or empty!")
+            return False
+        latest_c = continuity[-1]
+        mean_c = latest_c.get("semantic_continuity_percent", 0.0)
+        if mean_c < 80.0:
+            self.logger.error(f"SSP INTEGRITY FAIL: Semantic continuity is too low ({mean_c:.2f}% < 80.0%)!")
+            return False
+
+        # 2. Verify weak_signal rescue
+        weak = load_trace("weak_signal_trace.jsonl")
+        if not weak:
+            self.logger.error("SSP INTEGRITY FAIL: weak_signal trace is missing or empty!")
+            return False
+        total_rescued = sum(r.get("rescued_weak_signal_count", 0) for r in weak)
+        if total_rescued == 0:
+            self.logger.error("SSP INTEGRITY FAIL: No weak-signal rescues were performed! Over-pruning of weak signals detected.")
+            return False
+
+        # 3. Verify planning planning_persistence
+        planning = load_trace("planning_trace.jsonl")
+        if not planning:
+            self.logger.error("SSP INTEGRITY FAIL: planning trace is missing or empty!")
+            return False
+        latest_p = planning[-1]
+        p_persistence = latest_p.get("planning_persistence_percent", 0.0)
+        if p_persistence < 80.0:
+            self.logger.error(f"SSP INTEGRITY FAIL: Planning persistence is too low ({p_persistence:.2f}% < 80.0%)!")
+            return False
+
+        # 4. Verify abstraction trace
+        abstraction = load_trace("abstraction_trace.jsonl")
+        if not abstraction:
+            self.logger.error("SSP INTEGRITY FAIL: abstraction trace is missing or empty!")
+            return False
+
+        # 5. Verify extractive collapse
+        extractive = load_trace("extractive_collapse_trace.jsonl")
+        if not extractive:
+            self.logger.error("SSP INTEGRITY FAIL: extractive_collapse trace is missing or empty!")
+            return False
+        latest_ext = extractive[-1]
+        ext_rate = latest_ext.get("extractive_collapse_rate", 10.0)
+        if ext_rate > 5.0:
+            self.logger.error(f"SSP INTEGRITY FAIL: Extractive collapse rate {ext_rate:.2f}% is too high! Output is too extractive.")
+            return False
+
+        # 6. Verify discourse plan
+        discourse = load_trace("discourse_trace.jsonl")
+        if not discourse:
+            self.logger.error("SSP INTEGRITY FAIL: discourse trace is missing or empty!")
+            return False
+
+        # 7. Verify semantic drift
+        drift = load_trace("semantic_drift_trace.jsonl")
+        if not drift:
+            self.logger.error("SSP INTEGRITY FAIL: semantic_drift trace is missing or empty!")
+            return False
+        latest_drift = drift[-1]
+        drift_rate = latest_drift.get("semantic_drift_rate", 50.0)
+        if drift_rate > 15.0:
+            self.logger.error(f"SSP INTEGRITY FAIL: Semantic drift rate {drift_rate:.2f}% is too high! Expected <= 15.0%.")
+            return False
+
+        # 8. Verify semantic blending
+        blending = load_trace("semantic_blending_trace.jsonl")
+        if not blending:
+            self.logger.error("SSP INTEGRITY FAIL: semantic_blending trace is missing or empty!")
+            return False
+
+        # 9. Verify Ollama parity
+        ollama_comp = load_trace("ollama_semantic_comparison_trace.jsonl")
+        if not ollama_comp:
+            self.logger.error("SSP INTEGRITY FAIL: ollama_semantic_comparison trace is missing or empty!")
+            return False
+        latest_comp = ollama_comp[-1]
+        parity = latest_comp.get("ollama_semantic_parity_percent", 0.0)
+        if parity < 80.0:
+            self.logger.error(f"SSP INTEGRITY FAIL: Ollama semantic parity {parity:.2f}% is too low! Expected >= 80.0%.")
+            return False
+
+        self.logger.info("SSP Integrity Guard: PASS — Stage 4B.2 Semantic Synthesis Preservation successfully verified.")
+        return True
+
+    def validate_qro_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate QRO (Quantization & Residency Optimization) trace records.
+        """
+        self.logger.info("QRO Integrity Guard: Beginning Stage 4B.3 Quantization & Residency Optimization verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify quantized_residency
+        res = load_trace("quantized_residency_trace.jsonl")
+        if not res:
+            self.logger.error("QRO INTEGRITY FAIL: quantized_residency trace is missing or empty!")
+            return False
+        latest_res = res[-1]
+        vram_pressure = latest_res.get("vram_pressure_percent", 150.0)
+        if vram_pressure > 95.0:
+            self.logger.error(f"QRO INTEGRITY FAIL: VRAM pressure {vram_pressure:.2f}% is too high! Model is not fully VRAM resident.")
+            return False
+
+        # 2. Verify pcie_transfer and paging_event (must have 0 spillover events under quantized modes)
+        paging = load_trace("paging_event_trace.jsonl")
+        if not paging:
+            self.logger.error("QRO INTEGRITY FAIL: paging_event trace is missing or empty!")
+            return False
+        total_spill = sum(r.get("spillover_events_count", 0) for r in paging if r.get("mode") != "fp16")
+        if total_spill > 0:
+            self.logger.error(f"QRO INTEGRITY FAIL: Active PCIe spillover detected under quantized execution! Total spillover events: {total_spill}. Full residency target violated.")
+            return False
+
+        # 3. Verify semantic_quantization (must preserve quality >= 90%)
+        sem = load_trace("semantic_quantization_trace.jsonl")
+        if not sem:
+            self.logger.error("QRO INTEGRITY FAIL: semantic_quantization trace is missing or empty!")
+            return False
+        latest_sem = sem[-1]
+        parity = latest_sem.get("semantic_parity_percent", 0.0)
+        if parity < 90.0:
+            self.logger.error(f"QRO INTEGRITY FAIL: Quantized semantic parity {parity:.2f}% is below acceptable quality boundary of 90.0%!")
+            return False
+
+        # 4. Verify real_tps (must show major throughput improvement >= 10.0 TPS)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("QRO INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        latest_tps = tps_records[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 10.0:
+            self.logger.error(f"QRO INTEGRITY FAIL: Throughput target not met! Quantized speed is {tps_val:.2f} TPS, expected >= 10.0 TPS.")
+            return False
+
+        # 5. Verify replay_stability (graph reuse >= 90%)
+        replay = load_trace("replay_stability_trace.jsonl")
+        if not replay:
+            self.logger.error("QRO INTEGRITY FAIL: replay_stability trace is missing or empty!")
+            return False
+        latest_rep = replay[-1]
+        reuse = latest_rep.get("replay_reuse_percent", 0.0)
+        if reuse < 90.0:
+            self.logger.error(f"QRO INTEGRITY FAIL: Graph replay stability compromised! Replay reuse ratio: {reuse:.2f}% < 90.0%.")
+            return False
+
+        self.logger.info("QRO Integrity Guard: PASS — Stage 4B.3 Quantization & Residency Optimization successfully verified.")
+        return True
+
+    def validate_kfo_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate KFO (Kernel Fusion & Occupancy Optimization) trace records.
+        """
+        self.logger.info("KFO Integrity Guard: Beginning Stage 4B.4 Kernel Fusion & Occupancy Optimization verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify tensor-core utilization (must reach >= 80% under advanced modes)
+        tc = load_trace("tensor_core_trace.jsonl")
+        if not tc:
+            self.logger.error("KFO INTEGRITY FAIL: tensor_core trace is missing or empty!")
+            return False
+        high_tc = [r for r in tc if r.get("mode") in ["fused_triton", "persistent_decode"]]
+        if not high_tc:
+            self.logger.error("KFO INTEGRITY FAIL: Advanced fusion execution sweeps are missing!")
+            return False
+        latest_tc = high_tc[-1]
+        tc_util = latest_tc.get("tensor_core_utilization_percent", 0.0)
+        if tc_util < 80.0:
+            self.logger.error(f"KFO INTEGRITY FAIL: Tensor core utilization {tc_util:.2f}% is below acceptable saturation boundary of 80.0%!")
+            return False
+
+        # 2. Verify kernel_fusion (fused kernel ratio must reach >= 80%)
+        kf = load_trace("kernel_fusion_trace.jsonl")
+        if not kf:
+            self.logger.error("KFO INTEGRITY FAIL: kernel_fusion trace is missing or empty!")
+            return False
+        high_kf = [r for r in kf if r.get("mode") in ["fused_triton", "persistent_decode"]]
+        latest_kf = high_kf[-1]
+        fuse_ratio = latest_kf.get("fused_kernel_ratio_percent", 0.0)
+        if fuse_ratio < 80.0:
+            self.logger.error(f"KFO INTEGRITY FAIL: Fused kernel ratio {fuse_ratio:.2f}% is insufficient! Target >= 80.0%.")
+            return False
+
+        # 3. Verify launch_collapse (launches/token must collapse <= 15 dispatches per token)
+        lc = load_trace("launch_collapse_trace.jsonl")
+        if not lc:
+            self.logger.error("KFO INTEGRITY FAIL: launch_collapse trace is missing or empty!")
+            return False
+        high_lc = [r for r in lc if r.get("mode") in ["fused_triton", "persistent_decode"]]
+        latest_lc = high_lc[-1]
+        launches = latest_lc.get("launches_per_token", 100.0)
+        if launches > 15.0:
+            self.logger.error(f"KFO INTEGRITY FAIL: Fragmented dispatches remain high! Launches/token: {launches:.2f} > 15.0.")
+            return False
+
+        # 4. Verify compute_density (GPU power draw must rise materially >= 140W in advanced modes)
+        cd = load_trace("compute_density_trace.jsonl")
+        if not cd:
+            self.logger.error("KFO INTEGRITY FAIL: compute_density trace is missing or empty!")
+            return False
+        high_cd = [r for r in cd if r.get("mode") in ["fused_triton", "persistent_decode"]]
+        latest_cd = high_cd[-1]
+        power = latest_cd.get("gpu_power_draw_w", 0.0)
+        if power < 140.0:
+            self.logger.error(f"KFO INTEGRITY FAIL: Compute pipeline under-saturated! Power draw is {power:.2f}W, expected >= 140.0W.")
+            return False
+
+        # 5. Verify real_tps (must scale beyond 30.0 TPS under persistent decode mode)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("KFO INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("mode") == "persistent_decode"]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 30.0:
+            self.logger.error(f"KFO INTEGRITY FAIL: Throughput target not met! Optimized speed is {tps_val:.2f} TPS, expected >= 30.0 TPS.")
+            return False
+
+        self.logger.info("KFO Integrity Guard: PASS — Stage 4B.4 Kernel Fusion & Occupancy Optimization successfully verified.")
+        return True
+
+    def validate_nco_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate NCO (Native Concurrency & Orchestration) trace records.
+        """
+        self.logger.info("NCO Integrity Guard: Beginning Stage 4B.5 Native Concurrency & Orchestration verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify continuous serving (continuity must reach >= 90.0% under concurrency 16+)
+        cs = load_trace("continuous_serving_trace.jsonl")
+        if not cs:
+            self.logger.error("NCO INTEGRITY FAIL: continuous_serving trace is missing or empty!")
+            return False
+        high_cs = [r for r in cs if r.get("concurrency", 0) >= 16]
+        if not high_cs:
+            self.logger.error("NCO INTEGRITY FAIL: Advanced concurrency serving sweep records are missing!")
+            return False
+        latest_cs = high_cs[-1]
+        continuity = latest_cs.get("decode_continuity_percent", 0.0)
+        if continuity < 90.0:
+            self.logger.error(f"NCO INTEGRITY FAIL: Continuous decode slot occupancy {continuity:.2f}% is below acceptable boundary of 90.0%!")
+            return False
+
+        # 2. Verify prefix reuse savings (must exceed >= 80% savings)
+        pr = load_trace("prefix_reuse_trace.jsonl")
+        if not pr:
+            self.logger.error("NCO INTEGRITY FAIL: prefix_reuse trace is missing or empty!")
+            return False
+        high_pr = [r for r in pr if r.get("concurrency", 0) >= 16]
+        latest_pr = high_pr[-1]
+        savings = latest_pr.get("reuse_savings_percent", 0.0)
+        if savings < 80.0:
+            self.logger.error(f"NCO INTEGRITY FAIL: Prefix reuse savings {savings:.2f}% are insufficient! Target >= 80.0%.")
+            return False
+
+        # 3. Verify tail latency (p99 must stay <= 35 ms)
+        tl = load_trace("tail_latency_trace.jsonl")
+        if not tl:
+            self.logger.error("NCO INTEGRITY FAIL: tail_latency trace is missing or empty!")
+            return False
+        high_tl = [r for r in tl if r.get("concurrency", 0) >= 16]
+        latest_tl = high_tl[-1]
+        p99 = latest_tl.get("p99_latency_ms", 100.0)
+        if p99 > 35.0:
+            self.logger.error(f"NCO INTEGRITY FAIL: High tail latency spike detected! p99: {p99:.2f} ms > 35.0 ms.")
+            return False
+
+        # 4. Verify speculative acceptance (must exceed >= 70%)
+        sd = load_trace("speculative_decode_trace.jsonl")
+        if not sd:
+            self.logger.error("NCO INTEGRITY FAIL: speculative_decode trace is missing or empty!")
+            return False
+        high_sd = [r for r in sd if r.get("concurrency", 0) >= 16]
+        latest_sd = high_sd[-1]
+        acceptance = latest_sd.get("speculative_acceptance_percent", 0.0)
+        if acceptance < 70.0:
+            self.logger.error(f"NCO INTEGRITY FAIL: Speculative token acceptance rate {acceptance:.2f}% is too low! Expected >= 70.0%.")
+            return False
+
+        # 5. Verify real tps under load (must scale beyond 70.0 TPS under concurrent slot allocation)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("NCO INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 16]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 70.0:
+            self.logger.error(f"NCO INTEGRITY FAIL: Concurrency scaling target not met! Real TPS: {tps_val:.2f} < 70.0 TPS under 16 sessions.")
+            return False
+
+        self.logger.info("NCO Integrity Guard: PASS — Stage 4B.5 Native Concurrency & Orchestration successfully verified.")
+        return True
+
+    def validate_sds_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate SDS (Speculative Decode Scaling) trace records.
+        """
+        self.logger.info("SDS Integrity Guard: Beginning Stage 4C.1 Speculative Decode Scaling verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify speculative acceptance ratio (must be >= 85%)
+        sa = load_trace("speculative_acceptance_trace.jsonl")
+        if not sa:
+            self.logger.error("SDS INTEGRITY FAIL: speculative_acceptance trace is missing or empty!")
+            return False
+        high_sa = [r for r in sa if r.get("concurrency", 0) >= 16]
+        if not high_sa:
+            self.logger.error("SDS INTEGRITY FAIL: Advanced concurrency validation sweep records are missing!")
+            return False
+        latest_sa = high_sa[-1]
+        acceptance = latest_sa.get("speculative_acceptance_percent", 0.0)
+        if acceptance < 85.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: Speculative token acceptance rate {acceptance:.2f}% is too low! Expected >= 85.0%.")
+            return False
+
+        # 2. Verify rollback frequency (must be <= 15%)
+        rb = load_trace("rollback_trace.jsonl")
+        if not rb:
+            self.logger.error("SDS INTEGRITY FAIL: rollback trace is missing or empty!")
+            return False
+        high_rb = [r for r in rb if r.get("concurrency", 0) >= 16]
+        latest_rb = high_rb[-1]
+        rollback_freq = latest_rb.get("rollback_frequency_percent", 100.0)
+        if rollback_freq > 15.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: Speculative rollbacks are too frequent! Rollback frequency: {rollback_freq:.2f}% > 15.0%.")
+            return False
+
+        # 3. Verify tail latency (p99 must stay <= 40 ms)
+        lt = load_trace("latency_trace.jsonl")
+        if not lt:
+            self.logger.error("SDS INTEGRITY FAIL: latency trace is missing or empty!")
+            return False
+        high_lt = [r for r in lt if r.get("concurrency", 0) >= 16]
+        latest_lt = high_lt[-1]
+        p99 = latest_lt.get("p99_latency_ms", 100.0)
+        if p99 > 40.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: Tail latency spike detected under concurrent load! p99: {p99:.2f} ms > 40.0 ms.")
+            return False
+
+        # 4. Verify GPU occupancy (must stay >= 95%)
+        occ = load_trace("occupancy_trace.jsonl")
+        if not occ:
+            self.logger.error("SDS INTEGRITY FAIL: occupancy trace is missing or empty!")
+            return False
+        high_occ = [r for r in occ if r.get("concurrency", 0) >= 16]
+        latest_occ = high_occ[-1]
+        occupancy = latest_occ.get("gpu_occupancy_percent", 0.0)
+        if occupancy < 95.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: GPU stream occupancy collapsed! Occupancy: {occupancy:.2f}% < 95.0%.")
+            return False
+
+        # 5. Verify semantic drift / narrative continuity parity (must exceed >= 95.0%)
+        sd = load_trace("semantic_drift_trace.jsonl")
+        if not sd:
+            self.logger.error("SDS INTEGRITY FAIL: semantic_drift trace is missing or empty!")
+            return False
+        high_sd = [r for r in sd if r.get("concurrency", 0) >= 16]
+        latest_sd = high_sd[-1]
+        continuity = latest_sd.get("narrative_continuity_percent", 0.0)
+        if continuity < 95.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: Semantic drift detected under dynamic speculation! Parity: {continuity:.2f}% < 95.0%.")
+            return False
+
+        # 6. Verify CUDA graph replay stability (must exceed >= 95%)
+        rr = load_trace("replay_residency_trace.jsonl")
+        if not rr:
+            self.logger.error("SDS INTEGRITY FAIL: replay_residency trace is missing or empty!")
+            return False
+        high_rr = [r for r in rr if r.get("concurrency", 0) >= 16]
+        latest_rr = high_rr[-1]
+        replay_stable = latest_rr.get("graph_reuse_percent", 0.0)
+        if replay_stable < 95.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: CUDA Graph replay stability degraded under variable spans! Replay stability: {replay_stable:.2f}% < 95.0%.")
+            return False
+
+        # 7. Verify aggregate real tps under load (must scale beyond 140.0 TPS under concurrent speculative window scheduling)
+        tps_records = load_trace("throughput_burst_trace.jsonl")
+        if not tps_records:
+            self.logger.error("SDS INTEGRITY FAIL: throughput_burst trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 16]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 140.0:
+            self.logger.error(f"SDS INTEGRITY FAIL: Speculative serving scaling failed! Aggregate real TPS: {tps_val:.2f} < 140.0 TPS.")
+            return False
+
+        self.logger.info("SDS Integrity Guard: PASS — Stage 4C.1 Speculative Decode Scaling successfully verified.")
+        return True
+
+    def validate_hbs_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate HBS (Hierarchical Batch Scheduling) trace records.
+        """
+        self.logger.info("HBS Integrity Guard: Beginning Stage 4C.2 Hierarchical Batch Scheduling verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify speculative acceptance ratio (must be >= 88%)
+        sb = load_trace("speculative_batch_trace.jsonl")
+        if not sb:
+            self.logger.error("HBS INTEGRITY FAIL: speculative_batch trace is missing or empty!")
+            return False
+        high_sb = [r for r in sb if r.get("concurrency", 0) >= 32]
+        if not high_sb:
+            self.logger.error("HBS INTEGRITY FAIL: Advanced concurrency validation sweep records are missing!")
+            return False
+        latest_sb = high_sb[-1]
+        acceptance = latest_sb.get("acceptance_preservation_percent", 0.0)
+        if acceptance < 88.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: Speculative token acceptance rate {acceptance:.2f}% is too low! Expected >= 88.0%.")
+            return False
+
+        # 2. Verify replay stability (must be >= 97%)
+        ra = load_trace("replay_affinity_trace.jsonl")
+        if not ra:
+            self.logger.error("HBS INTEGRITY FAIL: replay_affinity trace is missing or empty!")
+            return False
+        high_ra = [r for r in ra if r.get("concurrency", 0) >= 32]
+        latest_ra = high_ra[-1]
+        replay_stable = latest_ra.get("replay_reuse_percent", 0.0)
+        if replay_stable < 97.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: CUDA Graph replay stability collapsed! Replay stability: {replay_stable:.2f}% < 97.0%.")
+            return False
+
+        # 3. Verify GPU occupancy (must stay >= 97%)
+        occ = load_trace("occupancy_trace.jsonl")
+        if not occ:
+            self.logger.error("HBS INTEGRITY FAIL: occupancy trace is missing or empty!")
+            return False
+        high_occ = [r for r in occ if r.get("concurrency", 0) >= 32]
+        latest_occ = high_occ[-1]
+        occupancy = latest_occ.get("gpu_occupancy_percent", 0.0)
+        if occupancy < 97.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: GPU stream occupancy collapsed! Occupancy: {occupancy:.2f}% < 97.0%.")
+            return False
+
+        # 4. Verify fairness score (must exceed >= 95.0%)
+        ft = load_trace("fairness_trace.jsonl")
+        if not ft:
+            self.logger.error("HBS INTEGRITY FAIL: fairness trace is missing or empty!")
+            return False
+        high_ft = [r for r in ft if r.get("concurrency", 0) >= 32]
+        latest_ft = high_ft[-1]
+        fairness = latest_ft.get("fairness_ratio_percent", 0.0)
+        if fairness < 95.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: Scheduler starvation detected under concurrent loads! Fairness: {fairness:.2f}% < 95.0%.")
+            return False
+
+        # 5. Verify tail latency (p99 must stay <= 45 ms)
+        lt = load_trace("latency_distribution_trace.jsonl")
+        if not lt:
+            self.logger.error("HBS INTEGRITY FAIL: latency_distribution trace is missing or empty!")
+            return False
+        high_lt = [r for r in lt if r.get("concurrency", 0) >= 32]
+        latest_lt = high_lt[-1]
+        p99 = latest_lt.get("p99_latency_ms", 100.0)
+        if p99 > 45.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: Tail latency spike detected under concurrent load! p99: {p99:.2f} ms > 45.0 ms.")
+            return False
+
+        # 6. Verify queue turbulence (must be <= 10.0%)
+        qt = load_trace("queue_turbulence_trace.jsonl")
+        if not qt:
+            self.logger.error("HBS INTEGRITY FAIL: queue_turbulence trace is missing or empty!")
+            return False
+        high_qt = [r for r in qt if r.get("concurrency", 0) >= 32]
+        latest_qt = high_qt[-1]
+        turbulence = latest_qt.get("queue_turbulence_percent", 100.0)
+        if turbulence > 10.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: Scheduler queue is highly turbulent! Turbulence: {turbulence:.2f}% > 10.0%.")
+            return False
+
+        # 7. Verify aggregate real tps under load (must scale beyond 240.0 TPS)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("HBS INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 32]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 240.0:
+            self.logger.error(f"HBS INTEGRITY FAIL: Hierarchical serving scaling failed! Aggregate real TPS: {tps_val:.2f} < 240.0 TPS.")
+            return False
+
+        self.logger.info("HBS Integrity Guard: PASS — Stage 4C.2 Hierarchical Batch Scheduling successfully verified.")
+        return True
+
+    def validate_ads_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate ADS (Adaptive Draft Scaling) trace records.
+        """
+        self.logger.info("ADS Integrity Guard: Beginning Stage 4C.3 Adaptive Draft Scaling verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify speculative acceptance ratio (must be >= 97.0%)
+        ba = load_trace("branch_acceptance_trace.jsonl")
+        if not ba:
+            self.logger.error("ADS INTEGRITY FAIL: branch_acceptance trace is missing or empty!")
+            return False
+        high_ba = [r for r in ba if r.get("concurrency", 0) >= 32]
+        if not high_ba:
+            self.logger.error("ADS INTEGRITY FAIL: Advanced concurrency validation sweep records are missing!")
+            return False
+        latest_ba = high_ba[-1]
+        acceptance = latest_ba.get("branch_acceptance_percent", 0.0)
+        if acceptance < 97.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: Speculative token acceptance rate {acceptance:.2f}% is too low! Expected >= 97.0%.")
+            return False
+
+        # 2. Verify replay stability (must be >= 98.0%)
+        ra = load_trace("replay_adaptation_trace.jsonl")
+        if not ra:
+            self.logger.error("ADS INTEGRITY FAIL: replay_adaptation trace is missing or empty!")
+            return False
+        high_ra = [r for r in ra if r.get("concurrency", 0) >= 32]
+        latest_ra = high_ra[-1]
+        replay_stable = latest_ra.get("replay_persistence_percent", 0.0)
+        if replay_stable < 98.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: CUDA Graph replay stability degraded under variable spans! Replay stability: {replay_stable:.2f}% < 98.0%.")
+            return False
+
+        # 3. Verify GPU occupancy (must stay >= 98.0%)
+        occ = load_trace("occupancy_trace.jsonl")
+        if not occ:
+            self.logger.error("ADS INTEGRITY FAIL: occupancy trace is missing or empty!")
+            return False
+        high_occ = [r for r in occ if r.get("concurrency", 0) >= 32]
+        latest_occ = high_occ[-1]
+        occupancy = latest_occ.get("gpu_occupancy_percent", 0.0)
+        if occupancy < 98.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: GPU stream occupancy collapsed! Occupancy: {occupancy:.2f}% < 98.0%.")
+            return False
+
+        # 4. Verify rollback amplification (must stay <= 5.0%)
+        ramp = load_trace("rollback_amplification_trace.jsonl")
+        if not ramp:
+            self.logger.error("ADS INTEGRITY FAIL: rollback_amplification trace is missing or empty!")
+            return False
+        high_ramp = [r for r in ramp if r.get("concurrency", 0) >= 32]
+        latest_ramp = high_ramp[-1]
+        amp = latest_ramp.get("rollback_amplification_percent", 100.0)
+        if amp > 5.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: Rollback amplification occurred! Rollback amplification: {amp:.2f}% > 5.0%.")
+            return False
+
+        # 5. Verify semantic parity (must exceed >= 97.0%)
+        sd = load_trace("semantic_drift_trace.jsonl")
+        if not sd:
+            self.logger.error("ADS INTEGRITY FAIL: semantic_drift trace is missing or empty!")
+            return False
+        high_sd = [r for r in sd if r.get("concurrency", 0) >= 32]
+        latest_sd = high_sd[-1]
+        parity = latest_sd.get("narrative_stability_percent", 0.0)
+        if parity < 97.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: Semantic drift or narrative instability detected! Narrative stability: {parity:.2f}% < 97.0%.")
+            return False
+
+        # 6. Verify aggregate real tps under load (must scale beyond 320.0 TPS)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("ADS INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        
+        # Single-session TPS check
+        low_tps = [r for r in tps_records if r.get("concurrency", 0) == 1]
+        latest_low = low_tps[-1]
+        low_tps_val = latest_low.get("real_tps", 0.0)
+        if low_tps_val < 110.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: Single-session serving speed collapsed! Real TPS: {low_tps_val:.2f} < 110.0 TPS.")
+            return False
+
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 32]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 320.0:
+            self.logger.error(f"ADS INTEGRITY FAIL: Adaptive serving scaling failed! Aggregate real TPS: {tps_val:.2f} < 320.0 TPS.")
+            return False
+
+        self.logger.info("ADS Integrity Guard: PASS — Stage 4C.3 Adaptive Draft Scaling successfully verified.")
+        return True
+
+    def validate_apix_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate APIX (Production API & Runtime Fabric) trace records.
+        """
+        self.logger.info("APIX Integrity Guard: Beginning Stage 4C.4 Production API & Runtime Fabric verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify API success rate (must be >= 99.9%)
+        req = load_trace("api_request_trace.jsonl")
+        if not req:
+            self.logger.error("APIX INTEGRITY FAIL: api_request trace is missing or empty!")
+            return False
+        high_req = [r for r in req if r.get("concurrency", 0) >= 128]
+        if not high_req:
+            self.logger.error("APIX INTEGRITY FAIL: Advanced concurrency validation sweep records are missing!")
+            return False
+        latest_req = high_req[-1]
+        success_rate = latest_req.get("api_success_rate_percent", 0.0)
+        if success_rate < 99.9:
+            self.logger.error(f"APIX INTEGRITY FAIL: API request success rate collapsed under load! Success rate: {success_rate:.2f}% < 99.9%.")
+            return False
+
+        # 2. Verify streaming stability (must stay >= 99.0%)
+        st = load_trace("streaming_trace.jsonl")
+        if not st:
+            self.logger.error("APIX INTEGRITY FAIL: streaming trace is missing or empty!")
+            return False
+        high_st = [r for r in st if r.get("concurrency", 0) >= 128]
+        latest_st = high_st[-1]
+        streaming_stable = latest_st.get("stream_cadence_percent", 0.0)
+        if streaming_stable < 99.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: Low-latency streaming stability degraded! Streaming stability: {streaming_stable:.2f}% < 99.0%.")
+            return False
+
+        # 3. Verify worker recovery frequency (must stay <= 1%)
+        wf = load_trace("worker_fabric_trace.jsonl")
+        if not wf:
+            self.logger.error("APIX INTEGRITY FAIL: worker_fabric trace is missing or empty!")
+            return False
+        high_wf = [r for r in wf if r.get("concurrency", 0) >= 128]
+        latest_wf = high_wf[-1]
+        recovery_events = latest_wf.get("recovery_events_count", 10.0)
+        if recovery_events > 1.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: Worker crash recovery events occurred! Recovery events: {recovery_events:.2f} > 1.0%.")
+            return False
+
+        # 4. Verify GPU occupancy (must stay >= 98.0%)
+        occ = load_trace("occupancy_trace.jsonl")
+        if not occ:
+            self.logger.error("APIX INTEGRITY FAIL: occupancy trace is missing or empty!")
+            return False
+        high_occ = [r for r in occ if r.get("concurrency", 0) >= 128]
+        latest_occ = high_occ[-1]
+        occupancy = latest_occ.get("gpu_occupancy_percent", 0.0)
+        if occupancy < 98.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: GPU stream occupancy collapsed! Occupancy: {occupancy:.2f}% < 98.0%.")
+            return False
+
+        # 5. Verify tail latency (p99 must stay <= 50 ms)
+        lt = load_trace("latency_distribution_trace.jsonl")
+        if not lt:
+            self.logger.error("APIX INTEGRITY FAIL: latency_distribution trace is missing or empty!")
+            return False
+        high_lt = [r for r in lt if r.get("concurrency", 0) >= 128]
+        latest_lt = high_lt[-1]
+        p99 = latest_lt.get("p99_latency_ms", 100.0)
+        if p99 > 50.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: Tail latency spike detected under concurrent load! p99: {p99:.2f} ms > 50.0 ms.")
+            return False
+
+        # 6. Verify CUDA Graph replay reuse persistence (must stay >= 98.0%)
+        rt = load_trace("routing_trace.jsonl")
+        if not rt:
+            self.logger.error("APIX INTEGRITY FAIL: routing trace is missing or empty!")
+            return False
+        high_rt = [r for r in rt if r.get("concurrency", 0) >= 128]
+        latest_rt = high_rt[-1]
+        replay_stable = latest_rt.get("replay_reuse_percent", 0.0)
+        if replay_stable < 98.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: CUDA Graph replay stability collapsed! Replay reuse: {replay_stable:.2f}% < 98.0%.")
+            return False
+
+        # 7. Verify aggregate real tps under load (must scale beyond 350.0 TPS)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("APIX INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 128]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 350.0:
+            self.logger.error(f"APIX INTEGRITY FAIL: Production serving scaling failed! Aggregate real TPS: {tps_val:.2f} < 350.0 TPS.")
+            return False
+
+        self.logger.info("APIX Integrity Guard: PASS — Stage 4C.4 Production API & Runtime Fabric successfully verified.")
+        return True
+
+    def validate_qci_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate QCI (Quantized Compatibility & Interoperability) trace records.
+        """
+        self.logger.info("QCI Integrity Guard: Beginning Stage 4C.5 Quantized Compatibility & Interoperability verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify GGUF compatibility
+        gguf = load_trace("gguf_trace.jsonl")
+        if not gguf:
+            self.logger.error("QCI INTEGRITY FAIL: gguf trace is missing or empty!")
+            return False
+        latest_gguf = gguf[-1]
+        if latest_gguf.get("compatibility_status", "") != "PASS":
+            self.logger.error("QCI INTEGRITY FAIL: GGUF ecosystem compatibility failed!")
+            return False
+
+        # 2. Verify GPTQ compatibility
+        gptq = load_trace("gptq_trace.jsonl")
+        if not gptq:
+            self.logger.error("QCI INTEGRITY FAIL: gptq trace is missing or empty!")
+            return False
+        latest_gptq = gptq[-1]
+        if latest_gptq.get("compatibility_status", "") != "PASS":
+            self.logger.error("QCI INTEGRITY FAIL: GPTQ ecosystem compatibility failed!")
+            return False
+
+        # 3. Verify AWQ compatibility
+        awq = load_trace("awq_trace.jsonl")
+        if not awq:
+            self.logger.error("QCI INTEGRITY FAIL: awq trace is missing or empty!")
+            return False
+        latest_awq = awq[-1]
+        if latest_awq.get("compatibility_status", "") != "PASS":
+            self.logger.error("QCI INTEGRITY FAIL: AWQ ecosystem compatibility failed!")
+            return False
+
+        # 4. Verify EXL2 compatibility
+        exl2 = load_trace("exl2_trace.jsonl")
+        if not exl2:
+            self.logger.error("QCI INTEGRITY FAIL: exl2 trace is missing or empty!")
+            return False
+        latest_exl2 = exl2[-1]
+        if latest_exl2.get("compatibility_status", "") != "PASS":
+            self.logger.error("QCI INTEGRITY FAIL: EXL2 ecosystem compatibility failed!")
+            return False
+
+        # 5. Verify quant-aware replay stability (must be >= 97.0%)
+        qr = load_trace("quant_replay_trace.jsonl")
+        if not qr:
+            self.logger.error("QCI INTEGRITY FAIL: quant_replay trace is missing or empty!")
+            return False
+        high_qr = [r for r in qr if r.get("concurrency", 0) >= 32]
+        if not high_qr:
+            self.logger.error("QCI INTEGRITY FAIL: Advanced concurrency validation sweep records are missing!")
+            return False
+        latest_qr = high_qr[-1]
+        replay_stable = latest_qr.get("quant_replay_persistence_percent", 0.0)
+        if replay_stable < 97.0:
+            self.logger.error(f"QCI INTEGRITY FAIL: Quantized CUDA Graph replay stability collapsed! Replay stability: {replay_stable:.2f}% < 97.0%.")
+            return False
+
+        # 6. Verify mmap residency continuity (must stay >= 98.0%)
+        mm = load_trace("mmap_trace.jsonl")
+        if not mm:
+            self.logger.error("QCI INTEGRITY FAIL: mmap trace is missing or empty!")
+            return False
+        high_mm = [r for r in mm if r.get("concurrency", 0) >= 32]
+        latest_mm = high_mm[-1]
+        mmap_stable = latest_mm.get("residency_continuity_percent", 0.0)
+        if mmap_stable < 98.0:
+            self.logger.error(f"QCI INTEGRITY FAIL: Lazy mmap parameter residency collapsed! Residency: {mmap_stable:.2f}% < 98.0%.")
+            return False
+
+        # 7. Verify semantic parity (must be >= 97.0%)
+        sp = load_trace("semantic_parity_trace.jsonl")
+        if not sp:
+            self.logger.error("QCI INTEGRITY FAIL: semantic_parity trace is missing or empty!")
+            return False
+        high_sp = [r for r in sp if r.get("concurrency", 0) >= 32]
+        latest_sp = high_sp[-1]
+        parity = latest_sp.get("semantic_parity_percent", 0.0)
+        if parity < 97.0:
+            self.logger.error(f"QCI INTEGRITY FAIL: Semantic quality regressed under quantization! Parity: {parity:.2f}% < 97.0%.")
+            return False
+
+        # 8. Verify GPU occupancy (must stay >= 97.0%)
+        occ = load_trace("occupancy_trace.jsonl")
+        if not occ:
+            self.logger.error("QCI INTEGRITY FAIL: occupancy trace is missing or empty!")
+            return False
+        high_occ = [r for r in occ if r.get("concurrency", 0) >= 32]
+        latest_occ = high_occ[-1]
+        occupancy = latest_occ.get("gpu_occupancy_percent", 0.0)
+        if occupancy < 97.0:
+            self.logger.error(f"QCI INTEGRITY FAIL: GPU graphics SM occupancy collapsed! Occupancy: {occupancy:.2f}% < 97.0%.")
+            return False
+
+        # 9. Verify aggregate real tps under load (must scale beyond 350.0 TPS)
+        tps_records = load_trace("real_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("QCI INTEGRITY FAIL: real_tps trace is missing or empty!")
+            return False
+        high_tps = [r for r in tps_records if r.get("concurrency", 0) >= 32]
+        latest_tps = high_tps[-1]
+        tps_val = latest_tps.get("real_tps", 0.0)
+        if tps_val < 350.0:
+            self.logger.error(f"QCI INTEGRITY FAIL: Interoperable serving scaling failed! Aggregate real TPS: {tps_val:.2f} < 350.0 TPS.")
+            return False
+
+        self.logger.info("QCI Integrity Guard: PASS — Stage 4C.5 Quantized Compatibility & Interoperability successfully verified.")
+        return True
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

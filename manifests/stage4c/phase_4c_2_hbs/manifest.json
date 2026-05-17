@@ -1,0 +1,19 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "total_tokens_decoded": 192,
+  "timestamp": 1779025233.051808,
+  "scheduler_summary": {
+    "mean_cohesion": 97.3,
+    "mean_affinity": 98.39999999999999,
+    "mean_fairness": 98.25,
+    "mean_turbulence": 3.7,
+    "mean_efficiency": 96.66666666666667
+  },
+  "fairness_summary": {
+    "mean_starvation": 0.0,
+    "mean_fairness": 98.66666666666667,
+    "mean_variance": 0.9833333333333334,
+    "mean_aging": 3.0166666666666666
+  }
+}

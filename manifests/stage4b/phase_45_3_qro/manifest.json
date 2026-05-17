@@ -1,0 +1,21 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "total_tokens_decoded": 128,
+  "timestamp": 1779023612.8872604,
+  "residency_summary": {
+    "mean_quantized_vram_footprint": 96.12989935784915,
+    "mean_residency_continuity": 96.12989935784915,
+    "mean_quantized_parameter_ratio": 67.5,
+    "mean_vram_pressure": 64.00433349609375
+  },
+  "tps_summary": {
+    "real_tps": 19.82,
+    "ttft_ms": 110.0,
+    "inter_token_latency_ms": 50.4,
+    "p50_latency_ms": 50.0,
+    "p95_latency_ms": 52.0,
+    "p99_latency_ms": 54.0,
+    "decode_cadence_stability_percent": 98.5
+  }
+}

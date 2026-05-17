@@ -1,0 +1,11 @@
+{"timestamp": 1779019796.483296, "sm_util": 2.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 160.06986397639827, "pcie_rx_kbps": 262.6708133626675, "is_synthetic": false}
+{"timestamp": 1779019797.4837978, "sm_util": 1.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 184.35659447484184, "pcie_rx_kbps": 301.0722466841659, "is_synthetic": false}
+{"timestamp": 1779019798.4840062, "sm_util": 1.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 171.76586613710117, "pcie_rx_kbps": 291.47434068824805, "is_synthetic": false}
+{"timestamp": 1779019799.4847434, "sm_util": 1.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 177.70210987782133, "pcie_rx_kbps": 246.86595725622664, "is_synthetic": false}
+{"timestamp": 1779019800.4855058, "sm_util": 1.0, "gpu_temp_c": 42.0, "pcie_tx_kbps": 165.6659258482173, "pcie_rx_kbps": 241.77390979664517, "is_synthetic": false}
+{"timestamp": 1779019801.4860857, "sm_util": 2.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 183.80352041794612, "pcie_rx_kbps": 264.9783841334254, "is_synthetic": false}
+{"timestamp": 1779019802.4871829, "sm_util": 8.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 157.70822642400378, "pcie_rx_kbps": 301.68579472856186, "is_synthetic": false}
+{"timestamp": 1779019803.4876492, "sm_util": 11.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 171.80378088907108, "pcie_rx_kbps": 279.4883473269325, "is_synthetic": false}
+{"timestamp": 1779019804.4880064, "sm_util": 11.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 165.26881905337848, "pcie_rx_kbps": 243.18361174996673, "is_synthetic": false}
+{"timestamp": 1779019805.4883192, "sm_util": 13.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 184.2994002770882, "pcie_rx_kbps": 242.83511297043322, "is_synthetic": false}
+{"timestamp": 1779019806.4886339, "sm_util": 1.0, "gpu_temp_c": 41.0, "pcie_tx_kbps": 169.93712355527182, "pcie_rx_kbps": 276.09098541756816, "is_synthetic": false}
