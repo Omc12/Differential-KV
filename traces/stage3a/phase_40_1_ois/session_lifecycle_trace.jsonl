@@ -1,0 +1,8 @@
+{"timestamp": 1778969247.5983508, "session_id": "375c0888-77f0-4759-bef1-498138bc230d", "event": "created", "metadata": {}}
+{"timestamp": 1778969247.598568, "session_id": "207fe586-6259-4702-a11b-c8668b918831", "event": "created", "metadata": {}}
+{"timestamp": 1778969247.5987103, "session_id": "56ca07e9-219d-467c-a4f9-5a192485acc6", "event": "created", "metadata": {}}
+{"timestamp": 1778969247.5988345, "session_id": "cc2694a4-c0b2-4ed0-a111-20560177fc09", "event": "created", "metadata": {}}
+{"timestamp": 1778969257.6949177, "session_id": "375c0888-77f0-4759-bef1-498138bc230d", "event": "ended", "metadata": {}}
+{"timestamp": 1778969267.7996964, "session_id": "207fe586-6259-4702-a11b-c8668b918831", "event": "ended", "metadata": {}}
+{"timestamp": 1778969277.9071317, "session_id": "56ca07e9-219d-467c-a4f9-5a192485acc6", "event": "ended", "metadata": {}}
+{"timestamp": 1778969288.0109107, "session_id": "cc2694a4-c0b2-4ed0-a111-20560177fc09", "event": "ended", "metadata": {}}

@@ -1,0 +1,5 @@
+{"timestamp": 1778969247.599193, "failure_type": "stall", "severity": "WARNING", "details": "Simulated stall"}
+{"timestamp": 1778969258.7036922, "failure_type": "stall", "severity": "WARNING", "details": "Simulated stall"}
+{"timestamp": 1778969271.8476384, "failure_type": "disconnect", "severity": "WARNING", "details": "Simulated disconnect"}
+{"timestamp": 1778969291.045269, "failure_type": "stall", "severity": "WARNING", "details": "Simulated stall"}
+{"timestamp": 1778969294.071436, "failure_type": "disconnect", "severity": "WARNING", "details": "Simulated disconnect"}

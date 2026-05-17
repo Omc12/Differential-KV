@@ -146,7 +146,9 @@ class OpenAICompatibleAPIGateway:
         }
 
     async def start(self):
-        await self.scheduler.start(self.resolver.lgs_runtime_executor)
+        # Handle cases where self.resolver is either the runtime object or the executor function itself
+        executor = self.resolver.lgs_runtime_executor if hasattr(self.resolver, "lgs_runtime_executor") else self.resolver
+        await self.scheduler.start(executor)
 
     async def stop(self):
         await self.scheduler.stop()

@@ -94,12 +94,35 @@ class DiffKVHFWrapper:
         if session_id:
             self.switch_session(session_id)
             
-        with torch.no_grad():
+        seq_len = input_ids.shape[1]
+        chunk_size = self.config.get("prefill_chunk_size", 512)
+        
+        if seq_len <= chunk_size:
+            # Short prompt - single pass
+            with torch.no_grad():
+                past = self.session_kvs.get(session_id, None)
+                outputs = self.model(input_ids=input_ids, past_key_values=past, use_cache=True)
+                self.session_kvs[session_id] = outputs.past_key_values
+                self._update_manager(outputs.past_key_values, session_id)
+                return outputs.logits[:, -1, :]
+        else:
+            # Long prompt - Chunked Prefill (Prevent OOM)
+            print(f"Long sequence detected ({seq_len} tokens). Using Chunked Prefill...")
             past = self.session_kvs.get(session_id, None)
-            outputs = self.model(input_ids=input_ids, past_key_values=past, use_cache=True)
-            self.session_kvs[session_id] = outputs.past_key_values
-            self._update_manager(outputs.past_key_values, session_id)
-            return outputs.logits[:, -1, :]
+            logits = None
+            
+            for i in range(0, seq_len, chunk_size):
+                chunk = input_ids[:, i:i + chunk_size]
+                with torch.no_grad():
+                    outputs = self.model(input_ids=chunk, past_key_values=past, use_cache=True)
+                    past = outputs.past_key_values
+                    logits = outputs.logits[:, -1, :]
+                    
+                    # Apply sparsity/compression at each chunk boundary if needed
+                    self._update_manager(past, session_id)
+            
+            self.session_kvs[session_id] = past
+            return logits
 
     def _update_manager(self, past_key_values, session_id: Optional[str] = None):
         if past_key_values is None:
