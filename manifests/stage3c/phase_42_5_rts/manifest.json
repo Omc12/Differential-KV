@@ -1,0 +1,20 @@
+{
+  "status": "COMPLETED",
+  "model_sweeps": [
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "Qwen/Qwen2.5-1.5B-Instruct"
+  ],
+  "concurrency_sweeps": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "context_sweeps": [
+    4096,
+    8192,
+    16384
+  ],
+  "validation_timestamp": 1779014797.2282348
+}

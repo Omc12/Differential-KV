@@ -1,0 +1,16 @@
+{
+  "stage": "3B.2.5",
+  "phase": "SIP",
+  "status": "COMPLETED",
+  "timestamp": 1779001303.0820682,
+  "duration_sec": 182.0,
+  "requests_profiled": 692,
+  "trace_record_counts": {
+    "execution_lineage": 692,
+    "stage_participation": 272,
+    "native_activation": 272,
+    "sparse_participation": 272,
+    "serving_path": 272,
+    "governance_activation": 0
+  }
+}

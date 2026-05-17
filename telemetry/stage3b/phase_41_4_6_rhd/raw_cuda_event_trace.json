@@ -1,0 +1,1634 @@
+[
+    {
+        "event_name": "prefill_Qwen/Qwen2.5-0.5B-Instruct",
+        "event_type": "prefill",
+        "start_timestamp": 1779003514.209447,
+        "end_timestamp": 1779003514.83986,
+        "duration_ms": 631.8343505859375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_1",
+        "event_type": "kernel",
+        "start_timestamp": 1779003514.8527071,
+        "end_timestamp": 1779003514.949757,
+        "duration_ms": 97.497314453125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_2",
+        "event_type": "kernel",
+        "start_timestamp": 1779003514.991362,
+        "end_timestamp": 1779003515.049599,
+        "duration_ms": 58.724449157714844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_3",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.1004841,
+        "end_timestamp": 1779003515.1432073,
+        "duration_ms": 43.20793533325195,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_4",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.194837,
+        "end_timestamp": 1779003515.2450855,
+        "duration_ms": 50.75289535522461,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_5",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.288227,
+        "end_timestamp": 1779003515.3395512,
+        "duration_ms": 51.761600494384766,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_6",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.382001,
+        "end_timestamp": 1779003515.439957,
+        "duration_ms": 58.444801330566406,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_7",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.4901671,
+        "end_timestamp": 1779003515.5447907,
+        "duration_ms": 55.09423828125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_8",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.5850108,
+        "end_timestamp": 1779003515.6287758,
+        "duration_ms": 44.253089904785156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_9",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.6782389,
+        "end_timestamp": 1779003515.7208884,
+        "duration_ms": 43.39926528930664,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_10",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.7734642,
+        "end_timestamp": 1779003515.8166406,
+        "duration_ms": 43.66057586669922,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_11",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.8669426,
+        "end_timestamp": 1779003515.910846,
+        "duration_ms": 44.40095901489258,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_12",
+        "event_type": "kernel",
+        "start_timestamp": 1779003515.960626,
+        "end_timestamp": 1779003516.0096185,
+        "duration_ms": 49.4793586730957,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_13",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.0549648,
+        "end_timestamp": 1779003516.098892,
+        "duration_ms": 44.42259216308594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_14",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.149244,
+        "end_timestamp": 1779003516.193138,
+        "duration_ms": 44.38140869140625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_15",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.2423806,
+        "end_timestamp": 1779003516.2862387,
+        "duration_ms": 44.3570556640625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_16",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.3367512,
+        "end_timestamp": 1779003516.3789408,
+        "duration_ms": 42.679710388183594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_17",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.4302087,
+        "end_timestamp": 1779003516.4731355,
+        "duration_ms": 43.41494369506836,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_18",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.5241897,
+        "end_timestamp": 1779003516.567536,
+        "duration_ms": 43.83225631713867,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_19",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.616147,
+        "end_timestamp": 1779003516.6583998,
+        "duration_ms": 42.738304138183594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_20",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.7092342,
+        "end_timestamp": 1779003516.752665,
+        "duration_ms": 43.92502212524414,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_21",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.8010514,
+        "end_timestamp": 1779003516.8438005,
+        "duration_ms": 43.241214752197266,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_22",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.894648,
+        "end_timestamp": 1779003516.9405358,
+        "duration_ms": 46.37171173095703,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_23",
+        "event_type": "kernel",
+        "start_timestamp": 1779003516.9895594,
+        "end_timestamp": 1779003517.0328941,
+        "duration_ms": 43.8353271484375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_24",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.0843947,
+        "end_timestamp": 1779003517.1280644,
+        "duration_ms": 44.15788650512695,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_25",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.1781564,
+        "end_timestamp": 1779003517.2212899,
+        "duration_ms": 43.62736129760742,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_26",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.2712436,
+        "end_timestamp": 1779003517.3148713,
+        "duration_ms": 44.33967971801758,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_27",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.3644657,
+        "end_timestamp": 1779003517.4172952,
+        "duration_ms": 53.31398391723633,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_28",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.4554548,
+        "end_timestamp": 1779003517.5127058,
+        "duration_ms": 57.733665466308594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_29",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.5656083,
+        "end_timestamp": 1779003517.6225982,
+        "duration_ms": 57.48054504394531,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_30",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.6734524,
+        "end_timestamp": 1779003517.7302506,
+        "duration_ms": 57.30070495605469,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_31",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.7832372,
+        "end_timestamp": 1779003517.835276,
+        "duration_ms": 52.519073486328125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_32",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.874038,
+        "end_timestamp": 1779003517.9165661,
+        "duration_ms": 43.024574279785156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_33",
+        "event_type": "kernel",
+        "start_timestamp": 1779003517.9664476,
+        "end_timestamp": 1779003518.0144908,
+        "duration_ms": 48.54364776611328,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_34",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.0601978,
+        "end_timestamp": 1779003518.105841,
+        "duration_ms": 46.14112091064453,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_35",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.153108,
+        "end_timestamp": 1779003518.195649,
+        "duration_ms": 43.02316665649414,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_36",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.2486126,
+        "end_timestamp": 1779003518.3009949,
+        "duration_ms": 52.86975860595703,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_37",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.3407555,
+        "end_timestamp": 1779003518.3885796,
+        "duration_ms": 48.3218879699707,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_38",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.4336655,
+        "end_timestamp": 1779003518.481834,
+        "duration_ms": 48.6635856628418,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_39",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.5269718,
+        "end_timestamp": 1779003518.58014,
+        "duration_ms": 53.654945373535156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_40",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.6227734,
+        "end_timestamp": 1779003518.6656191,
+        "duration_ms": 43.326881408691406,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_41",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.7009943,
+        "end_timestamp": 1779003518.7452905,
+        "duration_ms": 44.96809768676758,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_42",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.794267,
+        "end_timestamp": 1779003518.8366148,
+        "duration_ms": 42.82563018798828,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_43",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.8872392,
+        "end_timestamp": 1779003518.9307468,
+        "duration_ms": 43.99705505371094,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_44",
+        "event_type": "kernel",
+        "start_timestamp": 1779003518.9797044,
+        "end_timestamp": 1779003519.0251014,
+        "duration_ms": 45.89161682128906,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_45",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.0745313,
+        "end_timestamp": 1779003519.120569,
+        "duration_ms": 46.528160095214844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_46",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.1680238,
+        "end_timestamp": 1779003519.2113237,
+        "duration_ms": 43.7825927734375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_47",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.2616446,
+        "end_timestamp": 1779003519.305378,
+        "duration_ms": 44.86275100708008,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_48",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.3554,
+        "end_timestamp": 1779003519.3986151,
+        "duration_ms": 44.30080032348633,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_49",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.4488738,
+        "end_timestamp": 1779003519.490447,
+        "duration_ms": 43.01804733276367,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_50",
+        "event_type": "kernel",
+        "start_timestamp": 1779003519.5418606,
+        "end_timestamp": 1779003519.582627,
+        "duration_ms": 41.886497497558594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "prefill_Qwen/Qwen2.5-1.5B-Instruct",
+        "event_type": "prefill",
+        "start_timestamp": 1779003522.9574602,
+        "end_timestamp": 1779003523.9069688,
+        "duration_ms": 964.2555541992188,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_1",
+        "event_type": "kernel",
+        "start_timestamp": 1779003523.9225283,
+        "end_timestamp": 1779003523.9721947,
+        "duration_ms": 50.546016693115234,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_2",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.012434,
+        "end_timestamp": 1779003524.060078,
+        "duration_ms": 48.73267364501953,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_3",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.1055615,
+        "end_timestamp": 1779003524.153734,
+        "duration_ms": 49.11475372314453,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_4",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.1991751,
+        "end_timestamp": 1779003524.246666,
+        "duration_ms": 48.3875846862793,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_5",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.29233,
+        "end_timestamp": 1779003524.339328,
+        "duration_ms": 47.92550277709961,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_6",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.3849957,
+        "end_timestamp": 1779003524.4322033,
+        "duration_ms": 48.156063079833984,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_7",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.4799428,
+        "end_timestamp": 1779003524.5295267,
+        "duration_ms": 50.505313873291016,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_8",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.5726848,
+        "end_timestamp": 1779003524.619908,
+        "duration_ms": 48.19337463378906,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_9",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.6678274,
+        "end_timestamp": 1779003524.7155423,
+        "duration_ms": 48.6229133605957,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_10",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.7627227,
+        "end_timestamp": 1779003524.8087814,
+        "duration_ms": 46.96995162963867,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_11",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.8559473,
+        "end_timestamp": 1779003524.9031515,
+        "duration_ms": 48.10201644897461,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_12",
+        "event_type": "kernel",
+        "start_timestamp": 1779003524.9499576,
+        "end_timestamp": 1779003524.9986584,
+        "duration_ms": 49.60512161254883,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_13",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.0450397,
+        "end_timestamp": 1779003525.093039,
+        "duration_ms": 48.907936096191406,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_14",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.1392317,
+        "end_timestamp": 1779003525.1856122,
+        "duration_ms": 47.28473663330078,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_15",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.232987,
+        "end_timestamp": 1779003525.2796257,
+        "duration_ms": 47.60367965698242,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_16",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.3289971,
+        "end_timestamp": 1779003525.3754442,
+        "duration_ms": 47.4917106628418,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_17",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.4248037,
+        "end_timestamp": 1779003525.471883,
+        "duration_ms": 48.22832107543945,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_18",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.5177333,
+        "end_timestamp": 1779003525.567297,
+        "duration_ms": 50.55503845214844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_19",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.6123178,
+        "end_timestamp": 1779003525.6597128,
+        "duration_ms": 48.480224609375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_20",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.7050922,
+        "end_timestamp": 1779003525.7521865,
+        "duration_ms": 48.00483322143555,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_21",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.798061,
+        "end_timestamp": 1779003525.8459306,
+        "duration_ms": 48.90323257446289,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_22",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.890786,
+        "end_timestamp": 1779003525.93755,
+        "duration_ms": 47.70524978637695,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_23",
+        "event_type": "kernel",
+        "start_timestamp": 1779003525.9832985,
+        "end_timestamp": 1779003526.0312278,
+        "duration_ms": 48.80412673950195,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_24",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.0751138,
+        "end_timestamp": 1779003526.1244202,
+        "duration_ms": 50.315582275390625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_25",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.1697881,
+        "end_timestamp": 1779003526.2203023,
+        "duration_ms": 51.47324752807617,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_26",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.2627056,
+        "end_timestamp": 1779003526.310559,
+        "duration_ms": 48.81532669067383,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_27",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.3549218,
+        "end_timestamp": 1779003526.4018967,
+        "duration_ms": 47.89593505859375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_28",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.4499803,
+        "end_timestamp": 1779003526.4961352,
+        "duration_ms": 47.347328186035156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_29",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.5433335,
+        "end_timestamp": 1779003526.591732,
+        "duration_ms": 49.284671783447266,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_30",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.6363256,
+        "end_timestamp": 1779003526.6834455,
+        "duration_ms": 48.03862380981445,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_31",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.7297325,
+        "end_timestamp": 1779003526.7755315,
+        "duration_ms": 46.73126220703125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_32",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.8228655,
+        "end_timestamp": 1779003526.8693688,
+        "duration_ms": 47.45487976074219,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_33",
+        "event_type": "kernel",
+        "start_timestamp": 1779003526.9150157,
+        "end_timestamp": 1779003526.9608948,
+        "duration_ms": 46.90265655517578,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_34",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.0074909,
+        "end_timestamp": 1779003527.0542803,
+        "duration_ms": 47.73932647705078,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_35",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.1013827,
+        "end_timestamp": 1779003527.1484363,
+        "duration_ms": 47.94755172729492,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_36",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.1940587,
+        "end_timestamp": 1779003527.2408848,
+        "duration_ms": 47.729793548583984,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_37",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.2886138,
+        "end_timestamp": 1779003527.337334,
+        "duration_ms": 49.67238235473633,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_38",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.3819344,
+        "end_timestamp": 1779003527.4289339,
+        "duration_ms": 47.87459182739258,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_39",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.4757717,
+        "end_timestamp": 1779003527.522294,
+        "duration_ms": 47.484127044677734,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_40",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.569076,
+        "end_timestamp": 1779003527.6165173,
+        "duration_ms": 48.39539337158203,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_41",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.662245,
+        "end_timestamp": 1779003527.7092342,
+        "duration_ms": 47.832672119140625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_42",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.755007,
+        "end_timestamp": 1779003527.802924,
+        "duration_ms": 48.7955207824707,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_43",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.849269,
+        "end_timestamp": 1779003527.903018,
+        "duration_ms": 54.648319244384766,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_44",
+        "event_type": "kernel",
+        "start_timestamp": 1779003527.9417014,
+        "end_timestamp": 1779003527.9913883,
+        "duration_ms": 50.65951919555664,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_45",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.0351937,
+        "end_timestamp": 1779003528.0839307,
+        "duration_ms": 49.835777282714844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_46",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.1288376,
+        "end_timestamp": 1779003528.175968,
+        "duration_ms": 48.038272857666016,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_47",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.221956,
+        "end_timestamp": 1779003528.268405,
+        "duration_ms": 47.39596939086914,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_48",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.316118,
+        "end_timestamp": 1779003528.3619888,
+        "duration_ms": 46.80051040649414,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_49",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.4098957,
+        "end_timestamp": 1779003528.4580648,
+        "duration_ms": 49.056705474853516,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_50",
+        "event_type": "kernel",
+        "start_timestamp": 1779003528.5031152,
+        "end_timestamp": 1779003528.549855,
+        "duration_ms": 47.659423828125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "prefill_Qwen/Qwen2.5-0.5B-Instruct",
+        "event_type": "prefill",
+        "start_timestamp": 1779003585.6352277,
+        "end_timestamp": 1779003586.1948795,
+        "duration_ms": 560.9280395507812,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_1",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.205681,
+        "end_timestamp": 1779003586.2868092,
+        "duration_ms": 81.58946990966797,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_2",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.3274207,
+        "end_timestamp": 1779003586.3804812,
+        "duration_ms": 53.54857635498047,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_3",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.4209156,
+        "end_timestamp": 1779003586.4662774,
+        "duration_ms": 45.857086181640625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_4",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.5157022,
+        "end_timestamp": 1779003586.5616992,
+        "duration_ms": 46.61167907714844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_5",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.6095855,
+        "end_timestamp": 1779003586.651893,
+        "duration_ms": 42.792320251464844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_6",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.6875045,
+        "end_timestamp": 1779003586.7311099,
+        "duration_ms": 44.295841217041016,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_7",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.7807877,
+        "end_timestamp": 1779003586.826874,
+        "duration_ms": 46.568511962890625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_8",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.8737934,
+        "end_timestamp": 1779003586.915921,
+        "duration_ms": 42.63158416748047,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_9",
+        "event_type": "kernel",
+        "start_timestamp": 1779003586.9516282,
+        "end_timestamp": 1779003586.99764,
+        "duration_ms": 46.70345687866211,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_10",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.0456061,
+        "end_timestamp": 1779003587.0886564,
+        "duration_ms": 43.742591857910156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_11",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.1389585,
+        "end_timestamp": 1779003587.1975183,
+        "duration_ms": 59.03228759765625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_12",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.2481222,
+        "end_timestamp": 1779003587.292874,
+        "duration_ms": 45.23596954345703,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_13",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.3404214,
+        "end_timestamp": 1779003587.383053,
+        "duration_ms": 43.12799835205078,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_14",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.4194436,
+        "end_timestamp": 1779003587.4632523,
+        "duration_ms": 44.2918701171875,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_15",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.5134609,
+        "end_timestamp": 1779003587.5744886,
+        "duration_ms": 61.51164627075195,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_16",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.6213973,
+        "end_timestamp": 1779003587.6700373,
+        "duration_ms": 49.12422561645508,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_17",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.714568,
+        "end_timestamp": 1779003587.759167,
+        "duration_ms": 45.08208084106445,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_18",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.8075752,
+        "end_timestamp": 1779003587.8528965,
+        "duration_ms": 45.38115310668945,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_19",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.9011524,
+        "end_timestamp": 1779003587.9476278,
+        "duration_ms": 46.95686340332031,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_20",
+        "event_type": "kernel",
+        "start_timestamp": 1779003587.9928575,
+        "end_timestamp": 1779003588.0361645,
+        "duration_ms": 43.76995086669922,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_21",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.0871115,
+        "end_timestamp": 1779003588.1300354,
+        "duration_ms": 43.40825653076172,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_22",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.1813052,
+        "end_timestamp": 1779003588.2299058,
+        "duration_ms": 49.071678161621094,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_23",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.2730489,
+        "end_timestamp": 1779003588.316714,
+        "duration_ms": 44.1611213684082,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_24",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.3661942,
+        "end_timestamp": 1779003588.4102528,
+        "duration_ms": 44.55321502685547,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_25",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.4590986,
+        "end_timestamp": 1779003588.5143447,
+        "duration_ms": 55.7086067199707,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_26",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.552875,
+        "end_timestamp": 1779003588.607018,
+        "duration_ms": 54.63536071777344,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_27",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.6449935,
+        "end_timestamp": 1779003588.6887832,
+        "duration_ms": 44.46332931518555,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_28",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.7404916,
+        "end_timestamp": 1779003588.7828944,
+        "duration_ms": 42.894752502441406,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_29",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.833319,
+        "end_timestamp": 1779003588.8775156,
+        "duration_ms": 44.6940803527832,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_30",
+        "event_type": "kernel",
+        "start_timestamp": 1779003588.9259946,
+        "end_timestamp": 1779003588.9697819,
+        "duration_ms": 44.26911926269531,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_31",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.020607,
+        "end_timestamp": 1779003589.062286,
+        "duration_ms": 42.18483352661133,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_32",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.1141121,
+        "end_timestamp": 1779003589.1560798,
+        "duration_ms": 42.46393585205078,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_33",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.1931105,
+        "end_timestamp": 1779003589.236801,
+        "duration_ms": 44.188926696777344,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_34",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.29004,
+        "end_timestamp": 1779003589.3368645,
+        "duration_ms": 47.299617767333984,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_35",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.3791416,
+        "end_timestamp": 1779003589.4220123,
+        "duration_ms": 43.567134857177734,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_36",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.4713883,
+        "end_timestamp": 1779003589.517074,
+        "duration_ms": 46.17830276489258,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_37",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.5662966,
+        "end_timestamp": 1779003589.6120555,
+        "duration_ms": 46.25580978393555,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_38",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.6602533,
+        "end_timestamp": 1779003589.7035625,
+        "duration_ms": 43.8012809753418,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_39",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.7535114,
+        "end_timestamp": 1779003589.7981548,
+        "duration_ms": 45.11983871459961,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_40",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.8454673,
+        "end_timestamp": 1779003589.8907807,
+        "duration_ms": 45.80169677734375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_41",
+        "event_type": "kernel",
+        "start_timestamp": 1779003589.9397268,
+        "end_timestamp": 1779003589.9839997,
+        "duration_ms": 44.74800109863281,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_42",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.033294,
+        "end_timestamp": 1779003590.074847,
+        "duration_ms": 42.011680603027344,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_43",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.126288,
+        "end_timestamp": 1779003590.1695871,
+        "duration_ms": 43.78313446044922,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_44",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.206554,
+        "end_timestamp": 1779003590.2512217,
+        "duration_ms": 45.151424407958984,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_45",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.3000176,
+        "end_timestamp": 1779003590.3430572,
+        "duration_ms": 43.73408126831055,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_46",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.3943787,
+        "end_timestamp": 1779003590.4369214,
+        "duration_ms": 43.036895751953125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_47",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.4894862,
+        "end_timestamp": 1779003590.53359,
+        "duration_ms": 44.59312057495117,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_48",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.583788,
+        "end_timestamp": 1779003590.6287417,
+        "duration_ms": 45.448062896728516,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_49",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.6763072,
+        "end_timestamp": 1779003590.7198462,
+        "duration_ms": 44.03132629394531,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_50",
+        "event_type": "kernel",
+        "start_timestamp": 1779003590.7690268,
+        "end_timestamp": 1779003590.8199558,
+        "duration_ms": 51.416831970214844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "prefill_Qwen/Qwen2.5-1.5B-Instruct",
+        "event_type": "prefill",
+        "start_timestamp": 1779003594.1750977,
+        "end_timestamp": 1779003595.0706646,
+        "duration_ms": 907.0052490234375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_1",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.0824666,
+        "end_timestamp": 1779003595.1348917,
+        "duration_ms": 53.30992126464844,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_2",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.1750283,
+        "end_timestamp": 1779003595.2217836,
+        "duration_ms": 47.82371139526367,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_3",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.2692084,
+        "end_timestamp": 1779003595.3154902,
+        "duration_ms": 47.19744110107422,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_4",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.3619323,
+        "end_timestamp": 1779003595.408272,
+        "duration_ms": 47.397823333740234,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_5",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.4559903,
+        "end_timestamp": 1779003595.504074,
+        "duration_ms": 49.017822265625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_6",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.5483725,
+        "end_timestamp": 1779003595.5959756,
+        "duration_ms": 48.53567886352539,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_7",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.6421945,
+        "end_timestamp": 1779003595.6902177,
+        "duration_ms": 48.9554557800293,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_8",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.7364466,
+        "end_timestamp": 1779003595.7837718,
+        "duration_ms": 48.22022247314453,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_9",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.8301172,
+        "end_timestamp": 1779003595.8774788,
+        "duration_ms": 48.271968841552734,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_10",
+        "event_type": "kernel",
+        "start_timestamp": 1779003595.9222443,
+        "end_timestamp": 1779003595.9696002,
+        "duration_ms": 48.24924850463867,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_11",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.0165534,
+        "end_timestamp": 1779003596.0624702,
+        "duration_ms": 46.872222900390625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_12",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.1102853,
+        "end_timestamp": 1779003596.1595519,
+        "duration_ms": 50.19171142578125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_13",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.220873,
+        "end_timestamp": 1779003596.271005,
+        "duration_ms": 51.0840950012207,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_14",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.314092,
+        "end_timestamp": 1779003596.3654132,
+        "duration_ms": 52.212799072265625,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_15",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.4062304,
+        "end_timestamp": 1779003596.4559534,
+        "duration_ms": 50.7540168762207,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_16",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.4994473,
+        "end_timestamp": 1779003596.5468743,
+        "duration_ms": 48.326656341552734,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_17",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.5931625,
+        "end_timestamp": 1779003596.6456497,
+        "duration_ms": 53.58537673950195,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_18",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.6854825,
+        "end_timestamp": 1779003596.7450438,
+        "duration_ms": 60.45686340332031,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_19",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.7950237,
+        "end_timestamp": 1779003596.8424015,
+        "duration_ms": 48.31190490722656,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_20",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.8879044,
+        "end_timestamp": 1779003596.9373906,
+        "duration_ms": 50.39091110229492,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_21",
+        "event_type": "kernel",
+        "start_timestamp": 1779003596.9809935,
+        "end_timestamp": 1779003597.026808,
+        "duration_ms": 46.74028778076172,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_22",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.073071,
+        "end_timestamp": 1779003597.122159,
+        "duration_ms": 50.069984436035156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_23",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.1675453,
+        "end_timestamp": 1779003597.2135332,
+        "duration_ms": 46.87577438354492,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_24",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.2603533,
+        "end_timestamp": 1779003597.3082724,
+        "duration_ms": 48.854942321777344,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_25",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.3558598,
+        "end_timestamp": 1779003597.4042537,
+        "duration_ms": 49.239105224609375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_26",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.4486067,
+        "end_timestamp": 1779003597.4963765,
+        "duration_ms": 48.681182861328125,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_27",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.5423322,
+        "end_timestamp": 1779003597.589115,
+        "duration_ms": 47.65871810913086,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_28",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.6371024,
+        "end_timestamp": 1779003597.6850307,
+        "duration_ms": 48.92390441894531,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_29",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.728992,
+        "end_timestamp": 1779003597.7764668,
+        "duration_ms": 48.38723373413086,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_30",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.82293,
+        "end_timestamp": 1779003597.8723688,
+        "duration_ms": 50.333473205566406,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_31",
+        "event_type": "kernel",
+        "start_timestamp": 1779003597.9150937,
+        "end_timestamp": 1779003597.9688373,
+        "duration_ms": 54.62527847290039,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_32",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.0084984,
+        "end_timestamp": 1779003598.0552406,
+        "duration_ms": 47.701534271240234,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_33",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.1034105,
+        "end_timestamp": 1779003598.1496172,
+        "duration_ms": 47.23196792602539,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_34",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.197091,
+        "end_timestamp": 1779003598.2433307,
+        "duration_ms": 47.14806365966797,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_35",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.2923043,
+        "end_timestamp": 1779003598.3409297,
+        "duration_ms": 49.621952056884766,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_36",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.385869,
+        "end_timestamp": 1779003598.432498,
+        "duration_ms": 47.554561614990234,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_37",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.4795532,
+        "end_timestamp": 1779003598.5296736,
+        "duration_ms": 51.023582458496094,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_38",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.570976,
+        "end_timestamp": 1779003598.6179752,
+        "duration_ms": 47.916961669921875,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_39",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.6651213,
+        "end_timestamp": 1779003598.7087984,
+        "duration_ms": 44.71507263183594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_40",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.7559166,
+        "end_timestamp": 1779003598.802536,
+        "duration_ms": 47.588417053222656,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_41",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.8481965,
+        "end_timestamp": 1779003598.8958273,
+        "duration_ms": 48.61433410644531,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_42",
+        "event_type": "kernel",
+        "start_timestamp": 1779003598.9422863,
+        "end_timestamp": 1779003598.9917355,
+        "duration_ms": 51.13264083862305,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_43",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.037233,
+        "end_timestamp": 1779003599.0850847,
+        "duration_ms": 48.779457092285156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_44",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.13243,
+        "end_timestamp": 1779003599.1804886,
+        "duration_ms": 48.976478576660156,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_45",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.226103,
+        "end_timestamp": 1779003599.272531,
+        "duration_ms": 47.344608306884766,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_46",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.3197315,
+        "end_timestamp": 1779003599.3667881,
+        "duration_ms": 48.20297622680664,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_47",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.412692,
+        "end_timestamp": 1779003599.4601333,
+        "duration_ms": 48.436161041259766,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_48",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.5075152,
+        "end_timestamp": 1779003599.553789,
+        "duration_ms": 47.167327880859375,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_49",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.6012027,
+        "end_timestamp": 1779003599.648577,
+        "duration_ms": 48.30003356933594,
+        "cuda_stream": 0
+    },
+    {
+        "event_name": "decode_step_50",
+        "event_type": "kernel",
+        "start_timestamp": 1779003599.6937253,
+        "end_timestamp": 1779003599.7400398,
+        "duration_ms": 47.231040954589844,
+        "cuda_stream": 0
+    }
+]

@@ -1,0 +1,17 @@
+{
+    "validation_phase": "STAGE_3C_0_CGO",
+    "timestamp": 1779004058.7662358,
+    "integrity_check": "PASS",
+    "raw_artifacts": [
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_0_cgo\\raw_nvidia_smi.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_0_cgo\\raw_nvidia_smi_dmon.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_0_cgo\\raw_torch_profiler_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\gpu_stall_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\tensor_core_activity_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\decode_continuity_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\batch_residency_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\sparse_fusion_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\throughput_comparison_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_0_cgo\\async_kv_trace.jsonl"
+    ]
+}

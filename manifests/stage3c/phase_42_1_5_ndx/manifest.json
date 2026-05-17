@@ -1,0 +1,17 @@
+{
+    "validation_phase": "STAGE_3C_1_5_NDX",
+    "timestamp": 1779010525.2198915,
+    "integrity_check": "PASS",
+    "raw_artifacts": [
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_5_ndx\\raw_nvidia_smi.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_5_ndx\\raw_nvidia_smi_dmon.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_5_ndx\\raw_torch_profiler_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\native_decode_execution_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\native_batch_residency_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\native_stream_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\cuda_graph_replay_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\native_queue_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\fallback_violation_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_5_ndx\\execution_lineage_trace.jsonl"
+    ]
+}

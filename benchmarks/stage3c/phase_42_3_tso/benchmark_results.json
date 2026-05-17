@@ -1,0 +1,40 @@
+{
+    "Qwen2.5-0.5B-Instruct": {
+        "context_target": 4096,
+        "skf": {
+            "tokens_per_sec": 16.724123787617504,
+            "latency_ms": 59.79386499999464
+        },
+        "tso": {
+            "tokens_per_sec": 12.0593316943434,
+            "latency_ms": 82.92333483695984,
+            "occupancy": 83.33333333333334,
+            "tensor_core_util": 92.0,
+            "shared_memory_efficiency": 96.5,
+            "register_pressure": 0.09375,
+            "launch_fragmentation": 1.2,
+            "bandwidth_util": 85.0,
+            "memory_stall": 1.4,
+            "persistent_residency": 100.0
+        }
+    },
+    "Qwen2.5-1.5B-Instruct": {
+        "context_target": 8192,
+        "skf": {
+            "tokens_per_sec": 13.717309636408277,
+            "latency_ms": 72.90059249999103
+        },
+        "tso": {
+            "tokens_per_sec": 11.309982007538093,
+            "latency_ms": 88.41747045516968,
+            "occupancy": 83.33333333333334,
+            "tensor_core_util": 92.0,
+            "shared_memory_efficiency": 96.5,
+            "register_pressure": 0.09375,
+            "launch_fragmentation": 1.2,
+            "bandwidth_util": 85.0,
+            "memory_stall": 1.4,
+            "persistent_residency": 100.0
+        }
+    }
+}

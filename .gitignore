@@ -35,3 +35,18 @@ Thumbs.db
 
 # Logs
 *.log
+
+# C/C++ and CUDA build artifacts
+*.dll
+*.lib
+*.exp
+*.exe
+*.obj
+*.o
+*.so
+*.dylib
+*.pdb
+
+# Large telemetry profiler traces
+raw_torch_profiler_trace.json
+

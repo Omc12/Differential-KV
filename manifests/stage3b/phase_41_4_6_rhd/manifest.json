@@ -1,0 +1,14 @@
+{
+    "validation_phase": "STAGE_3B_4_6_RHD",
+    "timestamp": 1779003617.3081753,
+    "integrity_check": "PASS",
+    "raw_artifacts": [
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3b\\phase_41_4_6_rhd\\raw_nvidia_smi.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3b\\phase_41_4_6_rhd\\raw_nvidia_smi_dmon.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3b\\phase_41_4_6_rhd\\raw_torch_profiler_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3b\\phase_41_4_6_rhd\\raw_cuda_event_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3b\\phase_41_4_6_rhd\\raw_vram_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3b\\phase_41_4_6_rhd\\raw_transformer_activity_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3b\\phase_41_4_6_rhd\\raw_gpu_timeline_trace.jsonl"
+    ]
+}

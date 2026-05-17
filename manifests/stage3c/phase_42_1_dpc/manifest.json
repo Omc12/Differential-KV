@@ -1,0 +1,17 @@
+{
+    "validation_phase": "STAGE_3C_1_DPC",
+    "timestamp": 1779005095.8449965,
+    "integrity_check": "PASS",
+    "raw_artifacts": [
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_dpc\\raw_nvidia_smi.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_dpc\\raw_nvidia_smi_dmon.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_1_dpc\\raw_torch_profiler_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\decode_launch_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\decode_residency_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\synchronization_bubble_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\async_decode_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\native_decode_loop_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\pipeline_continuity_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_1_dpc\\gpu_idle_gap_trace.jsonl"
+    ]
+}

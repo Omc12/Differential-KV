@@ -1,0 +1,14 @@
+{
+    "status": "COMPLETED",
+    "timestamp": 1779014277.9177482,
+    "models_tested": [
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "Qwen/Qwen2.5-1.5B-Instruct"
+    ],
+    "concurrency_tested": [
+        1,
+        2,
+        4,
+        8
+    ]
+}

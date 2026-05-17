@@ -1,0 +1,804 @@
+{"timestamp": 1778997933.2387404, "sm_utilization_pct": 8, "memory_utilization_pct": 38}
+{"timestamp": 1778997934.2442, "sm_utilization_pct": 28, "memory_utilization_pct": 44}
+{"timestamp": 1778997935.2597723, "sm_utilization_pct": 12, "memory_utilization_pct": 40}
+{"timestamp": 1778997936.2624345, "sm_utilization_pct": 8, "memory_utilization_pct": 34}
+{"timestamp": 1778997962.6698356, "sm_utilization_pct": 8, "memory_utilization_pct": 36}
+{"timestamp": 1778997963.6780443, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778997964.689235, "sm_utilization_pct": 9, "memory_utilization_pct": 32}
+{"timestamp": 1778997965.701055, "sm_utilization_pct": 10, "memory_utilization_pct": 38}
+{"timestamp": 1778997966.71025, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778997967.7204869, "sm_utilization_pct": 9, "memory_utilization_pct": 41}
+{"timestamp": 1778997968.7280414, "sm_utilization_pct": 9, "memory_utilization_pct": 42}
+{"timestamp": 1778997969.7393541, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778997970.753888, "sm_utilization_pct": 9, "memory_utilization_pct": 32}
+{"timestamp": 1778997971.7675016, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778997972.771468, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997973.7849371, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778997974.796823, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997975.8055024, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997976.8189952, "sm_utilization_pct": 13, "memory_utilization_pct": 32}
+{"timestamp": 1778997977.8310285, "sm_utilization_pct": 9, "memory_utilization_pct": 40}
+{"timestamp": 1778997978.843664, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997979.852232, "sm_utilization_pct": 9, "memory_utilization_pct": 40}
+{"timestamp": 1778997980.8593688, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778997981.8662696, "sm_utilization_pct": 10, "memory_utilization_pct": 41}
+{"timestamp": 1778997982.872283, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778997983.8781412, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778997984.8890462, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778997985.8954124, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778997986.908382, "sm_utilization_pct": 10, "memory_utilization_pct": 34}
+{"timestamp": 1778997987.9160774, "sm_utilization_pct": 9, "memory_utilization_pct": 40}
+{"timestamp": 1778997988.9276168, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778997989.9389656, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778997990.947334, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997991.953454, "sm_utilization_pct": 11, "memory_utilization_pct": 33}
+{"timestamp": 1778997992.9639158, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778997993.9730613, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778997994.9869857, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778997995.994506, "sm_utilization_pct": 9, "memory_utilization_pct": 32}
+{"timestamp": 1778997997.0068462, "sm_utilization_pct": 10, "memory_utilization_pct": 33}
+{"timestamp": 1778997998.020355, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778997999.03466, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778998000.0455217, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778998001.0593176, "sm_utilization_pct": 9, "memory_utilization_pct": 43}
+{"timestamp": 1778998002.0661645, "sm_utilization_pct": 10, "memory_utilization_pct": 30}
+{"timestamp": 1778998003.0733438, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998004.0832279, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998005.0952392, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778998006.109028, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778998007.123143, "sm_utilization_pct": 12, "memory_utilization_pct": 34}
+{"timestamp": 1778998008.1325133, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998009.1475003, "sm_utilization_pct": 9, "memory_utilization_pct": 40}
+{"timestamp": 1778998010.157643, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778998011.163977, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778998012.1743364, "sm_utilization_pct": 12, "memory_utilization_pct": 35}
+{"timestamp": 1778998013.1837537, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998014.1925654, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778998015.206112, "sm_utilization_pct": 9, "memory_utilization_pct": 41}
+{"timestamp": 1778998016.2131371, "sm_utilization_pct": 9, "memory_utilization_pct": 42}
+{"timestamp": 1778998017.2209008, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998018.2330887, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778998019.2421432, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778998020.2523282, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998021.2551076, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998022.2658608, "sm_utilization_pct": 13, "memory_utilization_pct": 35}
+{"timestamp": 1778998023.2783918, "sm_utilization_pct": 90, "memory_utilization_pct": 68}
+{"timestamp": 1778998024.2897098, "sm_utilization_pct": 4, "memory_utilization_pct": 1}
+{"timestamp": 1778998025.3023014, "sm_utilization_pct": 8, "memory_utilization_pct": 1}
+{"timestamp": 1778998026.3138707, "sm_utilization_pct": 0, "memory_utilization_pct": 0}
+{"timestamp": 1778998027.3274174, "sm_utilization_pct": 4, "memory_utilization_pct": 1}
+{"timestamp": 1778998028.337135, "sm_utilization_pct": 5, "memory_utilization_pct": 4}
+{"timestamp": 1778998029.3507447, "sm_utilization_pct": 0, "memory_utilization_pct": 0}
+{"timestamp": 1778998030.3635993, "sm_utilization_pct": 0, "memory_utilization_pct": 9}
+{"timestamp": 1778998031.3792448, "sm_utilization_pct": 0, "memory_utilization_pct": 13}
+{"timestamp": 1778998032.394531, "sm_utilization_pct": 0, "memory_utilization_pct": 7}
+{"timestamp": 1778998033.4088774, "sm_utilization_pct": 18, "memory_utilization_pct": 19}
+{"timestamp": 1778998034.423126, "sm_utilization_pct": 8, "memory_utilization_pct": 19}
+{"timestamp": 1778998035.4358983, "sm_utilization_pct": 0, "memory_utilization_pct": 10}
+{"timestamp": 1778998036.4511578, "sm_utilization_pct": 6, "memory_utilization_pct": 21}
+{"timestamp": 1778998037.4565372, "sm_utilization_pct": 0, "memory_utilization_pct": 23}
+{"timestamp": 1778998038.470116, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998039.4823604, "sm_utilization_pct": 2, "memory_utilization_pct": 1}
+{"timestamp": 1778998040.4964063, "sm_utilization_pct": 1, "memory_utilization_pct": 1}
+{"timestamp": 1778998041.5108252, "sm_utilization_pct": 4, "memory_utilization_pct": 1}
+{"timestamp": 1778998042.5127037, "sm_utilization_pct": 0, "memory_utilization_pct": 12}
+{"timestamp": 1778998043.524376, "sm_utilization_pct": 0, "memory_utilization_pct": 12}
+{"timestamp": 1778998044.5353742, "sm_utilization_pct": 11, "memory_utilization_pct": 12}
+{"timestamp": 1778998045.5481133, "sm_utilization_pct": 18, "memory_utilization_pct": 24}
+{"timestamp": 1778998046.556802, "sm_utilization_pct": 9, "memory_utilization_pct": 25}
+{"timestamp": 1778998047.5687635, "sm_utilization_pct": 7, "memory_utilization_pct": 31}
+{"timestamp": 1778998048.5817332, "sm_utilization_pct": 4, "memory_utilization_pct": 26}
+{"timestamp": 1778998049.5976837, "sm_utilization_pct": 0, "memory_utilization_pct": 26}
+{"timestamp": 1778998050.6097503, "sm_utilization_pct": 32, "memory_utilization_pct": 28}
+{"timestamp": 1778998051.6151202, "sm_utilization_pct": 22, "memory_utilization_pct": 23}
+{"timestamp": 1778998052.6244283, "sm_utilization_pct": 0, "memory_utilization_pct": 17}
+{"timestamp": 1778998053.6360936, "sm_utilization_pct": 11, "memory_utilization_pct": 26}
+{"timestamp": 1778998054.6509166, "sm_utilization_pct": 3, "memory_utilization_pct": 1}
+{"timestamp": 1778998055.663695, "sm_utilization_pct": 3, "memory_utilization_pct": 1}
+{"timestamp": 1778998056.6757483, "sm_utilization_pct": 0, "memory_utilization_pct": 2}
+{"timestamp": 1778998057.6886666, "sm_utilization_pct": 0, "memory_utilization_pct": 2}
+{"timestamp": 1778998058.6939988, "sm_utilization_pct": 13, "memory_utilization_pct": 11}
+{"timestamp": 1778998059.7020626, "sm_utilization_pct": 0, "memory_utilization_pct": 28}
+{"timestamp": 1778998060.7132492, "sm_utilization_pct": 6, "memory_utilization_pct": 25}
+{"timestamp": 1778998061.7202222, "sm_utilization_pct": 0, "memory_utilization_pct": 27}
+{"timestamp": 1778998062.7302125, "sm_utilization_pct": 0, "memory_utilization_pct": 28}
+{"timestamp": 1778998063.7475965, "sm_utilization_pct": 0, "memory_utilization_pct": 30}
+{"timestamp": 1778998064.7599983, "sm_utilization_pct": 0, "memory_utilization_pct": 29}
+{"timestamp": 1778998065.7658002, "sm_utilization_pct": 18, "memory_utilization_pct": 25}
+{"timestamp": 1778998066.7762065, "sm_utilization_pct": 0, "memory_utilization_pct": 33}
+{"timestamp": 1778998067.7828887, "sm_utilization_pct": 24, "memory_utilization_pct": 25}
+{"timestamp": 1778998068.7925818, "sm_utilization_pct": 0, "memory_utilization_pct": 30}
+{"timestamp": 1778998069.8068247, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998070.820746, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998071.8310165, "sm_utilization_pct": 0, "memory_utilization_pct": 2}
+{"timestamp": 1778998072.8433447, "sm_utilization_pct": 6, "memory_utilization_pct": 13}
+{"timestamp": 1778998073.8532727, "sm_utilization_pct": 75, "memory_utilization_pct": 64}
+{"timestamp": 1778998074.8665004, "sm_utilization_pct": 14, "memory_utilization_pct": 11}
+{"timestamp": 1778998075.8756688, "sm_utilization_pct": 24, "memory_utilization_pct": 32}
+{"timestamp": 1778998076.8853648, "sm_utilization_pct": 26, "memory_utilization_pct": 36}
+{"timestamp": 1778998077.8953614, "sm_utilization_pct": 8, "memory_utilization_pct": 40}
+{"timestamp": 1778998078.9051588, "sm_utilization_pct": 8, "memory_utilization_pct": 37}
+{"timestamp": 1778998079.9157217, "sm_utilization_pct": 26, "memory_utilization_pct": 41}
+{"timestamp": 1778998080.9166245, "sm_utilization_pct": 26, "memory_utilization_pct": 29}
+{"timestamp": 1778998081.9237268, "sm_utilization_pct": 53, "memory_utilization_pct": 48}
+{"timestamp": 1778998082.9337912, "sm_utilization_pct": 5, "memory_utilization_pct": 1}
+{"timestamp": 1778998083.9388661, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998084.9459164, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998085.9581552, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998086.972867, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998087.9753315, "sm_utilization_pct": 0, "memory_utilization_pct": 1}
+{"timestamp": 1778998088.9771066, "sm_utilization_pct": 9, "memory_utilization_pct": 2}
+{"timestamp": 1778998089.985427, "sm_utilization_pct": 8, "memory_utilization_pct": 3}
+{"timestamp": 1778998090.9872766, "sm_utilization_pct": 0, "memory_utilization_pct": 17}
+{"timestamp": 1778998091.9981802, "sm_utilization_pct": 5, "memory_utilization_pct": 20}
+{"timestamp": 1778998093.0113814, "sm_utilization_pct": 8, "memory_utilization_pct": 17}
+{"timestamp": 1778998094.0132537, "sm_utilization_pct": 8, "memory_utilization_pct": 16}
+{"timestamp": 1778998095.0181081, "sm_utilization_pct": 10, "memory_utilization_pct": 18}
+{"timestamp": 1778998096.0289798, "sm_utilization_pct": 9, "memory_utilization_pct": 18}
+{"timestamp": 1778998097.042461, "sm_utilization_pct": 9, "memory_utilization_pct": 15}
+{"timestamp": 1778998098.055229, "sm_utilization_pct": 9, "memory_utilization_pct": 15}
+{"timestamp": 1778998099.0603364, "sm_utilization_pct": 10, "memory_utilization_pct": 18}
+{"timestamp": 1778998100.074172, "sm_utilization_pct": 9, "memory_utilization_pct": 14}
+{"timestamp": 1778998101.0859115, "sm_utilization_pct": 9, "memory_utilization_pct": 17}
+{"timestamp": 1778998102.0999668, "sm_utilization_pct": 9, "memory_utilization_pct": 16}
+{"timestamp": 1778998103.111117, "sm_utilization_pct": 9, "memory_utilization_pct": 16}
+{"timestamp": 1778998104.1193526, "sm_utilization_pct": 10, "memory_utilization_pct": 14}
+{"timestamp": 1778998105.1318192, "sm_utilization_pct": 9, "memory_utilization_pct": 20}
+{"timestamp": 1778998106.1424477, "sm_utilization_pct": 9, "memory_utilization_pct": 17}
+{"timestamp": 1778998107.1557825, "sm_utilization_pct": 9, "memory_utilization_pct": 15}
+{"timestamp": 1778998108.168732, "sm_utilization_pct": 10, "memory_utilization_pct": 18}
+{"timestamp": 1778998109.1824064, "sm_utilization_pct": 10, "memory_utilization_pct": 16}
+{"timestamp": 1778998110.1834831, "sm_utilization_pct": 9, "memory_utilization_pct": 17}
+{"timestamp": 1778998111.1950479, "sm_utilization_pct": 10, "memory_utilization_pct": 17}
+{"timestamp": 1778998112.2106993, "sm_utilization_pct": 10, "memory_utilization_pct": 20}
+{"timestamp": 1778998113.2193038, "sm_utilization_pct": 9, "memory_utilization_pct": 16}
+{"timestamp": 1778998114.230332, "sm_utilization_pct": 11, "memory_utilization_pct": 17}
+{"timestamp": 1778998115.2432146, "sm_utilization_pct": 10, "memory_utilization_pct": 15}
+{"timestamp": 1778998116.2534385, "sm_utilization_pct": 9, "memory_utilization_pct": 18}
+{"timestamp": 1778998117.263662, "sm_utilization_pct": 10, "memory_utilization_pct": 17}
+{"timestamp": 1778998118.2718275, "sm_utilization_pct": 9, "memory_utilization_pct": 19}
+{"timestamp": 1778998119.2786038, "sm_utilization_pct": 10, "memory_utilization_pct": 16}
+{"timestamp": 1778998120.2814972, "sm_utilization_pct": 9, "memory_utilization_pct": 19}
+{"timestamp": 1778998121.2949476, "sm_utilization_pct": 9, "memory_utilization_pct": 19}
+{"timestamp": 1778998122.3022237, "sm_utilization_pct": 9, "memory_utilization_pct": 18}
+{"timestamp": 1778998123.3134577, "sm_utilization_pct": 9, "memory_utilization_pct": 19}
+{"timestamp": 1778998124.3269618, "sm_utilization_pct": 9, "memory_utilization_pct": 15}
+{"timestamp": 1778998125.3378909, "sm_utilization_pct": 9, "memory_utilization_pct": 20}
+{"timestamp": 1778998126.3491476, "sm_utilization_pct": 9, "memory_utilization_pct": 18}
+{"timestamp": 1778998127.3618283, "sm_utilization_pct": 10, "memory_utilization_pct": 40}
+{"timestamp": 1778998128.373401, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998129.3834205, "sm_utilization_pct": 11, "memory_utilization_pct": 37}
+{"timestamp": 1778998130.3945205, "sm_utilization_pct": 10, "memory_utilization_pct": 38}
+{"timestamp": 1778998131.4050012, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998132.412846, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998133.4270601, "sm_utilization_pct": 10, "memory_utilization_pct": 43}
+{"timestamp": 1778998134.438288, "sm_utilization_pct": 13, "memory_utilization_pct": 35}
+{"timestamp": 1778998135.4494443, "sm_utilization_pct": 10, "memory_utilization_pct": 32}
+{"timestamp": 1778998136.4565232, "sm_utilization_pct": 10, "memory_utilization_pct": 39}
+{"timestamp": 1778998137.4686792, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998138.475028, "sm_utilization_pct": 10, "memory_utilization_pct": 45}
+{"timestamp": 1778998139.4853368, "sm_utilization_pct": 11, "memory_utilization_pct": 36}
+{"timestamp": 1778998140.496341, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998141.5050018, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778998142.51706, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778998143.5280807, "sm_utilization_pct": 9, "memory_utilization_pct": 36}
+{"timestamp": 1778998144.5422063, "sm_utilization_pct": 12, "memory_utilization_pct": 32}
+{"timestamp": 1778998145.5548468, "sm_utilization_pct": 10, "memory_utilization_pct": 35}
+{"timestamp": 1778998146.5648444, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998147.5769334, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778998148.5871725, "sm_utilization_pct": 9, "memory_utilization_pct": 41}
+{"timestamp": 1778998149.598036, "sm_utilization_pct": 11, "memory_utilization_pct": 33}
+{"timestamp": 1778998150.609678, "sm_utilization_pct": 9, "memory_utilization_pct": 32}
+{"timestamp": 1778998151.6229978, "sm_utilization_pct": 9, "memory_utilization_pct": 41}
+{"timestamp": 1778998152.6353292, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998153.6502209, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998154.6649866, "sm_utilization_pct": 11, "memory_utilization_pct": 35}
+{"timestamp": 1778998155.6742425, "sm_utilization_pct": 10, "memory_utilization_pct": 35}
+{"timestamp": 1778998156.683662, "sm_utilization_pct": 10, "memory_utilization_pct": 51}
+{"timestamp": 1778998157.6933413, "sm_utilization_pct": 10, "memory_utilization_pct": 30}
+{"timestamp": 1778998158.7052765, "sm_utilization_pct": 10, "memory_utilization_pct": 40}
+{"timestamp": 1778998159.7152543, "sm_utilization_pct": 11, "memory_utilization_pct": 35}
+{"timestamp": 1778998160.7242644, "sm_utilization_pct": 10, "memory_utilization_pct": 36}
+{"timestamp": 1778998161.7246737, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998162.7315443, "sm_utilization_pct": 9, "memory_utilization_pct": 35}
+{"timestamp": 1778998163.7451184, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998164.7547512, "sm_utilization_pct": 12, "memory_utilization_pct": 34}
+{"timestamp": 1778998165.7651193, "sm_utilization_pct": 9, "memory_utilization_pct": 42}
+{"timestamp": 1778998166.7756264, "sm_utilization_pct": 9, "memory_utilization_pct": 39}
+{"timestamp": 1778998167.7900143, "sm_utilization_pct": 9, "memory_utilization_pct": 34}
+{"timestamp": 1778998168.8010318, "sm_utilization_pct": 9, "memory_utilization_pct": 31}
+{"timestamp": 1778998169.8114674, "sm_utilization_pct": 10, "memory_utilization_pct": 44}
+{"timestamp": 1778998170.8128176, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998171.8253882, "sm_utilization_pct": 9, "memory_utilization_pct": 38}
+{"timestamp": 1778998172.83934, "sm_utilization_pct": 9, "memory_utilization_pct": 37}
+{"timestamp": 1778998173.8500247, "sm_utilization_pct": 9, "memory_utilization_pct": 33}
+{"timestamp": 1778998174.8503687, "sm_utilization_pct": 10, "memory_utilization_pct": 42}
+{"timestamp": 1778998175.8566878, "sm_utilization_pct": 10, "memory_utilization_pct": 37}
+{"timestamp": 1778998176.8646836, "sm_utilization_pct": 10, "memory_utilization_pct": 37}
+{"timestamp": 1778998177.8652031, "sm_utilization_pct": 10, "memory_utilization_pct": 34}
+{"timestamp": 1778998178.8781812, "sm_utilization_pct": 10, "memory_utilization_pct": 33}
+{"timestamp": 1778998179.8927286, "sm_utilization_pct": 15, "memory_utilization_pct": 37}
+{"timestamp": 1778998180.9048576, "sm_utilization_pct": 10, "memory_utilization_pct": 40}
+{"timestamp": 1778998181.916182, "sm_utilization_pct": 10, "memory_utilization_pct": 30}
+{"timestamp": 1778998218.029142, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998219.0383315, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998220.0362864, "sm_utilization_pct": 9, "memory_utilization_pct": 47, "power_draw_w": 9.6}
+{"timestamp": 1778998221.0325663, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998222.0294902, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998223.039246, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998224.0379584, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998225.0319653, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.6}
+{"timestamp": 1778998226.040586, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998227.0360093, "sm_utilization_pct": 13, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998228.0395796, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998229.0395696, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998230.036227, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998231.034959, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998232.0319588, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998233.0441332, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998234.0431552, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998235.036472, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.6}
+{"timestamp": 1778998236.0299785, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.6}
+{"timestamp": 1778998237.0429177, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998238.039626, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998239.0360866, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998240.0325227, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.5}
+{"timestamp": 1778998241.0412536, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998242.0337372, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998243.0467148, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998244.044249, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998245.0393045, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998246.033647, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998247.0449283, "sm_utilization_pct": 12, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998248.0380378, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998249.0488987, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998250.043329, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998251.0413628, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.6}
+{"timestamp": 1778998252.037752, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998253.0466142, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998254.0385928, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998255.0381505, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998256.0455754, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998257.051773, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998258.045258, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.7}
+{"timestamp": 1778998259.0410478, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998260.0383084, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998261.0494657, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998262.039542, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 26.6}
+{"timestamp": 1778998263.0498955, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 30.3}
+{"timestamp": 1778998264.0392952, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 30.1}
+{"timestamp": 1778998265.0465257, "sm_utilization_pct": 1, "memory_utilization_pct": 3, "power_draw_w": 23.3}
+{"timestamp": 1778998266.0403042, "sm_utilization_pct": 1, "memory_utilization_pct": 17, "power_draw_w": 19.1}
+{"timestamp": 1778998267.0393953, "sm_utilization_pct": 9, "memory_utilization_pct": 16, "power_draw_w": 14.6}
+{"timestamp": 1778998268.0524492, "sm_utilization_pct": 10, "memory_utilization_pct": 15, "power_draw_w": 14.4}
+{"timestamp": 1778998269.0492535, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 10.5}
+{"timestamp": 1778998270.0437706, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.6}
+{"timestamp": 1778998271.0437639, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998272.0552728, "sm_utilization_pct": 16, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998273.0513308, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.6}
+{"timestamp": 1778998274.0519066, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.6}
+{"timestamp": 1778998275.043495, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.6}
+{"timestamp": 1778998276.052873, "sm_utilization_pct": 9, "memory_utilization_pct": 45, "power_draw_w": 9.7}
+{"timestamp": 1778998277.0508864, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998278.0493972, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998279.0437171, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998280.0439372, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998281.0516236, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998282.0470028, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998283.0520115, "sm_utilization_pct": 12, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998284.046433, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998285.051573, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998286.0586638, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998287.050058, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998288.0590715, "sm_utilization_pct": 11, "memory_utilization_pct": 31, "power_draw_w": 9.6}
+{"timestamp": 1778998289.0501192, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998290.0607626, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998291.0550923, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998292.048723, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998293.0596726, "sm_utilization_pct": 8, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998294.0559096, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998295.0642025, "sm_utilization_pct": 8, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998296.060822, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998297.0590765, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998298.054184, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998299.0596056, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998300.05992, "sm_utilization_pct": 8, "memory_utilization_pct": 30, "power_draw_w": 9.5}
+{"timestamp": 1778998301.0557067, "sm_utilization_pct": 9, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998302.0653195, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998303.0607724, "sm_utilization_pct": 13, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998304.0606532, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998305.0535986, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998306.0601852, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.7}
+{"timestamp": 1778998307.0577734, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.7}
+{"timestamp": 1778998308.0664918, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998309.061966, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998310.0553954, "sm_utilization_pct": 9, "memory_utilization_pct": 43, "power_draw_w": 9.6}
+{"timestamp": 1778998311.0686505, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998312.0578306, "sm_utilization_pct": 8, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998313.0552087, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998314.066201, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998315.0590246, "sm_utilization_pct": 8, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998316.0686457, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998317.0652113, "sm_utilization_pct": 8, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998318.060515, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998319.0716927, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998320.0650578, "sm_utilization_pct": 8, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998321.0620627, "sm_utilization_pct": 8, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998322.0704355, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998323.061783, "sm_utilization_pct": 9, "memory_utilization_pct": 44, "power_draw_w": 9.7}
+{"timestamp": 1778998324.0592885, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.6}
+{"timestamp": 1778998325.0696163, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998326.0653517, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.6}
+{"timestamp": 1778998327.0594094, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998328.070893, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.5}
+{"timestamp": 1778998329.06583, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998330.0607545, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.6}
+{"timestamp": 1778998331.0748172, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998332.0684094, "sm_utilization_pct": 10, "memory_utilization_pct": 44, "power_draw_w": 9.5}
+{"timestamp": 1778998333.0765362, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998334.0713723, "sm_utilization_pct": 11, "memory_utilization_pct": 33, "power_draw_w": 9.6}
+{"timestamp": 1778998335.0668132, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998336.0636632, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998337.0766397, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998338.0761805, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998339.0734298, "sm_utilization_pct": 12, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998340.070779, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998341.0673482, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998342.0689266, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998343.0759933, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998344.0652437, "sm_utilization_pct": 11, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998345.081818, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998346.0758858, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998347.0706046, "sm_utilization_pct": 11, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998348.0817463, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998349.0754375, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998350.0822513, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998351.0725734, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998352.0810256, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998353.0786276, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998354.0732439, "sm_utilization_pct": 12, "memory_utilization_pct": 30, "power_draw_w": 9.4}
+{"timestamp": 1778998355.073384, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998356.0802002, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.5}
+{"timestamp": 1778998357.075722, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998358.0742543, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998359.073357, "sm_utilization_pct": 13, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998360.0836232, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998361.0807803, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998362.0762556, "sm_utilization_pct": 10, "memory_utilization_pct": 45, "power_draw_w": 9.4}
+{"timestamp": 1778998363.0706148, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998364.0799563, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998365.0792215, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998366.0745802, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998367.0737646, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998368.0872054, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998369.0825083, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998370.0736716, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998371.083592, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998372.0804522, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998373.0743785, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998374.0845857, "sm_utilization_pct": 9, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998375.0774243, "sm_utilization_pct": 11, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998376.085764, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998377.0816262, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998378.0855694, "sm_utilization_pct": 9, "memory_utilization_pct": 45, "power_draw_w": 9.4}
+{"timestamp": 1778998379.078273, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998380.075659, "sm_utilization_pct": 11, "memory_utilization_pct": 42, "power_draw_w": 9.3}
+{"timestamp": 1778998381.088539, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998382.0796287, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998383.0785644, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998384.082786, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.6}
+{"timestamp": 1778998385.0826595, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998386.082085, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998387.0894861, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998388.0854878, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998389.0814154, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.5}
+{"timestamp": 1778998390.0772746, "sm_utilization_pct": 13, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998391.0873065, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998392.0850418, "sm_utilization_pct": 12, "memory_utilization_pct": 40, "power_draw_w": 9.3}
+{"timestamp": 1778998393.0782633, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998394.0908256, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998395.0881448, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998396.0829804, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998397.0806608, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998398.0972145, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998399.089834, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.4}
+{"timestamp": 1778998400.0883355, "sm_utilization_pct": 12, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998401.080212, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998402.0912082, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998403.0862157, "sm_utilization_pct": 9, "memory_utilization_pct": 43, "power_draw_w": 9.4}
+{"timestamp": 1778998404.0945947, "sm_utilization_pct": 9, "memory_utilization_pct": 44, "power_draw_w": 9.4}
+{"timestamp": 1778998405.093029, "sm_utilization_pct": 11, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998406.0903685, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998407.0937364, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998408.0879161, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998409.083871, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.5}
+{"timestamp": 1778998410.0832825, "sm_utilization_pct": 11, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998411.091526, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998412.0845644, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998413.0938437, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998414.08939, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998415.099781, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998416.095482, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998417.0927148, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998418.099245, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998419.0955038, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998420.0870564, "sm_utilization_pct": 13, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998421.0999894, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998422.095883, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998423.0936148, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998424.0916183, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998425.0881972, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998426.0995452, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.5}
+{"timestamp": 1778998427.101475, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998428.100383, "sm_utilization_pct": 10, "memory_utilization_pct": 46, "power_draw_w": 9.4}
+{"timestamp": 1778998429.090336, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998430.1000395, "sm_utilization_pct": 12, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998431.0949883, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998432.093921, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998433.0931764, "sm_utilization_pct": 10, "memory_utilization_pct": 50, "power_draw_w": 9.5}
+{"timestamp": 1778998434.091454, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998435.0914936, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998436.1013107, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998437.0983348, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998438.1031466, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998439.1049066, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.3}
+{"timestamp": 1778998440.0944765, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998441.105716, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998442.1025887, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998443.105004, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998444.0999138, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998445.094719, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998446.092861, "sm_utilization_pct": 11, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998447.1047099, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998448.1009207, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998449.0938752, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998450.1071832, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998451.1066077, "sm_utilization_pct": 11, "memory_utilization_pct": 43, "power_draw_w": 9.4}
+{"timestamp": 1778998452.1027853, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998453.0949416, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998454.1059659, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998455.1048186, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.7}
+{"timestamp": 1778998456.1033947, "sm_utilization_pct": 11, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998457.1022482, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998458.0979125, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998459.110673, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998460.1060631, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998461.098928, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998462.1109073, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998463.102478, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998464.1011896, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998465.1010213, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998466.1081421, "sm_utilization_pct": 14, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998467.0996928, "sm_utilization_pct": 10, "memory_utilization_pct": 44, "power_draw_w": 9.4}
+{"timestamp": 1778998468.1114056, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998469.1091213, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998470.107705, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998471.1033373, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998472.1148927, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998473.1106608, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998474.1063366, "sm_utilization_pct": 9, "memory_utilization_pct": 44, "power_draw_w": 9.4}
+{"timestamp": 1778998475.1030145, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998476.1131687, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998477.113028, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998478.104849, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998479.1120477, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 21.3}
+{"timestamp": 1778998480.1054885, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 30.6}
+{"timestamp": 1778998481.1183934, "sm_utilization_pct": 1, "memory_utilization_pct": 1, "power_draw_w": 30.5}
+{"timestamp": 1778998482.1087787, "sm_utilization_pct": 1, "memory_utilization_pct": 2, "power_draw_w": 29.8}
+{"timestamp": 1778998483.1174045, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 31.3}
+{"timestamp": 1778998484.1136978, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 30.9}
+{"timestamp": 1778998485.110572, "sm_utilization_pct": 0, "memory_utilization_pct": 1, "power_draw_w": 30.7}
+{"timestamp": 1778998486.1175609, "sm_utilization_pct": 5, "memory_utilization_pct": 17, "power_draw_w": 19.5}
+{"timestamp": 1778998487.1082706, "sm_utilization_pct": 7, "memory_utilization_pct": 15, "power_draw_w": 13.9}
+{"timestamp": 1778998488.117186, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 12.2}
+{"timestamp": 1778998489.1131573, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998490.1134956, "sm_utilization_pct": 11, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998491.1136782, "sm_utilization_pct": 11, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998492.1225758, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.5}
+{"timestamp": 1778998493.1215482, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.6}
+{"timestamp": 1778998494.1191046, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998495.1148295, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.5}
+{"timestamp": 1778998496.113458, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998497.1217024, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998498.114828, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998499.1192806, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998500.1122253, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998501.126207, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998502.1178555, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998503.1126153, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998504.1240656, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998505.1203077, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998506.1177738, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.5}
+{"timestamp": 1778998507.1269376, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998508.1268103, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998509.1140995, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998510.1291542, "sm_utilization_pct": 9, "memory_utilization_pct": 44, "power_draw_w": 9.5}
+{"timestamp": 1778998511.1288407, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.7}
+{"timestamp": 1778998512.1291852, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.6}
+{"timestamp": 1778998513.1269412, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998514.120509, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.6}
+{"timestamp": 1778998515.1225946, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.6}
+{"timestamp": 1778998516.1163957, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998517.117362, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.6}
+{"timestamp": 1778998518.1305206, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998519.1209939, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998520.127809, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998521.120454, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.5}
+{"timestamp": 1778998522.1325946, "sm_utilization_pct": 12, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998523.1294665, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998524.1261642, "sm_utilization_pct": 12, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998525.125216, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998526.1193762, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.6}
+{"timestamp": 1778998527.1191354, "sm_utilization_pct": 11, "memory_utilization_pct": 38, "power_draw_w": 9.5}
+{"timestamp": 1778998528.1328502, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998529.1287959, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.5}
+{"timestamp": 1778998530.1316824, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998531.1311731, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998532.1343174, "sm_utilization_pct": 13, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998533.1366208, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998534.1285462, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998535.1226215, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998536.1372166, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998537.1356096, "sm_utilization_pct": 10, "memory_utilization_pct": 28, "power_draw_w": 9.5}
+{"timestamp": 1778998538.1338255, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998539.1302743, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998540.1310167, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.6}
+{"timestamp": 1778998541.127732, "sm_utilization_pct": 11, "memory_utilization_pct": 31, "power_draw_w": 9.7}
+{"timestamp": 1778998542.1278608, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.6}
+{"timestamp": 1778998543.1352813, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998544.13436, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.6}
+{"timestamp": 1778998545.13243, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998546.1360261, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998547.132802, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998548.1288228, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998549.1405149, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998550.1380272, "sm_utilization_pct": 9, "memory_utilization_pct": 45, "power_draw_w": 9.3}
+{"timestamp": 1778998551.1420286, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998552.1328645, "sm_utilization_pct": 11, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998553.139641, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.3}
+{"timestamp": 1778998554.13808, "sm_utilization_pct": 13, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998555.1445618, "sm_utilization_pct": 8, "memory_utilization_pct": 36, "power_draw_w": 9.2}
+{"timestamp": 1778998556.1423013, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.2}
+{"timestamp": 1778998557.1405191, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998558.1360927, "sm_utilization_pct": 8, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998559.1316347, "sm_utilization_pct": 11, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998560.1435509, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998561.140064, "sm_utilization_pct": 10, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998562.133502, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998563.1318536, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998564.142709, "sm_utilization_pct": 13, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998565.141943, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998566.1356058, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998567.1449733, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.2}
+{"timestamp": 1778998568.1408024, "sm_utilization_pct": 8, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998569.1356926, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.4}
+{"timestamp": 1778998570.146787, "sm_utilization_pct": 8, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998571.140921, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998572.1378655, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998573.1461055, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998574.1473935, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998575.1408186, "sm_utilization_pct": 8, "memory_utilization_pct": 28, "power_draw_w": 9.3}
+{"timestamp": 1778998576.1381524, "sm_utilization_pct": 8, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998577.1512449, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998578.1479812, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998579.1417303, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.2}
+{"timestamp": 1778998580.1386187, "sm_utilization_pct": 10, "memory_utilization_pct": 30, "power_draw_w": 9.3}
+{"timestamp": 1778998581.145939, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998582.1426847, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998583.1531703, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998584.1479633, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998585.1388545, "sm_utilization_pct": 10, "memory_utilization_pct": 28, "power_draw_w": 9.3}
+{"timestamp": 1778998586.1459985, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998587.1451406, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998588.1531904, "sm_utilization_pct": 8, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998589.1411104, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998590.15012, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.3}
+{"timestamp": 1778998591.148922, "sm_utilization_pct": 8, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998592.1407738, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998593.1522772, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998594.1441069, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.5}
+{"timestamp": 1778998595.1512642, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998596.1487505, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998597.1435556, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998598.1532886, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998599.1470287, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998600.1426456, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998601.1520574, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998602.1459572, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998603.1521869, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998604.1468887, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.2}
+{"timestamp": 1778998605.1531618, "sm_utilization_pct": 13, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998606.1489723, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.2}
+{"timestamp": 1778998607.159658, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998608.152871, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998609.1612935, "sm_utilization_pct": 8, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998610.1520386, "sm_utilization_pct": 8, "memory_utilization_pct": 39, "power_draw_w": 9.2}
+{"timestamp": 1778998611.1614735, "sm_utilization_pct": 8, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998612.1551576, "sm_utilization_pct": 8, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998613.1625838, "sm_utilization_pct": 8, "memory_utilization_pct": 41, "power_draw_w": 9.3}
+{"timestamp": 1778998614.153167, "sm_utilization_pct": 8, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998615.1480393, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998616.1597733, "sm_utilization_pct": 9, "memory_utilization_pct": 31, "power_draw_w": 9.3}
+{"timestamp": 1778998617.1546912, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998618.1497562, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998619.158847, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998620.1566434, "sm_utilization_pct": 11, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998621.1542897, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998622.1490629, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.2}
+{"timestamp": 1778998623.1595688, "sm_utilization_pct": 10, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998624.1551037, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.3}
+{"timestamp": 1778998625.1533322, "sm_utilization_pct": 13, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998626.1500063, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.3}
+{"timestamp": 1778998627.163218, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998628.158909, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998629.158286, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998630.1547518, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998631.1544776, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.3}
+{"timestamp": 1778998632.1534941, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.3}
+{"timestamp": 1778998633.1655576, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998634.1635454, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998635.1591098, "sm_utilization_pct": 10, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998636.1686883, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998637.1606812, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998638.1696823, "sm_utilization_pct": 9, "memory_utilization_pct": 44, "power_draw_w": 9.4}
+{"timestamp": 1778998639.1621637, "sm_utilization_pct": 10, "memory_utilization_pct": 48, "power_draw_w": 9.4}
+{"timestamp": 1778998640.158819, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998641.1643384, "sm_utilization_pct": 11, "memory_utilization_pct": 29, "power_draw_w": 9.4}
+{"timestamp": 1778998642.1580255, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998643.1550326, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.5}
+{"timestamp": 1778998644.1688495, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998645.1641254, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998646.1591742, "sm_utilization_pct": 10, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998647.1717725, "sm_utilization_pct": 11, "memory_utilization_pct": 43, "power_draw_w": 9.5}
+{"timestamp": 1778998648.1674478, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.3}
+{"timestamp": 1778998649.1606727, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998650.1581538, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998651.1685457, "sm_utilization_pct": 11, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998652.1666973, "sm_utilization_pct": 11, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998653.158208, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.4}
+{"timestamp": 1778998654.1688569, "sm_utilization_pct": 10, "memory_utilization_pct": 30, "power_draw_w": 9.2}
+{"timestamp": 1778998655.1656313, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998656.160956, "sm_utilization_pct": 11, "memory_utilization_pct": 38, "power_draw_w": 9.1}
+{"timestamp": 1778998657.1601706, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.1}
+{"timestamp": 1778998658.1709843, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998659.1732652, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998660.1696348, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998661.1662014, "sm_utilization_pct": 12, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998662.162401, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998663.1693647, "sm_utilization_pct": 14, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998664.170485, "sm_utilization_pct": 14, "memory_utilization_pct": 31, "power_draw_w": 9.3}
+{"timestamp": 1778998665.1652546, "sm_utilization_pct": 12, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998666.1620078, "sm_utilization_pct": 17, "memory_utilization_pct": 42, "power_draw_w": 9.2}
+{"timestamp": 1778998667.1761339, "sm_utilization_pct": 16, "memory_utilization_pct": 43, "power_draw_w": 9.2}
+{"timestamp": 1778998668.1691017, "sm_utilization_pct": 15, "memory_utilization_pct": 32, "power_draw_w": 9.1}
+{"timestamp": 1778998669.164637, "sm_utilization_pct": 13, "memory_utilization_pct": 36, "power_draw_w": 9.2}
+{"timestamp": 1778998670.1759398, "sm_utilization_pct": 19, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998671.1682823, "sm_utilization_pct": 15, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998672.168207, "sm_utilization_pct": 13, "memory_utilization_pct": 31, "power_draw_w": 9.2}
+{"timestamp": 1778998673.1692085, "sm_utilization_pct": 13, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998674.1705408, "sm_utilization_pct": 13, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998675.1648495, "sm_utilization_pct": 16, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998676.176383, "sm_utilization_pct": 19, "memory_utilization_pct": 40, "power_draw_w": 9.1}
+{"timestamp": 1778998677.1724916, "sm_utilization_pct": 14, "memory_utilization_pct": 35, "power_draw_w": 9.2}
+{"timestamp": 1778998678.1664727, "sm_utilization_pct": 18, "memory_utilization_pct": 36, "power_draw_w": 9.2}
+{"timestamp": 1778998679.1773965, "sm_utilization_pct": 14, "memory_utilization_pct": 36, "power_draw_w": 9.1}
+{"timestamp": 1778998680.1756637, "sm_utilization_pct": 15, "memory_utilization_pct": 38, "power_draw_w": 9.1}
+{"timestamp": 1778998681.1716492, "sm_utilization_pct": 15, "memory_utilization_pct": 38, "power_draw_w": 9.2}
+{"timestamp": 1778998682.1809084, "sm_utilization_pct": 15, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998683.1768901, "sm_utilization_pct": 14, "memory_utilization_pct": 36, "power_draw_w": 9.1}
+{"timestamp": 1778998684.1705313, "sm_utilization_pct": 14, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998685.1755345, "sm_utilization_pct": 15, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998686.1715345, "sm_utilization_pct": 12, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998687.1686592, "sm_utilization_pct": 13, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998688.1798546, "sm_utilization_pct": 17, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998689.1712477, "sm_utilization_pct": 13, "memory_utilization_pct": 32, "power_draw_w": 9.2}
+{"timestamp": 1778998690.1829991, "sm_utilization_pct": 13, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998691.1797674, "sm_utilization_pct": 12, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998692.1798348, "sm_utilization_pct": 14, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998693.1709313, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998694.1820729, "sm_utilization_pct": 13, "memory_utilization_pct": 29, "power_draw_w": 9.2}
+{"timestamp": 1778998695.178282, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998696.1760774, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998697.17627, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.2}
+{"timestamp": 1778998698.1709354, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998699.1844578, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.3}
+{"timestamp": 1778998700.1793334, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.3}
+{"timestamp": 1778998701.1782396, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998702.1855652, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998703.1803083, "sm_utilization_pct": 14, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998704.1795235, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998705.176133, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998706.184826, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.3}
+{"timestamp": 1778998707.1834996, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998708.1779845, "sm_utilization_pct": 10, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998709.1917462, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998710.1774402, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.3}
+{"timestamp": 1778998711.1856723, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998712.1853478, "sm_utilization_pct": 10, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998713.1812718, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998714.1767476, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998715.181261, "sm_utilization_pct": 9, "memory_utilization_pct": 42, "power_draw_w": 9.4}
+{"timestamp": 1778998716.1787064, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998717.1910832, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.3}
+{"timestamp": 1778998718.1856973, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998719.1828835, "sm_utilization_pct": 11, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998720.1801991, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.2}
+{"timestamp": 1778998721.1880276, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998722.1830754, "sm_utilization_pct": 10, "memory_utilization_pct": 32, "power_draw_w": 9.4}
+{"timestamp": 1778998723.193, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998724.190831, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998725.1917403, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998726.1888046, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.3}
+{"timestamp": 1778998727.1836872, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998728.1938636, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998729.184751, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998730.182336, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998731.1874704, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.5}
+{"timestamp": 1778998732.185711, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.4}
+{"timestamp": 1778998733.182998, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998734.1965773, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998735.1903274, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998736.191453, "sm_utilization_pct": 10, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998737.1859517, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.4}
+{"timestamp": 1778998738.1872685, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998739.1852853, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.4}
+{"timestamp": 1778998740.1968303, "sm_utilization_pct": 9, "memory_utilization_pct": 39, "power_draw_w": 9.4}
+{"timestamp": 1778998741.195371, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.6}
+{"timestamp": 1778998742.191413, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998743.1891491, "sm_utilization_pct": 10, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998744.1847944, "sm_utilization_pct": 13, "memory_utilization_pct": 28, "power_draw_w": 9.3}
+{"timestamp": 1778998745.1939704, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.2}
+{"timestamp": 1778998746.1904664, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.3}
+{"timestamp": 1778998747.1859202, "sm_utilization_pct": 12, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998748.1930103, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.5}
+{"timestamp": 1778998749.189337, "sm_utilization_pct": 11, "memory_utilization_pct": 31, "power_draw_w": 9.4}
+{"timestamp": 1778998750.1939335, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.5}
+{"timestamp": 1778998751.189255, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998752.201168, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.4}
+{"timestamp": 1778998753.194773, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998754.1922698, "sm_utilization_pct": 10, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998755.1895406, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998756.1983697, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.3}
+{"timestamp": 1778998757.194031, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.4}
+{"timestamp": 1778998758.1929498, "sm_utilization_pct": 10, "memory_utilization_pct": 44, "power_draw_w": 9.5}
+{"timestamp": 1778998759.2037375, "sm_utilization_pct": 10, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998760.1973052, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998761.1936927, "sm_utilization_pct": 9, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998762.204104, "sm_utilization_pct": 9, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998763.203007, "sm_utilization_pct": 10, "memory_utilization_pct": 35, "power_draw_w": 9.4}
+{"timestamp": 1778998764.2030966, "sm_utilization_pct": 13, "memory_utilization_pct": 29, "power_draw_w": 9.4}
+{"timestamp": 1778998765.2007618, "sm_utilization_pct": 9, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998766.1947844, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998767.200898, "sm_utilization_pct": 9, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998768.1969748, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.3}
+{"timestamp": 1778998769.2058785, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.3}
+{"timestamp": 1778998770.2064269, "sm_utilization_pct": 9, "memory_utilization_pct": 29, "power_draw_w": 9.3}
+{"timestamp": 1778998771.198676, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998772.204927, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.2}
+{"timestamp": 1778998773.2017066, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.2}
+{"timestamp": 1778998774.1989732, "sm_utilization_pct": 9, "memory_utilization_pct": 35, "power_draw_w": 9.2}
+{"timestamp": 1778998775.208858, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.1}
+{"timestamp": 1778998776.1940649, "sm_utilization_pct": 10, "memory_utilization_pct": 37, "power_draw_w": 9.2}
+{"timestamp": 1778998777.205214, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.1}
+{"timestamp": 1778998778.1984897, "sm_utilization_pct": 9, "memory_utilization_pct": 33, "power_draw_w": 9.2}
+{"timestamp": 1778998779.2020552, "sm_utilization_pct": 9, "memory_utilization_pct": 38, "power_draw_w": 9.2}
+{"timestamp": 1778998780.1955702, "sm_utilization_pct": 11, "memory_utilization_pct": 35, "power_draw_w": 9.3}
+{"timestamp": 1778998781.2078683, "sm_utilization_pct": 9, "memory_utilization_pct": 41, "power_draw_w": 9.1}
+{"timestamp": 1778998782.2016, "sm_utilization_pct": 10, "memory_utilization_pct": 45, "power_draw_w": 9.2}
+{"timestamp": 1778998783.19694, "sm_utilization_pct": 9, "memory_utilization_pct": 30, "power_draw_w": 9.2}
+{"timestamp": 1778998784.2080853, "sm_utilization_pct": 9, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998785.204605, "sm_utilization_pct": 13, "memory_utilization_pct": 34, "power_draw_w": 9.2}
+{"timestamp": 1778998786.2003083, "sm_utilization_pct": 13, "memory_utilization_pct": 38, "power_draw_w": 9.2}
+{"timestamp": 1778998787.2104793, "sm_utilization_pct": 15, "memory_utilization_pct": 32, "power_draw_w": 9.3}
+{"timestamp": 1778998788.2063107, "sm_utilization_pct": 13, "memory_utilization_pct": 33, "power_draw_w": 9.4}
+{"timestamp": 1778998789.214209, "sm_utilization_pct": 13, "memory_utilization_pct": 35, "power_draw_w": 9.5}
+{"timestamp": 1778998790.214879, "sm_utilization_pct": 11, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998791.2079422, "sm_utilization_pct": 13, "memory_utilization_pct": 29, "power_draw_w": 9.3}
+{"timestamp": 1778998792.1996787, "sm_utilization_pct": 16, "memory_utilization_pct": 39, "power_draw_w": 9.3}
+{"timestamp": 1778998793.2068038, "sm_utilization_pct": 13, "memory_utilization_pct": 38, "power_draw_w": 9.4}
+{"timestamp": 1778998794.205024, "sm_utilization_pct": 13, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998795.2128704, "sm_utilization_pct": 13, "memory_utilization_pct": 36, "power_draw_w": 9.3}
+{"timestamp": 1778998796.2068243, "sm_utilization_pct": 13, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998797.211883, "sm_utilization_pct": 15, "memory_utilization_pct": 36, "power_draw_w": 9.4}
+{"timestamp": 1778998798.2106524, "sm_utilization_pct": 14, "memory_utilization_pct": 40, "power_draw_w": 9.4}
+{"timestamp": 1778998799.2054183, "sm_utilization_pct": 13, "memory_utilization_pct": 33, "power_draw_w": 9.4}

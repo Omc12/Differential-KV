@@ -1,0 +1,17 @@
+{
+    "validation_phase": "STAGE_3C_2_SKF",
+    "timestamp": 1779011214.974831,
+    "integrity_check": "PASS",
+    "raw_artifacts": [
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_2_skf\\raw_nvidia_smi.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_2_skf\\raw_nvidia_smi_dmon.log",
+        "d:\\Codes\\Projects\\Differential KV\\telemetry\\stage3c\\phase_42_2_skf\\raw_torch_profiler_trace.json",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\sparse_kernel_launch_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\warp_divergence_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\tensor_core_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\fused_metadata_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\persistent_kernel_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\occupancy_trace.jsonl",
+        "d:\\Codes\\Projects\\Differential KV\\traces\\stage3c\\phase_42_2_skf\\memory_stall_trace.jsonl"
+    ]
+}

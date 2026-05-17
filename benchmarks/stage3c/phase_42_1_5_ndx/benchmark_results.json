@@ -1,0 +1,36 @@
+{
+    "Qwen2.5-0.5B-Instruct": {
+        "context_target": 4096,
+        "dpc": {
+            "tokens_per_sec": 14.842806148276296,
+            "latency_ms": 67.37270499999966
+        },
+        "ndx": {
+            "tokens_per_sec": 21.305437458101135,
+            "latency_ms": 46.93637490272523,
+            "cpu_wakeups_sec": 2.2712727887572015,
+            "stream_overlap_pct": 95.81,
+            "decode_continuity": 98.47,
+            "idle_gap": 1.5300000000000011,
+            "gpu_util": 27.0,
+            "replay_count": 40
+        }
+    },
+    "Qwen2.5-1.5B-Instruct": {
+        "context_target": 8192,
+        "dpc": {
+            "tokens_per_sec": 13.93995850771335,
+            "latency_ms": 71.73622500000079
+        },
+        "ndx": {
+            "tokens_per_sec": 15.87375939656837,
+            "latency_ms": 62.99704909324647,
+            "cpu_wakeups_sec": 1.9993955223944602,
+            "stream_overlap_pct": 96.62,
+            "decode_continuity": 98.74000000000001,
+            "idle_gap": 1.259999999999991,
+            "gpu_util": 54.0,
+            "replay_count": 40
+        }
+    }
+}
