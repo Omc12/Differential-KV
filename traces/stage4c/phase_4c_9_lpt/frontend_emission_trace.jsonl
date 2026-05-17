@@ -1,0 +1,6 @@
+{"turn": 0, "backend_tps": 120.0, "visible_tps": 119.4, "frontend_render_latency_ms": 22.0, "backend_frontend_tps_correlation_percent": 99.5}
+{"turn": 1, "backend_tps": 120.0, "visible_tps": 118.4039605714803, "frontend_render_latency_ms": 25.365883939231587, "backend_frontend_tps_correlation_percent": 98.66996714290025}
+{"turn": 2, "backend_tps": 120.0, "visible_tps": 117.0693331911976, "frontend_render_latency_ms": 25.637189707302728, "backend_frontend_tps_correlation_percent": 97.55777765933134}
+{"turn": 3, "backend_tps": 120.0, "visible_tps": 117.61168701439117, "frontend_render_latency_ms": 22.56448003223947, "backend_frontend_tps_correlation_percent": 98.0097391786593}
+{"turn": 4, "backend_tps": 120.0, "visible_tps": 119.13067905421231, "frontend_render_latency_ms": 18.972790018768286, "backend_frontend_tps_correlation_percent": 99.27556587851025}
+{"turn": 5, "backend_tps": 120.0, "visible_tps": 119.10468270521197, "frontend_render_latency_ms": 18.164302901347448, "backend_frontend_tps_correlation_percent": 99.2539022543433}

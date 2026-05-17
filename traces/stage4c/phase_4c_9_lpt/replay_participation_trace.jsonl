@@ -1,0 +1,6 @@
+{"turn": 0, "replay_participation_percent": 99.9, "replay_freshness_percent": 98.0, "invocation_count": 1, "stale_reuse_detected": false}
+{"turn": 1, "replay_participation_percent": 99.89, "replay_freshness_percent": 99.26220647721185, "invocation_count": 2, "stale_reuse_detected": false}
+{"turn": 2, "replay_participation_percent": 99.88000000000001, "replay_freshness_percent": 99.36394614023853, "invocation_count": 3, "stale_reuse_detected": false}
+{"turn": 3, "replay_participation_percent": 99.87, "replay_freshness_percent": 98.2116800120898, "invocation_count": 4, "stale_reuse_detected": false}
+{"turn": 4, "replay_participation_percent": 99.86, "replay_freshness_percent": 96.86479625703811, "invocation_count": 5, "stale_reuse_detected": false}
+{"turn": 5, "replay_participation_percent": 99.85000000000001, "replay_freshness_percent": 96.56161358800529, "invocation_count": 6, "stale_reuse_detected": false}

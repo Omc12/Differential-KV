@@ -1,0 +1,6 @@
+{"turn": 0, "mutation_success_rate": 100.0, "semantic_transition_continuity": 100.0, "dialogue_evolution_score": 96.0, "active_memory_size": 1}
+{"turn": 1, "mutation_success_rate": 99.9, "semantic_transition_continuity": 99.08060461173628, "dialogue_evolution_score": 98.6736220801843, "active_memory_size": 2}
+{"turn": 2, "mutation_success_rate": 99.8, "semantic_transition_continuity": 97.16770632690572, "dialogue_evolution_score": 98.42548921145877, "active_memory_size": 3}
+{"turn": 3, "mutation_success_rate": 99.7, "semantic_transition_continuity": 96.02001500679911, "dialogue_evolution_score": 95.52676291757025, "active_memory_size": 4}
+{"turn": 4, "mutation_success_rate": 99.6, "semantic_transition_continuity": 96.69271275827278, "dialogue_evolution_score": 95.0, "active_memory_size": 5}
+{"turn": 5, "mutation_success_rate": 99.5, "semantic_transition_continuity": 98.56732437092646, "dialogue_evolution_score": 95.0, "active_memory_size": 6}

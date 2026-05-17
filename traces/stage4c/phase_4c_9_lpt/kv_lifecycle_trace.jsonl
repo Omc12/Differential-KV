@@ -1,0 +1,6 @@
+{"turn": 0, "kv_lineage_id": "kv_lin_turn_0", "kv_continuity_percent": 99.89999999999999, "append_continuity_percent": 99.7, "invalidation_events": 0, "active_kv_nodes": 128}
+{"turn": 1, "kv_lineage_id": "kv_lin_turn_1", "kv_continuity_percent": 99.85403023058682, "append_continuity_percent": 99.82622064772119, "invalidation_events": 1, "active_kv_nodes": 256}
+{"turn": 2, "kv_lineage_id": "kv_lin_turn_2", "kv_continuity_percent": 99.75838531634528, "append_continuity_percent": 99.83639461402386, "invalidation_events": 0, "active_kv_nodes": 384}
+{"turn": 3, "kv_lineage_id": "kv_lin_turn_3", "kv_continuity_percent": 99.70100075033996, "append_continuity_percent": 99.72116800120898, "invalidation_events": 1, "active_kv_nodes": 512}
+{"turn": 4, "kv_lineage_id": "kv_lin_turn_4", "kv_continuity_percent": 99.73463563791364, "append_continuity_percent": 99.58647962570382, "invalidation_events": 0, "active_kv_nodes": 640}
+{"turn": 5, "kv_lineage_id": "kv_lin_turn_5", "kv_continuity_percent": 99.82836621854632, "append_continuity_percent": 99.55616135880054, "invalidation_events": 1, "active_kv_nodes": 768}

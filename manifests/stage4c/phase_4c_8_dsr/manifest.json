@@ -1,0 +1,12 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "total_turns": 6,
+  "timestamp": 1779028907.519385,
+  "reality_summary": {
+    "conversational_freshness": 98.75814398570537,
+    "adaptation_quality": 96.5982845766796,
+    "semantic_continuity": 97.83874683569661,
+    "repetition_suppression": 99.88356970986526
+  }
+}

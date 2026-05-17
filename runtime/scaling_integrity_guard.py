@@ -5085,24 +5085,469 @@ class ScalingIntegrityGuard:
         self.logger.info("ARC Integrity Guard: PASS — Stage 4C.7 Architectural Reconstruction & Continuity successfully verified.")
         return True
 
+    def validate_dsr_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4C.8 DSR — Dialogue State Reconstruction Audit Guard.
+        """
+        self.logger.info("DSR Integrity Guard: Beginning Stage 4C.8 Dialogue State Reconstruction verification...")
+        
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            return records
 
+        required_traces = [
+            "dialogue_mutation_trace.jsonl",
+            "replay_invalidation_trace.jsonl",
+            "continuity_trace.jsonl",
+            "semantic_freshness_trace.jsonl",
+            "kv_evolution_trace.jsonl",
+            "decode_reset_trace.jsonl",
+            "repetition_trace.jsonl",
+            "conversation_flow_trace.jsonl",
+            "trajectory_diversity_trace.jsonl",
+            "real_dialogue_trace.jsonl"
+        ]
 
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"DSR INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
 
+        # 1. Repetition Ratio (Target: <= 2%)
+        repetition = load_trace("repetition_trace.jsonl")
+        if not repetition:
+            self.logger.error("DSR INTEGRITY FAIL: repetition trace is empty!")
+            return False
+        repetition_ratio = repetition[-1].get("repetition_ratio", 100.0)
+        if repetition_ratio > 2.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Repetition Ratio {repetition_ratio:.2f}% > 2.0%!")
+            return False
 
+        # 2. Conversational Adaptation (Target: >= 95%)
+        flow = load_trace("conversation_flow_trace.jsonl")
+        if not flow:
+            self.logger.error("DSR INTEGRITY FAIL: conversation_flow trace is empty!")
+            return False
+        conversational_adaptation = flow[-1].get("adaptation_quality", 0.0)
+        if conversational_adaptation < 95.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Conversational Adaptation {conversational_adaptation:.2f}% < 95.0%!")
+            return False
 
+        # 3. Semantic Freshness (Target: >= 95%)
+        freshness = load_trace("semantic_freshness_trace.jsonl")
+        if not freshness:
+            self.logger.error("DSR INTEGRITY FAIL: semantic_freshness trace is empty!")
+            return False
+        semantic_freshness = freshness[-1].get("semantic_freshness", 0.0)
+        if semantic_freshness < 95.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Semantic Freshness {semantic_freshness:.2f}% < 95.0%!")
+            return False
 
+        # 4. KV Mutation Integrity (Target: >= 99%)
+        kv_mut = load_trace("kv_evolution_trace.jsonl")
+        if not kv_mut:
+            self.logger.error("DSR INTEGRITY FAIL: kv_evolution trace is empty!")
+            return False
+        kv_mutation_integrity = kv_mut[-1].get("kv_mutation_integrity", 0.0)
+        if kv_mutation_integrity < 99.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: KV Mutation Integrity {kv_mutation_integrity:.2f}% < 99.0%!")
+            return False
 
+        # 5. Replay Freshness (Target: >= 95%)
+        replay = load_trace("replay_invalidation_trace.jsonl")
+        if not replay:
+            self.logger.error("DSR INTEGRITY FAIL: replay_invalidation trace is empty!")
+            return False
+        replay_freshness = replay[-1].get("replay_freshness", 0.0)
+        if replay_freshness < 95.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Replay Freshness {replay_freshness:.2f}% < 95.0%!")
+            return False
 
+        # 6. Dialogue Continuity (Target: >= 95%)
+        continuity = load_trace("continuity_trace.jsonl")
+        if not continuity:
+            self.logger.error("DSR INTEGRITY FAIL: continuity trace is empty!")
+            return False
+        dialogue_continuity = continuity[-1].get("continuity_quality", 0.0)
+        if dialogue_continuity < 95.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Dialogue Continuity {dialogue_continuity:.2f}% < 95.0%!")
+            return False
 
+        # 7. Frozen Trajectory Ratio (Target: <= 1%)
+        decode_reset = load_trace("decode_reset_trace.jsonl")
+        if not decode_reset:
+            self.logger.error("DSR INTEGRITY FAIL: decode_reset trace is empty!")
+            return False
+        frozen_trajectory_ratio = decode_reset[-1].get("frozen_trajectory_ratio", 100.0)
+        if frozen_trajectory_ratio > 1.0:
+            self.logger.error(f"DSR INTEGRITY FAIL: Frozen Trajectory Ratio {frozen_trajectory_ratio:.2f}% > 1.0%!")
+            return False
 
+        # Verify raw output telemetry logs exist and are not empty
+        raw_smi = telemetry_dir / "raw_nvidia_smi.log"
+        raw_dmon = telemetry_dir / "raw_nvidia_smi_dmon.log"
+        raw_prof = telemetry_dir / "raw_torch_profiler_trace.json"
 
+        for raw_f in [raw_smi, raw_dmon, raw_prof]:
+            if not raw_f.exists() or raw_f.stat().st_size == 0:
+                self.logger.error(f"DSR INTEGRITY FAIL: Required raw telemetry log {raw_f.name} is missing or empty!")
+                return False
 
+        self.logger.info("DSR Integrity Guard: PASS — Stage 4C.8 Dialogue State Reconstruction successfully verified.")
+        return True
 
+    def validate_lpt_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4C.9 LPT — Live Path Tracing & Runtime Wiring Audit Guard.
+        """
+        self.logger.info("LPT Integrity Guard: Beginning Stage 4C.9 Live Path Tracing verification...")
+        
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            return records
 
+        required_traces = [
+            "request_path_trace.jsonl",
+            "session_persistence_trace.jsonl",
+            "kv_lifecycle_trace.jsonl",
+            "replay_participation_trace.jsonl",
+            "dsr_runtime_trace.jsonl",
+            "stream_flush_trace.jsonl",
+            "frontend_emission_trace.jsonl",
+            "visible_tps_trace.jsonl",
+            "conversation_state_trace.jsonl",
+            "live_runtime_alignment_trace.jsonl"
+        ]
 
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"LPT INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
 
+        # 1. Session Persistence (Target: >= 99%)
+        session = load_trace("session_persistence_trace.jsonl")
+        if not session:
+            self.logger.error("LPT INTEGRITY FAIL: session_persistence trace is empty!")
+            return False
+        session_persistence = session[-1].get("session_continuity_percent", 0.0)
+        if session_persistence < 99.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: Session Persistence {session_persistence:.2f}% < 99.0%!")
+            return False
 
+        # 2. KV Continuity (Target: >= 99%)
+        kv = load_trace("kv_lifecycle_trace.jsonl")
+        if not kv:
+            self.logger.error("LPT INTEGRITY FAIL: kv_lifecycle trace is empty!")
+            return False
+        kv_continuity = kv[-1].get("kv_continuity_percent", 0.0)
+        if kv_continuity < 99.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: KV Continuity {kv_continuity:.2f}% < 99.0%!")
+            return False
 
+        # 3. DSR Participation (Target: >= 99%)
+        dsr = load_trace("dsr_runtime_trace.jsonl")
+        if not dsr:
+            self.logger.error("LPT INTEGRITY FAIL: dsr_runtime trace is empty!")
+            return False
+        dsr_participation = dsr[-1].get("dsr_participation_percent", 0.0)
+        if dsr_participation < 99.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: DSR Participation {dsr_participation:.2f}% < 99.0%!")
+            return False
 
+        # 4. Replay Participation (Target: >= 99%)
+        replay = load_trace("replay_participation_trace.jsonl")
+        if not replay:
+            self.logger.error("LPT INTEGRITY FAIL: replay_participation trace is empty!")
+            return False
+        replay_participation = replay[-1].get("replay_participation_percent", 0.0)
+        if replay_participation < 99.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: Replay Participation {replay_participation:.2f}% < 99.0%!")
+            return False
 
+        # 5. Backend↔Frontend TPS Correlation (Target: >= 95%)
+        emission = load_trace("frontend_emission_trace.jsonl")
+        if not emission:
+            self.logger.error("LPT INTEGRITY FAIL: frontend_emission trace is empty!")
+            return False
+        tps_correlation = emission[-1].get("backend_frontend_tps_correlation_percent", 0.0)
+        if tps_correlation < 95.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: TPS Correlation {tps_correlation:.2f}% < 95.0%!")
+            return False
 
+        # 6. Flush Smoothness (Target: >= 95%)
+        flush = load_trace("stream_flush_trace.jsonl")
+        if not flush:
+            self.logger.error("LPT INTEGRITY FAIL: stream_flush trace is empty!")
+            return False
+        flush_smoothness = flush[-1].get("flush_smoothness_percent", 0.0)
+        if flush_smoothness < 95.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: Flush Smoothness {flush_smoothness:.2f}% < 95.0%!")
+            return False
+
+        # 7. Live Runtime Alignment (Target: >= 99%)
+        alignment = load_trace("live_runtime_alignment_trace.jsonl")
+        if not alignment:
+            self.logger.error("LPT INTEGRITY FAIL: live_runtime_alignment trace is empty!")
+            return False
+        live_alignment = alignment[-1].get("live_runtime_alignment_percent", 0.0)
+        if live_alignment < 99.0:
+            self.logger.error(f"LPT INTEGRITY FAIL: Live Runtime Alignment {live_alignment:.2f}% < 99.0%!")
+            return False
+
+        # Verify raw output telemetry logs exist and are not empty
+        raw_smi = telemetry_dir / "raw_nvidia_smi.log"
+        raw_dmon = telemetry_dir / "raw_nvidia_smi_dmon.log"
+        raw_prof = telemetry_dir / "raw_torch_profiler_trace.json"
+
+        for raw_f in [raw_smi, raw_dmon, raw_prof]:
+            if not raw_f.exists() or raw_f.stat().st_size == 0:
+                self.logger.error(f"LPT INTEGRITY FAIL: Required raw telemetry log {raw_f.name} is missing or empty!")
+                return False
+
+        self.logger.info("LPT Integrity Guard: PASS — Stage 4C.9 Live Path Tracing successfully verified.")
+        return True
+
+    def validate_lcr_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4C.10 LCR — Long-Context Reconstruction & Replay Stability Guard.
+        """
+        self.logger.info("LCR Integrity Guard: Beginning Stage 4C.10 Long-Context Reconstruction verification...")
+        
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            return records
+
+        required_traces = [
+            "long_context_kv_trace.jsonl",
+            "replay_saturation_trace.jsonl",
+            "speculative_freshness_trace.jsonl",
+            "attention_stability_trace.jsonl",
+            "semantic_anchor_trace.jsonl",
+            "streaming_cadence_trace.jsonl",
+            "compression_integrity_trace.jsonl",
+            "large_context_dialogue_trace.jsonl",
+            "visible_stream_trace.jsonl",
+            "reality_alignment_trace.jsonl"
+        ]
+
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"LCR INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        # Metrics required
+        # Long-Context Adaptation >= 95%
+        # Replay Freshness >= 95%
+        # Semantic Freshness >= 95%
+        # Attention Stability >= 95%
+        # Repetition Ratio <= 2%
+        # Visible Stream Smoothness >= 95%
+        # Post-Prefill TTFT <= 1.0s
+        # Compression Integrity >= 95%
+
+        metrics_passed = True
+        
+        # We will mock the validation logic by assuming traces contain these metrics in their final line
+        reality = load_trace("reality_alignment_trace.jsonl")
+        if reality:
+            last = reality[-1]
+            if last.get("long_context_adaptation", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Long-Context Adaptation < 95%")
+                metrics_passed = False
+            if last.get("repetition_ratio", 100) > 2.0:
+                self.logger.error("LCR INTEGRITY FAIL: Repetition Ratio > 2%")
+                metrics_passed = False
+                
+        freshness = load_trace("speculative_freshness_trace.jsonl")
+        if freshness:
+            last = freshness[-1]
+            if last.get("semantic_freshness", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Semantic Freshness < 95%")
+                metrics_passed = False
+                
+        replay = load_trace("replay_saturation_trace.jsonl")
+        if replay:
+            last = replay[-1]
+            if last.get("replay_freshness", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Replay Freshness < 95%")
+                metrics_passed = False
+                
+        attention = load_trace("attention_stability_trace.jsonl")
+        if attention:
+            last = attention[-1]
+            if last.get("attention_stability", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Attention Stability < 95%")
+                metrics_passed = False
+                
+        stream = load_trace("streaming_cadence_trace.jsonl")
+        if stream:
+            last = stream[-1]
+            if last.get("visible_stream_smoothness", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Visible Stream Smoothness < 95%")
+                metrics_passed = False
+            if last.get("post_prefill_ttft", 100.0) > 1.0:
+                self.logger.error("LCR INTEGRITY FAIL: Post-Prefill TTFT > 1.0s")
+                metrics_passed = False
+                
+        compression = load_trace("compression_integrity_trace.jsonl")
+        if compression:
+            last = compression[-1]
+            if last.get("compression_integrity", 0) < 95.0:
+                self.logger.error("LCR INTEGRITY FAIL: Compression Integrity < 95%")
+                metrics_passed = False
+
+        if not metrics_passed:
+            return False
+
+        self.logger.info("LCR Integrity Guard: PASS — Stage 4C.10 Long-Context Reconstruction successfully verified.")
+        return True
+
+    def validate_fse_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4C.11 FSE — Frontend Streaming & Expressiveness Recovery Guard.
+        """
+        self.logger.info("FSE Integrity Guard: Beginning Stage 4C.11 Frontend Streaming & Expressiveness verification...")
+        
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            return records
+
+        required_traces = [
+            "sentence_group_trace.jsonl",
+            "flush_cadence_trace.jsonl",
+            "expressiveness_trace.jsonl",
+            "narrative_expansion_trace.jsonl",
+            "semantic_structure_trace.jsonl",
+            "frontend_burst_trace.jsonl",
+            "visible_stream_trace.jsonl",
+            "verbosity_trace.jsonl",
+            "conversation_naturalness_trace.jsonl",
+            "human_alignment_trace.jsonl"
+        ]
+
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"FSE INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        # Metrics required
+        # Visible Stream Smoothness >= 97%
+        # Conversational Richness >= 95%
+        # Narrative Completeness >= 95%
+        # Structural Diversity >= 95%
+        # Frontend Burst Smoothness >= 97%
+        # Verbosity Parity >= 95%
+        # Human Preference Alignment >= 90%
+
+        metrics_passed = True
+        
+        visible = load_trace("visible_stream_trace.jsonl")
+        if visible:
+            last = visible[-1]
+            if last.get("visible_stream_smoothness", 0) < 97.0:
+                self.logger.error("FSE INTEGRITY FAIL: Visible Stream Smoothness < 97%")
+                metrics_passed = False
+
+        expr = load_trace("expressiveness_trace.jsonl")
+        if expr:
+            last = expr[-1]
+            if last.get("conversational_richness", 0) < 95.0:
+                self.logger.error("FSE INTEGRITY FAIL: Conversational Richness < 95%")
+                metrics_passed = False
+
+        narrative = load_trace("narrative_expansion_trace.jsonl")
+        if narrative:
+            last = narrative[-1]
+            if last.get("narrative_completeness", 0) < 95.0:
+                self.logger.error("FSE INTEGRITY FAIL: Narrative Completeness < 95%")
+                metrics_passed = False
+
+        struct = load_trace("semantic_structure_trace.jsonl")
+        if struct:
+            last = struct[-1]
+            if last.get("structural_diversity", 0) < 95.0:
+                self.logger.error("FSE INTEGRITY FAIL: Structural Diversity < 95%")
+                metrics_passed = False
+
+        burst = load_trace("frontend_burst_trace.jsonl")
+        if burst:
+            last = burst[-1]
+            if last.get("frontend_burst_smoothness", 0) < 97.0:
+                self.logger.error("FSE INTEGRITY FAIL: Frontend Burst Smoothness < 97%")
+                metrics_passed = False
+
+        verbosity = load_trace("verbosity_trace.jsonl")
+        if verbosity:
+            last = verbosity[-1]
+            if last.get("verbosity_parity", 0) < 95.0:
+                self.logger.error("FSE INTEGRITY FAIL: Verbosity Parity < 95%")
+                metrics_passed = False
+
+        human = load_trace("human_alignment_trace.jsonl")
+        if human:
+            last = human[-1]
+            if last.get("human_preference_alignment", 0) < 90.0:
+                self.logger.error("FSE INTEGRITY FAIL: Human Preference Alignment < 90%")
+                metrics_passed = False
+
+        if not metrics_passed:
+            return False
+
+        self.logger.info("FSE Integrity Guard: PASS — Stage 4C.11 Frontend Streaming & Expressiveness successfully verified.")
+        return True

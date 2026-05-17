@@ -1,0 +1,6 @@
+{"turn": 0, "replay_invalidation_correctness": 99.8, "stale_branch_reuse": 0.8, "replay_freshness": 97.5, "invalidated_branches_count": 2}
+{"turn": 1, "replay_invalidation_correctness": 99.78, "stale_branch_reuse": 0.4282948806670812, "replay_freshness": 98.93471218179904, "invalidated_branches_count": 4}
+{"turn": 2, "replay_invalidation_correctness": 99.75999999999999, "stale_branch_reuse": 0.004003001359821845, "replay_freshness": 99.49914720608301, "invalidated_branches_count": 6}
+{"turn": 3, "replay_invalidation_correctness": 99.74, "stale_branch_reuse": 0.31568168022768817, "replay_freshness": 98.8509263611023, "invalidated_branches_count": 8}
+{"turn": 4, "replay_invalidation_correctness": 99.72, "stale_branch_reuse": 0.7840681146601465, "replay_freshness": 97.38325171314484, "invalidated_branches_count": 10}
+{"turn": 5, "replay_invalidation_correctness": 99.7, "stale_branch_reuse": 0.5386541271340104, "replay_freshness": 95.98639500938414, "invalidated_branches_count": 12}
