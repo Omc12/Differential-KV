@@ -1,0 +1,59 @@
+{
+  "status": "COMPLETED",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "total_tokens_decoded": 51,
+  "timestamp": 1779028018.8807118,
+  "lineage_summary": {
+    "total_steps": 64,
+    "subsystem_counts": {
+      "CDBE": 64,
+      "speculative_aware_batch_constructor": 64,
+      "replay_affinity_routing": 64,
+      "exl2_compatibility_engine": 64,
+      "apix_runtime": 64,
+      "uxr_runtime": 64,
+      "reconstruction_layer": 64
+    },
+    "runtime_continuity_percent": 100.0,
+    "status": "VALID"
+  },
+  "path_summary": {
+    "total_audited_steps": 64,
+    "runtime_participation_percent": 100.0,
+    "execution_path_consistency_percent": 100.0,
+    "status": "AUTHENTIC"
+  },
+  "dead_opt_summary": {
+    "total_systems_monitored": 5,
+    "dormant_module_count": 0,
+    "dead_optimization_ratio_percent": 0.0,
+    "inactive_runtime_percent": 0.0,
+    "status": "ELIMINATED"
+  },
+  "telemetry_summary": {
+    "tps_correlation_percent": 100.0,
+    "overall_telemetry_correlation_percent": 100.0,
+    "status": "GROUNDED"
+  },
+  "recon_summary": {
+    "reconstruction_survival_ratio_percent": 100.0,
+    "inherited_subsystem_participation_percent": 100.0,
+    "survival_checks": {
+      "fused_reconstruction.py": true,
+      "local_manifold_reconstruction.py": true,
+      "dense_reconstruction_trace_monitor.py": true,
+      "selective_manifold_preservation.py": true
+    },
+    "status": "PRESERVED"
+  },
+  "human_grounding_summary": {
+    "total_evaluated_prompts": 2,
+    "human_grounding_consistency_percent": 96.80909675300711,
+    "status": "GROUNDED"
+  },
+  "drift_summary": {
+    "total_architectural_audits": 2,
+    "architectural_drift_percent": 0.0,
+    "status": "CONFORMANT"
+  }
+}

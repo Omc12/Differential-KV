@@ -4836,6 +4836,257 @@ class ScalingIntegrityGuard:
         self.logger.info("QCI Integrity Guard: PASS — Stage 4C.5 Quantized Compatibility & Interoperability successfully verified.")
         return True
 
+    def validate_uxr_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        Validate UXR (User Experience & Reality Validation) trace records.
+        """
+        self.logger.info("UXR Integrity Guard: Beginning Stage 4C.6 User Experience & Reality verification...")
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        records.append(json.loads(line))
+            return records
+
+        # 1. Verify Visible TPS (must be >= Ollama parity)
+        tps_records = load_trace("real_user_tps_trace.jsonl")
+        if not tps_records:
+            self.logger.error("UXR INTEGRITY FAIL: real_user_tps trace is missing or empty!")
+            return False
+        latest_tps = tps_records[-1]
+        visible_tps = latest_tps.get("visible_tps", 0.0)
+        ollama_visible_tps = latest_tps.get("ollama_visible_tps", 0.0)
+        if visible_tps < ollama_visible_tps:
+            self.logger.error(f"UXR INTEGRITY FAIL: Visible TPS ({visible_tps:.2f}) is below Ollama parity ({ollama_visible_tps:.2f})!")
+            return False
+
+        # 2. Verify Conversational Flow Smoothness (must be >= 95%)
+        flow_records = load_trace("conversation_flow_trace.jsonl")
+        if not flow_records:
+            self.logger.error("UXR INTEGRITY FAIL: conversation_flow trace is missing or empty!")
+            return False
+        latest_flow = flow_records[-1]
+        flow_smoothness = latest_flow.get("flow_smoothness_percent", 0.0)
+        if flow_smoothness < 95.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Conversational flow smoothness {flow_smoothness:.2f}% is below acceptable boundary of 95.0%!")
+            return False
+
+        # 3. Verify Semantic Richness (must be >= 97%)
+        rich_records = load_trace("semantic_richness_trace.jsonl")
+        if not rich_records:
+            self.logger.error("UXR INTEGRITY FAIL: semantic_richness trace is missing or empty!")
+            return False
+        latest_rich = rich_records[-1]
+        richness = latest_rich.get("richness_score_percent", 0.0)
+        if richness < 97.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Semantic richness score {richness:.2f}% is below acceptable boundary of 97.0%!")
+            return False
+
+        # 4. Verify Verbosity Parity (must be >= 97%)
+        verb_records = load_trace("verbosity_trace.jsonl")
+        if not verb_records:
+            self.logger.error("UXR INTEGRITY FAIL: verbosity trace is missing or empty!")
+            return False
+        latest_verb = verb_records[-1]
+        verbosity = latest_verb.get("verbosity_parity_percent", 0.0)
+        if verbosity < 97.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Verbosity parity {verbosity:.2f}% is below acceptable boundary of 97.0%!")
+            return False
+
+        # 5. Verify Blind Preference Win Rate (must be >= 60%)
+        pref_records = load_trace("blind_preference_trace.jsonl")
+        if not pref_records:
+            self.logger.error("UXR INTEGRITY FAIL: blind_preference trace is missing or empty!")
+            return False
+        latest_pref = pref_records[-1]
+        pref_win_rate = latest_pref.get("preference_win_rate_percent", 0.0)
+        if pref_win_rate < 60.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Blind preference win rate {pref_win_rate:.2f}% is below acceptable boundary of 60.0%!")
+            return False
+
+        # 6. Verify Flush Smoothness (must be >= 95%)
+        flush_records = load_trace("flush_trace.jsonl")
+        if not flush_records:
+            self.logger.error("UXR INTEGRITY FAIL: flush trace is missing or empty!")
+            return False
+        latest_flush = flush_records[-1]
+        flush_smoothness = latest_flush.get("flush_smoothness_percent", 0.0)
+        if flush_smoothness < 95.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Flush smoothness {flush_smoothness:.2f}% is below acceptable boundary of 95.0%!")
+            return False
+
+        # 7. Verify Perceived Responsiveness (must be >= 95%)
+        resp_records = load_trace("latency_perception_trace.jsonl")
+        if not resp_records:
+            self.logger.error("UXR INTEGRITY FAIL: latency_perception trace is missing or empty!")
+            return False
+        latest_resp = resp_records[-1]
+        responsiveness = latest_resp.get("responsiveness_score_percent", 0.0)
+        if responsiveness < 95.0:
+            self.logger.error(f"UXR INTEGRITY FAIL: Perceived responsiveness {responsiveness:.2f}% is below acceptable boundary of 95.0%!")
+            return False
+
+        self.logger.info("UXR Integrity Guard: PASS — Stage 4C.6 User Experience & Reality Validation successfully verified.")
+        return True
+
+    def validate_arc_run(self, traces_dir: Path, telemetry_dir: Path) -> bool:
+        """
+        STAGE 4C.7 ARC — Architectural Reconstruction & Continuity Audit Guard.
+        """
+        self.logger.info("ARC Integrity Guard: Beginning Stage 4C.7 Architectural Reconstruction & Continuity verification...")
+        
+        traces_dir = Path(traces_dir)
+        telemetry_dir = Path(telemetry_dir)
+        
+        def load_trace(filename: str) -> List[Dict[str, Any]]:
+            path = traces_dir / filename
+            if not path.exists():
+                return []
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            return records
+
+        required_traces = [
+            "runtime_lineage_trace.jsonl",
+            "execution_path_trace.jsonl",
+            "dead_optimization_trace.jsonl",
+            "telemetry_correlation_trace.jsonl",
+            "reconstruction_integrity_trace.jsonl",
+            "human_grounded_validation_trace.jsonl",
+            "architectural_drift_trace.jsonl",
+            "runtime_participation_trace.jsonl",
+            "emitted_token_lineage_trace.jsonl",
+            "reality_alignment_trace.jsonl"
+        ]
+
+        for fname in required_traces:
+            p = traces_dir / fname
+            if not p.exists() or p.stat().st_size == 0:
+                self.logger.error(f"ARC INTEGRITY FAIL: Required trace {fname} is missing or empty!")
+                return False
+
+        # 1. Load and Verify Runtime Lineage Continuity (Target: >= 99%)
+        lineage = load_trace("runtime_lineage_trace.jsonl")
+        if not lineage:
+            self.logger.error("ARC INTEGRITY FAIL: runtime_lineage trace is empty!")
+            return False
+        runtime_continuity = lineage[-1].get("runtime_continuity_percent", 0.0)
+        if runtime_continuity < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Runtime Continuity {runtime_continuity:.2f}% < 99.0%!")
+            return False
+
+        # 2. Load and Verify Telemetry Correlation (Target: >= 99%)
+        telemetry_corr_rec = load_trace("telemetry_correlation_trace.jsonl")
+        if not telemetry_corr_rec:
+            self.logger.error("ARC INTEGRITY FAIL: telemetry_correlation trace is empty!")
+            return False
+        telemetry_corr = telemetry_corr_rec[-1].get("overall_telemetry_correlation_percent", 0.0)
+        if telemetry_corr < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Telemetry Correlation {telemetry_corr:.2f}% < 99.0%!")
+            return False
+
+        # 3. Load and Verify Dead Optimization Ratio (Target: <= 1%)
+        dead_opt = load_trace("dead_optimization_trace.jsonl")
+        if not dead_opt:
+            self.logger.error("ARC INTEGRITY FAIL: dead_optimization trace is empty!")
+            return False
+        dead_opt_ratio = dead_opt[-1].get("dead_optimization_ratio_percent", 0.0)
+        if dead_opt_ratio > 1.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Dead Optimization Ratio {dead_opt_ratio:.2f}% > 1.0%!")
+            return False
+
+        # 4. Load and Verify Runtime Participation (Target: >= 99%)
+        participation = load_trace("runtime_participation_trace.jsonl")
+        if not participation:
+            self.logger.error("ARC INTEGRITY FAIL: runtime_participation trace is empty!")
+            return False
+        runtime_participation = participation[-1].get("runtime_participation_percent", 0.0)
+        if runtime_participation < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Runtime Participation {runtime_participation:.2f}% < 99.0%!")
+            return False
+
+        # 5. Load and Verify Architectural Drift (Target: <= 1%)
+        drift_rec = load_trace("architectural_drift_trace.jsonl")
+        if not drift_rec:
+            self.logger.error("ARC INTEGRITY FAIL: architectural_drift trace is empty!")
+            return False
+        arch_drift = drift_rec[-1].get("architectural_drift_percent", 0.0)
+        if arch_drift > 1.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Architectural Drift {arch_drift:.2f}% > 1.0%!")
+            return False
+
+        # 6. Load and Verify Emitted TPS Correlation (Target: >= 99%)
+        reality_align = load_trace("reality_alignment_trace.jsonl")
+        if not reality_align:
+            self.logger.error("ARC INTEGRITY FAIL: reality_alignment trace is empty!")
+            return False
+        emitted_tps_correlation = reality_align[-1].get("tps_correlation_percent", 0.0)
+        if emitted_tps_correlation < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Emitted TPS Correlation {emitted_tps_correlation:.2f}% < 99.0%!")
+            return False
+
+        # 7. Load and Verify Human Grounding Consistency (Target: >= 95%)
+        human_grounding = load_trace("human_grounded_validation_trace.jsonl")
+        if not human_grounding:
+            self.logger.error("ARC INTEGRITY FAIL: human_grounded_validation trace is empty!")
+            return False
+        human_grounding_consistency = human_grounding[-1].get("human_grounding_consistency_percent", 0.0)
+        if human_grounding_consistency < 95.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Human Grounding Consistency {human_grounding_consistency:.2f}% < 95.0%!")
+            return False
+
+        # 8. Load and Verify Reconstruction Integrity (Target: >= 99%)
+        recon = load_trace("reconstruction_integrity_trace.jsonl")
+        if not recon:
+            self.logger.error("ARC INTEGRITY FAIL: reconstruction_integrity trace is empty!")
+            return False
+        reconstruction_integrity = recon[-1].get("reconstruction_survival_ratio_percent", 0.0)
+        if reconstruction_integrity < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Reconstruction Integrity {reconstruction_integrity:.2f}% < 99.0%!")
+            return False
+
+        # 9. Verify replay participation & speculative runtime participation from execution path (Target: >= 99%)
+        exec_path = load_trace("execution_path_trace.jsonl")
+        if not exec_path:
+            self.logger.error("ARC INTEGRITY FAIL: execution_path trace is empty!")
+            return False
+        
+        replay_participation = exec_path[-1].get("replay_participation_percent", 100.0)
+        if replay_participation < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Replay Participation {replay_participation:.2f}% < 99.0%!")
+            return False
+
+        speculative_runtime_participation = exec_path[-1].get("speculative_runtime_participation_percent", 100.0)
+        if speculative_runtime_participation < 99.0:
+            self.logger.error(f"ARC INTEGRITY FAIL: Speculative Runtime Participation {speculative_runtime_participation:.2f}% < 99.0%!")
+            return False
+
+        # 10. Verify raw output telemetry logs exist and are not empty
+        raw_smi = telemetry_dir / "raw_nvidia_smi.log"
+        raw_dmon = telemetry_dir / "raw_nvidia_smi_dmon.log"
+        raw_prof = telemetry_dir / "raw_torch_profiler_trace.json"
+
+        for raw_f in [raw_smi, raw_dmon, raw_prof]:
+            if not raw_f.exists() or raw_f.stat().st_size == 0:
+                self.logger.error(f"ARC INTEGRITY FAIL: Required raw telemetry log {raw_f.name} is missing or empty!")
+                return False
+
+        self.logger.info("ARC Integrity Guard: PASS — Stage 4C.7 Architectural Reconstruction & Continuity successfully verified.")
+        return True
+
+
+
 
 
 
