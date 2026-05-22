@@ -293,6 +293,24 @@ class KVRuntimeManager:
         return s
 
     def get_session_micro_block_size(self, session_id: str) -> int:
+        max_size = 0
+        if self._streaming_mgr is not None and session_id in self._streaming_mgr.session_blocks:
+            for layer_idx, blocks in self._streaming_mgr.session_blocks[session_id].items():
+                for block in blocks:
+                    block_mbs = getattr(block, "micro_block_size", 0)
+                    if block_mbs > max_size:
+                        max_size = block_mbs
+
+        if session_id in self.session_blocks:
+            for layer_idx, blocks in self.session_blocks[session_id].items():
+                for block in blocks:
+                    block_mbs = getattr(block, "micro_block_size", 0)
+                    if block_mbs > max_size:
+                        max_size = block_mbs
+
+        if max_size > 0:
+            return max_size
+
         if self._streaming_mgr is not None:
             return self._streaming_mgr.session_micro_block_sizes.get(session_id, self.micro_block_size)
         return self.micro_block_size

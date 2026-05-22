@@ -127,7 +127,8 @@ class StreamingSparseIngestManager:
         self.session_micro_block_sizes: Dict[str, int] = {}
         
         # (session_id, layer_idx) -> (k_gpu, v_gpu, k_cpu, v_cpu) pre-allocated pinned memory buffers
-        self.layer_staging_buffers: Dict[Tuple[str, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # Keyed per-layer to prevent cross-layer data corruption in the async compressor queue.
+        self.session_staging_buffers: Dict[Tuple[str, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
         # Telemetry
         self.stats = {
@@ -151,7 +152,7 @@ class StreamingSparseIngestManager:
             else:
                 self.session_micro_block_sizes[session_id] = self.micro_block_size
 
-    def _get_layer_staging_buffers(
+    def _get_session_staging_buffer(
         self,
         session_id: str,
         layer_idx: int,
@@ -162,7 +163,7 @@ class StreamingSparseIngestManager:
         device: str
     ):
         key = (session_id, layer_idx)
-        buffers = self.layer_staging_buffers.get(key)
+        buffers = self.session_staging_buffers.get(key)
         
         if (buffers is None or 
             buffers[0].shape[0] < num_blocks or 
@@ -170,8 +171,8 @@ class StreamingSparseIngestManager:
             buffers[0].shape[1] != heads or
             buffers[0].shape[3] != head_dim):
             
-            # Allocate larger buffers
-            alloc_blocks = max(num_blocks, 512)
+            # Allocate larger buffers dynamically
+            alloc_blocks = max(num_blocks, 128)
             alloc_mbs = max(micro_block_size, 256)
             
             k_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
@@ -181,7 +182,7 @@ class StreamingSparseIngestManager:
             v_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16).pin_memory()
             
             buffers = (k_gpu, v_gpu, k_cpu, v_cpu)
-            self.layer_staging_buffers[key] = buffers
+            self.session_staging_buffers[key] = buffers
             
         k_gpu, v_gpu, k_cpu, v_cpu = buffers
         return (
@@ -194,9 +195,10 @@ class StreamingSparseIngestManager:
     def clear_session(self, session_id: str):
         self.session_blocks.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
-        keys_to_del = [k for k in self.layer_staging_buffers.keys() if k[0] == session_id]
-        for k in keys_to_del:
-            self.layer_staging_buffers.pop(k, None)
+        # Drop all layer staging buffers for this session
+        keys_to_drop = [k for k in self.session_staging_buffers if k[0] == session_id]
+        for k in keys_to_drop:
+            del self.session_staging_buffers[k]
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -224,6 +226,8 @@ class StreamingSparseIngestManager:
         micro_block_size = self.session_micro_block_sizes.get(session_id, self.micro_block_size)
 
         if seq_len == 1:
+            # Force micro_block_size to 32 for active window during decode
+            micro_block_size = 32
             # ───────────────────────────────────────────────────────────────
             # DECODE PATH (T=1) — legacy sequential append (fast, no loops)
             # ───────────────────────────────────────────────────────────────
@@ -272,119 +276,149 @@ class StreamingSparseIngestManager:
         # ───────────────────────────────────────────────────────────────────
         # PREFILL PATH (T > 1) — highly optimized vectorized batch ingestion
         # ───────────────────────────────────────────────────────────────────
-        block_capacity = 1 + micro_block_size
-        num_blocks = (seq_len + block_capacity - 1) // block_capacity
-        num_full_blocks = seq_len // block_capacity
-        L_full = num_full_blocks * block_capacity
-
-        new_blocks = []
-        full_blocks_to_compress = []
-        base_idx = self._next_anchor_idx(blocks)
-
-        # 1. Vectorized extraction of full blocks
-        if num_full_blocks > 0:
-            k_full = k[:, :, :L_full]
-            v_full = v[:, :, :L_full]
-
-            # Reshape into [1, heads, num_full_blocks, block_capacity, head_dim]
-            k_reshaped = k_full.reshape(1, k.shape[1], num_full_blocks, block_capacity, k.shape[3])
-            v_reshaped = v_full.reshape(1, v.shape[1], num_full_blocks, block_capacity, v.shape[3])
-
-            # Extract anchors: [1, heads, num_full_blocks, head_dim]
-            anchors_k = k_reshaped[:, :, :, 0]
-            anchors_v = v_reshaped[:, :, :, 0]
-
-            # Stack K/V anchors: [num_full_blocks, 1, 2, heads, head_dim]
-            stacked_anchors = torch.stack([anchors_k, anchors_v], dim=2).permute(3, 0, 2, 1, 4)
+        # Partition the prefill sequence into regions based on distance to sequence end
+        regions = []
+        # Region 1 (Active recent window): last 1024 tokens (MBS = 32)
+        r1_start = max(0, seq_len - 1024)
+        if r1_start < seq_len:
+            regions.append((r1_start, seq_len, 32))
             
-            # Consolidated copy of stacked anchors to CPU in a single step (zero round-trips!)
-            stacked_anchors_cpu = stacked_anchors.cpu()
+        # Region 2 (Conversational locality): from seq_len-4096 to seq_len-1024 (MBS = 64)
+        r2_start = max(0, seq_len - 4096)
+        if r2_start < r1_start:
+            regions.append((r2_start, r1_start, 64))
+            
+        # Region 3 (Mid-history): from seq_len-12288 to seq_len-4096 (MBS = 128)
+        r3_start = max(0, seq_len - 12288)
+        if r3_start < r2_start:
+            regions.append((r3_start, r2_start, 128))
+            
+        # Region 4 (Cold archive): from 0 to seq_len-12288 (MBS = 256)
+        if 0 < r3_start:
+            regions.append((0, r3_start, 256))
+            
+        # Reverse to process chronologically (left to right)
+        regions.reverse()
 
-            # Extract active states: [num_full_blocks, 1, heads, micro_block_size, head_dim]
-            active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
-            active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
+        for start_idx, end_idx, r_mbs in regions:
+            region_k = k[:, :, start_idx:end_idx]
+            region_v = v[:, :, start_idx:end_idx]
+            region_len = region_k.shape[2]
+            if region_len == 0:
+                continue
 
-            # Pre-allocate NativeBlockPool indices in a single batch call!
-            pool_indices = []
-            if self.native_pool is not None:
-                pool_indices = self.native_pool.allocate_blocks(num_full_blocks)
+            block_capacity = 1 + r_mbs
+            num_full_blocks = region_len // block_capacity
+            L_full = num_full_blocks * block_capacity
 
-            for i in range(num_full_blocks):
-                anchor_idx = base_idx + i * block_capacity
-                anchor_kv = stacked_anchors[i]
-                anchor_kv_cpu = stacked_anchors_cpu[i]
+            new_blocks = []
+            full_blocks_to_compress = []
+            base_idx = self._next_anchor_idx(blocks)
+
+            # 1. Vectorized extraction of full blocks
+            if num_full_blocks > 0:
+                k_full = region_k[:, :, :L_full]
+                v_full = region_v[:, :, :L_full]
+
+                # Reshape into [1, heads, num_full_blocks, block_capacity, head_dim]
+                k_reshaped = k_full.reshape(1, k.shape[1], num_full_blocks, block_capacity, k.shape[3])
+                v_reshaped = v_full.reshape(1, v.shape[1], num_full_blocks, block_capacity, v.shape[3])
+
+                # Extract anchors: [1, heads, num_full_blocks, head_dim]
+                anchors_k = k_reshaped[:, :, :, 0]
+                anchors_v = v_reshaped[:, :, :, 0]
+
+                # Stack K/V anchors: [num_full_blocks, 1, 2, heads, head_dim]
+                stacked_anchors = torch.stack([anchors_k, anchors_v], dim=2).permute(3, 0, 2, 1, 4)
                 
-                pool_idx = pool_indices[i] if pool_indices else None
+                # Consolidated copy of stacked anchors to CPU in a single step (zero round-trips!)
+                stacked_anchors_cpu = stacked_anchors.cpu()
+
+                # Extract active states: [num_full_blocks, 1, heads, r_mbs, head_dim]
+                active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
+                active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
+
+                # Pre-allocate NativeBlockPool indices in a single batch call!
+                pool_indices = []
+                if self.native_pool is not None:
+                    pool_indices = self.native_pool.allocate_blocks(num_full_blocks)
+
+                for i in range(num_full_blocks):
+                    anchor_idx = base_idx + i * block_capacity
+                    anchor_kv = stacked_anchors[i]
+                    anchor_kv_cpu = stacked_anchors_cpu[i]
+                    
+                    pool_idx = pool_indices[i] if pool_indices else None
+
+                    new_block = StreamingKVBlock(
+                        anchor_idx=anchor_idx,
+                        anchor_kv=anchor_kv,
+                        anchor_kv_cpu=anchor_kv_cpu,
+                        micro_block_size=r_mbs,
+                        token_indices=list(range(anchor_idx, anchor_idx + block_capacity)),
+                        pool_idx=pool_idx,
+                    )
+                    new_block.active_k = active_k_blocks[i]
+                    new_block.active_v = active_v_blocks[i]
+                    new_block.state = "SUBMITTED"
+
+                    new_blocks.append(new_block)
+                    full_blocks_to_compress.append(new_block)
+
+                    with self._stats_lock:
+                        self.stats["total_blocks_created"] += 1
+
+            # 2. Extract partial block if any
+            if region_len > L_full:
+                anchor_idx = base_idx + L_full
+                
+                # Slice anchor token
+                anchor_k = region_k[:, :, L_full : L_full + 1]
+                anchor_v = region_v[:, :, L_full : L_full + 1]
+                anchor_kv = torch.stack([anchor_k[:, :, 0], anchor_v[:, :, 0]], dim=1)
+
+                active_start = L_full + 1
+                blk_active_k = None
+                blk_active_v = None
+                token_indices = [anchor_idx]
+
+                if region_len > active_start:
+                    blk_active_k = region_k[:, :, active_start:region_len]
+                    blk_active_v = region_v[:, :, active_start:region_len]
+                    token_indices.extend(list(range(anchor_idx + 1, anchor_idx + 1 + (region_len - active_start))))
+
+                pool_idx = None
+                if self.native_pool is not None:
+                    pool_idx = self.native_pool.allocate_block()
 
                 new_block = StreamingKVBlock(
                     anchor_idx=anchor_idx,
                     anchor_kv=anchor_kv,
-                    anchor_kv_cpu=anchor_kv_cpu,
-                    micro_block_size=micro_block_size,
-                    token_indices=list(range(anchor_idx, anchor_idx + block_capacity)),
+                    anchor_kv_cpu=anchor_kv.cpu(),
+                    micro_block_size=r_mbs,
+                    token_indices=token_indices,
                     pool_idx=pool_idx,
                 )
-                new_block.active_k = active_k_blocks[i]
-                new_block.active_v = active_v_blocks[i]
-                new_block.state = "SUBMITTED"
+
+                if blk_active_k is not None:
+                    new_block.active_k = blk_active_k
+                    new_block.active_v = blk_active_v
+
+                if new_block.is_compression_eligible():
+                    new_block.state = "SUBMITTED"
+                    full_blocks_to_compress.append(new_block)
+                else:
+                    new_block.state = "ACCUMULATING"
 
                 new_blocks.append(new_block)
-                full_blocks_to_compress.append(new_block)
-
                 with self._stats_lock:
                     self.stats["total_blocks_created"] += 1
 
-        # 2. Extract partial block if any
-        if seq_len > L_full:
-            anchor_idx = base_idx + L_full
-            
-            # Slice anchor token
-            anchor_k = k[:, :, L_full : L_full + 1]
-            anchor_v = v[:, :, L_full : L_full + 1]
-            anchor_kv = torch.stack([anchor_k[:, :, 0], anchor_v[:, :, 0]], dim=1)
+            blocks.extend(new_blocks)
 
-            active_start = L_full + 1
-            blk_active_k = None
-            blk_active_v = None
-            token_indices = [anchor_idx]
-
-            if seq_len > active_start:
-                blk_active_k = k[:, :, active_start:seq_len]
-                blk_active_v = v[:, :, active_start:seq_len]
-                token_indices.extend(list(range(anchor_idx + 1, anchor_idx + 1 + (seq_len - active_start))))
-
-            pool_idx = None
-            if self.native_pool is not None:
-                pool_idx = self.native_pool.allocate_block()
-
-            new_block = StreamingKVBlock(
-                anchor_idx=anchor_idx,
-                anchor_kv=anchor_kv,
-                anchor_kv_cpu=anchor_kv.cpu(),
-                micro_block_size=micro_block_size,
-                token_indices=token_indices,
-                pool_idx=pool_idx,
-            )
-
-            if blk_active_k is not None:
-                new_block.active_k = blk_active_k
-                new_block.active_v = blk_active_v
-
-            if new_block.is_compression_eligible():
-                new_block.state = "SUBMITTED"
-                full_blocks_to_compress.append(new_block)
-            else:
-                new_block.state = "ACCUMULATING"
-
-            new_blocks.append(new_block)
-            with self._stats_lock:
-                self.stats["total_blocks_created"] += 1
-
-        blocks.extend(new_blocks)
-
-        # Batch submit all compression requests in one consolidation transfer
-        if full_blocks_to_compress:
-            self._submit_blocks_batched(session_id, layer_idx, full_blocks_to_compress)
+            # Batch submit all compression requests in one consolidation transfer
+            if full_blocks_to_compress:
+                self._submit_blocks_batched(session_id, layer_idx, full_blocks_to_compress)
 
         # Track peak dense footprint
         dense_tokens = self._count_dense_tokens(blocks)
@@ -402,8 +436,9 @@ class StreamingSparseIngestManager:
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
 
-        # Get session/layer-specific persistent staging buffers
-        k_gpu, v_gpu, k_cpu, v_cpu = self._get_layer_staging_buffers(
+        # Get per-(session, layer) persistent staging buffers — keyed by layer to prevent
+        # cross-layer data corruption when the async compressor processes queued slices.
+        k_gpu, v_gpu, k_cpu, v_cpu = self._get_session_staging_buffer(
             session_id, layer_idx, len(blocks_list), heads, micro_block_size, head_dim, device
         )
 
