@@ -104,6 +104,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         
                         pool = getattr(kv_manager, 'native_pool', None)
                         
+                        session_mbs = kv_manager.get_session_micro_block_size(sid)
+                        
                         if pool is not None and compressed_pool_indices:
                             block_indices = torch.tensor(
                                 compressed_pool_indices, 
@@ -119,7 +121,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 active_v=None,
                                 num_key_value_groups=num_key_value_groups,
                                 R=kv_manager.rank,
-                                S_MAX=kv_manager.micro_block_size
+                                S_MAX=session_mbs
                             )
                         else:
                             attn_out_b = native_triton_sparse_attn_decode(
@@ -131,7 +133,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 active_v=None,
                                 num_key_value_groups=num_key_value_groups,
                                 R=kv_manager.rank,
-                                S_MAX=kv_manager.micro_block_size
+                                S_MAX=session_mbs
                             )
                         
                         attn_outputs.append(attn_out_b)

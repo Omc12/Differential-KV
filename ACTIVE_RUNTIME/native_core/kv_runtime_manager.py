@@ -100,7 +100,7 @@ class KVRuntimeManager:
         
         # Dynamically calculate max_blocks based on gpu_budget_gb
         pool_rank = self.rank
-        pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
+        pool_block_size = 256 if self.streaming_ingest else self.block_size
         
         bytes_per_block = (
             (pool_block_size * pool_rank * 2) +                                # U
@@ -130,10 +130,10 @@ class KVRuntimeManager:
         # Instantiate ReconstructionPool for high-throughput decode path
         from native_core.recon_cache import ReconstructionPool
         self.recon_pool = ReconstructionPool(
-            max_cached_blocks=2048,
+            max_cached_blocks=256 if self.streaming_ingest else 2048,
             num_kv_heads=self.kv_heads,
             head_dim=self.head_dim,
-            micro_block_size=self.micro_block_size,
+            micro_block_size=256 if self.streaming_ingest else self.micro_block_size,
             device=self.device
         )
         self.decode_workspace = {}
@@ -165,11 +165,11 @@ class KVRuntimeManager:
 
     # ── Session management ────────────────────────────────────────────────────
 
-    def init_session(self, session_id: str):
+    def init_session(self, session_id: str, prefill_len: int = 0):
         if session_id not in self.session_blocks:
             self.session_blocks[session_id] = {i: [] for i in range(self.num_layers)}
         if self._streaming_mgr is not None and session_id not in self._streaming_mgr.session_blocks:
-            self._streaming_mgr.init_session(session_id, self.num_layers)
+            self._streaming_mgr.init_session(session_id, self.num_layers, prefill_len=prefill_len)
 
     def clear_session(self, session_id: str):
         # Free blocks from NativeBlockPool before deleting references
@@ -261,7 +261,13 @@ class KVRuntimeManager:
             return
 
         if session_id not in self._streaming_mgr.session_blocks:
-            self._streaming_mgr.init_session(session_id, self.num_layers)
+            self.init_session(session_id, prefill_len=k.shape[2])
+        elif k.shape[2] > 1 and session_id in self._streaming_mgr.session_micro_block_sizes:
+            # Update adaptive size if it was initialized with default
+            if self._streaming_mgr.session_micro_block_sizes[session_id] == self._streaming_mgr.micro_block_size:
+                raw_size = max(16, min(256, k.shape[2] // 64))
+                adaptive_size = ((raw_size + 15) // 16) * 16
+                self._streaming_mgr.session_micro_block_sizes[session_id] = adaptive_size
 
         if k.shape[2] == 1:
             self._streaming_mgr.append_decode_token(session_id, layer_idx, k, v)
@@ -285,6 +291,11 @@ class KVRuntimeManager:
         s["streaming_ingest"] = True
         s["micro_block_size"] = self.micro_block_size
         return s
+
+    def get_session_micro_block_size(self, session_id: str) -> int:
+        if self._streaming_mgr is not None:
+            return self._streaming_mgr.session_micro_block_sizes.get(session_id, self.micro_block_size)
+        return self.micro_block_size
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 

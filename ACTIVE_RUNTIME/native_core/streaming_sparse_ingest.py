@@ -122,6 +122,12 @@ class StreamingSparseIngestManager:
 
         # session_id -> layer_idx -> List[StreamingKVBlock]
         self.session_blocks: Dict[str, Dict[int, List[StreamingKVBlock]]] = {}
+        
+        # session_id -> micro_block_size (dynamic adaptive size per session)
+        self.session_micro_block_sizes: Dict[str, int] = {}
+        
+        # (session_id, layer_idx) -> (k_gpu, v_gpu, k_cpu, v_cpu) pre-allocated pinned memory buffers
+        self.layer_staging_buffers: Dict[Tuple[str, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
         # Telemetry
         self.stats = {
@@ -134,12 +140,63 @@ class StreamingSparseIngestManager:
 
     # ── Session management ─────────────────────────────────────────────────────
 
-    def init_session(self, session_id: str, num_layers: int):
+    def init_session(self, session_id: str, num_layers: int, prefill_len: int = 0):
         if session_id not in self.session_blocks:
             self.session_blocks[session_id] = {i: [] for i in range(num_layers)}
+        if session_id not in self.session_micro_block_sizes:
+            if prefill_len > 0:
+                raw_size = max(16, min(256, prefill_len // 64))
+                adaptive_size = ((raw_size + 15) // 16) * 16
+                self.session_micro_block_sizes[session_id] = adaptive_size
+            else:
+                self.session_micro_block_sizes[session_id] = self.micro_block_size
+
+    def _get_layer_staging_buffers(
+        self,
+        session_id: str,
+        layer_idx: int,
+        num_blocks: int,
+        heads: int,
+        micro_block_size: int,
+        head_dim: int,
+        device: str
+    ):
+        key = (session_id, layer_idx)
+        buffers = self.layer_staging_buffers.get(key)
+        
+        if (buffers is None or 
+            buffers[0].shape[0] < num_blocks or 
+            buffers[0].shape[2] < micro_block_size or
+            buffers[0].shape[1] != heads or
+            buffers[0].shape[3] != head_dim):
+            
+            # Allocate larger buffers
+            alloc_blocks = max(num_blocks, 512)
+            alloc_mbs = max(micro_block_size, 256)
+            
+            k_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
+            v_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
+            
+            k_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16).pin_memory()
+            v_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16).pin_memory()
+            
+            buffers = (k_gpu, v_gpu, k_cpu, v_cpu)
+            self.layer_staging_buffers[key] = buffers
+            
+        k_gpu, v_gpu, k_cpu, v_cpu = buffers
+        return (
+            k_gpu[:num_blocks, :, :micro_block_size, :],
+            v_gpu[:num_blocks, :, :micro_block_size, :],
+            k_cpu[:num_blocks, :, :micro_block_size, :],
+            v_cpu[:num_blocks, :, :micro_block_size, :]
+        )
 
     def clear_session(self, session_id: str):
         self.session_blocks.pop(session_id, None)
+        self.session_micro_block_sizes.pop(session_id, None)
+        keys_to_del = [k for k in self.layer_staging_buffers.keys() if k[0] == session_id]
+        for k in keys_to_del:
+            self.layer_staging_buffers.pop(k, None)
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -157,11 +214,14 @@ class StreamingSparseIngestManager:
         For prefill: k/v shape is [1, heads, seq_len, head_dim].
         For decode:  k/v shape is [1, heads, 1, head_dim].
 
-        Processes tokens in micro-blocks of `micro_block_size`.
+        Processes tokens in micro-blocks of dynamic `micro_block_size`.
         Triggers compression immediately when each micro-block fills.
         """
         blocks = self.session_blocks[session_id][layer_idx]
         seq_len = k.shape[2]
+        
+        # Read the session-specific micro-block size (defaults to self.micro_block_size)
+        micro_block_size = self.session_micro_block_sizes.get(session_id, self.micro_block_size)
 
         if seq_len == 1:
             # ───────────────────────────────────────────────────────────────
@@ -181,7 +241,7 @@ class StreamingSparseIngestManager:
                 new_block = StreamingKVBlock(
                     anchor_idx=self._next_anchor_idx(blocks),
                     anchor_kv=anchor_kv,
-                    micro_block_size=self.micro_block_size,
+                    micro_block_size=micro_block_size,
                     token_indices=[self._next_anchor_idx(blocks)],
                     pool_idx=pool_idx,
                 )
@@ -212,7 +272,7 @@ class StreamingSparseIngestManager:
         # ───────────────────────────────────────────────────────────────────
         # PREFILL PATH (T > 1) — highly optimized vectorized batch ingestion
         # ───────────────────────────────────────────────────────────────────
-        block_capacity = 1 + self.micro_block_size
+        block_capacity = 1 + micro_block_size
         num_blocks = (seq_len + block_capacity - 1) // block_capacity
         num_full_blocks = seq_len // block_capacity
         L_full = num_full_blocks * block_capacity
@@ -236,24 +296,31 @@ class StreamingSparseIngestManager:
 
             # Stack K/V anchors: [num_full_blocks, 1, 2, heads, head_dim]
             stacked_anchors = torch.stack([anchors_k, anchors_v], dim=2).permute(3, 0, 2, 1, 4)
+            
+            # Consolidated copy of stacked anchors to CPU in a single step (zero round-trips!)
+            stacked_anchors_cpu = stacked_anchors.cpu()
 
             # Extract active states: [num_full_blocks, 1, heads, micro_block_size, head_dim]
             active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
             active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
 
+            # Pre-allocate NativeBlockPool indices in a single batch call!
+            pool_indices = []
+            if self.native_pool is not None:
+                pool_indices = self.native_pool.allocate_blocks(num_full_blocks)
+
             for i in range(num_full_blocks):
                 anchor_idx = base_idx + i * block_capacity
                 anchor_kv = stacked_anchors[i]
+                anchor_kv_cpu = stacked_anchors_cpu[i]
                 
-                # Pre-allocate NativeBlockPool index in the single-threaded main thread
-                pool_idx = None
-                if self.native_pool is not None:
-                    pool_idx = self.native_pool.allocate_block()
+                pool_idx = pool_indices[i] if pool_indices else None
 
                 new_block = StreamingKVBlock(
                     anchor_idx=anchor_idx,
                     anchor_kv=anchor_kv,
-                    micro_block_size=self.micro_block_size,
+                    anchor_kv_cpu=anchor_kv_cpu,
+                    micro_block_size=micro_block_size,
                     token_indices=list(range(anchor_idx, anchor_idx + block_capacity)),
                     pool_idx=pool_idx,
                 )
@@ -293,7 +360,8 @@ class StreamingSparseIngestManager:
             new_block = StreamingKVBlock(
                 anchor_idx=anchor_idx,
                 anchor_kv=anchor_kv,
-                micro_block_size=self.micro_block_size,
+                anchor_kv_cpu=anchor_kv.cpu(),
+                micro_block_size=micro_block_size,
                 token_indices=token_indices,
                 pool_idx=pool_idx,
             )
@@ -316,7 +384,7 @@ class StreamingSparseIngestManager:
 
         # Batch submit all compression requests in one consolidation transfer
         if full_blocks_to_compress:
-            self._submit_blocks_batched(full_blocks_to_compress)
+            self._submit_blocks_batched(session_id, layer_idx, full_blocks_to_compress)
 
         # Track peak dense footprint
         dense_tokens = self._count_dense_tokens(blocks)
@@ -324,29 +392,38 @@ class StreamingSparseIngestManager:
             if dense_tokens > self.stats["total_dense_tokens_peak"]:
                 self.stats["total_dense_tokens_peak"] = dense_tokens
 
-    def _submit_blocks_batched(self, blocks_list: List[StreamingKVBlock]):
+    def _submit_blocks_batched(self, session_id: str, layer_idx: int, blocks_list: List[StreamingKVBlock]):
         if not blocks_list:
             return
 
-        # Stack K-V active tensors
-        stacked_k = torch.cat([b.active_k for b in blocks_list], dim=0)
-        stacked_v = torch.cat([b.active_v for b in blocks_list], dim=0)
+        # Fetch shape metadata from the first active block
+        micro_block_size = blocks_list[0].micro_block_size
+        heads = blocks_list[0].active_k.shape[1]
+        head_dim = blocks_list[0].active_k.shape[3]
+        device = blocks_list[0].active_k.device
 
-        # Single consolidated copy to CPU.
-        # CRITICAL: We use non_blocking=True for transfer efficiency.
-        # To avoid blocking the main thread, we record a CUDA Event and synchronize in the background.
-        stacked_k_cpu = stacked_k.to("cpu", non_blocking=True)
-        stacked_v_cpu = stacked_v.to("cpu", non_blocking=True)
+        # Get session/layer-specific persistent staging buffers
+        k_gpu, v_gpu, k_cpu, v_cpu = self._get_layer_staging_buffers(
+            session_id, layer_idx, len(blocks_list), heads, micro_block_size, head_dim, device
+        )
+
+        # Concat K-V active tensors in-place directly into our pre-allocated GPU staging buffers
+        torch.cat([b.active_k for b in blocks_list], dim=0, out=k_gpu)
+        torch.cat([b.active_v for b in blocks_list], dim=0, out=v_gpu)
+
+        # Fast zero-allocation asynchronous DMA copy to pinned CPU staging memory
+        k_cpu.copy_(k_gpu, non_blocking=True)
+        v_cpu.copy_(v_gpu, non_blocking=True)
 
         event = None
-        if stacked_k.device.type == "cuda":
+        if k_gpu.is_cuda:
             event = torch.cuda.Event()
             event.record()
 
-        # Enqueue individual blocks
+        # Enqueue individual blocks referencing CPU pinned memory slices
         for idx, block in enumerate(blocks_list):
-            k_cpu_slice = stacked_k_cpu[idx : idx + 1]
-            v_cpu_slice = stacked_v_cpu[idx : idx + 1]
+            k_cpu_slice = k_cpu[idx : idx + 1]
+            v_cpu_slice = v_cpu[idx : idx + 1]
 
             try:
                 self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, event))

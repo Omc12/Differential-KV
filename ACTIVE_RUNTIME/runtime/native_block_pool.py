@@ -44,6 +44,13 @@ class NativeBlockPool:
         if not self._free_indices:
             raise RuntimeError("NativeBlockPool is out of memory! Increase max_blocks.")
         return self._free_indices.pop()
+
+    def allocate_blocks(self, count: int) -> list:
+        if len(self._free_indices) < count:
+            raise RuntimeError(f"NativeBlockPool is out of memory! Requested {count}, available {len(self._free_indices)}")
+        allocated = self._free_indices[-count:]
+        del self._free_indices[-count:]
+        return allocated
         
     def free_block(self, pool_idx: int):
         self._free_indices.append(pool_idx)
