@@ -109,9 +109,12 @@ class KVRuntimeManager:
             6                                                                  # scales (2) + seq_lens (4)
         )
         
-        # Dedicate 75% of the gpu_budget to the contiguous NativeBlockPool to ensure plenty of blocks
+        # Dedicate pool budget to the contiguous NativeBlockPool.
+        # Cap at 24,000 blocks: sufficient for 4 concurrent 25K sessions
+        # (each uses ~2,700 blocks across 28 layers) with 2x safety margin.
+        # Pre-allocated torch.zeros, so every block beyond actual usage wastes VRAM.
         pool_budget_bytes = int(gpu_budget_gb * (1024 ** 3) * 0.75)
-        dynamic_max_blocks = max(20000, pool_budget_bytes // bytes_per_block)
+        dynamic_max_blocks = max(4000, min(24000, pool_budget_bytes // bytes_per_block))
         
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
@@ -127,10 +130,12 @@ class KVRuntimeManager:
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
         self.recon_cache = ReconstructionCache(max_entries=recon_cache_size)
 
-        # Instantiate ReconstructionPool for high-throughput decode path
+        # Instantiate ReconstructionPool for high-throughput decode path.
+        # 128 slots covers all realistic working sets (recent blocks in a conversation);
+        # reducing from 256 saves ~16.8 MB of persistent GPU K+V storage.
         from native_core.recon_cache import ReconstructionPool
         self.recon_pool = ReconstructionPool(
-            max_cached_blocks=256 if self.streaming_ingest else 2048,
+            max_cached_blocks=128 if self.streaming_ingest else 512,
             num_kv_heads=self.kv_heads,
             head_dim=self.head_dim,
             micro_block_size=256 if self.streaming_ingest else self.micro_block_size,
@@ -385,8 +390,9 @@ class KVRuntimeManager:
         ws_key = (session_id, layer_idx)
         ws = self.decode_workspace.get(ws_key)
         if ws is None:
-            # Allocate with head room (+25%) to reduce future reallocations
-            alloc_len = max(total_seq_len + total_seq_len // 4, 64)
+            # Allocate with 5% headroom to reduce future reallocations while minimising
+            # persistent VRAM waste. Reallocation is rare (vectorised GPU copy) and cheap.
+            alloc_len = max(total_seq_len + max(total_seq_len // 20, 64), 128)
             k_ws = torch.zeros(
                 (1, self.kv_heads, alloc_len, self.head_dim),
                 dtype=dtype, device=self.device
@@ -404,7 +410,7 @@ class KVRuntimeManager:
             # Vectorized GPU-to-GPU copy from old workspace to resized workspace
             old_k, old_v = ws
             old_len = old_k.shape[2]
-            alloc_len = max(total_seq_len + total_seq_len // 4, 64)
+            alloc_len = max(total_seq_len + max(total_seq_len // 20, 64), 128)
             k_ws = torch.zeros(
                 (1, self.kv_heads, alloc_len, self.head_dim),
                 dtype=dtype, device=self.device

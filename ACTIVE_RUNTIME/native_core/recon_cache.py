@@ -134,10 +134,11 @@ class ReconstructionPool:
         self.K = torch.zeros((max_cached_blocks, num_kv_heads, micro_block_size, head_dim), dtype=torch.float16, device=device)
         self.V = torch.zeros((max_cached_blocks, num_kv_heads, micro_block_size, head_dim), dtype=torch.float16, device=device)
         
-        # Map: pool_idx -> cache_slot_idx (GPU tensor)
-        self.pool_to_slot = torch.full((200000,), -1, dtype=torch.int32, device=device)
+        # Map: pool_idx -> cache_slot_idx (GPU tensor).
+        # Initial size 32,000 covers all realistic sessions; grows on demand if exceeded.
+        self.pool_to_slot = torch.full((32000,), -1, dtype=torch.int32, device=device)
         # Map: pool_idx -> cache_slot_idx (CPU shadow NumPy array to avoid PCIe sync)
-        self.pool_to_slot_cpu = np.full((200000,), -1, dtype=np.int32)
+        self.pool_to_slot_cpu = np.full((32000,), -1, dtype=np.int32)
         # Map: cache_slot_idx -> pool_idx (GPU tensor)
         self.slot_to_pool = torch.full((max_cached_blocks,), -1, dtype=torch.int32, device=device)
         

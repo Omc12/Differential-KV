@@ -172,7 +172,7 @@ class StreamingSparseIngestManager:
             buffers[0].shape[3] != head_dim):
             
             # Allocate larger buffers dynamically
-            alloc_blocks = max(num_blocks, 128)
+            alloc_blocks = max(num_blocks, 16)
             alloc_mbs = max(micro_block_size, 256)
             
             k_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
@@ -446,12 +446,14 @@ class StreamingSparseIngestManager:
         k_cpu.copy_(k_gpu, non_blocking=True)
         v_cpu.copy_(v_gpu, non_blocking=True)
 
-        # Synchronize on the main thread BEFORE cloning slices.
-        # This ensures the pinned-memory copy is complete and the cloned tensors
-        # contain valid data. The staging buffer is then free to be overwritten
-        # by any subsequent layer call without corrupting the enqueued slices.
+        # Use a targeted CUDA Event to wait only for the DMA copy, not all subsequent
+        # GPU work. current_stream().synchronize() would also stall on any compute
+        # kernels queued after this point (e.g. next layer's projections), causing
+        # 600ms+ prefill overhead across 28 layers × 4 regions = 112 sync points.
         if k_gpu.is_cuda:
-            torch.cuda.current_stream().synchronize()
+            _dma_event = torch.cuda.Event()
+            _dma_event.record()
+            _dma_event.synchronize()
 
         # Enqueue cloned slices — each clone is an independent CPU tensor,
         # so the shared staging buffer can be safely reused across layers.
