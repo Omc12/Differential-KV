@@ -126,9 +126,10 @@ class StreamingSparseIngestManager:
         # session_id -> micro_block_size (dynamic adaptive size per session)
         self.session_micro_block_sizes: Dict[str, int] = {}
         
-        # (session_id, layer_idx) -> (k_gpu, v_gpu, k_cpu, v_cpu) pre-allocated pinned memory buffers
-        # Keyed per-layer to prevent cross-layer data corruption in the async compressor queue.
-        self.session_staging_buffers: Dict[Tuple[str, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # session_id -> (k_gpu, v_gpu, k_cpu, v_cpu) pre-allocated pinned memory buffers.
+        # A single buffer per session is shared across all layers (safe because slices are
+        # cloned before being enqueued into the async compressor — breaking aliasing).
+        self.session_staging_buffers: Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
         # Telemetry
         self.stats = {
@@ -155,14 +156,13 @@ class StreamingSparseIngestManager:
     def _get_session_staging_buffer(
         self,
         session_id: str,
-        layer_idx: int,
         num_blocks: int,
         heads: int,
         micro_block_size: int,
         head_dim: int,
         device: str
     ):
-        key = (session_id, layer_idx)
+        key = session_id
         buffers = self.session_staging_buffers.get(key)
         
         if (buffers is None or 
@@ -195,10 +195,7 @@ class StreamingSparseIngestManager:
     def clear_session(self, session_id: str):
         self.session_blocks.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
-        # Drop all layer staging buffers for this session
-        keys_to_drop = [k for k in self.session_staging_buffers if k[0] == session_id]
-        for k in keys_to_drop:
-            del self.session_staging_buffers[k]
+        self.session_staging_buffers.pop(session_id, None)
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -436,32 +433,34 @@ class StreamingSparseIngestManager:
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
 
-        # Get per-(session, layer) persistent staging buffers — keyed by layer to prevent
-        # cross-layer data corruption when the async compressor processes queued slices.
+        # Get single session-level staging buffer (shared across all layers).
         k_gpu, v_gpu, k_cpu, v_cpu = self._get_session_staging_buffer(
-            session_id, layer_idx, len(blocks_list), heads, micro_block_size, head_dim, device
+            session_id, len(blocks_list), heads, micro_block_size, head_dim, device
         )
 
         # Concat K-V active tensors in-place directly into our pre-allocated GPU staging buffers
         torch.cat([b.active_k for b in blocks_list], dim=0, out=k_gpu)
         torch.cat([b.active_v for b in blocks_list], dim=0, out=v_gpu)
 
-        # Fast zero-allocation asynchronous DMA copy to pinned CPU staging memory
+        # Synchronous GPU->CPU DMA via pinned memory
         k_cpu.copy_(k_gpu, non_blocking=True)
         v_cpu.copy_(v_gpu, non_blocking=True)
 
-        event = None
+        # Synchronize on the main thread BEFORE cloning slices.
+        # This ensures the pinned-memory copy is complete and the cloned tensors
+        # contain valid data. The staging buffer is then free to be overwritten
+        # by any subsequent layer call without corrupting the enqueued slices.
         if k_gpu.is_cuda:
-            event = torch.cuda.Event()
-            event.record()
+            torch.cuda.current_stream().synchronize()
 
-        # Enqueue individual blocks referencing CPU pinned memory slices
+        # Enqueue cloned slices — each clone is an independent CPU tensor,
+        # so the shared staging buffer can be safely reused across layers.
         for idx, block in enumerate(blocks_list):
-            k_cpu_slice = k_cpu[idx : idx + 1]
-            v_cpu_slice = v_cpu[idx : idx + 1]
+            k_cpu_slice = k_cpu[idx : idx + 1].clone()
+            v_cpu_slice = v_cpu[idx : idx + 1].clone()
 
             try:
-                self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, event))
+                self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, None))
                 with self.compressor._stats_lock:
                     self.compressor.stats["submitted"] += 1
                     depth = self.compressor._queue.qsize()
