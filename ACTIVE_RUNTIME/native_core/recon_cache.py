@@ -136,6 +136,8 @@ class ReconstructionPool:
         
         # Map: pool_idx -> cache_slot_idx (GPU tensor)
         self.pool_to_slot = torch.full((200000,), -1, dtype=torch.int32, device=device)
+        # Map: pool_idx -> cache_slot_idx (CPU shadow NumPy array to avoid PCIe sync)
+        self.pool_to_slot_cpu = np.full((200000,), -1, dtype=np.int32)
         # Map: cache_slot_idx -> pool_idx (GPU tensor)
         self.slot_to_pool = torch.full((max_cached_blocks,), -1, dtype=torch.int32, device=device)
         
@@ -162,6 +164,10 @@ class ReconstructionPool:
             new_tensor = torch.full((new_size,), -1, dtype=torch.int32, device=self.device)
             new_tensor[:self.pool_to_slot.shape[0]] = self.pool_to_slot
             self.pool_to_slot = new_tensor
+
+            new_cpu = np.full((new_size,), -1, dtype=np.int32)
+            new_cpu[:self.pool_to_slot_cpu.shape[0]] = self.pool_to_slot_cpu
+            self.pool_to_slot_cpu = new_cpu
 
         with self._lock:
             self.step_counter += 1
@@ -194,10 +200,12 @@ class ReconstructionPool:
             valid_old_mask = (old_pool_idxs >= 0)
             if valid_old_mask.any():
                 self.pool_to_slot[old_pool_idxs[valid_old_mask]] = -1
+                self.pool_to_slot_cpu[old_pool_idxs[valid_old_mask].cpu().numpy()] = -1
 
             # Write new pool indices
             self.pool_to_slot[miss_pool_idxs] = allocated_slots.to(torch.int32)
             self.slot_to_pool[allocated_slots] = miss_pool_idxs.to(torch.int32)
+            self.pool_to_slot_cpu[miss_pool_idxs.cpu().numpy()] = allocated_slots.cpu().numpy()
 
             # Update final slots list and update LRU scores
             final_slots = self.pool_to_slot[pool_indices_t]
@@ -228,14 +236,28 @@ class ReconstructionPool:
             # Clear mappings
             self.slot_to_pool[valid_slots] = -1
             self.pool_to_slot[valid_pool_idxs] = -1
+            self.pool_to_slot_cpu[valid_pool_idxs.cpu().numpy()] = -1
             self.lru_scores[valid_slots] = 0.0
+
+    def update_lru(self, hit_slots: list) -> None:
+        """
+        Updates the LRU timestamps for hit slots (called from decode hot path to avoid eviction).
+        """
+        if not hit_slots:
+            return
+        with self._lock:
+            self.step_counter += 1
+            hit_slots_t = torch.tensor(hit_slots, device=self.device, dtype=torch.long)
+            self.lru_scores[hit_slots_t] = self.step_counter
 
     def clear(self):
         with self._lock:
             self.pool_to_slot.fill_(-1)
+            self.pool_to_slot_cpu.fill(-1)
             self.slot_to_pool.fill_(-1)
             self.lru_scores.zero_()
             self.step_counter = 0
             self.K.zero_()
             self.V.zero_()
+
 

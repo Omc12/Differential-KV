@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingKVBlock:
     """
     A KV block with sparse-first lifecycle.
@@ -62,6 +62,7 @@ class StreamingKVBlock:
     state: str = "ACCUMULATING"  # ACCUMULATING | SUBMITTED | COMPRESSED | PAGED
     pool_idx: Optional[int] = None
     dirty: bool = True
+    _cache_id: Optional[str] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self):

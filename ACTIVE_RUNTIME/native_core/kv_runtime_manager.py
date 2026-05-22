@@ -30,7 +30,7 @@ from native_core.compression.async_compressor import AsyncCompressor
 # KVBlock definition (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)
 class KVBlock:
     """Physically stores compressed KV memory for one block of tokens."""
     anchor_idx: int
@@ -47,6 +47,7 @@ class KVBlock:
     active_v: Optional[torch.Tensor] = None
     pool_idx: Optional[int] = None
     dirty:    bool = True
+    _cache_id: Optional[str] = None
     _lock:    threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -342,20 +343,19 @@ class KVRuntimeManager:
         for b in blocks:
             snapshots.append(BlockSnapshot(b))
 
-        # ── 2. Compute total sequence length from snapshots ─────────────────────
-        total_seq_len = 0
-        for b_snap in snapshots:
-            total_seq_len += 1  # anchor
-            if b_snap.U is not None:
-                total_seq_len += b_snap.U.shape[0]
-            elif b_snap.active_k is not None:
-                total_seq_len += b_snap.active_k.shape[2]
+        # ── 2. Compute total sequence length in O(1) from the last block ─────────
+        last_block = snapshots[-1]
+        last_token_count = (
+            last_block.U.shape[0] if last_block.U is not None else (
+                last_block.active_k.shape[2] if last_block.active_k is not None else 0
+            )
+        )
+        total_seq_len = last_block.b.anchor_idx + 1 + last_token_count
 
-        # ── 3. Allocate or resize persistent workspace ────────────────────────
+        # ── 3. Allocate or resize persistent workspace with vectorized copy ──────
         ws_key = (session_id, layer_idx)
         ws = self.decode_workspace.get(ws_key)
-        ws_new = False
-        if ws is None or ws[0].shape[2] < total_seq_len:
+        if ws is None:
             # Allocate with head room (+25%) to reduce future reallocations
             alloc_len = max(total_seq_len + total_seq_len // 4, 64)
             k_ws = torch.zeros(
@@ -368,16 +368,31 @@ class KVRuntimeManager:
             )
             self.decode_workspace[ws_key] = (k_ws, v_ws)
             ws = (k_ws, v_ws)
-            ws_new = True
+            # If it's a completely new workspace, all blocks must be written
+            for b_snap in snapshots:
+                b_snap.dirty = True
+        elif ws[0].shape[2] < total_seq_len:
+            # Vectorized GPU-to-GPU copy from old workspace to resized workspace
+            old_k, old_v = ws
+            old_len = old_k.shape[2]
+            alloc_len = max(total_seq_len + total_seq_len // 4, 64)
+            k_ws = torch.zeros(
+                (1, self.kv_heads, alloc_len, self.head_dim),
+                dtype=dtype, device=self.device
+            )
+            v_ws = torch.zeros(
+                (1, self.kv_heads, alloc_len, self.head_dim),
+                dtype=dtype, device=self.device
+            )
+            k_ws[..., :old_len, :] = old_k
+            v_ws[..., :old_len, :] = old_v
+            self.decode_workspace[ws_key] = (k_ws, v_ws)
+            ws = (k_ws, v_ws)
+            # Keep dirty blocks as they are; no need to mark past blocks dirty!
 
         k_ws, v_ws = ws
 
-        # If workspace was newly allocated or resized, all blocks must be rewritten
-        if ws_new:
-            for b_snap in snapshots:
-                b_snap.dirty = True
-
-        # ── 4. Separate dirty blocks into categories ───────────────────────────────
+        # ── 4. Separate dirty blocks into categories using O(1) offsets ──────────
         anchor_positions = []     # position index in k_ws
         anchor_k_list   = []     # [kv_heads, head_dim] tensors
         anchor_v_list   = []
@@ -387,14 +402,16 @@ class KVRuntimeManager:
 
         dense_copies = []        # (b_snap, start_pos, length)
 
-        cursor = 0
         miss_pool_idxs = []
         dirty_blocks = []
+        hit_slots = []
 
         for b_snap in snapshots:
-            b_anchor_pos = cursor
-            cursor += 1
-            b_content_pos = cursor
+            if not b_snap.dirty:
+                continue
+
+            b_anchor_pos = b_snap.b.anchor_idx
+            b_content_pos = b_anchor_pos + 1
 
             if b_snap.U is not None and b_snap.V is not None:
                 block_len = b_snap.U.shape[0]
@@ -403,32 +420,31 @@ class KVRuntimeManager:
             else:
                 block_len = 0
 
-            cursor += block_len
+            dirty_blocks.append(b_snap)
 
-            if b_snap.dirty:
-                dirty_blocks.append(b_snap)
+            anchor_positions.append(b_anchor_pos)
+            anchor_k_list.append(b_snap.anchor_kv[0, 0])
+            anchor_v_list.append(b_snap.anchor_kv[0, 1])
 
-                anchor_positions.append(b_anchor_pos)
-                anchor_k_list.append(b_snap.anchor_kv[0, 0])
-                anchor_v_list.append(b_snap.anchor_kv[0, 1])
-
-                if b_snap.U is not None and b_snap.V is not None:
-                    pool_idx = b_snap.pool_idx
-                    if pool_idx is not None:
-                        if pool_idx < self.recon_pool.pool_to_slot.shape[0]:
-                            slot = int(self.recon_pool.pool_to_slot[pool_idx])
-                        else:
-                            slot = -1
-                        if slot >= 0:
-                            compressed_hits.append((b_snap, slot, b_content_pos))
-                        else:
-                            compressed_misses.append((b_snap, b_content_pos))
-                            miss_pool_idxs.append(pool_idx)
+            if b_snap.U is not None and b_snap.V is not None:
+                pool_idx = b_snap.pool_idx
+                if pool_idx is not None:
+                    # ZERO-SYNC: check CPU shadow array to avoid PCIe sync
+                    if pool_idx < self.recon_pool.pool_to_slot_cpu.shape[0]:
+                        slot = int(self.recon_pool.pool_to_slot_cpu[pool_idx])
+                    else:
+                        slot = -1
+                    if slot >= 0:
+                        compressed_hits.append((b_snap, slot, b_content_pos))
+                        hit_slots.append(slot)
                     else:
                         compressed_misses.append((b_snap, b_content_pos))
-                        miss_pool_idxs.append(-1)
-                elif b_snap.active_k is not None:
-                    dense_copies.append((b_snap, b_content_pos, block_len))
+                        miss_pool_idxs.append(pool_idx)
+                else:
+                    compressed_misses.append((b_snap, b_content_pos))
+                    miss_pool_idxs.append(-1)
+            elif b_snap.active_k is not None:
+                dense_copies.append((b_snap, b_content_pos, block_len))
 
         # ── 5. Vectorized anchor copy for dirty blocks ─────────────────────────
         if anchor_positions:
@@ -445,6 +461,9 @@ class KVRuntimeManager:
                 self.recon_pool.K[slot, :, :block_len, :]
             v_ws[0, :, start_pos:start_pos + block_len, :] = \
                 self.recon_pool.V[slot, :, :block_len, :]
+
+        if hit_slots:
+            self.recon_pool.update_lru(hit_slots)
 
         # ── 7. Compressed misses — batched GEMM then write into pool + ws ─────
         if compressed_misses:
