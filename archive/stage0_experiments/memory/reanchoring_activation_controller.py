@@ -1,1 +1,0 @@
-class ReanchoringActivationController: pass

@@ -1,0 +1,16 @@
+﻿27: '# ΓöÇΓöÇ Salvaged P1: Adaptive rank selector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ\n'
+28: 'try:\n'
+29: '    import importlib.util as _ilu\n'
+30: '    _adaptive_path = os.path.abspath(\n'
+31: "        os.path.join(os.path.dirname(__file__), '..', '..', 'RESEARCH_PROTOTYPES',\n"
+32: "                     'compression', 'adaptive.py')\n"
+33: '    )\n'
+34: '    _spec = _ilu.spec_from_file_location("rp_adaptive", _adaptive_path)\n'
+35: '    _rp_mod = _ilu.module_from_spec(_spec)\n'
+36: '    _spec.loader.exec_module(_rp_mod)\n'
+37: '    _AdaptiveRankSelector = _rp_mod.AdaptiveRankSelector\n'
+38: '    _ADAPTIVE_RANK = True\n'
+39: 'except Exception:\n'
+40: '    _ADAPTIVE_RANK = False\n'
+41: '    _AdaptiveRankSelector = None\n'
+42: '\n'

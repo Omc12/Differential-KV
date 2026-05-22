@@ -1,6 +1,0 @@
-{"turn": 0, "trajectory_reset_frequency": 0.0, "stale_anchor_collapse": 0, "semantic_branch_regeneration": 100.0, "frozen_trajectory_ratio": 0.0}
-{"turn": 1, "trajectory_reset_frequency": 0.0, "stale_anchor_collapse": 0, "semantic_branch_regeneration": 100.0, "frozen_trajectory_ratio": 0.0}
-{"turn": 2, "trajectory_reset_frequency": 0.0, "stale_anchor_collapse": 0, "semantic_branch_regeneration": 100.0, "frozen_trajectory_ratio": 0.0}
-{"turn": 3, "trajectory_reset_frequency": 0.3333333333333333, "stale_anchor_collapse": 3, "semantic_branch_regeneration": 96.31501125509934, "frozen_trajectory_ratio": 0.29320390859672263}
-{"turn": 4, "trajectory_reset_frequency": 0.25, "stale_anchor_collapse": 3, "semantic_branch_regeneration": 100.0, "frozen_trajectory_ratio": 0.0}
-{"turn": 5, "trajectory_reset_frequency": 0.2, "stale_anchor_collapse": 3, "semantic_branch_regeneration": 100.0, "frozen_trajectory_ratio": 0.0}

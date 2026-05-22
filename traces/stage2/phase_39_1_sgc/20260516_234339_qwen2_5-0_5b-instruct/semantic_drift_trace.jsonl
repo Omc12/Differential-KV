@@ -1,6 +1,0 @@
-{"ts": 1778955226.2352576, "step": 20, "kl_divergence": 15.7734375, "preservation_score": 0.0}
-{"ts": 1778955227.4594214, "step": 40, "kl_divergence": 6.59375, "preservation_score": 0.0}
-{"ts": 1778955228.702573, "step": 60, "kl_divergence": 14.203125, "preservation_score": 0.0}
-{"ts": 1778955229.9485004, "step": 80, "kl_divergence": 14.84375, "preservation_score": 0.0}
-{"ts": 1778955231.1890695, "step": 100, "kl_divergence": 12.9375, "preservation_score": 0.0}
-{"ts": 1778955232.4561148, "step": 120, "kl_divergence": 18.5625, "preservation_score": 0.0}

@@ -1,1 +1,0 @@
-class DistributedConfidenceSampler: pass

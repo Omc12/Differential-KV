@@ -1,7 +1,0 @@
-{
-  "status": "COMPLETED",
-  "model_name": "Qwen/Qwen2.5-7B-Instruct",
-  "total_turns": 6,
-  "timestamp": 1779029422.5197308,
-  "target": "Live Serving Path Integrity"
-}

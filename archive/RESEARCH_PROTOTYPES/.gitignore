@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Experiment results (large, reproducible)
+results/
+
+# Plots (reproducible from results/)
+results/plots/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# C/C++ and CUDA build artifacts
+*.dll
+*.lib
+*.exp
+*.exe
+*.obj
+*.o
+*.so
+*.dylib
+*.pdb
+
+# Large telemetry profiler traces
+raw_torch_profiler_trace.json
+

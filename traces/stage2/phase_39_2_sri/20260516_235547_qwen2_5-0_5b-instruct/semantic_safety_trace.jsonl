@@ -1,4 +1,0 @@
-{"ts": 1778955956.2125504, "step": 20, "drift": 9.7109375, "pressure": 9.6309375, "is_sparse": true, "is_preserved": false}
-{"ts": 1778955957.6128645, "step": 40, "drift": 13.140625, "pressure": 13.094483764648437, "is_sparse": true, "is_preserved": false}
-{"ts": 1778955958.8776155, "step": 80, "drift": 15.4921875, "pressure": 15.435205147242547, "is_sparse": true, "is_preserved": false}
-{"ts": 1778955960.186522, "step": 120, "drift": 10.140625, "pressure": 10.087757196547887, "is_sparse": true, "is_preserved": false}

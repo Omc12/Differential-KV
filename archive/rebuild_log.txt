@@ -1,0 +1,365 @@
+﻿======================================================================
+STEP 1 ù Archive entire junk top-level dirs
+======================================================================
+  [skip]  aeg
+  [moved] agents  ->  archive\agents  
+  [moved] ako  ->  archive\ako  
+  [moved] analysis  ->  archive\analysis  
+  [moved] anchor_logic  ->  archive\anchor_logic  
+  [moved] api  ->  archive\api  
+  [moved] arc  ->  archive\arc  
+  [moved] aro  ->  archive\aro  
+  [moved] bso  ->  archive\bso  
+  [moved] cem  ->  archive\cem  
+  [moved] collective  ->  archive\collective  
+  [moved] compiler  ->  archive\compiler  
+  [moved] compression  ->  archive\compression  
+  [moved] compute  ->  archive\compute  
+  [moved] continuity  ->  archive\continuity  
+  [moved] crs  ->  archive\crs  
+  [moved] cuda_kernels  ->  archive\cuda_kernels  
+  [moved] dar  ->  archive\dar  
+  [moved] decoder  ->  archive\decoder  
+  [moved] deployment  ->  archive\deployment  
+  [moved] dist  ->  archive\dist  
+  [moved] distributed  ->  archive\distributed  
+  [moved] distributed_execution  ->  archive\distributed_execution  
+  [moved] distributed_inference  ->  archive\distributed_inference  
+  [moved] distributed_nccl  ->  archive\distributed_nccl  
+  [moved] distributed_optimization  ->  archive\distributed_optimization  
+  [moved] distributed_orchestration  ->  archive\distributed_orchestration  
+  [moved] elf  ->  archive\elf  
+  [moved] emergence  ->  archive\emergence  
+  [moved] empirical  ->  archive\empirical  
+  [moved] esm  ->  archive\esm  
+  [moved] evaluation  ->  archive\evaluation  
+  [moved] evolution  ->  archive\evolution  
+  [moved] experiments  ->  archive\experiments  
+  [moved] federation  ->  archive\federation  
+  [moved] gpu  ->  archive\gpu  
+  [moved] hardware_materialization  ->  archive\hardware_materialization  
+  [moved] hec  ->  archive\hec  
+  [moved] hpo  ->  archive\hpo  
+  [moved] hsha  ->  archive\hsha  
+  [moved] identity  ->  archive\identity  
+  [moved] inference  ->  archive\inference  
+  [moved] integrations  ->  archive\integrations  
+  [moved] kernels  ->  archive\kernels  
+  [moved] krx  ->  archive\krx  
+  [moved] kv_collection  ->  archive\kv_collection  
+  [moved] lcs  ->  archive\lcs  
+  [moved] memory  ->  archive\memory  
+  [moved] models  ->  archive\models  
+  [moved] native  ->  archive\native  
+  [moved] optimization  ->  archive\optimization  
+  [moved] orchestration  ->  archive\orchestration  
+  [moved] per  ->  archive\per  
+  [moved] profiling  ->  archive\profiling  
+  [moved] rbe  ->  archive\rbe  
+  [moved] reconstruction  ->  archive\reconstruction  
+  [moved] regulation  ->  archive\regulation  
+  [moved] repositories  ->  archive\repositories  
+  [moved] repro  ->  archive\repro  
+  [moved] revival  ->  archive\revival  
+  [moved] robustness  ->  archive\robustness  
+  [moved] runtime  ->  archive\runtime  
+  [moved] runtime_optimization  ->  archive\runtime_optimization  
+  [moved] serving  ->  archive\serving  
+  [moved] ski  ->  archive\ski  
+  [moved] skv  ->  archive\skv  
+  [moved] sre  ->  archive\sre  
+  [moved] telemetry  ->  archive\telemetry  
+  [moved] training  ->  archive\training  
+  [moved] triton_kernels  ->  archive\triton_kernels  
+  [moved] validation  ->  archive\validation  
+  [moved] virtualization  ->  archive\virtualization  
+  [moved] visualization  ->  archive\visualization  
+  [moved] EXPERIMENTAL_RUNTIME  ->  archive\EXPERIMENTAL_RUNTIME  
+  [moved] MINIMAL_RUNTIME  ->  archive\MINIMAL_RUNTIME  
+  [moved] NATIVE_RUNTIME  ->  archive\NATIVE_RUNTIME  
+  [moved] ARCHIVED_SYNTHETIC_SYSTEMS  ->  archive\ARCHIVED_SYNTHETIC_SYSTEMS  
+  [moved] RESEARCH_PROTOTYPES  ->  archive\RESEARCH_PROTOTYPES  
+  [moved] __pycache__  ->  archive\__pycache__  
+
+======================================================================
+STEP 2 ù Archive root-level junk files
+======================================================================
+  [moved] phase27_deadcode_audit.md  ->  archive\phase27_deadcode_audit.md  
+  [moved] phase27_distributed_truth_audit.md  ->  archive\phase27_distributed_truth_audit.md  
+  [moved] phase27_final_execution_verdict.md  ->  archive\phase27_final_execution_verdict.md  
+  [moved] phase27_full_reality_matrix.md  ->  archive\phase27_full_reality_matrix.md  
+  [moved] phase27_live_execution_trace.md  ->  archive\phase27_live_execution_trace.md  
+  [moved] phase27_real_serving_validation.md  ->  archive\phase27_real_serving_validation.md  
+  [moved] phase27_system_verification.md  ->  archive\phase27_system_verification.md  
+  [moved] phase27_true_runtime_roadmap.md  ->  archive\phase27_true_runtime_roadmap.md  
+  [moved] phase28_cuda_graph_report.md  ->  archive\phase28_cuda_graph_report.md  
+  [moved] phase28_kernel_dispatch_validation.md  ->  archive\phase28_kernel_dispatch_validation.md  
+  [moved] phase28_long_context_fix.md  ->  archive\phase28_long_context_fix.md  
+  [moved] phase28_native_build_report.md  ->  archive\phase28_native_build_report.md  
+  [moved] phase28_native_pool_activation.md  ->  archive\phase28_native_pool_activation.md  
+  [moved] phase28_real_benchmarks.md  ->  archive\phase28_real_benchmarks.md  
+  [moved] phase28_runtime_reclassification.md  ->  archive\phase28_runtime_reclassification.md  
+  [moved] phase28_triton_cutover.md  ->  archive\phase28_triton_cutover.md  
+  [moved] refactor_repo.py  ->  archive\refactor_repo.py  
+
+======================================================================
+STEP 3 ù Archive ACTIVE_RUNTIME phase docs and trace data
+======================================================================
+  [moved] ACTIVE_RUNTIME\diagnose_step.py  ->  ACTIVE_RUNTIME\archive\diagnose_step.py  
+  [moved] ACTIVE_RUNTIME\launch_real_serving.py  ->  ACTIVE_RUNTIME\archive\launch_real_serving.py  
+  [moved] ACTIVE_RUNTIME\p246_run.py  ->  ACTIVE_RUNTIME\archive\p246_run.py  
+  [moved] ACTIVE_RUNTIME\phase15_runtime_reality_report.md  ->  ACTIVE_RUNTIME\archive\phase15_runtime_reality_report.md  
+  [moved] ACTIVE_RUNTIME\phase15_salvage_delta_audit.md  ->  ACTIVE_RUNTIME\archive\phase15_salvage_delta_audit.md  
+  [moved] ACTIVE_RUNTIME\phase16_category_execution_trace.md  ->  ACTIVE_RUNTIME\archive\phase16_category_execution_trace.md  
+  [moved] ACTIVE_RUNTIME\phase16_complete_salvage_matrix.md  ->  ACTIVE_RUNTIME\archive\phase16_complete_salvage_matrix.md  
+  [moved] ACTIVE_RUNTIME\phase16_native_runtime_candidates.md  ->  ACTIVE_RUNTIME\archive\phase16_native_runtime_candidates.md  
+  [moved] ACTIVE_RUNTIME\phase16_rejected_architecture.md  ->  ACTIVE_RUNTIME\archive\phase16_rejected_architecture.md  
+  [moved] ACTIVE_RUNTIME\phase16_synergy_report.md  ->  ACTIVE_RUNTIME\archive\phase16_synergy_report.md  
+  [moved] ACTIVE_RUNTIME\phase17_cuda_stream_prefetch.md  ->  ACTIVE_RUNTIME\archive\phase17_cuda_stream_prefetch.md  
+  [moved] ACTIVE_RUNTIME\phase17_hotpath_collapse_report.md  ->  ACTIVE_RUNTIME\archive\phase17_hotpath_collapse_report.md  
+  [moved] ACTIVE_RUNTIME\phase17_metadata_pooling.md  ->  ACTIVE_RUNTIME\archive\phase17_metadata_pooling.md  
+  [moved] ACTIVE_RUNTIME\phase17_native_boundary.md  ->  ACTIVE_RUNTIME\archive\phase17_native_boundary.md  
+  [moved] ACTIVE_RUNTIME\phase17_static_sparse_graphs.md  ->  ACTIVE_RUNTIME\archive\phase17_static_sparse_graphs.md  
+  [moved] ACTIVE_RUNTIME\phase19_archival_boundary.md  ->  ACTIVE_RUNTIME\archive\phase19_archival_boundary.md  
+  [moved] ACTIVE_RUNTIME\phase19_final_architecture.md  ->  ACTIVE_RUNTIME\archive\phase19_final_architecture.md  
+  [moved] ACTIVE_RUNTIME\phase19_hotpath_validation.md  ->  ACTIVE_RUNTIME\archive\phase19_hotpath_validation.md  
+  [moved] ACTIVE_RUNTIME\phase19_runtime_convergence_report.md  ->  ACTIVE_RUNTIME\archive\phase19_runtime_convergence_report.md  
+  [moved] ACTIVE_RUNTIME\phase19_unified_execution_trace.md  ->  ACTIVE_RUNTIME\archive\phase19_unified_execution_trace.md  
+  [moved] ACTIVE_RUNTIME\phase20_batch_engine_survival.md  ->  ACTIVE_RUNTIME\archive\phase20_batch_engine_survival.md  
+  [moved] ACTIVE_RUNTIME\phase20_native_serving_validation.md  ->  ACTIVE_RUNTIME\archive\phase20_native_serving_validation.md  
+  [moved] ACTIVE_RUNTIME\phase20_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase20_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase20_post_python_bottlenecks.md  ->  ACTIVE_RUNTIME\archive\phase20_post_python_bottlenecks.md  
+  [moved] ACTIVE_RUNTIME\phase20_reality_verdict.md  ->  ACTIVE_RUNTIME\archive\phase20_reality_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase20_runtime_boundary.md  ->  ACTIVE_RUNTIME\archive\phase20_runtime_boundary.md  
+  [moved] ACTIVE_RUNTIME\phase20_serving_mapping.md  ->  ACTIVE_RUNTIME\archive\phase20_serving_mapping.md  
+  [moved] ACTIVE_RUNTIME\phase21_architecture_finality.md  ->  ACTIVE_RUNTIME\archive\phase21_architecture_finality.md  
+  [moved] ACTIVE_RUNTIME\phase21_first_native_target.md  ->  ACTIVE_RUNTIME\archive\phase21_first_native_target.md  
+  [moved] ACTIVE_RUNTIME\phase21_memory_ownership_trace.md  ->  ACTIVE_RUNTIME\archive\phase21_memory_ownership_trace.md  
+  [moved] ACTIVE_RUNTIME\phase21_native_failure_modes.md  ->  ACTIVE_RUNTIME\archive\phase21_native_failure_modes.md  
+  [moved] ACTIVE_RUNTIME\phase21_native_readiness_matrix.md  ->  ACTIVE_RUNTIME\archive\phase21_native_readiness_matrix.md  
+  [moved] ACTIVE_RUNTIME\phase21_python_hotpath_audit.md  ->  ACTIVE_RUNTIME\archive\phase21_python_hotpath_audit.md  
+  [moved] ACTIVE_RUNTIME\phase21_viability_verdict.md  ->  ACTIVE_RUNTIME\archive\phase21_viability_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase22_async_paging_design.md  ->  ACTIVE_RUNTIME\archive\phase22_async_paging_design.md  
+  [moved] ACTIVE_RUNTIME\phase22_fragmentation_verdict.md  ->  ACTIVE_RUNTIME\archive\phase22_fragmentation_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase22_memory_state_machine.md  ->  ACTIVE_RUNTIME\archive\phase22_memory_state_machine.md  
+  [moved] ACTIVE_RUNTIME\phase22_native_asynccompressor.md  ->  ACTIVE_RUNTIME\archive\phase22_native_asynccompressor.md  
+  [moved] ACTIVE_RUNTIME\phase22_native_boundary.md  ->  ACTIVE_RUNTIME\archive\phase22_native_boundary.md  
+  [moved] ACTIVE_RUNTIME\phase22_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase22_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase22_runtime_stability_report.md  ->  ACTIVE_RUNTIME\archive\phase22_runtime_stability_report.md  
+  [moved] ACTIVE_RUNTIME\phase22_slab_allocator_design.md  ->  ACTIVE_RUNTIME\archive\phase22_slab_allocator_design.md  
+  [moved] ACTIVE_RUNTIME\phase23_gil_elimination_report.md  ->  ACTIVE_RUNTIME\archive\phase23_gil_elimination_report.md  
+  [moved] ACTIVE_RUNTIME\phase23_native_extraction_verdict.md  ->  ACTIVE_RUNTIME\archive\phase23_native_extraction_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase23_native_runtime_trace.md  ->  ACTIVE_RUNTIME\archive\phase23_native_runtime_trace.md  
+  [moved] ACTIVE_RUNTIME\phase23_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase23_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase23_paging_latency_report.md  ->  ACTIVE_RUNTIME\archive\phase23_paging_latency_report.md  
+  [moved] ACTIVE_RUNTIME\phase23_race_condition_report.md  ->  ACTIVE_RUNTIME\archive\phase23_race_condition_report.md  
+  [moved] ACTIVE_RUNTIME\phase23_runtime_stability.md  ->  ACTIVE_RUNTIME\archive\phase23_runtime_stability.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_compressed_prefill.md  ->  ACTIVE_RUNTIME\archive\phase24_5_compressed_prefill.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_dense_dependency_map.md  ->  ACTIVE_RUNTIME\archive\phase24_5_dense_dependency_map.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_dense_elimination_verdict.md  ->  ACTIVE_RUNTIME\archive\phase24_5_dense_elimination_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_kv_lifecycle_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_5_kv_lifecycle_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_micro_recency.md  ->  ACTIVE_RUNTIME\archive\phase24_5_micro_recency.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_openwebui_behavior.md  ->  ACTIVE_RUNTIME\archive\phase24_5_openwebui_behavior.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_phase25_gate.md  ->  ACTIVE_RUNTIME\archive\phase24_5_phase25_gate.md  
+  [moved] ACTIVE_RUNTIME\phase24_5_streaming_compression.md  ->  ACTIVE_RUNTIME\archive\phase24_5_streaming_compression.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_allocator_behavior.md  ->  ACTIVE_RUNTIME\archive\phase24_6_allocator_behavior.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_dense_execution_audit.md  ->  ACTIVE_RUNTIME\archive\phase24_6_dense_execution_audit.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_execution_reality_verdict.md  ->  ACTIVE_RUNTIME\archive\phase24_6_execution_reality_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_live_residency.md  ->  ACTIVE_RUNTIME\archive\phase24_6_live_residency.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_next_blocker.md  ->  ACTIVE_RUNTIME\archive\phase24_6_next_blocker.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_openwebui_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_6_openwebui_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_6_raw_results.json  ->  ACTIVE_RUNTIME\archive\phase24_6_raw_results.json  
+  [moved] ACTIVE_RUNTIME\phase24_6_real_vram_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_6_real_vram_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_dual_ownership_audit.md  ->  ACTIVE_RUNTIME\archive\phase24_7_dual_ownership_audit.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_execution_verdict.md  ->  ACTIVE_RUNTIME\archive\phase24_7_execution_verdict.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_hf_fallback_removal.md  ->  ACTIVE_RUNTIME\archive\phase24_7_hf_fallback_removal.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_memory_scaling_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_7_memory_scaling_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_openwebui_end_to_end.md  ->  ACTIVE_RUNTIME\archive\phase24_7_openwebui_end_to_end.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_post_kv_frontier.md  ->  ACTIVE_RUNTIME\archive\phase24_7_post_kv_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_sparse_kv_cutover.md  ->  ACTIVE_RUNTIME\archive\phase24_7_sparse_kv_cutover.md  
+  [moved] ACTIVE_RUNTIME\phase24_7_vllm_kv_ownership_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_7_vllm_kv_ownership_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_anchor_routing_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_8_anchor_routing_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_chunked_sparse_prefill.md  ->  ACTIVE_RUNTIME\archive\phase24_8_chunked_sparse_prefill.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_compressed_prefill.md  ->  ACTIVE_RUNTIME\archive\phase24_8_compressed_prefill.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_execution_regime.md  ->  ACTIVE_RUNTIME\archive\phase24_8_execution_regime.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_flashattention_reintegration.md  ->  ACTIVE_RUNTIME\archive\phase24_8_flashattention_reintegration.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_long_context_scaling.md  ->  ACTIVE_RUNTIME\archive\phase24_8_long_context_scaling.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase24_8_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase24_8_prefill_execution_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_8_prefill_execution_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_attention_dispatch_audit.md  ->  ACTIVE_RUNTIME\archive\phase24_9_attention_dispatch_audit.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_chunked_prefill_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_9_chunked_prefill_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_eager_elimination.md  ->  ACTIVE_RUNTIME\archive\phase24_9_eager_elimination.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_execution_regime.md  ->  ACTIVE_RUNTIME\archive\phase24_9_execution_regime.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_layer_patch_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_9_layer_patch_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_live_vram_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_9_live_vram_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_real_execution_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_9_real_execution_trace.md  
+  [moved] ACTIVE_RUNTIME\phase24_9_remaining_limit.md  ->  ACTIVE_RUNTIME\archive\phase24_9_remaining_limit.md  
+  [moved] ACTIVE_RUNTIME\phase24_failure_recovery.md  ->  ACTIVE_RUNTIME\archive\phase24_failure_recovery.md  
+  [moved] ACTIVE_RUNTIME\phase24_live_serving_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_live_serving_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_long_context_validation.md  ->  ACTIVE_RUNTIME\archive\phase24_long_context_validation.md  
+  [moved] ACTIVE_RUNTIME\phase24_native_hotpath_final.md  ->  ACTIVE_RUNTIME\archive\phase24_native_hotpath_final.md  
+  [moved] ACTIVE_RUNTIME\phase24_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase24_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase24_openwebui_integration.md  ->  ACTIVE_RUNTIME\archive\phase24_openwebui_integration.md  
+  [moved] ACTIVE_RUNTIME\phase24_serving_readiness.md  ->  ACTIVE_RUNTIME\archive\phase24_serving_readiness.md  
+  [moved] ACTIVE_RUNTIME\phase24_vllm_backend_trace.md  ->  ACTIVE_RUNTIME\archive\phase24_vllm_backend_trace.md  
+  [moved] ACTIVE_RUNTIME\phase25_execution_regime.md  ->  ACTIVE_RUNTIME\archive\phase25_execution_regime.md  
+  [moved] ACTIVE_RUNTIME\phase25_last_token_logits.md  ->  ACTIVE_RUNTIME\archive\phase25_last_token_logits.md  
+  [moved] ACTIVE_RUNTIME\phase25_long_context_serving.md  ->  ACTIVE_RUNTIME\archive\phase25_long_context_serving.md  
+  [moved] ACTIVE_RUNTIME\phase25_next_frontier.md  ->  ACTIVE_RUNTIME\archive\phase25_next_frontier.md  
+  [moved] ACTIVE_RUNTIME\phase25_prefill_compute_trace.md  ->  ACTIVE_RUNTIME\archive\phase25_prefill_compute_trace.md  
+  [moved] ACTIVE_RUNTIME\phase25_sparse_compute_reduction.md  ->  ACTIVE_RUNTIME\archive\phase25_sparse_compute_reduction.md  
+  [moved] ACTIVE_RUNTIME\phase25_sparse_ffn_revival.md  ->  ACTIVE_RUNTIME\archive\phase25_sparse_ffn_revival.md  
+  [moved] ACTIVE_RUNTIME\phase25_sparse_prefill_reintegration.md  ->  ACTIVE_RUNTIME\archive\phase25_sparse_prefill_reintegration.md  
+  [moved] ACTIVE_RUNTIME\phase26_cross_gpu_sparse_execution.md  ->  ACTIVE_RUNTIME\archive\phase26_cross_gpu_sparse_execution.md  
+  [moved] ACTIVE_RUNTIME\phase26_distributed_prefill.md  ->  ACTIVE_RUNTIME\archive\phase26_distributed_prefill.md  
+  [moved] ACTIVE_RUNTIME\phase26_distributed_retrieval.md  ->  ACTIVE_RUNTIME\archive\phase26_distributed_retrieval.md  
+  [moved] ACTIVE_RUNTIME\phase26_distributed_slab_design.md  ->  ACTIVE_RUNTIME\archive\phase26_distributed_slab_design.md  
+  [moved] ACTIVE_RUNTIME\phase26_execution_regime.md  ->  ACTIVE_RUNTIME\archive\phase26_execution_regime.md  
+  [moved] ACTIVE_RUNTIME\phase26_hyperscale_limits.md  ->  ACTIVE_RUNTIME\archive\phase26_hyperscale_limits.md  
+  [moved] ACTIVE_RUNTIME\phase26_multi_gpu_validation.md  ->  ACTIVE_RUNTIME\archive\phase26_multi_gpu_validation.md  
+  [moved] ACTIVE_RUNTIME\phase26_single_gpu_assumptions.md  ->  ACTIVE_RUNTIME\archive\phase26_single_gpu_assumptions.md  
+  [moved] ACTIVE_RUNTIME\phase3_triton_trace.json  ->  ACTIVE_RUNTIME\archive\phase3_triton_trace.json  
+  [moved] ACTIVE_RUNTIME\phase4_reconstruction_trace.json  ->  ACTIVE_RUNTIME\archive\phase4_reconstruction_trace.json  
+  [moved] ACTIVE_RUNTIME\profile_phase3.py  ->  ACTIVE_RUNTIME\archive\profile_phase3.py  
+  [moved] ACTIVE_RUNTIME\test_batching.py  ->  ACTIVE_RUNTIME\archive\test_batching.py  
+  [moved] ACTIVE_RUNTIME\test_long_context.py  ->  ACTIVE_RUNTIME\archive\test_long_context.py  
+  [moved] ACTIVE_RUNTIME\test_long_session_pressure.py  ->  ACTIVE_RUNTIME\archive\test_long_session_pressure.py  
+  [moved] ACTIVE_RUNTIME\test_memory_profiler.py  ->  ACTIVE_RUNTIME\archive\test_memory_profiler.py  
+  [moved] ACTIVE_RUNTIME\test_p1_salvage_integration.py  ->  ACTIVE_RUNTIME\archive\test_p1_salvage_integration.py  
+  [moved] ACTIVE_RUNTIME\test_paging_trigger.py  ->  ACTIVE_RUNTIME\archive\test_paging_trigger.py  
+  [moved] ACTIVE_RUNTIME\test_phase10_cuda_graph.py  ->  ACTIVE_RUNTIME\archive\test_phase10_cuda_graph.py  
+  [moved] ACTIVE_RUNTIME\test_phase10_native_overhead.py  ->  ACTIVE_RUNTIME\archive\test_phase10_native_overhead.py  
+  [moved] ACTIVE_RUNTIME\test_phase11_fused.py  ->  ACTIVE_RUNTIME\archive\test_phase11_fused.py  
+  [moved] ACTIVE_RUNTIME\test_phase11_sparse_mlp.py  ->  ACTIVE_RUNTIME\archive\test_phase11_sparse_mlp.py  
+  [moved] ACTIVE_RUNTIME\test_phase12_hybrid_residency.py  ->  ACTIVE_RUNTIME\archive\test_phase12_hybrid_residency.py  
+  [moved] ACTIVE_RUNTIME\test_phase12_tiered_ffn.py  ->  ACTIVE_RUNTIME\archive\test_phase12_tiered_ffn.py  
+  [moved] ACTIVE_RUNTIME\test_phase13_sparse_prefill.py  ->  ACTIVE_RUNTIME\archive\test_phase13_sparse_prefill.py  
+  [moved] ACTIVE_RUNTIME\test_phase13_sparse_prefill_mlp.py  ->  ACTIVE_RUNTIME\archive\test_phase13_sparse_prefill_mlp.py  
+  [moved] ACTIVE_RUNTIME\test_phase14_sparse_anchors.py  ->  ACTIVE_RUNTIME\archive\test_phase14_sparse_anchors.py  
+  [moved] ACTIVE_RUNTIME\test_phase15_fused_prefill.py  ->  ACTIVE_RUNTIME\archive\test_phase15_fused_prefill.py  
+  [moved] ACTIVE_RUNTIME\test_phase15_orchestration.py  ->  ACTIVE_RUNTIME\archive\test_phase15_orchestration.py  
+  [moved] ACTIVE_RUNTIME\test_phase17_orchestration_collapse.py  ->  ACTIVE_RUNTIME\archive\test_phase17_orchestration_collapse.py  
+  [moved] ACTIVE_RUNTIME\test_phase6_sparse_attention.py  ->  ACTIVE_RUNTIME\archive\test_phase6_sparse_attention.py  
+  [moved] ACTIVE_RUNTIME\test_phase7_scaling.py  ->  ACTIVE_RUNTIME\archive\test_phase7_scaling.py  
+  [moved] ACTIVE_RUNTIME\test_phase8_batched_sparse.py  ->  ACTIVE_RUNTIME\archive\test_phase8_batched_sparse.py  
+  [moved] ACTIVE_RUNTIME\test_phase9_e2e_reality.py  ->  ACTIVE_RUNTIME\archive\test_phase9_e2e_reality.py  
+  [moved] ACTIVE_RUNTIME\test_phase9_triton_fused.py  ->  ACTIVE_RUNTIME\archive\test_phase9_triton_fused.py  
+  [moved] ACTIVE_RUNTIME\test_reconstruction_quality.py  ->  ACTIVE_RUNTIME\archive\test_reconstruction_quality.py  
+  [moved] ACTIVE_RUNTIME\test_sdpa.py  ->  ACTIVE_RUNTIME\archive\test_sdpa.py  
+
+======================================================================
+STEP 4 ù Archive dead ACTIVE_RUNTIME subdirs
+======================================================================
+  [moved] ACTIVE_RUNTIME\research  ->  ACTIVE_RUNTIME\archive\research  
+  [moved] ACTIVE_RUNTIME\session_checkpoints  ->  ACTIVE_RUNTIME\archive\session_checkpoints  
+  [moved] ACTIVE_RUNTIME\results  ->  ACTIVE_RUNTIME\archive\results  
+  [moved] ACTIVE_RUNTIME\frontend  ->  ACTIVE_RUNTIME\archive\frontend  
+  [moved] ACTIVE_RUNTIME\native_core\residency  ->  ACTIVE_RUNTIME\archive\residency  
+  [moved] ACTIVE_RUNTIME\native_core\metadata_pool  ->  ACTIVE_RUNTIME\archive\metadata_pool  
+  [moved] ACTIVE_RUNTIME\native_core\vllm_bridge  ->  ACTIVE_RUNTIME\archive\vllm_bridge  
+  [moved] ACTIVE_RUNTIME\native_core\kernels  ->  ACTIVE_RUNTIME\archive\kernels  
+  [moved] ACTIVE_RUNTIME\dist  ->  ACTIVE_RUNTIME\archive\dist  
+
+======================================================================
+STEP 5 ù Archive dead runtime/ files (keep only what executes)
+======================================================================
+  [moved] ACTIVE_RUNTIME\runtime\batched_sparse_attn.py  ->  ACTIVE_RUNTIME\archive\batched_sparse_attn.py  
+  [moved] ACTIVE_RUNTIME\runtime\sparse_attention.py  ->  ACTIVE_RUNTIME\archive\sparse_attention.py  
+  [moved] ACTIVE_RUNTIME\runtime\lgs_resolver.py  ->  ACTIVE_RUNTIME\archive\lgs_resolver.py  
+  [moved] ACTIVE_RUNTIME\runtime\prefill_attention_pruner.py  ->  ACTIVE_RUNTIME\archive\prefill_attention_pruner.py  
+  [moved] ACTIVE_RUNTIME\runtime\sparse_prefill_mlp.py  ->  ACTIVE_RUNTIME\archive\sparse_prefill_mlp.py  
+  [moved] ACTIVE_RUNTIME\runtime\triton_sparse_mlp.py  ->  ACTIVE_RUNTIME\archive\triton_sparse_mlp.py  
+
+======================================================================
+STEP 6 ù Archive dead compression/ files
+======================================================================
+  [moved] ACTIVE_RUNTIME\compression\quantization.py  ->  ACTIVE_RUNTIME\archive\quantization.py  
+  [moved] ACTIVE_RUNTIME\compression\quantization_advanced.py  ->  ACTIVE_RUNTIME\archive\quantization_advanced.py  
+  [moved] ACTIVE_RUNTIME\compression\shared_basis.py  ->  ACTIVE_RUNTIME\archive\shared_basis.py  
+  [moved] ACTIVE_RUNTIME\compression\sparse_repair.py  ->  ACTIVE_RUNTIME\archive\sparse_repair.py  
+
+======================================================================
+STEP 7 ù Archive dead ACTIVE_RUNTIME phase docs in subdirs
+======================================================================
+  [ok] native_core/recon_cache.py ù KEPT (used by kv_runtime_manager)
+
+======================================================================
+STEP 8 ù Archive NATIVE_RUNTIME phase docs
+======================================================================
+
+======================================================================
+STEP 9 ù Create clean docs/ directory
+======================================================================
+  [copy] README.md -> docs/README.md
+  [exist] docs/README.md
+  [new]   docs/runtime_architecture.md
+  [new]   docs/benchmark_results.md
+  [new]   docs/known_limitations.md
+  [new]   docs/build_instructions.md
+
+======================================================================
+STEP 10 ù Create tests/ directory with stub benchmarks
+======================================================================
+  [new] tests/test_4k.py
+  [new] tests/test_25k.py
+  [new] tests/benchmark.py
+  [new] tests/test_concurrency.py
+
+======================================================================
+FINAL MANIFEST ù Files that remain alive
+======================================================================
+  LIVE  ACTIVE_RUNTIME/native_core\kv_runtime_manager.py
+  LIVE  ACTIVE_RUNTIME/native_core\recon_cache.py
+  LIVE  ACTIVE_RUNTIME/native_core\streaming_sparse_ingest.py
+  LIVE  ACTIVE_RUNTIME/native_core\compression\async_compressor.py
+  LIVE  ACTIVE_RUNTIME/native_core\compression\lowrank.py
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\build_log.txt
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\CMakeLists.txt
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\diffkv_core.cp313-win_amd64.pyd
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\setup.py
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\test_native_stress.py
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\block_state.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\compressor_thread.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\paging_stream.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\spsc_ring_buffer.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\bindings.cpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\compressor_thread.cpp
+  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\paging_stream.cu
+  LIVE  ACTIVE_RUNTIME/native_core\graph_runtime\static_decode_graph.py
+  LIVE  ACTIVE_RUNTIME/native_core\paging\paged_kv_store.py
+  LIVE  ACTIVE_RUNTIME/native_core\sparse_decode\triton_diffkv.py
+  LIVE  ACTIVE_RUNTIME/native_core\sparse_decode\triton_sparse_attn.py
+  LIVE  ACTIVE_RUNTIME/runtime\diffkv_attention.py
+  LIVE  ACTIVE_RUNTIME/runtime\native_block_pool.py
+  LIVE  ACTIVE_RUNTIME/serving\batch_engine.py
+  LIVE  ACTIVE_RUNTIME/serving\hf_diffkv_wrapper.py
+  LIVE  ACTIVE_RUNTIME/serving\openai_compatible_api_gateway.py
+  LIVE  ACTIVE_RUNTIME/serving\production_session_manager.py
+  LIVE  ACTIVE_RUNTIME/tests\benchmark.py
+  LIVE  ACTIVE_RUNTIME/tests\test_25k.py
+  LIVE  ACTIVE_RUNTIME/tests\test_4k.py
+  LIVE  ACTIVE_RUNTIME/tests\test_concurrency.py
+  LIVE  ACTIVE_RUNTIME/docs\benchmark_results.md
+  LIVE  ACTIVE_RUNTIME/docs\build_instructions.md
+  LIVE  ACTIVE_RUNTIME/docs\known_limitations.md
+  LIVE  ACTIVE_RUNTIME/docs\README.md
+  LIVE  ACTIVE_RUNTIME/docs\runtime_architecture.md
+
+======================================================================
+REBUILD COMPLETE
+======================================================================
+
+Surviving execution-grounded systems:
+  [1] SDPA/FlashAttention prefill    (diffkv_attention.py)
+  [2] StreamingSparseIngestManager   (streaming_sparse_ingest.py)
+  [3] AsyncCompressor                (async_compressor.py)
+  [4] NativeBlockPool                (native_block_pool.py)
+  [5] Triton Sparse Decode Kernel    (triton_sparse_attn.py)
+  [6] Last-Token Logits Projection   (diffkv_attention.py)
+  [7] Geometry-preserving SVD        (lowrank.py)
+  [8] ContinuousBatchEngine          (batch_engine.py)
+  [9] OpenAI-compatible API          (openai_compatible_api_gateway.py)
+
+Everything else is in /archive or ACTIVE_RUNTIME/archive.
+Docs in ACTIVE_RUNTIME/docs/  (5 files only).
+Tests in ACTIVE_RUNTIME/tests/ (4 files only).

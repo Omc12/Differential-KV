@@ -1,1 +1,0 @@
-class ContextualIdentityEchoes: pass

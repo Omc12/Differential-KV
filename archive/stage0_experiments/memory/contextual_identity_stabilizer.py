@@ -1,1 +1,0 @@
-class ContextualIdentityStabilizer: pass

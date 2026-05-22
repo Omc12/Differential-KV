@@ -1,1 +1,0 @@
-class SparseEchoPropagator: pass

@@ -1,1 +1,0 @@
-class DriftOverheadAuditor: pass

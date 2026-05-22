@@ -1,8 +1,0 @@
-{"timestamp": 1778954169.3648858, "event": "ADMISSION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-00", "active_count": 1}
-{"timestamp": 1778954169.4365675, "event": "ADMISSION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-01", "active_count": 2}
-{"timestamp": 1778954169.5154455, "event": "ADMISSION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-02", "active_count": 3}
-{"timestamp": 1778954169.5884004, "event": "ADMISSION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-03", "active_count": 4}
-{"timestamp": 1778954214.9847193, "event": "COMPLETION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-00", "active_count": 3}
-{"timestamp": 1778954214.985896, "event": "COMPLETION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-01", "active_count": 2}
-{"timestamp": 1778954214.986567, "event": "COMPLETION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-02", "active_count": 1}
-{"timestamp": 1778954214.9903486, "event": "COMPLETION", "session_id": "sgc-20260516_232602_qwen2_5-3b-instruct-03", "active_count": 0}

@@ -1,1 +1,0 @@
-class GlobalConfidenceBroadcaster: pass

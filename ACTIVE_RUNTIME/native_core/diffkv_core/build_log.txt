@@ -1,0 +1,101 @@
+running build_ext
+building 'diffkv_core' extension
+[1/1] C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\nvcc -MD -MF "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\build\temp.win-amd64-cpython-313\Release\src/paging_stream.obj".d -std=c++17 -Xcompiler /MD -Xcompiler /wd4819 -Xcompiler /wd4251 -Xcompiler /wd4244 -Xcompiler /wd4267 -Xcompiler /wd4275 -Xcompiler /wd4018 -Xcompiler /wd4190 -Xcompiler /wd4624 -Xcompiler /wd4067 -Xcompiler /wd4068 -Xcompiler /EHsc --use-local-env -Xcudafe --diag_suppress=base_class_has_different_dll_interface -Xcudafe --diag_suppress=field_without_dll_interface -Xcudafe --diag_suppress=dll_interface_conflict_none_assumed -Xcudafe --diag_suppress=dll_interface_conflict_dllexport_assumed "-ID:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\include" -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\include -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\include\torch\csrc\api\include "-IC:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\include" -IC:\Users\USER\AppData\Local\Programs\Python\Python313\include -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Include "-IC:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\include" "-IC:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.22000.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\cppwinrt" -c "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\src\paging_stream.cu" -o "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\build\temp.win-amd64-cpython-313\Release\src/paging_stream.obj" -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -O3 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=diffkv_core -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
+FAILED: [code=2] D:/Codes/Projects/Differential KV/ACTIVE_RUNTIME/native_core/diffkv_core/build/temp.win-amd64-cpython-313/Release/src/paging_stream.obj 
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\nvcc -MD -MF "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\build\temp.win-amd64-cpython-313\Release\src/paging_stream.obj".d -std=c++17 -Xcompiler /MD -Xcompiler /wd4819 -Xcompiler /wd4251 -Xcompiler /wd4244 -Xcompiler /wd4267 -Xcompiler /wd4275 -Xcompiler /wd4018 -Xcompiler /wd4190 -Xcompiler /wd4624 -Xcompiler /wd4067 -Xcompiler /wd4068 -Xcompiler /EHsc --use-local-env -Xcudafe --diag_suppress=base_class_has_different_dll_interface -Xcudafe --diag_suppress=field_without_dll_interface -Xcudafe --diag_suppress=dll_interface_conflict_none_assumed -Xcudafe --diag_suppress=dll_interface_conflict_dllexport_assumed "-ID:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\include" -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\include -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\include\torch\csrc\api\include "-IC:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\include" -IC:\Users\USER\AppData\Local\Programs\Python\Python313\include -IC:\Users\USER\AppData\Local\Programs\Python\Python313\Include "-IC:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\include" "-IC:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.22000.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.22000.0\\cppwinrt" -c "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\src\paging_stream.cu" -o "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\build\temp.win-amd64-cpython-313\Release\src/paging_stream.obj" -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -O3 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=diffkv_core -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\include\crt/host_config.h(153): fatal error C1189: #error:  -- unsupported Microsoft Visual Studio version! Only the versions between 2017 and 2022 (inclusive) are supported! The nvcc flag '-allow-unsupported-compiler' can be used to override this version check; however, using an unsupported host compiler may cause compilation failure or incorrect run time execution. Use at your own risk.
+paging_stream.cu
+ninja: build stopped: subcommand failed.
+Traceback (most recent call last):
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\utils\cpp_extension.py", line 2774, in _run_ninja_build
+    subprocess.run(
+    ~~~~~~~~~~~~~~^
+        command,
+        ^^^^^^^^
+    ...<4 lines>...
+        check=True,
+        ^^^^^^^^^^^
+        env=env)
+        ^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 2.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Codes\Projects\Differential KV\ACTIVE_RUNTIME\native_core\diffkv_core\setup.py", line 9, in <module>
+    setup(
+    ~~~~~^
+        name='diffkv_core',
+        ^^^^^^^^^^^^^^^^^^^
+    ...<14 lines>...
+        }
+        ^
+    )
+    ^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\__init__.py", line 103, in setup
+    return distutils.core.setup(**attrs)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\core.py", line 184, in setup
+    return run_commands(dist)
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\core.py", line 200, in run_commands
+    dist.run_commands()
+    ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\dist.py", line 970, in run_commands
+    self.run_command(cmd)
+    ~~~~~~~~~~~~~~~~^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\dist.py", line 974, in run_command
+    super().run_command(command)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\dist.py", line 989, in run_command
+    cmd_obj.run()
+    ~~~~~~~~~~~^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\command\build_ext.py", line 93, in run
+    _build_ext.run(self)
+    ~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\command\build_ext.py", line 359, in run
+    self.build_extensions()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\utils\cpp_extension.py", line 1184, in build_extensions
+    build_ext.build_extensions(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\command\build_ext.py", line 479, in build_extensions
+    self._build_extensions_serial()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\command\build_ext.py", line 505, in _build_extensions_serial
+    self.build_extension(ext)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\command\build_ext.py", line 254, in build_extension
+    _build_ext.build_extension(self, ext)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\setuptools\_distutils\command\build_ext.py", line 560, in build_extension
+    objects = self.compiler.compile(
+        sources,
+    ...<5 lines>...
+        depends=ext.depends,
+    )
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\utils\cpp_extension.py", line 1153, in win_wrap_ninja_compile
+    _write_ninja_file_and_compile_objects(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        sources=sources,
+        ^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+        with_cuda=with_cuda,
+        ^^^^^^^^^^^^^^^^^^^^
+        with_sycl=with_sycl)
+        ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\utils\cpp_extension.py", line 2361, in _write_ninja_file_and_compile_objects
+    _run_ninja_build(
+    ~~~~~~~~~~~~~~~~^
+        build_directory,
+        ^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        # that failed to build but there isn't a good way to get it here.
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        error_prefix='Error compiling objects for extension')
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\USER\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\utils\cpp_extension.py", line 2791, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error compiling objects for extension

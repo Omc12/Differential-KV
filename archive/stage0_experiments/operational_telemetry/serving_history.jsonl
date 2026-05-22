@@ -1,6 +1,0 @@
-{"timestamp": 1778924983.966439, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 405.2007675170899}}
-{"timestamp": 1778925008.9908314, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 403.2961368560791}}
-{"timestamp": 1778925311.8903208, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 411.26811504364014}}
-{"timestamp": 1778925353.0505884, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 404.21016216278076}}
-{"timestamp": 1778925375.1480207, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 405.9321403503418}}
-{"timestamp": 1778925428.2586222, "metrics": {"queue_depth": 0, "processed_requests": 1, "batches_executed": 1, "average_latency_ms": 406.0763359069824}}

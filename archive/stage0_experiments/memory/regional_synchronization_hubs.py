@@ -1,1 +1,0 @@
-class RegionalSynchronizationHubs: pass

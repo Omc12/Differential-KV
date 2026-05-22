@@ -1,2 +1,0 @@
-class TopologyEnergyRouter:
-    pass

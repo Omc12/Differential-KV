@@ -1,1 +1,0 @@
-class ConvergentIdentityResolver: pass

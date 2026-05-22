@@ -1,52 +1,32 @@
-# Python
-__pycache__/
-*.py[cod]
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+*.pyc
 *.pyo
 *.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
 
-# Virtual environments
-venv/
-.venv/
-env/
-
-# Experiment results (large, reproducible)
-results/
-
-# Plots (reproducible from results/)
-results/plots/
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+# Unit test / coverage reports
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+.cache
 *.log
 
-# C/C++ and CUDA build artifacts
-*.dll
-*.lib
-*.exp
-*.exe
-*.obj
-*.o
-*.so
-*.dylib
-*.pdb
+# Telemetry and PyTorch Profiler trace files (huge JSONs)
+*profiler_trace.json
+*.pt.trace.json
+*raw_telemetry.json
+*raw_nvidia_smi*.log
+*.jsonl
+*.pt
+*.pth
+*.bin
+*.safetensors
 
-# Large telemetry profiler traces
-raw_torch_profiler_trace.json
+# Exclude all JSON trace/profiler files in any archive, telemetry, or results folder
+**/archive/**/*.json
+**/telemetry/**/*.json
+**/results/**/*.json
 
+# Ignore the massive synthetic systems archive completely
+archive/ARCHIVED_SYNTHETIC_SYSTEMS/

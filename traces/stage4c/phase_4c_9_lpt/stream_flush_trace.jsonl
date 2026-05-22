@@ -1,6 +1,0 @@
-{"turn": 0, "flush_smoothness_percent": 98.2, "flush_latency_ms": 6.920294841352761, "chunk_interval_ms": 30.0, "emission_buffering_detected": false}
-{"turn": 1, "flush_smoothness_percent": 98.26237099364994, "flush_latency_ms": 10.456729961144513, "chunk_interval_ms": 27.7015115293407, "emission_buffering_detected": false}
-{"turn": 2, "flush_smoothness_percent": 98.07536589577376, "flush_latency_ms": 8.787433452000293, "chunk_interval_ms": 22.91926581726429, "emission_buffering_detected": false}
-{"turn": 3, "flush_smoothness_percent": 98.3866816352606, "flush_latency_ms": 13.61766069493845, "chunk_interval_ms": 20.050037516997772, "emission_buffering_detected": false}
-{"turn": 4, "flush_smoothness_percent": 97.95159373682753, "flush_latency_ms": 11.568995003680163, "chunk_interval_ms": 21.73178189568194, "emission_buffering_detected": false}
-{"turn": 5, "flush_smoothness_percent": 98.5097012229067, "flush_latency_ms": 9.682194861000328, "chunk_interval_ms": 26.41831092731613, "emission_buffering_detected": false}

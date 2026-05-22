@@ -1,1 +1,0 @@
-class SymbolicVisibilityBooster: pass

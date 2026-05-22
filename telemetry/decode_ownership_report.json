@@ -1,8 +1,0 @@
-{
-  "model": "Qwen/Qwen2.5-7B-Instruct",
-  "decode_owner": "diffkv",
-  "triton_dispatch": "INACTIVE",
-  "kv_virtualization": "ACTIVE",
-  "custom_sampler": "ACTIVE",
-  "status": "VERIFIED"
-}
