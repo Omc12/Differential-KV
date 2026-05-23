@@ -90,51 +90,24 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     attn_outputs = []
                     for b_idx in range(bsz):
                         sid = session_ids[b_idx]
-                        blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
-                        
-                        compressed_pool_indices = []
-                        dense_blocks = []
-                        
-                        for blk in blocks:
-                            pool_idx = getattr(blk, 'pool_idx', None)
-                            if blk.U is not None and blk.V is not None and pool_idx is not None:
-                                compressed_pool_indices.append(pool_idx)
-                            else:
-                                dense_blocks.append(blk)
+                        block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
+                            sid, captured_layer_idx, query_states.device
+                        )
                         
                         pool = getattr(kv_manager, 'native_pool', None)
-                        
                         session_mbs = kv_manager.get_session_micro_block_size(sid)
                         
-                        if pool is not None and compressed_pool_indices:
-                            block_indices = torch.tensor(
-                                compressed_pool_indices, 
-                                device=query_states.device, 
-                                dtype=torch.int32
-                            )
-                            attn_out_b = native_triton_sparse_attn_decode(
-                                q=query_states[b_idx:b_idx+1],
-                                block_indices=block_indices,
-                                pool=pool,
-                                dense_blocks=dense_blocks,
-                                active_k=None,
-                                active_v=None,
-                                num_key_value_groups=num_key_value_groups,
-                                R=kv_manager.rank,
-                                S_MAX=session_mbs
-                            )
-                        else:
-                            attn_out_b = native_triton_sparse_attn_decode(
-                                q=query_states[b_idx:b_idx+1],
-                                block_indices=None,
-                                pool=pool,
-                                dense_blocks=dense_blocks,
-                                active_k=None,
-                                active_v=None,
-                                num_key_value_groups=num_key_value_groups,
-                                R=kv_manager.rank,
-                                S_MAX=session_mbs
-                            )
+                        attn_out_b = native_triton_sparse_attn_decode(
+                            q=query_states[b_idx:b_idx+1],
+                            block_indices=block_indices,
+                            pool=pool,
+                            dense_blocks=dense_blocks,
+                            active_k=None,
+                            active_v=None,
+                            num_key_value_groups=num_key_value_groups,
+                            R=kv_manager.rank,
+                            S_MAX=session_mbs
+                        )
                         
                         attn_outputs.append(attn_out_b)
 

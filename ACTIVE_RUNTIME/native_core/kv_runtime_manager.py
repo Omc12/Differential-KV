@@ -51,6 +51,34 @@ class KVBlock:
     _lock:    threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
+# Helper class for thread-safe block snapshots
+class BlockSnapshot:
+    __slots__ = ('b', 'anchor_kv', 'U', 'V', 'scale', 'active_k', 'active_v', 'pool_idx', 'dirty')
+
+    def __init__(self, block):
+        self.b = block
+        lock = getattr(block, "_lock", None)
+        if lock is not None:
+            with lock:
+                self.anchor_kv = block.anchor_kv
+                self.U = block.U
+                self.V = block.V
+                self.scale = getattr(block, "scale", 1.0)
+                self.active_k = block.active_k
+                self.active_v = block.active_v
+                self.pool_idx = getattr(block, "pool_idx", None)
+                self.dirty = getattr(block, "dirty", True)
+        else:
+            self.anchor_kv = block.anchor_kv
+            self.U = block.U
+            self.V = block.V
+            self.scale = getattr(block, "scale", 1.0)
+            self.active_k = block.active_k
+            self.active_v = block.active_v
+            self.pool_idx = getattr(block, "pool_idx", None)
+            self.dirty = getattr(block, "dirty", True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Manager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +242,12 @@ class KVRuntimeManager:
             for k in keys_to_del:
                 del self.decode_workspace[k]
 
+        # Delete pre-categorized blocks cache for this session
+        if hasattr(self, '_decode_block_cache'):
+            keys_to_del = [k for k in self._decode_block_cache.keys() if k[0] == session_id]
+            for k in keys_to_del:
+                del self._decode_block_cache[k]
+
         if session_id in self.session_blocks:
             del self.session_blocks[session_id]
         if self._streaming_mgr is not None:
@@ -236,6 +270,8 @@ class KVRuntimeManager:
             self.recon_pool.clear()
         if hasattr(self, 'decode_workspace'):
             self.decode_workspace.clear()
+        if hasattr(self, '_decode_block_cache'):
+            self._decode_block_cache.clear()
         
         if hasattr(self, 'native_pool') and self.native_pool is not None:
             self.native_pool.reset()
@@ -320,6 +356,66 @@ class KVRuntimeManager:
             return self._streaming_mgr.session_micro_block_sizes.get(session_id, self.micro_block_size)
         return self.micro_block_size
 
+    def get_cached_decode_blocks(
+        self,
+        session_id: str,
+        layer_idx: int,
+        device: torch.device,
+    ) -> Tuple[Optional[torch.Tensor], List[Any]]:
+        """
+        Retrieves pre-categorized compressed pool indices and dense blocks,
+        fully avoiding Python-side iteration and torch.tensor allocation.
+        """
+        blocks = self.get_streaming_blocks(session_id, layer_idx)
+        if not blocks:
+            return None, []
+
+        if not hasattr(self, "_decode_block_cache"):
+            self._decode_block_cache = {}
+
+        cache_key = (session_id, layer_idx)
+        cached = self._decode_block_cache.get(cache_key)
+
+        if cached is not None and cached["blocks_len"] == len(blocks):
+            # Fast-path check: did any cached dense block get compressed?
+            # Typically there is only 1 active dense block, so this check is extremely cheap.
+            dirty_compression = False
+            for blk in cached["dense_blocks"]:
+                if blk.U is not None:
+                    dirty_compression = True
+                    break
+            
+            if not dirty_compression:
+                return cached["block_indices_tensor"], cached["dense_blocks"]
+
+        # Cache miss or invalidation: perform full categorization
+        compressed_pool_indices = []
+        dense_blocks = []
+
+        for blk in blocks:
+            pool_idx = getattr(blk, "pool_idx", None)
+            if blk.U is not None and blk.V is not None and pool_idx is not None:
+                compressed_pool_indices.append(pool_idx)
+            else:
+                dense_blocks.append(blk)
+
+        if compressed_pool_indices:
+            block_indices_tensor = torch.tensor(
+                compressed_pool_indices,
+                device=device,
+                dtype=torch.int32
+            )
+        else:
+            block_indices_tensor = None
+
+        self._decode_block_cache[cache_key] = {
+            "blocks_len": len(blocks),
+            "dense_blocks": dense_blocks,
+            "block_indices_tensor": block_indices_tensor,
+        }
+
+        return block_indices_tensor, dense_blocks
+
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
     def assemble_decode_kv(
@@ -347,44 +443,35 @@ class KVRuntimeManager:
         if not blocks:
             return None, None
 
-        # Helper class for thread-safe block snapshots
-        class BlockSnapshot:
-            def __init__(self, block):
-                self.b = block
-                lock = getattr(block, "_lock", None)
-                if lock is not None:
-                    with lock:
-                        self.anchor_kv = block.anchor_kv
-                        self.U = block.U
-                        self.V = block.V
-                        self.scale = getattr(block, "scale", 1.0)
-                        self.active_k = block.active_k
-                        self.active_v = block.active_v
-                        self.pool_idx = getattr(block, "pool_idx", None)
-                        self.dirty = getattr(block, "dirty", True)
-                else:
-                    self.anchor_kv = block.anchor_kv
-                    self.U = block.U
-                    self.V = block.V
-                    self.scale = getattr(block, "scale", 1.0)
-                    self.active_k = block.active_k
-                    self.active_v = block.active_v
-                    self.pool_idx = getattr(block, "pool_idx", None)
-                    self.dirty = getattr(block, "dirty", True)
+        # ── 1. Check workspace state and snapshot dirty blocks only ──
+        ws_key = (session_id, layer_idx)
+        ws = self.decode_workspace.get(ws_key)
+        need_full_snapshot = (ws is None)
 
-        # ── 1. Snapshot blocks under lock to prevent background compression races ──
         snapshots = []
-        for b in blocks:
-            snapshots.append(BlockSnapshot(b))
+        if need_full_snapshot:
+            for b in blocks:
+                snapshots.append(BlockSnapshot(b))
+        else:
+            for b in blocks:
+                if b.dirty:
+                    snapshots.append(BlockSnapshot(b))
 
         # ── 2. Compute total sequence length in O(1) from the last block ─────────
-        last_block = snapshots[-1]
-        last_token_count = (
-            last_block.U.shape[0] if last_block.U is not None else (
-                last_block.active_k.shape[2] if last_block.active_k is not None else 0
-            )
-        )
-        total_seq_len = last_block.b.anchor_idx + 1 + last_token_count
+        last_block = blocks[-1]
+        lock = getattr(last_block, "_lock", None)
+        if lock is not None:
+            with lock:
+                last_U = last_block.U
+                last_active_k = last_block.active_k
+                last_U_len = last_U.shape[0] if last_U is not None else 0
+                last_active_len = last_active_k.shape[2] if last_active_k is not None else 0
+        else:
+            last_U_len = last_block.U.shape[0] if last_block.U is not None else 0
+            last_active_len = last_block.active_k.shape[2] if last_block.active_k is not None else 0
+
+        last_token_count = last_U_len if last_U_len > 0 else last_active_len
+        total_seq_len = last_block.anchor_idx + 1 + last_token_count
 
         # ── 3. Allocate or resize persistent workspace with vectorized copy ──────
         ws_key = (session_id, layer_idx)
