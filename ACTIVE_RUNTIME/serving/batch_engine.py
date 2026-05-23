@@ -170,7 +170,7 @@ class ContinuousBatchEngine:
             # Always clear any stale KV for this session before prefill
             self._free_session_kv(req.session_id)
 
-            input_ids    = torch.tensor([req.prompt_ids], device=self.wrapper.device)
+            input_ids    = torch.tensor([req.prompt_ids], dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
             position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long,
                                         device=self.wrapper.device).unsqueeze(0)
 
@@ -206,8 +206,8 @@ class ContinuousBatchEngine:
             position_ids_list.append([cur_pos])
             session_ids.append(req.session_id)
 
-        input_ids = torch.tensor(input_ids_list, device=self.wrapper.device)
-        position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
+        input_ids = torch.tensor(input_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
+        position_ids = torch.tensor(position_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
 
         # Inject session IDs for this batch decode step
         self.wrapper.model._diffkv_session_ids = session_ids
