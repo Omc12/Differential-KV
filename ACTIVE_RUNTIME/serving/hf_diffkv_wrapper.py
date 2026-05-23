@@ -65,6 +65,11 @@ class DiffKVHFWrapper:
         # Apply Differential KV Attention Interception!
         apply_diffkv_attention_patch(self.model, self.manager)
 
+        # Optional Torch Compile JIT wrapper for auto-fusion
+        if os.environ.get("DIFFKV_USE_TORCH_COMPILE", "0") == "1":
+            print("[DiffKV] Compiling model with torch.compile...")
+            self.model = torch.compile(self.model, mode="reduce-overhead")
+
     def stop(self):
         """Cleanly release all resources and stop background worker threads."""
         if hasattr(self, "manager") and self.manager is not None:
