@@ -93,48 +93,68 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     if not HAS_TRITON:
                         # Vectorized single-launch batched PyTorch fallback (zero loops!)
-                        batch_k = []
-                        batch_v = []
-                        max_len = 0
-                        for b_idx in range(bsz):
-                            sid = session_ids[b_idx]
-                            if sid == "dummy_session":
-                                batch_k.append(None)
-                                batch_v.append(None)
-                                continue
-                            full_k, full_v = kv_manager.assemble_decode_kv(sid, captured_layer_idx, query_states.dtype)
-                            batch_k.append(full_k)
-                            batch_v.append(full_v)
-                            if full_k is not None:
-                                max_len = max(max_len, full_k.shape[2])
-
-                        if max_len > 0:
-                            padded_k = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
-                            padded_v = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
-                            attn_mask = torch.zeros((bsz, 1, 1, max_len), dtype=torch.bool, device=query_states.device)
-
-                            for b_idx in range(bsz):
-                                fk = batch_k[b_idx]
-                                fv = batch_v[b_idx]
-                                if fk is not None:
-                                    l = fk.shape[2]
-                                    padded_k[b_idx, :, :l, :] = fk[0]
-                                    padded_v[b_idx, :, :l, :] = fv[0]
-                                    attn_mask[b_idx, 0, 0, :l] = True
-
-                            if num_key_value_groups > 1:
-                                k_rep = _mq.repeat_kv(padded_k, num_key_value_groups)
-                                v_rep = _mq.repeat_kv(padded_v, num_key_value_groups)
+                        if bsz == 1:
+                            sid = session_ids[0]
+                            if sid != "dummy_session":
+                                full_k, full_v = kv_manager.assemble_decode_kv(sid, captured_layer_idx, query_states.dtype)
+                                if full_k is not None:
+                                    if num_key_value_groups > 1:
+                                        k_rep = _mq.repeat_kv(full_k, num_key_value_groups)
+                                        v_rep = _mq.repeat_kv(full_v, num_key_value_groups)
+                                    else:
+                                        k_rep = full_k
+                                        v_rep = full_v
+                                    attn_output = _F.scaled_dot_product_attention(
+                                        query_states, k_rep, v_rep,
+                                        attn_mask=None, dropout_p=0.0, is_causal=False
+                                    )
+                                else:
+                                    attn_output = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
                             else:
-                                k_rep = padded_k
-                                v_rep = padded_v
-
-                            attn_output = _F.scaled_dot_product_attention(
-                                query_states, k_rep, v_rep,
-                                attn_mask=attn_mask, dropout_p=0.0, is_causal=False
-                            )
+                                attn_output = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
                         else:
-                            attn_output = torch.zeros((bsz, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                            batch_k = []
+                            batch_v = []
+                            max_len = 0
+                            for b_idx in range(bsz):
+                                sid = session_ids[b_idx]
+                                if sid == "dummy_session":
+                                    batch_k.append(None)
+                                    batch_v.append(None)
+                                    continue
+                                full_k, full_v = kv_manager.assemble_decode_kv(sid, captured_layer_idx, query_states.dtype)
+                                batch_k.append(full_k)
+                                batch_v.append(full_v)
+                                if full_k is not None:
+                                    max_len = max(max_len, full_k.shape[2])
+
+                            if max_len > 0:
+                                padded_k = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                                padded_v = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                                attn_mask = torch.zeros((bsz, 1, 1, max_len), dtype=torch.bool, device=query_states.device)
+
+                                for b_idx in range(bsz):
+                                    fk = batch_k[b_idx]
+                                    fv = batch_v[b_idx]
+                                    if fk is not None:
+                                        l = fk.shape[2]
+                                        padded_k[b_idx, :, :l, :] = fk[0]
+                                        padded_v[b_idx, :, :l, :] = fv[0]
+                                        attn_mask[b_idx, 0, 0, :l] = True
+
+                                if num_key_value_groups > 1:
+                                    k_rep = _mq.repeat_kv(padded_k, num_key_value_groups)
+                                    v_rep = _mq.repeat_kv(padded_v, num_key_value_groups)
+                                else:
+                                    k_rep = padded_k
+                                    v_rep = padded_v
+
+                                attn_output = _F.scaled_dot_product_attention(
+                                    query_states, k_rep, v_rep,
+                                    attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+                                )
+                            else:
+                                attn_output = torch.zeros((bsz, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
                     else:
                         attn_outputs = []
                         for b_idx in range(bsz):

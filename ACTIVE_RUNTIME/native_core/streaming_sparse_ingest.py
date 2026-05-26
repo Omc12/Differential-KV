@@ -67,6 +67,12 @@ class StreamingKVBlock:
     _cache_id: Optional[str] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    def __eq__(self, other):
+        return self is other
+
+    def __hash__(self):
+        return id(self)
+
     def __post_init__(self):
         if self.anchor_kv_cpu is None and self.anchor_kv is not None:
             self.anchor_kv_cpu = self.anchor_kv.cpu()
@@ -226,9 +232,12 @@ class StreamingSparseIngestManager:
 
     def update_metadata_state(self, session_id: str, layer_idx: int, block):
         blocks = self.session_blocks.get(session_id, {}).get(layer_idx, [])
-        try:
-            block_idx = blocks.index(block)
-        except ValueError:
+        block_idx = -1
+        for idx, b in enumerate(blocks):
+            if b is block:
+                block_idx = idx
+                break
+        if block_idx == -1:
             return
         metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is not None and block_idx < metadata.shape[0]:

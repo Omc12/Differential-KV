@@ -50,6 +50,12 @@ class KVBlock:
     _cache_id: Optional[str] = None
     _lock:    threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    def __eq__(self, other):
+        return self is other
+
+    def __hash__(self):
+        return id(self)
+
 
 # Helper class for thread-safe block snapshots
 class BlockSnapshot:
@@ -131,6 +137,14 @@ class KVRuntimeManager:
             recon_pool_blocks = 32
             gpu_budget_gb = 0.5
         elif serving_mode == "performance":
+            recon_cache_size = 256
+            recon_pool_blocks = 512
+            gpu_budget_gb = 8.0
+        elif serving_mode == "long-context":
+            recon_cache_size = 512
+            recon_pool_blocks = 1024
+            gpu_budget_gb = 12.0
+        elif serving_mode == "fused-sparse":
             recon_cache_size = 256
             recon_pool_blocks = 512
             gpu_budget_gb = 8.0
