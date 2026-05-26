@@ -3,14 +3,21 @@ runtime/triton_diffkv.py
 
 Triton-optimized fused reconstruction kernels for Differential KV.
 Provides maximum memory bandwidth efficiency for ΔKV = U @ V.T + S + anchor.
+Falls back to pure-PyTorch on any system where Triton is unavailable.
 """
 
 import torch
-import triton
-import triton.language as tl
 from typing import Optional, Tuple
 
-@triton.jit
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except ImportError:
+    _HAS_TRITON = False
+
+if _HAS_TRITON:
+    @triton.jit
 def lowrank_recon_kernel(
     U_ptr, V_ptr, anchor_ptr, out_ptr,
     stride_un, stride_uk,
@@ -76,9 +83,17 @@ def triton_fused_reconstruct(
 ) -> torch.Tensor:
     """
     Python wrapper for Triton fused low-rank reconstruction.
+    Falls back to pure-PyTorch matmul if Triton is unavailable.
     """
     n_tokens, rank = U.shape
     _, feat_dim = V.shape
+
+    if not _HAS_TRITON:
+        result = (torch.matmul(U.float(), V.float()) * scale + anchor.float()).to(U.dtype)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
     
     if out is None:
         out = torch.empty((n_tokens, feat_dim), device=U.device, dtype=U.dtype)
@@ -90,7 +105,9 @@ def triton_fused_reconstruct(
     
     grid = (triton.cdiv(n_tokens, BLOCK_SIZE_N), triton.cdiv(feat_dim, BLOCK_SIZE_D))
     
-    torch.cuda.nvtx.range_push("Triton_LowRank_Recon_Kernel_Launch")
+    _use_nvtx = torch.cuda.is_available()
+    if _use_nvtx:
+        torch.cuda.nvtx.range_push("Triton_LowRank_Recon_Kernel_Launch")
     lowrank_recon_kernel[grid](
         U, V, anchor, out,
         U.stride(0), U.stride(1),
@@ -100,7 +117,8 @@ def triton_fused_reconstruct(
         n_tokens, rank, feat_dim, scale,
         BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_D=BLOCK_SIZE_D, BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
-    torch.cuda.nvtx.range_pop()
+    if _use_nvtx:
+        torch.cuda.nvtx.range_pop()
     
     return out
 

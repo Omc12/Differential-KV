@@ -175,12 +175,31 @@ class OpenAICompatibleAPIGateway:
         @self.app.get("/v1/runtime_info")
         async def runtime_info():
             vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+            serving_mode = "balanced"
+            model_id = "diffkv-serving"
+            if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
+                w = self.resolver.wrapper
+                serving_mode = getattr(getattr(w, "manager", None), "serving_mode", "balanced")
+                model_id = getattr(w, "model_id", model_id)
             return {
                 "vram_allocated_gb": round(vram_gb, 3),
                 "cuda_available":    torch.cuda.is_available(),
                 "sampling_mode":     "temperature+top_p+repetition_penalty",
                 "streaming_mode":    "phrase_group_chunked",
+                "serving_mode":      serving_mode,
+                "model":             model_id,
             }
+
+        @self.app.get("/health")
+        @self.app.get("/v1/health")
+        async def health_check():
+            """Health check endpoint required by Open WebUI and Ollama-compatible clients."""
+            return {"status": "ok"}
+
+        @self.app.get("/")
+        async def root():
+            """Root endpoint — returns service identity for discoverability."""
+            return {"service": "Differential KV API", "status": "running", "docs": "/docs"}
 
     # -----------------------------------------------------------------------
     # Streaming helper
@@ -304,7 +323,10 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--rank', type=int, default=8)
     parser.add_argument('--batch-size', type=int, default=4)
-    parser.add_argument('--serving-mode', type=str, choices=['lightweight', 'balanced', 'performance'], default='balanced')
+    parser.add_argument('--serving-mode', type=str,
+                        choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
+                        default='balanced',
+                        help='KV cache serving mode. Use long-context for >8K tokens; fused-sparse for max GPU throughput.')
     args = parser.parse_args()
 
     # Disable tokenizer parallelism warnings
