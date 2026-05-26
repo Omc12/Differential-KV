@@ -89,41 +89,69 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
                     # 2. Attention Decode Dispatch per batch element
-                    attn_outputs = []
-                    for b_idx in range(bsz):
-                        sid = session_ids[b_idx]
-                        if sid == "dummy_session":
-                            dummy_out = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
-                            attn_outputs.append(dummy_out)
-                            continue
-                        
-                        from native_core.sparse_decode.triton_sparse_attn import HAS_TRITON
-                        
-                        if not HAS_TRITON:
-                            # Direct high-throughput PyTorch fallback utilizing pre-allocated workspace and ReconstructionPool
+                    from native_core.sparse_decode.triton_sparse_attn import HAS_TRITON
+
+                    if not HAS_TRITON:
+                        # Vectorized single-launch batched PyTorch fallback (zero loops!)
+                        batch_k = []
+                        batch_v = []
+                        max_len = 0
+                        for b_idx in range(bsz):
+                            sid = session_ids[b_idx]
+                            if sid == "dummy_session":
+                                batch_k.append(None)
+                                batch_v.append(None)
+                                continue
                             full_k, full_v = kv_manager.assemble_decode_kv(sid, captured_layer_idx, query_states.dtype)
+                            batch_k.append(full_k)
+                            batch_v.append(full_v)
                             if full_k is not None:
-                                if num_key_value_groups > 1:
-                                    key_rep = _mq.repeat_kv(full_k, num_key_value_groups)
-                                    value_rep = _mq.repeat_kv(full_v, num_key_value_groups)
-                                else:
-                                    key_rep = full_k
-                                    value_rep = full_v
-                                attn_out_b = _F.scaled_dot_product_attention(
-                                    query_states[b_idx:b_idx+1], key_rep, value_rep,
-                                    attn_mask=None, dropout_p=0.0, is_causal=False
-                                )
+                                max_len = max(max_len, full_k.shape[2])
+
+                        if max_len > 0:
+                            padded_k = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                            padded_v = torch.zeros((bsz, num_key_value_heads, max_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                            attn_mask = torch.zeros((bsz, 1, 1, max_len), dtype=torch.bool, device=query_states.device)
+
+                            for b_idx in range(bsz):
+                                fk = batch_k[b_idx]
+                                fv = batch_v[b_idx]
+                                if fk is not None:
+                                    l = fk.shape[2]
+                                    padded_k[b_idx, :, :l, :] = fk[0]
+                                    padded_v[b_idx, :, :l, :] = fv[0]
+                                    attn_mask[b_idx, 0, 0, :l] = True
+
+                            if num_key_value_groups > 1:
+                                k_rep = _mq.repeat_kv(padded_k, num_key_value_groups)
+                                v_rep = _mq.repeat_kv(padded_v, num_key_value_groups)
                             else:
-                                attn_out_b = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                                k_rep = padded_k
+                                v_rep = padded_v
+
+                            attn_output = _F.scaled_dot_product_attention(
+                                query_states, k_rep, v_rep,
+                                attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+                            )
                         else:
+                            attn_output = torch.zeros((bsz, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                    else:
+                        attn_outputs = []
+                        for b_idx in range(bsz):
+                            sid = session_ids[b_idx]
+                            if sid == "dummy_session":
+                                dummy_out = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                                attn_outputs.append(dummy_out)
+                                continue
+
                             # Triton Fused Attention Decode Kernel Dispatch
                             block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
                                 sid, captured_layer_idx, query_states.device
                             )
-                            
+
                             pool = getattr(kv_manager, 'native_pool', None)
                             session_mbs = kv_manager.get_session_micro_block_size(sid)
-                            
+
                             attn_out_b = native_triton_sparse_attn_decode(
                                 q=query_states[b_idx:b_idx+1],
                                 block_indices=block_indices,
@@ -135,10 +163,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 R=kv_manager.rank,
                                 S_MAX=session_mbs
                             )
-                        
-                        attn_outputs.append(attn_out_b)
+                            attn_outputs.append(attn_out_b)
 
-                    attn_output = torch.cat(attn_outputs, dim=0)
+                        attn_output = torch.cat(attn_outputs, dim=0)
                     attn_output = attn_output.transpose(1, 2).contiguous()
                     attn_output = attn_output.reshape(bsz, q_len, hidden_size)
                     attn_output = self.o_proj(attn_output)

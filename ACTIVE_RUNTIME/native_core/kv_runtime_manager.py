@@ -106,6 +106,7 @@ class KVRuntimeManager:
         micro_block_size:    int   = 16,
         rank:                int   = 8,
         kv_heads:            int   = None,
+        serving_mode:        str   = "balanced",
     ):
         self.num_layers  = num_layers
         self.heads       = heads
@@ -122,6 +123,21 @@ class KVRuntimeManager:
         self.dense_recency_blocks = 1
         self.streaming_ingest     = streaming_ingest
         self.micro_block_size     = micro_block_size
+        self.serving_mode         = serving_mode
+
+        # Dynamically set budgets and pool/cache counts based on serving mode
+        if serving_mode == "lightweight":
+            recon_cache_size = 16
+            recon_pool_blocks = 32
+            gpu_budget_gb = 0.5
+        elif serving_mode == "performance":
+            recon_cache_size = 256
+            recon_pool_blocks = 512
+            gpu_budget_gb = 8.0
+        else: # balanced
+            recon_cache_size = 64
+            recon_pool_blocks = 128 if streaming_ingest else 512
+            gpu_budget_gb = 2.0
 
         # ── Phase 28 Native Block Pool ──────────────────────────────────────────
         from runtime.native_block_pool import NativeBlockPool
@@ -138,9 +154,6 @@ class KVRuntimeManager:
         )
         
         # Dedicate pool budget to the contiguous NativeBlockPool.
-        # Cap at 24,000 blocks: sufficient for 4 concurrent 25K sessions
-        # (each uses ~2,700 blocks across 28 layers) with 2x safety margin.
-        # Pre-allocated torch.zeros, so every block beyond actual usage wastes VRAM.
         pool_budget_bytes = int(gpu_budget_gb * (1024 ** 3) * 0.75)
         dynamic_max_blocks = max(4000, min(24000, pool_budget_bytes // bytes_per_block))
         
@@ -159,16 +172,15 @@ class KVRuntimeManager:
         self.recon_cache = ReconstructionCache(max_entries=recon_cache_size)
 
         # Instantiate ReconstructionPool for high-throughput decode path.
-        # 128 slots covers all realistic working sets (recent blocks in a conversation);
-        # reducing from 256 saves ~16.8 MB of persistent GPU K+V storage.
         from native_core.recon_cache import ReconstructionPool
         self.recon_pool = ReconstructionPool(
-            max_cached_blocks=128 if self.streaming_ingest else 512,
+            max_cached_blocks=recon_pool_blocks,
             num_kv_heads=self.kv_heads,
             head_dim=self.head_dim,
             micro_block_size=256 if self.streaming_ingest else self.micro_block_size,
             device=self.device
         )
+        self.recon_pool.native_pool = self.native_pool
         self.decode_workspace = {}
 
         self._async      = async_compression
@@ -495,57 +507,38 @@ class KVRuntimeManager:
         device: torch.device,
     ) -> Tuple[Optional[torch.Tensor], List[Any]]:
         """
-        Retrieves pre-categorized compressed pool indices and dense blocks,
-        fully avoiding Python-side iteration and torch.tensor allocation.
+        Vectorized O(1) metadata retrieval from contiguous packed tensors,
+        completely avoiding Python-side loops and list traversals.
         """
-        blocks = self.get_streaming_blocks(session_id, layer_idx)
-        if not blocks:
+        if self._streaming_mgr is None:
             return None, []
-
-        if not hasattr(self, "_decode_block_cache"):
-            self._decode_block_cache = {}
-
-        cache_key = (session_id, layer_idx)
-        cached = self._decode_block_cache.get(cache_key)
-
-        if cached is not None and cached["blocks_len"] == len(blocks):
-            # Fast-path check: did any cached dense block get compressed?
-            # Typically there is only 1 active dense block, so this check is extremely cheap.
-            dirty_compression = False
-            for blk in cached["dense_blocks"]:
-                if blk.U is not None:
-                    dirty_compression = True
-                    break
+        metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
+        if metadata is None:
+            return None, []
             
-            if not dirty_compression:
-                return cached["block_indices_tensor"], cached["dense_blocks"]
-
-        # Cache miss or invalidation: perform full categorization
-        compressed_pool_indices = []
-        dense_blocks = []
-
-        for blk in blocks:
-            pool_idx = getattr(blk, "pool_idx", None)
-            if blk.U is not None and blk.V is not None and pool_idx is not None:
-                compressed_pool_indices.append(pool_idx)
-            else:
-                dense_blocks.append(blk)
-
-        if compressed_pool_indices:
-            block_indices_tensor = torch.tensor(
-                compressed_pool_indices,
-                device=device,
-                dtype=torch.int32
-            )
+        valid_mask = metadata[:, 1] >= 0
+        num_blocks = int(valid_mask.sum().item())
+        
+        if num_blocks == 0:
+            return None, []
+            
+        active_meta = metadata[:num_blocks]
+        
+        # state_code == 2 represents COMPRESSED
+        compressed_mask = active_meta[:, 3] == 2
+        if compressed_mask.any():
+            block_indices_tensor = active_meta[compressed_mask, 0]
         else:
             block_indices_tensor = None
-
-        self._decode_block_cache[cache_key] = {
-            "blocks_len": len(blocks),
-            "dense_blocks": dense_blocks,
-            "block_indices_tensor": block_indices_tensor,
-        }
-
+            
+        # Get active dense block (at most 1, at the end of the sequence)
+        dense_blocks = []
+        blocks = self.get_streaming_blocks(session_id, layer_idx)
+        if blocks:
+            last_block = blocks[-1]
+            if last_block.state != "COMPRESSED" and last_block.state != "PAGED":
+                dense_blocks.append(last_block)
+                
         return block_indices_tensor, dense_blocks
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
@@ -721,52 +714,65 @@ class KVRuntimeManager:
 
         # ── 7. Compressed misses — batched GEMM then write into pool + ws ─────
         if compressed_misses:
-            B = len(compressed_misses)
-            miss_blocks = [t[0] for t in compressed_misses]
-            miss_starts = [t[1] for t in compressed_misses]
+            # Group misses by sequence length to handle variable-size adaptive blocks perfectly
+            groups = {}
+            for item in compressed_misses:
+                b_snap, start_pos = item
+                seq_len = b_snap.U.shape[0]
+                groups.setdefault(seq_len, []).append(item)
 
-            stacked_U      = torch.stack([b_snap.U.float()           for b_snap in miss_blocks], dim=0)
-            stacked_V      = torch.stack([b_snap.V.float()           for b_snap in miss_blocks], dim=0)
-            stacked_scale  = torch.tensor(
-                [b_snap.scale for b_snap in miss_blocks], device=self.device, dtype=torch.float32
-            ).view(B, 1, 1)
-            stacked_anchor = torch.stack(
-                [b_snap.anchor_kv.reshape(-1).float() for b_snap in miss_blocks], dim=0
-            ).unsqueeze(1)
+            for seq_len, group_items in groups.items():
+                B_grp = len(group_items)
+                grp_blocks = [t[0] for t in group_items]
+                grp_starts = [t[1] for t in group_items]
 
-            recon_flat = torch.bmm(stacked_U, stacked_V) * stacked_scale + stacked_anchor
+                # FP16 low-rank reconstruction: direct GPU arithmetic without slow FP32 conversions
+                stacked_U = torch.stack([b_snap.U for b_snap in grp_blocks], dim=0) # [B_grp, S, R]
+                stacked_V = torch.stack([b_snap.V for b_snap in grp_blocks], dim=0) # [B_grp, R, H_kv * D * 2]
+                stacked_scale = torch.tensor(
+                    [b_snap.scale for b_snap in grp_blocks], device=self.device, dtype=dtype
+                ).view(B_grp, 1, 1)
+                stacked_anchor = torch.stack(
+                    [b_snap.anchor_kv.reshape(-1).to(dtype) for b_snap in grp_blocks], dim=0
+                ).unsqueeze(1) # [B_grp, 1, H_kv * D * 2]
 
-            if not torch.isfinite(recon_flat).all():
-                recon_flat = torch.nan_to_num(recon_flat, nan=0.0, posinf=0.0, neginf=0.0)
+                recon_flat = torch.bmm(stacked_U, stacked_V) * stacked_scale + stacked_anchor
 
-            recon = recon_flat.view(B, -1, 2, self.kv_heads, self.head_dim).to(dtype)
-            recon_k = recon[:, :, 0].permute(0, 2, 1, 3)
-            recon_v = recon[:, :, 1].permute(0, 2, 1, 3)
+                if not torch.isfinite(recon_flat).all():
+                    recon_flat = torch.nan_to_num(recon_flat, nan=0.0, posinf=0.0, neginf=0.0)
 
-            valid_pool_idxs = [p for p in miss_pool_idxs if p >= 0]
-            if valid_pool_idxs:
-                alloc_slots = self.recon_pool.allocate_slots(valid_pool_idxs)
-            else:
-                alloc_slots = []
+                recon = recon_flat.view(B_grp, -1, 2, self.kv_heads, self.head_dim)
+                recon_k = recon[:, :, 0].permute(0, 2, 1, 3)
+                recon_v = recon[:, :, 1].permute(0, 2, 1, 3)
 
-            slot_iter = iter(alloc_slots)
-            for i, (b_snap, start_pos) in enumerate(zip(miss_blocks, miss_starts)):
-                block_len = b_snap.U.shape[0]
-                k_ws[0, :, start_pos:start_pos + block_len, :] = recon_k[i, :, :block_len, :]
-                v_ws[0, :, start_pos:start_pos + block_len, :] = recon_v[i, :, :block_len, :]
+                grp_pool_idxs = []
+                for b_snap in grp_blocks:
+                    pool_idx = getattr(b_snap.b, 'pool_idx', None)
+                    grp_pool_idxs.append(pool_idx if pool_idx is not None else -1)
 
-                pool_idx = miss_pool_idxs[i]
-                if pool_idx >= 0:
-                    slot = next(slot_iter, -1)
-                    if slot >= 0:
-                        self.recon_pool.K[slot, :, :block_len, :] = recon_k[i, :, :block_len, :].to(torch.float16)
-                        self.recon_pool.V[slot, :, :block_len, :] = recon_v[i, :, :block_len, :].to(torch.float16)
+                valid_pool_idxs = [p for p in grp_pool_idxs if p >= 0]
+                if valid_pool_idxs:
+                    alloc_slots = self.recon_pool.allocate_slots(valid_pool_idxs)
+                else:
+                    alloc_slots = []
 
-                self.recon_cache.put(
-                    b_snap.b,
-                    recon_k[i:i+1, :, :block_len, :].contiguous().clone(),
-                    recon_v[i:i+1, :, :block_len, :].contiguous().clone(),
-                )
+                slot_iter = iter(alloc_slots)
+                for i, (b_snap, start_pos) in enumerate(zip(grp_blocks, grp_starts)):
+                    k_ws[0, :, start_pos:start_pos + seq_len, :] = recon_k[i, :, :seq_len, :]
+                    v_ws[0, :, start_pos:start_pos + seq_len, :] = recon_v[i, :, :seq_len, :]
+
+                    pool_idx = grp_pool_idxs[i]
+                    if pool_idx >= 0:
+                        slot = next(slot_iter, -1)
+                        if slot >= 0:
+                            self.recon_pool.K[slot, :, :seq_len, :] = recon_k[i, :, :seq_len, :].to(torch.float16)
+                            self.recon_pool.V[slot, :, :seq_len, :] = recon_v[i, :, :seq_len, :].to(torch.float16)
+
+                    self.recon_cache.put(
+                        b_snap.b,
+                        recon_k[i:i+1, :, :seq_len, :].contiguous().clone(),
+                        recon_v[i:i+1, :, :seq_len, :].contiguous().clone(),
+                    )
 
         # ── 8. Dense active blocks — slice copy ───────────────────────────────
         for b_snap, start_pos, block_len in dense_copies:
@@ -1046,6 +1052,9 @@ class KVRuntimeManager:
             except Exception as e:
                 # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
                 print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
+
+        if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
+            self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
 
         self.total_compressions += 1
         self.total_cosine_sim   += lr_delta.cosine_sim

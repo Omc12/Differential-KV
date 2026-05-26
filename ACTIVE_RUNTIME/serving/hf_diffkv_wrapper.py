@@ -52,13 +52,15 @@ class DiffKVHFWrapper:
         self.head_dim = self.model.config.hidden_size // self.heads
         
         self.kv_heads = getattr(self.model.config, "num_key_value_heads", self.heads)
+        self.serving_mode = config.get("serving_mode", "balanced")
         self.manager = KVRuntimeManager(
             self.num_layers,
             self.kv_heads,
             self.head_dim,
             device=device,
             rank=self.rank,
-            micro_block_size=self.micro_block_size
+            micro_block_size=self.micro_block_size,
+            serving_mode=self.serving_mode
         )
         self.active_session = None
         

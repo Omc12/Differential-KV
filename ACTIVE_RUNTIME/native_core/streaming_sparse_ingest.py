@@ -62,6 +62,8 @@ class StreamingKVBlock:
     state: str = "ACCUMULATING"  # ACCUMULATING | SUBMITTED | COMPRESSED | PAGED
     pool_idx: Optional[int] = None
     dirty: bool = True
+    session_id: Optional[str] = None
+    layer_idx: Optional[int] = None
     _cache_id: Optional[str] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -113,15 +115,20 @@ class StreamingSparseIngestManager:
         micro_block_size: int = 16,
         dense_anchor_only: bool = True,
         native_pool = None,
+        device: str = "cuda",
     ):
         self.compressor = compressor
         self.compress_fn = compress_fn
         self.micro_block_size = micro_block_size
         self.dense_anchor_only = dense_anchor_only
         self.native_pool = native_pool
+        self.device = device
 
         # session_id -> layer_idx -> List[StreamingKVBlock]
         self.session_blocks: Dict[str, Dict[int, List[StreamingKVBlock]]] = {}
+        
+        # session_id -> layer_idx -> Contiguous 2D metadata tensor [MAX_BLOCKS, 4]
+        self.session_metadata: Dict[str, Dict[int, torch.Tensor]] = {}
         
         # session_id -> micro_block_size (dynamic adaptive size per session)
         self.session_micro_block_sizes: Dict[str, int] = {}
@@ -145,6 +152,8 @@ class StreamingSparseIngestManager:
     def init_session(self, session_id: str, num_layers: int, prefill_len: int = 0):
         if session_id not in self.session_blocks:
             self.session_blocks[session_id] = {i: [] for i in range(num_layers)}
+        if session_id not in self.session_metadata:
+            self.session_metadata[session_id] = {}
         if session_id not in self.session_micro_block_sizes:
             if prefill_len > 0:
                 raw_size = max(16, min(256, prefill_len // 64))
@@ -194,8 +203,39 @@ class StreamingSparseIngestManager:
 
     def clear_session(self, session_id: str):
         self.session_blocks.pop(session_id, None)
+        self.session_metadata.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
         self.session_staging_buffers.pop(session_id, None)
+
+    def update_metadata_block(self, session_id: str, layer_idx: int, block_idx: int, block):
+        metadata = self.session_metadata.setdefault(session_id, {}).setdefault(
+            layer_idx, torch.full((1024, 4), -1, dtype=torch.int32, device=self.device)
+        )
+        if block_idx >= metadata.shape[0]:
+            new_size = metadata.shape[0] * 2
+            new_meta = torch.full((new_size, 4), -1, dtype=torch.int32, device=self.device)
+            new_meta[:metadata.shape[0]] = metadata
+            self.session_metadata[session_id][layer_idx] = new_meta
+            metadata = new_meta
+
+        metadata[block_idx, 0] = block.pool_idx if block.pool_idx is not None else -1
+        metadata[block_idx, 1] = block.anchor_idx
+        metadata[block_idx, 2] = block.token_count()
+        state_codes = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
+        metadata[block_idx, 3] = state_codes.get(block.state, -1)
+
+    def update_metadata_state(self, session_id: str, layer_idx: int, block):
+        blocks = self.session_blocks.get(session_id, {}).get(layer_idx, [])
+        try:
+            block_idx = blocks.index(block)
+        except ValueError:
+            return
+        metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
+        if metadata is not None and block_idx < metadata.shape[0]:
+            metadata[block_idx, 0] = block.pool_idx if block.pool_idx is not None else -1
+            metadata[block_idx, 2] = block.token_count()
+            state_codes = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
+            metadata[block_idx, 3] = state_codes.get(block.state, -1)
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -245,8 +285,11 @@ class StreamingSparseIngestManager:
                     micro_block_size=micro_block_size,
                     token_indices=[self._next_anchor_idx(blocks)],
                     pool_idx=pool_idx,
+                    session_id=session_id,
+                    layer_idx=layer_idx,
                 )
                 blocks.append(new_block)
+                self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
                 
                 with self._stats_lock:
                     self.stats["total_blocks_created"] += 1
@@ -262,10 +305,12 @@ class StreamingSparseIngestManager:
 
             current_block.dirty = True
             current_block.token_indices.append(current_block.anchor_idx + len(current_block.token_indices))
+            self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
 
             # Immediately compress when micro-block fills — during ingest!
             if current_block.is_compression_eligible():
                 self._submit_block_for_compression(current_block)
+                self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
                 with self._stats_lock:
                     self.stats["compressions_during_ingest"] += 1
             return
@@ -412,6 +457,10 @@ class StreamingSparseIngestManager:
                     self.stats["total_blocks_created"] += 1
 
             blocks.extend(new_blocks)
+            for idx, block in enumerate(new_blocks):
+                block.session_id = session_id
+                block.layer_idx = layer_idx
+                self.update_metadata_block(session_id, layer_idx, len(blocks) - len(new_blocks) + idx, block)
 
             # Batch submit all compression requests in one consolidation transfer
             if full_blocks_to_compress:

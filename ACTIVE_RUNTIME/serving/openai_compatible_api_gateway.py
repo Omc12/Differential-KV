@@ -304,13 +304,14 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--rank', type=int, default=8)
     parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--serving-mode', type=str, choices=['lightweight', 'balanced', 'performance'], default='balanced')
     args = parser.parse_args()
 
     # Disable tokenizer parallelism warnings
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     
     print(f'Loading DiffKV runtime with model: {args.model}...')
-    wrapper = DiffKVHFWrapper(args.model, config={'rank': args.rank}, device='cuda')
+    wrapper = DiffKVHFWrapper(args.model, config={'rank': args.rank, 'serving_mode': args.serving_mode}, device='cuda')
     
     print('Starting Continuous Batching Engine...')
     engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size)

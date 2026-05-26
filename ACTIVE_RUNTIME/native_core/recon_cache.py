@@ -193,6 +193,17 @@ class ReconstructionPool:
                 self.lru_scores
             )
 
+            # Prefix Pinning: protect slots holding blocks shared across sessions (ref_count > 1) from eviction
+            native_pool = getattr(self, "native_pool", None)
+            if native_pool is not None:
+                ref_counts = [native_pool._ref_counts[int(pid)] if pid >= 0 else 0 for pid in self.slot_to_pool.tolist()]
+                ref_counts_t = torch.tensor(ref_counts, device=self.device, dtype=torch.float32)
+                scores = torch.where(
+                    ref_counts_t > 1,
+                    torch.tensor(1e9, device=self.device),
+                    scores
+                )
+
             # Find the num_misses slots with the smallest scores
             _, allocated_slots = torch.topk(scores, k=num_misses, largest=False, sorted=False)
 
