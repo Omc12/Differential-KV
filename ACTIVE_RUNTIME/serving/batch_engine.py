@@ -64,28 +64,26 @@ class ContinuousBatchEngine:
 
     # ── Compression barrier ─────────────────────────────────────────────
 
-    def _wait_for_compression(self, session_id: str, timeout_s: float = 8.0):
+    async def _wait_for_compression(self, session_id: str, timeout_s: float = 8.0):
         """
-        Block the calling thread until every block belonging to *session_id*
-        in the streaming ingest manager has left the SUBMITTED state (i.e. the
-        async SVD compressor has processed them and they are now COMPRESSED or
-        ACCUMULATING), OR until *timeout_s* seconds elapse.
+        Non-blocking async wait until every block for *session_id* has left
+        the SUBMITTED state (async SVD compressor is done), OR timeout elapses.
 
-        This prevents the transient double-VRAM scenario where a block's
-        active_k/v is still alive in VRAM while its CPU copy sits in the
-        compressor queue — causing reconstructed dense fallback during decode.
+        CRITICAL: uses `await asyncio.sleep()` so the event loop is NEVER
+        blocked. A sync `time.sleep()` here would freeze the entire server,
+        causing SSE streams to idle-timeout and responses to appear truncated.
         """
         mgr = self.wrapper.manager
         streaming_mgr = getattr(mgr, "_streaming_mgr", None)
         if streaming_mgr is None:
-            return  # No streaming ingest — nothing to wait for
+            return
 
         session_blocks = streaming_mgr.session_blocks.get(session_id, {})
         if not session_blocks:
             return
 
         deadline = time.monotonic() + timeout_s
-        check_interval = 0.005  # 5 ms poll
+        check_interval = 0.005  # 5 ms async yield — event loop stays live
 
         while time.monotonic() < deadline:
             found_submitted = False
@@ -97,10 +95,10 @@ class ContinuousBatchEngine:
                 if found_submitted:
                     break
             if not found_submitted:
-                return  # All blocks compressed — safe to decode
-            time.sleep(check_interval)
+                return  # All blocks compressed — safe to start decode
+            await asyncio.sleep(check_interval)  # yield to event loop, stream chunks etc.
 
-        # Timeout — log a warning but don't block decode indefinitely
+        # Timeout — warn but don’t block decode indefinitely
         if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             print(f"[DiffKV BatchEngine] WARNING: compression barrier timed out after {timeout_s}s "
                   f"for session {session_id}. Some blocks may still be SUBMITTED.")
@@ -190,7 +188,7 @@ class ContinuousBatchEngine:
         req = BatchRequest(
             session_id=session_id,
             prompt=payload["prompt"],
-            max_tokens=payload.get("max_tokens", 512),
+            max_tokens=payload.get("max_tokens", 2048),
             temperature=payload.get("temperature", 0.7),
             top_p=payload.get("top_p", 0.9),
             repetition_penalty=payload.get("repetition_penalty", 1.15)
@@ -339,15 +337,17 @@ class ContinuousBatchEngine:
             torch.cuda.empty_cache()
             self._log_vram(f"post-prefill session={req.session_id}")
 
-            # ── Compression barrier: wait for async SVD to drain SUBMITTED blocks ──
-            # Blocks that are still SUBMITTED hold both their active_k/v in VRAM
-            # AND a CPU copy in the compressor queue. Waiting here ensures decode
-            # starts only when all prefill blocks are COMPRESSED (active_k/v=None),
-            # cutting VRAM to just anchors + U/V matrices before decode begins.
-            self._boost_compressor_priority()
-            self._wait_for_compression(req.session_id)
-            self._restore_compressor_priority()
-            self._log_vram(f"post-barrier session={req.session_id}")
+            # ── Compression barrier (only for large fresh prefills) ──────────────
+            # Only blocks that were freshly SUBMITTED during this prefill matter.
+            # Incremental prefills (cached_len > 0) add at most a few tokens to
+            # the current ACCUMULATING window — they create zero SUBMITTED blocks,
+            # so the barrier is meaningless and just wastes time.
+            # For short fresh prefills (<= 512 tokens) compression is also instant.
+            if cached_len == 0 and len(req.prompt_ids) > 512:
+                self._boost_compressor_priority()
+                await self._wait_for_compression(req.session_id)
+                self._restore_compressor_priority()
+                self._log_vram(f"post-barrier session={req.session_id}")
 
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_pref = (time.perf_counter() - t0_pref) * 1000

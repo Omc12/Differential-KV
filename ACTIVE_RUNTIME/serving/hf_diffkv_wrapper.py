@@ -82,8 +82,11 @@ class DiffKVHFWrapper:
             elif isinstance(model_eos, int):
                 self.stop_token_ids.add(model_eos)
                 
-        # 3. Universally scan tokenizer's special tokens for common turn end markers
-        special_words = ["<|im_end|>", "<|im_start|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
+        # 3. Universally scan tokenizer's special tokens for genuine end-of-turn markers.
+        # IMPORTANT: "<|im_start|>" is intentionally EXCLUDED — it is a message START
+        # marker, not a stop signal. Including it causes premature generation halt when
+        # the model predicts a next-turn prefix (e.g. structured output or roleplay).
+        special_words = ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
         for word in special_words:
             tok_id = self.tokenizer.convert_tokens_to_ids(word)
             if tok_id is not None and tok_id != self.tokenizer.unk_token_id:

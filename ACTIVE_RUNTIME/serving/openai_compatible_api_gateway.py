@@ -22,7 +22,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
-    max_tokens: Optional[int] = 512
+    max_tokens: Optional[int] = 2048
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 0.9
     repetition_penalty: Optional[float] = 1.15
@@ -92,7 +92,7 @@ class OpenAICompatibleAPIGateway:
 
             payload = {
                 "messages":           [{"role": m.role, "content": m.content} for m in request.messages],
-                "max_tokens":         request.max_tokens if request.max_tokens is not None else 512,
+                "max_tokens":         request.max_tokens if request.max_tokens is not None else 2048,
                 "temperature":        request.temperature if request.temperature is not None else 0.7,
                 "top_p":              request.top_p if request.top_p is not None else 0.9,
                 "repetition_penalty": request.repetition_penalty if request.repetition_penalty is not None else 1.15,
@@ -335,7 +335,7 @@ def main():
     parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-1.5B-Instruct')
     parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
-    parser.add_argument('--rank', type=int, default=16,
+    parser.add_argument('--rank', type=int, default=32,
                         help='SVD rank for KV compression. Higher = better quality, more VRAM. '
                              'Recommended: 16 for balanced, 32 for quality, 8 for VRAM-constrained.')
     parser.add_argument('--micro-block-size', type=int, default=32,
