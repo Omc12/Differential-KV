@@ -39,9 +39,9 @@ if HAS_TRITON:
         pool_u_ptr,         # [MAX_BLOCKS, S_MAX, R]
         pool_scales_ptr,    # [MAX_BLOCKS]
         pool_seq_lens_ptr,  # [MAX_BLOCKS]
-        out_ptr,            # [H_q, D]
-        m_ptr,              # [H_q]
-        l_ptr,              # [H_q]
+        out_ptr,            # [H_q, D] if NUM_CHUNKS == 1 else [H_q, NUM_CHUNKS, D]
+        m_ptr,              # [H_q] if NUM_CHUNKS == 1 else [H_q, NUM_CHUNKS]
+        l_ptr,              # [H_q] if NUM_CHUNKS == 1 else [H_q, NUM_CHUNKS]
         
         # Strides
         stride_q_h, stride_q_d,
@@ -61,9 +61,13 @@ if HAS_TRITON:
         R: tl.constexpr,
         S_MAX: tl.constexpr,
         INV_SCALE: tl.constexpr,
+        
+        BLOCKS_PER_CHUNK: tl.constexpr,
+        NUM_CHUNKS: tl.constexpr,
     ):
-        # Each program processes one Query Head
+        # Each program processes one Query Head and one Chunk ID
         h_q = tl.program_id(0)
+        chunk_id = tl.program_id(1)
         h_kv = h_q // KV_GRP
         
         # Offsets for D and R dimensions
@@ -80,8 +84,14 @@ if HAS_TRITON:
         l_i = 0.0
         O_i = tl.zeros([D], dtype=tl.float32)
         
-        # Loop over all N blocks
-        for n in range(N):
+        # FlashDecoding sequence range
+        start_block = chunk_id * BLOCKS_PER_CHUNK
+        end_block = start_block + BLOCKS_PER_CHUNK
+        if end_block > N:
+            end_block = N
+        
+        # Loop over assigned block chunk range
+        for n in range(start_block, end_block):
             # 1. Lookup global pool index for the n-th block in our logical sequence
             pool_idx = tl.load(block_indices_ptr + n)
             
@@ -154,17 +164,81 @@ if HAS_TRITON:
             O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta
             m_i = m_new
 
+        if NUM_CHUNKS == 1:
+            # Final normalization
+            O_i = O_i / l_i
+            # Store to final global memory
+            out_ptrs = out_ptr + h_q * stride_out_h + offs_d * stride_out_d
+            tl.store(out_ptrs, O_i)
+            
+            if m_ptr is not None:
+                tl.store(m_ptr + h_q, m_i)
+            if l_ptr is not None:
+                tl.store(l_ptr + h_q, l_i)
+        else:
+            # Store unnormalized results to global workspaces for reduction
+            out_work_ptrs = out_ptr + h_q * (NUM_CHUNKS * D) + chunk_id * D + offs_d
+            tl.store(out_work_ptrs, O_i)
+            
+            if m_ptr is not None:
+                tl.store(m_ptr + h_q * NUM_CHUNKS + chunk_id, m_i)
+            if l_ptr is not None:
+                tl.store(l_ptr + h_q * NUM_CHUNKS + chunk_id, l_i)
+
+    @triton.jit
+    def _fused_sparse_decode_reduction_kernel(
+        out_workspace_ptr,  # [H_q, NUM_CHUNKS, D]
+        m_workspace_ptr,    # [H_q, NUM_CHUNKS]
+        l_workspace_ptr,    # [H_q, NUM_CHUNKS]
+        out_ptr,            # [H_q, D]
+        m_final_ptr,        # [H_q]
+        l_final_ptr,        # [H_q]
+        
+        NUM_CHUNKS: tl.constexpr,
+        D: tl.constexpr,
+    ):
+        h_q = tl.program_id(0)
+        offs_d = tl.arange(0, D)
+        
+        # Initialize running reduction state
+        m_i = -float("inf")
+        l_i = 0.0
+        O_i = tl.zeros([D], dtype=tl.float32)
+        
+        for c in range(NUM_CHUNKS):
+            # Load chunk stats
+            m_c = tl.load(m_workspace_ptr + h_q * NUM_CHUNKS + c)
+            l_c = tl.load(l_workspace_ptr + h_q * NUM_CHUNKS + c)
+            
+            # Load chunk output
+            out_c_ptrs = out_workspace_ptr + h_q * (NUM_CHUNKS * D) + c * D + offs_d
+            O_c = tl.load(out_c_ptrs).to(tl.float32)
+            
+            # Update running max
+            m_new = tl.maximum(m_i, m_c)
+            
+            # Exponential scaling factors
+            alpha = tl.exp(m_i - m_new)
+            beta = tl.exp(m_c - m_new)
+            
+            # Update running denominator
+            l_i = l_i * alpha + l_c * beta
+            
+            # Accumulate scaled local outputs
+            O_i = O_i * alpha + O_c * beta
+            m_i = m_new
+            
         # Final normalization
         O_i = O_i / l_i
         
-        # Store to global memory
-        out_ptrs = out_ptr + h_q * stride_out_h + offs_d * stride_out_d
+        # Store to final output
+        out_ptrs = out_ptr + h_q * D + offs_d
         tl.store(out_ptrs, O_i)
-
-        if m_ptr is not None:
-            tl.store(m_ptr + h_q, m_i)
-        if l_ptr is not None:
-            tl.store(l_ptr + h_q, l_i)
+        
+        if m_final_ptr is not None:
+            tl.store(m_final_ptr + h_q, m_i)
+        if l_final_ptr is not None:
+            tl.store(l_final_ptr + h_q, l_i)
 
 
 def _pytorch_vectorized_sparse_attn_decode(
@@ -273,21 +347,51 @@ def native_triton_sparse_attn_decode(
     
     if N > 0:
         try:
-            out = torch.empty((H_q, D), device=q.device, dtype=torch.float32)
             q_sq = q[0, :, 0, :] # [H_q, D]
             D_pad = triton.next_power_of_2(D)
             R_pad = triton.next_power_of_2(R)
             S_pad = triton.next_power_of_2(S_MAX)
             
+            # FlashDecoding configuration: chunk size of 16 blocks
+            BLOCKS_PER_CHUNK = 16
+            if N > BLOCKS_PER_CHUNK:
+                num_chunks = (N + BLOCKS_PER_CHUNK - 1) // BLOCKS_PER_CHUNK
+            else:
+                num_chunks = 1
+                
+            grid = (H_q, num_chunks)
+            
+            # Reusable workspaces cache to eliminate allocator churn
+            if num_chunks > 1:
+                cache_key = (H_q, num_chunks, D_pad, q.device)
+                if not hasattr(native_triton_sparse_attn_decode, "_workspaces_cache"):
+                    native_triton_sparse_attn_decode._workspaces_cache = {}
+                
+                workspaces = native_triton_sparse_attn_decode._workspaces_cache.get(cache_key)
+                if workspaces is None:
+                    out_workspace = torch.empty((H_q, num_chunks, D_pad), device=q.device, dtype=torch.float32)
+                    m_workspace = torch.empty((H_q, num_chunks), device=q.device, dtype=torch.float32)
+                    l_workspace = torch.empty((H_q, num_chunks), device=q.device, dtype=torch.float32)
+                    workspaces = (out_workspace, m_workspace, l_workspace)
+                    native_triton_sparse_attn_decode._workspaces_cache[cache_key] = workspaces
+                else:
+                    out_workspace, m_workspace, l_workspace = workspaces
+                    
+                out = torch.empty((H_q, D), device=q.device, dtype=torch.float32)
+                m_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
+                l_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
+            else:
+                out = torch.empty((H_q, D), device=q.device, dtype=torch.float32)
+                m_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
+                l_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
+                out_workspace = out
+                m_workspace = m_out
+                l_workspace = l_out
+            
             # Phase 28: Proof of dispatch
             if not hasattr(native_triton_sparse_attn_decode, "fired"):
                 print("[Phase 28] TRITON FUSED SPARSE DECODE KERNEL FIRED!")
                 native_triton_sparse_attn_decode.fired = True
-            
-            grid = (H_q,)
-            
-            m_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
-            l_out = torch.empty((H_q,), device=q.device, dtype=torch.float32)
             
             _fused_sparse_decode_kernel[grid](
                 q_ptr=q_sq,
@@ -299,9 +403,9 @@ def native_triton_sparse_attn_decode(
                 pool_u_ptr=pool.U,
                 pool_scales_ptr=pool.scales,
                 pool_seq_lens_ptr=pool.seq_lens,
-                out_ptr=out,
-                m_ptr=m_out,
-                l_ptr=l_out,
+                out_ptr=out_workspace,
+                m_ptr=m_workspace,
+                l_ptr=l_workspace,
                 
                 stride_q_h=q_sq.stride(0), stride_q_d=q_sq.stride(1),
                 stride_ak_n=pool.anchors_K.stride(0), stride_ak_h=pool.anchors_K.stride(1), stride_ak_d=pool.anchors_K.stride(2),
@@ -309,7 +413,7 @@ def native_triton_sparse_attn_decode(
                 stride_vk_n=pool.V_K.stride(0), stride_vk_r=pool.V_K.stride(1), stride_vk_h=pool.V_K.stride(2), stride_vk_d=pool.V_K.stride(3),
                 stride_vv_n=pool.V_V.stride(0), stride_vv_r=pool.V_V.stride(1), stride_vv_h=pool.V_V.stride(2), stride_vv_d=pool.V_V.stride(3),
                 stride_u_n=pool.U.stride(0), stride_u_s=pool.U.stride(1), stride_u_r=pool.U.stride(2),
-                stride_out_h=out.stride(0), stride_out_d=out.stride(1),
+                stride_out_h=out_workspace.stride(0), stride_out_d=out_workspace.stride(1),
                 
                 N=N,
                 H_q=H_q,
@@ -319,7 +423,23 @@ def native_triton_sparse_attn_decode(
                 R=R_pad,
                 S_MAX=S_pad,
                 INV_SCALE=inv_scale,
+                
+                BLOCKS_PER_CHUNK=BLOCKS_PER_CHUNK,
+                NUM_CHUNKS=num_chunks,
             )
+            
+            if num_chunks > 1:
+                grid_reduction = (H_q,)
+                _fused_sparse_decode_reduction_kernel[grid_reduction](
+                    out_workspace_ptr=out_workspace,
+                    m_workspace_ptr=m_workspace,
+                    l_workspace_ptr=l_workspace,
+                    out_ptr=out,
+                    m_final_ptr=m_out,
+                    l_final_ptr=l_out,
+                    NUM_CHUNKS=num_chunks,
+                    D=D_pad,
+                )
             
             if dense_blocks or (active_k is not None and active_k.shape[2] > 0):
                 # Un-normalize O_i to continue accumulation

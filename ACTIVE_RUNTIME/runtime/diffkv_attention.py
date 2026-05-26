@@ -79,35 +79,62 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     import torch.nn.functional as _F
                     from native_core.sparse_decode.triton_sparse_attn import native_triton_sparse_attn_decode
 
-                    # 1. Ingest new tokens for all batch elements
+                    # 1. Ingest new tokens for all active batch elements
                     for b_idx in range(bsz):
                         sid = session_ids[b_idx]
+                        if sid == "dummy_session":
+                            continue
                         curr_k = key_states[b_idx:b_idx+1]
                         curr_v = value_states[b_idx:b_idx+1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
-                    # 2. Triton Fused Attention Decode Kernel Dispatch per batch element
+                    # 2. Attention Decode Dispatch per batch element
                     attn_outputs = []
                     for b_idx in range(bsz):
                         sid = session_ids[b_idx]
-                        block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
-                            sid, captured_layer_idx, query_states.device
-                        )
+                        if sid == "dummy_session":
+                            dummy_out = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                            attn_outputs.append(dummy_out)
+                            continue
                         
-                        pool = getattr(kv_manager, 'native_pool', None)
-                        session_mbs = kv_manager.get_session_micro_block_size(sid)
+                        from native_core.sparse_decode.triton_sparse_attn import HAS_TRITON
                         
-                        attn_out_b = native_triton_sparse_attn_decode(
-                            q=query_states[b_idx:b_idx+1],
-                            block_indices=block_indices,
-                            pool=pool,
-                            dense_blocks=dense_blocks,
-                            active_k=None,
-                            active_v=None,
-                            num_key_value_groups=num_key_value_groups,
-                            R=kv_manager.rank,
-                            S_MAX=session_mbs
-                        )
+                        if not HAS_TRITON:
+                            # Direct high-throughput PyTorch fallback utilizing pre-allocated workspace and ReconstructionPool
+                            full_k, full_v = kv_manager.assemble_decode_kv(sid, captured_layer_idx, query_states.dtype)
+                            if full_k is not None:
+                                if num_key_value_groups > 1:
+                                    key_rep = _mq.repeat_kv(full_k, num_key_value_groups)
+                                    value_rep = _mq.repeat_kv(full_v, num_key_value_groups)
+                                else:
+                                    key_rep = full_k
+                                    value_rep = full_v
+                                attn_out_b = _F.scaled_dot_product_attention(
+                                    query_states[b_idx:b_idx+1], key_rep, value_rep,
+                                    attn_mask=None, dropout_p=0.0, is_causal=False
+                                )
+                            else:
+                                attn_out_b = torch.zeros((1, num_heads, 1, head_dim), device=query_states.device, dtype=query_states.dtype)
+                        else:
+                            # Triton Fused Attention Decode Kernel Dispatch
+                            block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
+                                sid, captured_layer_idx, query_states.device
+                            )
+                            
+                            pool = getattr(kv_manager, 'native_pool', None)
+                            session_mbs = kv_manager.get_session_micro_block_size(sid)
+                            
+                            attn_out_b = native_triton_sparse_attn_decode(
+                                q=query_states[b_idx:b_idx+1],
+                                block_indices=block_indices,
+                                pool=pool,
+                                dense_blocks=dense_blocks,
+                                active_k=None,
+                                active_v=None,
+                                num_key_value_groups=num_key_value_groups,
+                                R=kv_manager.rank,
+                                S_MAX=session_mbs
+                            )
                         
                         attn_outputs.append(attn_out_b)
 

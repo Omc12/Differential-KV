@@ -1,0 +1,42 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "model_weight_mb": 1214.96,
+  "allocator_overhead_mb": 21.160000000000082,
+  "sessions": [
+    {
+      "label": "short_prompt",
+      "prompt_tokens": 32,
+      "model_weight_mb": 1214.96,
+      "peak_prefill_mb": 1226.11,
+      "kv_overhead_mb": 11.149999999999864,
+      "post_gc_reserved_mb": 1245.71,
+      "recon_calls": 0,
+      "recon_total_mb": 0,
+      "decode_recon_calls": 0
+    },
+    {
+      "label": "medium_prompt",
+      "prompt_tokens": 128,
+      "model_weight_mb": 1214.96,
+      "peak_prefill_mb": 1233.61,
+      "kv_overhead_mb": 18.649999999999864,
+      "post_gc_reserved_mb": 1249.9,
+      "recon_calls": 0,
+      "recon_total_mb": 0,
+      "decode_recon_calls": 0
+    },
+    {
+      "label": "long_prompt",
+      "prompt_tokens": 512,
+      "model_weight_mb": 1214.96,
+      "peak_prefill_mb": 1252.09,
+      "kv_overhead_mb": 37.12999999999988,
+      "post_gc_reserved_mb": 1260.39,
+      "recon_calls": 0,
+      "recon_total_mb": 0,
+      "decode_recon_calls": 0
+    }
+  ],
+  "streaming_active": true,
+  "micro_block_size": 16
+}

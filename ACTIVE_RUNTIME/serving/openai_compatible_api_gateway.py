@@ -316,7 +316,7 @@ def main():
     engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size)
     
     print('Starting Session Manager...')
-    session_manager = ProductionSessionManager()
+    session_manager = ProductionSessionManager(kv_manager=wrapper.manager)
     
     gateway = OpenAICompatibleAPIGateway(resolver=engine, session_manager=session_manager)
     

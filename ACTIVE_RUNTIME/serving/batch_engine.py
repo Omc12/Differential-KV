@@ -167,12 +167,13 @@ class ContinuousBatchEngine:
         # be batched without padding, which wastes memory for large prompts)
         # ─────────────────────────────────────────────────────────────────
         for req in prefill_reqs:
+            t0_pref = time.perf_counter()
             # Always clear any stale KV for this session before prefill
             self._free_session_kv(req.session_id)
 
             input_ids    = torch.tensor([req.prompt_ids], dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
             position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long,
-                                        device=self.wrapper.device).unsqueeze(0)
+                                         device=self.wrapper.device).unsqueeze(0)
 
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
@@ -190,12 +191,18 @@ class ContinuousBatchEngine:
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
 
+            import os
+            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                dur_pref = (time.perf_counter() - t0_pref) * 1000
+                print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
+
         if not decode_reqs:
             return
 
         # ─────────────────────────────────────────────────────────────────
-        # BATCHED DECODE (B >= 1) — extremely fast parallel execution
+        # BATCHED DECODE (B >= 1) — CUDA Graph Stability Buckets (Batch Padding)
         # ─────────────────────────────────────────────────────────────────
+        t0_dec = time.perf_counter()
         input_ids_list = []
         position_ids_list = []
         session_ids = []
@@ -205,6 +212,25 @@ class ContinuousBatchEngine:
             input_ids_list.append([req.generated_ids[-1]])
             position_ids_list.append([cur_pos])
             session_ids.append(req.session_id)
+
+        actual_batch_size = len(decode_reqs)
+        
+        # Determine the nearest power of 2 stability bucket size (1, 2, 4, 8, etc.)
+        bucket_size = 1
+        while bucket_size < actual_batch_size:
+            bucket_size *= 2
+            
+        # Pad with dummy request structures if needed to fill the stability bucket shape
+        if actual_batch_size < bucket_size:
+            dummy_req = decode_reqs[-1]
+            dummy_input = [dummy_req.generated_ids[-1]]
+            dummy_pos = [dummy_req.total_seq_len - 1]
+            dummy_sid = "dummy_session"
+            
+            for _ in range(bucket_size - actual_batch_size):
+                input_ids_list.append(dummy_input)
+                position_ids_list.append(dummy_pos)
+                session_ids.append(dummy_sid)
 
         input_ids = torch.tensor(input_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
         position_ids = torch.tensor(position_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
@@ -219,12 +245,20 @@ class ContinuousBatchEngine:
                 use_cache=True
             )
 
-        logits = out.logits[:, -1, :]  # shape: [B, vocab_size]
-        for idx, req in enumerate(decode_reqs):
+        logits = out.logits[:, -1, :]  # shape: [bucket_size, vocab_size]
+        
+        # Extract and sample outputs ONLY for actual active requests
+        for idx in range(actual_batch_size):
+            req = decode_reqs[idx]
             req_logits = logits[idx : idx + 1]  # shape: [1, vocab_size]
             next_id = self._sample(req_logits, req)
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
+
+        import os
+        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            dur_dec = (time.perf_counter() - t0_dec) * 1000
+            print(f"[DiffKV Telemetry] Decode Step batch_size={actual_batch_size} bucket_size={bucket_size} duration={dur_dec:.2f}ms")
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
         # Apply repetition penalty over the most recent tokens

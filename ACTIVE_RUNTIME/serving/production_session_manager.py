@@ -10,9 +10,10 @@ class ProductionSessionManager:
     Handles multi-session lifecycle, persistence, and sparse residency management.
     Ensures sessions are correctly loaded, saved, and cleaned up.
     """
-    def __init__(self, storage_path: str = "./session_checkpoints", max_resident_sessions: int = 5):
+    def __init__(self, storage_path: str = "./session_checkpoints", max_resident_sessions: int = 5, kv_manager = None):
         self.storage_path = storage_path
         self.max_resident_sessions = max_resident_sessions
+        self.kv_manager = kv_manager
         self.active_sessions: Dict[str, Dict[str, Any]] = {}
         self.resident_sessions: List[str] = []  # LRU for VRAM residency
         self.message_histories: Dict[str, List[Dict[str, str]]] = {}  # session_id -> [{role, content}]
@@ -82,14 +83,30 @@ class ProductionSessionManager:
             self._load_into_vram(session_id)
 
     def _evict_from_vram(self, session_id: str):
-        # In a real implementation, this would involve clearing GPU tensors
-        print(f"[PSM] Evicting session {session_id} from VRAM residency.")
-        pass
+        if self.kv_manager is not None:
+            try:
+                # Take zero-copy snapshot under persisted ID
+                self.kv_manager.snapshot_session(session_id, f"persisted_{session_id}")
+                # Clear session blocks to free NativeBlockPool slots and GPU memory
+                self.kv_manager.clear_session(session_id)
+                print(f"[PSM] Evicted session {session_id} to VRAM snapshot.")
+            except Exception as e:
+                print(f"[PSM] Warning: failed to evict session {session_id} from VRAM: {e}")
+        else:
+            print(f"[PSM] Evicting session {session_id} from VRAM residency (no KV manager).")
 
     def _load_into_vram(self, session_id: str):
-        # In a real implementation, this would involve loading tensors to GPU
-        print(f"[PSM] Loading session {session_id} into VRAM residency.")
-        pass
+        if self.kv_manager is not None:
+            checkpoint_id = f"persisted_{session_id}"
+            if hasattr(self.kv_manager, "_session_checkpoints") and checkpoint_id in self.kv_manager._session_checkpoints:
+                try:
+                    self.kv_manager.restore_session(session_id, checkpoint_id)
+                    self.kv_manager.delete_checkpoint(checkpoint_id)
+                    print(f"[PSM] Loaded session {session_id} back from VRAM snapshot.")
+                except Exception as e:
+                    print(f"[PSM] Warning: failed to restore session {session_id} into VRAM: {e}")
+        else:
+            print(f"[PSM] Loading session {session_id} into VRAM residency (no KV manager).")
 
     def cleanup_idle_sessions(self, idle_timeout_seconds: int = 3600):
         current_time = time.time()

@@ -457,23 +457,39 @@ class StreamingSparseIngestManager:
 
         # Enqueue cloned slices — each clone is an independent CPU tensor,
         # so the shared staging buffer can be safely reused across layers.
+        is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "_queue")
+        
         for idx, block in enumerate(blocks_list):
             k_cpu_slice = k_cpu[idx : idx + 1].clone()
             v_cpu_slice = v_cpu[idx : idx + 1].clone()
 
-            try:
-                self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, None))
-                with self.compressor._stats_lock:
-                    self.compressor.stats["submitted"] += 1
-                    depth = self.compressor._queue.qsize()
-                    if depth > self.compressor.stats["queue_depth_peak"]:
-                        self.compressor.stats["queue_depth_peak"] = depth
-            except queue.Full:
-                # Sync fallback if queue is full
-                self.compress_fn(block, block.active_k, block.active_v)
+            if is_async_active:
+                try:
+                    self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, None))
+                    with self.compressor._stats_lock:
+                        self.compressor.stats["submitted"] += 1
+                        depth = self.compressor._queue.qsize()
+                        if depth > self.compressor.stats["queue_depth_peak"]:
+                            self.compressor.stats["queue_depth_peak"] = depth
+                except queue.Full:
+                    # Sync fallback if queue is full
+                    self.compress_fn(block, k_cpu_slice, v_cpu_slice)
+                    block.state = "COMPRESSED"
+                    with self.compressor._stats_lock:
+                        self.compressor.stats["sync_fallbacks"] += 1
+            else:
+                # Sync execution directly on the CPU slice
+                self.compress_fn(block, k_cpu_slice, v_cpu_slice)
                 block.state = "COMPRESSED"
-                with self.compressor._stats_lock:
-                    self.compressor.stats["sync_fallbacks"] += 1
+                if hasattr(self.compressor, "stats"):
+                    stats = getattr(self.compressor, "stats")
+                    if isinstance(stats, dict) and "sync_fallbacks" in stats:
+                        lock = getattr(self.compressor, "_stats_lock", None)
+                        if lock is not None:
+                            with lock:
+                                stats["sync_fallbacks"] += 1
+                        else:
+                            stats["sync_fallbacks"] += 1
 
             with self._stats_lock:
                 self.stats["total_compressed"] += 1

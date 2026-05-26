@@ -39,21 +39,34 @@ class NativeBlockPool:
         
         # Block allocator state
         self._free_indices = list(range(max_blocks - 1, -1, -1))
+        self._ref_counts = [0] * max_blocks
         
     def allocate_block(self) -> int:
         if not self._free_indices:
             raise RuntimeError("NativeBlockPool is out of memory! Increase max_blocks.")
-        return self._free_indices.pop()
+        idx = self._free_indices.pop()
+        self._ref_counts[idx] = 1
+        return idx
 
     def allocate_blocks(self, count: int) -> list:
         if len(self._free_indices) < count:
             raise RuntimeError(f"NativeBlockPool is out of memory! Requested {count}, available {len(self._free_indices)}")
         allocated = self._free_indices[-count:]
         del self._free_indices[-count:]
+        for idx in allocated:
+            self._ref_counts[idx] = 1
         return allocated
         
+    def increment_ref(self, pool_idx: int):
+        if pool_idx is not None and 0 <= pool_idx < self.max_blocks:
+            self._ref_counts[pool_idx] += 1
+
     def free_block(self, pool_idx: int):
-        self._free_indices.append(pool_idx)
+        if pool_idx is not None and 0 <= pool_idx < self.max_blocks:
+            self._ref_counts[pool_idx] -= 1
+            if self._ref_counts[pool_idx] <= 0:
+                self._ref_counts[pool_idx] = 0
+                self._free_indices.append(pool_idx)
         
     def write_block(
         self, 
@@ -89,6 +102,7 @@ class NativeBlockPool:
     def reset(self):
         """Completely reset the pool to its initial state, zeroing out all tensors."""
         self._free_indices = list(range(self.max_blocks - 1, -1, -1))
+        self._ref_counts = [0] * self.max_blocks
         self.U.zero_()
         self.V_K.zero_()
         self.V_V.zero_()

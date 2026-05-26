@@ -254,6 +254,128 @@ class KVRuntimeManager:
             self._streaming_mgr.clear_session(session_id)
         self.pager.evict_session(session_id)
 
+    def snapshot_session(self, session_id: str, checkpoint_id: str):
+        """
+        Takes a zero-copy metadata snapshot of the session's current KV state.
+        Saves it under checkpoint_id.
+        """
+        if not hasattr(self, "_session_checkpoints"):
+            self._session_checkpoints = {}
+
+        if session_id not in self.session_blocks and (self._streaming_mgr is None or session_id not in self._streaming_mgr.session_blocks):
+            raise ValueError(f"Session {session_id} not found to snapshot.")
+
+        snap_blocks = {}
+        if self._streaming_mgr is not None and session_id in self._streaming_mgr.session_blocks:
+            src_blocks = self._streaming_mgr.session_blocks[session_id]
+        else:
+            src_blocks = self.session_blocks[session_id]
+
+        for layer_idx, blocks in src_blocks.items():
+            snap_blocks[layer_idx] = []
+            for b in blocks:
+                import copy
+                b_snap = copy.copy(b)
+                b_snap._lock = threading.Lock()
+                b_snap.token_indices = list(b.token_indices)
+                
+                if getattr(b, "active_k", None) is not None:
+                    b_snap.active_k = b.active_k.clone()
+                if getattr(b, "active_v", None) is not None:
+                    b_snap.active_v = b.active_v.clone()
+                if getattr(b, "anchor_kv", None) is not None:
+                    b_snap.anchor_kv = b.anchor_kv.clone()
+                if getattr(b, "anchor_kv_cpu", None) is not None:
+                    b_snap.anchor_kv_cpu = b.anchor_kv_cpu.clone()
+
+                # Increment pool reference counts for compressed blocks
+                if getattr(b, "pool_idx", None) is not None and getattr(self, "native_pool", None) is not None:
+                    self.native_pool.increment_ref(b.pool_idx)
+
+                snap_blocks[layer_idx].append(b_snap)
+
+        mbs = self.get_session_micro_block_size(session_id)
+        
+        self._session_checkpoints[checkpoint_id] = {
+            "blocks": snap_blocks,
+            "micro_block_size": mbs
+        }
+        print(f"[DiffKV] Session snapshot captured: {session_id} -> {checkpoint_id}")
+
+    def restore_session(self, session_id: str, checkpoint_id: str):
+        """
+        Restores a session to a previously saved checkpoint_id state.
+        """
+        if not hasattr(self, "_session_checkpoints") or checkpoint_id not in self._session_checkpoints:
+            raise KeyError(f"Checkpoint {checkpoint_id} not found.")
+
+        # Clean existing session blocks safely (refcounts will decrement correctly)
+        self.clear_session(session_id)
+        self.init_session(session_id)
+
+        checkpoint = self._session_checkpoints[checkpoint_id]
+        snap_blocks = checkpoint["blocks"]
+        mbs = checkpoint["micro_block_size"]
+
+        if self._streaming_mgr is not None:
+            self._streaming_mgr.session_micro_block_sizes[session_id] = mbs
+
+        dest_blocks = {}
+        for layer_idx, blocks in snap_blocks.items():
+            dest_blocks[layer_idx] = []
+            for b in blocks:
+                import copy
+                b_restore = copy.copy(b)
+                b_restore._lock = threading.Lock()
+                b_restore.token_indices = list(b.token_indices)
+                
+                if getattr(b, "active_k", None) is not None:
+                    b_restore.active_k = b.active_k.clone()
+                if getattr(b, "active_v", None) is not None:
+                    b_restore.active_v = b.active_v.clone()
+                if getattr(b, "anchor_kv", None) is not None:
+                    b_restore.anchor_kv = b.anchor_kv.clone()
+                if getattr(b, "anchor_kv_cpu", None) is not None:
+                    b_restore.anchor_kv_cpu = b.anchor_kv_cpu.clone()
+
+                # Increment pool reference counts for compressed blocks
+                if getattr(b, "pool_idx", None) is not None and getattr(self, "native_pool", None) is not None:
+                    self.native_pool.increment_ref(b.pool_idx)
+
+                dest_blocks[layer_idx].append(b_restore)
+
+        if self._streaming_mgr is not None:
+            self._streaming_mgr.session_blocks[session_id] = dest_blocks
+        else:
+            self.session_blocks[session_id] = dest_blocks
+
+        # Invalidate cached categorized structures
+        self.pager.evict_session(session_id)
+        print(f"[DiffKV] Session restored from checkpoint: {checkpoint_id} -> {session_id}")
+
+    def clone_session(self, src_session_id: str, dest_session_id: str):
+        """
+        Clones src_session_id state to a new dest_session_id (zero-copy branching).
+        """
+        temp_ckpt = f"_temp_clone_{src_session_id}_{dest_session_id}"
+        self.snapshot_session(src_session_id, temp_ckpt)
+        self.restore_session(dest_session_id, temp_ckpt)
+        self.delete_checkpoint(temp_ckpt)
+
+    def delete_checkpoint(self, checkpoint_id: str):
+        """
+        Deletes a saved checkpoint and releases its block pool references.
+        """
+        if not hasattr(self, "_session_checkpoints") or checkpoint_id not in self._session_checkpoints:
+            return
+        checkpoint = self._session_checkpoints[checkpoint_id]
+        if getattr(self, "native_pool", None) is not None:
+            for layer_idx, blocks in checkpoint["blocks"].items():
+                for b in blocks:
+                    if getattr(b, "pool_idx", None) is not None:
+                        self.native_pool.free_block(b.pool_idx)
+        del self._session_checkpoints[checkpoint_id]
+
     def clear(self):
         # 1. Cleanly clear all registered sessions to release their pool blocks
         sessions = set(self.session_blocks.keys())
@@ -262,6 +384,16 @@ class KVRuntimeManager:
             
         for session_id in sessions:
             self.clear_session(session_id)
+
+        # Free checkpoints
+        if hasattr(self, "_session_checkpoints"):
+            if getattr(self, "native_pool", None) is not None:
+                for ckpt in self._session_checkpoints.values():
+                    for layer_idx, blocks in ckpt["blocks"].items():
+                        for b in blocks:
+                            if getattr(b, "pool_idx", None) is not None:
+                                self.native_pool.free_block(b.pool_idx)
+            self._session_checkpoints.clear()
 
         # 2. Reset subsystems and clear references
         self.session_blocks.clear()
