@@ -64,6 +64,40 @@ class DiffKVHFWrapper:
         )
         self.active_session = None
         
+        # Collect stop token IDs universally across all loaded models (Qwen, Llama, Mistral, etc.)
+        self.stop_token_ids = set()
+        
+        # 1. Collect from tokenizer.eos_token_id
+        eos_id = self.tokenizer.eos_token_id
+        if isinstance(eos_id, list):
+            self.stop_token_ids.update(eos_id)
+        elif isinstance(eos_id, int):
+            self.stop_token_ids.add(eos_id)
+            
+        # 2. Collect from model generation_config
+        if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
+            model_eos = getattr(self.model.generation_config, "eos_token_id", None)
+            if isinstance(model_eos, list):
+                self.stop_token_ids.update(model_eos)
+            elif isinstance(model_eos, int):
+                self.stop_token_ids.add(model_eos)
+                
+        # 3. Universally scan tokenizer's special tokens for common turn end markers
+        special_words = ["<|im_end|>", "<|im_start|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
+        for word in special_words:
+            tok_id = self.tokenizer.convert_tokens_to_ids(word)
+            if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
+                self.stop_token_ids.add(tok_id)
+                
+        # 4. Fallback standard token
+        if self.tokenizer.eos_token_id is not None:
+            if isinstance(self.tokenizer.eos_token_id, list):
+                self.stop_token_ids.update(self.tokenizer.eos_token_id)
+            else:
+                self.stop_token_ids.add(self.tokenizer.eos_token_id)
+                
+        print(f"[DiffKV] Universal Stop Token IDs initialized: {sorted(list(self.stop_token_ids))}")
+        
         # Apply Differential KV Attention Interception!
         apply_diffkv_attention_patch(self.model, self.manager)
 
@@ -150,7 +184,7 @@ class DiffKVHFWrapper:
                     next_id = torch.multinomial(probs, 1).squeeze(-1)
 
             generated.append(next_id.item())
-            if next_id.item() == self.tokenizer.eos_token_id:
+            if next_id.item() in self.stop_token_ids:
                 break
 
             # Pass the correct absolute position so RoPE rotates at the right angle.

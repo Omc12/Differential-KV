@@ -64,6 +64,24 @@ class OpenAICompatibleAPIGateway:
         async def chat_completions(request: ChatCompletionRequest):
             # Create or reuse a session
             session_id = request.session_id
+            
+            # Dynamic matching by prompt message history prefix (essential for standard OpenAI clients like Open WebUI)
+            if session_id is None and self.session_manager is not None:
+                incoming_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+                if len(incoming_messages) > 1:
+                    prefix_history = incoming_messages[:-1]
+                    for sid, history in getattr(self.session_manager, "message_histories", {}).items():
+                        if len(history) == len(prefix_history):
+                            match = True
+                            for h_msg, p_msg in zip(history, prefix_history):
+                                if h_msg.get("role") != p_msg.get("role") or h_msg.get("content") != p_msg.get("content"):
+                                    match = False
+                                    break
+                            if match:
+                                session_id = sid
+                                print(f"[DiffKV Gateway] Dynamically matched message history prefix to active session: {session_id}")
+                                break
+
             if session_id is None and self.session_manager is not None:
                 session_id = self.session_manager.create_session()
             elif session_id is None:
@@ -115,11 +133,9 @@ class OpenAICompatibleAPIGateway:
                     
                     # Store in session manager
                     if self.session_manager:
-                        original_messages = payload.get("messages", [])
-                        history = self.session_manager.get_history(session_id)
-                        if not history:
-                            for msg in original_messages:
-                                self.session_manager.append_message(session_id, msg["role"], msg["content"])
+                        self.session_manager.clear_history(session_id)
+                        for msg in payload.get("messages", []):
+                            self.session_manager.append_message(session_id, msg["role"], msg["content"])
                         self.session_manager.append_message(session_id, "assistant", result_text)
                         
                     result = {"text": result_text}
@@ -266,11 +282,9 @@ class OpenAICompatibleAPIGateway:
             
             # Store in session manager
             if self.session_manager:
-                original_messages = payload.get("messages", [])
-                history = self.session_manager.get_history(session_id)
-                if not history:
-                    for msg in original_messages:
-                        self.session_manager.append_message(session_id, msg["role"], msg["content"])
+                self.session_manager.clear_history(session_id)
+                for msg in payload.get("messages", []):
+                    self.session_manager.append_message(session_id, msg["role"], msg["content"])
                 self.session_manager.append_message(session_id, "assistant", "".join(full_text))
         except asyncio.CancelledError:
             if hasattr(self.resolver, "cancel"):
@@ -332,13 +346,49 @@ def main():
                         choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
                         default='balanced',
                         help='KV cache serving mode. Use long-context for >8K tokens; fused-sparse for max GPU throughput.')
+    # ── Weight quantization args ────────────────────────────────────────────────────
+    parser.add_argument('--load-in-4bit', action='store_true',
+                        help='Load model weights in 4-bit NF4 quantization (bitsandbytes). '
+                             'Reduces weight VRAM by ~70%% (e.g. Qwen2.5-1.5B: 3.1 GB -> ~0.9 GB). '
+                             'Requires: pip install bitsandbytes')
+    parser.add_argument('--load-in-8bit', action='store_true',
+                        help='Load model weights in 8-bit LLM.int8 quantization (bitsandbytes). '
+                             'Reduces weight VRAM by ~50%% with near-lossless quality. '
+                             'Requires: pip install bitsandbytes')
+    # ── Session residency arg ──────────────────────────────────────────────────────
+    parser.add_argument('--max-resident-sessions', type=int, default=3,
+                        help='Maximum number of sessions resident in VRAM simultaneously. '
+                             'Lower = less VRAM used for KV cache per idle session. '
+                             'Increase for multi-user serving with active parallel sessions.')
     args = parser.parse_args()
 
     # Disable tokenizer parallelism warnings
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-    
+
+    # ── Build quantization config ──────────────────────────────────────────────────
+    quantization_config = None
+    if args.load_in_4bit or args.load_in_8bit:
+        try:
+            from transformers import BitsAndBytesConfig
+            if args.load_in_4bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+                print("[DiffKV] Weight quantization: 4-bit NF4 (bitsandbytes) — weight VRAM reduced ~70%")
+            elif args.load_in_8bit:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+                print("[DiffKV] Weight quantization: 8-bit LLM.int8 (bitsandbytes) — weight VRAM reduced ~50%")
+        except ImportError:
+            print("[DiffKV] WARNING: bitsandbytes not installed. Falling back to full precision.")
+            print("[DiffKV]   Install with: pip install bitsandbytes")
+            quantization_config = None
+
     print(f'Loading DiffKV runtime with model: {args.model}...')
     print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
+    print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
     wrapper = DiffKVHFWrapper(
         args.model,
         config={
@@ -347,13 +397,17 @@ def main():
             'serving_mode': args.serving_mode,
         },
         device='cuda',
+        quantization_config=quantization_config,
     )
     
     print('Starting Continuous Batching Engine...')
     engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size)
     
     print('Starting Session Manager...')
-    session_manager = ProductionSessionManager(kv_manager=wrapper.manager)
+    session_manager = ProductionSessionManager(
+        kv_manager=wrapper.manager,
+        max_resident_sessions=args.max_resident_sessions,
+    )
     
     gateway = OpenAICompatibleAPIGateway(resolver=engine, session_manager=session_manager)
     

@@ -1,6 +1,8 @@
 import asyncio
+import gc
 import os
 import time
+import threading
 import torch
 from typing import Dict, List, Optional, Any
 from transformers import AutoTokenizer
@@ -43,6 +45,123 @@ class ContinuousBatchEngine:
         self.tokenizer = self.wrapper.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
         self._alphanumeric_tokens = {}
+        
+        # Universal stop tokens inherited from wrapper
+        self.stop_token_ids = getattr(self.wrapper, "stop_token_ids", {self.tokenizer.eos_token_id})
+
+    # ── VRAM instrumentation ────────────────────────────────────────────
+
+    def _log_vram(self, tag: str):
+        """Log VRAM stats (allocated and reserved) under a human-readable tag.
+        Only active when DIFFKV_TELEMETRY=1 to avoid overhead in production."""
+        if os.environ.get("DIFFKV_TELEMETRY", "0") != "1":
+            return
+        if not torch.cuda.is_available():
+            return
+        alloc_gb = torch.cuda.memory_allocated() / 1024 ** 3
+        resv_gb  = torch.cuda.memory_reserved()   / 1024 ** 3
+        print(f"[DiffKV VRAM] [{tag}] allocated={alloc_gb:.3f} GB  reserved={resv_gb:.3f} GB")
+
+    # ── Compression barrier ─────────────────────────────────────────────
+
+    def _wait_for_compression(self, session_id: str, timeout_s: float = 8.0):
+        """
+        Block the calling thread until every block belonging to *session_id*
+        in the streaming ingest manager has left the SUBMITTED state (i.e. the
+        async SVD compressor has processed them and they are now COMPRESSED or
+        ACCUMULATING), OR until *timeout_s* seconds elapse.
+
+        This prevents the transient double-VRAM scenario where a block's
+        active_k/v is still alive in VRAM while its CPU copy sits in the
+        compressor queue — causing reconstructed dense fallback during decode.
+        """
+        mgr = self.wrapper.manager
+        streaming_mgr = getattr(mgr, "_streaming_mgr", None)
+        if streaming_mgr is None:
+            return  # No streaming ingest — nothing to wait for
+
+        session_blocks = streaming_mgr.session_blocks.get(session_id, {})
+        if not session_blocks:
+            return
+
+        deadline = time.monotonic() + timeout_s
+        check_interval = 0.005  # 5 ms poll
+
+        while time.monotonic() < deadline:
+            found_submitted = False
+            for layer_idx, blocks in session_blocks.items():
+                for block in blocks:
+                    if getattr(block, "state", None) == "SUBMITTED":
+                        found_submitted = True
+                        break
+                if found_submitted:
+                    break
+            if not found_submitted:
+                return  # All blocks compressed — safe to decode
+            time.sleep(check_interval)
+
+        # Timeout — log a warning but don't block decode indefinitely
+        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            print(f"[DiffKV BatchEngine] WARNING: compression barrier timed out after {timeout_s}s "
+                  f"for session {session_id}. Some blocks may still be SUBMITTED.")
+
+    # ── SVD thread priority helpers ──────────────────────────────────────
+
+    def _boost_compressor_priority(self):
+        """Temporarily raise SVD worker thread priority during prefill burst.
+        On Windows uses SetThreadPriority. On POSIX uses os.nice()."""
+        compressor = getattr(self.wrapper.manager, "_compressor", None)
+        if compressor is None:
+            return
+        workers = getattr(compressor, "_workers", [])
+        if not workers:
+            return
+        try:
+            import sys
+            if sys.platform == "win32":
+                import ctypes
+                THREAD_PRIORITY_ABOVE_NORMAL = 1
+                for t in workers:
+                    handle = ctypes.windll.kernel32.OpenThread(0x0060, False, t.ident)  # THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION
+                    if handle:
+                        ctypes.windll.kernel32.SetThreadPriority(handle, THREAD_PRIORITY_ABOVE_NORMAL)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+            else:
+                # POSIX: renice to -5 (higher priority), clamped by OS permission
+                for t in workers:
+                    try:
+                        os.setpriority(os.PRIO_PROCESS, t.ident, -5)
+                    except PermissionError:
+                        pass
+        except Exception:
+            pass  # Priority boost is best-effort
+
+    def _restore_compressor_priority(self):
+        """Restore SVD worker threads back to normal priority."""
+        compressor = getattr(self.wrapper.manager, "_compressor", None)
+        if compressor is None:
+            return
+        workers = getattr(compressor, "_workers", [])
+        if not workers:
+            return
+        try:
+            import sys
+            if sys.platform == "win32":
+                import ctypes
+                THREAD_PRIORITY_NORMAL = 0
+                for t in workers:
+                    handle = ctypes.windll.kernel32.OpenThread(0x0060, False, t.ident)
+                    if handle:
+                        ctypes.windll.kernel32.SetThreadPriority(handle, THREAD_PRIORITY_NORMAL)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+            else:
+                for t in workers:
+                    try:
+                        os.setpriority(os.PRIO_PROCESS, t.ident, 0)
+                    except PermissionError:
+                        pass
+        except Exception:
+            pass
 
     def start(self):
         if not self.is_running:
@@ -77,11 +196,17 @@ class ContinuousBatchEngine:
             repetition_penalty=payload.get("repetition_penalty", 1.15)
         )
 
-        # Tokenize WITHOUT stripping special tokens — the chat template already
-        # added them as plain text characters, so add_special_tokens=False is
-        # correct here (avoids double-adding BOS etc.).
         encoded = self.tokenizer(req.prompt, return_tensors="pt", add_special_tokens=False)
         req.prompt_ids = encoded.input_ids[0].tolist()
+
+        # O(1) Smart Prefix Check: check if the session already has resident KV cache.
+        # If so, mark the cached length so prefill is incremental (avoiding O(N) re-prefill of history).
+        req.cached_len = 0
+        if hasattr(self.wrapper.manager, "get_session_sequence_length"):
+            cached_len = self.wrapper.manager.get_session_sequence_length(session_id)
+            if cached_len > 0 and cached_len < len(req.prompt_ids):
+                req.cached_len = cached_len
+                print(f"[DiffKV BatchEngine] Found cached history for session {session_id}: length {cached_len} tokens. Reusing KV cache!")
 
         await self.incoming_queue.put(req)
         return req.chunks_queue
@@ -123,9 +248,11 @@ class ContinuousBatchEngine:
                 except asyncio.TimeoutError:
                     continue
 
-            # 2. Filter out finished/cancelled requests, freeing their KV cache
+            # 2. Filter out cancelled requests, freeing their KV cache.
+            # Finished requests are NOT cleared; their KV cache is kept resident
+            # and managed cleanly by ProductionSessionManager!
             for req in self.active_requests:
-                if req.is_finished or req.cancelled:
+                if req.cancelled:
                     self._free_session_kv(req.session_id)
             self.active_requests = [r for r in self.active_requests if not r.cancelled and not r.is_finished]
 
@@ -169,12 +296,23 @@ class ContinuousBatchEngine:
         # ─────────────────────────────────────────────────────────────────
         for req in prefill_reqs:
             t0_pref = time.perf_counter()
-            # Always clear any stale KV for this session before prefill
-            self._free_session_kv(req.session_id)
-
-            input_ids    = torch.tensor([req.prompt_ids], dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
-            position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long,
-                                         device=self.wrapper.device).unsqueeze(0)
+            
+            cached_len = getattr(req, "cached_len", 0)
+            if cached_len > 0:
+                # Incremental prefill! Only process the new prompt ids.
+                new_prompt_ids = req.prompt_ids[cached_len:]
+                input_ids = torch.tensor([new_prompt_ids], dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
+                position_ids = torch.arange(cached_len, cached_len + input_ids.shape[1], dtype=torch.long,
+                                             device=self.wrapper.device).unsqueeze(0)
+                # Ensure session is registered and metadata initialized for incremental prefill
+                if hasattr(self.wrapper.manager, "init_session"):
+                    self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids))
+            else:
+                # Fresh prefill from scratch — clear stale KV
+                self._free_session_kv(req.session_id)
+                input_ids = torch.tensor([req.prompt_ids], dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
+                position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long,
+                                             device=self.wrapper.device).unsqueeze(0)
 
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
@@ -192,9 +330,31 @@ class ContinuousBatchEngine:
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
 
+            # ── Post-prefill: release GPU caching allocator pages immediately ──
+            # This is the earliest safe moment to release VRAM held by the
+            # forward pass intermediate activations and attention matrices.
+            # gc.collect() ensures Python objects with __del__ (e.g. tensors)
+            # are freed before empty_cache() walks the pool.
+            gc.collect()
+            torch.cuda.empty_cache()
+            self._log_vram(f"post-prefill session={req.session_id}")
+
+            # ── Compression barrier: wait for async SVD to drain SUBMITTED blocks ──
+            # Blocks that are still SUBMITTED hold both their active_k/v in VRAM
+            # AND a CPU copy in the compressor queue. Waiting here ensures decode
+            # starts only when all prefill blocks are COMPRESSED (active_k/v=None),
+            # cutting VRAM to just anchors + U/V matrices before decode begins.
+            self._boost_compressor_priority()
+            self._wait_for_compression(req.session_id)
+            self._restore_compressor_priority()
+            self._log_vram(f"post-barrier session={req.session_id}")
+
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_pref = (time.perf_counter() - t0_pref) * 1000
                 print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
+                # Emit block state breakdown (ACCUMULATING / SUBMITTED / COMPRESSED)
+                if hasattr(self.wrapper.manager, "log_block_states"):
+                    self.wrapper.manager.log_block_states(req.session_id)
 
         if not decode_reqs:
             return
@@ -314,7 +474,7 @@ class ContinuousBatchEngine:
         if req.first_token_time is None:
             req.first_token_time = time.time()
 
-        is_eos = (token_id == self.tokenizer.eos_token_id)
+        is_eos = (token_id in self.stop_token_ids)
         is_max = (len(req.generated_ids) >= req.max_tokens)
 
         # O(1) incremental decode: only decode a small constant-size window.

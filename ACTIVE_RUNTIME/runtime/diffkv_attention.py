@@ -1,13 +1,35 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers.models.qwen2.modeling_qwen2 as _qwen2_mq
 import math
 import threading
 from typing import Optional, Tuple
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, apply_rotary_pos_emb
 from native_core.sparse_decode.triton_diffkv import TritonDiffKV
 from native_core.sparse_decode.triton_sparse_attn import native_triton_sparse_attn_decode, HAS_TRITON
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors."""
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    Universal repeat_kv implementation to support GQA.
+    """
+    if n_rep == 1:
+        return hidden_states.contiguous()
+    bs, num_key_value_heads, slen, head_dim = hidden_states.shape
+    hidden_states = hidden_states[:, :, None, :, :].expand(bs, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(bs, num_key_value_heads * n_rep, slen, head_dim).contiguous()
 
 # ---------------------------------------------------------------------------
 # PHASE 6: Fused Sparse Attention Integration
@@ -105,13 +127,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 )
                                 if full_k is not None:
                                     if num_key_value_groups > 1:
-                                        k_rep = _qwen2_mq.repeat_kv(full_k, num_key_value_groups)
-                                        v_rep = _qwen2_mq.repeat_kv(full_v, num_key_value_groups)
+                                        k_rep = repeat_kv(full_k, num_key_value_groups)
+                                        v_rep = repeat_kv(full_v, num_key_value_groups)
                                     else:
                                         k_rep = full_k
                                         v_rep = full_v
                                     attn_output = F.scaled_dot_product_attention(
-                                        query_states, k_rep, v_rep,
+                                        query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
                                         attn_mask=None, dropout_p=0.0, is_causal=False
                                     )
                                 else:
@@ -160,14 +182,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         attn_mask[b_idx, 0, 0, :l] = True
 
                                 if num_key_value_groups > 1:
-                                    k_rep = _qwen2_mq.repeat_kv(padded_k, num_key_value_groups)
-                                    v_rep = _qwen2_mq.repeat_kv(padded_v, num_key_value_groups)
+                                    k_rep = repeat_kv(padded_k, num_key_value_groups)
+                                    v_rep = repeat_kv(padded_v, num_key_value_groups)
                                 else:
                                     k_rep = padded_k
                                     v_rep = padded_v
 
                                 attn_output = F.scaled_dot_product_attention(
-                                    query_states, k_rep, v_rep,
+                                    query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
                                     attn_mask=attn_mask, dropout_p=0.0, is_causal=False
                                 )
                             else:
@@ -232,10 +254,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
                     # Step 2: Compute attention using raw K/V from this forward pass
-                    key_rep   = _qwen2_mq.repeat_kv(key_states,   num_key_value_groups)
-                    value_rep = _qwen2_mq.repeat_kv(value_states, num_key_value_groups)
+                    key_rep   = repeat_kv(key_states,   num_key_value_groups)
+                    value_rep = repeat_kv(value_states, num_key_value_groups)
                     attn_output = F.scaled_dot_product_attention(
-                        query_states, key_rep, value_rep,
+                        query_states.contiguous(), key_rep.contiguous(), value_rep.contiguous(),
                         attn_mask=None, dropout_p=0.0, is_causal=True
                     )
                     attn_weights = None
@@ -253,7 +275,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
             return diffkv_forward
 
-        layer.self_attn.forward = make_diffkv_forward(i).__get__(layer.self_attn, Qwen2Attention)
+        layer.self_attn.forward = make_diffkv_forward(i).__get__(layer.self_attn, layer.self_attn.__class__)
 
     # Phase 25: Patch LM Head to only compute logits for the last token
     if hasattr(model, "lm_head"):

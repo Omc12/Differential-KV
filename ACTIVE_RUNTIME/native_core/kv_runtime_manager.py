@@ -169,7 +169,8 @@ class KVRuntimeManager:
         
         # Dedicate pool budget to the contiguous NativeBlockPool.
         pool_budget_bytes = int(gpu_budget_gb * (1024 ** 3) * 0.75)
-        dynamic_max_blocks = max(4000, min(24000, pool_budget_bytes // bytes_per_block))
+        min_blocks = 1024 if self.serving_mode == "lightweight" else (2048 if self.serving_mode == "balanced" else 4000)
+        dynamic_max_blocks = max(min_blocks, min(24000, pool_budget_bytes // bytes_per_block))
         
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
@@ -335,6 +336,79 @@ class KVRuntimeManager:
             "micro_block_size": mbs
         }
         print(f"[DiffKV] Session snapshot captured: {session_id} -> {checkpoint_id}")
+
+    def get_session_sequence_length(self, session_id: str) -> int:
+        """
+        Universal query to get the exact sequence length currently cached in blocks.
+        Model-agnostic and session-residency safe.
+        """
+        blocks = self.get_streaming_blocks(session_id, 0)
+        if not blocks:
+            return 0
+        last_block = blocks[-1]
+        last_U_len = last_block.U.shape[0] if last_block.U is not None else 0
+        last_active_len = last_block.active_k.shape[2] if last_block.active_k is not None else 0
+        last_token_count = last_U_len if last_U_len > 0 else last_active_len
+        return last_block.anchor_idx + 1 + last_token_count
+
+    def log_block_states(self, session_id: str) -> None:
+        """
+        Emit a per-layer block state summary for *session_id* when
+        DIFFKV_TELEMETRY=1.  Counts blocks in each lifecycle state:
+          ACCUMULATING — dense, not yet eligible for compression
+          SUBMITTED    — queued for async SVD, still holding active_k/v in VRAM
+          COMPRESSED   — U/V set, active_k/v freed, minimal VRAM footprint
+          PAGED        — evicted to CPU RAM
+        This is the primary diagnostic for VRAM anomalies.
+        """
+        import os
+        if os.environ.get("DIFFKV_TELEMETRY", "0") != "1":
+            return
+
+        streaming_mgr = getattr(self, "_streaming_mgr", None)
+        if streaming_mgr is not None:
+            src = streaming_mgr.session_blocks.get(session_id, {})
+        else:
+            src = self.session_blocks.get(session_id, {})
+
+        if not src:
+            print(f"[DiffKV BlockStates] session={session_id}: no blocks found")
+            return
+
+        # Aggregate across all layers
+        state_counts: Dict[str, int] = {"ACCUMULATING": 0, "SUBMITTED": 0, "COMPRESSED": 0, "PAGED": 0, "UNKNOWN": 0}
+        total_active_vram_mb = 0.0
+        total_uv_vram_mb = 0.0
+        total_blocks = 0
+
+        for layer_idx, blocks in src.items():
+            for block in blocks:
+                total_blocks += 1
+                state = getattr(block, "state", "UNKNOWN")
+                state_counts[state] = state_counts.get(state, 0) + 1
+
+                # active_k/v VRAM (dense accumulation or SUBMITTED residual)
+                if getattr(block, "active_k", None) is not None:
+                    total_active_vram_mb += block.active_k.numel() * block.active_k.element_size() / 1e6
+                if getattr(block, "active_v", None) is not None:
+                    total_active_vram_mb += block.active_v.numel() * block.active_v.element_size() / 1e6
+
+                # U/V VRAM (compressed representation)
+                if getattr(block, "U", None) is not None:
+                    total_uv_vram_mb += block.U.numel() * block.U.element_size() / 1e6
+                if getattr(block, "V", None) is not None:
+                    total_uv_vram_mb += block.V.numel() * block.V.element_size() / 1e6
+
+        print(
+            f"[DiffKV BlockStates] session={session_id} "
+            f"total_blocks={total_blocks} "
+            f"ACCUMULATING={state_counts['ACCUMULATING']} "
+            f"SUBMITTED={state_counts['SUBMITTED']} "
+            f"COMPRESSED={state_counts['COMPRESSED']} "
+            f"PAGED={state_counts['PAGED']} "
+            f"| dense_active_VRAM={total_active_vram_mb:.1f} MB "
+            f"| UV_compressed_VRAM={total_uv_vram_mb:.1f} MB"
+        )
 
     def restore_session(self, session_id: str, checkpoint_id: str):
         """

@@ -457,8 +457,8 @@ class StreamingSparseIngestManager:
                         token_indices=list(range(anchor_idx, anchor_idx + block_capacity)),
                         pool_idx=pool_idx,
                     )
-                    new_block.active_k = active_k_blocks[i]
-                    new_block.active_v = active_v_blocks[i]
+                    new_block.active_k = active_k_blocks[i].clone()
+                    new_block.active_v = active_v_blocks[i].clone()
                     
                     # Dynamic Prefill Compression Guard: Bypass SVD compression for short
                     # context sequences (< 1024 tokens) to preserve 100% precision.
@@ -506,8 +506,8 @@ class StreamingSparseIngestManager:
                 )
 
                 if blk_active_k is not None:
-                    new_block.active_k = blk_active_k
-                    new_block.active_v = blk_active_v
+                    new_block.active_k = blk_active_k.clone()
+                    new_block.active_v = blk_active_v.clone()
 
                 if new_block.is_compression_eligible():
                     new_block.state = "SUBMITTED"
