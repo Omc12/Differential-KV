@@ -31,6 +31,11 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
+# Module-level constant — avoids re-creating this dict on every metadata write call
+# (previously created fresh inside update_metadata_block every token × every layer)
+_STATE_CODES = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
+
+
 @dataclass(slots=True)
 class StreamingKVBlock:
     """
@@ -67,6 +72,14 @@ class StreamingKVBlock:
     _cache_id: Optional[str] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    # ── Phase 29: Ring buffer fields (Fix #1 — eliminate torch.cat per token) ──
+    # Pre-allocated GPU tensor of shape [1, heads, micro_block_size, head_dim].
+    # Tokens are written in-place via buf[:, :, fill, :] = k[:, :, 0, :].
+    # active_k/v are kept as O(1) views: buf[:, :, :fill, :] — no allocation.
+    _active_buf_k: Optional[torch.Tensor] = None
+    _active_buf_v: Optional[torch.Tensor] = None
+    _active_fill: int = 0   # number of tokens written into the ring buffer
+
     def __eq__(self, other):
         return self is other
 
@@ -85,6 +98,12 @@ class StreamingKVBlock:
         return 0
 
     def is_compression_eligible(self) -> bool:
+        # Dynamic Compression Guard: SVD compression is deferred for short context windows
+        # (< 1024 tokens) to preserve 100% exact-match precision and eliminate SVD CPU/GPU
+        # roundtrip overhead, running at maximum possible TPS. SVD compression starts saving VRAM
+        # exactly when needed (contexts >= 1024 tokens).
+        if self.anchor_idx + self.token_count() < 1024:
+            return False
         return (
             self.state == "ACCUMULATING"
             and self.active_k is not None
@@ -214,21 +233,22 @@ class StreamingSparseIngestManager:
         self.session_staging_buffers.pop(session_id, None)
 
     def update_metadata_block(self, session_id: str, layer_idx: int, block_idx: int, block):
+        # Phase 29 Fix #3: metadata is a CPU tensor — all writes are pure CPU memory ops,
+        # zero CUDA syncs (previously 4 GPU scalar writes = 4 CUDA syncs per call).
         metadata = self.session_metadata.setdefault(session_id, {}).setdefault(
-            layer_idx, torch.full((1024, 4), -1, dtype=torch.int32, device=self.device)
+            layer_idx, torch.full((1024, 4), -1, dtype=torch.int32)  # CPU — no device=
         )
         if block_idx >= metadata.shape[0]:
             new_size = metadata.shape[0] * 2
-            new_meta = torch.full((new_size, 4), -1, dtype=torch.int32, device=self.device)
+            new_meta = torch.full((new_size, 4), -1, dtype=torch.int32)  # CPU
             new_meta[:metadata.shape[0]] = metadata
             self.session_metadata[session_id][layer_idx] = new_meta
             metadata = new_meta
 
-        metadata[block_idx, 0] = block.pool_idx if block.pool_idx is not None else -1
-        metadata[block_idx, 1] = block.anchor_idx
+        metadata[block_idx, 0] = int(block.pool_idx) if block.pool_idx is not None else -1
+        metadata[block_idx, 1] = int(block.anchor_idx)
         metadata[block_idx, 2] = block.token_count()
-        state_codes = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
-        metadata[block_idx, 3] = state_codes.get(block.state, -1)
+        metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
 
     def update_metadata_state(self, session_id: str, layer_idx: int, block):
         blocks = self.session_blocks.get(session_id, {}).get(layer_idx, [])
@@ -241,10 +261,9 @@ class StreamingSparseIngestManager:
             return
         metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is not None and block_idx < metadata.shape[0]:
-            metadata[block_idx, 0] = block.pool_idx if block.pool_idx is not None else -1
+            metadata[block_idx, 0] = int(block.pool_idx) if block.pool_idx is not None else -1
             metadata[block_idx, 2] = block.token_count()
-            state_codes = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
-            metadata[block_idx, 3] = state_codes.get(block.state, -1)
+            metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -272,51 +291,80 @@ class StreamingSparseIngestManager:
         micro_block_size = self.session_micro_block_sizes.get(session_id, self.micro_block_size)
 
         if seq_len == 1:
-            # Force micro_block_size to 32 for active window during decode
+            # Force micro_block_size to 32 for the active accumulation window during decode
             micro_block_size = 32
-            # ───────────────────────────────────────────────────────────────
-            # DECODE PATH (T=1) — legacy sequential append (fast, no loops)
-            # ───────────────────────────────────────────────────────────────
+            # ───────────────────────────────────────────────────────────────────
+            # DECODE PATH (T=1)
+            # Phase 29 Fix #1: Ring buffer — zero torch.cat allocations per token.
+            # ───────────────────────────────────────────────────────────────────
             if not blocks or blocks[-1].state != "ACCUMULATING":
-                # Start a new block — extract anchor token (1 dense token, irreducible)
-                anchor_k = k
-                anchor_v = v
-                anchor_kv = torch.stack([anchor_k[:, :, 0], anchor_v[:, :, 0]], dim=1)
-                
-                # Pre-allocate NativeBlockPool index on the single-threaded main thread
+                # Start a new block. Current token becomes the anchor (1 dense token,
+                # irreducible). Pre-allocate the ring buffer for future active tokens.
+                anchor_idx = self._next_anchor_idx(blocks)
+                anchor_kv = torch.stack([k[:, :, 0], v[:, :, 0]], dim=1)
+
                 pool_idx = None
                 if self.native_pool is not None:
                     pool_idx = self.native_pool.allocate_block()
 
+                # Pre-allocate ring buffer — ONE allocation per block (every 32 tokens),
+                # not one per token. shape: [1, heads, micro_block_size, head_dim]
+                heads    = k.shape[1]
+                head_dim = k.shape[3]
+                buf_k = torch.empty((1, heads, micro_block_size, head_dim),
+                                    device=k.device, dtype=k.dtype)
+                buf_v = torch.empty((1, heads, micro_block_size, head_dim),
+                                    device=k.device, dtype=k.dtype)
+
                 new_block = StreamingKVBlock(
-                    anchor_idx=self._next_anchor_idx(blocks),
+                    anchor_idx=anchor_idx,
                     anchor_kv=anchor_kv,
                     micro_block_size=micro_block_size,
-                    token_indices=[self._next_anchor_idx(blocks)],
+                    token_indices=[anchor_idx],
                     pool_idx=pool_idx,
                     session_id=session_id,
                     layer_idx=layer_idx,
+                    _active_buf_k=buf_k,
+                    _active_buf_v=buf_v,
+                    _active_fill=0,
                 )
                 blocks.append(new_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
-                
+
                 with self._stats_lock:
                     self.stats["total_blocks_created"] += 1
                 return
 
             current_block = blocks[-1]
-            if current_block.active_k is None:
-                current_block.active_k = k
-                current_block.active_v = v
+            fill   = current_block._active_fill
+            buf_k  = current_block._active_buf_k
+            buf_v  = current_block._active_buf_v
+
+            if buf_k is not None and fill < buf_k.shape[2]:
+                # ── Fast path: in-place ring buffer write (zero allocation) ──
+                buf_k[0, :, fill, :] = k[0, :, 0, :]
+                buf_v[0, :, fill, :] = v[0, :, 0, :]
+                fill += 1
+                current_block._active_fill = fill
+                # Update active_k/v to be a view of the filled slice — no copy
+                current_block.active_k = buf_k[:, :, :fill, :]
+                current_block.active_v = buf_v[:, :, :fill, :]
             else:
-                current_block.active_k = torch.cat([current_block.active_k, k], dim=2)
-                current_block.active_v = torch.cat([current_block.active_v, v], dim=2)
+                # ── Safety fallback (buffer not allocated or overflowed) ──────
+                if current_block.active_k is None:
+                    current_block.active_k = k
+                    current_block.active_v = v
+                else:
+                    current_block.active_k = torch.cat([current_block.active_k, k], dim=2)
+                    current_block.active_v = torch.cat([current_block.active_v, v], dim=2)
 
             current_block.dirty = True
-            current_block.token_indices.append(current_block.anchor_idx + len(current_block.token_indices))
+            current_block.token_indices.append(
+                current_block.anchor_idx + len(current_block.token_indices)
+            )
             self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
 
-            # Immediately compress when micro-block fills — during ingest!
+            # Trigger compression as soon as the micro-block fills
             if current_block.is_compression_eligible():
                 self._submit_block_for_compression(current_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
@@ -411,10 +459,16 @@ class StreamingSparseIngestManager:
                     )
                     new_block.active_k = active_k_blocks[i]
                     new_block.active_v = active_v_blocks[i]
-                    new_block.state = "SUBMITTED"
+                    
+                    # Dynamic Prefill Compression Guard: Bypass SVD compression for short
+                    # context sequences (< 1024 tokens) to preserve 100% precision.
+                    if seq_len < 1024:
+                        new_block.state = "ACCUMULATING"
+                    else:
+                        new_block.state = "SUBMITTED"
+                        full_blocks_to_compress.append(new_block)
 
                     new_blocks.append(new_block)
-                    full_blocks_to_compress.append(new_block)
 
                     with self._stats_lock:
                         self.stats["total_blocks_created"] += 1

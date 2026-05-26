@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import torch
 from typing import Dict, List, Optional, Any
@@ -191,7 +192,6 @@ class ContinuousBatchEngine:
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
 
-            import os
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_pref = (time.perf_counter() - t0_pref) * 1000
                 print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
@@ -232,8 +232,8 @@ class ContinuousBatchEngine:
                 position_ids_list.append(dummy_pos)
                 session_ids.append(dummy_sid)
 
-        input_ids = torch.tensor(input_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
-        position_ids = torch.tensor(position_ids_list, dtype=torch.long).pin_memory().to(self.wrapper.device, non_blocking=True)
+        input_ids = torch.tensor(input_ids_list, dtype=torch.long, device=self.wrapper.device)
+        position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
 
         # Inject session IDs for this batch decode step
         self.wrapper.model._diffkv_session_ids = session_ids
@@ -255,30 +255,28 @@ class ContinuousBatchEngine:
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
 
-        import os
         if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             dur_dec = (time.perf_counter() - t0_dec) * 1000
             print(f"[DiffKV Telemetry] Decode Step batch_size={actual_batch_size} bucket_size={bucket_size} duration={dur_dec:.2f}ms")
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
-        # Apply repetition penalty over the most recent tokens
-        if req.repetition_penalty != 1.0:
-            for tok_id in set(req.generated_ids[-64:]):
-                if tok_id < logits.shape[-1]:
-                    # Skip punctuation/newlines/whitespace to avoid suppressing lists/bullets/formatting
-                    is_alnum = self._alphanumeric_tokens.get(tok_id)
-                    if is_alnum is None:
-                        tok_text = self.tokenizer.decode([tok_id], skip_special_tokens=True)
-                        is_alnum = any(c.isalnum() for c in tok_text)
-                        self._alphanumeric_tokens[tok_id] = is_alnum
-                    
-                    if not is_alnum:
-                        continue
-
-                    if logits[0, tok_id] > 0:
-                        logits[0, tok_id] /= req.repetition_penalty
-                    else:
-                        logits[0, tok_id] *= req.repetition_penalty
+        # Apply repetition penalty over the most recent tokens.
+        # Fully vectorized on GPU — no Python loop, no CUDA sync per token.
+        # Previous code iterated over set(generated_ids[-64:]) and indexed logits
+        # one element at a time, forcing a CUDA sync for every unique token id.
+        if req.repetition_penalty != 1.0 and req.generated_ids:
+            penalty_ids = torch.tensor(
+                list(set(req.generated_ids[-64:])),
+                dtype=torch.long, device=logits.device
+            )
+            # Clamp to valid vocab range
+            penalty_ids = penalty_ids[penalty_ids < logits.shape[-1]]
+            if penalty_ids.numel() > 0:
+                scores = logits[0, penalty_ids]          # [N]
+                # Standard repetition-penalty formula (same sign, magnitude reduced)
+                scores = torch.where(scores > 0, scores / req.repetition_penalty,
+                                                 scores * req.repetition_penalty)
+                logits[0].scatter_(0, penalty_ids, scores)
 
         if req.temperature <= 0.01:
             return torch.argmax(logits, dim=-1).item()
@@ -319,10 +317,16 @@ class ContinuousBatchEngine:
         is_eos = (token_id == self.tokenizer.eos_token_id)
         is_max = (len(req.generated_ids) >= req.max_tokens)
 
-        # Sequence-delta decoding to resolve multi-byte characters and spacing correctly
-        new_text = self.tokenizer.decode(req.generated_ids, skip_special_tokens=True)
-        delta_text = new_text[len(req.decoded_text):]
-        req.decoded_text = new_text
+        # O(1) incremental decode: only decode a small constant-size window.
+        # Previous code decoded the ENTIRE req.generated_ids every token → O(N²) total.
+        # Fix: decode last 8 tokens with and without the newest token, take the difference.
+        WINDOW = 8
+        win_ids = req.generated_ids[-WINDOW:]
+        pre_ids = req.generated_ids[-WINDOW:-1] if len(req.generated_ids) > 1 else []
+        win_text = self.tokenizer.decode(win_ids, skip_special_tokens=True)
+        pre_text = self.tokenizer.decode(pre_ids, skip_special_tokens=True) if pre_ids else ""
+        delta_text = win_text[len(pre_text):]
+        req.decoded_text += delta_text
 
         if is_eos or is_max:
             req.is_finished = True

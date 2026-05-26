@@ -222,6 +222,10 @@ class KVRuntimeManager:
         self.total_norm_drift   = 0.0
         self.rank_histogram     = {}    # rank -> count
 
+        # Phase 29 Fix #4: micro_block_size cache (session_id -> int)
+        # Value is stable after prefill; invalidated on clear_session / init_session.
+        self._mbs_cache: dict = {}
+
     # ── Session management ────────────────────────────────────────────────────
 
     def init_session(self, session_id: str, prefill_len: int = 0):
@@ -229,6 +233,8 @@ class KVRuntimeManager:
             self.session_blocks[session_id] = {i: [] for i in range(self.num_layers)}
         if self._streaming_mgr is not None and session_id not in self._streaming_mgr.session_blocks:
             self._streaming_mgr.init_session(session_id, self.num_layers, prefill_len=prefill_len)
+        # Invalidate mbs cache so a reused session_id gets a fresh value
+        self._mbs_cache.pop(session_id, None)
 
     def clear_session(self, session_id: str):
         # Free blocks from NativeBlockPool before deleting references
@@ -279,6 +285,8 @@ class KVRuntimeManager:
         if self._streaming_mgr is not None:
             self._streaming_mgr.clear_session(session_id)
         self.pager.evict_session(session_id)
+        # Invalidate mbs cache for this session
+        self._mbs_cache.pop(session_id, None)
 
     def snapshot_session(self, session_id: str, checkpoint_id: str):
         """
@@ -492,27 +500,35 @@ class KVRuntimeManager:
         return s
 
     def get_session_micro_block_size(self, session_id: str) -> int:
+        """
+        Phase 29 Fix #4: Cached lookup. The micro_block_size is fixed at prefill time
+        and never changes during decode. Previously this scanned ALL blocks in ALL layers
+        every single decode step — O(N·L) per token. Now O(1) after first call.
+        """
+        cached = self._mbs_cache.get(session_id)
+        if cached is not None:
+            return cached
+
+        # First access: compute the real value
         max_size = 0
         if self._streaming_mgr is not None and session_id in self._streaming_mgr.session_blocks:
-            for layer_idx, blocks in self._streaming_mgr.session_blocks[session_id].items():
-                for block in blocks:
-                    block_mbs = getattr(block, "micro_block_size", 0)
-                    if block_mbs > max_size:
-                        max_size = block_mbs
+            # Read directly from the session_micro_block_sizes dict (O(1))
+            mbs = self._streaming_mgr.session_micro_block_sizes.get(session_id, 0)
+            if mbs > max_size:
+                max_size = mbs
 
-        if session_id in self.session_blocks:
+        if max_size == 0 and session_id in self.session_blocks:
             for layer_idx, blocks in self.session_blocks[session_id].items():
                 for block in blocks:
                     block_mbs = getattr(block, "micro_block_size", 0)
                     if block_mbs > max_size:
                         max_size = block_mbs
 
-        if max_size > 0:
-            return max_size
+        if max_size == 0:
+            max_size = self.micro_block_size
 
-        if self._streaming_mgr is not None:
-            return self._streaming_mgr.session_micro_block_sizes.get(session_id, self.micro_block_size)
-        return self.micro_block_size
+        self._mbs_cache[session_id] = max_size
+        return max_size
 
     def get_cached_decode_blocks(
         self,
@@ -521,38 +537,46 @@ class KVRuntimeManager:
         device: torch.device,
     ) -> Tuple[Optional[torch.Tensor], List[Any]]:
         """
-        Vectorized O(1) metadata retrieval from contiguous packed tensors,
-        completely avoiding Python-side loops and list traversals.
+        Vectorized O(1) metadata retrieval from contiguous packed CPU tensors.
+        Phase 29: metadata is now CPU-resident (zero CUDA syncs on write).
+        Only the final small block_indices array is transferred to GPU.
         """
         if self._streaming_mgr is None:
             return None, []
         metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is None:
             return None, []
-            
+
+        # All comparisons run on CPU — no GPU sync, no PCIe round-trip
         valid_mask = metadata[:, 1] >= 0
-        num_blocks = int(valid_mask.sum().item())
-        
+        num_blocks = int(valid_mask.sum().item())   # CPU .item() — no CUDA sync
+
         if num_blocks == 0:
             return None, []
-            
-        active_meta = metadata[:num_blocks]
-        
-        # state_code == 2 represents COMPRESSED
-        compressed_mask = active_meta[:, 3] == 2
-        if compressed_mask.any():
-            block_indices_tensor = active_meta[compressed_mask, 0]
+
+        active_meta = metadata[:num_blocks]          # CPU slice view
+
+        # state_code 2 == COMPRESSED
+        compressed_mask = active_meta[:, 3] == 2     # CPU compare
+        if compressed_mask.any():                    # CPU any() — no CUDA sync
+            # One small transfer: only the int32 pool_idx array goes to GPU
+            block_indices_tensor = active_meta[compressed_mask, 0].to(device)
         else:
             block_indices_tensor = None
-            
-        # Get active dense block (at most 1, at the end of the sequence)
+
+        # Get ALL non-compressed, non-paged blocks as dense context.
+        # CRITICAL FIX: Previously only the last block was included. Any block in
+        # SUBMITTED state (async compression in-flight) that was not the last block
+        # was silently dropped from attention — causing the model to lose those tokens
+        # entirely during the compression window. All ACCUMULATING and SUBMITTED blocks
+        # still have valid active_k/v tensors and must be included.
         dense_blocks = []
         blocks = self.get_streaming_blocks(session_id, layer_idx)
         if blocks:
-            last_block = blocks[-1]
-            if last_block.state != "COMPRESSED" and last_block.state != "PAGED":
-                dense_blocks.append(last_block)
-                
+            for block in blocks:
+                if block.state not in ("COMPRESSED", "PAGED"):
+                    dense_blocks.append(block)
+
         return block_indices_tensor, dense_blocks
 
     # ── High-throughput decode KV assembly ────────────────────────────────────

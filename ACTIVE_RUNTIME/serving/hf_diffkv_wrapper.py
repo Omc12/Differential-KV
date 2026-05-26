@@ -98,11 +98,19 @@ class DiffKVHFWrapper:
 
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
         input_ids = inputs.input_ids
+        prefill_len = input_ids.shape[1]
         generated = input_ids[0].tolist()
 
+        # Prefill — no position_ids needed (HF model derives them correctly for seq > 1)
         outputs = self.model(input_ids=input_ids, use_cache=True)
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
+
+        # CRITICAL FIX: track the absolute sequence position for each decode step.
+        # DiffKV always returns past_key_values=None (KV is managed internally), so
+        # without explicit position_ids the HF model infers cache_position=0 for every
+        # decode step — applying RoPE at position 0 for all tokens and corrupting output.
+        cur_pos = prefill_len
 
         for _ in range(max_new_tokens):
             # Repetition penalty
@@ -115,7 +123,7 @@ class DiffKVHFWrapper:
                             tok_text = self.tokenizer.decode([tok_id], skip_special_tokens=True)
                             is_alnum = any(c.isalnum() for c in tok_text)
                             self._alphanumeric_tokens[tok_id] = is_alnum
-                        
+
                         if not is_alnum:
                             continue
 
@@ -145,12 +153,20 @@ class DiffKVHFWrapper:
             if next_id.item() == self.tokenizer.eos_token_id:
                 break
 
+            # Pass the correct absolute position so RoPE rotates at the right angle.
+            # past_key_values is always None (DiffKV manages KV internally), so without
+            # this the model would wrongly use position 0 for every decode token.
+            pos_tensor = torch.tensor([[cur_pos]], dtype=torch.long, device=self.device)
             input_ids = next_id.unsqueeze(0)
             outputs = self.model(
-                input_ids=input_ids, past_key_values=past_kv, use_cache=True
+                input_ids=input_ids,
+                position_ids=pos_tensor,
+                past_key_values=past_kv,
+                use_cache=True,
             )
             logits = outputs.logits[:, -1, :]
             past_kv = outputs.past_key_values
+            cur_pos += 1
 
         return self.tokenizer.decode(generated, skip_special_tokens=True)
 

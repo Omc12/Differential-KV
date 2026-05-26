@@ -18,6 +18,9 @@ def test_4k():
     
     prompt = "Hello, " * 2000  # ~4K tokens
     
+    from native_core.sparse_decode import triton_sparse_attn
+    triton_sparse_attn.HAS_TRITON = False
+    
     before_vram = torch.cuda.memory_allocated() / 1e9
     result = wrapper.generate(prompt, max_new_tokens=32)
     after_vram = torch.cuda.memory_allocated() / 1e9

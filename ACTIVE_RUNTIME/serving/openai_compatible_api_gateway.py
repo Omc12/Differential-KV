@@ -321,7 +321,12 @@ def main():
     parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-1.5B-Instruct')
     parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
-    parser.add_argument('--rank', type=int, default=8)
+    parser.add_argument('--rank', type=int, default=16,
+                        help='SVD rank for KV compression. Higher = better quality, more VRAM. '
+                             'Recommended: 16 for balanced, 32 for quality, 8 for VRAM-constrained.')
+    parser.add_argument('--micro-block-size', type=int, default=32,
+                        help='Tokens accumulated before compression is submitted. '
+                             'Larger = fewer SVD calls, lower relative error. Must be >= rank.')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--serving-mode', type=str,
                         choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
@@ -333,7 +338,16 @@ def main():
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     
     print(f'Loading DiffKV runtime with model: {args.model}...')
-    wrapper = DiffKVHFWrapper(args.model, config={'rank': args.rank, 'serving_mode': args.serving_mode}, device='cuda')
+    print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
+    wrapper = DiffKVHFWrapper(
+        args.model,
+        config={
+            'rank': args.rank,
+            'micro_block_size': args.micro_block_size,
+            'serving_mode': args.serving_mode,
+        },
+        device='cuda',
+    )
     
     print('Starting Continuous Batching Engine...')
     engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size)
