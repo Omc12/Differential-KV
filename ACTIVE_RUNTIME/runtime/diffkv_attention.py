@@ -117,120 +117,50 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
                     # 2. Attention decode dispatch
-                    if not HAS_TRITON:
-                        # ── PyTorch vectorized fallback ───────────────────────
-                        if bsz == 1:
-                            sid = session_ids[0]
-                            if sid != "dummy_session":
-                                full_k, full_v = kv_manager.assemble_decode_kv(
-                                    sid, captured_layer_idx, query_states.dtype
-                                )
-                                if full_k is not None:
-                                    if num_key_value_groups > 1:
-                                        k_rep = repeat_kv(full_k, num_key_value_groups)
-                                        v_rep = repeat_kv(full_v, num_key_value_groups)
-                                    else:
-                                        k_rep = full_k
-                                        v_rep = full_v
-                                    attn_output = F.scaled_dot_product_attention(
-                                        query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                                        attn_mask=None, dropout_p=0.0, is_causal=False
-                                    )
-                                else:
-                                    attn_output = torch.zeros(
-                                        (1, num_heads, 1, head_dim),
-                                        device=query_states.device, dtype=query_states.dtype
-                                    )
-                            else:
-                                attn_output = torch.zeros(
+                    # Always route through the unified native_triton_sparse_attn_decode path.
+                    # This dispatches to either the GPU Triton kernel or the high-performance
+                    # Project-Then-Attend PyTorch fallback!
+                    attn_outputs = []
+                    for b_idx in range(bsz):
+                        sid = session_ids[b_idx]
+                        if sid == "dummy_session":
+                            attn_outputs.append(
+                                torch.zeros(
                                     (1, num_heads, 1, head_dim),
                                     device=query_states.device, dtype=query_states.dtype
                                 )
-                        else:
-                            batch_k, batch_v = [], []
-                            max_len = 0
-                            for b_idx in range(bsz):
-                                sid = session_ids[b_idx]
-                                if sid == "dummy_session":
-                                    batch_k.append(None)
-                                    batch_v.append(None)
-                                    continue
-                                full_k, full_v = kv_manager.assemble_decode_kv(
-                                    sid, captured_layer_idx, query_states.dtype
-                                )
-                                batch_k.append(full_k)
-                                batch_v.append(full_v)
-                                if full_k is not None:
-                                    max_len = max(max_len, full_k.shape[2])
-
-                            if max_len > 0:
-                                padded_k = torch.zeros(
-                                    (bsz, num_key_value_heads, max_len, head_dim),
-                                    dtype=query_states.dtype, device=query_states.device
-                                )
-                                padded_v = torch.zeros_like(padded_k)
-                                attn_mask = torch.zeros(
-                                    (bsz, 1, 1, max_len),
-                                    dtype=torch.bool, device=query_states.device
-                                )
-                                for b_idx in range(bsz):
-                                    fk = batch_k[b_idx]
-                                    if fk is not None:
-                                        l = fk.shape[2]
-                                        padded_k[b_idx, :, :l, :] = fk[0]
-                                        padded_v[b_idx, :, :l, :] = batch_v[b_idx][0]
-                                        attn_mask[b_idx, 0, 0, :l] = True
-
-                                if num_key_value_groups > 1:
-                                    k_rep = repeat_kv(padded_k, num_key_value_groups)
-                                    v_rep = repeat_kv(padded_v, num_key_value_groups)
-                                else:
-                                    k_rep = padded_k
-                                    v_rep = padded_v
-
-                                attn_output = F.scaled_dot_product_attention(
-                                    query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                                    attn_mask=attn_mask, dropout_p=0.0, is_causal=False
-                                )
-                            else:
-                                attn_output = torch.zeros(
-                                    (bsz, num_heads, 1, head_dim),
-                                    device=query_states.device, dtype=query_states.dtype
-                                )
-                    else:
-                        # ── Triton Fused Sparse Decode Kernel ─────────────────
-                        attn_outputs = []
-                        for b_idx in range(bsz):
-                            sid = session_ids[b_idx]
-                            if sid == "dummy_session":
-                                attn_outputs.append(
-                                    torch.zeros(
-                                        (1, num_heads, 1, head_dim),
-                                        device=query_states.device, dtype=query_states.dtype
-                                    )
-                                )
-                                continue
-
-                            block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
-                                sid, captured_layer_idx, query_states.device
                             )
-                            pool = getattr(kv_manager, 'native_pool', None)
-                            session_mbs = kv_manager.get_session_micro_block_size(sid)
+                            continue
 
-                            attn_out_b = native_triton_sparse_attn_decode(
-                                q=query_states[b_idx:b_idx+1],
-                                block_indices=block_indices,
-                                pool=pool,
-                                dense_blocks=dense_blocks,
-                                active_k=None,
-                                active_v=None,
-                                num_key_value_groups=num_key_value_groups,
-                                R=kv_manager.rank,
-                                S_MAX=session_mbs
+                        block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
+                            sid, captured_layer_idx, query_states.device
+                        )
+                        pool = getattr(kv_manager, 'native_pool', None)
+                        session_mbs = kv_manager.get_session_micro_block_size(sid)
+
+                        # Assemble ONLY the dense window (non-compressed blocks) into a
+                        # persistent workspace tensor. Uses lightweight slice copies, zero GEMM.
+                        # Compressed blocks are handled by block_indices in the sparse kernel.
+                        dense_k_assembled, dense_v_assembled = None, None
+                        if dense_blocks:
+                            dense_k_assembled, dense_v_assembled = kv_manager.assemble_dense_window_kv(
+                                sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
-                            attn_outputs.append(attn_out_b)
 
-                        attn_output = torch.cat(attn_outputs, dim=0)
+                        attn_out_b = native_triton_sparse_attn_decode(
+                            q=query_states[b_idx:b_idx+1],
+                            block_indices=block_indices,
+                            pool=pool,
+                            dense_blocks=[],          # dense window handled by active_k/v below
+                            active_k=dense_k_assembled,
+                            active_v=dense_v_assembled,
+                            num_key_value_groups=num_key_value_groups,
+                            R=kv_manager.rank,
+                            S_MAX=session_mbs
+                        )
+                        attn_outputs.append(attn_out_b)
+
+                    attn_output = torch.cat(attn_outputs, dim=0)
 
                     attn_output = attn_output.transpose(1, 2).contiguous()
                     attn_output = attn_output.reshape(bsz, q_len, hidden_size)

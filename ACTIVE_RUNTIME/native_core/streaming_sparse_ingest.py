@@ -149,6 +149,7 @@ class StreamingSparseIngestManager:
         self.dense_anchor_only = dense_anchor_only
         self.native_pool = native_pool
         self.device = device
+        self.manager = None
 
         # session_id -> layer_idx -> List[StreamingKVBlock]
         self.session_blocks: Dict[str, Dict[int, List[StreamingKVBlock]]] = {}
@@ -544,6 +545,25 @@ class StreamingSparseIngestManager:
         if not blocks_list:
             return
 
+        # ── GPU Batched SVD Hot Path (Zero-PCIe latency!) ──
+        from native_core.compression.lowrank import compress_layer_blocks_gpu
+        manager = getattr(self, "manager", None)
+        rank = manager.rank if manager is not None else 8
+
+        gpu_success = False
+        try:
+            gpu_success = compress_layer_blocks_gpu(blocks_list, rank, manager)
+        except Exception as e:
+            print(f"[DiffKV GPU-SVD] GPU SVD exception: {e}. Falling back to CPU SVD queue.")
+            gpu_success = False
+
+        if gpu_success:
+            with self._stats_lock:
+                self.stats["total_compressed"] += len(blocks_list)
+                self.stats["compressions_during_ingest"] += len(blocks_list)
+            return
+
+        # ── CPU SVD Queue Fallback Path ──
         # Fetch shape metadata from the first active block
         micro_block_size = blocks_list[0].micro_block_size
         heads = blocks_list[0].active_k.shape[1]

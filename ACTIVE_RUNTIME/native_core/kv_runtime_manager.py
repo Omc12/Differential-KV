@@ -187,18 +187,10 @@ class KVRuntimeManager:
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
-        self.recon_cache = ReconstructionCache(max_entries=recon_cache_size)
+        self.recon_cache = None
 
         # Instantiate ReconstructionPool for high-throughput decode path.
-        from native_core.recon_cache import ReconstructionPool
-        self.recon_pool = ReconstructionPool(
-            max_cached_blocks=recon_pool_blocks,
-            num_kv_heads=self.kv_heads,
-            head_dim=self.head_dim,
-            micro_block_size=256 if self.streaming_ingest else self.micro_block_size,
-            device=self.device
-        )
-        self.recon_pool.native_pool = self.native_pool
+        self.recon_pool = None
         self.decode_workspace = {}
 
         self._async      = async_compression
@@ -216,6 +208,7 @@ class KVRuntimeManager:
                 dense_anchor_only=True,
                 native_pool=self.native_pool,
             )
+            self._streaming_mgr.manager = self
         else:
             self._streaming_mgr = None
 
@@ -521,7 +514,8 @@ class KVRuntimeManager:
 
         # 2. Reset subsystems and clear references
         self.session_blocks.clear()
-        self.recon_cache.clear()
+        if getattr(self, "recon_cache", None) is not None:
+            self.recon_cache.clear()
         if hasattr(self, 'recon_pool') and self.recon_pool is not None:
             self.recon_pool.clear()
         if hasattr(self, 'decode_workspace'):
@@ -679,6 +673,79 @@ class KVRuntimeManager:
 
         return block_indices_tensor, dense_blocks
 
+    def assemble_dense_window_kv(
+        self,
+        session_id: str,
+        layer_idx: int,
+        dense_blocks: list,
+        dtype: torch.dtype,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Lightweight dense-window-only KV assembler for the decode hot path.
+
+        ONLY processes non-compressed (ACCUMULATING / SUBMITTED) blocks.
+        Compressed blocks are handled by block_indices in the sparse kernel.
+
+        This completely avoids the GEMM reconstruction path in assemble_decode_kv()
+        that was being called unnecessarily for every decode token × every layer.
+
+        Returns
+        -------
+        k_tensor : [1, kv_heads, dense_window_len, head_dim]  or None
+        v_tensor : [1, kv_heads, dense_window_len, head_dim]  or None
+        """
+        if not dense_blocks:
+            return None, None
+
+        ws_key = (session_id, layer_idx, "dense")
+        ws = self.decode_workspace.get(ws_key)
+
+        # Count total tokens in the dense window: anchor + active_k per block
+        total_dense_len = 0
+        for blk in dense_blocks:
+            total_dense_len += 1  # anchor
+            if blk.active_k is not None:
+                total_dense_len += blk.active_k.shape[2]
+
+        if total_dense_len == 0:
+            return None, None
+
+        device = self.device
+
+        # Allocate or grow the persistent dense window workspace
+        if ws is None or ws[0].shape[2] < total_dense_len:
+            alloc_len = max(total_dense_len + max(total_dense_len // 10, 32), 64)
+            k_ws = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), dtype=dtype, device=device)
+            v_ws = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), dtype=dtype, device=device)
+            ws = (k_ws, v_ws)
+            self.decode_workspace[ws_key] = ws
+            # Mark all blocks dirty so they get written into the new workspace
+            for blk in dense_blocks:
+                blk.dirty = True
+
+        k_ws, v_ws = ws
+
+        # Write only dirty blocks — typically just the last one (new decode token)
+        cur_pos = 0  # Position within the dense window workspace (starts at 0, not anchor_idx)
+
+        for blk in dense_blocks:
+            blk_len = 1 + (blk.active_k.shape[2] if blk.active_k is not None else 0)
+            if blk.dirty:
+                # Write anchor
+                anchor_k = blk.anchor_kv[0, 0]  # [H_kv, D]
+                anchor_v = blk.anchor_kv[0, 1]
+                k_ws[0, :, cur_pos, :] = anchor_k
+                v_ws[0, :, cur_pos, :] = anchor_v
+                # Write active tokens
+                if blk.active_k is not None:
+                    act_len = blk.active_k.shape[2]
+                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk.active_k[0]
+                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk.active_v[0]
+                blk.dirty = False
+            cur_pos += blk_len
+
+        return k_ws[:, :, :total_dense_len, :], v_ws[:, :, :total_dense_len, :]
+
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
     def assemble_decode_kv(
@@ -813,7 +880,7 @@ class KVRuntimeManager:
 
             if b_snap.U is not None and b_snap.V is not None:
                 pool_idx = b_snap.pool_idx
-                if pool_idx is not None:
+                if pool_idx is not None and getattr(self, "recon_pool", None) is not None:
                     # ZERO-SYNC: check CPU shadow array to avoid PCIe sync
                     if pool_idx < self.recon_pool.pool_to_slot_cpu.shape[0]:
                         slot = int(self.recon_pool.pool_to_slot_cpu[pool_idx])
@@ -839,15 +906,28 @@ class KVRuntimeManager:
             k_ws[0, :, pos_t, :] = ak_t.transpose(0, 1)   # [kv_heads, N, head_dim]
             v_ws[0, :, pos_t, :] = av_t.transpose(0, 1)
 
-        # ── 6. Compressed hits — direct slice from ReconstructionPool ─────────
-        for b_snap, slot, start_pos in compressed_hits:
-            block_len = b_snap.U.shape[0]
-            k_ws[0, :, start_pos:start_pos + block_len, :] = \
-                self.recon_pool.K[slot, :, :block_len, :]
-            v_ws[0, :, start_pos:start_pos + block_len, :] = \
-                self.recon_pool.V[slot, :, :block_len, :]
+        # ── 6. Compressed hits — direct slice from ReconstructionPool (Vectorized!) ──
+        if compressed_hits:
+            slots_list = []
+            toks_list = []
+            targets_list = []
+            for b_snap, slot, start_pos in compressed_hits:
+                block_len = b_snap.U.shape[0]
+                slots_list.extend([slot] * block_len)
+                toks_list.extend(range(block_len))
+                targets_list.extend(range(start_pos, start_pos + block_len))
+            
+            slots_t = torch.tensor(slots_list, device=self.device, dtype=torch.long)
+            toks_t = torch.tensor(toks_list, device=self.device, dtype=torch.long)
+            targets_t = torch.tensor(targets_list, device=self.device, dtype=torch.long)
+            
+            K_perm = self.recon_pool.K.permute(0, 2, 1, 3) # [max_cached_blocks, micro_block_size, heads, head_dim]
+            V_perm = self.recon_pool.V.permute(0, 2, 1, 3)
+            
+            k_ws[0, :, targets_t, :] = K_perm[slots_t, toks_t].transpose(0, 1)
+            v_ws[0, :, targets_t, :] = V_perm[slots_t, toks_t].transpose(0, 1)
 
-        if hit_slots:
+        if hit_slots and getattr(self, "recon_pool", None) is not None:
             self.recon_pool.update_lru(hit_slots)
 
         # ── 7. Compressed misses — batched GEMM then write into pool + ws ─────
@@ -901,7 +981,7 @@ class KVRuntimeManager:
                     grp_pool_idxs.append(pool_idx if pool_idx is not None else -1)
 
                 valid_pool_idxs = [p for p in grp_pool_idxs if p >= 0]
-                if valid_pool_idxs:
+                if valid_pool_idxs and getattr(self, "recon_pool", None) is not None:
                     alloc_slots = self.recon_pool.allocate_slots(valid_pool_idxs)
                 else:
                     alloc_slots = []
@@ -912,17 +992,18 @@ class KVRuntimeManager:
                     v_ws[0, :, start_pos:start_pos + seq_len, :] = recon_v[i, :, :seq_len, :]
 
                     pool_idx = grp_pool_idxs[i]
-                    if pool_idx >= 0:
+                    if pool_idx >= 0 and getattr(self, "recon_pool", None) is not None:
                         slot = next(slot_iter, -1)
                         if slot >= 0:
                             self.recon_pool.K[slot, :, :seq_len, :] = recon_k[i, :, :seq_len, :].to(torch.float16)
                             self.recon_pool.V[slot, :, :seq_len, :] = recon_v[i, :, :seq_len, :].to(torch.float16)
 
-                    self.recon_cache.put(
-                        b_snap.b,
-                        recon_k[i:i+1, :, :seq_len, :].contiguous().clone(),
-                        recon_v[i:i+1, :, :seq_len, :].contiguous().clone(),
-                    )
+                    if getattr(self, "recon_cache", None) is not None:
+                        self.recon_cache.put(
+                            b_snap.b,
+                            recon_k[i:i+1, :, :seq_len, :].contiguous().clone(),
+                            recon_v[i:i+1, :, :seq_len, :].contiguous().clone(),
+                        )
 
         # ── 8. Dense active blocks — slice copy ───────────────────────────────
         for b_snap, start_pos, block_len in dense_copies:
@@ -998,7 +1079,9 @@ class KVRuntimeManager:
 
             if block.U is not None and block.V is not None:
                 # Check reconstruction cache first
-                cached_k, cached_v = self.recon_cache.get(block)
+                cached_k, cached_v = None, None
+                if getattr(self, "recon_cache", None) is not None:
+                    cached_k, cached_v = self.recon_cache.get(block)
                 if cached_k is not None:
                     k_list.append(cached_k)
                     v_list.append(cached_v)
@@ -1016,7 +1099,8 @@ class KVRuntimeManager:
                     recon_k = recon[:, :, 0].transpose(1, 2).contiguous().clone()
                     recon_v = recon[:, :, 1].transpose(1, 2).contiguous().clone()
                     # Cache for reuse
-                    self.recon_cache.put(block, recon_k, recon_v)
+                    if getattr(self, "recon_cache", None) is not None:
+                        self.recon_cache.put(block, recon_k, recon_v)
                     k_list.append(recon_k)
                     v_list.append(recon_v)
 

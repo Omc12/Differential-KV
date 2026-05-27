@@ -273,3 +273,110 @@ def estimate_memory(seq_len: int, heads: int, dim: int,
         "recon_flops_per_token": rank * feat * 2,
         "recon_bandwidth_per_token": rank * 2 + (rank * feat * 4) / (seq_len/interval)
     }
+
+
+def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
+    """
+    Compress a list of StreamingKVBlock objects batched together entirely on the GPU.
+    Uses randomized SVD for efficiency and maintains correct K/V layout.
+    """
+    if not blocks_list:
+        return True
+
+    T_active = blocks_list[0].active_k.shape[2]
+    heads = blocks_list[0].active_k.shape[1]
+    head_dim = blocks_list[0].active_k.shape[3]
+    feat_dim = 2 * heads * head_dim
+    gpu_device = blocks_list[0].active_k.device
+    N_blocks = len(blocks_list)
+
+    # 1. Properly concatenate K and V along feat dimension [N, T, 2*H*D]
+    stacked_k = torch.cat([b.active_k.permute(0, 2, 1, 3).reshape(1, T_active, -1) for b in blocks_list], dim=0)
+    stacked_v = torch.cat([b.active_v.permute(0, 2, 1, 3).reshape(1, T_active, -1) for b in blocks_list], dim=0)
+    flat_batch = torch.cat([stacked_k, stacked_v], dim=2)
+
+    # 2. Compute GPU deltas
+    stacked_anchors = torch.cat([b.anchor_kv.reshape(1, -1) for b in blocks_list], dim=0)
+    deltas = (flat_batch.float() - stacked_anchors.unsqueeze(1).float())
+    if not torch.isfinite(deltas).all():
+        deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Vectorized scale computation and normalization on GPU (Phase 41)
+    # This prevents the scale factor from being applied twice (which caused deviation on long contexts),
+    # and reduces N_blocks CUDA syncs (.item() in loop) down to exactly 1 CPU copy.
+    scales_t = deltas.abs().max(dim=-1)[0].max(dim=-1)[0]  # [N_blocks]
+    scales_t = torch.clamp(scales_t, min=1e-9)
+    deltas_normalized = deltas / scales_t.view(N_blocks, 1, 1)
+    scales_cpu = scales_t.cpu()
+
+    # 3. Batched Randomized SVD — O(T × rank × feat) instead of O(T² × feat)
+    #    This is ~30x faster than full SVD for typical rank=8, T=256, feat=256.
+    n_oversamples = 5
+    r_proj = min(rank + n_oversamples, T_active, feat_dim)
+    if r_proj < 1:
+        return False
+
+    try:
+        Omega = torch.randn(N_blocks, feat_dim, r_proj, device=gpu_device, dtype=torch.float32)
+        Y = torch.matmul(deltas_normalized, Omega)                         # [N, T, r_proj]
+        # One power iteration for better subspace capture
+        Y = torch.matmul(deltas_normalized, torch.matmul(deltas_normalized.transpose(1, 2), Y))
+        Q, _ = torch.linalg.qr(Y, mode="reduced")              # [N, T, r_proj]
+        B = torch.matmul(Q.transpose(1, 2), deltas_normalized)            # [N, r_proj, feat_dim]
+        U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)  # tiny matrix — fast!
+        U = torch.matmul(Q, U_b)                               # [N, T, r_proj]
+    except Exception as e:
+        print(f"[DiffKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")
+        return False
+
+    # 4. Extract dynamic rank using S
+    S_cpu = S.cpu()
+    ranks = []
+    for i in range(N_blocks):
+        tot = (S_cpu[i] ** 2).sum().item()
+        k = rank
+        if tot > 1e-9:
+            cum = torch.cumsum(S_cpu[i] ** 2, dim=0)
+            threshold = 0.98 * tot
+            idx = torch.where(cum >= threshold)[0]
+            if idx.numel() > 0:
+                k = max(4, min(int(idx[0].item() + 1), rank))
+        ranks.append(k)
+
+    # 5. Conversion and Sanitization
+    U_fp16 = U.to(torch.float16)
+    Vh_fp16 = Vh.to(torch.float16)
+    S_fp16 = S.to(torch.float16)
+
+    # Sanitize outputs against NaNs/Infs (Phase 41 - safety first)
+    if not torch.isfinite(U_fp16).all():
+        U_fp16 = torch.nan_to_num(U_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+    if not torch.isfinite(Vh_fp16).all():
+        Vh_fp16 = torch.nan_to_num(Vh_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+
+    pool = getattr(manager, "native_pool", None) if manager is not None else None
+    for i, block in enumerate(blocks_list):
+        k = ranks[i]
+        u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)
+        v_k = Vh_fp16[i, :k, :]
+
+        block.U = torch.zeros((T_active, rank), dtype=torch.float16, device=gpu_device)
+        block.V = torch.zeros((rank, feat_dim), dtype=torch.float16, device=gpu_device)
+        block.U[:, :k] = u_k
+        block.V[:k, :] = v_k
+        block.scale = scales_cpu[i].item()  # local CPU read - zero CUDA sync!
+        block.dynamic_rank = k
+        block.active_k = None
+        block.active_v = None
+        block.state = "COMPRESSED"
+        block.dirty = True
+
+        if pool is not None:
+            if getattr(block, 'pool_idx', None) is None:
+                block.pool_idx = pool.allocate_block()
+            pool.write_block(block.pool_idx, block.U, block.V, block.anchor_kv[0,0], block.anchor_kv[0,1], block.scale, T_active)
+
+        if manager is not None and getattr(manager, "_streaming_mgr", None) is not None:
+            manager._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
+
+    return True

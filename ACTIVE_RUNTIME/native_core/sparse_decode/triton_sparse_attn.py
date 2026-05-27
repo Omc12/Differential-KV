@@ -252,70 +252,163 @@ def _pytorch_vectorized_sparse_attn_decode(
     R:                    int = 16,
     S_MAX:                int = 64,
 ) -> torch.Tensor:
-    """Highly-parallelized pure PyTorch low-rank reconstruction and attention fallback."""
+    """Highly-parallelized pure PyTorch low-rank Project-Then-Attend math decoder."""
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1, "Decode only"
     
-    k_parts = []
-    v_parts = []
+    inv_scale = 1.0 / math.sqrt(D)
     
+    # Reshape Q for fast matrix/vector operations
+    q_sq = q.view(H_q, D) # [H_q, D]
+    
+    # 1. Helper to repeat KV across Query heads for GQA compatibility
+    def repeat_kv_at_dim(t, n_rep, dim):
+        if n_rep == 1:
+            return t
+        if dim < 0:
+            dim = t.dim() + dim
+        shape = list(t.shape)
+        val = shape[dim]
+        t = t.unsqueeze(dim + 1)
+        expand_shape = list(t.shape)
+        expand_shape[dim + 1] = n_rep
+        t = t.expand(*expand_shape)
+        new_shape = shape[:dim] + [val * n_rep] + shape[dim + 1:]
+        return t.reshape(*new_shape)
+
     N = block_indices.shape[0] if block_indices is not None else 0
+    block_capacity = 0
+    
     if N > 0:
         indices = block_indices.long()
-        U_batch = pool.U[indices]          # [N, S_MAX, R]
-        V_K_batch = pool.V_K[indices]      # [N, R, H_kv, D]
-        V_V_batch = pool.V_V[indices]      # [N, R, H_kv, D]
-        scales_batch = pool.scales[indices].view(N, 1, 1, 1) # [N, 1, 1, 1]
-        seq_lens_batch = pool.seq_lens[indices].cpu().tolist()
-        
-        K_delta = torch.einsum('nsr,nrhd->nshd', U_batch, V_K_batch) * scales_batch
-        V_delta = torch.einsum('nsr,nrhd->nshd', U_batch, V_V_batch) * scales_batch
-        
-        anchors_K = pool.anchors_K[indices] # [N, H_kv, D]
-        anchors_V = pool.anchors_V[indices] # [N, H_kv, D]
-        
-        K_recon = K_delta + anchors_K.unsqueeze(1)  # [N, S_MAX, H_kv, D]
-        V_recon = V_delta + anchors_V.unsqueeze(1)  # [N, S_MAX, H_kv, D]
-        
-        for i in range(N):
-            seq_len = seq_lens_batch[i]
-            idx = indices[i]
-            k_parts.append(pool.anchors_K[idx].unsqueeze(0).unsqueeze(2))  # [1, H_kv, 1, D]
-            v_parts.append(pool.anchors_V[idx].unsqueeze(0).unsqueeze(2))  # [1, H_kv, 1, D]
-            if seq_len > 0:
-                k_parts.append(K_recon[i, :seq_len].permute(1, 0, 2).unsqueeze(0)) # [1, H_kv, seq_len, D]
-                v_parts.append(V_recon[i, :seq_len].permute(1, 0, 2).unsqueeze(0)) # [1, H_kv, seq_len, D]
+        U = pool.U[indices]                                     # [N, block_capacity, R]
+        block_capacity = U.shape[1]
+        # Pool shapes:
+        # V_K: [max_blocks, R, H_kv, D] -> slice: [N, R, H_kv, D] -> repeat at dim 2 (which is H_kv)
+        # V_V: [max_blocks, R, H_kv, D] -> slice: [N, R, H_kv, D] -> repeat at dim 2
+        # anchors_K: [max_blocks, H_kv, D] -> slice: [N, H_kv, D] -> repeat at dim 1 (which is H_kv, or dim -2)
+        V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)           # [N, R, H_q, D]
+        V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)           # [N, R, H_q, D]
+        anchors_K = repeat_kv_at_dim(pool.anchors_K[indices], num_key_value_groups, dim=1) # [N, H_q, D]
+        anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1) # [N, H_q, D]
+        scales = pool.scales[indices].view(N, 1, 1)             # [N, 1, 1]
+        # Keep seq_lens on GPU — used directly for the sequence length mask below
+        seq_lens_t = pool.seq_lens[indices]                      # [N] int32, on GPU
 
+        # Clamp block_capacity to the maximum actually-used slot across all blocks.
+        # pool.U is padded to max_seq_len (256) but most blocks use only 2-32 slots.
+        # This cuts the N×S einsum by up to 8× for short blocks (S=32 vs S=256).
+        max_valid_len = int(seq_lens_t.max().item())             # CPU scalar — single int
+        block_capacity = min(block_capacity, max(max_valid_len, 1))
+        
+        # ── 1. Anchor scores: [N, H_q] ──
+        # dot(q, anchors_K) * inv_scale
+        # q_sq is [H_q, D], anchors_K is [N, H_q, D]
+        scores_anchor = torch.sum(q_sq.unsqueeze(0) * anchors_K, dim=-1) * inv_scale # [N, H_q]
+        
+        # ── 2. Project Query onto low-rank subspace: [N, R, H_q] ──
+        # dot(q, V_K^T) * inv_scale
+        # q_sq is [H_q, D], V_K is [N, R, H_q, D]
+        q_proj = torch.sum(q_sq.unsqueeze(0).unsqueeze(1) * V_K, dim=-1) * inv_scale # [N, R, H_q]
+        
+        # ── 3. Delta scores: [N, block_capacity, H_q] ──
+        # Only compute up to block_capacity (clamped to max_valid_len) — not full pool padding
+        scores_delta = torch.einsum('nsr,nrh->nsh', U[:, :block_capacity, :].float(), q_proj.float()).to(q.dtype) * scales # [N, S, H_q]
+        
+        # Total scores for compressed blocks
+        scores_block = scores_anchor.unsqueeze(1) + scores_delta # [N, block_capacity, H_q]
+        
+        # ── 4. Sequence masking — in-place masked_fill_ avoids allocating a new -inf tensor ──
+        mask = torch.arange(block_capacity, device=q.device).view(1, block_capacity, 1) >= seq_lens_t.view(N, 1, 1)
+        scores_block = scores_block.masked_fill(mask, float('-inf'))
+        
+        # Reshape/transpose scores for global concatenation
+        scores_anchor = scores_anchor.transpose(0, 1) # [H_q, N]
+        scores_compressed = scores_block.permute(2, 0, 1).reshape(H_q, N * block_capacity) # [H_q, N * block_capacity]
+    else:
+        scores_anchor = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
+        scores_compressed = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
+
+    # ── 5. Dense tokens collection ──
+    dense_k_parts = []
+    dense_v_parts = []
     for blk in (dense_blocks or []):
-        k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2)) # [1, H_kv, 1, D]
-        v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
+        dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2)) # [1, H_kv, 1, D]
+        dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
         if blk.active_k is not None:
-            k_parts.append(blk.active_k)
-            v_parts.append(blk.active_v)
+            dense_k_parts.append(blk.active_k)
+            dense_v_parts.append(blk.active_v)
             
     if active_k is not None and active_k.shape[2] > 0:
-        k_parts.append(active_k)
-        v_parts.append(active_v)
-        
-    if not k_parts:
-        return torch.zeros((bsz, H_q, q_len, D), dtype=q.dtype, device=q.device)
-        
-    full_k = torch.cat(k_parts, dim=2)   # [1, H_kv, S, D]
-    full_v = torch.cat(v_parts, dim=2)
-    
-    if num_key_value_groups > 1:
-        def _repeat_kv(t, n_rep):
-            b, h, s, d = t.shape
-            return t.unsqueeze(2).expand(b, h, n_rep, s, d).reshape(b, h * n_rep, s, d)
-        k_rep = _repeat_kv(full_k, num_key_value_groups)
-        v_rep = _repeat_kv(full_v, num_key_value_groups)
+        dense_k_parts.append(active_k)
+        dense_v_parts.append(active_v)
+
+    if dense_k_parts:
+        full_k = torch.cat(dense_k_parts, dim=2)
+        full_v = torch.cat(dense_v_parts, dim=2)
+        k_dense_rep = repeat_kv_at_dim(full_k, num_key_value_groups, dim=1) # [1, H_q, S_dense, D] -> repeat at dim 1 (H_kv)
+        v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1) # [1, H_q, S_dense, D] -> repeat at dim 1 (H_kv)
+        S_dense = k_dense_rep.shape[2]
+        scores_dense = torch.sum(q * k_dense_rep, dim=-1).squeeze(0) * inv_scale # [H_q, S_dense]
     else:
-        k_rep = full_k
-        v_rep = full_v
+        S_dense = 0
+        scores_dense = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
+
+    # ── 6. Global Softmax ──
+    # scores_all shape: [H_q, total_tokens]
+    scores_all = torch.cat([scores_anchor, scores_compressed, scores_dense], dim=-1)
+    
+    # CRITICAL: Only sanitize NaN and +Inf — NEVER convert -inf to a finite value!
+    # -inf entries are the intentional padding mask from sequence length gating.
+    # Converting them to -1e4 gives nonzero softmax weight to zero-padded U slots,
+    # which attenuates the output and causes progressive output drift / hallucination.
+    has_nan = torch.isnan(scores_all).any()
+    has_posinf = (scores_all == float('inf')).any()
+    if has_nan or has_posinf:
+        scores_all = scores_all.clone()
+        if has_nan:
+            scores_all[torch.isnan(scores_all)] = -1e4
+        if has_posinf:
+            scores_all[scores_all == float('inf')] = 1e4
+        # -inf entries are left INTACT: they produce zero softmax probability (correct)
         
-    return torch.nn.functional.scaled_dot_product_attention(
-        q, k_rep, v_rep, attn_mask=None, dropout_p=0.0, is_causal=False
-    )
+    probs_all = torch.nn.functional.softmax(scores_all, dim=-1) # [H_q, total_tokens]
+    
+    # Split probabilities back
+    P_anchor, P_comp, P_dense = torch.split(probs_all, [N, N * block_capacity, S_dense], dim=-1)
+
+    # ── 7. Value Reduction ──
+    O_final = torch.zeros((H_q, D), device=q.device, dtype=q.dtype)
+
+    if N > 0:
+        # 7.1 + 7.2 Fused: Anchor and compressed contributions share anchors_V.
+        # Compute combined probability on anchors_V in one matmul:
+        #   total_anchor_prob[n, h] = P_anchor[h, n] + sum_s P_comp[h, n, s]
+        # P_comp has shape [H_q, N * block_capacity] where block_capacity is clamped.
+        P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2) # [N, H_q, S]
+        # U is sliced to [:, :block_capacity, :] matching the clamped block_capacity
+        U_clamped = U[:, :block_capacity, :]                                    # [N, S, R]
+        P_U = torch.einsum('nhs,nsr->nhr', P_comp_reshaped.float(), U_clamped.float())  # [N, H_q, R]
+
+        # Combined anchor probability: direct sum of P_anchor and compressed-block total
+        # Avoids a separate O_anchor_total matmul — one fused operation
+        p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)  # [N, H_q]
+        O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)  # [H_q, D]
+        O_final = O_final + O_anchor_fused.to(q.dtype)
+
+        # Delta contribution from low-rank compressed values
+        O_delta = torch.einsum('nhr,nrhd->nhd', P_U, V_V.float()) * scales.float()  # [N, H_q, D]
+        O_final = O_final + O_delta.sum(0).to(q.dtype)
+
+    # 7.3. Dense contribution
+    if S_dense > 0:
+        # v_dense_rep is [1, H_q, S_dense, D] -> squeeze(0) is [H_q, S_dense, D]
+        # P_dense is [H_q, S_dense]
+        # O_dense_total is [H_q, D]
+        O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1) # [H_q, D]
+        O_final = O_final + O_dense_total.to(q.dtype)
+
+    return O_final.unsqueeze(0).unsqueeze(2)
 
 
 def native_triton_sparse_attn_decode(
