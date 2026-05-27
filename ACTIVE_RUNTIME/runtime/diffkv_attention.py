@@ -261,10 +261,21 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         k_rep   = repeat_kv(key_states,   num_key_value_groups)
                         v_rep   = repeat_kv(value_states, num_key_value_groups)
                         
-                        attn_output = F.scaled_dot_product_attention(
-                            query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                            attn_mask=None, dropout_p=0.0, is_causal=True
-                        )
+                        if q_len > 1024:
+                            # Phase 42: Retrieval-Aware Sparse Prefill (Bounded-Compute Execution)
+                            if not hasattr(self, "sparse_prefill_engine"):
+                                from runtime.sparse_prefill import RetrievalAwareSparsePrefill
+                                self.sparse_prefill_engine = RetrievalAwareSparsePrefill(
+                                    sink_tokens=64, chunk_size=512, local_window_chunks=1, top_k_retrieval_chunks=2
+                                )
+                            attn_output = self.sparse_prefill_engine.execute_sparse_attention(
+                                query_states, k_rep, v_rep
+                            )
+                        else:
+                            attn_output = F.scaled_dot_product_attention(
+                                query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                                attn_mask=None, dropout_p=0.0, is_causal=True
+                            )
                     attn_weights = None
 
                 attn_output = attn_output.transpose(1, 2).contiguous()
