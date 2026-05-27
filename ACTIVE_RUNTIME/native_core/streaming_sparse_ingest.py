@@ -62,6 +62,7 @@ class StreamingKVBlock:
     scale: float = 1.0
     cosine_sim: float = 1.0
     norm_drift: float = 0.0
+    dynamic_rank: int = -1
 
     token_indices: List[int] = field(default_factory=list)
     state: str = "ACCUMULATING"  # ACCUMULATING | SUBMITTED | COMPRESSED | PAGED
@@ -364,12 +365,15 @@ class StreamingSparseIngestManager:
             )
             self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
 
-            # Trigger compression as soon as the micro-block fills
-            if current_block.is_compression_eligible():
-                self._submit_block_for_compression(current_block)
-                self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
-                with self._stats_lock:
-                    self.stats["compressions_during_ingest"] += 1
+            # Get the current sequence length to determine rolling dense window
+            current_seq_len = current_block.anchor_idx + len(current_block.token_indices)
+            
+            # Compress any blocks that have now fallen out of the rolling dense window
+            for idx, b in enumerate(blocks):
+                if b.state == "ACCUMULATING" and b.active_k is not None and b.active_k.shape[2] >= b.micro_block_size:
+                    if (b.anchor_idx + b.token_count()) < (current_seq_len - 2048):
+                        self._submit_block_for_compression(b)
+                        self.update_metadata_block(session_id, layer_idx, idx, b)
             return
 
         # ───────────────────────────────────────────────────────────────────
@@ -461,8 +465,9 @@ class StreamingSparseIngestManager:
                     new_block.active_v = active_v_blocks[i].clone()
                     
                     # Dynamic Prefill Compression Guard: Bypass SVD compression for short
-                    # context sequences (< 1024 tokens) to preserve 100% precision.
-                    if seq_len < 1024:
+                    # context sequences (< 1024 tokens) or for blocks within the most recent
+                    # 2048 tokens to preserve 100% exact prompt attention.
+                    if seq_len < 1024 or (anchor_idx + block_capacity) >= (seq_len - 2048):
                         new_block.state = "ACCUMULATING"
                     else:
                         new_block.state = "SUBMITTED"
@@ -509,7 +514,7 @@ class StreamingSparseIngestManager:
                     new_block.active_k = blk_active_k.clone()
                     new_block.active_v = blk_active_v.clone()
 
-                if new_block.is_compression_eligible():
+                if new_block.is_compression_eligible() and (new_block.anchor_idx + new_block.token_count()) < (seq_len - 2048):
                     new_block.state = "SUBMITTED"
                     full_blocks_to_compress.append(new_block)
                 else:
@@ -554,30 +559,30 @@ class StreamingSparseIngestManager:
         torch.cat([b.active_k for b in blocks_list], dim=0, out=k_gpu)
         torch.cat([b.active_v for b in blocks_list], dim=0, out=v_gpu)
 
-        # Synchronous GPU->CPU DMA via pinned memory
+        # Asynchronous GPU->CPU DMA via pinned memory
         k_cpu.copy_(k_gpu, non_blocking=True)
         v_cpu.copy_(v_gpu, non_blocking=True)
-
-        # Use a targeted CUDA Event to wait only for the DMA copy, not all subsequent
-        # GPU work. current_stream().synchronize() would also stall on any compute
-        # kernels queued after this point (e.g. next layer's projections), causing
-        # 600ms+ prefill overhead across 28 layers × 4 regions = 112 sync points.
-        if k_gpu.is_cuda:
-            _dma_event = torch.cuda.Event()
-            _dma_event.record()
-            _dma_event.synchronize()
 
         # Enqueue cloned slices — each clone is an independent CPU tensor,
         # so the shared staging buffer can be safely reused across layers.
         is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "_queue")
+
+        # If async worker is active, the worker thread will call event.synchronize() in the background.
+        # This completely avoids stalling the main thread, increasing prefill TPS dramatically.
+        _dma_event = None
+        if k_gpu.is_cuda:
+            _dma_event = torch.cuda.Event()
+            _dma_event.record()
+            if not is_async_active:
+                _dma_event.synchronize()
         
         for idx, block in enumerate(blocks_list):
             k_cpu_slice = k_cpu[idx : idx + 1].clone()
             v_cpu_slice = v_cpu[idx : idx + 1].clone()
-
+ 
             if is_async_active:
                 try:
-                    self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, None))
+                    self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, _dma_event))
                     with self.compressor._stats_lock:
                         self.compressor.stats["submitted"] += 1
                         depth = self.compressor._queue.qsize()
@@ -585,10 +590,12 @@ class StreamingSparseIngestManager:
                             self.compressor.stats["queue_depth_peak"] = depth
                 except queue.Full:
                     # Sync fallback if queue is full
+                    if _dma_event is not None:
+                        _dma_event.synchronize()
                     self.compress_fn(block, k_cpu_slice, v_cpu_slice)
                     block.state = "COMPRESSED"
                     with self.compressor._stats_lock:
-                        self.compressor.stats["sync_fallbacks"] += 1
+                        self.stats["sync_fallbacks"] += 1
             else:
                 # Sync execution directly on the CPU slice
                 self.compress_fn(block, k_cpu_slice, v_cpu_slice)

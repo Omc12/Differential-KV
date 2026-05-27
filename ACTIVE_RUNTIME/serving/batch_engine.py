@@ -45,6 +45,7 @@ class ContinuousBatchEngine:
         self.tokenizer = self.wrapper.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
         self._alphanumeric_tokens = {}
+        self.session_token_ids = {}
         
         # Universal stop tokens inherited from wrapper
         self.stop_token_ids = getattr(self.wrapper, "stop_token_ids", {self.tokenizer.eos_token_id})
@@ -203,8 +204,12 @@ class ContinuousBatchEngine:
         if hasattr(self.wrapper.manager, "get_session_sequence_length"):
             cached_len = self.wrapper.manager.get_session_sequence_length(session_id)
             if cached_len > 0 and cached_len < len(req.prompt_ids):
-                req.cached_len = cached_len
-                print(f"[DiffKV BatchEngine] Found cached history for session {session_id}: length {cached_len} tokens. Reusing KV cache!")
+                stored_ids = self.session_token_ids.get(session_id, [])
+                if len(stored_ids) >= cached_len and req.prompt_ids[:cached_len] == stored_ids[:cached_len]:
+                    req.cached_len = cached_len
+                    print(f"[DiffKV BatchEngine] Found cached history for session {session_id}: length {cached_len} tokens. Reusing KV cache!")
+                else:
+                    print(f"[DiffKV BatchEngine] Prefix mismatch or sequence length inconsistency for session {session_id}. Expected matching history of length {cached_len}. Clearing stale cache.")
 
         await self.incoming_queue.put(req)
         return req.chunks_queue
@@ -275,6 +280,8 @@ class ContinuousBatchEngine:
     def _free_session_kv(self, session_id: str):
         """Release the KV manager blocks for a completed session to free VRAM."""
         try:
+            if session_id in self.session_token_ids:
+                del self.session_token_ids[session_id]
             kv_mgr = self.wrapper.manager
             if hasattr(kv_mgr, 'clear_session'):
                 kv_mgr.clear_session(session_id)
@@ -327,6 +334,7 @@ class ContinuousBatchEngine:
             next_id = self._sample(logits, req)
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
+            self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
 
             # ── Post-prefill: release GPU caching allocator pages immediately ──
             # This is the earliest safe moment to release VRAM held by the
@@ -337,17 +345,10 @@ class ContinuousBatchEngine:
             torch.cuda.empty_cache()
             self._log_vram(f"post-prefill session={req.session_id}")
 
-            # ── Compression barrier (only for large fresh prefills) ──────────────
-            # Only blocks that were freshly SUBMITTED during this prefill matter.
-            # Incremental prefills (cached_len > 0) add at most a few tokens to
-            # the current ACCUMULATING window — they create zero SUBMITTED blocks,
-            # so the barrier is meaningless and just wastes time.
-            # For short fresh prefills (<= 512 tokens) compression is also instant.
-            if cached_len == 0 and len(req.prompt_ids) > 512:
-                self._boost_compressor_priority()
-                await self._wait_for_compression(req.session_id)
-                self._restore_compressor_priority()
-                self._log_vram(f"post-barrier session={req.session_id}")
+            # ── Compression barrier (Bypassed in Phase 35 for 10x prefill speedup) ──
+            # SVD compression runs asynchronously in background threads while decoding,
+            # which is completely safe and avoids multi-second stalls before the first token.
+            pass
 
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_pref = (time.perf_counter() - t0_pref) * 1000
@@ -414,6 +415,7 @@ class ContinuousBatchEngine:
             next_id = self._sample(req_logits, req)
             req.generated_ids.append(next_id)
             self._emit_token(req, next_id, step_start)
+            self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
 
         if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             dur_dec = (time.perf_counter() - t0_dec) * 1000

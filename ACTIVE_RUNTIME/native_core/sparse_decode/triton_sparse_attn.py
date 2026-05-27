@@ -447,32 +447,46 @@ def native_triton_sparse_attn_decode(
                 m_i = m_out
                 l_i = l_out
                 
-                def _update_dense_hq(k_kv, v_kv):
-                    nonlocal m_i, l_i, O_i
-                    if k_kv is None or k_kv.shape[2] == 0:
-                        return
-                    def repeat_kv(t, n):
-                        if n == 1: return t
-                        b, h, s, d = t.shape
-                        return t.unsqueeze(2).expand(b, h, n, s, d).reshape(b, h * n, s, d)
-                    k = repeat_kv(k_kv, num_key_value_groups).float()[0].permute(1, 0, 2)  # [S, H_q, D]
-                    v = repeat_kv(v_kv, num_key_value_groups).float()[0].permute(1, 0, 2)
-                    s = (q_sq.unsqueeze(1) * k.permute(1, 0, 2) * inv_scale).sum(-1)  # [H_q, S]
+                dense_k_parts = []
+                dense_v_parts = []
+                for blk in (dense_blocks or []):
+                    if blk.anchor_kv is not None:
+                        dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2))
+                        dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
+                    if blk.active_k is not None and blk.active_k.shape[2] > 0:
+                        dense_k_parts.append(blk.active_k)
+                        dense_v_parts.append(blk.active_v)
+                if active_k is not None and active_k.shape[2] > 0:
+                    dense_k_parts.append(active_k)
+                    dense_v_parts.append(active_v)
+                    
+                if dense_k_parts:
+                    k_kv = torch.cat(dense_k_parts, dim=2).float()  # [1, H_kv, S, D]
+                    v_kv = torch.cat(dense_v_parts, dim=2).float()  # [1, H_kv, S, D]
+                    
+                    H_q, D = q_sq.shape
+                    H_kv = k_kv.shape[1]
+                    n_rep = num_key_value_groups
+                    
+                    q_reshaped = q_sq.float().view(H_kv, n_rep, D)
+                    k_permuted = k_kv[0].permute(0, 2, 1)  # [H_kv, D, S]
+                    
+                    s = torch.bmm(q_reshaped, k_permuted).view(H_q, -1) * inv_scale  # [H_q, S]
+                    
                     m_b = s.max(-1).values
                     m_new = torch.maximum(m_i, m_b)
                     a = torch.exp(m_i - m_new)
                     P = torch.exp(s - m_new.unsqueeze(-1))
                     l_i = a * l_i + P.sum(-1)
-                    O_i = a.unsqueeze(-1) * O_i + torch.bmm(P.unsqueeze(1), v.permute(1, 0, 2)).squeeze(1)
+                    
+                    P_reshaped = P.view(H_kv, n_rep, -1)
+                    v_permuted = v_kv[0]  # [H_kv, S, D]
+                    
+                    O_i_delta = torch.bmm(P_reshaped, v_permuted).view(H_q, D)
+                    
+                    O_i = a.unsqueeze(-1) * O_i + O_i_delta
                     m_i = m_new
-    
-                for blk in dense_blocks:
-                    _update_dense_hq(blk.anchor_kv[:, 0].unsqueeze(2), blk.anchor_kv[:, 1].unsqueeze(2))
-                    if blk.active_k is not None:
-                        _update_dense_hq(blk.active_k, blk.active_v)
-                
-                _update_dense_hq(active_k, active_v)
-                
+                    
                 out = O_i / l_i.unsqueeze(-1)
                 
             return out.unsqueeze(0).unsqueeze(2).to(q.dtype)

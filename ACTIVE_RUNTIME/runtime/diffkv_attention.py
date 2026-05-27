@@ -247,19 +247,94 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 # PREFILL / MULTI-QUERY PATH
                 # ==============================================================
                 if use_cache:
+                    # Check if ANY active session in this prefill batch already has resident history
+                    # (i.e. this is an incremental prefill).
+                    has_history = False
+                    for sid in session_ids:
+                        if sid != "dummy_session":
+                            blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
+                            if blocks and len(blocks) > 0:
+                                has_history = True
+                                break
+
                     # Step 1: Store K/V in streaming blocks for future decode
                     for b_idx, sid in enumerate(session_ids):
                         curr_k = key_states[b_idx:b_idx + 1]
                         curr_v = value_states[b_idx:b_idx + 1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
-                    # Step 2: Compute attention using raw K/V from this forward pass
-                    key_rep   = repeat_kv(key_states,   num_key_value_groups)
-                    value_rep = repeat_kv(value_states, num_key_value_groups)
-                    attn_output = F.scaled_dot_product_attention(
-                        query_states.contiguous(), key_rep.contiguous(), value_rep.contiguous(),
-                        attn_mask=None, dropout_p=0.0, is_causal=True
-                    )
+                    if has_history:
+                        # Incremental prefill! We must attend to the full historical KV cache.
+                        # Reconstruct the entire sequence (history + new) for each batch element.
+                        batch_k = []
+                        batch_v = []
+                        seq_lens = []
+                        for b_idx, sid in enumerate(session_ids):
+                            if sid == "dummy_session":
+                                k_rep_b = repeat_kv(key_states[b_idx:b_idx+1], num_key_value_groups)
+                                v_rep_b = repeat_kv(value_states[b_idx:b_idx+1], num_key_value_groups)
+                                batch_k.append(k_rep_b)
+                                batch_v.append(v_rep_b)
+                                seq_lens.append(q_len)
+                                continue
+                            full_k, full_v = kv_manager.assemble_decode_kv(
+                                sid, captured_layer_idx, query_states.dtype
+                            )
+                            if full_k is not None:
+                                k_rep_b = repeat_kv(full_k, num_key_value_groups)
+                                v_rep_b = repeat_kv(full_v, num_key_value_groups)
+                                batch_k.append(k_rep_b)
+                                batch_v.append(v_rep_b)
+                                seq_lens.append(full_k.shape[2])
+                            else:
+                                k_rep_b = repeat_kv(key_states[b_idx:b_idx+1], num_key_value_groups)
+                                v_rep_b = repeat_kv(value_states[b_idx:b_idx+1], num_key_value_groups)
+                                batch_k.append(k_rep_b)
+                                batch_v.append(v_rep_b)
+                                seq_lens.append(q_len)
+                        
+                        S_max = max(seq_lens)
+                        
+                        # Pad keys/values along the sequence dimension if lengths differ
+                        padded_k = []
+                        padded_v = []
+                        for b_idx, (k_b, v_b) in enumerate(zip(batch_k, batch_v)):
+                            S_b = seq_lens[b_idx]
+                            if S_b < S_max:
+                                pad_len = S_max - S_b
+                                k_pad = torch.zeros((1, num_heads, pad_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                                v_pad = torch.zeros((1, num_heads, pad_len, head_dim), dtype=query_states.dtype, device=query_states.device)
+                                padded_k.append(torch.cat([k_b, k_pad], dim=2))
+                                padded_v.append(torch.cat([v_b, v_pad], dim=2))
+                            else:
+                                padded_k.append(k_b)
+                                padded_v.append(v_b)
+                                
+                        k_rep = torch.cat(padded_k, dim=0)
+                        v_rep = torch.cat(padded_v, dim=0)
+                        
+                        # Build correct custom causal attention mask for unequal sequence lengths
+                        # attn_mask shape: [bsz, 1, q_len, S_max]
+                        attn_mask = torch.zeros((bsz, 1, q_len, S_max), dtype=torch.bool, device=query_states.device)
+                        for b_idx in range(bsz):
+                            S_b = seq_lens[b_idx]
+                            K_b = S_b - q_len
+                            for i in range(q_len):
+                                attn_mask[b_idx, 0, i, :K_b + i + 1] = True
+                                
+                        attn_output = F.scaled_dot_product_attention(
+                            query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                            attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+                        )
+                    else:
+                        # Fresh prefill — just repeat the current chunk's K/V states
+                        k_rep   = repeat_kv(key_states,   num_key_value_groups)
+                        v_rep   = repeat_kv(value_states, num_key_value_groups)
+                        
+                        attn_output = F.scaled_dot_product_attention(
+                            query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                            attn_mask=None, dropout_p=0.0, is_causal=True
+                        )
                     attn_weights = None
 
                 attn_output = attn_output.transpose(1, 2).contiguous()

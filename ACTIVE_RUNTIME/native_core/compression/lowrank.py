@@ -21,6 +21,7 @@ class LowRankDelta:
     energy_retained: float = 0.0
     cosine_sim: float = 1.0
     norm_drift: float = 0.0
+    dynamic_rank: int = -1
 
     def nbytes(self) -> int:
         return self.U.numel() * 2 + self.V.numel() * 2
@@ -48,7 +49,10 @@ class LowRankDelta:
 
 
 def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
-    """Compress [n, feat_dim] float32 delta matrix to rank-r approximation."""
+    """
+    Compress [n, feat_dim] float32 delta matrix to rank-r approximation.
+    Uses Phase 36 Randomized SVD (rSVD) and Energy-Preserving Dynamic Rank.
+    """
     assert deltas.dim() == 2
     n, d = deltas.shape
     rank = min(rank, n, d)
@@ -59,7 +63,7 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
         return LowRankDelta(
             U=torch.zeros(n, rank, dtype=torch.float16, device=device),
             V=torch.zeros(rank, d, dtype=torch.float16, device=device),
-            shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0
+            shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0, dynamic_rank=rank
         )
 
     # Perform all operations on CPU to guarantee zero GPU-CPU telemetry synchronizations (.item())
@@ -70,7 +74,7 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
         return LowRankDelta(
             U=torch.zeros(n, rank, dtype=torch.float16, device=device),
             V=torch.zeros(rank, d, dtype=torch.float16, device=device),
-            shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0
+            shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0, dynamic_rank=rank
         )
 
     x = deltas_cpu / scale
@@ -79,22 +83,82 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     if not torch.isfinite(x).all():
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # --- Phase 36 Randomized SVD (rSVD) with Graceful Fallback ---
+    U, S, Vh = None, None, None
+    svd_success = False
+    
     try:
-        U, S, Vh = torch.linalg.svd(x, full_matrices=False)
+        # Oversampling parameter and power iterations
+        n_oversamples = 5
+        n_iter = 2
+        r_proj = min(rank + n_oversamples, n, d)
+        
+        # 1. Generate random Gaussian projection matrix
+        Omega = torch.randn(d, r_proj, dtype=torch.float32)
+        
+        # 2. Form sample matrix Y with power iterations for stable subspace capture
+        Y = x @ Omega
+        for _ in range(n_iter):
+            Y = x @ (x.T @ Y)
+            
+        # 3. Orthogonalize Y to find orthonormal basis Q
+        Q, _ = torch.linalg.qr(Y, mode="reduced")
+        
+        # 4. Project original matrix onto low-rank subspace Q
+        B = Q.T @ x
+        
+        # 5. Perform standard SVD on the much smaller matrix B
+        U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)
+        U = Q @ U_b
+        svd_success = True
     except Exception:
-        return LowRankDelta(
-            U=torch.zeros(n, rank, dtype=torch.float16, device=device),
-            V=torch.zeros(rank, d, dtype=torch.float16, device=device),
-            shape=(n, d), rank=rank, scale=scale, energy_retained=0.0
-        )
+        # Graceful fallback to standard CPU SVD if randomized step fails
+        pass
 
-    U_r = (U[:, :rank] * S[:rank].unsqueeze(0)).to(torch.float16)
-    V_r = Vh[:rank, :].to(torch.float16)
-    total = (S**2).sum().item()
-    retained = (S[:rank]**2).sum().item() / (total + 1e-12)
+    if not svd_success:
+        try:
+            U, S, Vh = torch.linalg.svd(x, full_matrices=False)
+        except Exception:
+            return LowRankDelta(
+                U=torch.zeros(n, rank, dtype=torch.float16, device=device),
+                V=torch.zeros(rank, d, dtype=torch.float16, device=device),
+                shape=(n, d), rank=rank, scale=scale, energy_retained=0.0, dynamic_rank=rank
+            )
+
+    # --- Phase 36 Energy-Preserving Dynamic Rank Selection ---
+    total_energy = (S**2).sum().item()
+    k = rank
+    if total_energy > 1e-9:
+        cum_energy = torch.cumsum(S**2, dim=0)
+        threshold = 0.98 * total_energy  # Retain 98% energy
+        idx = torch.where(cum_energy >= threshold)[0]
+        if idx.numel() > 0:
+            k = max(4, min(int(idx[0].item() + 1), rank))
+
+    # Slice SVD outputs to dynamic rank k first
+    U_k = U[:, :k] * S[:k].unsqueeze(0)
+    Vh_k = Vh[:k, :]
+
+    # Convert to FP16
+    U_k_fp16 = U_k.to(torch.float16)
+    Vh_k_fp16 = Vh_k.to(torch.float16)
+
+    # Sanitize outputs against NaNs/Infs
+    if not torch.isfinite(U_k_fp16).all():
+        U_k_fp16 = torch.nan_to_num(U_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+    if not torch.isfinite(Vh_k_fp16).all():
+        Vh_k_fp16 = torch.nan_to_num(Vh_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Zero-pad outputs up to full capped rank for 100% layout compatibility with pool/Triton
+    U_padded = torch.zeros((n, rank), dtype=torch.float16)
+    V_padded = torch.zeros((rank, d), dtype=torch.float16)
+    U_padded[:, :k] = U_k_fp16
+    V_padded[:k, :] = Vh_k_fp16
+
+    retained = (S[:k]**2).sum().item() / (total_energy + 1e-12)
     
     # Calculate reconstruction metrics on CPU
-    recon = (U_r.float() @ V_r.float()) * scale
+    recon = (U_padded.float() @ V_padded.float()) * scale
     
     orig_norm = deltas_cpu.norm().item()
     recon_norm = recon.norm().item()
@@ -105,13 +169,13 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     recon_flat = recon.reshape(-1)
     cos_sim = torch.nn.functional.cosine_similarity(orig_flat.unsqueeze(0), recon_flat.unsqueeze(0)).item()
 
-    # Move U_r and V_r to the original device
-    U_r_out = U_r.to(device)
-    V_r_out = V_r.to(device)
+    # Move U and V to the original device
+    U_out = U_padded.to(device)
+    V_out = V_padded.to(device)
 
-    return LowRankDelta(U=U_r_out, V=V_r_out, shape=(n, d),
+    return LowRankDelta(U=U_out, V=V_out, shape=(n, d),
                         rank=rank, scale=scale, energy_retained=float(retained),
-                        cosine_sim=cos_sim, norm_drift=norm_drift)
+                        cosine_sim=cos_sim, norm_drift=norm_drift, dynamic_rank=k)
 
 
 def decompress_lowrank(lr: LowRankDelta,

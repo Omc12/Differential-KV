@@ -41,6 +41,7 @@ class KVBlock:
     token_indices: List[int] = None
     cosine_sim: float = 1.0
     norm_drift: float = 0.0
+    dynamic_rank: int = -1
 
     # Optional uncompressed tokens (dense window)
     active_k: Optional[torch.Tensor] = None
@@ -59,7 +60,7 @@ class KVBlock:
 
 # Helper class for thread-safe block snapshots
 class BlockSnapshot:
-    __slots__ = ('b', 'anchor_kv', 'U', 'V', 'scale', 'active_k', 'active_v', 'pool_idx', 'dirty')
+    __slots__ = ('b', 'anchor_kv', 'U', 'V', 'scale', 'active_k', 'active_v', 'pool_idx', 'dirty', 'dynamic_rank')
 
     def __init__(self, block):
         self.b = block
@@ -74,6 +75,7 @@ class BlockSnapshot:
                 self.active_v = block.active_v
                 self.pool_idx = getattr(block, "pool_idx", None)
                 self.dirty = getattr(block, "dirty", True)
+                self.dynamic_rank = getattr(block, "dynamic_rank", -1)
         else:
             self.anchor_kv = block.anchor_kv
             self.U = block.U
@@ -83,6 +85,7 @@ class BlockSnapshot:
             self.active_v = block.active_v
             self.pool_idx = getattr(block, "pool_idx", None)
             self.dirty = getattr(block, "dirty", True)
+            self.dynamic_rank = getattr(block, "dynamic_rank", -1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +230,9 @@ class KVRuntimeManager:
         # Value is stable after prefill; invalidated on clear_session / init_session.
         self._mbs_cache: dict = {}
 
+        # Phase 32 Fix: GPU block_indices cache to eliminate PCIe & GPU allocator churn
+        self._indices_gpu_cache: dict = {}
+
     # ── Session management ────────────────────────────────────────────────────
 
     def init_session(self, session_id: str, prefill_len: int = 0):
@@ -236,8 +242,17 @@ class KVRuntimeManager:
             self._streaming_mgr.init_session(session_id, self.num_layers, prefill_len=prefill_len)
         # Invalidate mbs cache so a reused session_id gets a fresh value
         self._mbs_cache.pop(session_id, None)
+        # Invalidate GPU block indices cache
+        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
+        for k in keys_to_del:
+            self._indices_gpu_cache.pop(k, None)
 
     def clear_session(self, session_id: str):
+        # Invalidate GPU block indices cache
+        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
+        for k in keys_to_del:
+            self._indices_gpu_cache.pop(k, None)
+
         # Free blocks from NativeBlockPool before deleting references
         if hasattr(self, 'native_pool') and self.native_pool is not None:
             if session_id in self.session_blocks:
@@ -349,7 +364,8 @@ class KVRuntimeManager:
         last_U_len = last_block.U.shape[0] if last_block.U is not None else 0
         last_active_len = last_block.active_k.shape[2] if last_block.active_k is not None else 0
         last_token_count = last_U_len if last_U_len > 0 else last_active_len
-        return last_block.anchor_idx + 1 + last_token_count
+        seq_len = last_block.anchor_idx + 1 + last_token_count
+        return seq_len
 
     def log_block_states(self, session_id: str) -> None:
         """
@@ -617,39 +633,49 @@ class KVRuntimeManager:
         """
         if self._streaming_mgr is None:
             return None, []
-        metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
-        if metadata is None:
+
+        blocks = self.get_streaming_blocks(session_id, layer_idx)
+        num_blocks = len(blocks) if blocks else 0
+        if num_blocks == 0:
             return None, []
 
-        # All comparisons run on CPU — no GPU sync, no PCIe round-trip
-        valid_mask = metadata[:, 1] >= 0
-        num_blocks = int(valid_mask.sum().item())   # CPU .item() — no CUDA sync
-
-        if num_blocks == 0:
+        metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
+        if metadata is None:
             return None, []
 
         active_meta = metadata[:num_blocks]          # CPU slice view
 
         # state_code 2 == COMPRESSED
         compressed_mask = active_meta[:, 3] == 2     # CPU compare
+        
+        # Phase 32: GPU block indices cache check
         if compressed_mask.any():                    # CPU any() — no CUDA sync
-            # One small transfer: only the int32 pool_idx array goes to GPU
-            block_indices_tensor = active_meta[compressed_mask, 0].to(device)
+            cpu_indices = active_meta[compressed_mask, 0]
+            cache_key = (session_id, layer_idx)
+            cached_val = self._indices_gpu_cache.get(cache_key)
+            if cached_val is not None:
+                cached_cpu, cached_gpu = cached_val
+                if cached_cpu.shape[0] == cpu_indices.shape[0] and torch.equal(cached_cpu, cpu_indices):
+                    block_indices_tensor = cached_gpu
+                else:
+                    block_indices_tensor = cpu_indices.to(device)
+                    self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor)
+            else:
+                block_indices_tensor = cpu_indices.to(device)
+                self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor)
         else:
             block_indices_tensor = None
 
         # Get ALL non-compressed, non-paged blocks as dense context.
-        # CRITICAL FIX: Previously only the last block was included. Any block in
-        # SUBMITTED state (async compression in-flight) that was not the last block
-        # was silently dropped from attention — causing the model to lose those tokens
-        # entirely during the compression window. All ACCUMULATING and SUBMITTED blocks
-        # still have valid active_k/v tensors and must be included.
+        # Phase 32 backwards optimization: since blocks are compressed chronologically,
+        # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
         dense_blocks = []
-        blocks = self.get_streaming_blocks(session_id, layer_idx)
-        if blocks:
-            for block in blocks:
-                if block.state not in ("COMPRESSED", "PAGED"):
-                    dense_blocks.append(block)
+        for block in reversed(blocks):
+            if block.state not in ("COMPRESSED", "PAGED"):
+                dense_blocks.append(block)
+            else:
+                break
+        dense_blocks.reverse()
 
         return block_indices_tensor, dense_blocks
 
@@ -838,9 +864,21 @@ class KVRuntimeManager:
                 grp_blocks = [t[0] for t in group_items]
                 grp_starts = [t[1] for t in group_items]
 
+                # Dynamic Rank Reconstruction: find the maximum dynamic rank in the batch to avoid redundant compute
+                max_k = max([getattr(b_snap, "dynamic_rank", self.rank) for b_snap in grp_blocks])
+                if max_k <= 0:
+                    max_k = self.rank
+                max_k = min(max_k, self.rank)
+
                 # FP16 low-rank reconstruction: direct GPU arithmetic without slow FP32 conversions
                 stacked_U = torch.stack([b_snap.U for b_snap in grp_blocks], dim=0) # [B_grp, S, R]
                 stacked_V = torch.stack([b_snap.V for b_snap in grp_blocks], dim=0) # [B_grp, R, H_kv * D * 2]
+
+                # Slice along rank dimension for fast BMM
+                if max_k < self.rank:
+                    stacked_U = stacked_U[:, :, :max_k]
+                    stacked_V = stacked_V[:, :max_k, :]
+
                 stacked_scale = torch.tensor(
                     [b_snap.scale for b_snap in grp_blocks], device=self.device, dtype=dtype
                 ).view(B_grp, 1, 1)
@@ -1126,6 +1164,7 @@ class KVRuntimeManager:
                 block.scale      = lr_delta.scale
                 block.cosine_sim = lr_delta.cosine_sim
                 block.norm_drift = lr_delta.norm_drift
+                block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
 
                 block.active_k = None
                 block.active_v = None
@@ -1139,6 +1178,7 @@ class KVRuntimeManager:
             block.scale      = lr_delta.scale
             block.cosine_sim = lr_delta.cosine_sim
             block.norm_drift = lr_delta.norm_drift
+            block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
 
             block.active_k = None
             block.active_v = None
