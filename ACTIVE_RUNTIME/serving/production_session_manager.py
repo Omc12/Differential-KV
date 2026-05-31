@@ -116,10 +116,39 @@ class ProductionSessionManager:
                 to_delete.append(sid)
         
         for sid in to_delete:
-            print(f"[PSM] Cleaning up idle session {sid}.")
-            if sid in self.resident_sessions:
-                self.resident_sessions.remove(sid)
-            del self.active_sessions[sid]
+            print(f"[PSM] Cleaning up idle session {sid} due to timeout.")
+            self.delete_session(sid)
+
+    def delete_session(self, session_id: str):
+        """Permanently deletes the session and clears all associated history, VRAM blocks, checkpoints, and files."""
+        print(f"[PSM] Deleting session {session_id} and freeing all VRAM/disk resources.")
+        
+        # 1. Clear conversation history
+        self.clear_history(session_id)
+        
+        # 2. Remove from residency and active lists
+        if session_id in self.resident_sessions:
+            self.resident_sessions.remove(session_id)
+        self.active_sessions.pop(session_id, None)
+        
+        # 3. Clear KV manager blocks
+        if self.kv_manager is not None:
+            try:
+                self.kv_manager.clear_session(session_id)
+                self.kv_manager.delete_checkpoint(f"persisted_{session_id}")
+            except Exception as e:
+                print(f"[PSM] Warning during deletion of session {session_id} from KV: {e}")
+                
+        # 4. Remove session checkpoint files from disk
+        try:
+            pt_path = os.path.join(self.storage_path, f"{session_id}.pt")
+            if os.path.exists(pt_path):
+                os.remove(pt_path)
+            meta_path = os.path.join(self.storage_path, f"{session_id}_meta.json")
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+        except Exception as e:
+            print(f"[PSM] Warning during deletion of checkpoint files for session {session_id}: {e}")
 
     def list_sessions(self) -> List[str]:
         return list(self.active_sessions.keys())

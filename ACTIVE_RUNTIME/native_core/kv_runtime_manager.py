@@ -60,7 +60,7 @@ class KVBlock:
 
 # Helper class for thread-safe block snapshots
 class BlockSnapshot:
-    __slots__ = ('b', 'anchor_kv', 'U', 'V', 'scale', 'active_k', 'active_v', 'pool_idx', 'dirty', 'dynamic_rank')
+    __slots__ = ('b', 'anchor_kv', 'U', 'V', 'scale', 'active_k', 'active_v', 'pool_idx', 'dirty', 'dynamic_rank', 'active_k_cpu', 'active_v_cpu')
 
     def __init__(self, block):
         self.b = block
@@ -76,6 +76,8 @@ class BlockSnapshot:
                 self.pool_idx = getattr(block, "pool_idx", None)
                 self.dirty = getattr(block, "dirty", True)
                 self.dynamic_rank = getattr(block, "dynamic_rank", -1)
+                self.active_k_cpu = getattr(block, "active_k_cpu", None)
+                self.active_v_cpu = getattr(block, "active_v_cpu", None)
         else:
             self.anchor_kv = block.anchor_kv
             self.U = block.U
@@ -86,6 +88,8 @@ class BlockSnapshot:
             self.pool_idx = getattr(block, "pool_idx", None)
             self.dirty = getattr(block, "dirty", True)
             self.dynamic_rank = getattr(block, "dynamic_rank", -1)
+            self.active_k_cpu = getattr(block, "active_k_cpu", None)
+            self.active_v_cpu = getattr(block, "active_v_cpu", None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,24 +146,23 @@ class KVRuntimeManager:
         elif serving_mode == "performance":
             recon_cache_size = 256
             recon_pool_blocks = 512
-            gpu_budget_gb = 8.0
+            gpu_budget_gb = 2.0
         elif serving_mode == "long-context":
             recon_cache_size = 512
             recon_pool_blocks = 1024
-            gpu_budget_gb = 12.0
+            gpu_budget_gb = 2.0
         elif serving_mode == "fused-sparse":
             recon_cache_size = 256
             recon_pool_blocks = 512
-            gpu_budget_gb = 8.0
+            gpu_budget_gb = 2.0
         else: # balanced
             recon_cache_size = 64
             recon_pool_blocks = 128 if streaming_ingest else 512
-            gpu_budget_gb = 2.0
+            gpu_budget_gb = 1.5
 
         # ── Phase 28 Native Block Pool ──────────────────────────────────────────
         from runtime.native_block_pool import NativeBlockPool
         
-        # Dynamically calculate max_blocks based on gpu_budget_gb
         pool_rank = self.rank
         pool_block_size = 256 if self.streaming_ingest else self.block_size
         
@@ -170,8 +173,20 @@ class KVRuntimeManager:
             6                                                                  # scales (2) + seq_lens (4)
         )
         
-        # Dedicate pool budget to the contiguous NativeBlockPool.
-        pool_budget_bytes = int(gpu_budget_gb * (1024 ** 3) * 0.75)
+        # Dynamically calculate pool budget based on expected token sequence length (e.g. 32K for long-context)
+        # instead of a static GB multiplier.
+        max_tokens_map = {"long-context": 32768, "performance": 16384, "balanced": 16384, "lightweight": 4096}
+        expected_tokens = max_tokens_map.get(serving_mode, 16384)
+        avg_block_sz = 64
+        n_blocks_per_layer = expected_tokens // avg_block_sz
+        
+        # Sum of compressed blocks across all layers
+        total_expected_blocks = n_blocks_per_layer * self.num_layers
+        pool_budget_bytes = int(total_expected_blocks * bytes_per_block * 1.5)  # 50% safety headroom
+        
+        # Clamp pool between 128MB and 2.0GB
+        pool_budget_bytes = max(128 * 1024 ** 2, min(2 * 1024 ** 3, pool_budget_bytes))
+        
         min_blocks = 1024 if self.serving_mode == "lightweight" else (2048 if self.serving_mode == "balanced" else 4000)
         dynamic_max_blocks = max(min_blocks, min(24000, pool_budget_bytes // bytes_per_block))
         
@@ -182,7 +197,8 @@ class KVRuntimeManager:
             rank=pool_rank,
             max_seq_len=pool_block_size,
             device=self.device,
-            dtype=torch.float16
+            dtype=torch.float16,
+            initial_blocks=512
         )
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
@@ -226,6 +242,11 @@ class KVRuntimeManager:
         # Phase 32 Fix: GPU block_indices cache to eliminate PCIe & GPU allocator churn
         self._indices_gpu_cache: dict = {}
 
+        # Prefill KV capture: session_id -> {layer_idx -> (K, V)}
+        # Populated by capture_prefill_kv() during the forward pass.
+        # Consumed and cleared by compress_prefill_kv() after the forward pass.
+        self._prefill_kv_capture: Dict[str, Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = {}
+
     # ── Session management ────────────────────────────────────────────────────
 
     def init_session(self, session_id: str, prefill_len: int = 0):
@@ -239,6 +260,71 @@ class KVRuntimeManager:
         keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
         for k in keys_to_del:
             self._indices_gpu_cache.pop(k, None)
+        # Also clear any stale prefill capture for this session
+        self._prefill_kv_capture.pop(session_id, None)
+
+    # ── Prefill KV capture & batch compression ────────────────────────────────
+
+    def capture_prefill_kv(
+        self,
+        session_id: str,
+        layer_idx: int,
+        K: torch.Tensor,   # [1, kv_heads, chunk_len, head_dim]
+        V: torch.Tensor,
+    ) -> None:
+        """
+        Stores a reference to the prefill K/V for one layer without copying.
+        Called from inside diffkv_forward() once per layer per prefill chunk.
+        Compression happens AFTER the entire forward pass returns.
+        """
+        if session_id not in self._prefill_kv_capture:
+            self._prefill_kv_capture[session_id] = {}
+        cap = self._prefill_kv_capture[session_id]
+        if layer_idx in cap:
+            # Accumulate chunks across multiple forward passes of the same layer
+            prev_K, prev_V = cap[layer_idx]
+            cap[layer_idx] = (
+                torch.cat([prev_K, K], dim=2),   # concat along seq_len dim
+                torch.cat([prev_V, V], dim=2),
+            )
+        else:
+            cap[layer_idx] = (K, V)
+
+    def compress_prefill_kv(self, session_id: str) -> None:
+        """
+        Runs once after the full prefill forward pass completes.
+        Feeds captured K/V tensors through the existing streaming ingest pipeline,
+        which handles block sizing, async SVD compression, pool writes, and
+        metadata updates correctly using the session's micro_block_size.
+
+        Using ingest_streaming (not a custom SVD path) is critical because the
+        Triton decode kernel reads U[pool_idx, :S_MAX, :] where S_MAX is the
+        session's micro_block_size (16–32 tokens). A custom 256-token block
+        would cause S_MAX misreads → garbage output.
+        """
+        captured = self._prefill_kv_capture.pop(session_id, {})
+        if not captured:
+            return
+
+        import os as _os
+
+        for layer_idx in sorted(captured.keys()):
+            K, V = captured[layer_idx]   # [1, kv_heads, seq_len, head_dim]
+            # ingest_streaming handles micro_block_size alignment, async SVD,
+            # native pool writes, and metadata tensor updates — all correctly.
+            self.ingest_streaming(session_id, layer_idx, K, V)
+            del K, V
+            captured[layer_idx] = None
+
+        del captured
+        import gc as _gc
+        _gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+        if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            print(f"[DiffKV] Post-prefill compression done. VRAM: {alloc:.2f} GB")
 
     def clear_session(self, session_id: str):
         # Invalidate GPU block indices cache
@@ -700,12 +786,14 @@ class KVRuntimeManager:
         ws_key = (session_id, layer_idx, "dense")
         ws = self.decode_workspace.get(ws_key)
 
-        # Count total tokens in the dense window: anchor + active_k per block
+        # Count total tokens in the dense window: anchor + active_k/active_k_cpu per block
         total_dense_len = 0
         for blk in dense_blocks:
             total_dense_len += 1  # anchor
             if blk.active_k is not None:
                 total_dense_len += blk.active_k.shape[2]
+            elif getattr(blk, "active_k_cpu", None) is not None:
+                total_dense_len += blk.active_k_cpu.shape[2]
 
         if total_dense_len == 0:
             return None, None
@@ -729,7 +817,18 @@ class KVRuntimeManager:
         cur_pos = 0  # Position within the dense window workspace (starts at 0, not anchor_idx)
 
         for blk in dense_blocks:
-            blk_len = 1 + (blk.active_k.shape[2] if blk.active_k is not None else 0)
+            blk_active_k = blk.active_k
+            blk_active_v = blk.active_v
+            blk_active_k_cpu = getattr(blk, "active_k_cpu", None)
+            blk_active_v_cpu = getattr(blk, "active_v_cpu", None)
+
+            act_len = 0
+            if blk_active_k is not None:
+                act_len = blk_active_k.shape[2]
+            elif blk_active_k_cpu is not None:
+                act_len = blk_active_k_cpu.shape[2]
+
+            blk_len = 1 + act_len
             if blk.dirty:
                 # Write anchor
                 anchor_k = blk.anchor_kv[0, 0]  # [H_kv, D]
@@ -737,10 +836,12 @@ class KVRuntimeManager:
                 k_ws[0, :, cur_pos, :] = anchor_k
                 v_ws[0, :, cur_pos, :] = anchor_v
                 # Write active tokens
-                if blk.active_k is not None:
-                    act_len = blk.active_k.shape[2]
-                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk.active_k[0]
-                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk.active_v[0]
+                if blk_active_k is not None:
+                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k[0]
+                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v[0]
+                elif blk_active_k_cpu is not None:
+                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k_cpu[0].to(device, non_blocking=True)
+                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v_cpu[0].to(device, non_blocking=True)
                 blk.dirty = False
             cur_pos += blk_len
 
@@ -794,11 +895,23 @@ class KVRuntimeManager:
             with lock:
                 last_U = last_block.U
                 last_active_k = last_block.active_k
+                last_active_k_cpu = getattr(last_block, "active_k_cpu", None)
                 last_U_len = last_U.shape[0] if last_U is not None else 0
-                last_active_len = last_active_k.shape[2] if last_active_k is not None else 0
+                last_active_len = 0
+                if last_active_k is not None:
+                    last_active_len = last_active_k.shape[2]
+                elif last_active_k_cpu is not None:
+                    last_active_len = last_active_k_cpu.shape[2]
         else:
-            last_U_len = last_block.U.shape[0] if last_block.U is not None else 0
-            last_active_len = last_block.active_k.shape[2] if last_block.active_k is not None else 0
+            last_U = last_block.U
+            last_active_k = last_block.active_k
+            last_active_k_cpu = getattr(last_block, "active_k_cpu", None)
+            last_U_len = last_U.shape[0] if last_U is not None else 0
+            last_active_len = 0
+            if last_active_k is not None:
+                last_active_len = last_active_k.shape[2]
+            elif last_active_k_cpu is not None:
+                last_active_len = last_active_k_cpu.shape[2]
 
         last_token_count = last_U_len if last_U_len > 0 else last_active_len
         total_seq_len = last_block.anchor_idx + 1 + last_token_count
@@ -869,6 +982,8 @@ class KVRuntimeManager:
                 block_len = b_snap.U.shape[0]
             elif b_snap.active_k is not None:
                 block_len = b_snap.active_k.shape[2]
+            elif b_snap.active_k_cpu is not None:
+                block_len = b_snap.active_k_cpu.shape[2]
             else:
                 block_len = 0
 
@@ -896,6 +1011,8 @@ class KVRuntimeManager:
                     compressed_misses.append((b_snap, b_content_pos))
                     miss_pool_idxs.append(-1)
             elif b_snap.active_k is not None:
+                dense_copies.append((b_snap, b_content_pos, block_len))
+            elif b_snap.active_k_cpu is not None:
                 dense_copies.append((b_snap, b_content_pos, block_len))
 
         # ── 5. Vectorized anchor copy for dirty blocks ─────────────────────────
@@ -1007,18 +1124,22 @@ class KVRuntimeManager:
 
         # ── 8. Dense active blocks — slice copy ───────────────────────────────
         for b_snap, start_pos, block_len in dense_copies:
-            k_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_k[0]
-            v_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_v[0]
+            if b_snap.active_k is not None:
+                k_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_k[0]
+                v_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_v[0]
+            elif b_snap.active_k_cpu is not None:
+                k_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_k_cpu[0].to(k_ws.device, non_blocking=True)
+                v_ws[0, :, start_pos:start_pos + block_len, :] = b_snap.active_v_cpu[0].to(v_ws.device, non_blocking=True)
 
         # ── 9. Reset dirty flags on processed blocks under lock, if they haven't changed since snapshot ──
         for b_snap in dirty_blocks:
             lock = getattr(b_snap.b, "_lock", None)
             if lock is not None:
                 with lock:
-                    if (b_snap.b.U is b_snap.U) and (b_snap.b.active_k is b_snap.active_k):
+                    if (b_snap.b.U is b_snap.U) and (b_snap.b.active_k is b_snap.active_k) and (getattr(b_snap.b, "active_k_cpu", None) is b_snap.active_k_cpu):
                         b_snap.b.dirty = False
             else:
-                if (b_snap.b.U is b_snap.U) and (b_snap.b.active_k is b_snap.active_k):
+                if (b_snap.b.U is b_snap.U) and (b_snap.b.active_k is b_snap.active_k) and (getattr(b_snap.b, "active_k_cpu", None) is b_snap.active_k_cpu):
                     b_snap.b.dirty = False
 
         # ── 10. Return a view of the valid portion (no copy) ───────────────────
@@ -1252,6 +1373,8 @@ class KVRuntimeManager:
 
                 block.active_k = None
                 block.active_v = None
+                block.active_k_cpu = None
+                block.active_v_cpu = None
                 block.dirty    = True
 
                 if hasattr(block, 'state'):
@@ -1266,31 +1389,43 @@ class KVRuntimeManager:
 
             block.active_k = None
             block.active_v = None
+            block.active_k_cpu = None
+            block.active_v_cpu = None
             block.dirty    = True
 
             if hasattr(block, 'state'):
                 block.state = "COMPRESSED"
 
-        # Phase 28 Native Block Pool Integration
-        if hasattr(self, 'native_pool') and self.native_pool is not None:
-            try:
-                if getattr(block, 'pool_idx', None) is None:
-                    block.pool_idx = self.native_pool.allocate_block()
-                self.native_pool.write_block(
-                    pool_idx=block.pool_idx,
-                    U=block.U,
-                    V=block.V,
-                    anchor_K=block.anchor_kv[0, 0],
-                    anchor_V=block.anchor_kv[0, 1],
-                    scale=block.scale,
-                    seq_len=block.U.shape[0]
-                )
-            except Exception as e:
-                # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
-                print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
+        # Check if block's session is still active/resident
+        session_id = getattr(block, 'session_id', None)
+        session_active = True
+        if session_id is not None:
+            if self._streaming_mgr is not None:
+                session_active = session_id in self._streaming_mgr.session_blocks
+            else:
+                session_active = session_id in self.session_blocks
 
-        if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
-            self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
+        if session_active:
+            # Phase 28 Native Block Pool Integration
+            if hasattr(self, 'native_pool') and self.native_pool is not None:
+                try:
+                    if getattr(block, 'pool_idx', None) is None:
+                        block.pool_idx = self.native_pool.allocate_block()
+                    self.native_pool.write_block(
+                        pool_idx=block.pool_idx,
+                        U=block.U,
+                        V=block.V,
+                        anchor_K=block.anchor_kv[0, 0],
+                        anchor_V=block.anchor_kv[0, 1],
+                        scale=block.scale,
+                        seq_len=block.U.shape[0]
+                    )
+                except Exception as e:
+                    # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
+                    print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
+
+            if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
+                self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
 
         self.total_compressions += 1
         self.total_cosine_sim   += lr_delta.cosine_sim

@@ -79,6 +79,116 @@ def apply_diffkv_attention_patch(model, kv_manager):
             ):
                 bsz, q_len, _ = hidden_states.size()
 
+                # Helpers for Decomposed Prefill Attention (Part 1)
+                def _flash_local_attention(q, k, v):
+                    # Local causal self-attention over the new chunk
+                    k_rep = repeat_kv(k, num_key_value_groups)
+                    v_rep = repeat_kv(v, num_key_value_groups)
+                    
+                    out = F.scaled_dot_product_attention(
+                        q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                        attn_mask=None, dropout_p=0.0, is_causal=True
+                    )
+                    
+                    # Compute Log-Sum-Exp manually for local causal attention
+                    scale = 1.0 / math.sqrt(head_dim)
+                    scores = torch.matmul(q * scale, k_rep.transpose(-2, -1))
+                    
+                    # Mask future tokens — specify q.dtype to avoid float32 upcast
+                    mask = torch.triu(torch.full((q_len, q_len), float('-inf'), device=q.device, dtype=q.dtype), diagonal=1)
+                    scores = scores + mask
+                    lse = torch.logsumexp(scores, dim=-1)
+                    return out, lse
+
+                def _project_then_attend_history(q, comp_blocks, pool):
+                    # Direct low-rank Project-Then-Attend over compressed blocks
+                    _, H, q_len, head_dim = q.shape
+                    pool_indices = [b.pool_idx for b in comp_blocks]
+                    pool_indices_t = torch.tensor(pool_indices, device=q.device, dtype=torch.long)
+                    
+                    U_stack = pool.U[pool_indices_t]          # [N_blocks, max_seq_len, rank]
+                    V_K_stack = pool.V_K[pool_indices_t]      # [N_blocks, rank, num_kv_heads, head_dim]
+                    V_V_stack = pool.V_V[pool_indices_t]      # [N_blocks, rank, num_kv_heads, head_dim]
+                    anc_K = pool.anchors_K[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
+                    anc_V = pool.anchors_V[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
+                    seq_lens_stack = pool.seq_lens[pool_indices_t]  # [N_blocks]
+                    
+                    # Repeat for GQA groups
+                    v_k_rep = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
+                    v_v_rep = repeat_kv(V_V_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
+                    anc_k_rep = repeat_kv(anc_K.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
+                    anc_v_rep = repeat_kv(anc_V.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
+                    
+                    scale = 1.0 / math.sqrt(head_dim)
+                    q_scaled = q * scale
+                    
+                    # Compute Anchor Scores
+                    anchor_scores = torch.einsum('bhqd,nhd->bhqn', q_scaled, anc_k_rep)  # [1, H, q_len, N]
+                    
+                    # Compute Q Projections onto Key space
+                    Q_proj = torch.einsum('bhqd,nhrd->bhqnr', q_scaled, v_k_rep)  # [1, H, q_len, N, R]
+                    
+                    # Compute Delta Scores (Q_proj @ U^T)
+                    delta_scores = torch.einsum('bhqnr,nsr->bhqns', Q_proj, U_stack)  # [1, H, q_len, N, max_seq]
+                    
+                    # Mask out padding in delta scores
+                    max_seq_len = U_stack.shape[1]
+                    col_s = torch.arange(max_seq_len, device=q.device).unsqueeze(0)
+                    valid_mask = col_s < seq_lens_stack.unsqueeze(1)  # [N_blocks, max_seq]
+                    mask = valid_mask.unsqueeze(0).unsqueeze(1).unsqueeze(2)  # [1, 1, 1, N, max_seq]
+                    
+                    delta_scores = torch.where(mask, delta_scores, torch.tensor(float('-inf'), device=q.device, dtype=q.dtype))
+                    
+                    # Concatenate anchor and delta scores
+                    block_scores = torch.cat([anchor_scores.unsqueeze(-1), delta_scores], dim=-1)  # [1, H, q_len, N, 1 + max_seq]
+                    flat_scores = block_scores.reshape(1, H, q_len, -1)
+                    
+                    # Log-Sum-Exp and softmax weights
+                    lse_hist = torch.logsumexp(flat_scores, dim=-1)
+                    weights = torch.softmax(flat_scores, dim=-1)
+                    
+                    # Value accumulation (Project-Then-Attend on V side)
+                    w_blocks = weights.reshape(1, H, q_len, len(comp_blocks), -1)
+                    w_anchor = w_blocks[..., 0]      # [1, H, q_len, N]
+                    w_delta  = w_blocks[..., 1:]     # [1, H, q_len, N, max_seq]
+                    
+                    out_anchor = torch.einsum('bhqn,nhd->bhqd', w_anchor, anc_v_rep)
+                    W_proj = torch.einsum('bhqns,nsr->bhqnr', w_delta, U_stack)
+                    out_delta = torch.einsum('bhqnr,nhrd->bhqd', W_proj, v_v_rep)
+                    
+                    out_hist = out_anchor + out_delta
+                    return out_hist, lse_hist
+
+                def _combine_outputs(out_lse_list):
+                    # Filter out empty paths
+                    valid_list = [x for x in out_lse_list if x[0] is not None and x[1] is not None]
+                    if not valid_list:
+                        return None
+                    if len(valid_list) == 1:
+                        return valid_list[0][0]
+                    
+                    # Log-sum-exp stable online softmax combination
+                    lses = torch.stack([x[1] for x in valid_list], dim=0)  # [M, 1, H, q_len]
+                    lse_max, _ = torch.max(lses, dim=0)                  # [1, H, q_len]
+                    
+                    weights_list = []
+                    denom = torch.zeros_like(lse_max)
+                    for out, lse in valid_list:
+                        w = torch.exp(lse - lse_max)
+                        weights_list.append(w)
+                        denom = denom + w
+                    
+                    # Prevent divide-by-zero
+                    denom = torch.clamp(denom, min=1e-9)
+                    
+                    out_combined = torch.zeros_like(valid_list[0][0])
+                    for idx, (out, lse) in enumerate(valid_list):
+                        w = weights_list[idx] / denom
+                        out_combined = out_combined + out * w.unsqueeze(-1)
+                    
+                    # Ensure dtype is cast back to avoid precision mismatch during linear projection
+                    return out_combined.to(valid_list[0][0].dtype)
+
                 # --- Projection ---
                 query_states = self.q_proj(hidden_states)
                 key_states   = self.k_proj(hidden_states)
@@ -177,105 +287,142 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 # PREFILL / MULTI-QUERY PATH
                 # ==============================================================
                 if use_cache:
-                    # Check if ANY active session in this prefill batch already has resident history
-                    # (i.e. this is an incremental prefill).
-                    has_history = False
+                    # Check if ANY active session already has compressed history in the pool.
+                    # "history" here means prior-turn compressed blocks — NOT ingest from this chunk.
+                    has_compressed_history = False
                     for sid in session_ids:
                         if sid != "dummy_session":
                             blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
-                            if blocks and len(blocks) > 0:
-                                has_history = True
+                            if blocks and any(
+                                getattr(b, "state", None) == "COMPRESSED"
+                                for b in blocks
+                            ):
+                                has_compressed_history = True
                                 break
 
-                    # Step 1: Store K/V in streaming blocks for future decode
-                    for b_idx, sid in enumerate(session_ids):
-                        curr_k = key_states[b_idx:b_idx + 1]
-                        curr_v = value_states[b_idx:b_idx + 1]
-                        kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
-
-                    if has_history:
-                        # Incremental prefill! We must attend to the full historical KV cache.
-                        # Reconstruct the entire sequence (history + new) for each batch element.
-                        batch_k = []
-                        batch_v = []
+                    if has_compressed_history:
+                        # ── INCREMENTAL PREFILL (2nd+ turn) ─────────────────────────────────
+                        # Compressed history already exists in the pool from a prior turn.
+                        # Use the decomposed A+B attention: Path A = local causal FA over the
+                        # new chunk; Path B = Project-Then-Attend over compressed history.
+                        # Capture KV for post-forward compression of the NEW chunk.
                         seq_lens = []
                         for b_idx, sid in enumerate(session_ids):
                             if sid == "dummy_session":
-                                k_rep_b = repeat_kv(key_states[b_idx:b_idx+1], num_key_value_groups)
-                                v_rep_b = repeat_kv(value_states[b_idx:b_idx+1], num_key_value_groups)
-                                batch_k.append(k_rep_b)
-                                batch_v.append(v_rep_b)
                                 seq_lens.append(q_len)
+                            else:
+                                seq_lens.append(kv_manager.get_session_sequence_length(sid))
+
+                        attn_outputs = []
+                        for b_idx, sid in enumerate(session_ids):
+                            if sid == "dummy_session":
+                                attn_outputs.append(
+                                    torch.zeros((1, num_heads, q_len, head_dim),
+                                                device=query_states.device, dtype=query_states.dtype)
+                                )
                                 continue
-                            full_k, full_v = kv_manager.assemble_decode_kv(
-                                sid, captured_layer_idx, query_states.dtype
-                            )
-                            if full_k is not None:
-                                k_rep_b = repeat_kv(full_k, num_key_value_groups)
-                                v_rep_b = repeat_kv(full_v, num_key_value_groups)
-                                batch_k.append(k_rep_b)
-                                batch_v.append(v_rep_b)
-                                seq_lens.append(full_k.shape[2])
-                            else:
-                                k_rep_b = repeat_kv(key_states[b_idx:b_idx+1], num_key_value_groups)
-                                v_rep_b = repeat_kv(value_states[b_idx:b_idx+1], num_key_value_groups)
-                                batch_k.append(k_rep_b)
-                                batch_v.append(v_rep_b)
-                                seq_lens.append(q_len)
-                        
-                        S_max = max(seq_lens)
-                        
-                        # Pad keys/values along the sequence dimension if lengths differ
-                        padded_k = []
-                        padded_v = []
-                        for b_idx, (k_b, v_b) in enumerate(zip(batch_k, batch_v)):
-                            S_b = seq_lens[b_idx]
-                            if S_b < S_max:
-                                pad_len = S_max - S_b
-                                k_pad = torch.zeros((1, num_heads, pad_len, head_dim), dtype=query_states.dtype, device=query_states.device)
-                                v_pad = torch.zeros((1, num_heads, pad_len, head_dim), dtype=query_states.dtype, device=query_states.device)
-                                padded_k.append(torch.cat([k_b, k_pad], dim=2))
-                                padded_v.append(torch.cat([v_b, v_pad], dim=2))
-                            else:
-                                padded_k.append(k_b)
-                                padded_v.append(v_b)
-                                
-                        k_rep = torch.cat(padded_k, dim=0)
-                        v_rep = torch.cat(padded_v, dim=0)
-                        
-                        # Build correct custom causal attention mask for unequal sequence lengths
-                        # attn_mask shape: [bsz, 1, q_len, S_max]
-                        attn_mask = torch.zeros((bsz, 1, q_len, S_max), dtype=torch.bool, device=query_states.device)
-                        for b_idx in range(bsz):
-                            S_b = seq_lens[b_idx]
-                            K_b = S_b - q_len
-                            for i in range(q_len):
-                                attn_mask[b_idx, 0, i, :K_b + i + 1] = True
-                                
+
+                            # ── Path A: Causal Local Self-Attention over new chunk ──
+                            curr_q = query_states[b_idx:b_idx+1]
+                            curr_k = key_states[b_idx:b_idx+1]
+                            curr_v = value_states[b_idx:b_idx+1]
+
+                            out_local, lse_local = _flash_local_attention(curr_q, curr_k, curr_v)
+
+                            # ── Path B: History Cross-Attention ──
+                            K_b = seq_lens[b_idx] - q_len
+                            out_hist_dense, lse_hist_dense = None, None
+                            out_hist_comp, lse_hist_comp   = None, None
+
+                            if K_b > 0:
+                                blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
+                                history_blocks = [b for b in blocks if b.anchor_idx < K_b]
+
+                                comp_blocks = []
+                                dense_k = []
+                                dense_v = []
+
+                                for b in history_blocks:
+                                    if getattr(b, "state", None) == "COMPRESSED" \
+                                            and b.U is not None and b.V is not None:
+                                        comp_blocks.append(b)
+                                    else:
+                                        ak = b.anchor_kv[0, 0]
+                                        av = b.anchor_kv[0, 1]
+                                        if b.active_k is not None:
+                                            k_blk = b.active_k[0]
+                                            v_blk = b.active_v[0]
+                                        elif getattr(b, "active_k_cpu", None) is not None:
+                                            k_blk = b.active_k_cpu[0].to(query_states.device, non_blocking=True)
+                                            v_blk = b.active_v_cpu[0].to(query_states.device, non_blocking=True)
+                                        else:
+                                            k_blk, v_blk = None, None
+                                        ak_u = ak.unsqueeze(1)
+                                        av_u = av.unsqueeze(1)
+                                        if k_blk is not None:
+                                            dense_k.append(torch.cat([ak_u, k_blk], dim=1))
+                                            dense_v.append(torch.cat([av_u, v_blk], dim=1))
+                                        else:
+                                            dense_k.append(ak_u)
+                                            dense_v.append(av_u)
+
+                                if dense_k:
+                                    k_dense = torch.cat(dense_k, dim=1).unsqueeze(0)
+                                    v_dense = torch.cat(dense_v, dim=1).unsqueeze(0)
+                                    k_dense_rep = repeat_kv(k_dense, num_key_value_groups)
+                                    v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
+                                    out_hist_dense = F.scaled_dot_product_attention(
+                                        curr_q.contiguous(), k_dense_rep.contiguous(), v_dense_rep.contiguous(),
+                                        attn_mask=None, dropout_p=0.0, is_causal=False
+                                    )
+                                    _scale = 1.0 / math.sqrt(head_dim)
+                                    scores_dense = torch.matmul(curr_q * _scale, k_dense_rep.transpose(-2, -1))
+                                    lse_hist_dense = torch.logsumexp(scores_dense, dim=-1)
+
+                                if comp_blocks and getattr(kv_manager, "native_pool", None) is not None:
+                                    out_hist_comp, lse_hist_comp = _project_then_attend_history(
+                                        curr_q, comp_blocks, kv_manager.native_pool
+                                    )
+
+                            out_b = _combine_outputs([
+                                (out_local,     lse_local),
+                                (out_hist_dense, lse_hist_dense),
+                                (out_hist_comp,  lse_hist_comp),
+                            ])
+                            attn_outputs.append(out_b)
+
+                        attn_output = torch.cat(attn_outputs, dim=0)
+
+                        # Capture new-chunk KV for post-forward compression
+                        for b_idx, sid in enumerate(session_ids):
+                            if sid != "dummy_session":
+                                kv_manager.capture_prefill_kv(
+                                    sid, captured_layer_idx,
+                                    key_states[b_idx:b_idx+1].detach(),
+                                    value_states[b_idx:b_idx+1].detach(),
+                                )
+
+                    else:
+                        # ── FRESH PREFILL (1st turn / new session) ───────────────────────────
+                        # Pure causal FlashAttention — no pool allocation, no custom mask.
+                        # FA2 fires cleanly here because attn_mask=None, is_causal=True.
+                        k_rep = repeat_kv(key_states,   num_key_value_groups)
+                        v_rep = repeat_kv(value_states, num_key_value_groups)
+
                         attn_output = F.scaled_dot_product_attention(
                             query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                            attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+                            attn_mask=None, dropout_p=0.0, is_causal=True
                         )
-                    else:
-                        # Fresh prefill — just repeat the current chunk's K/V states
-                        k_rep   = repeat_kv(key_states,   num_key_value_groups)
-                        v_rep   = repeat_kv(value_states, num_key_value_groups)
-                        
-                        if q_len > 1024:
-                            # Phase 42: Retrieval-Aware Sparse Prefill (Bounded-Compute Execution)
-                            if not hasattr(self, "sparse_prefill_engine"):
-                                from runtime.sparse_prefill import RetrievalAwareSparsePrefill
-                                self.sparse_prefill_engine = RetrievalAwareSparsePrefill(
-                                    sink_tokens=64, chunk_size=512, local_window_chunks=1, top_k_retrieval_chunks=2
+
+                        # Capture KV by reference — zero copy. Compression runs post-forward.
+                        for b_idx, sid in enumerate(session_ids):
+                            if sid != "dummy_session":
+                                kv_manager.capture_prefill_kv(
+                                    sid, captured_layer_idx,
+                                    key_states[b_idx:b_idx+1].detach(),
+                                    value_states[b_idx:b_idx+1].detach(),
                                 )
-                            attn_output = self.sparse_prefill_engine.execute_sparse_attention(
-                                query_states, k_rep, v_rep
-                            )
-                        else:
-                            attn_output = F.scaled_dot_product_attention(
-                                query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                                attn_mask=None, dropout_p=0.0, is_causal=True
-                            )
+
                     attn_weights = None
 
                 attn_output = attn_output.transpose(1, 2).contiguous()

@@ -48,6 +48,41 @@ class OpenAICompatibleAPIGateway:
             if hasattr(resolver, 'start'):
                 resolver.start()
                 print("Continuous Batching Engine started.")
+
+            # ── torch.compile warmup pass ────────────────────────────────────
+            # Pre-trigger JIT compilation for the standard 512-token chunk size
+            # so the first real user request doesn't absorb 30-60s of compile time.
+            # Runs asynchronously so the server is immediately ready to accept
+            # connections (warmup completes in the background).
+            wrapper = getattr(resolver, 'wrapper', None)
+            if wrapper is not None and hasattr(wrapper, 'model'):
+                import asyncio, os, torch
+                async def _warmup():
+                    try:
+                        use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+                        if use_compile == "0":
+                            return
+                        # Only warmup if torch.compile was applied (model wrapped)
+                        model = wrapper.model
+                        if not hasattr(model, '_orig_mod') and not hasattr(model, '_dynamo_ctx'):
+                            return
+                        print("[DiffKV] Running torch.compile warmup (chunk_size=512)...")
+                        device = wrapper.device
+                        chunk_size = 512
+                        dummy_ids = torch.zeros((1, chunk_size), dtype=torch.long, device=device)
+                        dummy_pos = torch.arange(0, chunk_size, dtype=torch.long, device=device).unsqueeze(0)
+                        # Inject a dummy session so the attention patch doesn't error
+                        wrapper.model._diffkv_session_ids = ["__warmup__"]
+                        with torch.no_grad():
+                            wrapper.model(input_ids=dummy_ids, position_ids=dummy_pos, use_cache=True)
+                        # Clean up warmup session artifacts
+                        if hasattr(wrapper, 'manager') and hasattr(wrapper.manager, 'clear_session'):
+                            wrapper.manager.clear_session("__warmup__")
+                        print("[DiffKV] torch.compile warmup complete.")
+                    except Exception as e:
+                        print(f"[DiffKV] WARNING: torch.compile warmup failed ({e}). Continuing in eager mode.")
+                asyncio.create_task(_warmup())
+
             yield
             if hasattr(resolver, 'stop'):
                 await resolver.stop()
@@ -86,6 +121,12 @@ class OpenAICompatibleAPIGateway:
                 session_id = self.session_manager.create_session()
             elif session_id is None:
                 session_id = str(uuid.uuid4())
+            elif self.session_manager is not None:
+                # Ensure the matched or requested session is loaded and resident in VRAM.
+                # Fall back to creating a new session if the session has expired or is invalid.
+                session = self.session_manager.get_session(session_id)
+                if session is None:
+                    session_id = self.session_manager.create_session()
 
             request_id   = f"chatcmpl-{uuid.uuid4()}"
             created_time = int(time.time())
@@ -156,8 +197,13 @@ class OpenAICompatibleAPIGateway:
         @self.app.delete("/v1/sessions/{session_id}")
         async def delete_session(session_id: str):
             if self.session_manager:
-                self.session_manager.clear_history(session_id)
-            return {"status": "cleared", "session_id": session_id}
+                if hasattr(self.session_manager, "delete_session"):
+                    self.session_manager.delete_session(session_id)
+                else:
+                    self.session_manager.clear_history(session_id)
+            if hasattr(self.resolver, "cancel"):
+                self.resolver.cancel(session_id)
+            return {"status": "deleted", "session_id": session_id}
 
         @self.app.get("/v1/models")
         @self.app.get("/models")

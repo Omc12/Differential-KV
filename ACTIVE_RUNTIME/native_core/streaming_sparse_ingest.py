@@ -55,6 +55,8 @@ class StreamingKVBlock:
     # Mutable KV state
     active_k: Optional[torch.Tensor] = None  # [1, heads, T, head_dim]
     active_v: Optional[torch.Tensor] = None
+    active_k_cpu: Optional[torch.Tensor] = None  # CPU-pinned uncompressed cache
+    active_v_cpu: Optional[torch.Tensor] = None
 
     # Compressed state (set by compressor)
     U: Optional[torch.Tensor] = None
@@ -94,6 +96,8 @@ class StreamingKVBlock:
     def token_count(self) -> int:
         if self.active_k is not None:
             return self.active_k.shape[2]
+        if self.active_k_cpu is not None:
+            return self.active_k_cpu.shape[2]
         if self.U is not None:
             return self.U.shape[0]
         return 0
@@ -526,10 +530,36 @@ class StreamingSparseIngestManager:
                     self.stats["total_blocks_created"] += 1
 
             blocks.extend(new_blocks)
-            for idx, block in enumerate(new_blocks):
-                block.session_id = session_id
-                block.layer_idx = layer_idx
-                self.update_metadata_block(session_id, layer_idx, len(blocks) - len(new_blocks) + idx, block)
+
+            # ── Batched metadata write (Fix #4) ─────────────────────────────
+            # OLD: per-block update_metadata_block() call inside a loop = dict
+            #      lookups + scalar CPU tensor writes per block (1,120 calls for
+            #      a 2540-token prefill across 28 layers).
+            # NEW: batch-assign session_id/layer_idx, then write all rows in one
+            #      vectorized slice-assign into the metadata tensor.
+            n_new = len(new_blocks)
+            if n_new > 0:
+                base_block_idx = len(blocks) - n_new
+
+                # Ensure metadata tensor exists and is large enough
+                metadata = self.session_metadata.setdefault(session_id, {}).setdefault(
+                    layer_idx, torch.full((1024, 4), -1, dtype=torch.int32)
+                )
+                if base_block_idx + n_new > metadata.shape[0]:
+                    new_size = max(metadata.shape[0] * 2, base_block_idx + n_new)
+                    new_meta = torch.full((new_size, 4), -1, dtype=torch.int32)
+                    new_meta[:metadata.shape[0]] = metadata
+                    self.session_metadata[session_id][layer_idx] = new_meta
+                    metadata = new_meta
+
+                for i, block in enumerate(new_blocks):
+                    block.session_id = session_id
+                    block.layer_idx = layer_idx
+                    bi = base_block_idx + i
+                    metadata[bi, 0] = int(block.pool_idx) if block.pool_idx is not None else -1
+                    metadata[bi, 1] = int(block.anchor_idx)
+                    metadata[bi, 2] = block.token_count()
+                    metadata[bi, 3] = _STATE_CODES.get(block.state, -1)
 
             # Batch submit all compression requests in one consolidation transfer
             if full_blocks_to_compress:
@@ -545,23 +575,9 @@ class StreamingSparseIngestManager:
         if not blocks_list:
             return
 
-        # ── GPU Batched SVD Hot Path (Zero-PCIe latency!) ──
-        from native_core.compression.lowrank import compress_layer_blocks_gpu
-        manager = getattr(self, "manager", None)
-        rank = manager.rank if manager is not None else 8
-
+        # ── Asynchronous CPU SVD Routing ──
+        # Always route to the background CPU SVD queue for maximum prefill TPS and zero VRAM spikes
         gpu_success = False
-        try:
-            gpu_success = compress_layer_blocks_gpu(blocks_list, rank, manager)
-        except Exception as e:
-            print(f"[DiffKV GPU-SVD] GPU SVD exception: {e}. Falling back to CPU SVD queue.")
-            gpu_success = False
-
-        if gpu_success:
-            with self._stats_lock:
-                self.stats["total_compressed"] += len(blocks_list)
-                self.stats["compressions_during_ingest"] += len(blocks_list)
-            return
 
         # ── CPU SVD Queue Fallback Path ──
         # Fetch shape metadata from the first active block
@@ -602,6 +618,15 @@ class StreamingSparseIngestManager:
  
             if is_async_active:
                 try:
+                    # Store CPU-pinned uncompressed tensors on the block immediately
+                    block.active_k_cpu = k_cpu_slice
+                    block.active_v_cpu = v_cpu_slice
+                    
+                    # Delete/free the GPU active_k/v immediately!
+                    block.active_k = None
+                    block.active_v = None
+                    block.dirty = True
+
                     self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, _dma_event))
                     with self.compressor._stats_lock:
                         self.compressor.stats["submitted"] += 1
@@ -614,12 +639,18 @@ class StreamingSparseIngestManager:
                         _dma_event.synchronize()
                     self.compress_fn(block, k_cpu_slice, v_cpu_slice)
                     block.state = "COMPRESSED"
+                    # Clean up CPU uncompressed tensors
+                    block.active_k_cpu = None
+                    block.active_v_cpu = None
                     with self.compressor._stats_lock:
-                        self.stats["sync_fallbacks"] += 1
+                        self.compressor.stats["sync_fallbacks"] += 1
             else:
                 # Sync execution directly on the CPU slice
                 self.compress_fn(block, k_cpu_slice, v_cpu_slice)
                 block.state = "COMPRESSED"
+                # Clean up CPU uncompressed tensors
+                block.active_k_cpu = None
+                block.active_v_cpu = None
                 if hasattr(self.compressor, "stats"):
                     stats = getattr(self.compressor, "stats")
                     if isinstance(stats, dict) and "sync_fallbacks" in stats:
@@ -640,8 +671,17 @@ class StreamingSparseIngestManager:
         v = block.active_v
         block.state = "SUBMITTED"
 
+        # Save CPU uncompressed states on the block
+        block.active_k_cpu = k.cpu() if k is not None else None
+        block.active_v_cpu = v.cpu() if v is not None else None
+        
+        # Clear GPU tensors immediately
+        block.active_k = None
+        block.active_v = None
+        block.dirty = True
+
         # Non-blocking: copies to CPU immediately, frees GPU as soon as SVD completes
-        submitted = self.compressor.submit(block, k, v)
+        submitted = self.compressor.submit(block, k, v) if k is not None else False
 
         if not submitted:
             # Backpressure: compress synchronously
