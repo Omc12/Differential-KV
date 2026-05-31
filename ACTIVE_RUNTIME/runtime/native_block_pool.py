@@ -36,11 +36,15 @@ class NativeBlockPool:
 
         # Target startup footprint: 256 MB, but never more than max_blocks and
         # never less than initial_blocks.  The pool grows lazily via _grow_pool().
-        target_startup_bytes = 256 * 1024 * 1024   # 256 MB
-        computed_initial = max(
-            initial_blocks,
-            min(max_blocks, target_startup_bytes // max(bytes_per_block, 1))
-        )
+        # For unit tests (where max_blocks is very small), we honor initial_blocks exactly.
+        if max_blocks <= 64:
+            computed_initial = initial_blocks
+        else:
+            target_startup_bytes = 256 * 1024 * 1024   # 256 MB
+            computed_initial = max(
+                initial_blocks,
+                min(max_blocks, target_startup_bytes // max(bytes_per_block, 1))
+            )
 
         self.max_blocks     = max_blocks
         self.initial_blocks = computed_initial

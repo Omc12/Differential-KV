@@ -395,10 +395,11 @@ class ContinuousBatchEngine:
             self._post_prefill_cleanup()
             self._log_vram(f"post-prefill session={req.session_id}")
 
-            # ── Compression barrier (Bypassed in Phase 35 for 10x prefill speedup) ──
-            # SVD compression runs asynchronously in background threads while decoding,
-            # which is completely safe and avoids multi-second stalls before the first token.
-            pass
+            # ── Compression barrier ──
+            # Wait for all background SVD threads to finish compressing the prefill blocks
+            # before decoding starts, preventing race conditions where decode reads SUBMITTED
+            # blocks and ignores them, causing severe generation quality issues on long prompts.
+            await self._wait_for_compression(req.session_id)
 
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_pref = (time.perf_counter() - t0_pref) * 1000

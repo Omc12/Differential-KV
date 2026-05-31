@@ -404,24 +404,55 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     else:
                         # ── FRESH PREFILL (1st turn / new session) ───────────────────────────
-                        # Pure causal FlashAttention — no pool allocation, no custom mask.
-                        # FA2 fires cleanly here because attn_mask=None, is_causal=True.
-                        k_rep = repeat_kv(key_states,   num_key_value_groups)
-                        v_rep = repeat_kv(value_states, num_key_value_groups)
-
-                        attn_output = F.scaled_dot_product_attention(
-                            query_states.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                            attn_mask=None, dropout_p=0.0, is_causal=True
-                        )
-
-                        # Capture KV by reference — zero copy. Compression runs post-forward.
-                        for b_idx, sid in enumerate(session_ids):
+                        # Attend to previous prefill chunks of the same prompt if they exist.
+                        # This is critical for progressive prompt chunking correctness!
+                        attn_outputs = []
+                        for b_idx in range(bsz):
+                            sid = session_ids[b_idx]
+                            curr_q = query_states[b_idx:b_idx+1]
+                            curr_k = key_states[b_idx:b_idx+1]
+                            curr_v = value_states[b_idx:b_idx+1]
+                            
+                            # Check for captured KV from previous chunks
+                            cap_dict = getattr(kv_manager, "_prefill_kv_capture", {})
+                            session_cap = cap_dict.get(sid, {})
+                            if captured_layer_idx in session_cap:
+                                prev_k, prev_v = session_cap[captured_layer_idx]
+                                full_k = torch.cat([prev_k, curr_k], dim=2)
+                                full_v = torch.cat([prev_v, curr_v], dim=2)
+                                
+                                # PyTorch's is_causal=True is broken when q_len != kv_len.
+                                # Construct the correct absolute causal attention mask.
+                                q_len = curr_q.shape[2]
+                                kv_len = full_k.shape[2]
+                                mask = torch.ones((q_len, kv_len), dtype=torch.bool, device=curr_q.device)
+                                mask = torch.tril(mask, diagonal=kv_len - q_len)
+                                is_causal_flag = False
+                                attn_mask_flag = mask
+                            else:
+                                full_k = curr_k
+                                full_v = curr_v
+                                is_causal_flag = True
+                                attn_mask_flag = None
+                                
+                            k_rep = repeat_kv(full_k, num_key_value_groups)
+                            v_rep = repeat_kv(full_v, num_key_value_groups)
+                            
+                            out_b = F.scaled_dot_product_attention(
+                                curr_q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                                attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag
+                            )
+                            attn_outputs.append(out_b)
+                            
+                            # Capture this chunk's KV (without prev concat)
                             if sid != "dummy_session":
                                 kv_manager.capture_prefill_kv(
                                     sid, captured_layer_idx,
-                                    key_states[b_idx:b_idx+1].detach(),
-                                    value_states[b_idx:b_idx+1].detach(),
+                                    curr_k.detach(),
+                                    curr_v.detach(),
                                 )
+                                
+                        attn_output = torch.cat(attn_outputs, dim=0)
 
                     attn_weights = None
 
