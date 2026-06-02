@@ -154,9 +154,13 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
         if idx.numel() > 0:
             k = max(4, min(int(idx[0].item() + 1), rank))
 
-    # Slice SVD outputs to dynamic rank k first
-    U_k = U[:, :k] * S[:k].unsqueeze(0)
-    Vh_k = Vh[:k, :]
+    # Slice SVD outputs to dynamic rank k — NO zero-padding.
+    # Storing zeros for unused rank slots (rank-k columns) wastes memory proportional
+    # to (rank-k)/rank — typically 50-87% of U/V storage for k=4..16, rank=32.
+    # NativeBlockPool.write_block() and the GEMM reconstruction path both handle
+    # variable-rank tensors correctly via min(U.shape[1], pool_rank) guards.
+    U_k = U[:, :k] * S[:k].unsqueeze(0)  # [n, k]
+    Vh_k = Vh[:k, :]                      # [k, d]
 
     # Convert to FP16
     U_k_fp16 = U_k.to(torch.float16)
@@ -168,16 +172,10 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     if not torch.isfinite(Vh_k_fp16).all():
         Vh_k_fp16 = torch.nan_to_num(Vh_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Zero-pad outputs up to full capped rank for 100% layout compatibility with pool/Triton
-    U_padded = torch.zeros((n, rank), dtype=torch.float16)
-    V_padded = torch.zeros((rank, d), dtype=torch.float16)
-    U_padded[:, :k] = U_k_fp16
-    V_padded[:k, :] = Vh_k_fp16
-
     retained = (S[:k]**2).sum().item() / (total_energy + 1e-12)
     
-    # Calculate reconstruction metrics on CPU
-    recon = (U_padded.float() @ V_padded.float()) * scale
+    # Calculate reconstruction metrics on CPU using actual (unpadded) k-rank matrices
+    recon = (U_k_fp16.float() @ Vh_k_fp16.float()) * scale
     
     orig_norm = deltas_cpu.norm().item()
     recon_norm = recon.norm().item()
@@ -188,9 +186,9 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     recon_flat = recon.reshape(-1)
     cos_sim = torch.nn.functional.cosine_similarity(orig_flat.unsqueeze(0), recon_flat.unsqueeze(0)).item()
 
-    # Move U and V to the original device
-    U_out = U_padded.to(device)
-    V_out = V_padded.to(device)
+    # Move unpadded U and V to the original device
+    U_out = U_k_fp16.to(device)   # [n, k]
+    V_out = Vh_k_fp16.to(device)  # [k, d]
 
     return LowRankDelta(U=U_out, V=V_out, shape=(n, d),
                         rank=rank, scale=scale, energy_retained=float(retained),
@@ -376,13 +374,15 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     pool = getattr(manager, "native_pool", None) if manager is not None else None
     for i, block in enumerate(blocks_list):
         k = ranks[i]
-        u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)
-        v_k = Vh_fp16[i, :k, :]
+        # Unpadded U/V — shape (T_active, k) and (k, feat_dim).
+        # No zero-padding: pool.write_block() handles variable-rank writes via
+        # min(U.shape[1], pool_rank) guards, and GEMM reconstruction slices
+        # stacked_U[:, :, :max_k] / stacked_V[:, :max_k, :] from dynamic_rank.
+        u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)  # [T_active, k]
+        v_k = Vh_fp16[i, :k, :]                                # [k, feat_dim]
 
-        block.U = torch.zeros((T_active, rank), dtype=torch.float16, device=gpu_device)
-        block.V = torch.zeros((rank, feat_dim), dtype=torch.float16, device=gpu_device)
-        block.U[:, :k] = u_k
-        block.V[:k, :] = v_k
+        block.U = u_k.contiguous()
+        block.V = v_k.contiguous()
         block.scale = scales_cpu[i].item()  # local CPU read - zero CUDA sync!
         block.dynamic_rank = k
         block.active_k = None

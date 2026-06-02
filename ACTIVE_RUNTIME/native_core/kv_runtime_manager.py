@@ -179,7 +179,15 @@ class KVRuntimeManager:
         from runtime.native_block_pool import NativeBlockPool
         
         pool_rank = self.rank
-        pool_block_size = 256 if self.streaming_ingest else self.block_size
+        # ── Phase Optimization: Use actual micro_block_size as max_seq_len ──
+        # The pool's U tensor stores per-token compressed data. Since micro-blocks
+        # are 16–32 tokens (not 256), allocating 256 slots per block wastes 8–16×
+        # VRAM for every compressed block. We now use the real micro_block_size.
+        # pool.write_block() uses min(seq_len, pool_max_seq) guards so variable
+        # fills are handled safely.
+        pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
+        # Ensure at least 33 slots so a full 32-token micro-block + anchor fits
+        pool_block_size = max(pool_block_size, 33)
         
         bytes_per_block = (
             (pool_block_size * pool_rank * 2) +                                # U
@@ -213,8 +221,9 @@ class KVRuntimeManager:
             max_seq_len=pool_block_size,
             device=self.device,
             dtype=torch.float16,
-            initial_blocks=512
+            initial_blocks=256   # 256 is sufficient since each slot is now micro_block_size (not 256) rows
         )
+
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)

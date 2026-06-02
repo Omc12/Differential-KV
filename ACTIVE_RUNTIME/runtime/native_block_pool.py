@@ -11,9 +11,15 @@ During inference, we completely bypass `torch.stack`. We simply pass a 1D tensor
 of `block_indices` to the Triton kernel, which does the gather natively in SRAM.
 
 Mac/MPS: all `torch.cuda.*` calls are routed through native_core.mac_utils.
+
+Phase Optimization: max_seq_len is now passed as the actual micro_block_size
+(16-32 tokens) rather than a static 256, reducing U-tensor VRAM by 8-16x per block.
+MPS gets a smaller initial footprint (128 blocks) and finer growth increments (128).
+Pre-realloc gc.collect() prevents momentary 2x VRAM spike during pool growth.
 """
 
 import torch
+import gc
 try:
     from native_core.mac_utils import empty_cache as _empty_cache
 except ImportError:
@@ -42,16 +48,24 @@ class NativeBlockPool:
             6                                  # scales (2B) + seq_lens (4B)
         )
 
-        # Target startup footprint: 256 MB, but never more than max_blocks and
-        # never less than initial_blocks.  The pool grows lazily via _grow_pool().
+        # MPS (Apple Silicon) has tighter unified memory — use a smaller
+        # startup footprint and finer-grained growth to avoid large spikes.
+        _is_mps = (str(device) == "mps" or
+                   (isinstance(device, torch.device) and device.type == "mps"))
+        _startup_target_bytes = 64 * 1024 * 1024 if _is_mps else 256 * 1024 * 1024
+        # Smaller default initial_blocks on MPS
+        if _is_mps and initial_blocks > 128:
+            initial_blocks = 128
+
+        # Target startup footprint, but never more than max_blocks and
+        # never less than initial_blocks. The pool grows lazily via _grow_pool().
         # For unit tests (where max_blocks is very small), we honor initial_blocks exactly.
         if max_blocks <= 64:
             computed_initial = initial_blocks
         else:
-            target_startup_bytes = 256 * 1024 * 1024   # 256 MB
             computed_initial = max(
                 initial_blocks,
-                min(max_blocks, target_startup_bytes // max(bytes_per_block, 1))
+                min(max_blocks, _startup_target_bytes // max(bytes_per_block, 1))
             )
 
         self.max_blocks     = max_blocks
@@ -59,6 +73,9 @@ class NativeBlockPool:
         self.current_blocks = self.initial_blocks
         self.device = device
         self.dtype  = dtype
+        # Growth increment: coarser on CUDA (512), finer on MPS (128) to
+        # keep peak spikes small on unified-memory devices.
+        self._grow_increment = 128 if _is_mps else 512
 
         # Allocate pools
         self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=device, dtype=self.dtype)
@@ -73,7 +90,9 @@ class NativeBlockPool:
         self._free_indices = list(range(self.current_blocks - 1, -1, -1))
         self._ref_counts = [0] * self.current_blocks
 
-    def _grow_pool(self, increment: int = 512):
+    def _grow_pool(self, increment: int = None):
+        if increment is None:
+            increment = self._grow_increment
         old_blocks = self.current_blocks
         if old_blocks >= self.max_blocks:
             raise RuntimeError(f"NativeBlockPool is out of memory and has reached its absolute maximum limit of {self.max_blocks} blocks!")
@@ -87,6 +106,13 @@ class NativeBlockPool:
         head_dim = self.V_K.shape[3]
         rank = self.U.shape[2]
         max_seq_len = self.U.shape[1]
+        
+        # ── Release old memory BEFORE allocating new tensors ──────────────
+        # Running gc+empty_cache here helps the GPU allocator reclaim the
+        # old pool pages before the new (larger) tensors are created, cutting
+        # the momentary peak from ~2x down to ~1.x of the new pool size.
+        gc.collect()
+        _empty_cache(self.device)
         
         new_U = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
         new_V_K = torch.zeros((new_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
@@ -104,6 +130,9 @@ class NativeBlockPool:
         new_scales[:old_blocks] = self.scales
         new_seq_lens[:old_blocks] = self.seq_lens
         
+        # Explicitly delete old tensors so the allocator can reclaim them
+        del self.U, self.V_K, self.V_V, self.anchors_K, self.anchors_V, self.scales, self.seq_lens
+        
         self.U = new_U
         self.V_K = new_V_K
         self.V_V = new_V_V
@@ -116,7 +145,6 @@ class NativeBlockPool:
         self._free_indices.extend(range(new_blocks - 1, old_blocks - 1, -1))
         self.current_blocks = new_blocks
         
-        import gc
         gc.collect()
         _empty_cache(self.device)
         
@@ -161,15 +189,22 @@ class NativeBlockPool:
         Copies compressed data directly into the contiguous pool.
         This happens in the background (AsyncCompressor) or once per block,
         NEVER during the decode hot-path.
+
+        U may be unpadded shape (seq_len, dynamic_rank) — we write only as
+        many rank columns as U actually has, leaving trailing zeros intact.
         """
-        self.U[pool_idx, :seq_len, :U.shape[1]] = U.to(self.dtype)
+        pool_max_seq = self.U.shape[1]
+        pool_rank    = self.U.shape[2]
+        write_seq    = min(seq_len, pool_max_seq)
+        write_rank   = min(U.shape[1], pool_rank)
+        self.U[pool_idx, :write_seq, :write_rank] = U[:write_seq, :write_rank].to(self.dtype)
         
-        rank = V.shape[0]
+        rank = min(V.shape[0], pool_rank)
         num_kv = self.V_K.shape[2]
         h_dim = self.V_K.shape[3]
         
-        vk = V[:, :num_kv * h_dim].view(rank, num_kv, h_dim)
-        vv = V[:, num_kv * h_dim:].view(rank, num_kv, h_dim)
+        vk = V[:rank, :num_kv * h_dim].view(rank, num_kv, h_dim)
+        vv = V[:rank, num_kv * h_dim:].view(rank, num_kv, h_dim)
         
         self.V_K[pool_idx, :rank] = vk.to(self.dtype)
         self.V_V[pool_idx, :rank] = vv.to(self.dtype)
@@ -189,6 +224,10 @@ class NativeBlockPool:
         rank = self.U.shape[2]
         max_seq_len = self.U.shape[1]
         
+        del self.U, self.V_K, self.V_V, self.anchors_K, self.anchors_V, self.scales, self.seq_lens
+        gc.collect()
+        _empty_cache(self.device)
+        
         self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
         self.V_K        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         self.V_V        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
@@ -197,7 +236,5 @@ class NativeBlockPool:
         self.scales     = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((self.current_blocks,), device=self.device, dtype=torch.int32)
         
-        import gc
         gc.collect()
         _empty_cache(self.device)
-

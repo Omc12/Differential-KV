@@ -102,8 +102,12 @@ class StreamingKVBlock:
         return id(self)
 
     def __post_init__(self):
-        if self.anchor_kv_cpu is None and self.anchor_kv is not None:
-            self.anchor_kv_cpu = self.anchor_kv.cpu()
+        # anchor_kv_cpu is intentionally NOT created here.
+        # It is lazily created in _compress_block_sync() only when the CPU
+        # compression path actually needs it (i.e. when k/v are CPU tensors).
+        # Eager creation wastes RAM: 28 layers x 500 blocks x anchor_size bytes
+        # per session for a field that is rarely accessed on the hot path.
+        pass
 
     def token_count(self) -> int:
         if self.active_k is not None:
@@ -116,14 +120,16 @@ class StreamingKVBlock:
 
     def is_compression_eligible(self) -> bool:
         # Dynamic Compression Guard: SVD compression is deferred for short context windows
-        # (< 1024 tokens) to preserve 100% exact-match precision and eliminate SVD CPU/GPU
-        # roundtrip overhead, running at maximum possible TPS. SVD compression starts saving VRAM
-        # exactly when needed (contexts >= 1024 tokens).
-        # Also protect blocks flagged with outliers (e.g. key activation > 20.0) from SVD compression
-        # to prevent attention sink corruption.
+        # (< 256 tokens) to preserve 100% exact-match precision and eliminate SVD CPU/GPU
+        # roundtrip overhead for very short conversations. The 512-token recency window
+        # (enforced by the rolling loop below) guarantees exact attention for recent tokens
+        # regardless of this gate. Lowered from 1024 to 256 so mid-length prompts (256-1024)
+        # can start compressing — they were previously locked dense unnecessarily.
+        # Also protect blocks flagged with outliers (e.g. key activation > 20.0) from SVD
+        # compression to prevent attention sink corruption.
         if self.anchor_idx == 0 or self.is_outlier:
             return False
-        if self.anchor_idx + self.token_count() < 1024:
+        if self.anchor_idx + self.token_count() < 256:
             return False
         return (
             self.state == "ACCUMULATING"
@@ -227,9 +233,12 @@ class StreamingSparseIngestManager:
             buffers[0].shape[1] != heads or
             buffers[0].shape[3] != head_dim):
             
-            # Allocate larger buffers dynamically
+            # Allocate larger buffers dynamically.
+            # Use 4× micro_block_size as headroom to avoid frequent reallocations;
+            # previously this was hardcoded to max(..., 256) which over-allocated
+            # staging buffers by 8–16× when micro_block_size=16 or 32.
             alloc_blocks = max(num_blocks, 16)
-            alloc_mbs = max(micro_block_size, 256)
+            alloc_mbs = max(micro_block_size * 4, micro_block_size + 16)
             
             k_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
             v_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
@@ -409,6 +418,18 @@ class StreamingSparseIngestManager:
                     if b.is_compression_eligible() and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
                         self._submit_block_for_compression(b)
                         self.update_metadata_block(session_id, layer_idx, idx, b)
+                    elif b.is_outlier and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
+                        # Outlier blocks skip SVD (to preserve attention quality) but their
+                        # dense active_k/v tensors can be offloaded to CPU once they've left
+                        # the recency window. The assemble_dense_window_kv() path handles
+                        # active_k_cpu transparently via .to(device, non_blocking=True).
+                        if b.active_k is not None:
+                            b.active_k_cpu = b.active_k.cpu()
+                            b.active_v_cpu = b.active_v.cpu()
+                            b.active_k = None
+                            b.active_v = None
+                            b.dirty = True
+                            self.update_metadata_block(session_id, layer_idx, idx, b)
             return
 
         # ───────────────────────────────────────────────────────────────────
@@ -509,10 +530,10 @@ class StreamingSparseIngestManager:
                     new_block.is_outlier = (k_max > 20.0)
 
                     # Dynamic Prefill Compression Guard: Bypass SVD compression for short
-                    # context sequences (< 1024 tokens) or for blocks within the most recent
+                    # context sequences (< 256 tokens) or for blocks within the most recent
                     # 512 tokens of the total sequence to preserve 100% exact prompt attention,
                     # or if the block is flagged as containing activation outliers.
-                    if total_seq_len < 1024 or anchor_idx == 0 or new_block.is_outlier or (anchor_idx + block_capacity) >= (total_seq_len - 512):
+                    if total_seq_len < 256 or anchor_idx == 0 or new_block.is_outlier or (anchor_idx + block_capacity) >= (total_seq_len - 512):
                         new_block.state = "ACCUMULATING"
                     else:
                         new_block.state = "SUBMITTED"
