@@ -9,13 +9,14 @@ async def test_long_prompt():
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     from serving.batch_engine import ContinuousBatchEngine
 
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     print(f"Initializing model {MODEL}...")
     
     # Enable telemetry to see state transitions
     os.environ["DIFFKV_TELEMETRY"] = "1"
     
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device="cuda")
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
     engine = ContinuousBatchEngine(wrapper, max_batch_size=2)
     engine.start()
 

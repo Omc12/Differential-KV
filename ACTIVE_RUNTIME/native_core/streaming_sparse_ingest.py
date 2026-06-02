@@ -72,6 +72,8 @@ class StreamingKVBlock:
     # Compressed state (set by compressor)
     U: Optional[torch.Tensor] = None
     V: Optional[torch.Tensor] = None
+    U_cpu: Optional[torch.Tensor] = None
+    V_cpu: Optional[torch.Tensor] = None
     scale: float = 1.0
     cosine_sim: float = 1.0
     norm_drift: float = 0.0
@@ -424,8 +426,8 @@ class StreamingSparseIngestManager:
                         # the recency window. The assemble_dense_window_kv() path handles
                         # active_k_cpu transparently via .to(device, non_blocking=True).
                         if b.active_k is not None:
-                            b.active_k_cpu = b.active_k.cpu()
-                            b.active_v_cpu = b.active_v.cpu()
+                            b.active_k_cpu = b.active_k.cpu().pin_memory() if b.active_k.is_cuda else b.active_k.cpu()
+                            b.active_v_cpu = b.active_v.cpu().pin_memory() if b.active_v.is_cuda else b.active_v.cpu()
                             b.active_k = None
                             b.active_v = None
                             b.dirty = True
@@ -694,8 +696,8 @@ class StreamingSparseIngestManager:
             if is_async_active:
                 try:
                     # Store CPU-pinned uncompressed tensors on the block immediately
-                    block.active_k_cpu = k_cpu_slice
-                    block.active_v_cpu = v_cpu_slice
+                    block.active_k_cpu = k_cpu_slice.pin_memory() if k_gpu.is_cuda else k_cpu_slice
+                    block.active_v_cpu = v_cpu_slice.pin_memory() if v_gpu.is_cuda else v_cpu_slice
                     
                     # Delete/free the GPU active_k/v immediately!
                     block.active_k = None
@@ -746,9 +748,9 @@ class StreamingSparseIngestManager:
         v = block.active_v
         block.state = "SUBMITTED"
 
-        # Save CPU uncompressed states on the block
-        block.active_k_cpu = k.cpu() if k is not None else None
-        block.active_v_cpu = v.cpu() if v is not None else None
+        _is_cuda = k.is_cuda if k is not None else False
+        block.active_k_cpu = (k.cpu().pin_memory() if _is_cuda else k.cpu()) if k is not None else None
+        block.active_v_cpu = (v.cpu().pin_memory() if _is_cuda else v.cpu()) if v is not None else None
         
         # Clear GPU tensors immediately
         block.active_k = None

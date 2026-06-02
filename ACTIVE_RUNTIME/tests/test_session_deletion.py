@@ -19,7 +19,7 @@ async def test_session_deletion():
     from serving.production_session_manager import ProductionSessionManager
     from serving.batch_engine import ContinuousBatchEngine
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     print(f"\n[Test Session Deletion] Initializing model {MODEL}...")
     try:
         from native_core.mac_utils import get_best_device

@@ -5,7 +5,11 @@ import math
 import threading
 from typing import Optional, Tuple
 from native_core.sparse_decode.triton_diffkv import TritonDiffKV
-from native_core.sparse_decode.triton_sparse_attn import native_triton_sparse_attn_decode, HAS_TRITON
+from native_core.sparse_decode.triton_sparse_attn import (
+    native_triton_sparse_attn_decode,
+    _prefill_fused_history_attend,
+    HAS_TRITON,
+)
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -26,7 +30,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     Universal repeat_kv implementation to support GQA.
     """
     if n_rep == 1:
-        return hidden_states.contiguous()
+        return hidden_states if hidden_states.is_contiguous() else hidden_states.contiguous()
     bs, num_key_value_heads, slen, head_dim = hidden_states.shape
     hidden_states = hidden_states[:, :, None, :, :].expand(bs, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(bs, num_key_value_heads * n_rep, slen, head_dim).contiguous()
@@ -101,81 +105,61 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     return out, lse
 
                 def _project_then_attend_history(q, comp_blocks, pool, cos_all=None, sin_all=None):
-                    # Low-rank unrotated reconstruction + dynamic RoPE re-application in prefill path
-                    _, H, q_len, head_dim = q.shape
+                    # O5b: Full history attention path routed through the JIT-fused kernel.
+                    # All 8 inner ops (K-recon, cat, RoPE, score, mask, logsumexp, softmax,
+                    # value-reduction) execute in a single TorchScript compilation unit.
+                    _, H, q_len_inner, head_dim = q.shape
                     pool_indices = [b.pool_idx for b in comp_blocks]
                     pool_indices_t = torch.tensor(pool_indices, device=q.device, dtype=torch.long)
-                    
-                    U_stack = pool.U[pool_indices_t]          # [N_blocks, max_seq_len, rank]
-                    V_K_stack = pool.V_K[pool_indices_t]      # [N_blocks, rank, num_kv_heads, head_dim]
-                    V_V_stack = pool.V_V[pool_indices_t]      # [N_blocks, rank, num_kv_heads, head_dim]
-                    anc_K = pool.anchors_K[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
-                    anc_V = pool.anchors_V[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
-                    scales_stack = pool.scales[pool_indices_t].view(-1, 1, 1)  # [N_blocks, 1, 1]
-                    seq_lens_stack = pool.seq_lens[pool_indices_t]  # [N_blocks]
-                    
-                    N_blocks = len(comp_blocks)
-                    max_seq_len = U_stack.shape[1]
-                    
-                    # 1. Repeat for GQA groups
-                    v_k_rep = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
-                    v_v_rep = repeat_kv(V_V_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
-                    anc_k_rep = repeat_kv(anc_K.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
-                    anc_v_rep = repeat_kv(anc_V.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
-                    
-                    # 2. Reconstruct unrotated keys: [N, 1 + max_seq_len, H, D]
-                    deltas_k = torch.einsum('nsr,nhrd->nshd', U_stack.float(), v_k_rep.float()).to(q.dtype) * scales_stack
-                    zeros_pad = torch.zeros((N_blocks, 1, H, head_dim), dtype=q.dtype, device=q.device)
-                    deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
-                    K_unrot_full = anc_k_rep.unsqueeze(1) + deltas_k_full
-                    
-                    # 3. Construct absolute position IDs and Slice cos/sin
-                    block_anchors = torch.tensor([b.anchor_idx for b in comp_blocks], device=q.device, dtype=torch.long)
-                    positions = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
-                    positions_flat = positions.view(-1)
-                    
+
+                    N_blocks  = len(comp_blocks)
+                    max_seq_len = pool.U.shape[1]
+
+                    # Gather block data from the pool
+                    U_stack    = pool.U[pool_indices_t]          # [N, S, R]
+                    V_K_stack  = pool.V_K[pool_indices_t]        # [N, R, num_kv_heads, D]
+                    V_V_stack  = pool.V_V[pool_indices_t]        # [N, R, num_kv_heads, D]
+                    anc_K      = pool.anchors_K[pool_indices_t]  # [N, num_kv_heads, D]
+                    anc_V      = pool.anchors_V[pool_indices_t]  # [N, num_kv_heads, D]
+                    scales_1d  = pool.scales[pool_indices_t]     # [N]
+                    seq_lens_t = pool.seq_lens[pool_indices_t]   # [N] int32
+
+                    # GQA repeat-expansion (zero-copy expand → contiguous only if needed)
+                    v_k_rep   = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)   # [N, H, R, D]
+                    v_v_rep   = repeat_kv(V_V_stack.permute(0, 2, 1, 3), num_key_value_groups)   # [N, H, R, D]
+                    anc_k_rep = repeat_kv(anc_K.unsqueeze(2), num_key_value_groups).squeeze(2)   # [N, H, D]
+                    anc_v_rep = repeat_kv(anc_V.unsqueeze(2), num_key_value_groups).squeeze(2)   # [N, H, D]
+
+                    # Build RoPE slices for all blocks in one gather (avoids per-block indexing)
+                    block_anchors   = torch.tensor([b.anchor_idx for b in comp_blocks], device=q.device, dtype=torch.long)
+                    positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
+                    positions_flat  = positions.view(-1)
                     cos_ref = cos_all if cos_all is not None else cos
                     sin_ref = sin_all if sin_all is not None else sin
                     cos_sliced = cos_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
                     sin_sliced = sin_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                    
-                    # 4. Apply RoPE to Reconstructed Keys
-                    K_rot_full = (K_unrot_full * cos_sliced) + (rotate_half(K_unrot_full) * sin_sliced) # [N, 1 + max_seq, H, D]
-                    
-                    # 5. Compute scores: dot product of q (shape [1, H, q_len, D]) with K_rot_full
-                    scale = 1.0 / math.sqrt(head_dim)
-                    scores_block_full = torch.einsum('bhqd,nshd->bhqns', q.float(), K_rot_full.float()).to(q.dtype) * scale # [1, H, q_len, N, 1 + max_seq]
-                    
-                    # 6. Mask out padding in scores
-                    col_s = torch.arange(1 + max_seq_len, device=q.device).unsqueeze(0)
-                    valid_mask = col_s < (1 + seq_lens_stack).unsqueeze(1)  # [N_blocks, 1 + max_seq]
-                    mask = valid_mask.unsqueeze(0).unsqueeze(1).unsqueeze(2)  # [1, 1, 1, N, 1 + max_seq]
-                    
-                    scores_block_full = torch.where(mask, scores_block_full, torch.tensor(float('-inf'), device=q.device, dtype=q.dtype))
-                    
-                    # Flat scores for Log-Sum-Exp and softmax weights
-                    flat_scores = scores_block_full.reshape(1, H, q_len, -1)
-                    
-                    # Log-Sum-Exp and softmax weights
-                    lse_hist = torch.logsumexp(flat_scores, dim=-1)
-                    weights = torch.softmax(flat_scores, dim=-1)
-                    
-                    # Value reduction (unchanged on V side since values are unrotated)
-                    w_blocks = weights.reshape(1, H, q_len, N_blocks, -1)
-                    w_anchor = w_blocks[..., 0]      # [1, H, q_len, N]
-                    w_delta  = w_blocks[..., 1:]     # [1, H, q_len, N, max_seq]
-                    
-                    p_total_anchor = w_anchor + w_delta.sum(dim=-1) # [1, H, q_len, N]
-                    
-                    out_anchor = torch.einsum('bhqn,nhd->bhqd', p_total_anchor, anc_v_rep)
-                    W_proj = torch.einsum('bhqns,nsr->bhqnr', w_delta, U_stack)
-                    
-                    # Apply scales to W_proj
-                    W_proj = W_proj * pool.scales[pool_indices_t].view(1, 1, 1, -1, 1)
-                    
-                    out_delta = torch.einsum('bhqnr,nhrd->bhqd', W_proj, v_v_rep)
-                    
-                    out_hist = out_anchor + out_delta
+
+                    inv_scale_val = 1.0 / math.sqrt(head_dim)
+
+                    # ── O5b: Single JIT dispatch covering all inner math ─────────────
+                    # result[0] = out_hist  [1, H, q_len, D]
+                    # result[1, 0, :, :, 0] = lse_hist [H, q_len]  (last dim replicated)
+                    result = _prefill_fused_history_attend(
+                        U          = U_stack,
+                        V_K        = v_k_rep.permute(0, 2, 1, 3),   # [N, R, H, D]
+                        V_V        = v_v_rep.permute(0, 2, 1, 3),   # [N, R, H, D]
+                        anchors_K  = anc_k_rep,
+                        anchors_V  = anc_v_rep,
+                        scales     = scales_1d,
+                        cos_sliced = cos_sliced,
+                        sin_sliced = sin_sliced,
+                        q          = q,
+                        seq_lens   = seq_lens_t,
+                        inv_scale  = inv_scale_val,
+                    )
+                    out_hist  = result[0]                     # [1, H, q_len, D]
+                    lse_hist  = result[1, 0, :, :, 0]        # [H, q_len]
+                    lse_hist  = lse_hist.unsqueeze(0)        # [1, H, q_len]  — matches _combine_outputs API
                     return out_hist, lse_hist
 
                 def _combine_outputs(out_lse_list):
@@ -262,7 +246,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             )
                             continue
 
-                        block_indices, dense_blocks, anchor_indices = kv_manager.get_cached_decode_blocks(
+                        block_indices, dense_blocks, anchor_indices, max_anchor_idx, max_valid_len = kv_manager.get_cached_decode_blocks(
                             sid, captured_layer_idx, query_states.device
                         )
                         pool = getattr(kv_manager, 'native_pool', None)
@@ -279,11 +263,22 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                         total_seq_len = kv_manager.get_session_sequence_length(sid)
                         max_pos = total_seq_len
-                        if anchor_indices is not None and anchor_indices.numel() > 0:
-                            max_pos = max(max_pos, int(anchor_indices.max().item()) + session_mbs)
+                        if max_anchor_idx is not None:
+                            max_pos = max(max_pos, max_anchor_idx + session_mbs)
                         
-                        hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
-                        cos_all, sin_all = model.model.rotary_emb(value_states[b_idx:b_idx+1], hist_pos)
+                        rope_cos_key = (sid, "rope_cos")
+                        rope_sin_key = (sid, "rope_sin")
+                        cached_cos = kv_manager.decode_workspace.get(rope_cos_key)
+                        cached_sin = kv_manager.decode_workspace.get(rope_sin_key)
+
+                        if cached_cos is not None and cached_cos.shape[1] >= max_pos:
+                            cos_all = cached_cos[:, :max_pos]
+                            sin_all = cached_sin[:, :max_pos]
+                        else:
+                            hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
+                            cos_all, sin_all = model.model.rotary_emb(value_states[b_idx:b_idx+1], hist_pos)
+                            kv_manager.decode_workspace[rope_cos_key] = cos_all
+                            kv_manager.decode_workspace[rope_sin_key] = sin_all
 
                         attn_out_b = native_triton_sparse_attn_decode(
                             q=query_states[b_idx:b_idx+1],
@@ -299,6 +294,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             cos=cos_all,
                             sin=sin_all,
                             total_seq_len=total_seq_len,
+                            max_valid_len=max_valid_len,
                         )
                         attn_outputs.append(attn_out_b)
 

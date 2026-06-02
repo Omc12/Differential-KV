@@ -233,11 +233,10 @@ class KVRuntimeManager:
         self.recon_pool = None
         self.decode_workspace = {}
 
-        # Force synchronous compression on Apple Silicon/MPS to guarantee thread safety
-        # and prevent concurrent Metal command encoder / buffer validation crashes.
+        # On Apple Silicon/MPS, we use thread-safe CPU-only background SVD compression
+        # to guarantee thread-safety and prevent Metal command encoder / buffer validation crashes.
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
-            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Forcing synchronous SVD compression to guarantee thread-safety and prevent Metal crashes.")
-            async_compression = False
+            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Enabling thread-safe CPU background SVD compression.")
 
         self._async      = async_compression
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
@@ -350,7 +349,6 @@ class KVRuntimeManager:
         import gc as _gc
         _gc.collect()
         _empty_cache(self.device)
-        _synchronize(self.device)
 
         if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             if _has_cuda():
@@ -358,6 +356,63 @@ class KVRuntimeManager:
                 print(f"[DiffKV] Post-prefill compression done. VRAM: {alloc:.2f} GB")
             else:
                 print(f"[DiffKV] Post-prefill compression done (MPS/CPU — no VRAM stats).")
+
+    def finalize_compressed_blocks(self):
+        """
+        Uploads CPU-compressed blocks (SVD computed on background thread) to GPU
+        and writes them to the native block pool. Runs on the main thread to ensure
+        MPS/Metal thread safety.
+        """
+        if self._streaming_mgr is None:
+            return
+
+        # Scan all resident sessions and layers
+        for session_id, layers in list(self._streaming_mgr.session_blocks.items()):
+            for layer_idx, blocks in list(layers.items()):
+                for block in blocks:
+                    if getattr(block, "state", None) == "CPU_COMPRESSED":
+                        try:
+                            # Perform the GPU/Metal upload on the main thread
+                            gpu_device = block.anchor_kv.device
+                            u_cpu = getattr(block, "U_cpu", None)
+                            v_cpu = getattr(block, "V_cpu", None)
+                            
+                            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                print(f"[DiffKV Finalizer Debug] Found CPU_COMPRESSED block: anchor={block.anchor_idx}, U_cpu is None? {u_cpu is None}, V_cpu is None? {v_cpu is None}")
+                            
+                            if u_cpu is None or v_cpu is None:
+                                continue
+                            
+                            block.U = u_cpu.to(gpu_device)
+                            block.V = v_cpu.to(gpu_device)
+
+                            # Clean up temporary CPU attributes
+                            block.U_cpu = None
+                            block.V_cpu = None
+
+                            # Write to native pool
+                            if hasattr(self, 'native_pool') and self.native_pool is not None:
+                                if getattr(block, 'pool_idx', None) is None:
+                                    block.pool_idx = self.native_pool.allocate_block()
+                                self.native_pool.write_block(
+                                    pool_idx=block.pool_idx,
+                                    U=block.U,
+                                    V=block.V,
+                                    anchor_K=block.anchor_kv[0, 0],
+                                    anchor_V=block.anchor_kv[0, 1],
+                                    scale=block.scale,
+                                    seq_len=block.U.shape[0]
+                                )
+
+                            # Update status and streaming manager metadata state
+                            block.state = "COMPRESSED"
+                            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                print(f"[DiffKV Finalizer Debug] Block anchor={block.anchor_idx} successfully finalized to COMPRESSED!")
+                            self._streaming_mgr.update_metadata_state(session_id, layer_idx, block)
+                        except Exception as e:
+                            import traceback
+                            print(f"[DiffKV WARNING] Failed to finalize CPU-compressed block: {e}")
+                            traceback.print_exc()
 
     def clear_session(self, session_id: str):
         # Invalidate GPU block indices cache
@@ -740,40 +795,50 @@ class KVRuntimeManager:
         session_id: str,
         layer_idx: int,
         device: torch.device,
-    ) -> Tuple[Optional[torch.Tensor], List[Any], Optional[torch.Tensor]]:
+    ) -> Tuple[Optional[torch.Tensor], List[Any], Optional[torch.Tensor], Optional[int], Optional[int]]:
         """
         Vectorized O(1) metadata retrieval from contiguous packed CPU tensors.
         Phase 29: metadata is now CPU-resident (zero CUDA syncs on write).
         Only the final small block_indices array is transferred to GPU.
         """
         if self._streaming_mgr is None:
-            return None, [], None
+            return None, [], None, None, None
 
         blocks = self.get_streaming_blocks(session_id, layer_idx)
         num_blocks = len(blocks) if blocks else 0
         if num_blocks == 0:
-            return None, [], None
+            return None, [], None, None, None
 
         metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is None:
-            return None, [], None
+            return None, [], None, None, None
 
         active_meta = metadata[:num_blocks]          # CPU slice view
 
         # state_code 2 == COMPRESSED
         compressed_mask = active_meta[:, 3] == 2     # CPU compare
         
+        max_anchor_idx = None
+        max_valid_len = None
         # Phase 32: GPU block indices cache check
         if compressed_mask.any():                    # CPU any() — no CUDA sync
             cpu_indices = active_meta[compressed_mask, 0]
+            # Touch accessed pool blocks for LRU tracking
+            if hasattr(self, "native_pool") and self.native_pool is not None:
+                touch_fn = getattr(self.native_pool, "touch_block", None)
+                if touch_fn is not None:
+                    for idx in cpu_indices.tolist():
+                        touch_fn(int(idx))
+
             cpu_anchors = active_meta[compressed_mask, 1]
+            cpu_seq_lens = active_meta[compressed_mask, 2]
+            max_anchor_idx = int(cpu_anchors.max().item())
+            max_valid_len = int(cpu_seq_lens.max().item())
             cache_key = (session_id, layer_idx)
             cached_val = self._indices_gpu_cache.get(cache_key)
             if cached_val is not None:
                 cached_cpu_ind, cached_gpu_ind, cached_cpu_anc, cached_gpu_anc = cached_val
-                if (cached_cpu_ind.shape[0] == cpu_indices.shape[0] and 
-                    torch.equal(cached_cpu_ind, cpu_indices) and 
-                    torch.equal(cached_cpu_anc, cpu_anchors)):
+                if cached_cpu_ind.shape[0] == cpu_indices.shape[0]:
                     block_indices_tensor = cached_gpu_ind
                     anchor_indices_gpu = cached_gpu_anc
                 else:
@@ -793,7 +858,7 @@ class KVRuntimeManager:
         # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
         dense_blocks = [block for block in blocks if block.state not in ("COMPRESSED", "PAGED")]
 
-        return block_indices_tensor, dense_blocks, anchor_indices_gpu
+        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len
 
     def assemble_dense_window_kv(
         self,
@@ -1401,20 +1466,52 @@ class KVRuntimeManager:
                       f"scale={lr_delta.scale:.4f} cos_sim={lr_delta.cosine_sim:.6f} norm_drift={lr_delta.norm_drift:.6f} "
                       f"dyn_rank={lr_delta.dynamic_rank}")
 
-        gpu_device = block.anchor_kv.device
-        u_gpu = U_scaled.to(gpu_device)
-        v_gpu = lr_delta.V.to(torch.float16).to(gpu_device)
+        is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
 
-        lock = getattr(block, "_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            try:
-                block._lock = lock
-            except AttributeError:
-                pass
+        if is_background:
+            # CPU-only background SVD to guarantee thread safety
+            block.U_cpu          = U_scaled.cpu()
+            block.V_cpu          = lr_delta.V.to(torch.float16).cpu()
+            block.scale          = lr_delta.scale
+            block.cosine_sim     = lr_delta.cosine_sim
+            block.norm_drift     = lr_delta.norm_drift
+            block.dynamic_rank   = getattr(lr_delta, "dynamic_rank", self.rank)
 
-        if lock is not None:
-            with lock:
+            block.dirty    = True
+
+            if hasattr(block, 'state'):
+                block.state = "CPU_COMPRESSED"
+        else:
+            gpu_device = block.anchor_kv.device
+            u_gpu = U_scaled.to(gpu_device)
+            v_gpu = lr_delta.V.to(torch.float16).to(gpu_device)
+
+            lock = getattr(block, "_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                try:
+                    block._lock = lock
+                except AttributeError:
+                    pass
+
+            if lock is not None:
+                with lock:
+                    block.U          = u_gpu
+                    block.V          = v_gpu
+                    block.scale      = lr_delta.scale
+                    block.cosine_sim = lr_delta.cosine_sim
+                    block.norm_drift = lr_delta.norm_drift
+                    block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
+
+                    block.active_k = None
+                    block.active_v = None
+                    block.active_k_cpu = None
+                    block.active_v_cpu = None
+                    block.dirty    = True
+
+                    if hasattr(block, 'state'):
+                        block.state = "COMPRESSED"
+            else:
                 block.U          = u_gpu
                 block.V          = v_gpu
                 block.scale      = lr_delta.scale
@@ -1430,53 +1527,37 @@ class KVRuntimeManager:
 
                 if hasattr(block, 'state'):
                     block.state = "COMPRESSED"
-        else:
-            block.U          = u_gpu
-            block.V          = v_gpu
-            block.scale      = lr_delta.scale
-            block.cosine_sim = lr_delta.cosine_sim
-            block.norm_drift = lr_delta.norm_drift
-            block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
 
-            block.active_k = None
-            block.active_v = None
-            block.active_k_cpu = None
-            block.active_v_cpu = None
-            block.dirty    = True
+            # Check if block's session is still active/resident
+            session_id = getattr(block, 'session_id', None)
+            session_active = True
+            if session_id is not None:
+                if self._streaming_mgr is not None:
+                    session_active = session_id in self._streaming_mgr.session_blocks
+                else:
+                    session_active = session_id in self.session_blocks
 
-            if hasattr(block, 'state'):
-                block.state = "COMPRESSED"
+            if session_active:
+                # Phase 28 Native Block Pool Integration
+                if hasattr(self, 'native_pool') and self.native_pool is not None:
+                    try:
+                        if getattr(block, 'pool_idx', None) is None:
+                            block.pool_idx = self.native_pool.allocate_block()
+                        self.native_pool.write_block(
+                            pool_idx=block.pool_idx,
+                            U=block.U,
+                            V=block.V,
+                            anchor_K=block.anchor_kv[0, 0],
+                            anchor_V=block.anchor_kv[0, 1],
+                            scale=block.scale,
+                            seq_len=block.U.shape[0]
+                        )
+                    except Exception as e:
+                        # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
+                        print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
 
-        # Check if block's session is still active/resident
-        session_id = getattr(block, 'session_id', None)
-        session_active = True
-        if session_id is not None:
-            if self._streaming_mgr is not None:
-                session_active = session_id in self._streaming_mgr.session_blocks
-            else:
-                session_active = session_id in self.session_blocks
-
-        if session_active:
-            # Phase 28 Native Block Pool Integration
-            if hasattr(self, 'native_pool') and self.native_pool is not None:
-                try:
-                    if getattr(block, 'pool_idx', None) is None:
-                        block.pool_idx = self.native_pool.allocate_block()
-                    self.native_pool.write_block(
-                        pool_idx=block.pool_idx,
-                        U=block.U,
-                        V=block.V,
-                        anchor_K=block.anchor_kv[0, 0],
-                        anchor_V=block.anchor_kv[0, 1],
-                        scale=block.scale,
-                        seq_len=block.U.shape[0]
-                    )
-                except Exception as e:
-                    # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
-                    print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
-
-            if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
-                self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
+                if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
+                    self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
 
         self.total_compressions += 1
         self.total_cosine_sim   += lr_delta.cosine_sim
@@ -1484,7 +1565,7 @@ class KVRuntimeManager:
         self.rank_histogram[rank] = self.rank_histogram.get(rank, 0) + 1
 
         fp16_bytes = seq_len * feat_dim * 2
-        lr_bytes   = block.U.numel() * 2 + block.V.numel() * 2
+        lr_bytes   = U_scaled.numel() * 2 + lr_delta.V.numel() * 2
         self.vram_saved_bytes += (fp16_bytes - lr_bytes)
 
     # ── Diagnostics ───────────────────────────────────────────────────────────

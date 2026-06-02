@@ -224,3 +224,20 @@ def get_default_dtype(device: Optional[str] = None) -> torch.dtype:
     if dev in ("cuda", "mps"):
         return torch.float16
     return torch.bfloat16
+
+
+# Monkeypatch torch.mps.capture_to_graph if it's missing in this PyTorch version
+if hasattr(torch, "mps") and not hasattr(torch.mps, "capture_to_graph"):
+    class _CaptureToGraphContext:
+        def __init__(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def _capture_to_graph():
+        return _CaptureToGraphContext()
+
+    torch.mps.capture_to_graph = _capture_to_graph
+

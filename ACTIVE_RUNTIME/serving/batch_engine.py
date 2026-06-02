@@ -26,6 +26,7 @@ class BatchRequest:
         self.start_time = time.time()
         self.cancelled = False
         self.decoded_text = ""
+        self.prefill_offset = 0
 
     @property
     def total_seq_len(self) -> int:
@@ -52,6 +53,7 @@ class ContinuousBatchEngine:
         
         # Track decode steps for periodic memory sweeps
         self.decode_steps_since_gc = 0
+        self._prefill_input_buf = None
 
     # ── VRAM instrumentation ────────────────────────────────────────────
 
@@ -121,10 +123,13 @@ class ContinuousBatchEngine:
         check_interval = 0.005  # 5 ms async yield — event loop stays live
 
         while time.monotonic() < deadline:
+            if hasattr(mgr, "finalize_compressed_blocks"):
+                mgr.finalize_compressed_blocks()
+
             found_submitted = False
             for layer_idx, blocks in session_blocks.items():
                 for block in blocks:
-                    if getattr(block, "state", None) == "SUBMITTED":
+                    if getattr(block, "state", None) in ("SUBMITTED", "CPU_COMPRESSED"):
                         found_submitted = True
                         break
                 if found_submitted:
@@ -330,186 +335,175 @@ class ContinuousBatchEngine:
         decode_reqs  = [r for r in self.active_requests if r.is_prefilled]
 
         # ─────────────────────────────────────────────────────────────────
-        # PREFILL — one request at a time (different prompt lengths can't
-        # be batched without padding, which wastes memory for large prompts)
+        # 1. CHUNKED PREFILL — process exactly one chunk of the first prefill request
         # ─────────────────────────────────────────────────────────────────
-        for req in prefill_reqs:
+        if prefill_reqs:
+            req = prefill_reqs[0]
             t0_pref = time.perf_counter()
             
             cached_len = getattr(req, "cached_len", 0)
-            if cached_len > 0:
-                new_prompt_ids = req.prompt_ids[cached_len:]
-            else:
+            if not hasattr(req, "prefill_offset") or req.prefill_offset == 0:
+                req.prefill_offset = cached_len
                 # Fresh prefill from scratch — clear stale KV
-                self._free_session_kv(req.session_id)
-                new_prompt_ids = req.prompt_ids
-
-            # Ensure session is registered and metadata initialized
-            if hasattr(self.wrapper.manager, "init_session"):
-                self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids))
+                if cached_len == 0:
+                    self._free_session_kv(req.session_id)
+            
+            # Ensure session is registered and metadata initialized at the start of prefill
+            if req.prefill_offset == cached_len:
+                if hasattr(self.wrapper.manager, "init_session"):
+                    self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids))
 
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
 
-            # Progressive Prompt Chunking — process in chunks of 1024 tokens.
-            # Chunk size of 1024 (vs previous 512) reduces chunk count by 2× for
-            # long prompts (e.g. 2540 tokens: 5 chunks → 3 chunks), cutting per-chunk
-            # Python overhead by the same factor. The O(N²) attention cost for 1024
-            # tokens is still well within GPU memory for Qwen2.5-1.5B.
-            # VRAM overhead vs 512: ~4× per-chunk peak activation (fp16 attention)
-            # but this is transient and reclaimed immediately after each chunk.
             chunk_size = 1024
-            L_new = len(new_prompt_ids)
-            out = None
+            offset = req.prefill_offset
+            chunk_ids = req.prompt_ids[offset : offset + chunk_size]
+            actual_len = len(chunk_ids)
 
-            # Pre-allocate a single pinned-memory input buffer (reused across all chunks).
-            # Avoids repeated pin_memory() allocation inside the hot loop — one allocation,
-            # N in-place fills. The transfer to GPU uses non_blocking=True so the CPU does
-            # not spin-wait on DMA completion between chunks.
-            # On macOS (MPS/CPU), pin_memory is not supported or causes storage mismatch errors;
-            # we only use it if the device is CUDA.
+            # Lazy pre-allocation of a single pinned-memory input buffer (reused across all chunks)
             _use_pinned = (self.wrapper.device == "cuda" or 
                            (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
-            if _use_pinned:
-                _input_buf = torch.zeros((1, chunk_size), dtype=torch.long).pin_memory()
-            else:
-                _input_buf = torch.zeros((1, chunk_size), dtype=torch.long)
+            if self._prefill_input_buf is None:
+                if _use_pinned:
+                    self._prefill_input_buf = torch.zeros((1, 1024), dtype=torch.long).pin_memory()
+                else:
+                    self._prefill_input_buf = torch.zeros((1, 1024), dtype=torch.long)
 
-            for offset in range(0, L_new, chunk_size):
-                chunk_ids = new_prompt_ids[offset : offset + chunk_size]
-                chunk_cached_len = cached_len + offset
-                actual_len = len(chunk_ids)
+            # In-place fill of the reusable buffer — zero allocation per chunk
+            self._prefill_input_buf[0, :actual_len] = torch.as_tensor(chunk_ids, dtype=torch.long)
+            input_ids = self._prefill_input_buf[:, :actual_len].to(self.wrapper.device, non_blocking=True)
 
-                # In-place fill of the reusable buffer — zero allocation per chunk
-                _input_buf[0, :actual_len] = torch.as_tensor(chunk_ids, dtype=torch.long)
-                input_ids = _input_buf[:, :actual_len].to(self.wrapper.device, non_blocking=True)
+            position_ids = torch.arange(
+                offset, offset + actual_len,
+                dtype=torch.long, device=self.wrapper.device
+            ).unsqueeze(0)
 
-                position_ids = torch.arange(
-                    chunk_cached_len, chunk_cached_len + actual_len,
-                    dtype=torch.long, device=self.wrapper.device
-                ).unsqueeze(0)
+            with torch.no_grad():
+                out = self.wrapper.model(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    use_cache=True
+                )
 
-                with torch.no_grad():
+            req.prefill_offset += actual_len
+
+            # Double-buffered async compression after each chunk
+            if hasattr(self.wrapper.manager, "compress_prefill_kv"):
+                self.wrapper.manager.compress_prefill_kv(req.session_id)
+
+            if req.prefill_offset >= len(req.prompt_ids):
+                req.is_prefilled = True
+                logits = out.logits[:, -1, :]  # lm_head patch already sliced to last token
+                next_id = self._sample(logits, req)
+                req.generated_ids.append(next_id)
+                self._emit_token(req, next_id, step_start)
+                self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
+
+                # Step 2: Release allocator-held staging buffers
+                self._post_prefill_cleanup()
+                self._log_vram(f"post-prefill session={req.session_id}")
+
+                # ── Compression barrier ──
+                # Wait for all background SVD threads to finish compressing the prefill blocks
+                # before decoding starts
+                await self._wait_for_compression(req.session_id)
+
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    dur_pref = (time.perf_counter() - t0_pref) * 1000
+                    print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
+                    if hasattr(self.wrapper.manager, "log_block_states"):
+                        self.wrapper.manager.log_block_states(req.session_id)
+
+        # ─────────────────────────────────────────────────────────────────
+        # 2. BATCHED DECODE (B >= 1) — CUDA Graph Stability Buckets
+        # ─────────────────────────────────────────────────────────────────
+        if decode_reqs:
+            # Finalize any completed async compressions
+            if hasattr(self.wrapper.manager, "finalize_compressed_blocks"):
+                self.wrapper.manager.finalize_compressed_blocks()
+
+            t0_dec = time.perf_counter()
+            input_ids_list = []
+            position_ids_list = []
+            session_ids = []
+
+            for req in decode_reqs:
+                cur_pos = req.total_seq_len - 1
+                input_ids_list.append([req.generated_ids[-1]])
+                position_ids_list.append([cur_pos])
+                session_ids.append(req.session_id)
+
+            actual_batch_size = len(decode_reqs)
+            
+            # Determine the nearest power of 2 stability bucket size (1, 2, 4, 8, etc.)
+            bucket_size = 1
+            while bucket_size < actual_batch_size:
+                bucket_size *= 2
+                
+            # Pad with dummy request structures if needed to fill the stability bucket shape
+            if actual_batch_size < bucket_size:
+                dummy_req = decode_reqs[-1]
+                dummy_input = [dummy_req.generated_ids[-1]]
+                dummy_pos = [dummy_req.total_seq_len - 1]
+                dummy_sid = "dummy_session"
+                
+                for _ in range(bucket_size - actual_batch_size):
+                    input_ids_list.append(dummy_input)
+                    position_ids_list.append(dummy_pos)
+                    session_ids.append(dummy_sid)
+
+            input_ids = torch.tensor(input_ids_list, dtype=torch.long, device=self.wrapper.device)
+            position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
+
+            # Inject session IDs for this batch decode step
+            self.wrapper.model._diffkv_session_ids = session_ids
+
+            # Wrap the decode loop model call in torch.mps.capture_to_graph on Apple Silicon
+            is_mps = (self.wrapper.device == "mps" or
+                      (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"))
+
+            with torch.no_grad():
+                if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
+                    with torch.mps.capture_to_graph():
+                        out = self.wrapper.model(
+                            input_ids=input_ids,
+                            position_ids=position_ids,
+                            use_cache=True
+                        )
+                else:
                     out = self.wrapper.model(
                         input_ids=input_ids,
                         position_ids=position_ids,
                         use_cache=True
                     )
-                # DO NOT call gc.collect()/empty_cache() here — it was firing once per
-                # 512-token chunk (5× for a 2540-token prompt), costing 500-1000ms of
-                # CUDA-allocator flush overhead. Moved to AFTER the loop.
 
-            req.is_prefilled = True
-            logits = out.logits[:, -1, :]  # lm_head patch already sliced to last token
-            next_id = self._sample(logits, req)
-            req.generated_ids.append(next_id)
-            self._emit_token(req, next_id, step_start)
-            self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
-
-            del _input_buf  # Release the pinned buffer immediately
-
-            # Step 1: Post-prefill batch GPU SVD — compress all captured KV into
-            # the block pool in a single batched operation per layer. Zero PCIe.
-            if hasattr(self.wrapper.manager, "compress_prefill_kv"):
-                self.wrapper.manager.compress_prefill_kv(req.session_id)
-
-            # Step 2: Release allocator-held staging buffers
-            self._post_prefill_cleanup()
-            self._log_vram(f"post-prefill session={req.session_id}")
-
-            # ── Compression barrier ──
-            # Wait for all background SVD threads to finish compressing the prefill blocks
-            # before decoding starts, preventing race conditions where decode reads SUBMITTED
-            # blocks and ignores them, causing severe generation quality issues on long prompts.
-            await self._wait_for_compression(req.session_id)
+            logits = out.logits[:, -1, :]  # shape: [bucket_size, vocab_size]
+            
+            # Extract and sample outputs ONLY for actual active requests
+            for idx in range(actual_batch_size):
+                req = decode_reqs[idx]
+                req_logits = logits[idx : idx + 1]  # shape: [1, vocab_size]
+                next_id = self._sample(req_logits, req)
+                req.generated_ids.append(next_id)
+                self._emit_token(req, next_id, step_start)
+                self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
 
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                dur_pref = (time.perf_counter() - t0_pref) * 1000
-                print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
-                # Emit block state breakdown (ACCUMULATING / SUBMITTED / COMPRESSED)
-                if hasattr(self.wrapper.manager, "log_block_states"):
-                    self.wrapper.manager.log_block_states(req.session_id)
+                dur_dec = (time.perf_counter() - t0_dec) * 1000
+                print(f"[DiffKV Telemetry] Decode Step batch_size={actual_batch_size} bucket_size={bucket_size} duration={dur_dec:.2f}ms")
 
-        if not decode_reqs:
-            return
-
-        # ─────────────────────────────────────────────────────────────────
-        # BATCHED DECODE (B >= 1) — CUDA Graph Stability Buckets (Batch Padding)
-        # ─────────────────────────────────────────────────────────────────
-        t0_dec = time.perf_counter()
-        input_ids_list = []
-        position_ids_list = []
-        session_ids = []
-
-        for req in decode_reqs:
-            cur_pos = req.total_seq_len - 1
-            input_ids_list.append([req.generated_ids[-1]])
-            position_ids_list.append([cur_pos])
-            session_ids.append(req.session_id)
-
-        actual_batch_size = len(decode_reqs)
-        
-        # Determine the nearest power of 2 stability bucket size (1, 2, 4, 8, etc.)
-        bucket_size = 1
-        while bucket_size < actual_batch_size:
-            bucket_size *= 2
-            
-        # Pad with dummy request structures if needed to fill the stability bucket shape
-        if actual_batch_size < bucket_size:
-            dummy_req = decode_reqs[-1]
-            dummy_input = [dummy_req.generated_ids[-1]]
-            dummy_pos = [dummy_req.total_seq_len - 1]
-            dummy_sid = "dummy_session"
-            
-            for _ in range(bucket_size - actual_batch_size):
-                input_ids_list.append(dummy_input)
-                position_ids_list.append(dummy_pos)
-                session_ids.append(dummy_sid)
-
-        input_ids = torch.tensor(input_ids_list, dtype=torch.long, device=self.wrapper.device)
-        position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
-
-        # Inject session IDs for this batch decode step
-        self.wrapper.model._diffkv_session_ids = session_ids
-
-        with torch.no_grad():
-            out = self.wrapper.model(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                use_cache=True
-            )
-
-        logits = out.logits[:, -1, :]  # shape: [bucket_size, vocab_size]
-        
-        # Extract and sample outputs ONLY for actual active requests
-        for idx in range(actual_batch_size):
-            req = decode_reqs[idx]
-            req_logits = logits[idx : idx + 1]  # shape: [1, vocab_size]
-            next_id = self._sample(req_logits, req)
-            req.generated_ids.append(next_id)
-            self._emit_token(req, next_id, step_start)
-            self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
-
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            dur_dec = (time.perf_counter() - t0_dec) * 1000
-            print(f"[DiffKV Telemetry] Decode Step batch_size={actual_batch_size} bucket_size={bucket_size} duration={dur_dec:.2f}ms")
-
-        # Periodic VRAM defragmentation during long decode runs.
-        # empty_cache() was removed from the prefill path to save 100-200ms of TTFT.
-        # We fire it here instead, every 100 decode steps, which is frequent enough
-        # to prevent caching-allocator fragmentation in multi-thousand-token outputs
-        # without blocking any user-visible latency metrics.
-        self.decode_steps_since_gc += 1
-        if self.decode_steps_since_gc >= 100:
-            self.decode_steps_since_gc = 0
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            else:
-                _mps = getattr(torch, "mps", None)
-                if _mps is not None:
-                    _empty = getattr(_mps, "empty_cache", None)
-                    if _empty is not None:
-                        _empty()
+            self.decode_steps_since_gc += 1
+            if self.decode_steps_since_gc >= 100:
+                self.decode_steps_since_gc = 0
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                else:
+                    _mps = getattr(torch, "mps", None)
+                    if _mps is not None:
+                        _empty = getattr(_mps, "empty_cache", None)
+                        if _empty is not None:
+                            _empty()
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
         # Apply repetition penalty over the most recent tokens.

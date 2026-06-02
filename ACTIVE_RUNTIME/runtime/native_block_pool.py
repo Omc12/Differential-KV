@@ -77,34 +77,32 @@ class NativeBlockPool:
         # keep peak spikes small on unified-memory devices.
         self._grow_increment = 128 if _is_mps else 512
 
-        # Allocate pools
+        # Allocate pools (fused contiguous allocation layout)
         self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=device, dtype=self.dtype)
-        self.V_K        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=device, dtype=self.dtype)
-        self.V_V        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=device, dtype=self.dtype)
-        self.anchors_K  = torch.zeros((self.current_blocks, num_kv_heads, head_dim), device=device, dtype=self.dtype)
-        self.anchors_V  = torch.zeros((self.current_blocks, num_kv_heads, head_dim), device=device, dtype=self.dtype)
+        self.V_KV       = torch.zeros((self.current_blocks, 2, rank, num_kv_heads, head_dim), device=device, dtype=self.dtype)
+        self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=device, dtype=self.dtype)
         self.scales     = torch.zeros((self.current_blocks,), device=device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((self.current_blocks,), device=device, dtype=torch.int32)
         
         # Block allocator state
         self._free_indices = list(range(self.current_blocks - 1, -1, -1))
         self._ref_counts = [0] * self.current_blocks
+        self._last_used = [0.0] * self.current_blocks
 
     def _grow_pool(self, increment: int = None):
-        if increment is None:
-            increment = self._grow_increment
         old_blocks = self.current_blocks
         if old_blocks >= self.max_blocks:
             raise RuntimeError(f"NativeBlockPool is out of memory and has reached its absolute maximum limit of {self.max_blocks} blocks!")
         
-        new_blocks = min(self.max_blocks, old_blocks + increment)
+        # Grow directly to max_blocks to eliminate subsequent copies and VRAM spikes
+        new_blocks = self.max_blocks
         added = new_blocks - old_blocks
         if added <= 0:
             return
             
-        num_kv_heads = self.V_K.shape[2]
-        head_dim = self.V_K.shape[3]
-        rank = self.U.shape[2]
+        num_kv_heads = self.V_KV.shape[3]
+        head_dim = self.V_KV.shape[4]
+        rank = self.V_KV.shape[2]
         max_seq_len = self.U.shape[1]
         
         # ── Release old memory BEFORE allocating new tensors ──────────────
@@ -115,33 +113,28 @@ class NativeBlockPool:
         _empty_cache(self.device)
         
         new_U = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
-        new_V_K = torch.zeros((new_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_V_V = torch.zeros((new_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_anchors_K = torch.zeros((new_blocks, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_anchors_V = torch.zeros((new_blocks, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_V_KV = torch.zeros((new_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
         
         new_U[:old_blocks] = self.U
-        new_V_K[:old_blocks] = self.V_K
-        new_V_V[:old_blocks] = self.V_V
-        new_anchors_K[:old_blocks] = self.anchors_K
-        new_anchors_V[:old_blocks] = self.anchors_V
+        new_V_KV[:old_blocks] = self.V_KV
+        new_anchors_KV[:old_blocks] = self.anchors_KV
         new_scales[:old_blocks] = self.scales
         new_seq_lens[:old_blocks] = self.seq_lens
         
         # Explicitly delete old tensors so the allocator can reclaim them
-        del self.U, self.V_K, self.V_V, self.anchors_K, self.anchors_V, self.scales, self.seq_lens
+        del self.U, self.V_KV, self.anchors_KV, self.scales, self.seq_lens
         
         self.U = new_U
-        self.V_K = new_V_K
-        self.V_V = new_V_V
-        self.anchors_K = new_anchors_K
-        self.anchors_V = new_anchors_V
+        self.V_KV = new_V_KV
+        self.anchors_KV = new_anchors_KV
         self.scales = new_scales
         self.seq_lens = new_seq_lens
         
         self._ref_counts.extend([0] * added)
+        self._last_used.extend([0.0] * added)
         self._free_indices.extend(range(new_blocks - 1, old_blocks - 1, -1))
         self.current_blocks = new_blocks
         
@@ -149,19 +142,26 @@ class NativeBlockPool:
         _empty_cache(self.device)
         
     def allocate_block(self) -> int:
-        if not self._free_indices:
+        import time as _time
+        free_indices = [i for i, ref in enumerate(self._ref_counts) if ref == 0]
+        if not free_indices:
             self._grow_pool()
-        idx = self._free_indices.pop()
+            free_indices = [i for i, ref in enumerate(self._ref_counts) if ref == 0]
+        
+        # Select the Least Recently Used (LRU) block based on _last_used
+        idx = min(free_indices, key=lambda i: self._last_used[i])
         self._ref_counts[idx] = 1
+        self._last_used[idx] = _time.time()
+        
+        # Keep _free_indices list in sync for compatibility
+        if idx in self._free_indices:
+            self._free_indices.remove(idx)
         return idx
 
     def allocate_blocks(self, count: int) -> list:
-        while len(self._free_indices) < count:
-            self._grow_pool()
-        allocated = self._free_indices[-count:]
-        del self._free_indices[-count:]
-        for idx in allocated:
-            self._ref_counts[idx] = 1
+        allocated = []
+        for _ in range(count):
+            allocated.append(self.allocate_block())
         return allocated
         
     def increment_ref(self, pool_idx: int):
@@ -169,11 +169,19 @@ class NativeBlockPool:
             self._ref_counts[pool_idx] += 1
 
     def free_block(self, pool_idx: int):
+        import time as _time
         if pool_idx is not None and 0 <= pool_idx < self.current_blocks:
             self._ref_counts[pool_idx] -= 1
             if self._ref_counts[pool_idx] <= 0:
                 self._ref_counts[pool_idx] = 0
-                self._free_indices.append(pool_idx)
+                self._last_used[pool_idx] = _time.time() # Mark freed time as last used
+                if pool_idx not in self._free_indices:
+                    self._free_indices.append(pool_idx)
+
+    def touch_block(self, pool_idx: int):
+        import time as _time
+        if pool_idx is not None and 0 <= pool_idx < self.current_blocks:
+            self._last_used[pool_idx] = _time.time()
         
     def write_block(
         self, 
@@ -218,23 +226,39 @@ class NativeBlockPool:
         self.current_blocks = self.initial_blocks
         self._free_indices = list(range(self.current_blocks - 1, -1, -1))
         self._ref_counts = [0] * self.current_blocks
+        self._last_used = [0.0] * self.current_blocks
         
-        num_kv_heads = self.V_K.shape[2]
-        head_dim = self.V_K.shape[3]
-        rank = self.U.shape[2]
+        num_kv_heads = self.V_KV.shape[3]
+        head_dim = self.V_KV.shape[4]
+        rank = self.V_KV.shape[2]
         max_seq_len = self.U.shape[1]
         
-        del self.U, self.V_K, self.V_V, self.anchors_K, self.anchors_V, self.scales, self.seq_lens
+        del self.U, self.V_KV, self.anchors_KV, self.scales, self.seq_lens
         gc.collect()
         _empty_cache(self.device)
         
         self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
-        self.V_K        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        self.V_V        = torch.zeros((self.current_blocks, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        self.anchors_K  = torch.zeros((self.current_blocks, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        self.anchors_V  = torch.zeros((self.current_blocks, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        self.V_KV       = torch.zeros((self.current_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((self.current_blocks,), device=self.device, dtype=torch.int32)
         
         gc.collect()
         _empty_cache(self.device)
+
+    # Contiguous property views for backward-compatibility with callers/kernels
+    @property
+    def V_K(self):
+        return self.V_KV[:, 0]
+
+    @property
+    def V_V(self):
+        return self.V_KV[:, 1]
+
+    @property
+    def anchors_K(self):
+        return self.anchors_KV[:, 0]
+
+    @property
+    def anchors_V(self):
+        return self.anchors_KV[:, 1]

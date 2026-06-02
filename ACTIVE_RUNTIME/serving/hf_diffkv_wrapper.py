@@ -293,6 +293,28 @@ class DiffKVHFWrapper:
         # Compress and ingest captured prefill KV
         if hasattr(self.manager, "compress_prefill_kv"):
             self.manager.compress_prefill_kv(session_id)
+
+        # Wait for background SVD compression to complete before decoding starts
+        if hasattr(self.manager, "_streaming_mgr") and self.manager._streaming_mgr is not None:
+            import time as _time
+            _barrier_deadline = _time.monotonic() + 8.0
+            while _time.monotonic() < _barrier_deadline:
+                if hasattr(self.manager, "finalize_compressed_blocks"):
+                    self.manager.finalize_compressed_blocks()
+                
+                found_submitted = False
+                blocks = self.manager._streaming_mgr.session_blocks.get(session_id, {})
+                for layer_idx, blks in blocks.items():
+                    for b in blks:
+                        if getattr(b, "state", None) in ("SUBMITTED", "CPU_COMPRESSED"):
+                            found_submitted = True
+                            break
+                    if found_submitted:
+                        break
+                if not found_submitted:
+                    break
+                _time.sleep(0.005)
+
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
 
@@ -345,12 +367,31 @@ class DiffKVHFWrapper:
             # this the model would wrongly use position 0 for every decode token.
             pos_tensor = torch.tensor([[cur_pos]], dtype=torch.long, device=self.device)
             input_ids = next_id.unsqueeze(0)
-            outputs = self.model(
-                input_ids=input_ids,
-                position_ids=pos_tensor,
-                past_key_values=past_kv,
-                use_cache=True,
-            )
+
+            # Finalize any completed CPU background compressions
+            if hasattr(self.manager, "finalize_compressed_blocks"):
+                self.manager.finalize_compressed_blocks()
+
+            # Wrap decode forward in capture_to_graph on MPS
+            is_mps = (self.device == "mps" or
+                      (isinstance(self.device, torch.device) and self.device.type == "mps"))
+
+            if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
+                with torch.mps.capture_to_graph():
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        position_ids=pos_tensor,
+                        past_key_values=past_kv,
+                        use_cache=True,
+                    )
+            else:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    position_ids=pos_tensor,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
+
             logits = outputs.logits[:, -1, :]
             past_kv = outputs.past_key_values
             cur_pos += 1

@@ -7,8 +7,6 @@ Verifies:
 2. Cosine similarity: The semantic output is highly aligned (> 0.99) with dense attention.
 3. FLOP reduction and execution summary are logged correctly.
 """
-
-import pytest
 import torch
 import torch.nn.functional as F
 import math
@@ -19,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from runtime.sparse_prefill import RetrievalAwareSparsePrefill
 
 def test_sparse_prefill():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # Dimensions: 1 batch, 8 heads, 2048 seq_len, 128 head_dim
     BSZ = 1

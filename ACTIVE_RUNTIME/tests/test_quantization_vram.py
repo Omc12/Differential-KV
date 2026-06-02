@@ -9,7 +9,6 @@ Verifies:
 4. Out-of-memory guards work perfectly.
 """
 
-import pytest
 import torch
 import sys
 import os
@@ -18,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from runtime.native_block_pool import NativeBlockPool
 
 def test_growable_block_pool():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # 1. Initialize with lightweight initial_blocks
     pool = NativeBlockPool(
@@ -57,9 +56,13 @@ def test_growable_block_pool():
     assert len(pool._free_indices) == 0
     
     # 5. Attempting to allocate beyond max_blocks should raise RuntimeError guard
-    with pytest.raises(RuntimeError) as excinfo:
+    raised = False
+    try:
         pool.allocate_block()
-    assert "absolute maximum limit" in str(excinfo.value)
+    except RuntimeError as e:
+        raised = True
+        assert "absolute maximum limit" in str(e)
+    assert raised, "Expected RuntimeError, but none was raised"
     
     # 6. Reset the pool and verify VRAM shrinkage
     pool.reset()
