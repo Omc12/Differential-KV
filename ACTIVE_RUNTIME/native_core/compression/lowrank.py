@@ -3,12 +3,23 @@ compression/lowrank.py — Phase 3 Stage A
 
 Low-rank delta representation for KV cache compression.
 ΔKV ≈ U @ V.T  where U=[n_deltas, rank], V=[rank, feat_dim]
+
+Mac/MPS: when MLX is installed, uses mlx_svd_lowrank() for rSVD on the
+Apple Neural Engine / GPU via unified memory — significantly faster than
+PyTorch CPU for large blocks.  Falls back to PyTorch rSVD if MLX fails.
 """
 
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import torch
+
+try:
+    from native_core.mac_utils import mlx_svd_lowrank as _mlx_svd, mlx_available as _mlx_available, has_cuda as _has_cuda
+except ImportError:
+    def _mlx_svd(*a, **kw): return None
+    def _mlx_available(): return False
+    def _has_cuda(): return torch.cuda.is_available()
 
 
 @dataclass
@@ -84,36 +95,44 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
     # --- Phase 36 Randomized SVD (rSVD) with Graceful Fallback ---
+    # On Apple Silicon without CUDA, try MLX-accelerated rSVD first.
     U, S, Vh = None, None, None
     svd_success = False
-    
-    try:
-        # Oversampling parameter and power iterations
-        n_oversamples = 5
-        n_iter = 2
-        r_proj = min(rank + n_oversamples, n, d)
-        
-        # 1. Generate random Gaussian projection matrix
-        Omega = torch.randn(d, r_proj, dtype=torch.float32)
-        
-        # 2. Form sample matrix Y with power iterations for stable subspace capture
-        Y = x @ Omega
-        for _ in range(n_iter):
-            Y = x @ (x.T @ Y)
+
+    if _mlx_available() and not _has_cuda():
+        mlx_result = _mlx_svd(x, rank, n_oversamples=5, n_iter=2)
+        if mlx_result is not None:
+            U, S, Vh = mlx_result
+            svd_success = True
+
+    if not svd_success:
+        try:
+            # Oversampling parameter and power iterations
+            n_oversamples = 5
+            n_iter = 2
+            r_proj = min(rank + n_oversamples, n, d)
             
-        # 3. Orthogonalize Y to find orthonormal basis Q
-        Q, _ = torch.linalg.qr(Y, mode="reduced")
-        
-        # 4. Project original matrix onto low-rank subspace Q
-        B = Q.T @ x
-        
-        # 5. Perform standard SVD on the much smaller matrix B
-        U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)
-        U = Q @ U_b
-        svd_success = True
-    except Exception:
-        # Graceful fallback to standard CPU SVD if randomized step fails
-        pass
+            # 1. Generate random Gaussian projection matrix
+            Omega = torch.randn(d, r_proj, dtype=torch.float32)
+            
+            # 2. Form sample matrix Y with power iterations for stable subspace capture
+            Y = x @ Omega
+            for _ in range(n_iter):
+                Y = x @ (x.T @ Y)
+                
+            # 3. Orthogonalize Y to find orthonormal basis Q
+            Q, _ = torch.linalg.qr(Y, mode="reduced")
+            
+            # 4. Project original matrix onto low-rank subspace Q
+            B = Q.T @ x
+            
+            # 5. Perform standard SVD on the much smaller matrix B
+            U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)
+            U = Q @ U_b
+            svd_success = True
+        except Exception:
+            # Graceful fallback to standard CPU SVD if randomized step fails
+            pass
 
     if not svd_success:
         try:
@@ -126,12 +145,12 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
             )
 
     # --- Phase 36 Energy-Preserving Dynamic Rank Selection ---
-    total_energy = (S**2).sum().item()
+    total_energy = (S ** 2).sum().item()
     k = rank
     if total_energy > 1e-9:
-        cum_energy = torch.cumsum(S**2, dim=0)
-        threshold = 0.98 * total_energy  # Retain 98% energy
-        idx = torch.where(cum_energy >= threshold)[0]
+        cum = torch.cumsum(S ** 2, dim=0)
+        threshold = 0.999 * total_energy
+        idx = torch.where(cum >= threshold)[0]
         if idx.numel() > 0:
             k = max(4, min(int(idx[0].item() + 1), rank))
 
@@ -337,7 +356,7 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         k = rank
         if tot > 1e-9:
             cum = torch.cumsum(S_cpu[i] ** 2, dim=0)
-            threshold = 0.98 * tot
+            threshold = 0.999 * tot
             idx = torch.where(cum >= threshold)[0]
             if idx.numel() > 0:
                 k = max(4, min(int(idx[0].item() + 1), rank))

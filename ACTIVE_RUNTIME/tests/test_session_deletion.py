@@ -10,7 +10,6 @@ Verifies:
 import os
 import sys
 import torch
-import pytest
 import asyncio
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -22,7 +21,12 @@ async def test_session_deletion():
     
     MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
     print(f"\n[Test Session Deletion] Initializing model {MODEL}...")
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 8}, device="cuda")
+    try:
+        from native_core.mac_utils import get_best_device
+        device = get_best_device()
+    except ImportError:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 8}, device=device)
     kv_mgr = wrapper.manager
     pool = kv_mgr.native_pool
     
@@ -99,7 +103,10 @@ async def test_session_deletion():
     # Flush GPU cache and collect garbage
     import gc
     gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, "mps") and torch.mps.is_available():
+        torch.mps.empty_cache()
     
     final_free_blocks = len(pool._free_indices)
     print(f"Final free block slots: {final_free_blocks}")

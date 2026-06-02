@@ -4,10 +4,20 @@ runtime/triton_diffkv.py
 Triton-optimized fused reconstruction kernels for Differential KV.
 Provides maximum memory bandwidth efficiency for DeltaKV = U @ V.T + anchor.
 Falls back to pure-PyTorch on any system where Triton is unavailable.
+
+Mac/MPS: Triton is CUDA-only; the PyTorch fallback is always used on Apple Silicon.
+NVTX tracing is replaced with mac_utils no-op shims on non-CUDA platforms.
 """
 
 import torch
 from typing import Optional
+
+try:
+    from native_core.mac_utils import nvtx_push as _nvtx_push, nvtx_pop as _nvtx_pop, has_cuda as _has_cuda
+except ImportError:
+    def _nvtx_push(label, device=None): pass
+    def _nvtx_pop(device=None): pass
+    def _has_cuda(): return torch.cuda.is_available()
 
 try:
     import triton
@@ -103,9 +113,9 @@ def triton_fused_reconstruct(
 
     grid = (triton.cdiv(n_tokens, BLOCK_SIZE_N), triton.cdiv(feat_dim, BLOCK_SIZE_D))
 
-    _use_nvtx = torch.cuda.is_available()
+    _use_nvtx = _has_cuda()
     if _use_nvtx:
-        torch.cuda.nvtx.range_push("Triton_LowRank_Recon_Kernel_Launch")
+        _nvtx_push("Triton_LowRank_Recon_Kernel_Launch")
 
     lowrank_recon_kernel[grid](
         U, V, anchor, out,
@@ -120,7 +130,7 @@ def triton_fused_reconstruct(
     )
 
     if _use_nvtx:
-        torch.cuda.nvtx.range_pop()
+        _nvtx_pop()
 
     return out
 

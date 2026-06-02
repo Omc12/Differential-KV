@@ -73,14 +73,29 @@ class ContinuousBatchEngine:
         """
         import gc
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        else:
+            # Safe Apple Silicon / MPS fallback
+            _mps = getattr(torch, "mps", None)
+            if _mps is not None:
+                _empty = getattr(_mps, "empty_cache", None)
+                _sync = getattr(_mps, "synchronize", None)
+                if _empty is not None:
+                    _empty()
+                if _sync is not None:
+                    _sync()
         
         if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved  = torch.cuda.memory_reserved()  / 1024**3
-            print(f"[DiffKV] Post-prefill: {allocated:.2f}GB allocated, "
-                  f"{reserved:.2f}GB reserved")
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved  = torch.cuda.memory_reserved()  / 1024**3
+                print(f"[DiffKV] Post-prefill: {allocated:.2f}GB allocated, "
+                      f"{reserved:.2f}GB reserved")
+            else:
+                print(f"[DiffKV] Post-prefill cleanup completed (non-CUDA platform).")
 
     # ── Compression barrier ─────────────────────────────────────────────
 
@@ -351,7 +366,14 @@ class ContinuousBatchEngine:
             # Avoids repeated pin_memory() allocation inside the hot loop — one allocation,
             # N in-place fills. The transfer to GPU uses non_blocking=True so the CPU does
             # not spin-wait on DMA completion between chunks.
-            _input_buf = torch.zeros((1, chunk_size), dtype=torch.long).pin_memory()
+            # On macOS (MPS/CPU), pin_memory is not supported or causes storage mismatch errors;
+            # we only use it if the device is CUDA.
+            _use_pinned = (self.wrapper.device == "cuda" or 
+                           (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
+            if _use_pinned:
+                _input_buf = torch.zeros((1, chunk_size), dtype=torch.long).pin_memory()
+            else:
+                _input_buf = torch.zeros((1, chunk_size), dtype=torch.long)
 
             for offset in range(0, L_new, chunk_size):
                 chunk_ids = new_prompt_ids[offset : offset + chunk_size]
@@ -480,7 +502,14 @@ class ContinuousBatchEngine:
         self.decode_steps_since_gc += 1
         if self.decode_steps_since_gc >= 100:
             self.decode_steps_since_gc = 0
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            else:
+                _mps = getattr(torch, "mps", None)
+                if _mps is not None:
+                    _empty = getattr(_mps, "empty_cache", None)
+                    if _empty is not None:
+                        _empty()
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
         # Apply repetition penalty over the most recent tokens.

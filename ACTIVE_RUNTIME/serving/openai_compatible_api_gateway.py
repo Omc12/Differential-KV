@@ -49,6 +49,23 @@ class OpenAICompatibleAPIGateway:
                 resolver.start()
                 print("Continuous Batching Engine started.")
 
+            # Start background session cleanup task to prevent VRAM / block pool depletion
+            cleanup_task = None
+            if session_manager is not None:
+                import asyncio
+                async def _cleanup_loop():
+                    while True:
+                        try:
+                            # Prune idle sessions every 60 seconds.
+                            # Timeout is 1800 seconds (30 minutes).
+                            await asyncio.sleep(60)
+                            session_manager.cleanup_idle_sessions(idle_timeout_seconds=1800)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            print(f"[DiffKV Cleanup] Error during idle cleanup: {e}")
+                cleanup_task = asyncio.create_task(_cleanup_loop())
+
             # ── torch.compile warmup pass ────────────────────────────────────
             # Pre-trigger JIT compilation for the standard 512-token chunk size
             # so the first real user request doesn't absorb 30-60s of compile time.
@@ -84,6 +101,13 @@ class OpenAICompatibleAPIGateway:
                 asyncio.create_task(_warmup())
 
             yield
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                try:
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    pass
+
             if hasattr(resolver, 'stop'):
                 await resolver.stop()
                 print("Continuous Batching Engine stopped.")
@@ -236,7 +260,12 @@ class OpenAICompatibleAPIGateway:
 
         @self.app.get("/v1/runtime_info")
         async def runtime_info():
-            vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+            import torch as _t
+            _cuda_avail = _t.cuda.is_available()
+            _mps_avail  = (
+                hasattr(_t.backends, "mps") and _t.backends.mps.is_available()
+            )
+            vram_gb = _t.cuda.memory_allocated() / 1024**3 if _cuda_avail else 0
             serving_mode = "balanced"
             model_id = "diffkv-serving"
             if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
@@ -245,7 +274,8 @@ class OpenAICompatibleAPIGateway:
                 model_id = getattr(w, "model_id", model_id)
             return {
                 "vram_allocated_gb": round(vram_gb, 3),
-                "cuda_available":    torch.cuda.is_available(),
+                "cuda_available":    _cuda_avail,
+                "mps_available":     _mps_avail,
                 "sampling_mode":     "temperature+top_p+repetition_penalty",
                 "streaming_mode":    "phrase_group_chunked",
                 "serving_mode":      serving_mode,
@@ -435,6 +465,13 @@ def main():
     print(f'Loading DiffKV runtime with model: {args.model}...')
     print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
     print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
+    # Auto-detect best device: CUDA → MPS (Apple Silicon) → CPU
+    try:
+        from native_core.mac_utils import get_best_device as _gbd
+        _best_device = _gbd()
+    except ImportError:
+        _best_device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f'[DiffKV] Auto-selected device: {_best_device}')
     wrapper = DiffKVHFWrapper(
         args.model,
         config={
@@ -442,7 +479,7 @@ def main():
             'micro_block_size': args.micro_block_size,
             'serving_mode': args.serving_mode,
         },
-        device='cuda',
+        device=_best_device,
         quantization_config=quantization_config,
     )
     

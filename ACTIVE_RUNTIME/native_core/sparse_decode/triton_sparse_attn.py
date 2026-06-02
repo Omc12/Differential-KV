@@ -17,6 +17,7 @@ Key hardware efficiency wins:
 
 import torch
 import math
+import os
 from typing import Optional
 
 try:
@@ -251,8 +252,12 @@ def _pytorch_vectorized_sparse_attn_decode(
     num_key_value_groups: int,
     R:                    int = 16,
     S_MAX:                int = 64,
+    anchor_indices:       Optional[torch.Tensor] = None,
+    cos:                  Optional[torch.Tensor] = None,
+    sin:                  Optional[torch.Tensor] = None,
+    total_seq_len:        int = 0,
 ) -> torch.Tensor:
-    """Highly-parallelized pure PyTorch low-rank Project-Then-Attend math decoder."""
+    """Highly-parallelized pure PyTorch low-rank SVD unrotated math decoder with dynamic RoPE."""
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1, "Decode only"
     
@@ -276,79 +281,127 @@ def _pytorch_vectorized_sparse_attn_decode(
         new_shape = shape[:dim] + [val * n_rep] + shape[dim + 1:]
         return t.reshape(*new_shape)
 
+    def rotate_half(x):
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
     N = block_indices.shape[0] if block_indices is not None else 0
     block_capacity = 0
+    
+    diagnostics = (os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1")
+    
+    if diagnostics:
+        print(f"\n--- [DiffKV Decode Diagnostic] N={N} ---")
+        print(f"  q: shape={q.shape} min={q.min().item():.4f} max={q.max().item():.4f} mean={q.mean().item():.4f}")
     
     if N > 0:
         indices = block_indices.long()
         U = pool.U[indices]                                     # [N, block_capacity, R]
         block_capacity = U.shape[1]
-        # Pool shapes:
-        # V_K: [max_blocks, R, H_kv, D] -> slice: [N, R, H_kv, D] -> repeat at dim 2 (which is H_kv)
-        # V_V: [max_blocks, R, H_kv, D] -> slice: [N, R, H_kv, D] -> repeat at dim 2
-        # anchors_K: [max_blocks, H_kv, D] -> slice: [N, H_kv, D] -> repeat at dim 1 (which is H_kv, or dim -2)
+        
         V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)           # [N, R, H_q, D]
         V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)           # [N, R, H_q, D]
         anchors_K = repeat_kv_at_dim(pool.anchors_K[indices], num_key_value_groups, dim=1) # [N, H_q, D]
         anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1) # [N, H_q, D]
-        scales = pool.scales[indices].view(N, 1, 1)             # [N, 1, 1]
-        # Keep seq_lens on GPU — used directly for the sequence length mask below
+        scales = pool.scales[indices].view(N, 1, 1)             # [N, 1, 1] (3D representation)
         seq_lens_t = pool.seq_lens[indices]                      # [N] int32, on GPU
 
         # Clamp block_capacity to the maximum actually-used slot across all blocks.
-        # pool.U is padded to max_seq_len (256) but most blocks use only 2-32 slots.
-        # This cuts the N×S einsum by up to 8× for short blocks (S=32 vs S=256).
         max_valid_len = int(seq_lens_t.max().item())             # CPU scalar — single int
         block_capacity = min(block_capacity, max(max_valid_len, 1))
         
-        # ── 1. Anchor scores: [N, H_q] ──
-        # dot(q, anchors_K) * inv_scale
-        # q_sq is [H_q, D], anchors_K is [N, H_q, D]
-        scores_anchor = torch.sum(q_sq.unsqueeze(0) * anchors_K, dim=-1) * inv_scale # [N, H_q]
+        # ── 1. Reconstruct Unrotated Keys in Parallel (Full Block: Anchor + Deltas) ──
+        deltas_k = torch.einsum('nsr,nrhd->nshd', U[:, :block_capacity, :].float(), V_K.float()).to(q.dtype) * scales.unsqueeze(-1)
+        zeros_pad = torch.zeros((N, 1, H_q, D), dtype=q.dtype, device=q.device)
+        deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
+        K_unrot_full = anchors_K.unsqueeze(1) + deltas_k_full
         
-        # ── 2. Project Query onto low-rank subspace: [N, R, H_q] ──
-        # dot(q, V_K^T) * inv_scale
-        # q_sq is [H_q, D], V_K is [N, R, H_q, D]
-        q_proj = torch.sum(q_sq.unsqueeze(0).unsqueeze(1) * V_K, dim=-1) * inv_scale # [N, R, H_q]
+        # ── 2. Construct Absolute Position IDs and Slice cos/sin ──
+        if anchor_indices is None:
+            anchor_indices = torch.zeros(N, dtype=torch.long, device=q.device)
+        positions = anchor_indices.view(N, 1) + torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity)
+        positions_flat = positions.view(-1)
         
-        # ── 3. Delta scores: [N, block_capacity, H_q] ──
-        # Only compute up to block_capacity (clamped to max_valid_len) — not full pool padding
-        scores_delta = torch.einsum('nsr,nrh->nsh', U[:, :block_capacity, :].float(), q_proj.float()).to(q.dtype) * scales # [N, S, H_q]
+        if cos is None or sin is None:
+            cos_sliced = torch.ones((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
+            sin_sliced = torch.zeros((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
+        else:
+            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+            cos_sliced = cos_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
+            sin_sliced = sin_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
         
-        # Total scores for compressed blocks
-        scores_block = scores_anchor.unsqueeze(1) + scores_delta # [N, block_capacity, H_q]
+        if diagnostics:
+            print(f"  block_capacity clamping: max_valid_len={max_valid_len} -> capacity={block_capacity}")
+            print(f"  U (clamped): min={U[:, :block_capacity].min().item():.4f} max={U[:, :block_capacity].max().item():.4f} mean={U[:, :block_capacity].mean().item():.4f}")
+            print(f"  V_K: min={V_K.min().item():.4f} max={V_K.max().item():.4f} mean={V_K.mean().item():.4f}")
+            print(f"  V_V: min={V_V.min().item():.4f} max={V_V.max().item():.4f} mean={V_V.mean().item():.4f}")
+            print(f"  anchors_K: min={anchors_K.min().item():.4f} max={anchors_K.max().item():.4f} mean={anchors_K.mean().item():.4f}")
+            print(f"  anchors_V: min={anchors_V.min().item():.4f} max={anchors_V.max().item():.4f} mean={anchors_V.mean().item():.4f}")
+            print(f"  scales: min={scales.min().item():.4f} max={scales.max().item():.4f} mean={scales.mean().item():.4f}")
+
+
+        # ── 3. Apply RoPE to Reconstructed Keys ──
+        K_rot_full = (K_unrot_full * cos_sliced) + (rotate_half(K_unrot_full) * sin_sliced)
         
-        # ── 4. Sequence masking — in-place masked_fill_ avoids allocating a new -inf tensor ──
-        mask = torch.arange(block_capacity, device=q.device).view(1, block_capacity, 1) >= seq_lens_t.view(N, 1, 1)
-        scores_block = scores_block.masked_fill(mask, float('-inf'))
+        # ── 4. Compute Scores Directly in Rotated Space ──
+        scores_block_full = torch.sum(q_sq.view(1, 1, H_q, D) * K_rot_full, dim=-1) * inv_scale # [N, 1 + block_capacity, H_q]
         
+        # ── 5. Sequence masking ──
+        mask = torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity, 1) >= (1 + seq_lens_t).view(N, 1, 1)
+        scores_block_full = scores_block_full.masked_fill(mask.expand_as(scores_block_full), float('-inf'))
+        
+        scores_anchor = scores_block_full[:, 0, :] # [N, H_q]
+        
+        if diagnostics:
+            print(f"  scores_anchor: min={scores_anchor.min().item():.4f} max={scores_anchor.max().item():.4f} mean={scores_anchor.mean().item():.4f}")
+            print(f"  scores_block (masked): min={scores_block_full[~mask.expand_as(scores_block_full)].min().item():.4f} max={scores_block_full[~mask.expand_as(scores_block_full)].max().item():.4f} mean={scores_block_full[~mask.expand_as(scores_block_full)].mean().item():.4f}")
+
         # Reshape/transpose scores for global concatenation
         scores_anchor = scores_anchor.transpose(0, 1) # [H_q, N]
-        scores_compressed = scores_block.permute(2, 0, 1).reshape(H_q, N * block_capacity) # [H_q, N * block_capacity]
+        scores_compressed = scores_block_full[:, 1:, :].permute(2, 0, 1).reshape(H_q, N * block_capacity) # [H_q, N * block_capacity]
     else:
         scores_anchor = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
         scores_compressed = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
 
-    # ── 5. Dense tokens collection ──
+    # ── 6. Dense tokens collection and dynamic RoPE application ──
     dense_k_parts = []
     dense_v_parts = []
-    for blk in (dense_blocks or []):
-        dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2)) # [1, H_kv, 1, D]
-        dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
-        if blk.active_k is not None:
-            dense_k_parts.append(blk.active_k)
-            dense_v_parts.append(blk.active_v)
-            
+    
     if active_k is not None and active_k.shape[2] > 0:
+        # Pre-assembled contiguous workspace (high-performance decode path)
         dense_k_parts.append(active_k)
         dense_v_parts.append(active_v)
+    else:
+        # Fallback block-by-block collection (e.g. from tests or Triton fallbacks)
+        for blk in (dense_blocks or []):
+            dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2)) # [1, H_kv, 1, D]
+            dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
+            if blk.active_k is not None:
+                dense_k_parts.append(blk.active_k)
+                dense_v_parts.append(blk.active_v)
 
     if dense_k_parts:
         full_k = torch.cat(dense_k_parts, dim=2)
         full_v = torch.cat(dense_v_parts, dim=2)
-        k_dense_rep = repeat_kv_at_dim(full_k, num_key_value_groups, dim=1) # [1, H_q, S_dense, D] -> repeat at dim 1 (H_kv)
-        v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1) # [1, H_q, S_dense, D] -> repeat at dim 1 (H_kv)
-        S_dense = k_dense_rep.shape[2]
+        
+        S_dense = full_k.shape[2]
+        if dense_blocks:
+            dense_positions_list = []
+            for blk in dense_blocks:
+                dense_positions_list.extend(blk.token_indices)
+            dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=q.device)
+        else:
+            dense_positions = torch.arange(total_seq_len - S_dense, total_seq_len, device=q.device)
+        
+        cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
+        sin_dense = sin[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
+        
+        full_k_rot = (full_k * cos_dense) + (rotate_half(full_k) * sin_dense)
+        
+        k_dense_rep = repeat_kv_at_dim(full_k_rot, num_key_value_groups, dim=1) # [1, H_q, S_dense, D]
+        v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1) # [1, H_q, S_dense, D]
         scores_dense = torch.sum(q * k_dense_rep, dim=-1).squeeze(0) * inv_scale # [H_q, S_dense]
     else:
         S_dense = 0
@@ -357,6 +410,9 @@ def _pytorch_vectorized_sparse_attn_decode(
     # ── 6. Global Softmax ──
     # scores_all shape: [H_q, total_tokens]
     scores_all = torch.cat([scores_anchor, scores_compressed, scores_dense], dim=-1)
+    
+    if diagnostics:
+        print(f"  scores_anchor shape={scores_anchor.shape} compressed shape={scores_compressed.shape} dense shape={scores_dense.shape} all shape={scores_all.shape}")
     
     # CRITICAL: Only sanitize NaN and +Inf — NEVER convert -inf to a finite value!
     # -inf entries are the intentional padding mask from sequence length gating.
@@ -398,6 +454,14 @@ def _pytorch_vectorized_sparse_attn_decode(
 
         # Delta contribution from low-rank compressed values
         O_delta = torch.einsum('nhr,nrhd->nhd', P_U, V_V.float()) * scales.float()  # [N, H_q, D]
+        
+        if diagnostics:
+            print(f"  P_comp_reshaped: min={P_comp_reshaped.min().item():.4f} max={P_comp_reshaped.max().item():.4f} mean={P_comp_reshaped.mean().item():.4f}")
+            print(f"  P_U: min={P_U.min().item():.4f} max={P_U.max().item():.4f} mean={P_U.mean().item():.4f}")
+            print(f"  p_total_anchor: min={p_total_anchor.min().item():.4f} max={p_total_anchor.max().item():.4f} mean={p_total_anchor.mean().item():.4f}")
+            print(f"  O_anchor_fused: min={O_anchor_fused.min().item():.4f} max={O_anchor_fused.max().item():.4f} mean={O_anchor_fused.mean().item():.4f}")
+            print(f"  O_delta: min={O_delta.min().item():.4f} max={O_delta.max().item():.4f} mean={O_delta.mean().item():.4f}")
+
         O_final = O_final + O_delta.sum(0).to(q.dtype)
 
     # 7.3. Dense contribution
@@ -406,7 +470,15 @@ def _pytorch_vectorized_sparse_attn_decode(
         # P_dense is [H_q, S_dense]
         # O_dense_total is [H_q, D]
         O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1) # [H_q, D]
+        
+        if diagnostics:
+            print(f"  P_dense: min={P_dense.min().item():.4f} max={P_dense.max().item():.4f} mean={P_dense.mean().item():.4f}")
+            print(f"  O_dense_total: min={O_dense_total.min().item():.4f} max={O_dense_total.max().item():.4f} mean={O_dense_total.mean().item():.4f}")
+            
         O_final = O_final + O_dense_total.to(q.dtype)
+
+    if diagnostics:
+        print(f"  O_final: min={O_final.min().item():.4f} max={O_final.max().item():.4f} mean={O_final.mean().item():.4f}")
 
     return O_final.unsqueeze(0).unsqueeze(2)
 
@@ -421,6 +493,10 @@ def native_triton_sparse_attn_decode(
     num_key_value_groups: int,
     R:                    int = 16,
     S_MAX:                int = 64,
+    anchor_indices:       Optional[torch.Tensor] = None,
+    cos:                  Optional[torch.Tensor] = None,
+    sin:                  Optional[torch.Tensor] = None,
+    total_seq_len:        int = 0,
 ) -> torch.Tensor:
     """
     Python wrapper for the Phase 10 Native Block Table Triton kernel.
@@ -432,7 +508,8 @@ def native_triton_sparse_attn_decode(
     
     if not HAS_TRITON:
         return _pytorch_vectorized_sparse_attn_decode(
-            q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX
+            q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
+            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len
         )
         
     inv_scale = 1.0 / math.sqrt(D)
@@ -588,9 +665,11 @@ def native_triton_sparse_attn_decode(
                 print(f"[DiffKV] WARNING: Triton compilation or execution failed: {e}. Falling back to zero-compile PyTorch vectorized low-rank decoder.")
                 native_triton_sparse_attn_decode.fallback_fired = True
             return _pytorch_vectorized_sparse_attn_decode(
-                q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX
+                q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
+                anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len
             )
     else:
         return _pytorch_vectorized_sparse_attn_decode(
-            q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX
+            q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
+            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len
         )

@@ -25,6 +25,21 @@ from native_core.paging.paged_kv_store import PagedKVStore
 from native_core.recon_cache import ReconstructionCache
 from native_core.compression.async_compressor import AsyncCompressor
 
+try:
+    from native_core.mac_utils import (
+        get_best_device as _get_best_device,
+        empty_cache as _empty_cache,
+        synchronize as _synchronize,
+        has_cuda as _has_cuda,
+    )
+except ImportError:
+    def _get_best_device(): return "cuda" if torch.cuda.is_available() else "cpu"
+    def _empty_cache(device=None):
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+    def _synchronize(device=None):
+        if torch.cuda.is_available(): torch.cuda.synchronize()
+    def _has_cuda(): return torch.cuda.is_available()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KVBlock definition (unchanged)
@@ -111,7 +126,7 @@ class KVRuntimeManager:
         num_layers:          int,
         heads:               int,
         head_dim:            int,
-        device:              str   = "cuda",
+        device:              str   = None,  # None → auto-detect (CUDA / MPS / CPU)
         gpu_budget_gb:       float = 2.0,
         recon_cache_size:    int   = 64,
         async_compression:   bool  = True,
@@ -125,7 +140,7 @@ class KVRuntimeManager:
         self.heads       = heads
         self.kv_heads    = kv_heads if kv_heads is not None else heads
         self.head_dim    = head_dim
-        self.device      = device
+        self.device      = device if device is not None else _get_best_device()
         self.feat_dim    = 2 * self.kv_heads * head_dim
 
         # session_id -> layer_idx -> List[KVBlock]
@@ -180,15 +195,15 @@ class KVRuntimeManager:
         avg_block_sz = 64
         n_blocks_per_layer = expected_tokens // avg_block_sz
         
-        # Sum of compressed blocks across all layers
-        total_expected_blocks = n_blocks_per_layer * self.num_layers
+        # Sum of compressed blocks across all layers, scaled by 6 to support multi-session serving
+        total_expected_blocks = n_blocks_per_layer * self.num_layers * 6
         pool_budget_bytes = int(total_expected_blocks * bytes_per_block * 1.5)  # 50% safety headroom
         
-        # Clamp pool between 128MB and 2.0GB
-        pool_budget_bytes = max(128 * 1024 ** 2, min(2 * 1024 ** 3, pool_budget_bytes))
+        # Clamp pool between 128MB and 4.0GB (generous limit for multi-session serving)
+        pool_budget_bytes = max(128 * 1024 ** 2, min(4 * 1024 ** 3, pool_budget_bytes))
         
-        min_blocks = 1024 if self.serving_mode == "lightweight" else (2048 if self.serving_mode == "balanced" else 4000)
-        dynamic_max_blocks = max(min_blocks, min(24000, pool_budget_bytes // bytes_per_block))
+        min_blocks = 2048 if self.serving_mode == "lightweight" else (4096 if self.serving_mode == "balanced" else 8000)
+        dynamic_max_blocks = max(min_blocks, min(65536, pool_budget_bytes // bytes_per_block))
         
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
@@ -208,6 +223,12 @@ class KVRuntimeManager:
         # Instantiate ReconstructionPool for high-throughput decode path.
         self.recon_pool = None
         self.decode_workspace = {}
+
+        # Force synchronous compression on Apple Silicon/MPS to guarantee thread safety
+        # and prevent concurrent Metal command encoder / buffer validation crashes.
+        if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
+            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Forcing synchronous SVD compression to guarantee thread-safety and prevent Metal crashes.")
+            async_compression = False
 
         self._async      = async_compression
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
@@ -319,12 +340,15 @@ class KVRuntimeManager:
         del captured
         import gc as _gc
         _gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        _empty_cache(self.device)
+        _synchronize(self.device)
 
         if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            alloc = torch.cuda.memory_allocated() / 1024**3
-            print(f"[DiffKV] Post-prefill compression done. VRAM: {alloc:.2f} GB")
+            if _has_cuda():
+                alloc = torch.cuda.memory_allocated() / 1024**3
+                print(f"[DiffKV] Post-prefill compression done. VRAM: {alloc:.2f} GB")
+            else:
+                print(f"[DiffKV] Post-prefill compression done (MPS/CPU — no VRAM stats).")
 
     def clear_session(self, session_id: str):
         # Invalidate GPU block indices cache
@@ -546,6 +570,8 @@ class KVRuntimeManager:
                     self.native_pool.increment_ref(b.pool_idx)
 
                 dest_blocks[layer_idx].append(b_restore)
+                if self._streaming_mgr is not None:
+                    self._streaming_mgr.update_metadata_block(session_id, layer_idx, len(dest_blocks[layer_idx]) - 1, b_restore)
 
         if self._streaming_mgr is not None:
             self._streaming_mgr.session_blocks[session_id] = dest_blocks
@@ -705,23 +731,23 @@ class KVRuntimeManager:
         session_id: str,
         layer_idx: int,
         device: torch.device,
-    ) -> Tuple[Optional[torch.Tensor], List[Any]]:
+    ) -> Tuple[Optional[torch.Tensor], List[Any], Optional[torch.Tensor]]:
         """
         Vectorized O(1) metadata retrieval from contiguous packed CPU tensors.
         Phase 29: metadata is now CPU-resident (zero CUDA syncs on write).
         Only the final small block_indices array is transferred to GPU.
         """
         if self._streaming_mgr is None:
-            return None, []
+            return None, [], None
 
         blocks = self.get_streaming_blocks(session_id, layer_idx)
         num_blocks = len(blocks) if blocks else 0
         if num_blocks == 0:
-            return None, []
+            return None, [], None
 
         metadata = self._streaming_mgr.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is None:
-            return None, []
+            return None, [], None
 
         active_meta = metadata[:num_blocks]          # CPU slice view
 
@@ -731,33 +757,34 @@ class KVRuntimeManager:
         # Phase 32: GPU block indices cache check
         if compressed_mask.any():                    # CPU any() — no CUDA sync
             cpu_indices = active_meta[compressed_mask, 0]
+            cpu_anchors = active_meta[compressed_mask, 1]
             cache_key = (session_id, layer_idx)
             cached_val = self._indices_gpu_cache.get(cache_key)
             if cached_val is not None:
-                cached_cpu, cached_gpu = cached_val
-                if cached_cpu.shape[0] == cpu_indices.shape[0] and torch.equal(cached_cpu, cpu_indices):
-                    block_indices_tensor = cached_gpu
+                cached_cpu_ind, cached_gpu_ind, cached_cpu_anc, cached_gpu_anc = cached_val
+                if (cached_cpu_ind.shape[0] == cpu_indices.shape[0] and 
+                    torch.equal(cached_cpu_ind, cpu_indices) and 
+                    torch.equal(cached_cpu_anc, cpu_anchors)):
+                    block_indices_tensor = cached_gpu_ind
+                    anchor_indices_gpu = cached_gpu_anc
                 else:
                     block_indices_tensor = cpu_indices.to(device)
-                    self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor)
+                    anchor_indices_gpu = cpu_anchors.to(device)
+                    self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
             else:
                 block_indices_tensor = cpu_indices.to(device)
-                self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor)
+                anchor_indices_gpu = cpu_anchors.to(device)
+                self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
         else:
             block_indices_tensor = None
+            anchor_indices_gpu = None
 
         # Get ALL non-compressed, non-paged blocks as dense context.
         # Phase 32 backwards optimization: since blocks are compressed chronologically,
         # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
-        dense_blocks = []
-        for block in reversed(blocks):
-            if block.state not in ("COMPRESSED", "PAGED"):
-                dense_blocks.append(block)
-            else:
-                break
-        dense_blocks.reverse()
+        dense_blocks = [block for block in blocks if block.state not in ("COMPRESSED", "PAGED")]
 
-        return block_indices_tensor, dense_blocks
+        return block_indices_tensor, dense_blocks, anchor_indices_gpu
 
     def assemble_dense_window_kv(
         self,
@@ -829,20 +856,19 @@ class KVRuntimeManager:
                 act_len = blk_active_k_cpu.shape[2]
 
             blk_len = 1 + act_len
-            if blk.dirty:
-                # Write anchor
-                anchor_k = blk.anchor_kv[0, 0]  # [H_kv, D]
-                anchor_v = blk.anchor_kv[0, 1]
-                k_ws[0, :, cur_pos, :] = anchor_k
-                v_ws[0, :, cur_pos, :] = anchor_v
-                # Write active tokens
-                if blk_active_k is not None:
-                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k[0]
-                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v[0]
-                elif blk_active_k_cpu is not None:
-                    k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k_cpu[0].to(device, non_blocking=True)
-                    v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v_cpu[0].to(device, non_blocking=True)
-                blk.dirty = False
+            # Write anchor (always write to ensure correct position in workspace if preceding blocks got compressed)
+            anchor_k = blk.anchor_kv[0, 0]  # [H_kv, D]
+            anchor_v = blk.anchor_kv[0, 1]
+            k_ws[0, :, cur_pos, :] = anchor_k
+            v_ws[0, :, cur_pos, :] = anchor_v
+            # Write active tokens
+            if blk_active_k is not None:
+                k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k[0]
+                v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v[0]
+            elif blk_active_k_cpu is not None:
+                k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k_cpu[0].to(device, non_blocking=True)
+                v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v_cpu[0].to(device, non_blocking=True)
+            blk.dirty = False
             cur_pos += blk_len
 
         return k_ws[:, :, :total_dense_len, :], v_ws[:, :, :total_dense_len, :]
@@ -1268,7 +1294,7 @@ class KVRuntimeManager:
             # Compress oldest prefill blocks (outside recency window)
             full_blocks = [
                 b for b in blocks
-                if b.active_k is not None and b.active_k.shape[2] >= self.block_size - 1
+                if b.anchor_idx > 0 and b.active_k is not None and b.active_k.shape[2] >= self.block_size - 1
             ]
             while len(full_blocks) > self.dense_recency_blocks:
                 oldest = full_blocks.pop(0)
@@ -1305,7 +1331,7 @@ class KVRuntimeManager:
         # Compress oldest full dense blocks outside the recency window
         full_dense = [
             b for b in blocks
-            if b.U is None and b.active_k is not None
+            if b.anchor_idx > 0 and b.U is None and b.active_k is not None
             and b.active_k.shape[2] >= self.block_size - 1
         ]
         while len(full_dense) > self.dense_recency_blocks:
@@ -1347,12 +1373,28 @@ class KVRuntimeManager:
         flat_tokens = stacked.reshape(seq_len, feat_dim).float()
         deltas      = flat_tokens - anchor_flat.unsqueeze(0)
 
+        # Token-wise Norm-Normalization (row-wise)
+        token_norms = deltas.norm(dim=1)
+        token_norms = torch.clamp(token_norms, min=1e-5)
+        normalized_deltas = deltas / token_norms.unsqueeze(1)
+
         rank = self.rank
-        lr_delta = compress_lowrank(deltas, rank)
+        lr_delta = compress_lowrank(normalized_deltas, rank)
+
+        # Scale U by token norms to perform token-wise denormalization when reconstructed
+        U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)
+        U_scaled = U_scaled.to(torch.float16)
+
+        if self.rank:
+            import os as _local_os
+            if _local_os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1":
+                print(f"[DiffKV SVD Debug] Block anchor_idx={block.anchor_idx} layer={block.layer_idx}: "
+                      f"scale={lr_delta.scale:.4f} cos_sim={lr_delta.cosine_sim:.6f} norm_drift={lr_delta.norm_drift:.6f} "
+                      f"dyn_rank={lr_delta.dynamic_rank}")
 
         gpu_device = block.anchor_kv.device
-        u_gpu = lr_delta.U.to(gpu_device)
-        v_gpu = lr_delta.V.to(gpu_device)
+        u_gpu = U_scaled.to(gpu_device)
+        v_gpu = lr_delta.V.to(torch.float16).to(gpu_device)
 
         lock = getattr(block, "_lock", None)
         if lock is None:

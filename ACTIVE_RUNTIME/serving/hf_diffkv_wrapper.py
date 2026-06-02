@@ -4,6 +4,11 @@ runtime/hf_diffkv_wrapper.py
 
 HuggingFace model wrapper for Differential KV.
 Integrates KVRuntimeManager with AutoModelForCausalLM.
+
+Mac/MPS: device is auto-detected (CUDA → MPS → CPU).
+  - torch.compile uses 'aot_eager' backend on MPS (no CUDAGraph dependency).
+  - torchao quantization is skipped on MPS where not yet supported.
+  - All CUDA-specific calls are routed through mac_utils helpers.
 """
 
 import torch
@@ -15,6 +20,23 @@ from native_core.kv_runtime_manager import KVRuntimeManager
 from native_core.sparse_decode.triton_diffkv import TritonDiffKV
 from runtime.diffkv_attention import apply_diffkv_attention_patch
 
+try:
+    from native_core.mac_utils import (
+        get_best_device as _get_best_device,
+        get_compile_backend as _get_compile_backend,
+        get_compile_mode as _get_compile_mode,
+        has_cuda as _has_cuda,
+        has_mps as _has_mps,
+        is_apple_silicon as _is_apple_silicon,
+    )
+except ImportError:
+    def _get_best_device(): return "cuda" if torch.cuda.is_available() else "cpu"
+    def _get_compile_backend(): return "inductor" if torch.cuda.is_available() else "aot_eager"
+    def _get_compile_mode(): return "reduce-overhead" if torch.cuda.is_available() else "default"
+    def _has_cuda(): return torch.cuda.is_available()
+    def _has_mps(): return getattr(getattr(torch, 'backends', None), 'mps', None) and torch.backends.mps.is_available()
+    def _is_apple_silicon(): return False
+
 class DiffKVHFWrapper:
     """
     Wraps a HuggingFace model to use Differential KV cache.
@@ -23,19 +45,26 @@ class DiffKVHFWrapper:
         self, 
         model_id: str,
         config: Dict[str, Any],
-        device: str = "cuda",
+        device: str = None,   # None → auto-detect (CUDA / MPS / CPU)
         quantization_config: Any = None,
-        torch_dtype: torch.dtype = torch.float16
+        torch_dtype: torch.dtype = None,  # None → auto (fp16 on GPU/MPS, bf16 on CPU)
     ):
         self.model_id = model_id
         self.config = config
-        self.device = device
+        # ── Device auto-detection ──────────────────────────────────────────
+        self.device = device if device is not None else _get_best_device()
+        print(f"[DiffKV] Device: {self.device}")
+        if torch_dtype is None:
+            if self.device in ("cuda", "mps"):
+                torch_dtype = torch.float16
+            else:
+                torch_dtype = torch.bfloat16
         self.mode = config.get("mode", "fp16")
         self.block_size = config.get("block_size", 64)
         self.rank = config.get("rank", 16)
         self.micro_block_size = config.get("micro_block_size", 16)
         
-        print(f"Loading model {model_id} (dtype={torch_dtype})...")
+        print(f"Loading model {model_id} (device={self.device}, dtype={torch_dtype})...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         self._alphanumeric_tokens = {}
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -66,21 +95,38 @@ class DiffKVHFWrapper:
             print("[DiffKV] Auto-detected already quantized model (GPTQ/AWQ/Bitsandbytes). Skipping torchao post-quantization to avoid conflicts.")
         else:
             # ── Native weight-only quantization (torchao) ──
+            # Skip on MPS/CPU where torchao may not support all ops yet.
             quant_type = config.get("quantization", os.environ.get("DIFFKV_QUANTIZATION"))
             if quant_type in ["int8", "int4"]:
-                try:
-                    from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
-                    
-                    if quant_type == "int8":
-                        print("[DiffKV] Applying native 8-bit weight-only quantization using torchao...")
-                        quantize_(self.model, Int8WeightOnlyConfig())
-                    elif quant_type == "int4":
-                        print("[DiffKV] Applying native 4-bit weight-only quantization using torchao...")
-                        quantize_(self.model, Int4WeightOnlyConfig())
+                if not _has_cuda() and not _has_mps():
+                    print(f"[DiffKV] torchao {quant_type} quantization skipped on CPU — run on GPU/MPS for best performance.")
+                elif _is_apple_silicon() and not _has_cuda():
+                    # MPS: int4 group quantization requires contiguous ops not yet in MPS;
+                    # int8 is generally safe. Attempt it and fall back gracefully.
+                    if quant_type == "int4":
+                        print("[DiffKV] int4 quantization on MPS is experimental — attempting, will fall back if unsupported.")
+                    try:
+                        from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
+                        cfg = Int8WeightOnlyConfig() if quant_type == "int8" else Int4WeightOnlyConfig()
+                        print(f"[DiffKV] Applying {quant_type} quantization via torchao on MPS...")
+                        quantize_(self.model, cfg)
+                        print("[DiffKV] torchao quantization applied successfully!")
+                    except Exception as e:
+                        print(f"[DiffKV] WARNING: torchao {quant_type} on MPS failed ({e}). Running in fp16.")
+                else:
+                    try:
+                        from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
                         
-                    print("[DiffKV] torchao quantization applied successfully!")
-                except Exception as e:
-                    print(f"[DiffKV] WARNING: Failed to apply torchao weight quantization: {e}")
+                        if quant_type == "int8":
+                            print("[DiffKV] Applying native 8-bit weight-only quantization using torchao...")
+                            quantize_(self.model, Int8WeightOnlyConfig())
+                        elif quant_type == "int4":
+                            print("[DiffKV] Applying native 4-bit weight-only quantization using torchao...")
+                            quantize_(self.model, Int4WeightOnlyConfig())
+                            
+                        print("[DiffKV] torchao quantization applied successfully!")
+                    except Exception as e:
+                        print(f"[DiffKV] WARNING: Failed to apply torchao weight quantization: {e}")
 
         self.num_layers = self.model.config.num_hidden_layers
         self.heads = self.model.config.num_attention_heads
@@ -147,13 +193,19 @@ class DiffKVHFWrapper:
         #   Linear layers cause graph breaks that prevent useful compilation.
         # On Windows: TorchInductor requires cl.exe (MSVC). Skip if not available.
         use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+        if use_compile == "auto" and _is_apple_silicon():
+            # macOS/MPS: torch.compile/Dynamo JIT tracing of diffkv_forward causes
+            # severe JIT recompilation loops and Metal command buffer crashes. Default to 0.
+            use_compile = "0"
+
         if use_compile == "0":
-            print("[DiffKV] torch.compile disabled by DIFFKV_USE_TORCH_COMPILE=0.")
+            print("[DiffKV] torch.compile disabled on Apple Silicon/MPS for stability.")
         elif is_quantized and use_compile != "1":
             print("[DiffKV] Quantized model detected — skipping torch.compile to avoid graph-break errors.")
         else:
             # Pre-flight: verify the C++ compiler required by TorchInductor is available.
             # On Windows this is cl.exe (MSVC); on Linux/macOS it is gcc/clang.
+            # On MPS we use 'aot_eager' which has no C++ compiler requirement.
             _compiler_ok = True
             import sys as _sys
             if _sys.platform == "win32":
@@ -164,11 +216,14 @@ class DiffKVHFWrapper:
                     _compiler_ok = False
 
             if _compiler_ok:
-                print("[DiffKV] Applying torch.compile(dynamic=True, mode='reduce-overhead') for prefill fusion...")
+                _backend = _get_compile_backend()
+                _mode    = _get_compile_mode()
+                print(f"[DiffKV] Applying torch.compile(dynamic=True, mode='{_mode}', backend='{_backend}') ...")
                 try:
                     self.model = torch.compile(
                         self.model,
-                        mode="reduce-overhead",
+                        backend=_backend,
+                        mode=_mode,
                         dynamic=True,       # supports variable chunk/sequence lengths
                         fullgraph=False,    # allow graph breaks rather than failing
                     )
@@ -196,25 +251,53 @@ class DiffKVHFWrapper:
         top_p: float = 0.9,
         repetition_penalty: float = 1.15,
     ):
-        # Clear previous session cache to prevent memory/block leaks
         session_id = self.active_session or "default"
-        self.manager.clear_session(session_id)
-
+        
+        # O(1) Smart Prefix Check: check if the session already has resident KV cache.
+        # If so, mark the cached length so prefill is incremental (avoiding O(N) re-prefill of history).
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
-        input_ids = inputs.input_ids
-        prefill_len = input_ids.shape[1]
-        generated = input_ids[0].tolist()
+        prompt_ids = inputs.input_ids[0].tolist()
+        
+        cached_len = 0
+        if hasattr(self.manager, "get_session_sequence_length"):
+            seq_len = self.manager.get_session_sequence_length(session_id)
+            if seq_len > 0 and seq_len < len(prompt_ids):
+                stored_ids = getattr(self, "_session_token_ids", {}).setdefault(session_id, [])
+                if len(stored_ids) >= seq_len and prompt_ids[:seq_len] == stored_ids[:seq_len]:
+                    cached_len = seq_len
+                    print(f"[DiffKV Wrapper] Found cached history for session {session_id}: length {cached_len} tokens. Reusing KV cache!")
+                    
+        if cached_len == 0:
+            self.manager.clear_session(session_id)
+            if not hasattr(self, "_session_token_ids"):
+                self._session_token_ids = {}
+            self._session_token_ids[session_id] = []
+            new_prompt_ids = prompt_ids
+        else:
+            new_prompt_ids = prompt_ids[cached_len:]
 
-        # Prefill — no position_ids needed (HF model derives them correctly for seq > 1)
-        outputs = self.model(input_ids=input_ids, use_cache=True)
+        input_ids = torch.tensor([new_prompt_ids], device=self.device)
+        prefill_len = input_ids.shape[1]
+        generated = prompt_ids.copy()
+
+        self.manager.init_session(session_id, prefill_len=cached_len + prefill_len)
+        self.model._diffkv_session_ids = [session_id]
+
+        # Prefill only the new tokens with correct position offset
+        if cached_len > 0:
+            pos_tensor = torch.arange(cached_len, cached_len + prefill_len, dtype=torch.long, device=self.device).unsqueeze(0)
+            outputs = self.model(input_ids=input_ids, position_ids=pos_tensor, use_cache=True)
+        else:
+            outputs = self.model(input_ids=input_ids, use_cache=True)
+        
+        # Compress and ingest captured prefill KV
+        if hasattr(self.manager, "compress_prefill_kv"):
+            self.manager.compress_prefill_kv(session_id)
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
 
         # CRITICAL FIX: track the absolute sequence position for each decode step.
-        # DiffKV always returns past_key_values=None (KV is managed internally), so
-        # without explicit position_ids the HF model infers cache_position=0 for every
-        # decode step — applying RoPE at position 0 for all tokens and corrupting output.
-        cur_pos = prefill_len
+        cur_pos = cached_len + prefill_len
 
         for _ in range(max_new_tokens):
             # Repetition penalty
@@ -271,6 +354,9 @@ class DiffKVHFWrapper:
             logits = outputs.logits[:, -1, :]
             past_kv = outputs.past_key_values
             cur_pos += 1
+
+        # Store the generated tokens to the session token cache
+        self._session_token_ids[session_id] = generated
 
         return self.tokenizer.decode(generated, skip_special_tokens=True)
 

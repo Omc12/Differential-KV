@@ -30,6 +30,17 @@ import threading
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
+try:
+    from native_core.mac_utils import new_event as _new_event
+except ImportError:
+    def _new_event(device=None):
+        if torch.cuda.is_available():
+            return torch.cuda.Event()
+        class _NE:
+            def record(self, stream=None): pass
+            def synchronize(self): pass
+        return _NE()
+
 
 # Module-level constant — avoids re-creating this dict on every metadata write call
 # (previously created fresh inside update_metadata_block every token × every layer)
@@ -70,6 +81,7 @@ class StreamingKVBlock:
     state: str = "ACCUMULATING"  # ACCUMULATING | SUBMITTED | COMPRESSED | PAGED
     pool_idx: Optional[int] = None
     dirty: bool = True
+    is_outlier: bool = False
     session_id: Optional[str] = None
     layer_idx: Optional[int] = None
     _cache_id: Optional[str] = None
@@ -107,6 +119,10 @@ class StreamingKVBlock:
         # (< 1024 tokens) to preserve 100% exact-match precision and eliminate SVD CPU/GPU
         # roundtrip overhead, running at maximum possible TPS. SVD compression starts saving VRAM
         # exactly when needed (contexts >= 1024 tokens).
+        # Also protect blocks flagged with outliers (e.g. key activation > 20.0) from SVD compression
+        # to prevent attention sink corruption.
+        if self.anchor_idx == 0 or self.is_outlier:
+            return False
         if self.anchor_idx + self.token_count() < 1024:
             return False
         return (
@@ -218,8 +234,13 @@ class StreamingSparseIngestManager:
             k_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
             v_gpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16, device=device)
             
-            k_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16).pin_memory()
-            v_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16).pin_memory()
+            # pin_memory() accelerates async GPU->CPU DMA on CUDA; not available/needed on MPS.
+            _use_pinned = device == "cuda" or (isinstance(device, torch.device) and device.type == "cuda")
+            k_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16)
+            v_cpu = torch.zeros((alloc_blocks, heads, alloc_mbs, head_dim), dtype=torch.float16)
+            if _use_pinned:
+                k_cpu = k_cpu.pin_memory()
+                v_cpu = v_cpu.pin_memory()
             
             buffers = (k_gpu, v_gpu, k_cpu, v_cpu)
             self.session_staging_buffers[key] = buffers
@@ -303,7 +324,7 @@ class StreamingSparseIngestManager:
             # DECODE PATH (T=1)
             # Phase 29 Fix #1: Ring buffer — zero torch.cat allocations per token.
             # ───────────────────────────────────────────────────────────────────
-            if not blocks or blocks[-1].state != "ACCUMULATING":
+            if not blocks or blocks[-1].state != "ACCUMULATING" or blocks[-1].token_count() >= blocks[-1].micro_block_size:
                 # Start a new block. Current token becomes the anchor (1 dense token,
                 # irreducible). Pre-allocate the ring buffer for future active tokens.
                 anchor_idx = self._next_anchor_idx(blocks)
@@ -334,6 +355,9 @@ class StreamingSparseIngestManager:
                     _active_buf_v=buf_v,
                     _active_fill=0,
                 )
+                # Flag outlier if the anchor key exceeds the threshold
+                new_block.is_outlier = (anchor_kv[:, 0].abs().max().item() > 20.0)
+                
                 blocks.append(new_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
 
@@ -363,6 +387,10 @@ class StreamingSparseIngestManager:
                 else:
                     current_block.active_k = torch.cat([current_block.active_k, k], dim=2)
                     current_block.active_v = torch.cat([current_block.active_v, v], dim=2)
+            
+            # Update outlier status if incoming key token exceeds the threshold
+            if k.abs().max().item() > 20.0:
+                current_block.is_outlier = True
 
             current_block.dirty = True
             current_block.token_indices.append(
@@ -374,9 +402,11 @@ class StreamingSparseIngestManager:
             current_seq_len = current_block.anchor_idx + len(current_block.token_indices)
             
             # Compress any blocks that have now fallen out of the rolling dense window
+            # Also protect Block 0 (anchor_idx == 0) from SVD compression entirely to prevent
+            # delta scale corruption caused by the first token attention sink outlier.
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and b.active_k is not None and b.active_k.shape[2] >= b.micro_block_size:
-                    if (b.anchor_idx + b.token_count()) < (current_seq_len - 2048):
+                    if b.is_compression_eligible() and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
                         self._submit_block_for_compression(b)
                         self.update_metadata_block(session_id, layer_idx, idx, b)
             return
@@ -386,27 +416,30 @@ class StreamingSparseIngestManager:
         # ───────────────────────────────────────────────────────────────────
         # Partition the prefill sequence into regions based on distance to sequence end
         regions = []
-        # Region 1 (Active recent window): last 1024 tokens (MBS = 32)
+        # Region 1 (Active recent window): last 1024 tokens (MBS = micro_block_size)
         r1_start = max(0, seq_len - 1024)
         if r1_start < seq_len:
-            regions.append((r1_start, seq_len, 32))
+            regions.append((r1_start, seq_len, micro_block_size))
             
-        # Region 2 (Conversational locality): from seq_len-4096 to seq_len-1024 (MBS = 64)
+        # Region 2 (Conversational locality): from seq_len-4096 to seq_len-1024 (MBS = micro_block_size)
         r2_start = max(0, seq_len - 4096)
         if r2_start < r1_start:
-            regions.append((r2_start, r1_start, 64))
+            regions.append((r2_start, r1_start, micro_block_size))
             
-        # Region 3 (Mid-history): from seq_len-12288 to seq_len-4096 (MBS = 128)
+        # Region 3 (Mid-history): from seq_len-12288 to seq_len-4096 (MBS = micro_block_size)
         r3_start = max(0, seq_len - 12288)
         if r3_start < r2_start:
-            regions.append((r3_start, r2_start, 128))
+            regions.append((r3_start, r2_start, micro_block_size))
             
-        # Region 4 (Cold archive): from 0 to seq_len-12288 (MBS = 256)
+        # Region 4 (Cold archive): from 0 to seq_len-12288 (MBS = micro_block_size)
         if 0 < r3_start:
-            regions.append((0, r3_start, 256))
+            regions.append((0, r3_start, micro_block_size))
             
         # Reverse to process chronologically (left to right)
         regions.reverse()
+
+        session_base_idx = self._next_anchor_idx(blocks)
+        total_seq_len = session_base_idx + seq_len
 
         for start_idx, end_idx, r_mbs in regions:
             region_k = k[:, :, start_idx:end_idx]
@@ -469,10 +502,17 @@ class StreamingSparseIngestManager:
                     new_block.active_k = active_k_blocks[i].clone()
                     new_block.active_v = active_v_blocks[i].clone()
                     
+                    # Outlier check
+                    k_max = anchor_kv[:, 0].abs().max().item()
+                    if new_block.active_k is not None:
+                        k_max = max(k_max, new_block.active_k.abs().max().item())
+                    new_block.is_outlier = (k_max > 20.0)
+
                     # Dynamic Prefill Compression Guard: Bypass SVD compression for short
                     # context sequences (< 1024 tokens) or for blocks within the most recent
-                    # 2048 tokens to preserve 100% exact prompt attention.
-                    if seq_len < 1024 or (anchor_idx + block_capacity) >= (seq_len - 2048):
+                    # 512 tokens of the total sequence to preserve 100% exact prompt attention,
+                    # or if the block is flagged as containing activation outliers.
+                    if total_seq_len < 1024 or anchor_idx == 0 or new_block.is_outlier or (anchor_idx + block_capacity) >= (total_seq_len - 512):
                         new_block.state = "ACCUMULATING"
                     else:
                         new_block.state = "SUBMITTED"
@@ -519,7 +559,13 @@ class StreamingSparseIngestManager:
                     new_block.active_k = blk_active_k.clone()
                     new_block.active_v = blk_active_v.clone()
 
-                if new_block.is_compression_eligible() and (new_block.anchor_idx + new_block.token_count()) < (seq_len - 2048):
+                # Outlier check
+                k_max = anchor_kv[:, 0].abs().max().item()
+                if new_block.active_k is not None:
+                    k_max = max(k_max, new_block.active_k.abs().max().item())
+                new_block.is_outlier = (k_max > 20.0)
+
+                if not new_block.is_outlier and new_block.is_compression_eligible() and (new_block.anchor_idx + new_block.token_count()) < (total_seq_len - 512):
                     new_block.state = "SUBMITTED"
                     full_blocks_to_compress.append(new_block)
                 else:
@@ -595,22 +641,30 @@ class StreamingSparseIngestManager:
         torch.cat([b.active_k for b in blocks_list], dim=0, out=k_gpu)
         torch.cat([b.active_v for b in blocks_list], dim=0, out=v_gpu)
 
-        # Asynchronous GPU->CPU DMA via pinned memory
-        k_cpu.copy_(k_gpu, non_blocking=True)
-        v_cpu.copy_(v_gpu, non_blocking=True)
+        # Asynchronous GPU->CPU DMA via pinned memory (non_blocking only on CUDA)
+        _is_cuda = (k_gpu.device.type == "cuda")
+        if k_gpu.device.type == "mps":
+            k_cpu.copy_(k_gpu.contiguous())
+            v_cpu.copy_(v_gpu.contiguous())
+            torch.mps.synchronize()
+        else:
+            k_cpu.copy_(k_gpu, non_blocking=_is_cuda)
+            v_cpu.copy_(v_gpu, non_blocking=_is_cuda)
+
+
 
         # Enqueue cloned slices — each clone is an independent CPU tensor,
         # so the shared staging buffer can be safely reused across layers.
         is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "_queue")
 
-        # If async worker is active, the worker thread will call event.synchronize() in the background.
-        # This completely avoids stalling the main thread, increasing prefill TPS dramatically.
+        # The DMA copy must be synchronized on the main thread because the staging buffer
+        # is shared across all layers and will be immediately overwritten in the next layer's
+        # forward pass. The actual SVD calculation itself remains fully asynchronous in the background.
         _dma_event = None
         if k_gpu.is_cuda:
-            _dma_event = torch.cuda.Event()
+            _dma_event = _new_event(k_gpu.device.type)
             _dma_event.record()
-            if not is_async_active:
-                _dma_event.synchronize()
+            _dma_event.synchronize()
         
         for idx, block in enumerate(blocks_list):
             k_cpu_slice = k_cpu[idx : idx + 1].clone()

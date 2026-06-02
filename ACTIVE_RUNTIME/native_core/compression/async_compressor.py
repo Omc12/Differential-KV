@@ -33,6 +33,17 @@ import time
 import torch
 from typing import Callable, Optional
 
+try:
+    from native_core.mac_utils import new_event as _new_event
+except ImportError:
+    def _new_event(device=None):
+        if torch.cuda.is_available():
+            return torch.cuda.Event()
+        class _NE:
+            def record(self, stream=None): pass
+            def synchronize(self): pass
+        return _NE()
+
 
 class AsyncCompressor:
     """
@@ -112,16 +123,16 @@ class AsyncCompressor:
         The caller MUST NOT clear block.active_k/v after this call — the worker
         will do so after SVD completes.
         """
-        # Snapshot tensors in CPU-pinned memory to avoid holding GPU tensors in
-        # the queue (prevents VRAM fragmentation from queued-but-not-compressed blocks).
-        # IMPORTANT: non_blocking=True means the GPU→CPU DMA copy runs on the CUDA stream
-        # and may not be complete when the tensors are immediately enqueued.
-        k_cpu = k.detach().to("cpu", non_blocking=True)
-        v_cpu = v.detach().to("cpu", non_blocking=True)
+        # Snapshot tensors in CPU-pinned memory (non-blocking only on CUDA)
+        _is_cuda = (k.device.type == "cuda")
+        k_cpu = k.detach().to("cpu", non_blocking=_is_cuda)
+        v_cpu = v.detach().to("cpu", non_blocking=_is_cuda)
         
+
+
         event = None
-        if k.device.type == "cuda":
-            event = torch.cuda.Event()
+        if _is_cuda:
+            event = _new_event(k.device.type)
             event.record()
 
         try:

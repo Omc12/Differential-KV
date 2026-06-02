@@ -1,3 +1,4 @@
+# ── Core ─────────────────────────────────────────────────────────────────────
 torch>=2.1.0
 numpy>=1.24.0
 matplotlib>=3.7.0
@@ -15,3 +16,13 @@ pyyaml
 httpx>=0.27.0
 transformers>=4.40.0
 accelerate>=0.29.0
+
+# ── CUDA only (Linux / Windows / cloud) ──────────────────────────────────────
+# triton>=2.1.0          # GPU Triton kernels — install manually on CUDA machines
+# torchao>=0.3.0         # INT8/INT4 weight quantization — CUDA only
+
+# ── Apple Silicon (macOS) — optional performance extras ──────────────────────
+# mlx>=0.16.0            # Apple MLX — faster SVD on M-series chips
+#                          Install with: pip install mlx
+# torchao>=0.3.0         # torchao INT8 on MPS (experimental, PyTorch >= 2.3)
+#                          Install with: pip install torchao

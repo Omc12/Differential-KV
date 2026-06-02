@@ -3,15 +3,23 @@ runtime/native_block_pool.py
 
 Phase 10: Native Block Pool (vLLM style block tables)
 
-Pre-allocates large contiguous GPU memory pools for all sparse block components
+Pre-allocates large contiguous GPU/MPS memory pools for all sparse block components
 (U, V_K, V_V, anchors, scales, seq_lens). When blocks are compressed, their data
 is copied into an assigned slot in this pool.
 
 During inference, we completely bypass `torch.stack`. We simply pass a 1D tensor
 of `block_indices` to the Triton kernel, which does the gather natively in SRAM.
+
+Mac/MPS: all `torch.cuda.*` calls are routed through native_core.mac_utils.
 """
 
 import torch
+try:
+    from native_core.mac_utils import empty_cache as _empty_cache
+except ImportError:
+    def _empty_cache(device=None):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 class NativeBlockPool:
     def __init__(
@@ -110,6 +118,7 @@ class NativeBlockPool:
         
         import gc
         gc.collect()
+        _empty_cache(self.device)
         
     def allocate_block(self) -> int:
         if not self._free_indices:
@@ -190,5 +199,5 @@ class NativeBlockPool:
         
         import gc
         gc.collect()
-        torch.cuda.empty_cache()
+        _empty_cache(self.device)
 

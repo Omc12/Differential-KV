@@ -100,8 +100,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     lse = torch.logsumexp(scores, dim=-1)
                     return out, lse
 
-                def _project_then_attend_history(q, comp_blocks, pool):
-                    # Direct low-rank Project-Then-Attend over compressed blocks
+                def _project_then_attend_history(q, comp_blocks, pool, cos_all=None, sin_all=None):
+                    # Low-rank unrotated reconstruction + dynamic RoPE re-application in prefill path
                     _, H, q_len, head_dim = q.shape
                     pool_indices = [b.pool_idx for b in comp_blocks]
                     pool_indices_t = torch.tensor(pool_indices, device=q.device, dtype=torch.long)
@@ -111,49 +111,68 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     V_V_stack = pool.V_V[pool_indices_t]      # [N_blocks, rank, num_kv_heads, head_dim]
                     anc_K = pool.anchors_K[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
                     anc_V = pool.anchors_V[pool_indices_t]    # [N_blocks, num_kv_heads, head_dim]
+                    scales_stack = pool.scales[pool_indices_t].view(-1, 1, 1)  # [N_blocks, 1, 1]
                     seq_lens_stack = pool.seq_lens[pool_indices_t]  # [N_blocks]
                     
-                    # Repeat for GQA groups
+                    N_blocks = len(comp_blocks)
+                    max_seq_len = U_stack.shape[1]
+                    
+                    # 1. Repeat for GQA groups
                     v_k_rep = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
                     v_v_rep = repeat_kv(V_V_stack.permute(0, 2, 1, 3), num_key_value_groups)  # [N, H, R, D]
                     anc_k_rep = repeat_kv(anc_K.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
                     anc_v_rep = repeat_kv(anc_V.unsqueeze(2), num_key_value_groups).squeeze(2)  # [N, H, D]
                     
+                    # 2. Reconstruct unrotated keys: [N, 1 + max_seq_len, H, D]
+                    deltas_k = torch.einsum('nsr,nhrd->nshd', U_stack.float(), v_k_rep.float()).to(q.dtype) * scales_stack
+                    zeros_pad = torch.zeros((N_blocks, 1, H, head_dim), dtype=q.dtype, device=q.device)
+                    deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
+                    K_unrot_full = anc_k_rep.unsqueeze(1) + deltas_k_full
+                    
+                    # 3. Construct absolute position IDs and Slice cos/sin
+                    block_anchors = torch.tensor([b.anchor_idx for b in comp_blocks], device=q.device, dtype=torch.long)
+                    positions = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
+                    positions_flat = positions.view(-1)
+                    
+                    cos_ref = cos_all if cos_all is not None else cos
+                    sin_ref = sin_all if sin_all is not None else sin
+                    cos_sliced = cos_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                    sin_sliced = sin_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                    
+                    # 4. Apply RoPE to Reconstructed Keys
+                    K_rot_full = (K_unrot_full * cos_sliced) + (rotate_half(K_unrot_full) * sin_sliced) # [N, 1 + max_seq, H, D]
+                    
+                    # 5. Compute scores: dot product of q (shape [1, H, q_len, D]) with K_rot_full
                     scale = 1.0 / math.sqrt(head_dim)
-                    q_scaled = q * scale
+                    scores_block_full = torch.einsum('bhqd,nshd->bhqns', q.float(), K_rot_full.float()).to(q.dtype) * scale # [1, H, q_len, N, 1 + max_seq]
                     
-                    # Compute Anchor Scores
-                    anchor_scores = torch.einsum('bhqd,nhd->bhqn', q_scaled, anc_k_rep)  # [1, H, q_len, N]
+                    # 6. Mask out padding in scores
+                    col_s = torch.arange(1 + max_seq_len, device=q.device).unsqueeze(0)
+                    valid_mask = col_s < (1 + seq_lens_stack).unsqueeze(1)  # [N_blocks, 1 + max_seq]
+                    mask = valid_mask.unsqueeze(0).unsqueeze(1).unsqueeze(2)  # [1, 1, 1, N, 1 + max_seq]
                     
-                    # Compute Q Projections onto Key space
-                    Q_proj = torch.einsum('bhqd,nhrd->bhqnr', q_scaled, v_k_rep)  # [1, H, q_len, N, R]
+                    scores_block_full = torch.where(mask, scores_block_full, torch.tensor(float('-inf'), device=q.device, dtype=q.dtype))
                     
-                    # Compute Delta Scores (Q_proj @ U^T)
-                    delta_scores = torch.einsum('bhqnr,nsr->bhqns', Q_proj, U_stack)  # [1, H, q_len, N, max_seq]
-                    
-                    # Mask out padding in delta scores
-                    max_seq_len = U_stack.shape[1]
-                    col_s = torch.arange(max_seq_len, device=q.device).unsqueeze(0)
-                    valid_mask = col_s < seq_lens_stack.unsqueeze(1)  # [N_blocks, max_seq]
-                    mask = valid_mask.unsqueeze(0).unsqueeze(1).unsqueeze(2)  # [1, 1, 1, N, max_seq]
-                    
-                    delta_scores = torch.where(mask, delta_scores, torch.tensor(float('-inf'), device=q.device, dtype=q.dtype))
-                    
-                    # Concatenate anchor and delta scores
-                    block_scores = torch.cat([anchor_scores.unsqueeze(-1), delta_scores], dim=-1)  # [1, H, q_len, N, 1 + max_seq]
-                    flat_scores = block_scores.reshape(1, H, q_len, -1)
+                    # Flat scores for Log-Sum-Exp and softmax weights
+                    flat_scores = scores_block_full.reshape(1, H, q_len, -1)
                     
                     # Log-Sum-Exp and softmax weights
                     lse_hist = torch.logsumexp(flat_scores, dim=-1)
                     weights = torch.softmax(flat_scores, dim=-1)
                     
-                    # Value accumulation (Project-Then-Attend on V side)
-                    w_blocks = weights.reshape(1, H, q_len, len(comp_blocks), -1)
+                    # Value reduction (unchanged on V side since values are unrotated)
+                    w_blocks = weights.reshape(1, H, q_len, N_blocks, -1)
                     w_anchor = w_blocks[..., 0]      # [1, H, q_len, N]
                     w_delta  = w_blocks[..., 1:]     # [1, H, q_len, N, max_seq]
                     
-                    out_anchor = torch.einsum('bhqn,nhd->bhqd', w_anchor, anc_v_rep)
+                    p_total_anchor = w_anchor + w_delta.sum(dim=-1) # [1, H, q_len, N]
+                    
+                    out_anchor = torch.einsum('bhqn,nhd->bhqd', p_total_anchor, anc_v_rep)
                     W_proj = torch.einsum('bhqns,nsr->bhqnr', w_delta, U_stack)
+                    
+                    # Apply scales to W_proj
+                    W_proj = W_proj * pool.scales[pool_indices_t].view(1, 1, 1, -1, 1)
+                    
                     out_delta = torch.einsum('bhqnr,nhrd->bhqd', W_proj, v_v_rep)
                     
                     out_hist = out_anchor + out_delta
@@ -203,6 +222,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     cos, sin = self.rotary_emb(value_states, position_ids)
                 else:
                     cos, sin = position_embeddings
+                unrot_key_states = key_states.clone()
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
                 session_ids = getattr(model, "_diffkv_session_ids", ["default"] * bsz)
@@ -222,7 +242,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         sid = session_ids[b_idx]
                         if sid == "dummy_session":
                             continue
-                        curr_k = key_states[b_idx:b_idx+1]
+                        curr_k = unrot_key_states[b_idx:b_idx+1]
                         curr_v = value_states[b_idx:b_idx+1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 
@@ -242,7 +262,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             )
                             continue
 
-                        block_indices, dense_blocks = kv_manager.get_cached_decode_blocks(
+                        block_indices, dense_blocks, anchor_indices = kv_manager.get_cached_decode_blocks(
                             sid, captured_layer_idx, query_states.device
                         )
                         pool = getattr(kv_manager, 'native_pool', None)
@@ -257,16 +277,28 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
 
+                        total_seq_len = kv_manager.get_session_sequence_length(sid)
+                        max_pos = total_seq_len
+                        if anchor_indices is not None and anchor_indices.numel() > 0:
+                            max_pos = max(max_pos, int(anchor_indices.max().item()) + session_mbs)
+                        
+                        hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
+                        cos_all, sin_all = model.model.rotary_emb(value_states[b_idx:b_idx+1], hist_pos)
+
                         attn_out_b = native_triton_sparse_attn_decode(
                             q=query_states[b_idx:b_idx+1],
                             block_indices=block_indices,
                             pool=pool,
-                            dense_blocks=[],          # dense window handled by active_k/v below
+                            dense_blocks=dense_blocks,
                             active_k=dense_k_assembled,
                             active_v=dense_v_assembled,
                             num_key_value_groups=num_key_value_groups,
                             R=kv_manager.rank,
-                            S_MAX=session_mbs
+                            S_MAX=session_mbs,
+                            anchor_indices=anchor_indices,
+                            cos=cos_all,
+                            sin=sin_all,
+                            total_seq_len=total_seq_len,
                         )
                         attn_outputs.append(attn_out_b)
 
@@ -287,16 +319,15 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 # PREFILL / MULTI-QUERY PATH
                 # ==============================================================
                 if use_cache:
-                    # Check if ANY active session already has compressed history in the pool.
-                    # "history" here means prior-turn compressed blocks — NOT ingest from this chunk.
+                    # Check if ANY active session already has history blocks in the pool.
+                    # This includes both uncompressed (accumulating) and compressed blocks,
+                    # ensuring that short contexts (<2048 tokens) are correctly routed to the
+                    # incremental prefill path instead of losing context.
                     has_compressed_history = False
                     for sid in session_ids:
                         if sid != "dummy_session":
                             blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
-                            if blocks and any(
-                                getattr(b, "state", None) == "COMPRESSED"
-                                for b in blocks
-                            ):
+                            if blocks:
                                 has_compressed_history = True
                                 break
 
@@ -330,17 +361,28 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             out_local, lse_local = _flash_local_attention(curr_q, curr_k, curr_v)
 
                             # ── Path B: History Cross-Attention ──
-                            K_b = seq_lens[b_idx] - q_len
+                            # The history sequence length is exactly the sequence length of the session
+                            # before the new chunk is appended. Subtracting q_len was a math bug that caused
+                            # history to be partially or completely ignored (when q_len >= seq_lens[b_idx]
+                            # during large prefills or long chat messages).
+                            K_b = seq_lens[b_idx]
                             out_hist_dense, lse_hist_dense = None, None
                             out_hist_comp, lse_hist_comp   = None, None
 
                             if K_b > 0:
+                                prev_len = 0
+                                cap_dict = getattr(kv_manager, "_prefill_kv_capture", {})
+                                session_cap = cap_dict.get(sid, {})
+                                if captured_layer_idx in session_cap:
+                                    prev_len = session_cap[captured_layer_idx][0].shape[2]
+
                                 blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                 history_blocks = [b for b in blocks if b.anchor_idx < K_b]
 
                                 comp_blocks = []
                                 dense_k = []
                                 dense_v = []
+                                dense_positions_list = []
 
                                 for b in history_blocks:
                                     if getattr(b, "state", None) == "COMPRESSED" \
@@ -352,11 +394,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         if b.active_k is not None:
                                             k_blk = b.active_k[0]
                                             v_blk = b.active_v[0]
+                                            act_len = k_blk.shape[1]
                                         elif getattr(b, "active_k_cpu", None) is not None:
                                             k_blk = b.active_k_cpu[0].to(query_states.device, non_blocking=True)
                                             v_blk = b.active_v_cpu[0].to(query_states.device, non_blocking=True)
+                                            act_len = k_blk.shape[1]
                                         else:
                                             k_blk, v_blk = None, None
+                                            act_len = 0
                                         ak_u = ak.unsqueeze(1)
                                         av_u = av.unsqueeze(1)
                                         if k_blk is not None:
@@ -365,11 +410,42 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         else:
                                             dense_k.append(ak_u)
                                             dense_v.append(av_u)
+                                        dense_positions_list.extend(range(b.anchor_idx, b.anchor_idx + 1 + act_len))
 
+                                k_dense, v_dense = None, None
                                 if dense_k:
                                     k_dense = torch.cat(dense_k, dim=1).unsqueeze(0)
                                     v_dense = torch.cat(dense_v, dim=1).unsqueeze(0)
-                                    k_dense_rep = repeat_kv(k_dense, num_key_value_groups)
+
+                                # Safe bounds calculation for rotary embeddings in prefill path
+                                max_pos = K_b + prev_len + q_len
+                                if comp_blocks:
+                                    mbs = getattr(comp_blocks[0], "micro_block_size", kv_manager.get_session_micro_block_size(sid))
+                                    max_pos = max(max_pos, max(b.anchor_idx for b in comp_blocks) + mbs)
+
+                                hist_pos = torch.arange(max_pos, device=query_states.device, dtype=torch.long).unsqueeze(0)
+                                cos_all, sin_all = model.model.rotary_emb(value_states[b_idx:b_idx+1], hist_pos)
+
+                                # Phase 29+ Fix: Also attend to the previous chunks of the CURRENT prefill turn!
+                                # This is critical for progressive prompt chunking correctness (e.g. long prompts / research papers).
+                                if prev_len > 0:
+                                    prev_k, prev_v = session_cap[captured_layer_idx]
+                                    if k_dense is not None:
+                                        k_dense = torch.cat([k_dense, prev_k], dim=2)
+                                        v_dense = torch.cat([v_dense, prev_v], dim=2)
+                                        dense_positions_list.extend(range(K_b, K_b + prev_len))
+                                    else:
+                                        k_dense = prev_k
+                                        v_dense = prev_v
+                                        dense_positions_list = list(range(K_b, K_b + prev_len))
+
+                                if k_dense is not None:
+                                    dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1) # [1, 1, len, D]
+                                    sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1) # [1, 1, len, D]
+                                    k_dense_rot = (k_dense * cos_dense) + (rotate_half(k_dense) * sin_dense)
+                                    
+                                    k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
                                     v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
                                     out_hist_dense = F.scaled_dot_product_attention(
                                         curr_q.contiguous(), k_dense_rep.contiguous(), v_dense_rep.contiguous(),
@@ -381,7 +457,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                 if comp_blocks and getattr(kv_manager, "native_pool", None) is not None:
                                     out_hist_comp, lse_hist_comp = _project_then_attend_history(
-                                        curr_q, comp_blocks, kv_manager.native_pool
+                                        curr_q, comp_blocks, kv_manager.native_pool, cos_all, sin_all
                                     )
 
                             out_b = _combine_outputs([
@@ -398,7 +474,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             if sid != "dummy_session":
                                 kv_manager.capture_prefill_kv(
                                     sid, captured_layer_idx,
-                                    key_states[b_idx:b_idx+1].detach(),
+                                    unrot_key_states[b_idx:b_idx+1].detach(),
                                     value_states[b_idx:b_idx+1].detach(),
                                 )
 
@@ -448,7 +524,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             if sid != "dummy_session":
                                 kv_manager.capture_prefill_kv(
                                     sid, captured_layer_idx,
-                                    curr_k.detach(),
+                                    unrot_key_states[b_idx:b_idx+1].detach(),
                                     curr_v.detach(),
                                 )
                                 
