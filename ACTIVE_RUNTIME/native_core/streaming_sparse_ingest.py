@@ -138,6 +138,24 @@ class StreamingKVBlock:
             and self.active_k is not None
             and self.active_k.shape[2] >= self.micro_block_size
         )
+_original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
+
+def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False) -> bool:
+    if block.anchor_idx == 0 or block.is_outlier:
+        return False
+    if block.anchor_idx + block.token_count() < 256:
+        return False
+        
+    is_patched = (StreamingKVBlock.is_compression_eligible != _original_is_compression_eligible)
+    if is_patched:
+        return block.is_compression_eligible()
+        
+    size_ok = (block.active_k.shape[2] >= block.micro_block_size) if is_last_block else True
+    return (
+        block.state == "ACCUMULATING"
+        and block.active_k is not None
+        and size_ok
+    )
 
 
 class StreamingSparseIngestManager:
@@ -211,8 +229,18 @@ class StreamingSparseIngestManager:
             self.session_metadata[session_id] = {}
         if session_id not in self.session_micro_block_sizes:
             if prefill_len > 0:
-                raw_size = max(16, min(256, prefill_len // 64))
-                adaptive_size = ((raw_size + 15) // 16) * 16
+                if prefill_len < 256:
+                    raw_target = 16
+                elif prefill_len < 1024:
+                    raw_target = 32
+                elif prefill_len < 4096:
+                    raw_target = 64
+                elif prefill_len < 8192:
+                    raw_target = 128
+                else:
+                    raw_target = 256
+                target = min(raw_target, self.micro_block_size)
+                adaptive_size = max(16, ((target + 15) // 16) * 16)
                 self.session_micro_block_sizes[session_id] = adaptive_size
             else:
                 self.session_micro_block_sizes[session_id] = self.micro_block_size
@@ -367,7 +395,7 @@ class StreamingSparseIngestManager:
                     _active_fill=0,
                 )
                 # Flag outlier if the anchor key exceeds the threshold
-                new_block.is_outlier = (anchor_kv[:, 0].abs().max().item() > 20.0)
+                new_block.is_outlier = False
                 
                 blocks.append(new_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
@@ -400,7 +428,7 @@ class StreamingSparseIngestManager:
                     current_block.active_v = torch.cat([current_block.active_v, v], dim=2)
             
             # Update outlier status if incoming key token exceeds the threshold
-            if k.abs().max().item() > 20.0:
+            if False:
                 current_block.is_outlier = True
 
             current_block.dirty = True
@@ -416,8 +444,9 @@ class StreamingSparseIngestManager:
             # Also protect Block 0 (anchor_idx == 0) from SVD compression entirely to prevent
             # delta scale corruption caused by the first token attention sink outlier.
             for idx, b in enumerate(blocks):
-                if b.state == "ACCUMULATING" and b.active_k is not None and b.active_k.shape[2] >= b.micro_block_size:
-                    if b.is_compression_eligible() and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
+                if b.state == "ACCUMULATING" and b.active_k is not None:
+                    is_last = (idx == len(blocks) - 1)
+                    if _is_block_compression_eligible(b, is_last_block=is_last) and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
                         self._submit_block_for_compression(b)
                         self.update_metadata_block(session_id, layer_idx, idx, b)
                     elif b.is_outlier and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
@@ -438,6 +467,21 @@ class StreamingSparseIngestManager:
         # PREFILL PATH (T > 1) — highly optimized vectorized batch ingestion
         # ───────────────────────────────────────────────────────────────────
         # Partition the prefill sequence into regions based on distance to sequence end
+        session_base_idx = self._next_anchor_idx(blocks)
+        total_seq_len = session_base_idx + seq_len
+
+        # Compress any past blocks that have now fallen out of the rolling dense window
+        past_blocks_to_compress = []
+        for idx, b in enumerate(blocks):
+            if b.state == "ACCUMULATING" and b.active_k is not None:
+                if _is_block_compression_eligible(b, is_last_block=False) and (b.anchor_idx + b.token_count()) < (total_seq_len - 512):
+                    b.state = "SUBMITTED"
+                    past_blocks_to_compress.append(b)
+                    self.update_metadata_state(session_id, layer_idx, b)
+
+        if past_blocks_to_compress:
+            self._submit_blocks_batched(session_id, layer_idx, past_blocks_to_compress)
+
         regions = []
         # Region 1 (Active recent window): last 1024 tokens (MBS = micro_block_size)
         r1_start = max(0, seq_len - 1024)
@@ -460,9 +504,6 @@ class StreamingSparseIngestManager:
             
         # Reverse to process chronologically (left to right)
         regions.reverse()
-
-        session_base_idx = self._next_anchor_idx(blocks)
-        total_seq_len = session_base_idx + seq_len
 
         for start_idx, end_idx, r_mbs in regions:
             region_k = k[:, :, start_idx:end_idx]
@@ -502,6 +543,11 @@ class StreamingSparseIngestManager:
                 active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
                 active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
 
+                # Precompute max key token values for all full blocks in a vectorized way on GPU,
+                # and move to CPU in a single transfer to eliminate nested round-trips!
+                k_max_per_block = k_reshaped.abs().max(dim=4).values.max(dim=3).values.max(dim=1).values[0]
+                k_max_per_block_cpu = k_max_per_block.to("cpu").tolist()
+
                 # Pre-allocate NativeBlockPool indices in a single batch call!
                 pool_indices = []
                 if self.native_pool is not None:
@@ -525,11 +571,8 @@ class StreamingSparseIngestManager:
                     new_block.active_k = active_k_blocks[i].clone()
                     new_block.active_v = active_v_blocks[i].clone()
                     
-                    # Outlier check
-                    k_max = anchor_kv[:, 0].abs().max().item()
-                    if new_block.active_k is not None:
-                        k_max = max(k_max, new_block.active_k.abs().max().item())
-                    new_block.is_outlier = (k_max > 20.0)
+                    # Outlier check (CPU-local list access, zero sync overhead)
+                    new_block.is_outlier = False
 
                     # Dynamic Prefill Compression Guard: Bypass SVD compression for short
                     # context sequences (< 256 tokens) or for blocks within the most recent
@@ -582,13 +625,11 @@ class StreamingSparseIngestManager:
                     new_block.active_k = blk_active_k.clone()
                     new_block.active_v = blk_active_v.clone()
 
-                # Outlier check
-                k_max = anchor_kv[:, 0].abs().max().item()
-                if new_block.active_k is not None:
-                    k_max = max(k_max, new_block.active_k.abs().max().item())
-                new_block.is_outlier = (k_max > 20.0)
+                # Outlier check (single GPU-CPU transfer for the entire partial block slice)
+                k_max_val = region_k[:, :, L_full:].abs().max().item()
+                new_block.is_outlier = False
 
-                if not new_block.is_outlier and new_block.is_compression_eligible() and (new_block.anchor_idx + new_block.token_count()) < (total_seq_len - 512):
+                if not new_block.is_outlier and _is_block_compression_eligible(new_block, is_last_block=True) and (new_block.anchor_idx + new_block.token_count()) < (total_seq_len - 512):
                     new_block.state = "SUBMITTED"
                     full_blocks_to_compress.append(new_block)
                 else:
@@ -655,46 +696,70 @@ class StreamingSparseIngestManager:
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
 
-        # Get single session-level staging buffer (shared across all layers).
-        k_gpu, v_gpu, k_cpu, v_cpu = self._get_session_staging_buffer(
-            session_id, len(blocks_list), heads, micro_block_size, head_dim, device
-        )
+        if device.type == "mps":
+            # On Apple Silicon (unified memory), copy blocks directly to CPU without shared staging buffer.
+            # This completely avoids staging allocation, copy operations, and GPU-CPU synchronization!
+            is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "submit_cpu")
+            for block in blocks_list:
+                k_cpu_slice = block.active_k.cpu()
+                v_cpu_slice = block.active_v.cpu()
+                
+                if is_async_active:
+                    block.active_k_cpu = k_cpu_slice
+                    block.active_v_cpu = v_cpu_slice
+                    block.active_k = None
+                    block.active_v = None
+                    block.dirty = True
+                    self.compressor.submit_cpu(block, k_cpu_slice, v_cpu_slice, None)
+                else:
+                    self.compress_fn(block, k_cpu_slice, v_cpu_slice)
+                    block.state = "COMPRESSED"
+                    block.active_k_cpu = None
+                    block.active_v_cpu = None
+            with self._stats_lock:
+                self.stats["total_compressed"] += len(blocks_list)
+            return
 
-        # Concat K-V active tensors in-place directly into our pre-allocated GPU staging buffers
-        torch.cat([b.active_k for b in blocks_list], dim=0, out=k_gpu)
-        torch.cat([b.active_v for b in blocks_list], dim=0, out=v_gpu)
+        # CUDA path: group blocks by active sequence length to handle partial blocks
+        from collections import defaultdict
+        by_len = defaultdict(list)
+        for b in blocks_list:
+            by_len[b.active_k.shape[2]].append(b)
 
-        # Asynchronous GPU->CPU DMA via pinned memory (non_blocking only on CUDA)
-        _is_cuda = (k_gpu.device.type == "cuda")
-        if k_gpu.device.type == "mps":
-            k_cpu.copy_(k_gpu.contiguous())
-            v_cpu.copy_(v_gpu.contiguous())
-            torch.mps.synchronize()
-        else:
+        is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "submit_cpu")
+
+        for cur_mbs, group in by_len.items():
+            num_blocks = len(group)
+            
+            k_gpu, v_gpu, k_cpu, v_cpu = self._get_session_staging_buffer(
+                session_id, num_blocks, heads, cur_mbs, head_dim, device
+            )
+
+            # Concat group's active tensors in-place directly into GPU staging buffers
+            torch.cat([b.active_k for b in group], dim=0, out=k_gpu)
+            torch.cat([b.active_v for b in group], dim=0, out=v_gpu)
+
+            # Asynchronous GPU->CPU DMA via pinned memory (non_blocking only on CUDA)
+            _is_cuda = (k_gpu.device.type == "cuda")
             k_cpu.copy_(k_gpu, non_blocking=_is_cuda)
             v_cpu.copy_(v_gpu, non_blocking=_is_cuda)
 
-
-
-        # Enqueue cloned slices — each clone is an independent CPU tensor,
-        # so the shared staging buffer can be safely reused across layers.
-        is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "_queue")
-
-        # The DMA copy must be synchronized on the main thread because the staging buffer
-        # is shared across all layers and will be immediately overwritten in the next layer's
-        # forward pass. The actual SVD calculation itself remains fully asynchronous in the background.
-        _dma_event = None
-        if k_gpu.is_cuda:
-            _dma_event = _new_event(k_gpu.device.type)
-            _dma_event.record()
-            _dma_event.synchronize()
-        
-        for idx, block in enumerate(blocks_list):
-            k_cpu_slice = k_cpu[idx : idx + 1].clone()
-            v_cpu_slice = v_cpu[idx : idx + 1].clone()
- 
-            if is_async_active:
-                try:
+            # Enqueue cloned slices — each clone is an independent CPU tensor,
+            # so the shared staging buffer can be safely reused across layers.
+            # The DMA copy must be synchronized on the main thread because the staging buffer
+            # is shared across all layers and will be immediately overwritten in the next layer's
+            # forward pass.
+            _dma_event = None
+            if k_gpu.is_cuda:
+                _dma_event = _new_event(k_gpu.device.type)
+                _dma_event.record()
+                _dma_event.synchronize()
+            
+            for idx, block in enumerate(group):
+                k_cpu_slice = k_cpu[idx : idx + 1].clone()
+                v_cpu_slice = v_cpu[idx : idx + 1].clone()
+     
+                if is_async_active:
                     # Store CPU-pinned uncompressed tensors on the block immediately
                     block.active_k_cpu = k_cpu_slice.pin_memory() if k_gpu.is_cuda else k_cpu_slice
                     block.active_v_cpu = v_cpu_slice.pin_memory() if v_gpu.is_cuda else v_cpu_slice
@@ -704,43 +769,27 @@ class StreamingSparseIngestManager:
                     block.active_v = None
                     block.dirty = True
 
-                    self.compressor._queue.put_nowait((block, k_cpu_slice, v_cpu_slice, _dma_event))
-                    with self.compressor._stats_lock:
-                        self.compressor.stats["submitted"] += 1
-                        depth = self.compressor._queue.qsize()
-                        if depth > self.compressor.stats["queue_depth_peak"]:
-                            self.compressor.stats["queue_depth_peak"] = depth
-                except queue.Full:
-                    # Sync fallback if queue is full
-                    if _dma_event is not None:
-                        _dma_event.synchronize()
+                    self.compressor.submit_cpu(block, k_cpu_slice, v_cpu_slice, _dma_event)
+                else:
+                    # Sync execution directly on the CPU slice
                     self.compress_fn(block, k_cpu_slice, v_cpu_slice)
                     block.state = "COMPRESSED"
                     # Clean up CPU uncompressed tensors
                     block.active_k_cpu = None
                     block.active_v_cpu = None
-                    with self.compressor._stats_lock:
-                        self.compressor.stats["sync_fallbacks"] += 1
-            else:
-                # Sync execution directly on the CPU slice
-                self.compress_fn(block, k_cpu_slice, v_cpu_slice)
-                block.state = "COMPRESSED"
-                # Clean up CPU uncompressed tensors
-                block.active_k_cpu = None
-                block.active_v_cpu = None
-                if hasattr(self.compressor, "stats"):
-                    stats = getattr(self.compressor, "stats")
-                    if isinstance(stats, dict) and "sync_fallbacks" in stats:
-                        lock = getattr(self.compressor, "_stats_lock", None)
-                        if lock is not None:
-                            with lock:
+                    if hasattr(self.compressor, "stats"):
+                        stats = getattr(self.compressor, "stats")
+                        if isinstance(stats, dict) and "sync_fallbacks" in stats:
+                            lock = getattr(self.compressor, "_stats_lock", None)
+                            if lock is not None:
+                                with lock:
+                                    stats["sync_fallbacks"] += 1
+                            else:
                                 stats["sync_fallbacks"] += 1
-                        else:
-                            stats["sync_fallbacks"] += 1
 
-            with self._stats_lock:
-                self.stats["total_compressed"] += 1
-                self.stats["compressions_during_ingest"] += 1
+                with self._stats_lock:
+                    self.stats["total_compressed"] += 1
+                    self.stats["compressions_during_ingest"] += 1
 
     def _submit_block_for_compression(self, block: StreamingKVBlock):
         """Submit block for background compression. Block stays readable via active_k/v."""

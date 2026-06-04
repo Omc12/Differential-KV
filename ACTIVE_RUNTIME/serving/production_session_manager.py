@@ -10,7 +10,18 @@ class ProductionSessionManager:
     Handles multi-session lifecycle, persistence, and sparse residency management.
     Ensures sessions are correctly loaded, saved, and cleaned up.
     """
-    def __init__(self, storage_path: str = "./session_checkpoints", max_resident_sessions: int = 5, kv_manager = None):
+    def __init__(self,
+                 storage_path: str = "./session_checkpoints",
+                 max_resident_sessions: int = None,
+                 kv_manager=None):
+        # Default: 1 resident session to minimize idle KV VRAM usage.
+        # Override with DIFFKV_MAX_SESSIONS env var for multi-user deployments.
+        if max_resident_sessions is None:
+            try:
+                max_resident_sessions = int(os.environ.get("DIFFKV_MAX_SESSIONS", "1"))
+            except (ValueError, TypeError):
+                max_resident_sessions = 1
+
         self.storage_path = storage_path
         self.max_resident_sessions = max_resident_sessions
         self.kv_manager = kv_manager

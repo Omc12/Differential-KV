@@ -414,9 +414,9 @@ def main():
     parser.add_argument('--rank', type=int, default=32,
                         help='SVD rank for KV compression. Higher = better quality, more VRAM. '
                              'Recommended: 16 for balanced, 32 for quality, 8 for VRAM-constrained.')
-    parser.add_argument('--micro-block-size', type=int, default=32,
-                        help='Tokens accumulated before compression is submitted. '
-                             'Larger = fewer SVD calls, lower relative error. Must be >= rank.')
+    parser.add_argument('--micro-block-size', type=int, default=256,
+                        help='Tokens per compressed KV block. S=256 gives 5.2x compression ratio. '
+                             'Lower values compress more frequently (more overhead). Must be >= rank.')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--serving-mode', type=str,
                         choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
@@ -431,11 +431,11 @@ def main():
                         help='Load model weights in 8-bit LLM.int8 quantization (bitsandbytes). '
                              'Reduces weight VRAM by ~50%% with near-lossless quality. '
                              'Requires: pip install bitsandbytes')
-    # ── Session residency arg ──────────────────────────────────────────────────────
-    parser.add_argument('--max-resident-sessions', type=int, default=3,
-                        help='Maximum number of sessions resident in VRAM simultaneously. '
-                             'Lower = less VRAM used for KV cache per idle session. '
-                             'Increase for multi-user serving with active parallel sessions.')
+    # ── Session residency arg ──────────────────────────────────────────────────────────────────────────────────
+    parser.add_argument('--max-resident-sessions', type=int, default=1,
+                        help='Maximum sessions resident in VRAM simultaneously. '
+                             'Default 1 eliminates idle KV VRAM waste. '
+                             'Increase for multi-user serving with parallel active sessions.')
     args = parser.parse_args()
 
     # Disable tokenizer parallelism warnings
@@ -465,6 +465,7 @@ def main():
     print(f'Loading DiffKV runtime with model: {args.model}...')
     print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
     print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
+    print(f'  [Tip] Set DIFFKV_TELEMETRY=1 to enable VRAM + block state logging')
     # Auto-detect best device: CUDA → MPS (Apple Silicon) → CPU
     try:
         from native_core.mac_utils import get_best_device as _gbd
@@ -475,9 +476,11 @@ def main():
     wrapper = DiffKVHFWrapper(
         args.model,
         config={
-            'rank': args.rank,
+            'rank':             args.rank,
             'micro_block_size': args.micro_block_size,
-            'serving_mode': args.serving_mode,
+            'block_size':       args.micro_block_size,   # keep in sync
+            'serving_mode':     args.serving_mode,
+            'mode':             'fp16',
         },
         device=_best_device,
         quantization_config=quantization_config,

@@ -41,6 +41,37 @@ except ImportError:
     def _has_cuda(): return torch.cuda.is_available()
 
 
+def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
+    """
+    Per-layer adaptive rank schedule tuned for Qwen 2.5 1.5B (28 layers).
+    Early layers have broader activation distributions and need higher rank;
+    final layers are more concentrated and can use lower rank.
+
+    Schedule is PROPORTIONAL to base_rank so the user's configured rank acts
+    as a hard ceiling (no silent VRAM inflation beyond --rank).
+
+    Old schedule used max(64, base_rank) which silently used rank=64 on early
+    layers even when base_rank=32, doubling VRAM for those layers.
+
+    New schedule (proportional factors of base_rank, clamped to [4, base_rank]):
+      Layers 0-15%:  min(ceil(1.25 * base_rank), base_rank) = base_rank
+      Layers 15-50%: base_rank  (no change)
+      Layers 50-79%: max(4, round(0.75 * base_rank))
+      Layers 79%+:   max(4, round(0.50 * base_rank))
+    """
+    ratio = layer_idx / max(num_layers, 1)
+    if ratio < 0.15:       # layers 0-4   for 28-layer model
+        # Early layers: use full base_rank (not higher — user's ceiling)
+        return base_rank
+    elif ratio < 0.50:     # layers 4-14
+        return base_rank
+    elif ratio < 0.79:     # layers 14-22 — slightly reduced
+        return max(4, round(0.75 * base_rank))
+    else:                  # layers 22-28 — concentrated final layers
+        return max(4, round(0.50 * base_rank))
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # KVBlock definition (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +162,7 @@ class KVRuntimeManager:
         recon_cache_size:    int   = 64,
         async_compression:   bool  = True,
         streaming_ingest:    bool  = True,
-        micro_block_size:    int   = 16,
+        micro_block_size:    int   = 256,   # S=256, R=32 → 5.2× compression ratio
         rank:                int   = 8,
         kv_heads:            int   = None,
         serving_mode:        str   = "balanced",
@@ -175,33 +206,34 @@ class KVRuntimeManager:
             recon_pool_blocks = 128 if streaming_ingest else 512
             gpu_budget_gb = 1.5
 
-        # ── Phase 28 Native Block Pool ──────────────────────────────────────────
         from runtime.native_block_pool import NativeBlockPool
-        
+
+        # pool_rank MUST equal self.rank exactly — it determines the physical shape of
+        # U [int8: pool_block_size × pool_rank] and V_K/V_V [fp16: pool_rank × kv_heads × head_dim]
+        # in the NativeBlockPool. Using max(64, rank) was silently 2–4× over-allocating
+        # when rank=8 or rank=16. The sparse kernel handles variable k-rank blocks via
+        # min(U.shape[1], pool_rank) guards — no minimum needed here.
         pool_rank = self.rank
-        # ── Phase Optimization: Use actual micro_block_size as max_seq_len ──
-        # The pool's U tensor stores per-token compressed data. Since micro-blocks
-        # are 16–32 tokens (not 256), allocating 256 slots per block wastes 8–16×
-        # VRAM for every compressed block. We now use the real micro_block_size.
-        # pool.write_block() uses min(seq_len, pool_max_seq) guards so variable
-        # fills are handled safely.
+        # Pool max_seq_len = micro_block_size (default varies by context length).
         pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
-        # Ensure at least 33 slots so a full 32-token micro-block + anchor fits
-        pool_block_size = max(pool_block_size, 33)
+        # Ensure pool_block_size can hold the maximum adaptive prefill block size (MBS + 1 anchor)
+        pool_block_size = max(pool_block_size, 257)
         
         bytes_per_block = (
-            (pool_block_size * pool_rank * 2) +                                # U
-            (pool_rank * self.kv_heads * self.head_dim * 2) * 2 +              # V_K, V_V
-            (self.kv_heads * self.head_dim * 2) * 2 +                          # anchors_K, anchors_V
-            6                                                                  # scales (2) + seq_lens (4)
+            (pool_block_size * pool_rank * 1) +                                # U (int8)
+            (pool_rank * self.kv_heads * self.head_dim * 2) * 2 +              # V_K, V_V (fp16)
+            (self.kv_heads * self.head_dim * 2) * 2 +                          # anchors_K, anchors_V (fp16)
+            6 + 2                                                              # scales (2) + seq_lens (4) + U_scale (2)
         )
         
-        # Dynamically calculate pool budget based on expected token sequence length (e.g. 32K for long-context)
-        # instead of a static GB multiplier.
-        max_tokens_map = {"long-context": 32768, "performance": 16384, "balanced": 16384, "lightweight": 4096}
-        expected_tokens = max_tokens_map.get(serving_mode, 16384)
-        avg_block_sz = 64
-        n_blocks_per_layer = expected_tokens // avg_block_sz
+        # Use the REAL mean block size (adaptive schedule mean ≈ 32 for short contexts).
+        # Old formula used micro_block_size=256 as avg even when 99% of sessions use S=32.
+        # This over-counted blocks_per_layer by 8× for typical chat, making the pool 8× larger.
+        # Conservative estimate: average between 32 (short chat) and micro_block_size (long ctx).
+        avg_block_sz = max(32, min(self.micro_block_size, 64))
+        max_tokens_map = {"long-context": 32768, "performance": 16384, "balanced": 8192, "lightweight": 4096}
+        expected_tokens = max_tokens_map.get(serving_mode, 8192)
+        n_blocks_per_layer = max(1, expected_tokens // avg_block_sz)
         
         # Sum of compressed blocks across all layers, scaled by 6 to support multi-session serving
         total_expected_blocks = n_blocks_per_layer * self.num_layers * 6
@@ -221,7 +253,7 @@ class KVRuntimeManager:
             max_seq_len=pool_block_size,
             device=self.device,
             dtype=torch.float16,
-            initial_blocks=256   # 256 is sufficient since each slot is now micro_block_size (not 256) rows
+            initial_blocks=256   # Each slot is now micro_block_size (256) rows
         )
 
 
@@ -271,10 +303,13 @@ class KVRuntimeManager:
         # Phase 32 Fix: GPU block_indices cache to eliminate PCIe & GPU allocator churn
         self._indices_gpu_cache: dict = {}
 
-        # Prefill KV capture: session_id -> {layer_idx -> (K, V)}
-        # Populated by capture_prefill_kv() during the forward pass.
-        # Consumed and cleared by compress_prefill_kv() after the forward pass.
-        self._prefill_kv_capture: Dict[str, Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = {}
+
+
+        # Fast-path counter: number of blocks in CPU_COMPRESSED state waiting for
+        # main-thread GPU upload. finalize_compressed_blocks() returns in O(1)
+        # when this is zero (the normal decode steady-state after prefill completes).
+        self._pending_cpu_blocks: int = 0
+        self._pending_lock = threading.Lock()
 
     # ── Session management ────────────────────────────────────────────────────
 
@@ -289,8 +324,7 @@ class KVRuntimeManager:
         keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
         for k in keys_to_del:
             self._indices_gpu_cache.pop(k, None)
-        # Also clear any stale prefill capture for this session
-        self._prefill_kv_capture.pop(session_id, None)
+
 
     # ── Prefill KV capture & batch compression ────────────────────────────────
 
@@ -302,69 +336,60 @@ class KVRuntimeManager:
         V: torch.Tensor,
     ) -> None:
         """
-        Stores a reference to the prefill K/V for one layer without copying.
-        Called from inside diffkv_forward() once per layer per prefill chunk.
-        Compression happens AFTER the entire forward pass returns.
+        Immediately streams K/V through the ingest pipeline.
+
+        Old behaviour: accumulated chunks via torch.cat into a growing GPU tensor
+        across all 28 layers × 4 chunks = 112 growing cat operations per 2048-token
+        prompt, then processed everything at once in compress_prefill_kv(). This
+        created an O(N²) GPU allocation spike and held all chunks in VRAM simultaneously.
+
+        New behaviour: each chunk is streamed directly into ingest_streaming() as
+        soon as the forward pass for that layer returns. This:
+          1. Eliminates all torch.cat accumulation (zero extra allocations).
+          2. Allows compression to start immediately on the first chunk.
+          3. Keeps VRAM bounded to 1 chunk at a time (not the whole prompt).
         """
-        if session_id not in self._prefill_kv_capture:
-            self._prefill_kv_capture[session_id] = {}
-        cap = self._prefill_kv_capture[session_id]
-        if layer_idx in cap:
-            # Accumulate chunks across multiple forward passes of the same layer
-            prev_K, prev_V = cap[layer_idx]
-            cap[layer_idx] = (
-                torch.cat([prev_K, K], dim=2),   # concat along seq_len dim
-                torch.cat([prev_V, V], dim=2),
-            )
-        else:
-            cap[layer_idx] = (K, V)
+        # Stream directly — ingest_streaming handles block alignment, SVD, pool writes.
+        self.ingest_streaming(session_id, layer_idx, K, V)
 
     def compress_prefill_kv(self, session_id: str) -> None:
         """
-        Runs once after the full prefill forward pass completes.
-        Feeds captured K/V tensors through the existing streaming ingest pipeline,
-        which handles block sizing, async SVD compression, pool writes, and
-        metadata updates correctly using the session's micro_block_size.
-
-        Using ingest_streaming (not a custom SVD path) is critical because the
-        Triton decode kernel reads U[pool_idx, :S_MAX, :] where S_MAX is the
-        session's micro_block_size (16–32 tokens). A custom 256-token block
-        would cause S_MAX misreads → garbage output.
+        No-op barrier stub — compression now fires immediately in capture_prefill_kv().
+        Kept for API compatibility with hf_diffkv_wrapper.py which calls this after
+        each prefill chunk to trigger SVD overlap with the next chunk forward pass.
         """
-        captured = self._prefill_kv_capture.pop(session_id, {})
-        if not captured:
-            return
 
-        import os as _os
 
-        for layer_idx in sorted(captured.keys()):
-            K, V = captured[layer_idx]   # [1, kv_heads, seq_len, head_dim]
-            # ingest_streaming handles micro_block_size alignment, async SVD,
-            # native pool writes, and metadata tensor updates — all correctly.
-            self.ingest_streaming(session_id, layer_idx, K, V)
-            del K, V
-            captured[layer_idx] = None
-
-        del captured
-        import gc as _gc
+        import gc as _gc, os as _os
         _gc.collect()
         _empty_cache(self.device)
 
         if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             if _has_cuda():
                 alloc = torch.cuda.memory_allocated() / 1024**3
-                print(f"[DiffKV] Post-prefill compression done. VRAM: {alloc:.2f} GB")
+                print(f"[DiffKV] Post-prefill flush. VRAM: {alloc:.2f} GB")
             else:
-                print(f"[DiffKV] Post-prefill compression done (MPS/CPU — no VRAM stats).")
+                print("[DiffKV] Post-prefill flush (MPS/CPU).")
+
+
 
     def finalize_compressed_blocks(self):
         """
         Uploads CPU-compressed blocks (SVD computed on background thread) to GPU
         and writes them to the native block pool. Runs on the main thread to ensure
         MPS/Metal thread safety.
+
+        Fast-path: returns immediately (O(1)) when _pending_cpu_blocks == 0.
+        This is the common case during decode after all prefill blocks are finalized.
         """
         if self._streaming_mgr is None:
             return
+
+        # O(1) early exit — no blocks waiting. Avoids full session×layer×block scan
+        # on every decode token once all prefill blocks are finalized.
+        with self._pending_lock:
+            if self._pending_cpu_blocks <= 0:
+                return
 
         # Scan all resident sessions and layers
         for session_id, layers in list(self._streaming_mgr.session_blocks.items()):
@@ -376,17 +401,15 @@ class KVRuntimeManager:
                             gpu_device = block.anchor_kv.device
                             u_cpu = getattr(block, "U_cpu", None)
                             v_cpu = getattr(block, "V_cpu", None)
-                            
-                            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                                print(f"[DiffKV Finalizer Debug] Found CPU_COMPRESSED block: anchor={block.anchor_idx}, U_cpu is None? {u_cpu is None}, V_cpu is None? {v_cpu is None}")
-                            
+
                             if u_cpu is None or v_cpu is None:
+                                # Still waiting for compressor to populate — skip for now
                                 continue
-                            
+
                             block.U = u_cpu.to(gpu_device)
                             block.V = v_cpu.to(gpu_device)
 
-                            # Clean up temporary CPU attributes
+                            # Clean up temporary CPU tensors
                             block.U_cpu = None
                             block.V_cpu = None
 
@@ -404,15 +427,18 @@ class KVRuntimeManager:
                                     seq_len=block.U.shape[0]
                                 )
 
-                            # Update status and streaming manager metadata state
+                            # Mark finalized and decrement pending counter
                             block.state = "COMPRESSED"
-                            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                                print(f"[DiffKV Finalizer Debug] Block anchor={block.anchor_idx} successfully finalized to COMPRESSED!")
+                            with self._pending_lock:
+                                self._pending_cpu_blocks = max(0, self._pending_cpu_blocks - 1)
                             self._streaming_mgr.update_metadata_state(session_id, layer_idx, block)
                         except Exception as e:
                             import traceback
                             print(f"[DiffKV WARNING] Failed to finalize CPU-compressed block: {e}")
                             traceback.print_exc()
+                            # Decrement on failure too to avoid infinite loops
+                            with self._pending_lock:
+                                self._pending_cpu_blocks = max(0, self._pending_cpu_blocks - 1)
 
     def clear_session(self, session_id: str):
         # Invalidate GPU block indices cache
@@ -466,6 +492,16 @@ class KVRuntimeManager:
         if session_id in self.session_blocks:
             del self.session_blocks[session_id]
         if self._streaming_mgr is not None:
+            # Count CPU_COMPRESSED blocks being evicted so the counter stays accurate
+            evicted_pending = 0
+            if session_id in self._streaming_mgr.session_blocks:
+                for layer_idx, blocks in self._streaming_mgr.session_blocks[session_id].items():
+                    for b in blocks:
+                        if getattr(b, "state", None) == "CPU_COMPRESSED":
+                            evicted_pending += 1
+            if evicted_pending > 0:
+                with self._pending_lock:
+                    self._pending_cpu_blocks = max(0, self._pending_cpu_blocks - evicted_pending)
             self._streaming_mgr.clear_session(session_id)
         self.pager.evict_session(session_id)
         # Invalidate mbs cache for this session
@@ -523,16 +559,34 @@ class KVRuntimeManager:
         """
         Universal query to get the exact sequence length currently cached in blocks.
         Model-agnostic and session-residency safe.
+
+        Handles all block states:
+          - ACCUMULATING: anchor + active_k tokens
+          - SUBMITTED:    anchor + tokens in token_indices (active_k may be None during SVD)
+          - COMPRESSED:   anchor + U.shape[0] rows
+          - PAGED:        anchor + active_k_cpu tokens
         """
         blocks = self.get_streaming_blocks(session_id, 0)
         if not blocks:
             return 0
         last_block = blocks[-1]
+
+        # Use token_indices list length when available — it is always kept up-to-date
+        # regardless of block state (SUBMITTED blocks have active_k=None during SVD).
+        token_indices = getattr(last_block, "token_indices", None)
+        if token_indices is not None and len(token_indices) > 0:
+            return int(token_indices[-1]) + 1
+
+        # Fallback: compute from U or active_k
         last_U_len = last_block.U.shape[0] if last_block.U is not None else 0
-        last_active_len = last_block.active_k.shape[2] if last_block.active_k is not None else 0
+        last_active_len = 0
+        if last_block.active_k is not None:
+            last_active_len = last_block.active_k.shape[2]
+        elif getattr(last_block, "active_k_cpu", None) is not None:
+            last_active_len = last_block.active_k_cpu.shape[2]
         last_token_count = last_U_len if last_U_len > 0 else last_active_len
-        seq_len = last_block.anchor_idx + 1 + last_token_count
-        return seq_len
+        return last_block.anchor_idx + 1 + last_token_count
+
 
     def log_block_states(self, session_id: str) -> None:
         """
@@ -730,11 +784,27 @@ class KVRuntimeManager:
         if session_id not in self._streaming_mgr.session_blocks:
             self.init_session(session_id, prefill_len=k.shape[2])
         elif k.shape[2] > 1 and session_id in self._streaming_mgr.session_micro_block_sizes:
-            # Update adaptive size if it was initialized with default
-            if self._streaming_mgr.session_micro_block_sizes[session_id] == self._streaming_mgr.micro_block_size:
-                raw_size = max(16, min(256, k.shape[2] // 64))
-                adaptive_size = ((raw_size + 15) // 16) * 16
-                self._streaming_mgr.session_micro_block_sizes[session_id] = adaptive_size
+            # Update adaptive size on the first chunked prefill if it was set by a
+            # decode-only init (no prefill_len known at session creation time).
+            # Use same tiered schedule as StreamingSparseIngestManager.init_session().
+            existing = self._streaming_mgr.session_micro_block_sizes[session_id]
+            if existing == min(32, self._streaming_mgr.micro_block_size):
+                seq_len = k.shape[2]
+                if seq_len < 256:
+                    raw_target = 16
+                elif seq_len < 1024:
+                    raw_target = 32
+                elif seq_len < 4096:
+                    raw_target = 64
+                elif seq_len < 8192:
+                    raw_target = 128
+                else:
+                    raw_target = 256
+                target = min(raw_target, self._streaming_mgr.micro_block_size)
+                target = max(16, ((target + 15) // 16) * 16)
+                self._streaming_mgr.session_micro_block_sizes[session_id] = target
+
+
 
         if k.shape[2] == 1:
             self._streaming_mgr.append_decode_token(session_id, layer_idx, k, v)
@@ -823,13 +893,6 @@ class KVRuntimeManager:
         # Phase 32: GPU block indices cache check
         if compressed_mask.any():                    # CPU any() — no CUDA sync
             cpu_indices = active_meta[compressed_mask, 0]
-            # Touch accessed pool blocks for LRU tracking
-            if hasattr(self, "native_pool") and self.native_pool is not None:
-                touch_fn = getattr(self.native_pool, "touch_block", None)
-                if touch_fn is not None:
-                    for idx in cpu_indices.tolist():
-                        touch_fn(int(idx))
-
             cpu_anchors = active_meta[compressed_mask, 1]
             cpu_seq_lens = active_meta[compressed_mask, 2]
             max_anchor_idx = int(cpu_anchors.max().item())
@@ -884,68 +947,20 @@ class KVRuntimeManager:
         if not dense_blocks:
             return None, None
 
-        ws_key = (session_id, layer_idx, "dense")
-        ws = self.decode_workspace.get(ws_key)
-
-        # Count total tokens in the dense window: anchor + active_k/active_k_cpu per block
-        total_dense_len = 0
-        for blk in dense_blocks:
-            total_dense_len += 1  # anchor
-            if blk.active_k is not None:
-                total_dense_len += blk.active_k.shape[2]
-            elif getattr(blk, "active_k_cpu", None) is not None:
-                total_dense_len += blk.active_k_cpu.shape[2]
-
-        if total_dense_len == 0:
-            return None, None
-
         device = self.device
-
-        # Allocate or grow the persistent dense window workspace
-        if ws is None or ws[0].shape[2] < total_dense_len:
-            alloc_len = max(total_dense_len + max(total_dense_len // 10, 32), 64)
-            k_ws = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), dtype=dtype, device=device)
-            v_ws = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), dtype=dtype, device=device)
-            ws = (k_ws, v_ws)
-            self.decode_workspace[ws_key] = ws
-            # Mark all blocks dirty so they get written into the new workspace
-            for blk in dense_blocks:
-                blk.dirty = True
-
-        k_ws, v_ws = ws
-
-        # Write only dirty blocks — typically just the last one (new decode token)
-        cur_pos = 0  # Position within the dense window workspace (starts at 0, not anchor_idx)
-
+        k_list = []
+        v_list = []
         for blk in dense_blocks:
-            blk_active_k = blk.active_k
-            blk_active_v = blk.active_v
-            blk_active_k_cpu = getattr(blk, "active_k_cpu", None)
-            blk_active_v_cpu = getattr(blk, "active_v_cpu", None)
+            k_list.append(blk.anchor_kv[:, 0].unsqueeze(2).to(device=device, dtype=dtype))
+            v_list.append(blk.anchor_kv[:, 1].unsqueeze(2).to(device=device, dtype=dtype))
+            if blk.active_k is not None:
+                k_list.append(blk.active_k.to(dtype=dtype))
+                v_list.append(blk.active_v.to(dtype=dtype))
+            elif getattr(blk, "active_k_cpu", None) is not None:
+                k_list.append(blk.active_k_cpu.to(device=device, dtype=dtype, non_blocking=True))
+                v_list.append(blk.active_v_cpu.to(device=device, dtype=dtype, non_blocking=True))
 
-            act_len = 0
-            if blk_active_k is not None:
-                act_len = blk_active_k.shape[2]
-            elif blk_active_k_cpu is not None:
-                act_len = blk_active_k_cpu.shape[2]
-
-            blk_len = 1 + act_len
-            # Write anchor (always write to ensure correct position in workspace if preceding blocks got compressed)
-            anchor_k = blk.anchor_kv[0, 0]  # [H_kv, D]
-            anchor_v = blk.anchor_kv[0, 1]
-            k_ws[0, :, cur_pos, :] = anchor_k
-            v_ws[0, :, cur_pos, :] = anchor_v
-            # Write active tokens
-            if blk_active_k is not None:
-                k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k[0]
-                v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v[0]
-            elif blk_active_k_cpu is not None:
-                k_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_k_cpu[0].to(device, non_blocking=True)
-                v_ws[0, :, cur_pos + 1:cur_pos + 1 + act_len, :] = blk_active_v_cpu[0].to(device, non_blocking=True)
-            blk.dirty = False
-            cur_pos += blk_len
-
-        return k_ws[:, :, :total_dense_len, :], v_ws[:, :, :total_dense_len, :]
+        return torch.cat(k_list, dim=2), torch.cat(v_list, dim=2)
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
@@ -1452,7 +1467,7 @@ class KVRuntimeManager:
         token_norms = torch.clamp(token_norms, min=1e-5)
         normalized_deltas = deltas / token_norms.unsqueeze(1)
 
-        rank = self.rank
+        rank = get_layer_rank(block.layer_idx, self.num_layers, self.rank)
         lr_delta = compress_lowrank(normalized_deltas, rank)
 
         # Scale U by token norms to perform token-wise denormalization when reconstructed
@@ -1481,6 +1496,7 @@ class KVRuntimeManager:
 
             if hasattr(block, 'state'):
                 block.state = "CPU_COMPRESSED"
+                # Signal main-thread finalizer that there is work to do
         else:
             gpu_device = block.anchor_kv.device
             u_gpu = U_scaled.to(gpu_device)

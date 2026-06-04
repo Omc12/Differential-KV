@@ -315,8 +315,10 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     # 2. Compute GPU deltas
     stacked_anchors = torch.cat([b.anchor_kv.reshape(1, -1) for b in blocks_list], dim=0)
     deltas = (flat_batch.float() - stacked_anchors.unsqueeze(1).float())
-    if not torch.isfinite(deltas).all():
-        deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
+    import os as _local_os
+    if _local_os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1":
+        if not torch.isfinite(deltas).all():
+            deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Vectorized scale computation and normalization on GPU (Phase 41)
     # This prevents the scale factor from being applied twice (which caused deviation on long contexts),
@@ -366,10 +368,11 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     S_fp16 = S.to(torch.float16)
 
     # Sanitize outputs against NaNs/Infs (Phase 41 - safety first)
-    if not torch.isfinite(U_fp16).all():
-        U_fp16 = torch.nan_to_num(U_fp16, nan=0.0, posinf=0.0, neginf=0.0)
-    if not torch.isfinite(Vh_fp16).all():
-        Vh_fp16 = torch.nan_to_num(Vh_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+    if _local_os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1":
+        if not torch.isfinite(U_fp16).all():
+            U_fp16 = torch.nan_to_num(U_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(Vh_fp16).all():
+            Vh_fp16 = torch.nan_to_num(Vh_fp16, nan=0.0, posinf=0.0, neginf=0.0)
 
     pool = getattr(manager, "native_pool", None) if manager is not None else None
     for i, block in enumerate(blocks_list):

@@ -101,7 +101,7 @@ class ContinuousBatchEngine:
 
     # ── Compression barrier ─────────────────────────────────────────────
 
-    async def _wait_for_compression(self, session_id: str, timeout_s: float = 8.0):
+    async def _wait_for_compression(self, session_id: str, timeout_s: float = 30.0):
         """
         Non-blocking async wait until every block for *session_id* has left
         the SUBMITTED state (async SVD compressor is done), OR timeout elapses.
@@ -356,19 +356,19 @@ class ContinuousBatchEngine:
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
 
-            chunk_size = 1024
+            chunk_size = 2048   # 2048 / S=256 = 8 blocks per chunk — optimal for batched GPU SVD
             offset = req.prefill_offset
             chunk_ids = req.prompt_ids[offset : offset + chunk_size]
             actual_len = len(chunk_ids)
 
             # Lazy pre-allocation of a single pinned-memory input buffer (reused across all chunks)
-            _use_pinned = (self.wrapper.device == "cuda" or 
+            _use_pinned = (self.wrapper.device == "cuda" or
                            (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
-            if self._prefill_input_buf is None:
+            if self._prefill_input_buf is None or self._prefill_input_buf.shape[1] < chunk_size:
                 if _use_pinned:
-                    self._prefill_input_buf = torch.zeros((1, 1024), dtype=torch.long).pin_memory()
+                    self._prefill_input_buf = torch.zeros((1, chunk_size), dtype=torch.long).pin_memory()
                 else:
-                    self._prefill_input_buf = torch.zeros((1, 1024), dtype=torch.long)
+                    self._prefill_input_buf = torch.zeros((1, chunk_size), dtype=torch.long)
 
             # In-place fill of the reusable buffer — zero allocation per chunk
             self._prefill_input_buf[0, :actual_len] = torch.as_tensor(chunk_ids, dtype=torch.long)
@@ -378,6 +378,10 @@ class ContinuousBatchEngine:
                 offset, offset + actual_len,
                 dtype=torch.long, device=self.wrapper.device
             ).unsqueeze(0)
+
+            # Finalize any completed CPU background compressions from the previous chunk
+            if hasattr(self.wrapper.manager, "finalize_compressed_blocks"):
+                self.wrapper.manager.finalize_compressed_blocks()
 
             with torch.no_grad():
                 out = self.wrapper.model(
@@ -416,10 +420,13 @@ class ContinuousBatchEngine:
                         self.wrapper.manager.log_block_states(req.session_id)
 
         # ─────────────────────────────────────────────────────────────────
-        # 2. BATCHED DECODE (B >= 1) — CUDA Graph Stability Buckets
+        # 2. BATCHED DECODE (B >= 1)
+        # CUDA: uses CUDAGraphDecodeRunner for ~2µs graph replay overhead.
+        # MPS:  runs eager — fused_decode_attention_mps fires automatically
+        #       inside the DiffKV attention patch (triton_sparse_attn.py).
         # ─────────────────────────────────────────────────────────────────
         if decode_reqs:
-            # Finalize any completed async compressions
+            # Finalize any completed async compressions before decode
             if hasattr(self.wrapper.manager, "finalize_compressed_blocks"):
                 self.wrapper.manager.finalize_compressed_blocks()
 
@@ -435,55 +442,73 @@ class ContinuousBatchEngine:
                 session_ids.append(req.session_id)
 
             actual_batch_size = len(decode_reqs)
-            
-            # Determine the nearest power of 2 stability bucket size (1, 2, 4, 8, etc.)
+
+            # Power-of-2 bucket for shape stability (required for CUDA graph replay)
             bucket_size = 1
             while bucket_size < actual_batch_size:
                 bucket_size *= 2
-                
-            # Pad with dummy request structures if needed to fill the stability bucket shape
+
+            # Pad to bucket with dummy rows if needed
             if actual_batch_size < bucket_size:
                 dummy_req = decode_reqs[-1]
-                dummy_input = [dummy_req.generated_ids[-1]]
-                dummy_pos = [dummy_req.total_seq_len - 1]
-                dummy_sid = "dummy_session"
-                
                 for _ in range(bucket_size - actual_batch_size):
-                    input_ids_list.append(dummy_input)
-                    position_ids_list.append(dummy_pos)
-                    session_ids.append(dummy_sid)
+                    input_ids_list.append([dummy_req.generated_ids[-1]])
+                    position_ids_list.append([dummy_req.total_seq_len - 1])
+                    session_ids.append("dummy_session")
 
-            input_ids = torch.tensor(input_ids_list, dtype=torch.long, device=self.wrapper.device)
+            input_ids  = torch.tensor(input_ids_list,  dtype=torch.long, device=self.wrapper.device)
             position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
 
-            # Inject session IDs for this batch decode step
+            # Inject session IDs into the model so the attention patch routes correctly
             self.wrapper.model._diffkv_session_ids = session_ids
 
-            # Wrap the decode loop model call in torch.mps.capture_to_graph on Apple Silicon
-            is_mps = (self.wrapper.device == "mps" or
-                      (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"))
+            is_cuda = (self.wrapper.device == "cuda" or
+                       (isinstance(self.wrapper.device, torch.device) and
+                        self.wrapper.device.type == "cuda"))
 
             with torch.no_grad():
-                if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
-                    with torch.mps.capture_to_graph():
+                # ── CUDA path: try CUDA graph runner first ──────────────────
+                _ran_graph = False
+                if is_cuda:
+                    runner = getattr(self.wrapper, "_cuda_graph_runner", None)
+                    if runner is not None and runner.is_captured():
+                        try:
+                            out = runner.run(input_ids, position_ids)
+                            _ran_graph = True
+                        except Exception as _ge:
+                            # Shape mismatch or runtime error — fall back to eager
+                            runner.invalidate()
+                    if not _ran_graph:
+                        # First decode step after a new prefill, or after shape change:
+                        # run eagerly (also warms up CUDA graph for next step)
                         out = self.wrapper.model(
                             input_ids=input_ids,
                             position_ids=position_ids,
-                            use_cache=True
+                            use_cache=True,
                         )
+                        # Try to capture for future steps
+                        if runner is not None and not runner.is_captured():
+                            try:
+                                runner.capture(self.wrapper.model, input_ids, position_ids)
+                            except Exception:
+                                pass   # capture failure is non-fatal — stays in eager mode
                 else:
+                    # ── MPS / CPU path: run normally ────────────────────────
+                    # fused_decode_attention_mps() fires automatically inside
+                    # diffkv_attention.py when the session has compressed blocks
+                    # and device == mps. No special wrapping needed here.
                     out = self.wrapper.model(
                         input_ids=input_ids,
                         position_ids=position_ids,
-                        use_cache=True
+                        use_cache=True,
                     )
 
-            logits = out.logits[:, -1, :]  # shape: [bucket_size, vocab_size]
-            
+            logits = out.logits[:, -1, :]  # [bucket_size, vocab_size]
+
             # Extract and sample outputs ONLY for actual active requests
             for idx in range(actual_batch_size):
                 req = decode_reqs[idx]
-                req_logits = logits[idx : idx + 1]  # shape: [1, vocab_size]
+                req_logits = logits[idx : idx + 1]
                 next_id = self._sample(req_logits, req)
                 req.generated_ids.append(next_id)
                 self._emit_token(req, next_id, step_start)
@@ -491,7 +516,11 @@ class ContinuousBatchEngine:
 
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 dur_dec = (time.perf_counter() - t0_dec) * 1000
-                print(f"[DiffKV Telemetry] Decode Step batch_size={actual_batch_size} bucket_size={bucket_size} duration={dur_dec:.2f}ms")
+                graph_tag = " [graph]" if _ran_graph else " [eager]"
+                print(f"[DiffKV Telemetry] Decode Step batch={actual_batch_size} "
+                      f"bucket={bucket_size} dur={dur_dec:.2f}ms{graph_tag}")
+
+
 
             self.decode_steps_since_gc += 1
             if self.decode_steps_since_gc >= 100:

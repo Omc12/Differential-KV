@@ -38,6 +38,7 @@ if HAS_TRITON:
         pool_vk_ptr,        # [MAX_BLOCKS, R, H_kv, D]
         pool_vv_ptr,        # [MAX_BLOCKS, R, H_kv, D]
         pool_u_ptr,         # [MAX_BLOCKS, S_MAX, R]
+        pool_u_scale_ptr,   # [MAX_BLOCKS]
         pool_scales_ptr,    # [MAX_BLOCKS]
         pool_seq_lens_ptr,  # [MAX_BLOCKS]
         out_ptr,            # [H_q, D] if NUM_CHUNKS == 1 else [H_q, NUM_CHUNKS, D]
@@ -120,6 +121,11 @@ if HAS_TRITON:
             # Mask out padded sequence elements
             s_mask = offs_s[:, None] < actual_s
             u = tl.load(u_ptrs, mask=s_mask, other=0.0).to(tl.float32) # [S_MAX, R]
+            
+            # Dequantize U from int8
+            u_scale_ptr = pool_u_scale_ptr + pool_idx
+            u_scale = tl.load(u_scale_ptr)
+            u = u * u_scale
             
             # === MATH TIME (In SRAM) ===
             
@@ -241,8 +247,7 @@ if HAS_TRITON:
         if l_final_ptr is not None:
             tl.store(l_final_ptr + h_q, l_i)
 
-@torch.jit.script
-def _reconstruct_and_score(
+def _reconstruct_and_score_compiled(
     U: torch.Tensor,
     V_K: torch.Tensor,
     anchors_K: torch.Tensor,
@@ -277,6 +282,43 @@ def _reconstruct_and_score(
     q_expanded = q_sq.view(1, 1, H, D)
     scores = torch.sum(q_expanded * K_rot_full, dim=-1) * inv_scale
     return scores
+
+# ── Compile _reconstruct_and_score for the active device ────────────────────
+# CUDA:  torch.compile(backend="inductor", mode="reduce-overhead") — full fusion.
+# MPS:   torch.jit.script — JIT-compiled, zero tracing overhead, works natively.
+# CPU:   torch.jit.script — same.
+# NOTE:  aot_eager was previously used on MPS. It is a *debugging* backend that
+#        performs ahead-of-time tracing but produces no optimized Metal code.
+#        It was 2–5× SLOWER than plain eager on MPS. Never use it for perf.
+_IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
+                     hasattr(torch.backends, "mps") and
+                     torch.backends.mps.is_available())
+_IS_CUDA_AVAILABLE = torch.cuda.is_available()
+
+if _IS_CUDA_AVAILABLE and not _IS_MPS_AVAILABLE:
+    # CUDA: use torch.compile with the inductor backend for full kernel fusion.
+    try:
+        _reconstruct_and_score = torch.compile(
+            _reconstruct_and_score_compiled,
+            backend="inductor",
+            mode="reduce-overhead",
+            fullgraph=False,
+            dynamic=False,
+        )
+    except Exception:
+        # Fallback: TorchScript JIT (always works on CUDA)
+        try:
+            _reconstruct_and_score = torch.jit.script(_reconstruct_and_score_compiled)
+        except Exception:
+            _reconstruct_and_score = _reconstruct_and_score_compiled
+else:
+    # MPS / CPU: TorchScript JIT. Compiles once, no per-call tracing overhead.
+    # torch.compile(backend="aot_eager") was previously used on MPS — it is a
+    # debugging backend that adds overhead without producing optimized Metal shaders.
+    try:
+        _reconstruct_and_score = torch.jit.script(_reconstruct_and_score_compiled)
+    except Exception:
+        _reconstruct_and_score = _reconstruct_and_score_compiled
 
 
 # ---------------------------------------------------------------------------
@@ -370,16 +412,21 @@ def _prefill_fused_history_attend(
     w_delta  = weights[:, :, :, 1:]                                  # [H, Q, N, S]
     p_total  = w_anchor + w_delta.sum(dim=-1)                        # [H, Q, N]
 
-    # Anchor contribution: [H, Q, N] einsum [H, N, D] -> [H, Q, D]
+    # Anchor contribution: [H, Q, N] matrix multiplication [H, N, D] -> [H, Q, D]
     anc_v_hnd = anchors_V.permute(1, 0, 2).float()                   # [H, N, D]
-    out_anchor = torch.einsum('hqn,hnd->hqd', p_total.float(), anc_v_hnd)  # [H, Q, D]
+    out_anchor = torch.bmm(p_total.float(), anc_v_hnd)               # [H, Q, D]
 
+    # Delta contribution: optimized bmm replacements for torch.einsum on MPS fallback
+    w_delta_perm = w_delta.float().permute(2, 0, 1, 3)               # [N, H, Q, S]
+    w_delta_flat = w_delta_perm.reshape(N, H * Q, S)
+    W_proj_flat = torch.bmm(w_delta_flat, U.float())                 # [N, H * Q, R]
+    W_proj_flat = W_proj_flat * scales.float().view(N, 1, 1)
+    W_proj = W_proj_flat.reshape(N, H, Q, R).permute(1, 2, 0, 3)     # [H, Q, N, R]
 
-    # Delta contribution
-    W_proj = torch.einsum('hqns,nsr->hqnr', w_delta.float(), U.float())
-    W_proj = W_proj * scales.float().view(1, 1, N, 1)
     V_V_t  = V_V.float().permute(2, 0, 1, 3)                        # [H, N, R, D]
-    out_delta = torch.einsum('hqnr,hnrd->hqd', W_proj, V_V_t)
+    W_proj_flat2 = W_proj.reshape(H, Q, N * R)
+    V_V_t_flat2 = V_V_t.contiguous().reshape(H, N * R, D)
+    out_delta = torch.bmm(W_proj_flat2, V_V_t_flat2)                 # [H, Q, D]
 
     out_hist = (out_anchor + out_delta).to(q.dtype).unsqueeze(0)    # [1, H, Q, D]
     lse_out  = lse_hist.to(q.dtype).unsqueeze(0)                    # [1, H, Q]
@@ -388,6 +435,99 @@ def _prefill_fused_history_attend(
     # Pad lse to [1, H, Q, D] by repeating so we can stack with out_hist
     lse_padded = lse_out.unsqueeze(-1).expand(1, H, Q, D)
     return torch.stack([out_hist, lse_padded], dim=0)                # [2, 1, H, Q, D]
+
+
+# ---------------------------------------------------------------------------
+# Part 6 — MPS Vectorized Fused Decode
+#
+# On MPS (Apple Silicon), Triton is not available. This function replaces
+# _pytorch_vectorized_sparse_attn_decode for the compressed-block portion
+# with zero Python loops. Every operation is a single Metal shader dispatch.
+#
+# Key design:
+#  - NO Python loops over blocks, heads, or sequence positions.
+#  - repeat_interleave is a view (zero alloc) on MPS for GQA expansion.
+#  - Softmax is computed in one call over the flattened [H, N*S] space.
+#  - Each einsum = one Metal dispatch.
+#
+# Input shapes (N = number of active compressed blocks):
+#   Q:       [H_q, D]
+#   U:       [pool_size, S_MAX, R]  int8 (raw pool — indexed by slot_idx)
+#   U_scale: [pool_size]            fp16
+#   VK:      [H_kv, R, D]          fp16  (shared across all blocks for this layer)
+#   VV:      [H_kv, R, D]          fp16
+#   AncK:    [pool_size, H_kv, D]  fp16
+#   AncV:    [pool_size, H_kv, D]  fp16
+#   slot_idx: [N] int64
+#   blk_sizes: [N] int32
+# ---------------------------------------------------------------------------
+
+def fused_decode_attention_mps(
+    Q:        torch.Tensor,   # [H_q, D]   — single query head vector (squeezed)
+    U:        torch.Tensor,   # [pool_size, S_MAX, R] int8
+    U_scale:  torch.Tensor,   # [pool_size] fp16
+    VK:       torch.Tensor,   # [H_kv, R, D] fp16
+    VV:       torch.Tensor,   # [H_kv, R, D] fp16
+    AncK:     torch.Tensor,   # [pool_size, H_kv, D] fp16
+    AncV:     torch.Tensor,   # [pool_size, H_kv, D] fp16
+    slot_idx: torch.Tensor,   # [N] int64
+    blk_sizes: torch.Tensor,  # [N] int32 — valid token count per block
+) -> torch.Tensor:
+    """
+    Zero-loop MPS vectorized decode attention over compressed blocks.
+    Each line = one Metal shader (no Python overhead).
+    Returns: [H_q, D] output tensor.
+    """
+    N  = slot_idx.shape[0]
+    if N == 0:
+        return torch.zeros(Q.shape, dtype=Q.dtype, device=Q.device)
+
+    H_q, D  = Q.shape
+    H_kv    = VK.shape[0]
+    gpk     = H_q // H_kv          # GQA groups per KV head
+    scale   = D ** -0.5
+    q       = Q.float()             # [H_q, D]
+
+    # ── Gather active pool slots (indexed reads — MPS handles strided gather) ──
+    U_a     = U[slot_idx].float() * U_scale[slot_idx].view(N, 1, 1).float()  # [N, S_MAX, R]
+    AncK_a  = AncK[slot_idx].float()    # [N, H_kv, D]
+    AncV_a  = AncV[slot_idx].float()    # [N, H_kv, D]
+
+    # ── GQA expansion — repeat_interleave is a zero-copy view on MPS ──────────
+    AncK_e  = AncK_a.repeat_interleave(gpk, dim=1)   # [N, H_q, D]
+    AncV_e  = AncV_a.repeat_interleave(gpk, dim=1)   # [N, H_q, D]
+    VK_e    = VK.float().repeat_interleave(gpk, dim=0)  # [H_q, R, D]
+    VV_e    = VV.float().repeat_interleave(gpk, dim=0)  # [H_q, R, D]
+
+    # ── Anchor scores: [H_q, N] ───────────────────────────────────────────────
+    score_anc = torch.einsum('hd,nhd->hn', q, AncK_e) * scale   # [H_q, N]
+
+    # ── Project Q once per head: [H_q, R] — reused across all N blocks ────────
+    q_proj    = torch.einsum('hd,hrd->hr', q, VK_e) * scale     # [H_q, R]
+
+    # ── Delta scores: [H_q, N, S_MAX] ─────────────────────────────────────────
+    delta_s   = torch.einsum('hr,nsr->hns', q_proj, U_a)        # [H_q, N, S_MAX]
+
+    # ── Mask invalid positions beyond blk_sizes ────────────────────────────────
+    s_range   = torch.arange(U_a.shape[1], device=Q.device).view(1, 1, -1)  # [1,1,S]
+    valid_mask = s_range < blk_sizes.view(1, N, 1).long()       # [1, N, S_MAX]
+    delta_s    = delta_s.masked_fill(~valid_mask, float('-inf'))
+
+    # ── Concatenate anchor + deltas, softmax over full history in one call ─────
+    all_scores = torch.cat(
+        [score_anc.unsqueeze(-1), delta_s], dim=-1
+    ).reshape(H_q, -1)   # [H_q, N*(1+S_MAX)]
+
+    w = torch.softmax(all_scores, dim=-1).reshape(H_q, N, 1 + U_a.shape[1])
+    w_anc = w[:, :, 0]          # [H_q, N]
+    w_d   = w[:, :, 1:]         # [H_q, N, S_MAX]
+
+    # ── Value reduction ────────────────────────────────────────────────────────
+    out_anc  = torch.einsum('hn,nhd->hd', w_anc, AncV_e)        # [H_q, D]
+    w_proj   = torch.einsum('hns,nsr->hr', w_d, U_a)            # [H_q, R]
+    out_d    = torch.einsum('hr,hrd->hd', w_proj, VV_e)         # [H_q, D]
+
+    return (out_anc + out_d).to(Q.dtype)                         # [H_q, D]
 
 
 def _pytorch_vectorized_sparse_attn_decode(
@@ -405,6 +545,8 @@ def _pytorch_vectorized_sparse_attn_decode(
     sin:                  Optional[torch.Tensor] = None,
     total_seq_len:        int = 0,
     max_valid_len:        Optional[int] = None,
+    cos_sliced:           Optional[torch.Tensor] = None,
+    sin_sliced:           Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Highly-parallelized pure PyTorch low-rank SVD unrotated math decoder with dynamic RoPE."""
     bsz, H_q, q_len, D = q.shape
@@ -446,7 +588,7 @@ def _pytorch_vectorized_sparse_attn_decode(
     
     if N > 0:
         indices = block_indices.long()
-        U = pool.U[indices]                                     # [N, block_capacity, R]
+        U = pool.U[indices].to(q.dtype) * pool.U_scale[indices].view(-1, 1, 1)  # [N, block_capacity, R]
         block_capacity = U.shape[1]
         
         V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)           # [N, R, H_q, D]
@@ -462,19 +604,24 @@ def _pytorch_vectorized_sparse_attn_decode(
         block_capacity = min(block_capacity, max(max_valid_len, 1))
         
         # ── 2. Construct Absolute Position IDs and Slice cos/sin ──
-        if anchor_indices is None:
-            anchor_indices = torch.zeros(N, dtype=torch.long, device=q.device)
-        positions = anchor_indices.view(N, 1) + torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity)
-        positions_flat = positions.view(-1)
-        
-        if cos is None or sin is None:
-            cos_sliced = torch.ones((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
-            sin_sliced = torch.zeros((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
+        if cos_sliced is not None:
+            # Pre-sliced RoPE tensors
+            cos_sliced = cos_sliced[:, :1 + block_capacity]
+            sin_sliced = sin_sliced[:, :1 + block_capacity]
         else:
-            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-            cos_sliced = cos_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
-            sin_sliced = sin_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
+            if anchor_indices is None:
+                anchor_indices = torch.zeros(N, dtype=torch.long, device=q.device)
+            positions = anchor_indices.view(N, 1) + torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity)
+            positions_flat = positions.view(-1)
+            
+            if cos is None or sin is None:
+                cos_sliced = torch.ones((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
+                sin_sliced = torch.zeros((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
+            else:
+                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                cos_sliced = cos_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
+                sin_sliced = sin_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
         
         if diagnostics:
             print(f"  block_capacity clamping: max_valid_len={max_valid_len} -> capacity={block_capacity}")
@@ -544,10 +691,12 @@ def _pytorch_vectorized_sparse_attn_decode(
         else:
             dense_positions = torch.arange(total_seq_len - S_dense, total_seq_len, device=q.device)
         
-        cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
-        sin_dense = sin[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
-        
-        full_k_rot = (full_k * cos_dense) + (rotate_half(full_k) * sin_dense)
+        if cos is not None and sin is not None:
+            cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
+            sin_dense = sin[0, dense_positions].unsqueeze(0).unsqueeze(1) # [1, 1, S_dense, D]
+            full_k_rot = (full_k * cos_dense) + (rotate_half(full_k) * sin_dense)
+        else:
+            full_k_rot = full_k
         
         k_dense_rep = repeat_kv_at_dim(full_k_rot, num_key_value_groups, dim=1) # [1, H_q, S_dense, D]
         v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1) # [1, H_q, S_dense, D]
@@ -563,20 +712,20 @@ def _pytorch_vectorized_sparse_attn_decode(
     if diagnostics:
         print(f"  scores_anchor shape={scores_anchor.shape} compressed shape={scores_compressed.shape} dense shape={scores_dense.shape} all shape={scores_all.shape}")
     
-    # CRITICAL: Only sanitize NaN and +Inf — NEVER convert -inf to a finite value!
-    # -inf entries are the intentional padding mask from sequence length gating.
-    # Converting them to -1e4 gives nonzero softmax weight to zero-padded U slots,
-    # which attenuates the output and causes progressive output drift / hallucination.
-    has_nan = torch.isnan(scores_all).any()
-    has_posinf = (scores_all == float('inf')).any()
-    if has_nan or has_posinf:
-        scores_all = scores_all.clone()
-        if has_nan:
-            scores_all[torch.isnan(scores_all)] = -1e4
-        if has_posinf:
-            scores_all[scores_all == float('inf')] = 1e4
-        # -inf entries are left INTACT: they produce zero softmax probability (correct)
-        
+    # PERFORMANCE NOTE: torch.isnan / tensor == float('inf') each force a GPU-CPU
+    # sync on MPS (56 sync barriers per token across 28 layers).  NaN/+Inf entries
+    # only appear during debugging or numerical anomalies — skip in production.
+    # Guard behind DIFFKV_DIAGNOSTICS=1 so the hot path is a plain softmax.
+    if diagnostics:
+        has_nan = torch.isnan(scores_all).any().item()
+        has_posinf = (scores_all == float('inf')).any().item()
+        if has_nan or has_posinf:
+            scores_all = scores_all.clone()
+            if has_nan:
+                scores_all[torch.isnan(scores_all)] = -1e4
+            if has_posinf:
+                scores_all[scores_all == float('inf')] = 1e4
+
     probs_all = torch.nn.functional.softmax(scores_all, dim=-1) # [H_q, total_tokens]
     
     # Split probabilities back
@@ -593,16 +742,18 @@ def _pytorch_vectorized_sparse_attn_decode(
         P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2) # [N, H_q, S]
         # U is sliced to [:, :block_capacity, :] matching the clamped block_capacity
         U_clamped = U[:, :block_capacity, :]                                    # [N, S, R]
-        P_U = torch.einsum('nhs,nsr->nhr', P_comp_reshaped.float(), U_clamped.float())  # [N, H_q, R]
+        P_U = torch.bmm(P_comp_reshaped.float(), U_clamped.float())                      # [N, H_q, R]
 
         # Combined anchor probability: direct sum of P_anchor and compressed-block total
         # Avoids a separate O_anchor_total matmul — one fused operation
-        p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)  # [N, H_q]
+        p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)          # [N, H_q]
         O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)  # [H_q, D]
         O_final = O_final + O_anchor_fused.to(q.dtype)
 
-        # Delta contribution from low-rank compressed values
-        O_delta = torch.einsum('nhr,nrhd->nhd', P_U, V_V.float()) * scales.float()  # [N, H_q, D]
+        # Delta contribution from low-rank compressed values: optimized bmm replacement
+        P_U_flat = P_U.reshape(N * H_q, 1, R)
+        V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
+        O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()      # [N, H_q, D]
         
         if diagnostics:
             print(f"  P_comp_reshaped: min={P_comp_reshaped.min().item():.4f} max={P_comp_reshaped.max().item():.4f} mean={P_comp_reshaped.mean().item():.4f}")
@@ -647,6 +798,8 @@ def native_triton_sparse_attn_decode(
     sin:                  Optional[torch.Tensor] = None,
     total_seq_len:        int = 0,
     max_valid_len:        Optional[int] = None,
+    cos_sliced:           Optional[torch.Tensor] = None,
+    sin_sliced:           Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Python wrapper for the Phase 10 Native Block Table Triton kernel.
@@ -659,7 +812,8 @@ def native_triton_sparse_attn_decode(
     if not HAS_TRITON:
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
-            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len
+            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
+            cos_sliced=cos_sliced, sin_sliced=sin_sliced
         )
         
     inv_scale = 1.0 / math.sqrt(D)
@@ -721,6 +875,7 @@ def native_triton_sparse_attn_decode(
                 pool_vk_ptr=pool.V_K,
                 pool_vv_ptr=pool.V_V,
                 pool_u_ptr=pool.U,
+                pool_u_scale_ptr=pool.U_scale,
                 pool_scales_ptr=pool.scales,
                 pool_seq_lens_ptr=pool.seq_lens,
                 out_ptr=out_workspace,
@@ -816,10 +971,12 @@ def native_triton_sparse_attn_decode(
                 native_triton_sparse_attn_decode.fallback_fired = True
             return _pytorch_vectorized_sparse_attn_decode(
                 q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
-                anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len
+                anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
+                cos_sliced=cos_sliced, sin_sliced=sin_sliced
             )
     else:
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
-            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len
+            anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
+            cos_sliced=cos_sliced, sin_sliced=sin_sliced
         )

@@ -14,18 +14,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_25k():
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+    wrapper = DiffKVHFWrapper(MODEL, config={}, device=device)
     
     prompt = "The following is a long document. " * 1000  # ~25K tokens
     
-    torch.cuda.reset_peak_memory_stats()
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     result = wrapper.generate(prompt, max_new_tokens=64)
-    peak_vram = torch.cuda.max_memory_allocated() / 1e9
+    if device == "cuda":
+        peak_vram = torch.cuda.max_memory_allocated() / 1e9
+        print(f"Peak VRAM:   {peak_vram:.2f} GB")
     
     summary = wrapper.manager.get_streaming_summary()
     
-    print(f"Peak VRAM:   {peak_vram:.2f} GB")
     print(f"Streaming:   {summary}")
     print(f"Generated:   {result[-200:]!r}")
     assert len(result) > 0

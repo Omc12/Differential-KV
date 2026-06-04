@@ -111,11 +111,11 @@ In particular, I argue that the current trajectory of AI development and use (ch
         # 1. Reconstruct unrotated block keys
         if b.state == "COMPRESSED":
             pool_idx = b.pool_idx
-            # block_len is 1 + seq_len, so seq_len = block_len - 1
-            block_len = b.token_count()
-            seq_len = block_len - 1
+            # seq_len is the number of active tokens in the block
+            seq_len = b.token_count()
+            block_len = 1 + seq_len
             
-            U = pool.U[pool_idx, :seq_len, :wrapper.manager.rank].float() # [seq_len, rank]
+            U = pool.U[pool_idx, :seq_len, :wrapper.manager.rank].float() * pool.U_scale[pool_idx].item() # [seq_len, rank]
             V_K = pool.V_K[pool_idx, :wrapper.manager.rank].float() # [rank, heads, head_dim]
             anchor_k = pool.anchors_K[pool_idx].float() # [heads, head_dim]
             
@@ -218,7 +218,7 @@ In particular, I argue that the current trajectory of AI development and use (ch
         local_pos = target_pos - target_blk.anchor_idx
         pool_idx = target_blk.pool_idx
         # Reconstruct unrotated key
-        U_val = pool.U[pool_idx, local_pos - 1, :wrapper.manager.rank].float() # [rank]
+        U_val = pool.U[pool_idx, local_pos - 1, :wrapper.manager.rank].float() * pool.U_scale[pool_idx].item() # [rank]
         V_K = pool.V_K[pool_idx, :wrapper.manager.rank].float() # [rank, heads, head_dim]
         anchor_k = pool.anchors_K[pool_idx].float() # [heads, head_dim]
         # delta = U @ V * scale

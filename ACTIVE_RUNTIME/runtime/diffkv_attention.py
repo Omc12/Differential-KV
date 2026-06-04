@@ -30,10 +30,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     Universal repeat_kv implementation to support GQA.
     """
     if n_rep == 1:
-        return hidden_states if hidden_states.is_contiguous() else hidden_states.contiguous()
+        return hidden_states
     bs, num_key_value_heads, slen, head_dim = hidden_states.shape
     hidden_states = hidden_states[:, :, None, :, :].expand(bs, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(bs, num_key_value_heads * n_rep, slen, head_dim).contiguous()
+    out = hidden_states.reshape(bs, num_key_value_heads * n_rep, slen, head_dim)
+    if hidden_states.device.type == "mps":
+        # MPS scaled_dot_product_attention supports non-contiguous views natively
+        return out
+    return out.contiguous()
 
 # ---------------------------------------------------------------------------
 # PHASE 6: Fused Sparse Attention Integration
@@ -104,7 +108,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     lse = torch.logsumexp(scores, dim=-1)
                     return out, lse
 
-                def _project_then_attend_history(q, comp_blocks, pool, cos_all=None, sin_all=None):
+                def _project_then_attend_history(q, comp_blocks, pool, sid, cos_all=None, sin_all=None):
                     # O5b: Full history attention path routed through the JIT-fused kernel.
                     # All 8 inner ops (K-recon, cat, RoPE, score, mask, logsumexp, softmax,
                     # value-reduction) execute in a single TorchScript compilation unit.
@@ -116,7 +120,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     max_seq_len = pool.U.shape[1]
 
                     # Gather block data from the pool
-                    U_stack    = pool.U[pool_indices_t]          # [N, S, R]
+                    U_stack    = pool.U[pool_indices_t].to(q.dtype) * pool.U_scale[pool_indices_t].view(-1, 1, 1)
                     V_K_stack  = pool.V_K[pool_indices_t]        # [N, R, num_kv_heads, D]
                     V_V_stack  = pool.V_V[pool_indices_t]        # [N, R, num_kv_heads, D]
                     anc_K      = pool.anchors_K[pool_indices_t]  # [N, num_kv_heads, D]
@@ -130,14 +134,33 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     anc_k_rep = repeat_kv(anc_K.unsqueeze(2), num_key_value_groups).squeeze(2)   # [N, H, D]
                     anc_v_rep = repeat_kv(anc_V.unsqueeze(2), num_key_value_groups).squeeze(2)   # [N, H, D]
 
-                    # Build RoPE slices for all blocks in one gather (avoids per-block indexing)
-                    block_anchors   = torch.tensor([b.anchor_idx for b in comp_blocks], device=q.device, dtype=torch.long)
-                    positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
-                    positions_flat  = positions.view(-1)
-                    cos_ref = cos_all if cos_all is not None else cos
-                    sin_ref = sin_all if sin_all is not None else sin
-                    cos_sliced = cos_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                    sin_sliced = sin_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                    # Cache-aware RoPE slicing to eliminate redundant GPU gathers per layer
+                    anchors_tuple = tuple(b.anchor_idx for b in comp_blocks)
+                    cache_cos_key = (sid, "prefill_cos_sliced", anchors_tuple)
+                    cache_sin_key = (sid, "prefill_sin_sliced", anchors_tuple)
+                    cos_sliced = kv_manager.decode_workspace.get(cache_cos_key)
+                    sin_sliced = kv_manager.decode_workspace.get(cache_sin_key)
+
+                    if cos_sliced is None or sin_sliced is None:
+                        block_anchors   = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
+                        positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
+                        positions_flat  = positions.view(-1)
+                        cos_ref = cos_all if cos_all is not None else cos
+                        sin_ref = sin_all if sin_all is not None else sin
+                        cos_sliced = cos_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                        sin_sliced = sin_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                        kv_manager.decode_workspace[cache_cos_key] = cos_sliced
+                        kv_manager.decode_workspace[cache_sin_key] = sin_sliced
+
+                        # Evict stale prefill sliced RoPE cache entries
+                        stale_keys = [
+                            k for k in kv_manager.decode_workspace.keys()
+                            if isinstance(k, tuple) and len(k) == 3 and k[0] == sid
+                            and k[1] in ("prefill_cos_sliced", "prefill_sin_sliced")
+                            and k[2] != anchors_tuple
+                        ]
+                        for k in stale_keys:
+                            del kv_manager.decode_workspace[k]
 
                     inv_scale_val = 1.0 / math.sqrt(head_dim)
 
@@ -280,6 +303,42 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             kv_manager.decode_workspace[rope_cos_key] = cos_all
                             kv_manager.decode_workspace[rope_sin_key] = sin_all
 
+                        cos_sliced_arg = None
+                        sin_sliced_arg = None
+                        if anchor_indices is not None and anchor_indices.numel() > 0 and pool is not None:
+                            anchors_tuple = tuple(anchor_indices.cpu().tolist())
+                            rope_cos_sliced_key = (sid, "decode_cos_sliced", anchors_tuple)
+                            rope_sin_sliced_key = (sid, "decode_sin_sliced", anchors_tuple)
+                            cos_sliced_cached = kv_manager.decode_workspace.get(rope_cos_sliced_key)
+                            sin_sliced_cached = kv_manager.decode_workspace.get(rope_sin_sliced_key)
+
+                            if cos_sliced_cached is None or sin_sliced_cached is None:
+                                N_blocks = anchor_indices.shape[0]
+                                max_seq_len = pool.U.shape[1]
+                                positions = anchor_indices.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=query_states.device).view(1, 1 + max_seq_len)
+                                positions_flat = positions.view(-1)
+                                
+                                cos_flat = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+                                sin_flat = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+                                
+                                cos_sliced_cached = cos_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                                sin_sliced_cached = sin_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                                
+                                kv_manager.decode_workspace[rope_cos_sliced_key] = cos_sliced_cached
+                                kv_manager.decode_workspace[rope_sin_sliced_key] = sin_sliced_cached
+                                
+                                stale_keys = [
+                                    k for k in kv_manager.decode_workspace.keys()
+                                    if isinstance(k, tuple) and len(k) == 3 and k[0] == sid
+                                    and k[1] in ("decode_cos_sliced", "decode_sin_sliced")
+                                    and k[2] != anchors_tuple
+                                ]
+                                for k in stale_keys:
+                                    del kv_manager.decode_workspace[k]
+
+                            cos_sliced_arg = cos_sliced_cached
+                            sin_sliced_arg = sin_sliced_cached
+
                         attn_out_b = native_triton_sparse_attn_decode(
                             q=query_states[b_idx:b_idx+1],
                             block_indices=block_indices,
@@ -295,6 +354,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             sin=sin_all,
                             total_seq_len=total_seq_len,
                             max_valid_len=max_valid_len,
+                            cos_sliced=cos_sliced_arg,
+                            sin_sliced=sin_sliced_arg,
                         )
                         attn_outputs.append(attn_out_b)
 
@@ -367,10 +428,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                             if K_b > 0:
                                 prev_len = 0
-                                cap_dict = getattr(kv_manager, "_prefill_kv_capture", {})
-                                session_cap = cap_dict.get(sid, {})
-                                if captured_layer_idx in session_cap:
-                                    prev_len = session_cap[captured_layer_idx][0].shape[2]
 
                                 blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                 history_blocks = [b for b in blocks if b.anchor_idx < K_b]
@@ -453,7 +510,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                 if comp_blocks and getattr(kv_manager, "native_pool", None) is not None:
                                     out_hist_comp, lse_hist_comp = _project_then_attend_history(
-                                        curr_q, comp_blocks, kv_manager.native_pool, cos_all, sin_all
+                                        curr_q, comp_blocks, kv_manager.native_pool, sid, cos_all, sin_all
                                     )
 
                             out_b = _combine_outputs([
@@ -485,27 +542,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             curr_k = key_states[b_idx:b_idx+1]
                             curr_v = value_states[b_idx:b_idx+1]
                             
-                            # Check for captured KV from previous chunks
-                            cap_dict = getattr(kv_manager, "_prefill_kv_capture", {})
-                            session_cap = cap_dict.get(sid, {})
-                            if captured_layer_idx in session_cap:
-                                prev_k, prev_v = session_cap[captured_layer_idx]
-                                full_k = torch.cat([prev_k, curr_k], dim=2)
-                                full_v = torch.cat([prev_v, curr_v], dim=2)
-                                
-                                # PyTorch's is_causal=True is broken when q_len != kv_len.
-                                # Construct the correct absolute causal attention mask.
-                                q_len = curr_q.shape[2]
-                                kv_len = full_k.shape[2]
-                                mask = torch.ones((q_len, kv_len), dtype=torch.bool, device=curr_q.device)
-                                mask = torch.tril(mask, diagonal=kv_len - q_len)
-                                is_causal_flag = False
-                                attn_mask_flag = mask
-                            else:
-                                full_k = curr_k
-                                full_v = curr_v
-                                is_causal_flag = True
-                                attn_mask_flag = None
+                            full_k = curr_k
+                            full_v = curr_v
+                            is_causal_flag = True
+                            attn_mask_flag = None
                                 
                             k_rep = repeat_kv(full_k, num_key_value_groups)
                             v_rep = repeat_kv(full_v, num_key_value_groups)

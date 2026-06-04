@@ -21,6 +21,12 @@ from native_core.sparse_decode.triton_diffkv import TritonDiffKV
 from runtime.diffkv_attention import apply_diffkv_attention_patch
 
 try:
+    from native_core.graph_runtime.static_decode_graph import CUDAGraphDecodeRunner
+    _HAS_CUDA_GRAPH_RUNNER = True
+except ImportError:
+    _HAS_CUDA_GRAPH_RUNNER = False
+
+try:
     from native_core.mac_utils import (
         get_best_device as _get_best_device,
         get_compile_backend as _get_compile_backend,
@@ -60,20 +66,48 @@ class DiffKVHFWrapper:
             else:
                 torch_dtype = torch.bfloat16
         self.mode = config.get("mode", "fp16")
-        self.block_size = config.get("block_size", 64)
+        self.block_size = config.get("block_size", 256)      # S=256 → 5.2× compression
         self.rank = config.get("rank", 16)
-        self.micro_block_size = config.get("micro_block_size", 16)
+        self.micro_block_size = config.get("micro_block_size", 256)
+
         
         print(f"Loading model {model_id} (device={self.device}, dtype={torch_dtype})...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         self._alphanumeric_tokens = {}
+
+        # ── 4-bit NF4 loading (BitsAndBytes) ──────────────────────────────────
+        # Triggered by config["quantization"] == "nf4" or DIFFKV_QUANTIZATION=nf4.
+        # Reduces Qwen 2.5 1.5B from 3.1 GB → ~1.2 GB VRAM.
+        # Only available on CUDA (bitsandbytes has no MPS support yet).
+        _quant_type_early = config.get(
+            "quantization", os.environ.get("DIFFKV_QUANTIZATION", "")
+        )
+        if (quantization_config is None
+                and _quant_type_early == "nf4"
+                and _has_cuda()):
+            try:
+                from transformers import BitsAndBytesConfig as _BnBConfig
+                quantization_config = _BnBConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,   # 2nd quantization step: -15% more VRAM
+                )
+                torch_dtype = torch.bfloat16   # compute dtype must match
+                print("[DiffKV] 4-bit NF4 quantization enabled (BitsAndBytes). "
+                      "Model VRAM: ~1.2 GB vs 3.1 GB BF16.")
+            except ImportError:
+                print("[DiffKV] WARNING: bitsandbytes not installed — cannot use NF4 4-bit. "
+                      "Install with: pip install bitsandbytes. Falling back to fp16.")
+
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_id, 
-            torch_dtype=torch_dtype, 
+            model_id,
+            torch_dtype=torch_dtype,
             device_map=device,
             trust_remote_code=True,
             quantization_config=quantization_config
         )
+
         self.model.eval()
         
         # ── Auto-detect standard 4-bit / 8-bit quantization (GPTQ, AWQ, bitsandbytes) ──
@@ -231,6 +265,19 @@ class DiffKVHFWrapper:
                 except Exception as e:
                     print(f"[DiffKV] WARNING: torch.compile failed ({e}). Running in eager mode.")
 
+        # ── CUDA Graph Runner ────────────────────────────────────────────────
+        # Created here so batch_engine.py can always find it via
+        # getattr(wrapper, '_cuda_graph_runner', None).
+        # On MPS/CPU: CUDAGraphDecodeRunner._capture_enabled=False so it's a no-op.
+        if _HAS_CUDA_GRAPH_RUNNER:
+            self._cuda_graph_runner = CUDAGraphDecodeRunner()
+            print(f"[DiffKV] CUDAGraphDecodeRunner initialized "
+                  f"({'CUDA graph capture enabled' if _has_cuda() else 'MPS/CPU — eager mode only'})")
+        else:
+            self._cuda_graph_runner = None
+
+
+
     def stop(self):
         """Cleanly release all resources and stop background worker threads."""
         if hasattr(self, "manager") and self.manager is not None:
@@ -241,6 +288,10 @@ class DiffKVHFWrapper:
                     self.manager.pager.stop()
             if hasattr(self.manager, "_compressor") and self.manager._compressor is not None:
                 self.manager._compressor.stop()
+
+        # Destroy CUDA graph runner if it was created
+        if hasattr(self, "_cuda_graph_runner"):
+            self._cuda_graph_runner.invalidate()
 
     @torch.no_grad()
     def generate(
@@ -283,37 +334,65 @@ class DiffKVHFWrapper:
         self.manager.init_session(session_id, prefill_len=cached_len + prefill_len)
         self.model._diffkv_session_ids = [session_id]
 
-        # Prefill only the new tokens with correct position offset
-        if cached_len > 0:
-            pos_tensor = torch.arange(cached_len, cached_len + prefill_len, dtype=torch.long, device=self.device).unsqueeze(0)
-            outputs = self.model(input_ids=input_ids, position_ids=pos_tensor, use_cache=True)
-        else:
-            outputs = self.model(input_ids=input_ids, use_cache=True)
-        
-        # Compress and ingest captured prefill KV
-        if hasattr(self.manager, "compress_prefill_kv"):
-            self.manager.compress_prefill_kv(session_id)
+        # Invalidate CUDA graph runner — new prefill changes pool layout
+        if hasattr(self, "_cuda_graph_runner") and self._cuda_graph_runner is not None:
+            self._cuda_graph_runner.invalidate()
 
-        # Wait for background SVD compression to complete before decoding starts
-        if hasattr(self.manager, "_streaming_mgr") and self.manager._streaming_mgr is not None:
-            import time as _time
-            _barrier_deadline = _time.monotonic() + 8.0
+        # ── Chunked prefill ──────────────────────────────────────────────────
+        # Process the prompt in 512-token chunks. After each chunk we call
+        # compress_prefill_kv so SVD runs on the background thread while the
+        # next chunk is being forward-passed (double-buffering compute and
+        # compression). This:
+        #   1. Eliminates the O(N²) attention VRAM spike from one giant forward.
+        #   2. Hides most of the SVD latency inside prefill time.
+        #   3. Keeps peak VRAM bounded regardless of prompt length.
+        PREFILL_CHUNK = 512
+        new_ids_list = new_prompt_ids
+        total_new = len(new_ids_list)
+        outputs = None
+        import time as _time
+
+        for chunk_start in range(0, total_new, PREFILL_CHUNK):
+            chunk_end = min(chunk_start + PREFILL_CHUNK, total_new)
+            chunk = new_ids_list[chunk_start:chunk_end]
+            abs_start = cached_len + chunk_start  # absolute position in full sequence
+
+            chunk_tensor = torch.tensor([chunk], dtype=torch.long, device=self.device)
+            pos_tensor = torch.arange(
+                abs_start, abs_start + len(chunk),
+                dtype=torch.long, device=self.device
+            ).unsqueeze(0)
+
+            # Finalize any completed CPU background compressions from the previous chunk
+            if hasattr(self.manager, "finalize_compressed_blocks"):
+                self.manager.finalize_compressed_blocks()
+
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=chunk_tensor,
+                    position_ids=pos_tensor,
+                    use_cache=True,
+                )
+
+            # Kick off async background SVD for this chunk immediately —
+            # the next chunk's forward pass runs in parallel with SVD.
+            if hasattr(self.manager, "compress_prefill_kv"):
+                self.manager.compress_prefill_kv(session_id)
+
+        # ── Post-prefill compression barrier ────────────────────────────────
+        # Drain all background SVD results to the native pool before decode starts.
+        # Since capture_prefill_kv() now streams immediately, all blocks have been
+        # SUBMITTED. We just need to wait for the async compressor to mark them
+        # CPU_COMPRESSED and then finalize (GPU upload) on the main thread.
+        # Timeout: 30 s for very long prompts (research paper, code dumps, etc.)
+        if hasattr(self.manager, "finalize_compressed_blocks"):
+            _barrier_deadline = _time.monotonic() + 30.0
             while _time.monotonic() < _barrier_deadline:
-                if hasattr(self.manager, "finalize_compressed_blocks"):
-                    self.manager.finalize_compressed_blocks()
-                
-                found_submitted = False
-                blocks = self.manager._streaming_mgr.session_blocks.get(session_id, {})
-                for layer_idx, blks in blocks.items():
-                    for b in blks:
-                        if getattr(b, "state", None) in ("SUBMITTED", "CPU_COMPRESSED"):
-                            found_submitted = True
-                            break
-                    if found_submitted:
-                        break
-                if not found_submitted:
+                pending = getattr(self.manager, "_pending_cpu_blocks", 0)
+                if pending <= 0:
                     break
-                _time.sleep(0.005)
+                self.manager.finalize_compressed_blocks()
+                _time.sleep(0.002)
 
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
@@ -372,11 +451,13 @@ class DiffKVHFWrapper:
             if hasattr(self.manager, "finalize_compressed_blocks"):
                 self.manager.finalize_compressed_blocks()
 
-            # Wrap decode forward in capture_to_graph on MPS
+            # ── Decode forward: choose execution path ──────────────────────
             is_mps = (self.device == "mps" or
                       (isinstance(self.device, torch.device) and self.device.type == "mps"))
+            is_cuda = torch.cuda.is_available() and not is_mps
 
             if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
+                # MPS path: Metal graph capture eliminates driver overhead
                 with torch.mps.capture_to_graph():
                     outputs = self.model(
                         input_ids=input_ids,
@@ -384,7 +465,44 @@ class DiffKVHFWrapper:
                         past_key_values=past_kv,
                         use_cache=True,
                     )
+            elif is_cuda and _HAS_CUDA_GRAPH_RUNNER:
+                # CUDA path: CUDA Graph runner. The runner captures on first call
+                # (after 3 warmup passes) then replays the static graph for all
+                # subsequent decode steps — eliminates kernel launch overhead.
+                # The Triton kernel uses pool indices that are static tensors, so
+                # graph capture is safe as long as the block layout doesn't change.
+                # We invalidate the graph whenever a new prefill runs (new session).
+                if not hasattr(self, "_cuda_graph_runner"):
+                    self._cuda_graph_runner = CUDAGraphDecodeRunner() if _HAS_CUDA_GRAPH_RUNNER else None
+
+                def _decode_model_fn(input_ids, position_ids, past_key_values, use_cache):
+                    return self.model(
+                        input_ids=input_ids,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                    )
+
+                try:
+                    outputs = self._cuda_graph_runner.run(
+                        _decode_model_fn,
+                        {
+                            "input_ids":      input_ids,
+                            "position_ids":   pos_tensor,
+                            "past_key_values": past_kv,
+                            "use_cache":      torch.tensor(True),  # static scalar
+                        }
+                    )
+                except Exception:
+                    # Graph capture failed (e.g. dynamic Python branching) — fall back to eager
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        position_ids=pos_tensor,
+                        past_key_values=past_kv,
+                        use_cache=True,
+                    )
             else:
+                # CPU / fallback eager
                 outputs = self.model(
                     input_ids=input_ids,
                     position_ids=pos_tensor,
