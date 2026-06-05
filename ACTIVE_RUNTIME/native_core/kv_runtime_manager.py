@@ -519,7 +519,7 @@ class KVRuntimeManager:
             session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
             default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
             default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
-            default_threshold_val = "99999"
+            default_threshold_val = "15"
             default_threshold = int(_os.environ.get("DIFFKV_SRL_THRESHOLD", default_threshold_val))
 
             k_min = session_config.get("srl_k_min", default_k_min)

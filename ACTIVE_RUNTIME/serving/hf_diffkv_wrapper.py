@@ -229,9 +229,11 @@ class DiffKVHFWrapper:
         #   Linear layers cause graph breaks that prevent useful compilation.
         # On Windows: TorchInductor requires cl.exe (MSVC). Skip if not available.
         use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
-        if use_compile == "auto" and _is_apple_silicon():
+        if _is_apple_silicon():
             # macOS/MPS: torch.compile/Dynamo JIT tracing of diffkv_forward causes
-            # severe JIT recompilation loops and Metal command buffer crashes. Default to 0.
+            # severe JIT recompilation loops and Metal command buffer crashes. Force disable it.
+            if use_compile == "1":
+                print("[DiffKV] WARNING: Force-disabling torch.compile on Apple Silicon/MPS for stability (ignoring environment override).")
             use_compile = "0"
 
         if use_compile == "0":

@@ -16,7 +16,7 @@ from native_core.sparse_decode.triton_sparse_attn import (
 # DIFFKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
 # DIFFKV_VALIDATE_SRL:  enable accuracy validation mode (0/1, default 0).
 # DIFFKV_VALIDATE_EVERY: validate every N decode steps (default 50).
-_SRL_THRESHOLD    = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "99999"))
+_SRL_THRESHOLD    = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "15"))
 _SRL_VALIDATE     = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
 _SRL_VALIDATE_EVERY = int(os.environ.get("DIFFKV_VALIDATE_EVERY", "50"))
 

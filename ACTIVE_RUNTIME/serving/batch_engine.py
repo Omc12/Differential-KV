@@ -334,12 +334,21 @@ class ContinuousBatchEngine:
                           f"new_prompt_token={req.prompt_ids[mismatch_idx] if mismatch_idx >= 0 else None}, "
                           f"stored_token={stored_ids[mismatch_idx] if mismatch_idx >= 0 else None}")
                     print(f"[DiffKV BatchEngine] Prefix mismatch details for session {session_id}: "
-                          f"cached_len={cached_len}, stored={len(stored_ids)}, new_prompt={len(req.prompt_ids)}. "
-                          f"Clearing stale KV cache and re-prefilling.")
-                    # The stored context diverged — clear so we get a fresh prefill
-                    self._free_session_kv(session_id)
-                    if self.draft_wrapper is not None:
-                        self._free_session_kv(session_id + "_draft", is_draft=True)
+                          f"cached_len={cached_len}, stored={len(stored_ids)}, new_prompt={len(req.prompt_ids)}.")
+                    
+                    if mismatch_idx > 32:
+                        print(f"[DiffKV BatchEngine] Partially rolling back session {session_id} to token index {mismatch_idx} instead of fully clearing.")
+                        self.wrapper.manager.rollback_session(session_id, mismatch_idx)
+                        if self.draft_wrapper is not None:
+                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", mismatch_idx)
+                        req.cached_len = mismatch_idx
+                        self.session_token_ids[session_id] = stored_ids[:mismatch_idx]
+                    else:
+                        print(f"[DiffKV BatchEngine] Clearing stale KV cache and re-prefilling from scratch.")
+                        # The stored context diverged — clear so we get a fresh prefill
+                        self._free_session_kv(session_id)
+                        if self.draft_wrapper is not None:
+                            self._free_session_kv(session_id + "_draft", is_draft=True)
 
             # Token-level prefix search fallback: if no match in the current session, search other active sessions
             if req.cached_len == 0:
@@ -854,25 +863,25 @@ class ContinuousBatchEngine:
         else:
             gen_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
-        # Prompt anti-copy guard: apply a tiny prompt-token penalty ONLY on the
-        # very first generated token (generated_ids is empty). This stops the model
-        # from opening with a direct copy of the prompt's last words.
-        # We use only the last 16 tokens — enough to break exact prefix continuation
-        # without penalising the vocabulary the model *needs* for a summary.
-        # From token 2 onward we revert to the standard generated-only penalty so
-        # summary quality is not degraded.
-        if req.prompt_ids and req.repetition_penalty != 1.0 and not req.generated_ids:
+        # Prompt anti-copy guard: apply a prompt-token penalty on the first 8 generated
+        # tokens. This guides the tiny model to start with its own words (e.g. "This paper...")
+        # instead of immediately reciting the prompt. We use the last 512 prompt tokens
+        # to cover the local context, and enforce an anti-copy penalty of at least 1.15
+        # even if the request's repetition penalty is unset (1.0).
+        if req.prompt_ids and len(req.generated_ids) < 8:
+            penalty_val = max(req.repetition_penalty, 1.15)
             prompt_tensor = torch.tensor(
-                req.prompt_ids[-16:], dtype=torch.long, device=logits.device
+                req.prompt_ids[-512:], dtype=torch.long, device=logits.device
             )
         else:
+            penalty_val = req.repetition_penalty
             prompt_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
         sampled_tensor = _sample_gpu_jit(
             logits,
             req.temperature,
             req.top_p,
-            req.repetition_penalty,
+            penalty_val,
             gen_tensor,
             prompt_tensor,
         )

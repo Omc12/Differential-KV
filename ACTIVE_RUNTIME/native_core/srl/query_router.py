@@ -42,7 +42,7 @@ _SEM_FRAC          = float(os.environ.get("DIFFKV_SRL_SEM_FRAC",  "0.50"))
 _LEX_FRAC          = float(os.environ.get("DIFFKV_SRL_LEX_FRAC",  "0.15"))
 _GRAPH_FRAC        = float(os.environ.get("DIFFKV_SRL_GRAPH_FRAC", "0.15"))
 _RECENCY_FRAC      = float(os.environ.get("DIFFKV_SRL_REC_FRAC",  "0.20"))
-_ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "99999"))
+_ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "15"))
 
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
