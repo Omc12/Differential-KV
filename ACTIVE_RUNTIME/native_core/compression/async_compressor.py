@@ -88,6 +88,7 @@ class AsyncCompressor:
         # One SPSC queue per worker — producer (main thread) round-robins across them
         self._queues  = [SPSCQueue(capacity=max_queue // max(num_workers, 1))
                          for _ in range(num_workers)]
+        self._events  = [threading.Event() for _ in range(num_workers)]
         self._workers: list = []
         self._num_workers = num_workers
         self._running = False
@@ -126,8 +127,9 @@ class AsyncCompressor:
     def stop(self) -> None:
         self._running = False
         # Unblock workers by pushing sentinel None values
-        for q in self._queues:
+        for i, q in enumerate(self._queues):
             q.push(None)
+            self._events[i].set()
         for t in self._workers:
             t.join(timeout=2.0)
         self._workers.clear()
@@ -175,10 +177,12 @@ class AsyncCompressor:
         self._adjust_pending(1)
 
         # Round-robin across workers for load balancing
-        q = self._queues[self._rr_idx % self._num_workers]
+        q_idx = self._rr_idx % self._num_workers
+        q = self._queues[q_idx]
         self._rr_idx += 1
 
         if q.push((block, k_cpu, v_cpu, event)):
+            self._events[q_idx].set()
             with self._stats_lock:
                 self.stats["submitted"] += 1
                 depth = q.size()
@@ -200,10 +204,12 @@ class AsyncCompressor:
         self._adjust_pending(1)
 
         # Round-robin across workers for load balancing
-        q = self._queues[self._rr_idx % self._num_workers]
+        q_idx = self._rr_idx % self._num_workers
+        q = self._queues[q_idx]
         self._rr_idx += 1
 
         if q.push((block, k_cpu, v_cpu, event)):
+            self._events[q_idx].set()
             with self._stats_lock:
                 self.stats["submitted"] += 1
                 depth = q.size()
@@ -235,6 +241,7 @@ class AsyncCompressor:
 
     def _worker_loop(self, worker_idx: int) -> None:
         q = self._queues[worker_idx]
+        evt = self._events[worker_idx]
 
         # On CUDA: set this thread to run on the low-priority compress stream
         compress_stream = None
@@ -246,7 +253,9 @@ class AsyncCompressor:
 
         while self._running:
             if q.is_empty():
-                time.sleep(SPIN_YIELD_S)
+                evt.clear()
+                if q.is_empty():
+                    evt.wait(timeout=0.05)
                 continue
             batch = q.drain(max_n=32)
 

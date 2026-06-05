@@ -528,6 +528,14 @@ class ContinuousBatchEngine:
         prefill_reqs = [r for r in self.active_requests if not r.is_prefilled]
         decode_reqs  = [r for r in self.active_requests if r.is_prefilled]
 
+        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            if prefill_reqs:
+                req0 = prefill_reqs[0]
+                offset = getattr(req0, "prefill_offset", 0)
+                cached = getattr(req0, "cached_len", 0)
+                print(f"[DiffKV Step] PREFILL session={req0.session_id[:8]}... "
+                      f"cached_len={cached} offset={offset}/{len(req0.prompt_ids)} "
+                      f"({'Turn2+' if cached > 0 else 'Turn1'})")
         # ─────────────────────────────────────────────────────────────────
         # 1. CHUNKED PREFILL — process exactly one chunk of the first prefill request
         # ─────────────────────────────────────────────────────────────────
@@ -680,12 +688,41 @@ class ContinuousBatchEngine:
                 _draft_mgr = self.draft_wrapper.manager if self.draft_wrapper is not None else None
                 _cached_len = getattr(req, "cached_len", 0)
                 _loop = asyncio.get_event_loop()
+                _is_first_turn = (_cached_len == 0)
 
                 async def _build_srl_index_async():
+                    _t_srl_start = time.perf_counter()
+
+                    # ── Fast-path for Turn 2+: SRL index already built from Turn 1 ──
+                    # When cached_len > 0, this is a continuation turn. The new delta
+                    # tokens (e.g. "hi" = ~11 tokens) generate ~168 new ACCUMULATING blocks
+                    # (micro_block_size × 28 layers). Waiting for SVD of all 168 blocks
+                    # on CPU takes minutes and completely stalls Turn 2 decode start.
+                    #
+                    # Solution: skip the compression barrier and SRL rebuild on Turn 2+.
+                    # The existing SRL index from Turn 1 is still valid for routing —
+                    # the small delta does not materially change the semantic index.
+                    # We only rebuild the SRL index if a significant amount of new blocks
+                    # were added (> 10% of existing blocks, or first turn).
+                    if not _is_first_turn:
+                        srl_state_existing = _mgr.get_srl_state(_sid)
+                        if srl_state_existing is not None:
+                            print(f"[DiffKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
+                                  f"({srl_state_existing.n_active_blocks()} blocks). "
+                                  f"Skipping compression barrier and SRL rebuild. "
+                                  f"(saved ~{srl_state_existing.n_active_blocks() * 28 // 1000:.1f}k SVD ops)")
+                            return  # ← decode starts immediately, no wait
+
+                    # ── First turn: wait for compression then build SRL ──────────────
+                    print(f"[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...")
+                    _t_barrier_start = time.perf_counter()
                     # 1. Wait for SVD compression to finish (async — yields to event loop)
                     await self._wait_for_compression(_sid)
                     if _draft_mgr is not None:
                         await self._wait_for_compression(_sid + "_draft")
+                    _t_barrier_end = time.perf_counter()
+                    print(f"[DiffKV BatchEngine] Compression barrier done in {(_t_barrier_end - _t_barrier_start)*1000:.1f}ms")
+
                     # 2. Build SRL index in a thread so the event loop stays live
                     def _do_finalize():
                         if hasattr(_mgr, "finalize_srl_index"):
@@ -693,8 +730,13 @@ class ContinuousBatchEngine:
                         if _draft_mgr is not None and hasattr(_draft_mgr, "finalize_srl_index"):
                             _draft_mgr.finalize_srl_index(_sid + "_draft", cached_len=_cached_len)
                     try:
+                        _t_finalize_start = time.perf_counter()
                         await _loop.run_in_executor(None, _do_finalize)
+                        _t_finalize_end = time.perf_counter()
+                        print(f"[DiffKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
+                              f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms")
                     except Exception as _e:
+                        print(f"[DiffKV BatchEngine] WARNING: SRL index build failed: {_e}")
                         pass  # SRL index failure is non-fatal; decode continues without routing
 
                 asyncio.ensure_future(_build_srl_index_async())
