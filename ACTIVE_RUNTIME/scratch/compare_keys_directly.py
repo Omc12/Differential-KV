@@ -79,6 +79,21 @@ In particular, I argue that the current trajectory of AI development and use (ch
         outputs_patched = wrapper.model(input_ids=encoded.input_ids, use_cache=True)
         wrapper.manager.compress_prefill_kv(session_id)
         
+    # Wait for SVD background compression thread to finish
+    import time
+    for _ in range(100):
+        with wrapper.manager._pending_lock:
+            pending = wrapper.manager._pending_cpu_blocks
+        # Also check if any block is in SUBMITTED state
+        blocks = wrapper.manager.get_streaming_blocks(session_id, 0)
+        submitted = sum(1 for b in blocks if getattr(b, "state", "") == "SUBMITTED")
+        if pending == 0 and submitted == 0:
+            break
+        time.sleep(0.1)
+        
+    # Finalize (GPU upload)
+    wrapper.manager.finalize_compressed_blocks()
+        
     # Run 1 decode step on patched
     with torch.no_grad():
         outputs_p = wrapper.model(input_ids=input_ids, position_ids=pos_tensor, use_cache=True)

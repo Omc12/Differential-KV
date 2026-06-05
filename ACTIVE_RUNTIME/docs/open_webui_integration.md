@@ -12,14 +12,14 @@ Open a terminal in the `ACTIVE_RUNTIME/` directory and run:
 ```powershell
 # Minimum viable (CPU-only / lightweight)
 python -m serving.openai_compatible_api_gateway `
-    --model Qwen/Qwen2.5-1.5B-Instruct `
+    --model Qwen/Qwen2.5-0.5B-Instruct `
     --host 0.0.0.0 `
     --port 8000 `
     --serving-mode balanced
 
 # GPU recommended (balanced / long-context)
 python -m serving.openai_compatible_api_gateway `
-    --model Qwen/Qwen2.5-1.5B-Instruct `
+    --model Qwen/Qwen2.5-0.5B-Instruct `
     --host 0.0.0.0 `
     --port 8000 `
     --serving-mode long-context `
@@ -84,8 +84,18 @@ Invoke-WebRequest http://localhost:8000/v1/models | Select-Object -ExpandPropert
 | POST   | `/v1/chat/completions` | Chat inference (streaming + non-streaming)|
 | POST   | `/v1/sessions`         | Create a new persistent session        |
 | DELETE | `/v1/sessions/{id}`    | Clear session history                  |
+| GET    | `/v1/sessions/{session_id}/srl` | Live SRL routing stats and configuration state |
 | GET    | `/v1/runtime_info`     | Live VRAM and serving mode telemetry   |
 | GET    | `/docs`                | Interactive Swagger API docs           |
+
+### Dynamic SRL Request Parameters
+
+You can pass custom parameters inside the JSON body of `POST /v1/chat/completions` to control the Semantic Routing Layer (SRL) dynamically per-request:
+
+* **`srl_enabled`** (bool, default `true`): Enable/disable semantic block routing for this session.
+* **`srl_threshold`** (int, default `50`): Minimum number of compressed blocks before SRL routing is activated.
+* **`srl_k_min`** (int, default `20`): Minimum number of compressed blocks to retain during routing.
+* **`srl_k_max`** (int, default `200`): Maximum number of compressed blocks to retain during routing.
 
 ---
 

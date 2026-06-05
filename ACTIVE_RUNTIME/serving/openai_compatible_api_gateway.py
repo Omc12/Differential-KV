@@ -27,6 +27,10 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 0.9
     repetition_penalty: Optional[float] = 1.15
     session_id: Optional[str] = None
+    srl_enabled: Optional[bool] = None
+    srl_threshold: Optional[int] = None
+    srl_k_min: Optional[int] = None
+    srl_k_max: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +121,42 @@ class OpenAICompatibleAPIGateway:
         self.session_manager = session_manager
         self._setup_routes()
 
+    def _is_ephemeral_request(self, messages: list) -> bool:
+        """
+        Detect ephemeral (title/summarization) requests that should NOT be matched
+        to an active conversation session. These requests must be routed to isolated
+        temporary sessions to prevent corruption of the main session's KV cache and
+        prefix registry.
+
+        Open WebUI (and similar clients) send background title/summarization requests
+        immediately after each assistant turn. These follow a pattern:
+          - Single user message (no prior assistant turns in THIS request)
+          - Message asks for title/summary/label generation in <100 chars
+          - OR the message contains Open WebUI's standard title generation prompt
+        """
+        if not messages:
+            return False
+        last_msg = messages[-1]
+        if last_msg.get("role") != "user":
+            return False
+        content = last_msg.get("content", "")
+        # Detect short title/label/summary generation prompts
+        if len(content) < 300:
+            content_lower = content.lower()
+            EPHEMERAL_KEYWORDS = (
+                "generate a title", "create a title", "suggest a title",
+                "write a title", "what is the title", "give a title",
+                "title for this", "title for the",
+                "summarize this conversation", "summarize the conversation",
+                "generate a summary", "create a summary",
+                "label this conversation", "name this conversation",
+                "generate a name", "give this chat a title",
+                "come up with a title", "one line title", "short title",
+            )
+            if any(kw in content_lower for kw in EPHEMERAL_KEYWORDS):
+                return True
+        return False
+
     def _setup_routes(self):
 
         @self.app.post("/v1/chat/completions")
@@ -124,12 +164,27 @@ class OpenAICompatibleAPIGateway:
             # Create or reuse a session
             session_id = request.session_id
             
+            # ── Ephemeral request detection ─────────────────────────────────────
+            # Detect title/summarization background requests (e.g. from Open WebUI)
+            # and route them to a temporary isolated session. This prevents them from
+            # matching the main conversation's history and corrupting the KV prefix
+            # registry with a title-generation response.
+            incoming_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+            is_ephemeral = (session_id is None) and self._is_ephemeral_request(incoming_messages)
+            if is_ephemeral:
+                ephemeral_session_id = f"__ephemeral__{uuid.uuid4()}"
+                print(f"[DiffKV Gateway] Detected ephemeral title/summary request. "
+                      f"Routing to isolated session {ephemeral_session_id} to protect main KV cache.")
+                session_id = ephemeral_session_id
+            
             # Dynamic matching by prompt message history prefix (essential for standard OpenAI clients like Open WebUI)
-            if session_id is None and self.session_manager is not None:
-                incoming_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+            if not is_ephemeral and session_id is None and self.session_manager is not None:
                 if len(incoming_messages) > 1:
                     prefix_history = incoming_messages[:-1]
                     for sid, history in getattr(self.session_manager, "message_histories", {}).items():
+                        # Never match against ephemeral sessions
+                        if sid.startswith("__ephemeral__"):
+                            continue
                         if len(history) == len(prefix_history):
                             match = True
                             for h_msg, p_msg in zip(history, prefix_history):
@@ -140,17 +195,66 @@ class OpenAICompatibleAPIGateway:
                                 session_id = sid
                                 print(f"[DiffKV Gateway] Dynamically matched message history prefix to active session: {session_id}")
                                 break
+                    
+                    # Fallback match comparing the last assistant message content in the history
+                    if session_id is None:
+                        last_incoming_assistant = None
+                        for msg in reversed(prefix_history):
+                            if msg.get("role") == "assistant":
+                                last_incoming_assistant = msg
+                                break
+                        if last_incoming_assistant is not None:
+                            for sid, history in getattr(self.session_manager, "message_histories", {}).items():
+                                # Never match against ephemeral sessions
+                                if sid.startswith("__ephemeral__"):
+                                    continue
+                                last_stored_assistant = None
+                                for msg in reversed(history):
+                                    if msg.get("role") == "assistant":
+                                        last_stored_assistant = msg
+                                        break
+                                if last_stored_assistant is not None:
+                                    if last_stored_assistant.get("content") == last_incoming_assistant.get("content"):
+                                        session_id = sid
+                                        print(f"[DiffKV Gateway] Dynamically matched session {session_id} using fallback last assistant message content match.")
+                                        break
 
-            if session_id is None and self.session_manager is not None:
+            if not is_ephemeral and session_id is None and self.session_manager is not None:
                 session_id = self.session_manager.create_session()
-            elif session_id is None:
+            elif not is_ephemeral and session_id is None:
                 session_id = str(uuid.uuid4())
-            elif self.session_manager is not None:
+            elif not is_ephemeral and self.session_manager is not None:
                 # Ensure the matched or requested session is loaded and resident in VRAM.
                 # Fall back to creating a new session if the session has expired or is invalid.
                 session = self.session_manager.get_session(session_id)
                 if session is None:
                     session_id = self.session_manager.create_session()
+
+            # Apply dynamic SRL configurations to the session (skip for ephemeral sessions)
+            kv_manager = getattr(getattr(self.resolver, "wrapper", None), "manager", None)
+            if not is_ephemeral and kv_manager is not None:
+                srl_config = {}
+                if request.srl_enabled is not None:
+                    srl_config["srl_enabled"] = request.srl_enabled
+                if request.srl_threshold is not None:
+                    srl_config["srl_threshold"] = request.srl_threshold
+                if request.srl_k_min is not None:
+                    srl_config["srl_k_min"] = request.srl_k_min
+                if request.srl_k_max is not None:
+                    srl_config["srl_k_max"] = request.srl_k_max
+                
+                if srl_config:
+                    if hasattr(kv_manager, "set_session_config"):
+                        kv_manager.set_session_config(session_id, srl_config)
+                    # If SRL state already exists, update its runtime configs directly
+                    srl_state = kv_manager.get_srl_state(session_id)
+                    if srl_state is not None:
+                        if "srl_k_min" in srl_config:
+                            srl_state.k_min = srl_config["srl_k_min"]
+                        if "srl_k_max" in srl_config:
+                            srl_state.k_max = srl_config["srl_k_max"]
+                        if "srl_threshold" in srl_config:
+                            srl_state.routing_threshold = srl_config["srl_threshold"]
 
             request_id   = f"chatcmpl-{uuid.uuid4()}"
             created_time = int(time.time())
@@ -166,7 +270,8 @@ class OpenAICompatibleAPIGateway:
             if request.stream:
                 return StreamingResponse(
                     self._stream_response(
-                        session_id, request_id, created_time, request.model, payload
+                        session_id, request_id, created_time, request.model, payload,
+                        is_ephemeral=is_ephemeral
                     ),
                     media_type="text/event-stream",
                 )
@@ -182,6 +287,7 @@ class OpenAICompatibleAPIGateway:
                 payload_copy = dict(payload)
                 payload_copy["prompt"] = prompt
                 
+                is_finished = False
                 try:
                     queue = await self.resolver.submit(session_id, payload_copy)
                     full_text = []
@@ -192,22 +298,51 @@ class OpenAICompatibleAPIGateway:
                         if chunk.get("text"):
                             full_text.append(chunk["text"])
                         if chunk.get("is_final"):
+                            is_finished = True
                             break
                             
                     result_text = "".join(full_text)
                     
-                    # Store in session manager
-                    if self.session_manager:
+                    # Store in session manager (skip for ephemeral sessions)
+                    if self.session_manager and not is_ephemeral:
                         self.session_manager.clear_history(session_id)
                         for msg in payload.get("messages", []):
                             self.session_manager.append_message(session_id, msg["role"], msg["content"])
                         self.session_manager.append_message(session_id, "assistant", result_text)
+
+                    # Update prefix registry for correct Turn 2+ prefix reuse (skip for ephemeral sessions)
+                    if not is_ephemeral:
+                        try:
+                            next_turn_messages = list(payload.get("messages", []))
+                            next_turn_messages.append({"role": "assistant", "content": result_text})
+                            full_next_prompt = self.resolver.tokenizer.apply_chat_template(
+                                next_turn_messages, tokenize=False, add_generation_prompt=False
+                            )
+                            if hasattr(self.resolver, "update_session_token_prefix"):
+                                self.resolver.update_session_token_prefix(session_id, full_next_prompt)
+                        except Exception as _prefix_e:
+                            print(f"[DiffKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
+                    else:
+                        # Clean up ephemeral session KV immediately to free VRAM
+                        try:
+                            if hasattr(self.resolver, "_free_session_kv"):
+                                self.resolver._free_session_kv(session_id)
+                            elif kv_manager is not None and hasattr(kv_manager, "clear_session"):
+                                kv_manager.clear_session(session_id)
+                        except Exception as _cleanup_e:
+                            pass  # Non-fatal; ephemeral session will GC eventually
                         
                     result = {"text": result_text}
                     return self._format_non_stream(request_id, created_time, request.model, result)
                 except asyncio.CancelledError:
-                    if hasattr(self.resolver, "cancel"):
-                        self.resolver.cancel(session_id)
+                    if not is_finished:
+                        if self.session_manager and full_text:
+                            self.session_manager.clear_history(session_id)
+                            for msg in payload.get("messages", []):
+                                self.session_manager.append_message(session_id, msg["role"], msg["content"])
+                            self.session_manager.append_message(session_id, "assistant", "".join(full_text))
+                        if hasattr(self.resolver, "cancel"):
+                            self.resolver.cancel(session_id, free_kv=False)
                     raise
 
         @self.app.post("/v1/sessions")
@@ -282,6 +417,49 @@ class OpenAICompatibleAPIGateway:
                 "model":             model_id,
             }
 
+        @self.app.get("/v1/sessions/{session_id}/srl")
+        async def session_srl_info(session_id: str):
+            """Get SRL (Semantic Routing Layer) stats for a given session."""
+            kv_manager = getattr(getattr(self.resolver, "wrapper", None), "manager", None)
+            if kv_manager is None:
+                return {"error": "KV manager not initialized"}
+            
+            srl_state = kv_manager.get_srl_state(session_id)
+            session_config = getattr(kv_manager, "session_configs", {}).get(session_id, {})
+            _device = "cuda"
+            if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
+                _device = getattr(self.resolver.wrapper, "device", "cuda")
+            default_threshold = 50
+
+            if srl_state is None:
+                return {
+                    "session_id": session_id,
+                    "srl_built": False,
+                    "reason": "SRL not built yet (prefill not completed, or sequence too short)",
+                    "srl_enabled": session_config.get("srl_enabled", True),
+                    "k_min": session_config.get("srl_k_min", 20),
+                    "k_max": session_config.get("srl_k_max", 200),
+                    "routing_threshold": session_config.get("srl_threshold", default_threshold),
+                }
+            
+            # Extract stats safely
+            n_blocks = srl_state.n_active_blocks()
+            return {
+                "session_id": session_id,
+                "srl_built": True,
+                "active_blocks": n_blocks,
+                "k_min": srl_state.k_min,
+                "k_max": srl_state.k_max,
+                "routing_threshold": srl_state.routing_threshold,
+                "call_count": srl_state.call_count,
+                "current_step_count": srl_state.current_step_count,
+                "miss_rate": round(srl_state.recent_miss_rate, 4),
+                "k_multiplier": round(srl_state.k_multiplier, 4),
+                "sink_blocks": srl_state.sink_blocks,
+                "ordered_slot_ids": srl_state.ordered_slot_ids,
+                "vocab_size": len(srl_state.inverted_index.important_vocab),
+            }
+
         @self.app.get("/health")
         @self.app.get("/v1/health")
         async def health_check():
@@ -304,6 +482,7 @@ class OpenAICompatibleAPIGateway:
         created: int,
         model: str,
         payload: Dict,
+        is_ephemeral: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         
         # Build full prompt with session history
@@ -321,6 +500,7 @@ class OpenAICompatibleAPIGateway:
         payload_copy = dict(payload)
         payload_copy["prompt"] = prompt
         
+        is_finished = False
         try:
             # Submit to background continuous batching engine
             queue = await self.resolver.submit(session_id, payload_copy)
@@ -337,6 +517,40 @@ class OpenAICompatibleAPIGateway:
                 if text:
                     full_text.append(text)
                     
+                if chunk.get("is_final"):
+                    is_finished = True
+                    # Store in session manager immediately before yield of final chunk (skip for ephemeral sessions)
+                    if self.session_manager and not is_ephemeral:
+                        self.session_manager.clear_history(session_id)
+                        for msg in payload.get("messages", []):
+                            self.session_manager.append_message(session_id, msg["role"], msg["content"])
+                        self.session_manager.append_message(session_id, "assistant", "".join(full_text))
+
+                    # Build the full next-turn prompt (current messages + assistant response)
+                    # and update the prefix token registry so Turn 2 correctly reuses the KV cache.
+                    # Skip for ephemeral sessions — they must not pollute the main session registry.
+                    if not is_ephemeral:
+                        try:
+                            next_turn_messages = list(payload.get("messages", []))
+                            next_turn_messages.append({"role": "assistant", "content": "".join(full_text)})
+                            full_next_prompt = self.resolver.tokenizer.apply_chat_template(
+                                next_turn_messages, tokenize=False, add_generation_prompt=False
+                            )
+                            if hasattr(self.resolver, "update_session_token_prefix"):
+                                self.resolver.update_session_token_prefix(session_id, full_next_prompt)
+                        except Exception as _prefix_e:
+                            print(f"[DiffKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
+                    else:
+                        # Clean up ephemeral session KV immediately to free VRAM
+                        try:
+                            kv_mgr = getattr(getattr(self.resolver, "wrapper", None), "manager", None)
+                            if hasattr(self.resolver, "_free_session_kv"):
+                                self.resolver._free_session_kv(session_id)
+                            elif kv_mgr is not None and hasattr(kv_mgr, "clear_session"):
+                                kv_mgr.clear_session(session_id)
+                        except Exception:
+                            pass  # Non-fatal; ephemeral session will GC eventually
+
                 finish_reason = "stop" if chunk.get("is_final") else None
                 data = {
                     "id":      request_id,
@@ -355,16 +569,15 @@ class OpenAICompatibleAPIGateway:
                     break
 
             yield b"data: [DONE]\n\n"
-            
-            # Store in session manager
-            if self.session_manager:
-                self.session_manager.clear_history(session_id)
-                for msg in payload.get("messages", []):
-                    self.session_manager.append_message(session_id, msg["role"], msg["content"])
-                self.session_manager.append_message(session_id, "assistant", "".join(full_text))
         except asyncio.CancelledError:
-            if hasattr(self.resolver, "cancel"):
-                self.resolver.cancel(session_id)
+            if not is_finished:
+                if self.session_manager and full_text:
+                    self.session_manager.clear_history(session_id)
+                    for msg in payload.get("messages", []):
+                        self.session_manager.append_message(session_id, msg["role"], msg["content"])
+                    self.session_manager.append_message(session_id, "assistant", "".join(full_text))
+                if hasattr(self.resolver, "cancel"):
+                    self.resolver.cancel(session_id, free_kv=False)
             raise
 
     # -----------------------------------------------------------------------
@@ -408,7 +621,7 @@ def main():
     from serving.production_session_manager import ProductionSessionManager
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-1.5B-Instruct')
+    parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-0.5B-Instruct')
     parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--rank', type=int, default=32,
@@ -432,10 +645,13 @@ def main():
                              'Reduces weight VRAM by ~50%% with near-lossless quality. '
                              'Requires: pip install bitsandbytes')
     # ── Session residency arg ──────────────────────────────────────────────────────────────────────────────────
-    parser.add_argument('--max-resident-sessions', type=int, default=1,
+    parser.add_argument('--max-resident-sessions', type=int, default=4,
                         help='Maximum sessions resident in VRAM simultaneously. '
-                             'Default 1 eliminates idle KV VRAM waste. '
+                             'Default 4 supports concurrent requests (e.g. title generation) without swapping. '
                              'Increase for multi-user serving with parallel active sessions.')
+    parser.add_argument('--draft-model', type=str, default=None,
+                        help='Optional path/name of the draft model for speculative decoding. '
+                             'If provided, speculative decoding is enabled.')
     args = parser.parse_args()
 
     # Disable tokenizer parallelism warnings
@@ -486,8 +702,24 @@ def main():
         quantization_config=quantization_config,
     )
     
+    draft_wrapper = None
+    if args.draft_model:
+        print(f"Loading speculative draft model: {args.draft_model}...")
+        draft_wrapper = DiffKVHFWrapper(
+            args.draft_model,
+            config={
+                'rank':             args.rank,
+                'micro_block_size': args.micro_block_size,
+                'block_size':       args.micro_block_size,   # keep in sync
+                'serving_mode':     args.serving_mode,
+                'mode':             'fp16',
+            },
+            device=_best_device,
+            quantization_config=quantization_config,
+        )
+    
     print('Starting Continuous Batching Engine...')
-    engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size)
+    engine = ContinuousBatchEngine(wrapper, max_batch_size=args.batch_size, draft_wrapper=draft_wrapper)
     
     print('Starting Session Manager...')
     session_manager = ProductionSessionManager(

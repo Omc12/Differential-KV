@@ -551,7 +551,6 @@ def _pytorch_vectorized_sparse_attn_decode(
     """Highly-parallelized pure PyTorch low-rank SVD unrotated math decoder with dynamic RoPE."""
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1, "Decode only"
-    
     inv_scale = 1.0 / math.sqrt(D)
     
     # Reshape Q for fast matrix/vector operations

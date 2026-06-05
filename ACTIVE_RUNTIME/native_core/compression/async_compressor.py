@@ -245,12 +245,14 @@ class AsyncCompressor:
                 compress_stream = None
 
         while self._running:
+            if q.is_empty():
+                time.sleep(SPIN_YIELD_S)
+                continue
             batch = q.drain(max_n=32)
 
             if not batch:
-                # Nothing in queue — spin-yield to minimize wakeup latency
-                time.sleep(SPIN_YIELD_S)
                 continue
+
 
             # Check for shutdown sentinel
             if batch[0] is None:

@@ -143,17 +143,18 @@ _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False) -> bool:
     if block.anchor_idx == 0 or block.is_outlier:
         return False
-    if block.anchor_idx + block.token_count() < 256:
+    toks = block.token_count()
+    if block.anchor_idx + toks < 256:
         return False
         
     is_patched = (StreamingKVBlock.is_compression_eligible != _original_is_compression_eligible)
     if is_patched:
         return block.is_compression_eligible()
         
-    size_ok = (block.active_k.shape[2] >= block.micro_block_size) if is_last_block else True
+    size_ok = (toks >= block.micro_block_size) if is_last_block else True
     return (
         block.state == "ACCUMULATING"
-        and block.active_k is not None
+        and (block.active_k is not None or block.active_k_cpu is not None)
         and size_ok
     )
 
@@ -297,6 +298,69 @@ class StreamingSparseIngestManager:
         self.session_metadata.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
         self.session_staging_buffers.pop(session_id, None)
+
+    def rollback_session(self, session_id: str, target_len: int) -> None:
+        """
+        Rollback/truncate a session's KV cache to a target sequence length.
+        Used by speculative decoding to discard rejected candidate tokens.
+        """
+        if session_id not in self.session_blocks:
+            return
+
+        num_layers = len(self.session_blocks[session_id])
+        for layer_idx in range(num_layers):
+            blocks = self.session_blocks[session_id][layer_idx]
+            if not blocks:
+                continue
+
+            new_blocks = []
+            for block_idx, block in enumerate(blocks):
+                # Case 1: Entire block is at or after target_len -> discard
+                if block.anchor_idx >= target_len:
+                    if block.pool_idx is not None and self.native_pool is not None:
+                        self.native_pool.free_block(block.pool_idx)
+                    # Reset metadata row
+                    metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
+                    if metadata is not None and block_idx < metadata.shape[0]:
+                        metadata[block_idx] = -1
+                    continue
+
+                # Case 2: Block spans across target_len -> truncate
+                total_tokens = len(block.token_indices)
+                if block.anchor_idx + total_tokens > target_len:
+                    keep_count = target_len - block.anchor_idx
+                    block.token_indices = block.token_indices[:keep_count]
+                    keep_active = keep_count - 1 # anchor is at index 0
+
+                    if block._active_buf_k is not None:
+                        block._active_fill = keep_active
+                        block.active_k = block._active_buf_k[:, :, :keep_active, :] if keep_active > 0 else None
+                        block.active_v = block._active_buf_v[:, :, :keep_active, :] if keep_active > 0 else None
+                    else:
+                        if block.active_k is not None:
+                            block.active_k = block.active_k[:, :, :keep_active, :] if keep_active > 0 else None
+                            block.active_v = block.active_v[:, :, :keep_active, :] if keep_active > 0 else None
+                    
+                    if block.active_k_cpu is not None:
+                        block.active_k_cpu = block.active_k_cpu[:, :, :keep_active, :] if keep_active > 0 else None
+                        block.active_v_cpu = block.active_v_cpu[:, :, :keep_active, :] if keep_active > 0 else None
+
+                    block.dirty = True
+                    new_blocks.append(block)
+                    self.update_metadata_block(session_id, layer_idx, len(new_blocks) - 1, block)
+                else:
+                    # Case 3: Block is entirely before target_len -> keep
+                    new_blocks.append(block)
+                    self.update_metadata_block(session_id, layer_idx, len(new_blocks) - 1, block)
+
+            self.session_blocks[session_id][layer_idx] = new_blocks
+
+            # Reset any unused rows in the metadata tensor to -1
+            metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
+            if metadata is not None:
+                for idx in range(len(new_blocks), metadata.shape[0]):
+                    metadata[idx] = -1
+
 
     def update_metadata_block(self, session_id: str, layer_idx: int, block_idx: int, block):
         # Phase 29 Fix #3: metadata is a CPU tensor — all writes are pure CPU memory ops,
@@ -470,17 +534,9 @@ class StreamingSparseIngestManager:
         session_base_idx = self._next_anchor_idx(blocks)
         total_seq_len = session_base_idx + seq_len
 
-        # Compress any past blocks that have now fallen out of the rolling dense window
+        # SVD compression is deferred during prefill to ensure 100% exact causal attention
+        # and prevent mixing compressed/uncompressed blocks which perturbs logits.
         past_blocks_to_compress = []
-        for idx, b in enumerate(blocks):
-            if b.state == "ACCUMULATING" and b.active_k is not None:
-                if _is_block_compression_eligible(b, is_last_block=False) and (b.anchor_idx + b.token_count()) < (total_seq_len - 512):
-                    b.state = "SUBMITTED"
-                    past_blocks_to_compress.append(b)
-                    self.update_metadata_state(session_id, layer_idx, b)
-
-        if past_blocks_to_compress:
-            self._submit_blocks_batched(session_id, layer_idx, past_blocks_to_compress)
 
         regions = []
         # Region 1 (Active recent window): last 1024 tokens (MBS = micro_block_size)
@@ -574,15 +630,8 @@ class StreamingSparseIngestManager:
                     # Outlier check (CPU-local list access, zero sync overhead)
                     new_block.is_outlier = False
 
-                    # Dynamic Prefill Compression Guard: Bypass SVD compression for short
-                    # context sequences (< 256 tokens) or for blocks within the most recent
-                    # 512 tokens of the total sequence to preserve 100% exact prompt attention,
-                    # or if the block is flagged as containing activation outliers.
-                    if total_seq_len < 256 or anchor_idx == 0 or new_block.is_outlier or (anchor_idx + block_capacity) >= (total_seq_len - 512):
-                        new_block.state = "ACCUMULATING"
-                    else:
-                        new_block.state = "SUBMITTED"
-                        full_blocks_to_compress.append(new_block)
+                    # SVD compression is deferred during prefill to ensure exact attention.
+                    new_block.state = "ACCUMULATING"
 
                     new_blocks.append(new_block)
 
@@ -629,11 +678,8 @@ class StreamingSparseIngestManager:
                 k_max_val = region_k[:, :, L_full:].abs().max().item()
                 new_block.is_outlier = False
 
-                if not new_block.is_outlier and _is_block_compression_eligible(new_block, is_last_block=True) and (new_block.anchor_idx + new_block.token_count()) < (total_seq_len - 512):
-                    new_block.state = "SUBMITTED"
-                    full_blocks_to_compress.append(new_block)
-                else:
-                    new_block.state = "ACCUMULATING"
+                # SVD compression is deferred during prefill to ensure exact attention.
+                new_block.state = "ACCUMULATING"
 
                 new_blocks.append(new_block)
                 with self._stats_lock:
@@ -685,42 +731,13 @@ class StreamingSparseIngestManager:
         if not blocks_list:
             return
 
-        # ── Asynchronous CPU SVD Routing ──
-        # Always route to the background CPU SVD queue for maximum prefill TPS and zero VRAM spikes
-        gpu_success = False
-
-        # ── CPU SVD Queue Fallback Path ──
         # Fetch shape metadata from the first active block
         micro_block_size = blocks_list[0].micro_block_size
         heads = blocks_list[0].active_k.shape[1]
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
 
-        if device.type == "mps":
-            # On Apple Silicon (unified memory), copy blocks directly to CPU without shared staging buffer.
-            # This completely avoids staging allocation, copy operations, and GPU-CPU synchronization!
-            is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "submit_cpu")
-            for block in blocks_list:
-                k_cpu_slice = block.active_k.cpu()
-                v_cpu_slice = block.active_v.cpu()
-                
-                if is_async_active:
-                    block.active_k_cpu = k_cpu_slice
-                    block.active_v_cpu = v_cpu_slice
-                    block.active_k = None
-                    block.active_v = None
-                    block.dirty = True
-                    self.compressor.submit_cpu(block, k_cpu_slice, v_cpu_slice, None)
-                else:
-                    self.compress_fn(block, k_cpu_slice, v_cpu_slice)
-                    block.state = "COMPRESSED"
-                    block.active_k_cpu = None
-                    block.active_v_cpu = None
-            with self._stats_lock:
-                self.stats["total_compressed"] += len(blocks_list)
-            return
-
-        # CUDA path: group blocks by active sequence length to handle partial blocks
+        # Group blocks by active sequence length to handle partial blocks
         from collections import defaultdict
         by_len = defaultdict(list)
         for b in blocks_list:
@@ -735,34 +752,33 @@ class StreamingSparseIngestManager:
                 session_id, num_blocks, heads, cur_mbs, head_dim, device
             )
 
-            # Concat group's active tensors in-place directly into GPU staging buffers
-            torch.cat([b.active_k for b in group], dim=0, out=k_gpu)
-            torch.cat([b.active_v for b in group], dim=0, out=v_gpu)
+            # Concat group's active tensors
+            k_gpu_concat = torch.cat([b.active_k for b in group], dim=0)
+            v_gpu_concat = torch.cat([b.active_v for b in group], dim=0)
 
-            # Asynchronous GPU->CPU DMA via pinned memory (non_blocking only on CUDA)
-            _is_cuda = (k_gpu.device.type == "cuda")
-            k_cpu.copy_(k_gpu, non_blocking=_is_cuda)
-            v_cpu.copy_(v_gpu, non_blocking=_is_cuda)
+            # Copy to CPU staging buffer (which is pinned on CUDA)
+            _is_cuda = (device.type == "cuda")
+            k_cpu[:num_blocks, :, :cur_mbs, :].copy_(k_gpu_concat, non_blocking=_is_cuda)
+            v_cpu[:num_blocks, :, :cur_mbs, :].copy_(v_gpu_concat, non_blocking=_is_cuda)
 
-            # Enqueue cloned slices — each clone is an independent CPU tensor,
-            # so the shared staging buffer can be safely reused across layers.
-            # The DMA copy must be synchronized on the main thread because the staging buffer
-            # is shared across all layers and will be immediately overwritten in the next layer's
-            # forward pass.
             _dma_event = None
-            if k_gpu.is_cuda:
-                _dma_event = _new_event(k_gpu.device.type)
+            if _is_cuda:
+                _dma_event = _new_event(device.type)
                 _dma_event.record()
                 _dma_event.synchronize()
+            elif device.type == "mps":
+                # On MPS, we must synchronize to ensure the CPU copy is complete before background threads read it
+                torch.mps.synchronize()
             
             for idx, block in enumerate(group):
-                k_cpu_slice = k_cpu[idx : idx + 1].clone()
-                v_cpu_slice = v_cpu[idx : idx + 1].clone()
+                # Slice to the exact actual shape (unpadded) to avoid running SVD on 4x larger padded buffers
+                k_cpu_slice = k_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
+                v_cpu_slice = v_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
      
                 if is_async_active:
                     # Store CPU-pinned uncompressed tensors on the block immediately
-                    block.active_k_cpu = k_cpu_slice.pin_memory() if k_gpu.is_cuda else k_cpu_slice
-                    block.active_v_cpu = v_cpu_slice.pin_memory() if v_gpu.is_cuda else v_cpu_slice
+                    block.active_k_cpu = k_cpu_slice.pin_memory() if _is_cuda else k_cpu_slice
+                    block.active_v_cpu = v_cpu_slice.pin_memory() if _is_cuda else v_cpu_slice
                     
                     # Delete/free the GPU active_k/v immediately!
                     block.active_k = None
@@ -889,6 +905,40 @@ class StreamingSparseIngestManager:
                     total += b.U.numel() * 2
                     total += b.V.numel() * 2
         return total
+
+    def compress_deferred_blocks(self, session_id: str) -> None:
+        """
+        Scan all layers of the session, identify blocks that have left the
+        recency window (last 512 tokens), and submit them to SVD compression.
+        """
+        if session_id not in self.session_blocks:
+            return
+
+        # 1. Determine the total sequence length of the session
+        total_seq_len = 0
+        layers = self.session_blocks[session_id]
+        if layers:
+            first_layer_blocks = layers.get(0, [])
+            if first_layer_blocks:
+                last_block = first_layer_blocks[-1]
+                total_seq_len = last_block.anchor_idx + last_block.token_count()
+
+        if total_seq_len < 256:
+            return  # No blocks are eligible
+
+        # 2. Iterate over each layer
+        for layer_idx, blocks in layers.items():
+            blocks_to_compress = []
+            for idx, b in enumerate(blocks):
+                if b.state == "ACCUMULATING" and b.active_k is not None:
+                    if _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1)):
+                        if (b.anchor_idx + b.token_count()) < (total_seq_len - 512):
+                            b.state = "SUBMITTED"
+                            blocks_to_compress.append(b)
+                            self.update_metadata_state(session_id, layer_idx, b)
+
+            if blocks_to_compress:
+                self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

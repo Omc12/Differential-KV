@@ -14,13 +14,13 @@ class ProductionSessionManager:
                  storage_path: str = "./session_checkpoints",
                  max_resident_sessions: int = None,
                  kv_manager=None):
-        # Default: 1 resident session to minimize idle KV VRAM usage.
+        # Default: 4 resident sessions to support concurrent workflows (like title generation) without swapping.
         # Override with DIFFKV_MAX_SESSIONS env var for multi-user deployments.
         if max_resident_sessions is None:
             try:
-                max_resident_sessions = int(os.environ.get("DIFFKV_MAX_SESSIONS", "1"))
+                max_resident_sessions = int(os.environ.get("DIFFKV_MAX_SESSIONS", "4"))
             except (ValueError, TypeError):
-                max_resident_sessions = 1
+                max_resident_sessions = 4
 
         self.storage_path = storage_path
         self.max_resident_sessions = max_resident_sessions
@@ -81,9 +81,12 @@ class ProductionSessionManager:
 
     def _ensure_residency(self, session_id: str):
         if session_id in self.resident_sessions:
-            # Move to end (most recently used)
-            self.resident_sessions.remove(session_id)
-            self.resident_sessions.append(session_id)
+            # Move to end (most recently used) only if not already at the end
+            if self.resident_sessions[-1] != session_id:
+                self.resident_sessions.remove(session_id)
+                self.resident_sessions.append(session_id)
+            # Already resident and up-to-date — nothing else needed
+            return
         else:
             if len(self.resident_sessions) >= self.max_resident_sessions:
                 # Evict oldest

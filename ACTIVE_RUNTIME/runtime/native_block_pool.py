@@ -19,6 +19,9 @@ Pre-realloc gc.collect() prevents momentary 2x VRAM spike during pool growth.
 """
 
 import torch
+
+# SRL descriptor dimension — must match native_core/srl/chunk_descriptor.py
+_SRL_DESC_DIM = 64
 import gc
 try:
     from native_core.mac_utils import empty_cache as _empty_cache
@@ -83,7 +86,20 @@ class NativeBlockPool:
         self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=device, dtype=self.dtype)
         self.scales     = torch.zeros((self.current_blocks,), device=device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((self.current_blocks,), device=device, dtype=torch.int32)
-        
+
+        # ── SRL descriptor tensor ─────────────────────────────────────────────
+        # desc[i] is a 64-dim semantic fingerprint for pool slot i.
+        # Written by write_block() after each SVD compression.
+        # Used by SemanticIndex for ANN search during decode routing.
+        self.desc = torch.zeros(
+            (self.current_blocks, _SRL_DESC_DIM), device=device, dtype=torch.float16
+        )
+
+        # Random projection matrix [DESC_DIM, head_dim] — set by KVRuntimeManager
+        # after construction (needs head_dim which is known at pool init).
+        # Initialized here as None; KVRuntimeManager sets it immediately after.
+        self.W_proj: torch.Tensor = None  # type: ignore[assignment]
+
         # Block allocator state
         self._free_indices = list(range(self.current_blocks - 1, -1, -1))
         self._free_indices_set = set(self._free_indices)
@@ -119,23 +135,26 @@ class NativeBlockPool:
         new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
-        
+        new_desc = torch.zeros((new_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
+
         new_U[:old_blocks] = self.U
         new_U_scale[:old_blocks] = self.U_scale
         new_V_KV[:old_blocks] = self.V_KV
         new_anchors_KV[:old_blocks] = self.anchors_KV
         new_scales[:old_blocks] = self.scales
         new_seq_lens[:old_blocks] = self.seq_lens
-        
+        new_desc[:old_blocks] = self.desc
+
         # Explicitly delete old tensors so the allocator can reclaim them
-        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens
-        
+        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc
+
         self.U = new_U
         self.U_scale = new_U_scale
         self.V_KV = new_V_KV
         self.anchors_KV = new_anchors_KV
         self.scales = new_scales
         self.seq_lens = new_seq_lens
+        self.desc = new_desc
         
         self._ref_counts.extend([0] * added)
         self._last_used.extend([0.0] * added)
@@ -169,6 +188,13 @@ class NativeBlockPool:
     def increment_ref(self, pool_idx: int):
         if pool_idx is not None and 0 <= pool_idx < self.current_blocks:
             self._ref_counts[pool_idx] += 1
+            if pool_idx in self._free_indices_set:
+                self._free_indices_set.discard(pool_idx)
+                try:
+                    self._free_indices.remove(pool_idx)
+                except ValueError:
+                    pass
+
 
     def free_block(self, pool_idx: int):
         import time as _time
@@ -236,6 +262,22 @@ class NativeBlockPool:
         self.scales[pool_idx] = scale
         self.seq_lens[pool_idx] = seq_len
 
+        # ── SRL: compute and store semantic descriptor ─────────────────────
+        # Runs only when W_proj is initialized (set by KVRuntimeManager).
+        # Cost: ~3R+2D multiplications — negligible vs. SVD compression cost.
+        if self.W_proj is not None:
+            try:
+                from native_core.srl.chunk_descriptor import compute_descriptor
+                self.desc[pool_idx] = compute_descriptor(
+                    anchor_K = self.anchors_K[pool_idx],           # [kv_heads, D] fp16
+                    U_int8   = self.U[pool_idx, :write_seq, :write_rank],  # [S, R] int8
+                    U_scale  = self.U_scale[pool_idx],             # scalar fp16
+                    V_K      = self.V_K[pool_idx, :rank],          # [R, kv_heads, D] fp16
+                    W_proj   = self.W_proj,                        # [DESC_DIM, D] fp32
+                )
+            except Exception:
+                pass  # Descriptor failure is non-fatal — SRL routing degrades gracefully
+
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
         self.current_blocks = self.initial_blocks
@@ -249,17 +291,18 @@ class NativeBlockPool:
         rank = self.V_KV.shape[2]
         max_seq_len = self.U.shape[1]
         
-        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens
+        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc
         gc.collect()
         _empty_cache(self.device)
-        
+
         self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=self.device, dtype=torch.int8)
         self.U_scale    = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
         self.V_KV       = torch.zeros((self.current_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((self.current_blocks,), device=self.device, dtype=torch.int32)
-        
+        self.desc       = torch.zeros((self.current_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
+
         gc.collect()
         _empty_cache(self.device)
 

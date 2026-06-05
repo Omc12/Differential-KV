@@ -1,48 +1,104 @@
 import os
 import sys
-import time
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import asyncio
 
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-LARGE_PROMPT_PAPER = """
-Abstract
-While there is a growing effort towards AI for Sustainability (e.g. towards the sustainable development goals) it is time to move beyond that and to address the sustainability of developing and using AI systems. In this paper I propose a definition of Sustainable AI; Sustainable AI is a movement to foster change in the entire lifecycle of AI products (i.e. idea generation, training, re-tuning, implementation, governance, and post-use disposal) towards ecological and social sustainability. Sustainable AI is divided into two categories: AI for sustainability (using AI to support sustainability goals) and sustainability of AI (sustainable development, training, and use of AI). The focus of this paper is on the latter.
-In particular, I argue that the current trajectory of AI development and use (characterized by massive deep learning models requiring huge amounts of energy and resources to train and run) is unsustainable. I analyze the ecological and social impacts of the AI lifecycle, including resource extraction for hardware, greenhouse gas emissions from data centers during training and inference, and the social inequalities perpetuated by high compute costs. Finally, I propose a set of guiding principles and actionable recommendations for researchers, developers, and policymakers to transition towards a sustainable AI ecosystem. These include energy-efficient hardware, green software engineering, open data and models, and robust governance frameworks that incorporate environmental impact assessments.
-"""
-
-long_abstract = "\n".join([f"Section {i+1}:\n{LARGE_PROMPT_PAPER}" for i in range(10)])
-
-def main():
-    print("Loading baseline model...")
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-0.5B-Instruct",
-        torch_dtype=torch.float16,
-        device_map=DEVICE,
+async def test_baseline():
+    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.batch_engine import ContinuousBatchEngine
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
+    MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+    device = "cpu"
+    
+    secret_info = "The secret code word is: ALBATROSS. Remember this secret word.\n\n"
+    filler = (
+        "Quantum computing is a multidisciplinary field comprising aspects of computer science, "
+        "physics, and mathematics that utilizes quantum mechanics to solve complex problems faster "
+        "than on classical computers. The field of quantum computing includes hardware research and "
+        "application development. "
     )
-    model.eval()
-
-    prompt = f"<|im_start|>user\nHere is a long research text:\n{long_abstract}\n\nBased on the text above, summarize the key points of Sustainable AI in 3 bullet points.<|im_end|>\n<|im_start|>assistant\n"
-    encoded = tokenizer(prompt, return_tensors="pt").to(DEVICE)
     
-    print("Running baseline generation...")
-    t0 = time.perf_counter()
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        + secret_info
+        + (filler * 40) + "\n\n"
+        "Question: What is the secret code word? Answer in exactly one word.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    
+    # 1. Test HF standard model
+    print("\n==================================================")
+    print("1. Standard Hugging Face Model (No DiffKV)")
+    print("==================================================")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        MODEL, torch_dtype=torch.float16, device_map=device
+    )
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
-        outputs = model.generate(
-            **encoded,
-            max_new_tokens=64,
-            temperature=0.0,
-            do_sample=False,
-            repetition_penalty=1.0,
-        )
-    print(f"Done in {time.perf_counter() - t0:.2f}s")
+        out = hf_model.generate(**inputs, max_new_tokens=16, temperature=0.0, do_sample=False)
+    print(f"HF Output: {repr(tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip())}")
     
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print("--- BASELINE RESPONSE ---")
-    print(response)
-    print("-------------------------")
+    del hf_model
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, "mps"):
+        torch.mps.empty_cache()
+        
+    # 2. Test DiffKV with attention cache disabled (threshold = 2.0)
+    print("\n==================================================")
+    print("2. DiffKV with SVD Compression only (No Attention Cache)")
+    print("==================================================")
+    os.environ["DIFFKV_SRL_THRESHOLD"] = "99999"  # disable SRL routing
+    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
+    
+    # Set threshold to 2.0 just to be sure
+    wrapper.manager.attention_score_cache.threshold = 2.0
+    
+    engine = ContinuousBatchEngine(wrapper, max_batch_size=1)
+    engine.start()
+    
+    q = await engine.submit("sess_diffkv_full", {
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0,
+    })
+    
+    full_output = []
+    while True:
+        chunk = await q.get()
+        text = chunk.get("text", "")
+        if text:
+            full_output.append(text)
+        if chunk.get("is_final"):
+            break
+    print(f"DiffKV Full Output: {repr(''.join(full_output).strip())}")
+    
+    # 3. Test follow-up turn on DiffKV
+    print("\nFollow-up turn (user says 'hi'):")
+    prompt2 = prompt + "".join(full_output) + "\n<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+    q2 = await engine.submit("sess_diffkv_full", {
+        "prompt": prompt2,
+        "max_tokens": 16,
+        "temperature": 0.0,
+    })
+    full_output2 = []
+    while True:
+        chunk = await q2.get()
+        text = chunk.get("text", "")
+        if text:
+            full_output2.append(text)
+        if chunk.get("is_final"):
+            break
+    print(f"DiffKV Follow-up Output: {repr(''.join(full_output2).strip())}")
+    
+    await engine.stop()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(test_baseline())

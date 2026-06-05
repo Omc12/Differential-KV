@@ -175,8 +175,10 @@ class DiffKVHFWrapper:
             device=device,
             rank=self.rank,
             micro_block_size=self.micro_block_size,
-            serving_mode=self.serving_mode
+            serving_mode=self.serving_mode,
+            tokenizer=self.tokenizer,    # ← SRL: used for stop word precomputation
         )
+        self.manager.model_id = self.model_id
         self.active_session = None
         
         # Collect stop token IDs universally across all loaded models (Qwen, Llama, Mistral, etc.)

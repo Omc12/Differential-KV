@@ -14,6 +14,8 @@ async def test_long_prompt():
     
     # Enable telemetry to see state transitions
     os.environ["DIFFKV_TELEMETRY"] = "1"
+    os.environ["DIFFKV_SRL_THRESHOLD"] = "10"
+    os.environ["DIFFKV_SRL_VERBOSE"] = "1"
     
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
@@ -68,6 +70,48 @@ async def test_long_prompt():
     print("GENERATED ANSWER:")
     print("=" * 50)
     print(f"REPR: {repr(generated_text)}")
+    print("=" * 50)
+
+    # ── Second Turn (Follow-up) ──────────────────────────────────────────────
+    print("\nSubmitting second turn follow-up prompt (user says 'hi')...")
+    # Set threshold lower for the test if needed, but the session has 912 compressed blocks,
+    # which is well above the default threshold (50). So it will definitely route!
+    prompt2 = (
+        prompt
+        + generated_text + "\n<|im_end|>\n"
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    
+    # Enable verbose logging for routing
+    os.environ["DIFFKV_SRL_VERBOSE"] = "1"
+    
+    q2 = await engine.submit("session_long_prompt", {
+        "prompt": prompt2,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "top_p": 0.9,
+        "repetition_penalty": 1.15,
+    })
+    
+    full_output2 = []
+    while True:
+        chunk = await asyncio.wait_for(q2.get(), timeout=30.0)
+        if "error" in chunk:
+            print(f"Error: {chunk['error']}")
+            break
+        text = chunk.get("text", "")
+        if text:
+            full_output2.append(text)
+            print(text, end="", flush=True)
+        if chunk.get("is_final"):
+            break
+
+    generated_text2 = "".join(full_output2).strip()
+    print("\n\n" + "=" * 50)
+    print("GENERATED ANSWER 2:")
+    print("=" * 50)
+    print(f"REPR: {repr(generated_text2)}")
     print("=" * 50)
 
     await engine.stop()

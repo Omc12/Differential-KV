@@ -166,6 +166,7 @@ class KVRuntimeManager:
         rank:                int   = 8,
         kv_heads:            int   = None,
         serving_mode:        str   = "balanced",
+        tokenizer                  = None,   # HuggingFace tokenizer (for SRL stop words)
     ):
         self.num_layers  = num_layers
         self.heads       = heads
@@ -173,6 +174,45 @@ class KVRuntimeManager:
         self.head_dim    = head_dim
         self.device      = device if device is not None else _get_best_device()
         self.feat_dim    = 2 * self.kv_heads * head_dim
+
+        # ── SRL: tokenizer + precomputed stop token IDs ────────────────────
+        self.tokenizer = tokenizer
+        self._stop_token_ids: set = set()
+        if tokenizer is not None:
+            _STOP_WORDS = {
+                "the", "a", "an", "is", "are", "was", "were", "be", "been",
+                "have", "has", "had", "do", "does", "did", "will", "would",
+                "could", "should", "may", "might", "shall", "can", "need",
+                "to", "of", "in", "on", "at", "by", "for", "with", "as",
+                "and", "or", "but", "if", "then", "that", "this", "it",
+                "he", "she", "they", "we", "you", "i", "not", "no",
+                ",", ".", ":", ";", "?", "!", "(", ")", "'", '"', "-", "\n",
+                "system", "user", "assistant", "im_start", "im_end",
+            }
+            for word in _STOP_WORDS:
+                try:
+                    ids = tokenizer.encode(word, add_special_tokens=False)
+                    self._stop_token_ids.update(ids)
+                except Exception:
+                    pass
+            if hasattr(tokenizer, "all_special_ids"):
+                self._stop_token_ids.update(tokenizer.all_special_ids)
+        else:
+            # Fallback: low-ID BPE tokens are overwhelmingly punctuation/particles
+            self._stop_token_ids = set(range(200))
+
+        # Per-session token ID registry (CPU tensors, for inverted index build)
+        self._session_token_ids: dict = {}
+
+        # Attention score cache for decode steps
+        from native_core.srl.attention_cache import AttentionScoreCache
+        self.attention_score_cache = AttentionScoreCache()
+
+        # Per-session SRL state (populated by finalize_srl_index)
+        self._session_srl: dict = {}
+
+        # Per-session SRL custom configuration settings
+        self.session_configs: dict = {}
 
         # session_id -> layer_idx -> List[KVBlock]
         self.session_blocks: Dict[str, Dict[int, List[KVBlock]]] = {}
@@ -256,6 +296,15 @@ class KVRuntimeManager:
             initial_blocks=256   # Each slot is now micro_block_size (256) rows
         )
 
+        # ── SRL: Initialize random projection matrix W_proj ──────────────
+        # Fixed at construction time — never updated.
+        # All block descriptors and query descriptors use the same W_proj,
+        # making them directly comparable across the lifetime of the pool.
+        _desc_dim = 64
+        _W = torch.randn(_desc_dim, self.head_dim, dtype=torch.float32)
+        _W = _W / (_W.norm(dim=1, keepdim=True) + 1e-8)   # normalize rows
+        self.native_pool.W_proj = _W.to(self.device)
+
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
@@ -325,6 +374,206 @@ class KVRuntimeManager:
         for k in keys_to_del:
             self._indices_gpu_cache.pop(k, None)
 
+    def rollback_session(self, session_id: str, target_len: int) -> None:
+        """
+        Rollback/truncate a session's KV cache to a target sequence length.
+        Used by speculative decoding to discard rejected candidate tokens.
+        """
+        if self._streaming_mgr is not None:
+            self._streaming_mgr.rollback_session(session_id, target_len)
+
+        # Rollback registered token IDs
+        if session_id in self._session_token_ids:
+            self._session_token_ids[session_id] = self._session_token_ids[session_id][:target_len]
+
+        # Invalidate GPU block indices cache for this session
+        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
+        for k in keys_to_del:
+            self._indices_gpu_cache.pop(k, None)
+
+    def set_session_config(self, session_id: str, config: dict):
+        if not hasattr(self, "session_configs"):
+            self.session_configs = {}
+        if session_id not in self.session_configs:
+            self.session_configs[session_id] = {}
+        self.session_configs[session_id].update(config)
+
+
+    def register_prefill_tokens(self, session_id: str, token_ids: torch.Tensor) -> None:
+        """
+        Store the full prompt token ID sequence for a session.
+
+        Called by batch_engine.py _step() before the prefill forward pass,
+        with input_ids.squeeze(0).cpu() — a [seq_len] CPU tensor.
+
+        These token IDs are used by finalize_srl_index() to build the
+        lexical inverted index. They are concatenated across prefill chunks
+        so multi-chunk prefills are handled correctly.
+        """
+        existing = self._session_token_ids.get(session_id)
+        if existing is None:
+            self._session_token_ids[session_id] = token_ids.cpu()
+        else:
+            # Append new chunk
+            self._session_token_ids[session_id] = torch.cat(
+                [existing, token_ids.cpu()], dim=0
+            )
+
+    def finalize_srl_index(self, session_id: str, cached_len: int = 0) -> None:
+        """
+        Build all SRL routing structures for a session after prefill completes.
+
+        Called from compress_prefill_kv() once all blocks are finalized
+        (pending_cpu_blocks == 0). Also callable directly after the
+        compression barrier in batch_engine.py for explicit control.
+
+        Builds:
+          - SemanticIndex  (ANN search over 64-dim descriptors)
+          - ChunkGraph     (block-to-block similarity graph)
+          - InvertedTokenIndex  (token_id → block list)
+          - SessionSRLState  (attaches all indexes + sink blocks)
+        """
+        import os as _os
+
+        pool = getattr(self, "native_pool", None)
+        if pool is None or pool.W_proj is None:
+            return  # SRL not available (W_proj not initialized)
+
+        # Gather all COMPRESSED pool slot IDs for this session (from layer 0)
+        blocks_layer0 = self.get_streaming_blocks(session_id, 0)
+        slot_ids = [
+            b.pool_idx for b in blocks_layer0
+            if getattr(b, "pool_idx", None) is not None
+            and getattr(b, "state", "") == "COMPRESSED"
+        ]
+
+        if not slot_ids:
+            return  # No compressed blocks yet — skip
+
+        try:
+            from native_core.srl.semantic_index import build_semantic_index
+            from native_core.srl.chunk_graph import build_chunk_graph
+            from native_core.srl.inverted_index import build_inverted_index
+            from native_core.srl.session_srl_state import SessionSRLState
+
+            # ── 1. Semantic index ───────────────────────────────────────
+            sem_index = build_semantic_index(pool, slot_ids)
+
+            # ── 2. Chunk graph ──────────────────────────────────────────
+            chunk_graph = build_chunk_graph(
+                sem_index.desc_matrix,
+                sem_index.slot_ids,
+                K_semantic=6,
+                K_temporal=2,
+            )
+
+            # ── 3. Inverted token index ─────────────────────────────────
+            token_ids_cpu = self._session_token_ids.get(session_id)
+            mbs = self.get_session_micro_block_size(session_id)
+            # block_size for indexing = anchor (1) + active tokens (mbs)
+            index_block_size = mbs + 1
+
+            if token_ids_cpu is not None and len(slot_ids) > 0:
+                inv_index = build_inverted_index(
+                    token_ids      = token_ids_cpu,
+                    slot_ids       = slot_ids,
+                    block_size     = index_block_size,
+                    stop_token_ids = self._stop_token_ids,
+                    top_n_per_block = 20,
+                )
+            else:
+                from native_core.srl.inverted_index import InvertedTokenIndex
+                inv_index = InvertedTokenIndex(index={}, important_vocab=set())
+
+            # ── 4. Sink blocks (block 0 + special token blocks) ──────────
+            sink_blocks: list = []
+            # Always include first slot (attention sinks / system prompt start)
+            if slot_ids:
+                sink_blocks.append(slot_ids[0])
+
+            # Include blocks containing special tokens if tokenizer is available
+            if self.tokenizer is not None:
+                SPECIAL_WORDS = [
+                    "<|system|>", "<|user|>", "<|assistant|>",
+                    "<|im_start|>", "<|im_end|>", "<|endoftext|>",
+                ]
+                special_ids: set = set()
+                for w in SPECIAL_WORDS:
+                    try:
+                        tok_id = self.tokenizer.convert_tokens_to_ids(w)
+                        if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
+                            special_ids.add(tok_id)
+                    except Exception:
+                        pass
+                from native_core.srl.inverted_index import lookup as _inv_lookup
+                from native_core.srl.inverted_index import InvertedTokenIndex as _ITI
+                _tmp = _ITI(
+                    index=inv_index.index,
+                    important_vocab=inv_index.important_vocab | special_ids,
+                )
+                for sid_special in _inv_lookup(_tmp, list(special_ids)):
+                    if sid_special not in sink_blocks:
+                        sink_blocks.append(sid_special)
+
+            # Get session config if any to dynamically set values on SessionSRLState
+            session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
+            default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
+            default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
+            default_threshold_val = "99999"
+            default_threshold = int(_os.environ.get("DIFFKV_SRL_THRESHOLD", default_threshold_val))
+
+            k_min = session_config.get("srl_k_min", default_k_min)
+            k_max = session_config.get("srl_k_max", default_k_max)
+            routing_threshold = session_config.get("srl_threshold", default_threshold)
+
+            # Enable SRL by default for all models
+            if "srl_enabled" not in session_config:
+                session_config["srl_enabled"] = True
+
+            # Preserve dynamic state flags (like nothing_found) across rebuilds
+            existing_srl = self._session_srl.get(session_id)
+            nothing_found = getattr(existing_srl, "nothing_found", False)
+
+            # Extract latest query tokens
+            current_query_tokens = getattr(existing_srl, "current_query_tokens", [])
+            if token_ids_cpu is not None:
+                current_query_tokens = token_ids_cpu[cached_len:].tolist()
+
+            # ── 5. Assemble SessionSRLState ──────────────────────────────
+            srl_state = SessionSRLState(
+                semantic_index    = sem_index,
+                chunk_graph       = chunk_graph,
+                inverted_index    = inv_index,
+                ordered_slot_ids  = slot_ids,
+                sink_blocks       = list(dict.fromkeys(sink_blocks)),
+                k_min             = k_min,
+                k_max             = k_max,
+                routing_threshold = routing_threshold,
+            )
+            srl_state.nothing_found = nothing_found
+            srl_state.current_query_tokens = current_query_tokens
+            self._session_srl[session_id] = srl_state
+
+            n = len(slot_ids)
+            desc_kb = n * 64 * 2 / 1024
+            graph_kb = n * 8 * 4 / 1024
+            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1" or \
+               _os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
+                print(
+                    f"[SRL] Index built: session={session_id} "
+                    f"blocks={n} desc={desc_kb:.1f}KB graph={graph_kb:.1f}KB "
+                    f"vocab={len(inv_index.important_vocab)} sink={len(sink_blocks)}"
+                )
+
+        except Exception as e:
+            import traceback
+            print(f"[SRL] WARNING: finalize_srl_index failed for session {session_id}: {e}")
+            if _os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
+                traceback.print_exc()
+
+    def get_srl_state(self, session_id: str):
+        """Return the SessionSRLState for a session, or None if not yet built."""
+        return self._session_srl.get(session_id)
 
     # ── Prefill KV capture & batch compression ────────────────────────────────
 
@@ -357,12 +606,23 @@ class KVRuntimeManager:
         No-op barrier stub — compression now fires immediately in capture_prefill_kv().
         Kept for API compatibility with hf_diffkv_wrapper.py which calls this after
         each prefill chunk to trigger SVD overlap with the next chunk forward pass.
-        """
 
+        Also triggers SRL index build once all blocks are finalized, if token IDs
+        have been registered for this session via register_prefill_tokens().
+        """
 
         import gc as _gc, os as _os
         _gc.collect()
         _empty_cache(self.device)
+
+        # ── SRL: build or update the semantic routing index ──────────────
+        # Deferred until ALL blocks are finalized (pending_cpu_blocks == 0).
+        # This is a no-op for intermediate chunks; fires on the last chunk
+        # when the compression barrier is already drained.
+        if session_id in self._session_token_ids:
+            pending = getattr(self, "_pending_cpu_blocks", 1)
+            if pending <= 0:
+                self.finalize_srl_index(session_id)
 
         if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             if _has_cuda():
@@ -370,6 +630,14 @@ class KVRuntimeManager:
                 print(f"[DiffKV] Post-prefill flush. VRAM: {alloc:.2f} GB")
             else:
                 print("[DiffKV] Post-prefill flush (MPS/CPU).")
+
+    def compress_deferred_prefill_blocks(self, session_id: str) -> None:
+        """
+        Trigger SVD compression for all deferred prefill blocks of a session.
+        Called once after the entire prefill is finished.
+        """
+        if self._streaming_mgr is not None:
+            self._streaming_mgr.compress_deferred_blocks(session_id)
 
 
 
@@ -506,6 +774,11 @@ class KVRuntimeManager:
         self.pager.evict_session(session_id)
         # Invalidate mbs cache for this session
         self._mbs_cache.pop(session_id, None)
+        # Clean up SRL state and stored token IDs
+        self._session_srl.pop(session_id, None)
+        self._session_token_ids.pop(session_id, None)
+        if hasattr(self, "attention_score_cache"):
+            self.attention_score_cache.clear_session(session_id)
 
     def snapshot_session(self, session_id: str, checkpoint_id: str):
         """
@@ -532,10 +805,33 @@ class KVRuntimeManager:
                 b_snap._lock = threading.Lock()
                 b_snap.token_indices = list(b.token_indices)
                 
-                if getattr(b, "active_k", None) is not None:
+                # Clone active GPU buffers and re-establish views to ensure complete isolation
+                if getattr(b, "_active_buf_k", None) is not None:
+                    b_snap._active_buf_k = b._active_buf_k.clone()
+                    fill = getattr(b, "_active_fill", 0)
+                    if fill > 0:
+                        b_snap.active_k = b_snap._active_buf_k[:, :, :fill, :]
+                    else:
+                        b_snap.active_k = None
+                elif getattr(b, "active_k", None) is not None:
                     b_snap.active_k = b.active_k.clone()
-                if getattr(b, "active_v", None) is not None:
+
+                if getattr(b, "_active_buf_v", None) is not None:
+                    b_snap._active_buf_v = b._active_buf_v.clone()
+                    fill = getattr(b, "_active_fill", 0)
+                    if fill > 0:
+                        b_snap.active_v = b_snap._active_buf_v[:, :, :fill, :]
+                    else:
+                        b_snap.active_v = None
+                elif getattr(b, "active_v", None) is not None:
                     b_snap.active_v = b.active_v.clone()
+
+                # Clone CPU-pinned uncompressed caches
+                if getattr(b, "active_k_cpu", None) is not None:
+                    b_snap.active_k_cpu = b.active_k_cpu.clone()
+                if getattr(b, "active_v_cpu", None) is not None:
+                    b_snap.active_v_cpu = b.active_v_cpu.clone()
+
                 if getattr(b, "anchor_kv", None) is not None:
                     b_snap.anchor_kv = b.anchor_kv.clone()
                 if getattr(b, "anchor_kv_cpu", None) is not None:
@@ -549,9 +845,20 @@ class KVRuntimeManager:
 
         mbs = self.get_session_micro_block_size(session_id)
         
+        # Clone token IDs and deepcopy configs if present
+        token_ids_snap = None
+        if session_id in self._session_token_ids:
+            token_ids_snap = self._session_token_ids[session_id].clone()
+            
+        configs_snap = None
+        if hasattr(self, "session_configs") and session_id in self.session_configs:
+            configs_snap = copy.deepcopy(self.session_configs[session_id])
+        
         self._session_checkpoints[checkpoint_id] = {
             "blocks": snap_blocks,
-            "micro_block_size": mbs
+            "micro_block_size": mbs,
+            "token_ids": token_ids_snap,
+            "configs": configs_snap
         }
         print(f"[DiffKV] Session snapshot captured: {session_id} -> {checkpoint_id}")
 
@@ -674,10 +981,33 @@ class KVRuntimeManager:
                 b_restore._lock = threading.Lock()
                 b_restore.token_indices = list(b.token_indices)
                 
-                if getattr(b, "active_k", None) is not None:
+                # Clone active GPU buffers and re-establish views to ensure complete isolation
+                if getattr(b, "_active_buf_k", None) is not None:
+                    b_restore._active_buf_k = b._active_buf_k.clone()
+                    fill = getattr(b, "_active_fill", 0)
+                    if fill > 0:
+                        b_restore.active_k = b_restore._active_buf_k[:, :, :fill, :]
+                    else:
+                        b_restore.active_k = None
+                elif getattr(b, "active_k", None) is not None:
                     b_restore.active_k = b.active_k.clone()
-                if getattr(b, "active_v", None) is not None:
+
+                if getattr(b, "_active_buf_v", None) is not None:
+                    b_restore._active_buf_v = b._active_buf_v.clone()
+                    fill = getattr(b, "_active_fill", 0)
+                    if fill > 0:
+                        b_restore.active_v = b_restore._active_buf_v[:, :, :fill, :]
+                    else:
+                        b_restore.active_v = None
+                elif getattr(b, "active_v", None) is not None:
                     b_restore.active_v = b.active_v.clone()
+
+                # Clone CPU-pinned uncompressed caches
+                if getattr(b, "active_k_cpu", None) is not None:
+                    b_restore.active_k_cpu = b.active_k_cpu.clone()
+                if getattr(b, "active_v_cpu", None) is not None:
+                    b_restore.active_v_cpu = b.active_v_cpu.clone()
+
                 if getattr(b, "anchor_kv", None) is not None:
                     b_restore.anchor_kv = b.anchor_kv.clone()
                 if getattr(b, "anchor_kv_cpu", None) is not None:
@@ -695,6 +1025,21 @@ class KVRuntimeManager:
             self._streaming_mgr.session_blocks[session_id] = dest_blocks
         else:
             self.session_blocks[session_id] = dest_blocks
+
+        # Restore token IDs and configs
+        import copy
+        if checkpoint.get("token_ids") is not None:
+            self._session_token_ids[session_id] = checkpoint["token_ids"].clone()
+        else:
+            self._session_token_ids.pop(session_id, None)
+
+        if checkpoint.get("configs") is not None:
+            if not hasattr(self, "session_configs"):
+                self.session_configs = {}
+            self.session_configs[session_id] = copy.deepcopy(checkpoint["configs"])
+
+        # Reconstruct / rebuild the SRL Sparse Routing indices
+        self.finalize_srl_index(session_id)
 
         # Invalidate cached categorized structures
         self.pager.evict_session(session_id)
