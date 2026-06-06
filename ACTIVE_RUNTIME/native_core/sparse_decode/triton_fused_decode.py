@@ -689,8 +689,6 @@ def _pytorch_vectorized_sparse_attn_decode(
     session_id:           Optional[str] = None,
     layer_idx:            Optional[int] = None,
     decode_workspace:     Optional[dict] = None,
-    block_indices_cpu:    Optional[torch.Tensor] = None,
-    anchor_indices_cpu:   Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -747,9 +745,6 @@ def _pytorch_vectorized_sparse_attn_decode(
         # Clear existing cached tensors in O(1) immediately to reclaim VRAM/RAM
         if session_dict is not None:
             session_dict.get("gathered_kv", {}).pop(layer_idx, None)
-            session_dict.get("concatenated_K_rot", {}).pop(layer_idx, None)
-            session_dict.get("V_V_perm", {}).pop(layer_idx, None)
-            # If the session_dict is empty, remove it to save memory
             is_empty = True
             for val in session_dict.values():
                 if isinstance(val, dict) and len(val) > 0:
@@ -760,26 +755,16 @@ def _pytorch_vectorized_sparse_attn_decode(
                     break
             if is_empty:
                 decode_workspace.pop(session_id, None)
-        # Compatibility clear for old flat keys
-        decode_workspace.pop((session_id, layer_idx, "gathered_kv"), None)
-        decode_workspace.pop((session_id, layer_idx, "concatenated_K_rot"), None)
-        decode_workspace.pop((session_id, layer_idx, "V_V_perm"), None)
 
     if N > 0:
-        if block_indices_cpu is not None:
-            block_ids_tuple = tuple(block_indices_cpu.tolist())
-        else:
-            block_ids_tuple = tuple(block_indices.tolist())
-        
-        versions_tuple = tuple(pool.version[idx] for idx in block_ids_tuple)
-        validation_key = (block_ids_tuple, versions_tuple)
+        current_version = session_dict.get("routing_version", 0) if session_dict is not None else 0
 
         cached_gathered = None
         gathered_cache = None
         if use_workspace_cache and session_dict is not None and layer_idx is not None:
             gathered_cache = session_dict.setdefault("gathered_kv", {})
             cached_val = gathered_cache.get(layer_idx)
-            if cached_val is not None and cached_val[0] == validation_key:
+            if cached_val is not None and cached_val[0] == current_version:
                 cached_gathered = cached_val[1]
 
         if cached_gathered is not None:
@@ -795,84 +780,30 @@ def _pytorch_vectorized_sparse_attn_decode(
             seq_lens_t = pool.seq_lens[indices]
             
             if use_workspace_cache and gathered_cache is not None:
-                gathered_cache[layer_idx] = (validation_key, (U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t))
+                gathered_cache[layer_idx] = (current_version, (U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t))
         
         block_capacity = U.shape[1]
 
-        # Static Shape Optimization: to avoid dynamic shape recompilations in torch.compile on Apple Silicon (MPS),
-        # we bypass slicing to max_valid_len and keep all intermediate shapes constant at maximum block capacity (U.shape[1]).
         if max_valid_len is None:
             max_valid_len = int(seq_lens_t.max().item())
-        
-        if cos_sliced is None:
-            if anchor_indices is None:
-                anchor_indices = torch.zeros(N, dtype=torch.long, device=q.device)
-            positions = anchor_indices.view(N, 1) + torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity)
-            positions_flat = positions.view(-1)
-            
-            if cos is None or sin is None:
-                cos_sliced = torch.ones((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
-                sin_sliced = torch.zeros((N, 1 + block_capacity, 1, D), dtype=q.dtype, device=q.device)
-            else:
-                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                cos_sliced = cos_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
-                sin_sliced = sin_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
-        
-        # Check cache for reconstructed and rotated keys, and permuted values
-        cached_K_rot = None
-        cached_V_V_perm = None
-        k_rot_cache = None
-        v_v_perm_cache = None
 
-        if use_workspace_cache and session_dict is not None and layer_idx is not None:
-            k_rot_cache = session_dict.setdefault("concatenated_K_rot", {})
-            cached_val_k = k_rot_cache.get(layer_idx)
-            if cached_val_k is not None and cached_val_k[0] == validation_key:
-                cached_K_rot = cached_val_k[1]
-
-            v_v_perm_cache = session_dict.setdefault("V_V_perm", {})
-            cached_val_v = v_v_perm_cache.get(layer_idx)
-            if cached_val_v is not None and cached_val_v[0] == validation_key:
-                cached_V_V_perm = cached_val_v[1]
+        # ── Project-Then-Attend formulation (zero-reconstruction, zero dense VRAM) ──
+        # exact anchor score: [H_q, N]
+        scores_anchor = torch.einsum('hd,nhd->hn', q_sq, anchors_K) * inv_scale
         
-        if cached_K_rot is not None:
-            K_rot_full = cached_K_rot
-        else:
-            # Reconstruct and rotate keys
-            # We use eager PyTorch operations optimized for MPS
-            deltas_k_flat = torch.bmm(U[:, :block_capacity, :].float(), V_K.float().reshape(N, R, H_q * D))
-            deltas_k = deltas_k_flat.reshape(N, block_capacity, H_q, D).to(U.dtype) * scales.unsqueeze(-1)
-            
-            zeros_pad = torch.zeros((N, 1, H_q, D), dtype=U.dtype, device=U.device)
-            deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
-            K_unrot_full = anchors_K.unsqueeze(1) + deltas_k_full
-            
-            half_d = D // 2
-            K_unrot_half1 = K_unrot_full[..., :half_d]
-            K_unrot_half2 = K_unrot_full[..., half_d:]
-            K_unrot_rotated = torch.cat([-K_unrot_half2, K_unrot_half1], dim=-1)
-            K_rot_full = K_unrot_full * cos_sliced + K_unrot_rotated * sin_sliced
-            
-            if use_workspace_cache and k_rot_cache is not None:
-                k_rot_cache[layer_idx] = (validation_key, K_rot_full)
-
-        if cached_V_V_perm is not None:
-            V_V_perm = cached_V_V_perm
-        else:
-            V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
-            if use_workspace_cache and v_v_perm_cache is not None:
-                v_v_perm_cache[layer_idx] = (validation_key, V_V_perm)
-
-        q_expanded = q_sq.view(1, 1, H_q, D)
-        scores_block_full = torch.sum(q_expanded * K_rot_full, dim=-1) * inv_scale
+        # Project query to V_K: [N, H_q, R]
+        q_proj = torch.einsum('hd,nrhd->nhr', q_sq, V_K) * inv_scale
         
-        mask = torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity, 1) >= (1 + seq_lens_t).view(N, 1, 1)
-        scores_block_full = scores_block_full.masked_fill(mask.expand_as(scores_block_full), float('-inf'))
+        # Inner product with U: [H_q, N, block_capacity]
+        scores_block = torch.einsum('nhr,nsr->hns', q_proj, U) * scales.view(1, N, 1)
+        scores_block = scores_block + scores_anchor.unsqueeze(-1)
         
-        scores_anchor = scores_block_full[:, 0, :]
-        scores_anchor = scores_anchor.transpose(0, 1)
-        scores_compressed = scores_block_full[:, 1:, :].permute(2, 0, 1).reshape(H_q, N * block_capacity)
+        # Mask out-of-bounds tokens
+        s_range = torch.arange(block_capacity, device=q.device).view(1, 1, -1)
+        valid_mask = s_range < seq_lens_t.view(1, N, 1)
+        scores_block = scores_block.masked_fill(~valid_mask, float('-inf'))
+        
+        scores_compressed = scores_block.reshape(H_q, N * block_capacity)
     else:
         scores_anchor = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
         scores_compressed = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
@@ -948,7 +879,7 @@ def _pytorch_vectorized_sparse_attn_decode(
         R=R,
         D=D,
         S_dense=S_dense,
-        V_V_perm=V_V_perm if N > 0 else None,
+        V_V_perm=None,
     )
 
     return O_final.unsqueeze(0).unsqueeze(2)
@@ -974,8 +905,6 @@ def native_triton_sparse_attn_decode(
     session_id:           Optional[str] = None,
     layer_idx:            Optional[int] = None,
     decode_workspace:     Optional[dict] = None,
-    block_indices_cpu:    Optional[torch.Tensor] = None,
-    anchor_indices_cpu:   Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -986,7 +915,6 @@ def native_triton_sparse_attn_decode(
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
             cos_sliced=cos_sliced, sin_sliced=sin_sliced,
             session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
-            block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
         )
         
     inv_scale = 1.0 / math.sqrt(D)
@@ -1111,7 +1039,6 @@ def native_triton_sparse_attn_decode(
                 anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
                 cos_sliced=cos_sliced, sin_sliced=sin_sliced,
                 session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
-                block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
             )
     else:
         return _pytorch_vectorized_sparse_attn_decode(
@@ -1119,7 +1046,6 @@ def native_triton_sparse_attn_decode(
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
             cos_sliced=cos_sliced, sin_sliced=sin_sliced,
             session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
-            block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
         )
 
 # ── 4. TritonDiffKV Low-Rank Reconstruction ───────────────────────────────────

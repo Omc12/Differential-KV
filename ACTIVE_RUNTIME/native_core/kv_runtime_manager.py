@@ -1247,20 +1247,16 @@ class KVRuntimeManager:
                 block_indices_tensor = cpu_indices.to(device)
                 anchor_indices_gpu = cpu_anchors.to(device)
                 indices_gpu_cache[layer_idx] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
-            anchor_indices_cpu = cpu_anchors
-            block_indices_cpu = cpu_indices
         else:
             block_indices_tensor = None
             anchor_indices_gpu = None
-            anchor_indices_cpu = None
-            block_indices_cpu = None
 
         # Get ALL non-compressed, non-paged blocks as dense context.
         # Phase 32 backwards optimization: since blocks are compressed chronologically,
         # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
         dense_blocks = [block for block in blocks if block.state not in ("COMPRESSED", "PAGED")]
 
-        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len, anchor_indices_cpu, block_indices_cpu
+        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len
 
     def assemble_dense_window_kv(
         self,
@@ -1757,6 +1753,39 @@ class KVRuntimeManager:
                 anchor_kv_local = block.anchor_kv.cpu()
         else:
             anchor_kv_local = block.anchor_kv
+
+        # ── Geometric Median Anchor Selection ──
+        # Form full block including the old anchor
+        full_k = torch.cat([anchor_kv_local[:, 0].unsqueeze(2), k], dim=2)
+        full_v = torch.cat([anchor_kv_local[:, 1].unsqueeze(2), v], dim=2)
+        S_total = full_k.shape[2]
+        
+        K_f = full_k[0].permute(1, 0, 2).reshape(S_total, -1).float() # [S_total, heads * head_dim]
+        diff = K_f.unsqueeze(0) - K_f.unsqueeze(1)
+        sq_dist = (diff ** 2).sum(-1)
+        median_idx = sq_dist.sum(-1).argmin().item()
+        
+        if median_idx > 0:
+            # Swap token at index 0 (old anchor) and median_idx in full_k and full_v
+            tmp_k = full_k[:, :, 0].clone()
+            tmp_v = full_v[:, :, 0].clone()
+            full_k[:, :, 0] = full_k[:, :, median_idx]
+            full_v[:, :, 0] = full_v[:, :, median_idx]
+            full_k[:, :, median_idx] = tmp_k
+            full_v[:, :, median_idx] = tmp_v
+            
+            # Update local anchor
+            anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
+            if input_device.type == "cpu":
+                block.anchor_kv_cpu = anchor_kv_local
+                block.anchor_kv = anchor_kv_local.to(block.anchor_kv.device)
+            else:
+                block.anchor_kv = anchor_kv_local
+            
+            # Update active tokens for SVD
+            k = full_k[:, :, 1:]
+            v = full_v[:, :, 1:]
+
         anchor_flat = anchor_kv_local.reshape(-1).float().to(input_device)
         seq_len  = k.shape[2]
         heads    = k.shape[1]
@@ -1891,9 +1920,22 @@ class KVRuntimeManager:
 
     def _get_rotated_anchor_k(self, session_id, anchor_k, anchor_idx):
         """
-        Returns the raw unrotated anchor_k.
-        We apply RoPE at query/decode time to avoid double-rotation during prefill reconstruction.
+        Applies RoPE to anchor_k at position anchor_idx using cached cos/sin in decode_workspace.
         """
+        session_dict = self.decode_workspace.get(session_id)
+        if session_dict is not None:
+            cos = session_dict.get("rope_cos")
+            sin = session_dict.get("rope_sin")
+            if cos is not None and sin is not None and anchor_idx < cos.shape[1]:
+                cos_val = cos[0, anchor_idx].to(anchor_k.device, dtype=anchor_k.dtype).view(1, -1)
+                sin_val = sin[0, anchor_idx].to(anchor_k.device, dtype=anchor_k.dtype).view(1, -1)
+                
+                # Apply RoPE
+                half_d = anchor_k.shape[-1] // 2
+                k1 = anchor_k[..., :half_d]
+                k2 = anchor_k[..., half_d:]
+                k_rot = torch.cat([-k2, k1], dim=-1)
+                return anchor_k * cos_val + k_rot * sin_val
         return anchor_k
 
 

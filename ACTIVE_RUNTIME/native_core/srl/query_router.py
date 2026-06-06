@@ -171,25 +171,37 @@ def route_query(
 
 
 
-    # ── Step 4: Chunk graph neighborhood expansion ────────────────────────
+    # ── Step 4: Chunk graph neighborhood expansion (vectorized) ──────────
     k_graph   = max(1, int(K * _GRAPH_FRAC))
-    graph_slots: List[int] = []
+    graph_slots_t: Optional[torch.Tensor] = None
     idx_map   = srl_state.semantic_index
     neighbors = srl_state.chunk_graph.neighbors   # [N, 8] CPU int32
 
-    # Expand neighbors of top-5 semantic results
-    for slot in semantic_slots[:5]:
-        row_idx = idx_map.slot_to_idx(int(slot))
-        if row_idx < 0 or row_idx >= neighbors.shape[0]:
-            continue
-        neighbor_rows = neighbors[row_idx].tolist()   # up to 8 row indices
-        for nrow in neighbor_rows:
-            if 0 <= nrow < idx_map.slot_ids.shape[0]:
-                graph_slots.append(int(idx_map.slot_ids[nrow]))
-        if len(graph_slots) >= k_graph * 3:
-            break
+    top_sem = semantic_slots_t[:5] if semantic_slots_t.numel() > 0 else semantic_slots_t
+    if top_sem.numel() > 0 and neighbors.shape[0] > 0:
+        # [M] int64 row indices for the top-5 semantic slot IDs (-1 = miss)
+        row_ids = idx_map.slot_to_row_vec(top_sem.cpu().to(torch.int32))   # [M]
+        valid_rows = row_ids[row_ids >= 0]                                  # filter misses
 
-    graph_slots = list(dict.fromkeys(graph_slots))[:k_graph]
+        if valid_rows.numel() > 0:
+            # Gather all neighbor row indices in one tensor op: [M_valid, 8]
+            nb_rows = neighbors[valid_rows]                                  # [M_valid, 8] int32
+            # Flatten and remove out-of-bounds entries
+            nb_flat = nb_rows.view(-1).to(torch.int64)                       # [M_valid*8]
+            N_idx   = idx_map.slot_ids.shape[0]
+            nb_valid = nb_flat[(nb_flat >= 0) & (nb_flat < N_idx)]
+            # Translate row indices → pool slot IDs
+            if nb_valid.numel() > 0:
+                slot_ids_cpu = idx_map.slot_ids.cpu()
+                graph_slots_t = slot_ids_cpu[nb_valid]                       # [M*8] int32
+
+    graph_slots: List[int]
+    if graph_slots_t is not None and graph_slots_t.numel() > 0:
+        # Deduplicate preserving order (unique_consecutive would need sort; use unique here)
+        graph_slots_t = torch.unique(graph_slots_t)[:k_graph]
+        graph_slots   = graph_slots_t.tolist()
+    else:
+        graph_slots = []
 
     # ── Step 5: Recency window ────────────────────────────────────────────
     k_recent     = max(1, int(K * _RECENCY_FRAC))

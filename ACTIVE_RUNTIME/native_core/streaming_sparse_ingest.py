@@ -639,8 +639,14 @@ class StreamingSparseIngestManager:
                     # Outlier check (CPU-local list access, zero sync overhead)
                     new_block.is_outlier = False
 
-                    # SVD compression is deferred during prefill to ensure exact attention.
-                    new_block.state = "ACCUMULATING"
+                    # Check if the block is eligible for immediate compression.
+                    # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
+                    # Only submit block if it lies outside the rolling dense recency window (512 tokens).
+                    if anchor_idx > 0 and (anchor_idx + block_capacity) < (total_seq_len - 512):
+                        new_block.state = "SUBMITTED"
+                        full_blocks_to_compress.append(new_block)
+                    else:
+                        new_block.state = "ACCUMULATING"
 
                     new_blocks.append(new_block)
 

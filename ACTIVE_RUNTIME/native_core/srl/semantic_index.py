@@ -17,7 +17,7 @@ Build cost (once per prefill):
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -34,16 +34,45 @@ class SemanticIndex:
     desc_matrix: torch.Tensor   # [N, DESC_DIM] float16 — L2 normalized
     slot_ids:    torch.Tensor   # [N] int32 — pool slot IDs (maps row → pool slot)
 
-    # Reverse map: pool_slot_id → row index in desc_matrix (built lazily)
-    _slot_to_idx: Optional[dict] = None
+    # Vectorized reverse map (built lazily, zero Python-dict GC pressure):
+    # _sorted_slots:      slot IDs sorted ascending        [N] int32
+    # _sorted_to_orig:    permutation mapping sorted→orig  [N] int64
+    _sorted_slots:    Optional[torch.Tensor] = field(default=None, repr=False)
+    _sorted_to_orig:  Optional[torch.Tensor] = field(default=None, repr=False)
+
+    def _build_sorted_index(self) -> None:
+        """Build sorted-slot lookup tensors (CPU, called once per session)."""
+        slot_cpu = self.slot_ids.cpu().to(torch.int32)
+        perm = torch.argsort(slot_cpu)          # ascending sort permutation
+        self._sorted_slots   = slot_cpu[perm]   # sorted slot values
+        self._sorted_to_orig = perm             # maps sorted-idx → original row
 
     def slot_to_idx(self, slot_id: int) -> int:
-        """Return the row index for a given pool slot ID."""
-        if self._slot_to_idx is None:
-            self._slot_to_idx = {
-                int(s): i for i, s in enumerate(self.slot_ids.tolist())
-            }
-        return self._slot_to_idx.get(slot_id, -1)
+        """Return the row index for a given pool slot ID (-1 if not found)."""
+        if self._sorted_slots is None:
+            self._build_sorted_index()
+        pos = torch.bucketize(torch.tensor([slot_id], dtype=torch.int32),
+                              self._sorted_slots, right=False)
+        pos_i = int(pos[0])
+        N = self._sorted_slots.shape[0]
+        if pos_i >= N or int(self._sorted_slots[pos_i]) != slot_id:
+            return -1
+        return int(self._sorted_to_orig[pos_i])
+
+    def slot_to_row_vec(self, slot_ids_t: torch.Tensor) -> torch.Tensor:
+        """
+        Vectorized reverse lookup: [M] int32 slot IDs → [M] int64 row indices.
+        Slots not present in the index are mapped to -1.
+        Runs entirely in C++ via torch.bucketize — zero Python loops.
+        """
+        if self._sorted_slots is None:
+            self._build_sorted_index()
+        q = slot_ids_t.cpu().to(torch.int32)
+        pos = torch.bucketize(q, self._sorted_slots, right=False)   # [M]
+        N = self._sorted_slots.shape[0]
+        valid = (pos < N) & (self._sorted_slots[pos.clamp(max=N - 1)] == q)
+        row_indices = torch.where(valid, self._sorted_to_orig[pos.clamp(max=N - 1)], torch.tensor(-1, dtype=torch.int64))
+        return row_indices  # [M] int64, -1 for misses
 
     def search(self, q_desc: torch.Tensor, k: int) -> torch.Tensor:
         """

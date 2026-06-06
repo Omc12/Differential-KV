@@ -135,8 +135,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     U_stack    = pool.U[pool_indices_t].to(q.dtype) * pool.U_scale[pool_indices_t].view(-1, 1, 1)
                     V_K_stack  = pool.V_K[pool_indices_t]        # [N, R, num_kv_heads, D]
                     V_V_stack  = pool.V_V[pool_indices_t]        # [N, R, num_kv_heads, D]
-                    anc_K      = pool.anchors_K[pool_indices_t]  # [N, num_kv_heads, D]
-                    anc_V      = pool.anchors_V[pool_indices_t]  # [N, num_kv_heads, D]
+                    anc_K      = torch.stack([b.anchor_kv[0, 0] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
+                    anc_V      = torch.stack([b.anchor_kv[0, 1] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     scales_1d  = pool.scales[pool_indices_t]     # [N]
                     seq_lens_t = pool.seq_lens[pool_indices_t]   # [N] int32
 
@@ -290,7 +290,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             )
                             continue
 
-                        block_indices, dense_blocks, anchor_indices, max_anchor_idx, max_valid_len, anchor_indices_cpu, block_indices_cpu = kv_manager.get_cached_decode_blocks(
+                        block_indices, dense_blocks, anchor_indices, max_anchor_idx, max_valid_len = kv_manager.get_cached_decode_blocks(
                             sid, captured_layer_idx, query_states.device
                         )
                         pool = getattr(kv_manager, 'native_pool', None)
@@ -336,13 +336,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     selected_anchors = anchor_indices[block_idx_in_full]
                                     srl_state.current_step_anchors = selected_anchors
                                     
-                                    # Cache CPU versions on srl_state to avoid device sync on layers 1-27
-                                    srl_state.current_step_anchors_cpu = selected_anchors.cpu()
                                 else:
                                     # Layers 1-27: reuse cached slot selection
                                     selected_slots = getattr(srl_state, "current_step_slots", None)
                                     selected_anchors = getattr(srl_state, "current_step_anchors", None)
-                                    selected_anchors_cpu = getattr(srl_state, "current_step_anchors_cpu", None)
 
                                 if selected_slots is not None and selected_slots.numel() > 0:
                                     # 1. GPU mapping (for block_indices and anchor_indices used in kernels)
@@ -351,19 +348,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     block_indices = block_indices[block_idx_in_layer]
                                     anchor_indices = selected_anchors
                                     
-                                    # 2. CPU mapping (to keep CPU indices in sync without device transfers)
-                                    if anchor_indices_cpu is not None and block_indices_cpu is not None:
-                                        if captured_layer_idx == 0:
-                                            sel_anchors_cpu = srl_state.current_step_anchors_cpu
-                                        else:
-                                            sel_anchors_cpu = selected_anchors_cpu
-                                        
-                                        if sel_anchors_cpu is not None:
-                                            mask_cpu = (sel_anchors_cpu.unsqueeze(1) == anchor_indices_cpu.unsqueeze(0))
-                                            block_idx_in_layer_cpu = mask_cpu.to(torch.uint8).argmax(dim=1)
-                                            block_indices_cpu = block_indices_cpu[block_idx_in_layer_cpu]
-                                            anchor_indices_cpu = sel_anchors_cpu
-
                                     # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
                                     _srl_rerouted = True
 
@@ -377,6 +361,21 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 # SRL failure is non-fatal — fall back to full attention
                                 if os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
                                     print(f"[SRL] route_query error: {_srl_e}")
+
+                        # ── Increment routing version at layer 0 ──
+                        if captured_layer_idx == 0:
+                            session_dict = kv_manager.decode_workspace.setdefault(sid, {})
+                            last_slots = session_dict.get("last_slots")
+                            if block_indices is None:
+                                changed = (last_slots is not None)
+                            elif last_slots is None:
+                                changed = True
+                            else:
+                                changed = not torch.equal(block_indices, last_slots)
+                            if changed:
+                                session_dict["last_slots"] = block_indices.clone() if block_indices is not None else None
+                                current_version = session_dict.get("routing_version", 0) + 1
+                                session_dict["routing_version"] = current_version
 
                         # ── Validation mode (DIFFKV_VALIDATE_SRL=1) ───────────────
                         _validate_this_step = (
@@ -416,21 +415,21 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                         cos_sliced_arg = None
                         sin_sliced_arg = None
-                        if anchor_indices_cpu is not None and anchor_indices_cpu.numel() > 0 and pool is not None:
-                            anchors_tuple = tuple(anchor_indices_cpu.tolist())
+                        if anchor_indices is not None and anchor_indices.numel() > 0 and pool is not None:
                             session_dict = kv_manager.decode_workspace.setdefault(sid, {})
+                            current_version = session_dict.get("routing_version", 0)
                             cos_sliced_cache = session_dict.setdefault("decode_cos_sliced", {})
                             sin_sliced_cache = session_dict.setdefault("decode_sin_sliced", {})
                             
                             cos_cached_val = cos_sliced_cache.get(captured_layer_idx)
                             sin_cached_val = sin_sliced_cache.get(captured_layer_idx)
                             
-                            if cos_cached_val is not None and cos_cached_val[0] == anchors_tuple:
+                            if cos_cached_val is not None and cos_cached_val[0] == current_version:
                                 cos_sliced_cached = cos_cached_val[1]
                             else:
                                 cos_sliced_cached = None
                             
-                            if sin_cached_val is not None and sin_cached_val[0] == anchors_tuple:
+                            if sin_cached_val is not None and sin_cached_val[0] == current_version:
                                 sin_sliced_cached = sin_cached_val[1]
                             else:
                                 sin_sliced_cached = None
@@ -447,8 +446,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 cos_sliced_cached = cos_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
                                 sin_sliced_cached = sin_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
                                 
-                                cos_sliced_cache[captured_layer_idx] = (anchors_tuple, cos_sliced_cached)
-                                sin_sliced_cache[captured_layer_idx] = (anchors_tuple, sin_sliced_cached)
+                                cos_sliced_cache[captured_layer_idx] = (current_version, cos_sliced_cached)
+                                sin_sliced_cache[captured_layer_idx] = (current_version, sin_sliced_cached)
 
                             cos_sliced_arg = cos_sliced_cached
                             sin_sliced_arg = sin_sliced_cached
@@ -594,14 +593,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 session_id=sid,
                                 layer_idx=captured_layer_idx,
                                 decode_workspace=kv_manager.decode_workspace,
-                                block_indices_cpu=block_indices_cpu,
-                                anchor_indices_cpu=anchor_indices_cpu,
                             )
 
                         # ── Validation: compare SRL output vs. full-attention output ──
                         if _validate_this_step:
                             try:
-                                _full_bi, _full_dn, _full_ai, _full_mai, _full_mvl, _full_ai_cpu, _full_bi_cpu = kv_manager.get_cached_decode_blocks(
+                                _full_bi, _full_dn, _full_ai, _full_mai, _full_mvl = kv_manager.get_cached_decode_blocks(
                                     sid, captured_layer_idx, query_states.device
                                 )
                                 with torch.no_grad():
@@ -678,8 +675,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             max_valid_len=_full_mvl,
                                             cos_sliced=None,
                                             sin_sliced=None,
-                                            block_indices_cpu=_full_bi_cpu,
-                                            anchor_indices_cpu=_full_ai_cpu,
                                         )
 
                                 rel_err = (
@@ -796,8 +791,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                 _VK = _pool.V_K[pidx]   # [R, num_kv_heads, D]
                                                 _VV = _pool.V_V[pidx]   # [R, num_kv_heads, D]
                                                 _R = _VK.shape[0]
-                                                _ak_nd = _pool.anchors_K[pidx].to(query_states.dtype)  # [num_kv_heads, D]
-                                                _av_nd = _pool.anchors_V[pidx].to(query_states.dtype)
+                                                _ak_nd = b.anchor_kv[0, 0].to(query_states.dtype)  # [num_kv_heads, D]
+                                                _av_nd = b.anchor_kv[0, 1].to(query_states.dtype)
                                                 # JIT kernel formula (triton_sparse_attn.py line 378):
                                                 #   K_unrot_full = cat([anchor, anchor + delta], dim=1)
                                                 # Body tokens = anchor + (U @ V_K), NOT just delta alone.
