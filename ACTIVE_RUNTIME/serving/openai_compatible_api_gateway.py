@@ -88,9 +88,15 @@ class OpenAICompatibleAPIGateway:
                         use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
                         if use_compile == "0":
                             return
-                        # Only warmup if torch.compile was applied (model wrapped)
                         model = wrapper.model
-                        if not hasattr(model, '_orig_mod') and not hasattr(model, '_dynamo_ctx'):
+                        # Check if any MLP layer is compiled
+                        is_compiled = False
+                        layers = getattr(model, "model", model).layers if hasattr(getattr(model, "model", model), "layers") else []
+                        for layer in layers:
+                            if hasattr(layer, "mlp") and (hasattr(layer.mlp, "_orig_mod") or hasattr(layer.mlp, "_dynamo_ctx")):
+                                is_compiled = True
+                                break
+                        if not hasattr(model, '_orig_mod') and not hasattr(model, '_dynamo_ctx') and not is_compiled:
                             return
                         print("[DiffKV] Running torch.compile warmup (chunk_size=512)...")
                         device = wrapper.device
@@ -704,6 +710,10 @@ def main():
                         choices=['lightweight', 'balanced', 'performance', 'long-context', 'fused-sparse'],
                         default='balanced',
                         help='KV cache serving mode. Use long-context for >8K tokens; fused-sparse for max GPU throughput.')
+    parser.add_argument('--preset', type=str,
+                        choices=['low', 'mid', 'high'],
+                        default='mid',
+                        help='Hardware optimization preset (low for 8GB Mac/swapping-heavy, mid for default, high for server/RTX)')
     # ── Weight quantization args ────────────────────────────────────────────────────
     parser.add_argument('--load-in-4bit', action='store_true',
                         help='Load model weights in 4-bit NF4 quantization (bitsandbytes). '
@@ -767,6 +777,7 @@ def main():
             'serving_mode':     args.serving_mode,
             'mode':             'fp16',
             'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
+            'preset':           args.preset,
         },
         device=_best_device,
         quantization_config=quantization_config,
@@ -784,6 +795,7 @@ def main():
                 'serving_mode':     args.serving_mode,
                 'mode':             'fp16',
                 'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
+                'preset':           args.preset,
             },
             device=_best_device,
             quantization_config=quantization_config,

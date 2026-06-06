@@ -365,30 +365,88 @@ def _reconstruct_and_score_compiled(
     scores = torch.sum(q_expanded * K_rot_full, dim=-1) * inv_scale
     return scores
 
+def _attend_and_reconstruct_v_compiled(
+    P_anchor: torch.Tensor,
+    P_comp: torch.Tensor,
+    P_dense: torch.Tensor,
+    U: torch.Tensor,
+    V_V: torch.Tensor,
+    anchors_V: torch.Tensor,
+    scales: torch.Tensor,
+    v_dense_rep: torch.Tensor,
+    H_q: int,
+    N: int,
+    block_capacity: int,
+    R: int,
+    D: int,
+    S_dense: int,
+    V_V_perm: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    O_final = torch.zeros((H_q, D), device=P_anchor.device, dtype=P_anchor.dtype)
+    if N > 0:
+        P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)
+        P_U = torch.bmm(P_comp_reshaped.float(), U.float())
+
+        p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)
+        O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)
+        O_final = O_final + O_anchor_fused.to(P_anchor.dtype)
+
+        P_U_flat = P_U.reshape(N * H_q, 1, R)
+        if V_V_perm is None:
+            V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
+        O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()
+        O_final = O_final + O_delta.sum(0).to(P_anchor.dtype)
+
+    if S_dense > 0:
+        O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1)
+        O_final = O_final + O_dense_total.to(P_anchor.dtype)
+
+    return O_final
+
 _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
                      hasattr(torch.backends, "mps") and
                      torch.backends.mps.is_available())
 _IS_CUDA_AVAILABLE = torch.cuda.is_available()
 
-if _IS_CUDA_AVAILABLE and not _IS_MPS_AVAILABLE:
+use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+if use_compile == "auto":
+    use_compile = "1" if _IS_CUDA_AVAILABLE else "0"
+elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
+    use_compile = "0"
+
+if use_compile == "1":
     try:
+        _backend = "inductor"
+        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_mode} (dynamic=True) ...")
         _reconstruct_and_score = torch.compile(
             _reconstruct_and_score_compiled,
-            backend="inductor",
-            mode="reduce-overhead",
+            backend=_backend,
+            mode=_mode,
             fullgraph=False,
-            dynamic=False,
+            dynamic=True,
         )
-    except Exception:
-        try:
-            _reconstruct_and_score = torch.jit.script(_reconstruct_and_score_compiled)
-        except Exception:
-            _reconstruct_and_score = _reconstruct_and_score_compiled
-else:
-    try:
-        _reconstruct_and_score = torch.jit.script(_reconstruct_and_score_compiled)
-    except Exception:
+    except Exception as e:
+        print(f"[DiffKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
         _reconstruct_and_score = _reconstruct_and_score_compiled
+        
+    try:
+        _backend = "inductor"
+        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        _attend_and_reconstruct_v = torch.compile(
+            _attend_and_reconstruct_v_compiled,
+            backend=_backend,
+            mode=_mode,
+            fullgraph=False,
+            dynamic=True,
+        )
+    except Exception as e:
+        print(f"[DiffKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
+        _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
+else:
+    _reconstruct_and_score = _reconstruct_and_score_compiled
+    _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
 
 
 @torch.jit.script
@@ -628,6 +686,11 @@ def _pytorch_vectorized_sparse_attn_decode(
     max_valid_len:        Optional[int] = None,
     cos_sliced:           Optional[torch.Tensor] = None,
     sin_sliced:           Optional[torch.Tensor] = None,
+    session_id:           Optional[str] = None,
+    layer_idx:            Optional[int] = None,
+    decode_workspace:     Optional[dict] = None,
+    block_indices_cpu:    Optional[torch.Tensor] = None,
+    anchor_indices_cpu:   Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -656,27 +719,92 @@ def _pytorch_vectorized_sparse_attn_decode(
     N = block_indices.shape[0] if block_indices is not None else 0
     block_capacity = 0
     diagnostics = (os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1")
-    
-    if N > 0:
-        indices = block_indices.long()
-        U = pool.U[indices].to(q.dtype) * pool.U_scale[indices].view(-1, 1, 1)
-        block_capacity = U.shape[1]
-        
-        V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)
-        V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
-        anchors_K = repeat_kv_at_dim(pool.anchors_K[indices], num_key_value_groups, dim=1)
-        anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1)
-        scales = pool.scales[indices].view(N, 1, 1)
-        seq_lens_t = pool.seq_lens[indices]
 
+    U = torch.empty((0,), device=q.device, dtype=q.dtype)
+    V_K = torch.empty((0,), device=q.device, dtype=q.dtype)
+    V_V = torch.empty((0,), device=q.device, dtype=q.dtype)
+    anchors_K = torch.empty((0,), device=q.device, dtype=q.dtype)
+    anchors_V = torch.empty((0,), device=q.device, dtype=q.dtype)
+    scales = torch.empty((0,), device=q.device, dtype=q.dtype)
+    seq_lens_t = torch.empty((0,), device=q.device, dtype=torch.int32)
+
+    # ── Check configuration-driven caching limits ───────────────────────
+    config = getattr(pool, "config", None)
+    decode_cache_enabled = config.decode_cache_enabled if config is not None else True
+    decode_cache_max_tokens = config.decode_cache_max_tokens if config is not None else 4096
+
+    use_workspace_cache = decode_cache_enabled
+    if decode_cache_max_tokens > 0 and total_seq_len > decode_cache_max_tokens:
+        use_workspace_cache = False
+
+    session_dict = None
+    if use_workspace_cache and decode_workspace is not None and session_id is not None:
+        session_dict = decode_workspace.setdefault(session_id, {})
+    elif decode_workspace is not None and session_id is not None:
+        session_dict = decode_workspace.get(session_id)
+
+    if not use_workspace_cache and decode_workspace is not None and session_id is not None and layer_idx is not None:
+        # Clear existing cached tensors in O(1) immediately to reclaim VRAM/RAM
+        if session_dict is not None:
+            session_dict.get("gathered_kv", {}).pop(layer_idx, None)
+            session_dict.get("concatenated_K_rot", {}).pop(layer_idx, None)
+            session_dict.get("V_V_perm", {}).pop(layer_idx, None)
+            # If the session_dict is empty, remove it to save memory
+            is_empty = True
+            for val in session_dict.values():
+                if isinstance(val, dict) and len(val) > 0:
+                    is_empty = False
+                    break
+                elif not isinstance(val, dict) and val is not None:
+                    is_empty = False
+                    break
+            if is_empty:
+                decode_workspace.pop(session_id, None)
+        # Compatibility clear for old flat keys
+        decode_workspace.pop((session_id, layer_idx, "gathered_kv"), None)
+        decode_workspace.pop((session_id, layer_idx, "concatenated_K_rot"), None)
+        decode_workspace.pop((session_id, layer_idx, "V_V_perm"), None)
+
+    if N > 0:
+        if block_indices_cpu is not None:
+            block_ids_tuple = tuple(block_indices_cpu.tolist())
+        else:
+            block_ids_tuple = tuple(block_indices.tolist())
+        
+        versions_tuple = tuple(pool.version[idx] for idx in block_ids_tuple)
+        validation_key = (block_ids_tuple, versions_tuple)
+
+        cached_gathered = None
+        gathered_cache = None
+        if use_workspace_cache and session_dict is not None and layer_idx is not None:
+            gathered_cache = session_dict.setdefault("gathered_kv", {})
+            cached_val = gathered_cache.get(layer_idx)
+            if cached_val is not None and cached_val[0] == validation_key:
+                cached_gathered = cached_val[1]
+
+        if cached_gathered is not None:
+            U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t = cached_gathered
+        else:
+            indices = block_indices.long()
+            U = pool.U[indices].to(q.dtype) * pool.U_scale[indices].view(-1, 1, 1)
+            V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)
+            V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
+            anchors_K = repeat_kv_at_dim(pool.anchors_K[indices], num_key_value_groups, dim=1)
+            anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1)
+            scales = pool.scales[indices].view(N, 1, 1)
+            seq_lens_t = pool.seq_lens[indices]
+            
+            if use_workspace_cache and gathered_cache is not None:
+                gathered_cache[layer_idx] = (validation_key, (U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t))
+        
+        block_capacity = U.shape[1]
+
+        # Static Shape Optimization: to avoid dynamic shape recompilations in torch.compile on Apple Silicon (MPS),
+        # we bypass slicing to max_valid_len and keep all intermediate shapes constant at maximum block capacity (U.shape[1]).
         if max_valid_len is None:
             max_valid_len = int(seq_lens_t.max().item())
-        block_capacity = min(block_capacity, max(max_valid_len, 1))
         
-        if cos_sliced is not None:
-            cos_sliced = cos_sliced[:, :1 + block_capacity]
-            sin_sliced = sin_sliced[:, :1 + block_capacity]
-        else:
+        if cos_sliced is None:
             if anchor_indices is None:
                 anchor_indices = torch.zeros(N, dtype=torch.long, device=q.device)
             positions = anchor_indices.view(N, 1) + torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity)
@@ -691,16 +819,53 @@ def _pytorch_vectorized_sparse_attn_decode(
                 cos_sliced = cos_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
                 sin_sliced = sin_flat[positions_flat].view(N, 1 + block_capacity, 1, D)
         
-        scores_block_full = _reconstruct_and_score(
-            U=U[:, :block_capacity, :],
-            V_K=V_K,
-            anchors_K=anchors_K,
-            scales=scales,
-            cos_sliced=cos_sliced,
-            sin_sliced=sin_sliced,
-            q_sq=q_sq,
-            inv_scale=inv_scale,
-        )
+        # Check cache for reconstructed and rotated keys, and permuted values
+        cached_K_rot = None
+        cached_V_V_perm = None
+        k_rot_cache = None
+        v_v_perm_cache = None
+
+        if use_workspace_cache and session_dict is not None and layer_idx is not None:
+            k_rot_cache = session_dict.setdefault("concatenated_K_rot", {})
+            cached_val_k = k_rot_cache.get(layer_idx)
+            if cached_val_k is not None and cached_val_k[0] == validation_key:
+                cached_K_rot = cached_val_k[1]
+
+            v_v_perm_cache = session_dict.setdefault("V_V_perm", {})
+            cached_val_v = v_v_perm_cache.get(layer_idx)
+            if cached_val_v is not None and cached_val_v[0] == validation_key:
+                cached_V_V_perm = cached_val_v[1]
+        
+        if cached_K_rot is not None:
+            K_rot_full = cached_K_rot
+        else:
+            # Reconstruct and rotate keys
+            # We use eager PyTorch operations optimized for MPS
+            deltas_k_flat = torch.bmm(U[:, :block_capacity, :].float(), V_K.float().reshape(N, R, H_q * D))
+            deltas_k = deltas_k_flat.reshape(N, block_capacity, H_q, D).to(U.dtype) * scales.unsqueeze(-1)
+            
+            zeros_pad = torch.zeros((N, 1, H_q, D), dtype=U.dtype, device=U.device)
+            deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
+            K_unrot_full = anchors_K.unsqueeze(1) + deltas_k_full
+            
+            half_d = D // 2
+            K_unrot_half1 = K_unrot_full[..., :half_d]
+            K_unrot_half2 = K_unrot_full[..., half_d:]
+            K_unrot_rotated = torch.cat([-K_unrot_half2, K_unrot_half1], dim=-1)
+            K_rot_full = K_unrot_full * cos_sliced + K_unrot_rotated * sin_sliced
+            
+            if use_workspace_cache and k_rot_cache is not None:
+                k_rot_cache[layer_idx] = (validation_key, K_rot_full)
+
+        if cached_V_V_perm is not None:
+            V_V_perm = cached_V_V_perm
+        else:
+            V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
+            if use_workspace_cache and v_v_perm_cache is not None:
+                v_v_perm_cache[layer_idx] = (validation_key, V_V_perm)
+
+        q_expanded = q_sq.view(1, 1, H_q, D)
+        scores_block_full = torch.sum(q_expanded * K_rot_full, dim=-1) * inv_scale
         
         mask = torch.arange(1 + block_capacity, device=q.device).view(1, 1 + block_capacity, 1) >= (1 + seq_lens_t).view(N, 1, 1)
         scores_block_full = scores_block_full.masked_fill(mask.expand_as(scores_block_full), float('-inf'))
@@ -768,25 +933,23 @@ def _pytorch_vectorized_sparse_attn_decode(
     probs_all = torch.nn.functional.softmax(scores_all, dim=-1)
     P_anchor, P_comp, P_dense = torch.split(probs_all, [N, N * block_capacity, S_dense], dim=-1)
 
-    O_final = torch.zeros((H_q, D), device=q.device, dtype=q.dtype)
-
-    if N > 0:
-        P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)
-        U_clamped = U[:, :block_capacity, :]
-        P_U = torch.bmm(P_comp_reshaped.float(), U_clamped.float())
-
-        p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)
-        O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)
-        O_final = O_final + O_anchor_fused.to(q.dtype)
-
-        P_U_flat = P_U.reshape(N * H_q, 1, R)
-        V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
-        O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()
-        O_final = O_final + O_delta.sum(0).to(q.dtype)
-
-    if S_dense > 0:
-        O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1)
-        O_final = O_final + O_dense_total.to(q.dtype)
+    O_final = _attend_and_reconstruct_v(
+        P_anchor=P_anchor,
+        P_comp=P_comp,
+        P_dense=P_dense,
+        U=U,
+        V_V=V_V,
+        anchors_V=anchors_V,
+        scales=scales,
+        v_dense_rep=v_dense_rep if S_dense > 0 else torch.empty((0,), device=q.device),
+        H_q=H_q,
+        N=N,
+        block_capacity=block_capacity,
+        R=R,
+        D=D,
+        S_dense=S_dense,
+        V_V_perm=V_V_perm if N > 0 else None,
+    )
 
     return O_final.unsqueeze(0).unsqueeze(2)
 
@@ -808,6 +971,11 @@ def native_triton_sparse_attn_decode(
     max_valid_len:        Optional[int] = None,
     cos_sliced:           Optional[torch.Tensor] = None,
     sin_sliced:           Optional[torch.Tensor] = None,
+    session_id:           Optional[str] = None,
+    layer_idx:            Optional[int] = None,
+    decode_workspace:     Optional[dict] = None,
+    block_indices_cpu:    Optional[torch.Tensor] = None,
+    anchor_indices_cpu:   Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -816,7 +984,9 @@ def native_triton_sparse_attn_decode(
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
-            cos_sliced=cos_sliced, sin_sliced=sin_sliced
+            cos_sliced=cos_sliced, sin_sliced=sin_sliced,
+            session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+            block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
         )
         
     inv_scale = 1.0 / math.sqrt(D)
@@ -939,13 +1109,17 @@ def native_triton_sparse_attn_decode(
             return _pytorch_vectorized_sparse_attn_decode(
                 q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
                 anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
-                cos_sliced=cos_sliced, sin_sliced=sin_sliced
+                cos_sliced=cos_sliced, sin_sliced=sin_sliced,
+                session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+                block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
             )
     else:
         return _pytorch_vectorized_sparse_attn_decode(
             q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
-            cos_sliced=cos_sliced, sin_sliced=sin_sliced
+            cos_sliced=cos_sliced, sin_sliced=sin_sliced,
+            session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+            block_indices_cpu=block_indices_cpu, anchor_indices_cpu=anchor_indices_cpu,
         )
 
 # ── 4. TritonDiffKV Low-Rank Reconstruction ───────────────────────────────────

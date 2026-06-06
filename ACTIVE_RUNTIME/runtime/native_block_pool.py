@@ -105,6 +105,7 @@ class NativeBlockPool:
         self._free_indices_set = set(self._free_indices)
         self._ref_counts = [0] * self.current_blocks
         self._last_used = [0.0] * self.current_blocks
+        self.version = [0] * self.current_blocks
 
     def _grow_pool(self, new_blocks: int = None):
         old_blocks = self.current_blocks
@@ -161,6 +162,7 @@ class NativeBlockPool:
         
         self._ref_counts.extend([0] * added)
         self._last_used.extend([0.0] * added)
+        self.version.extend([0] * added)
         added_range = range(new_blocks - 1, old_blocks - 1, -1)
         self._free_indices.extend(added_range)
         self._free_indices_set.update(added_range)
@@ -264,6 +266,7 @@ class NativeBlockPool:
         self.anchors_V[pool_idx] = anchor_V.to(self.dtype)
         self.scales[pool_idx] = scale
         self.seq_lens[pool_idx] = seq_len
+        self.version[pool_idx] += 1
 
         # ── SRL: compute and store semantic descriptor ─────────────────────
         # Runs only when W_proj is initialized (set by KVRuntimeManager).
@@ -288,6 +291,7 @@ class NativeBlockPool:
         self._free_indices_set = set(self._free_indices)
         self._ref_counts = [0] * self.current_blocks
         self._last_used = [0.0] * self.current_blocks
+        self.version = [0] * self.current_blocks
         
         num_kv_heads = self.V_KV.shape[3]
         head_dim = self.V_KV.shape[4]

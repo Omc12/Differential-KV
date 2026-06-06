@@ -64,7 +64,7 @@ class SemanticIndex:
         # Cast query to float16 to match desc_matrix dtype — faster matmul
         q16 = q_desc.half().to(self.desc_matrix.device)
         if q16.device.type == "mps":
-            scores = (self.desc_matrix.to("cpu") @ q16.to("cpu")).to("mps")
+            scores = self.desc_matrix.float() @ q16.float()
         else:
             scores = self.desc_matrix @ q16                  # [N]
 

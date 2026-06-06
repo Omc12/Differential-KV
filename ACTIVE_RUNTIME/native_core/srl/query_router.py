@@ -75,7 +75,7 @@ def two_level_gate(
     anc_flat = anc_K.mean(dim=1)                        # [M, D] average over kv heads
 
     if q_mean.device.type == "mps":
-        anchor_scores = (anc_flat.to("cpu") @ q_mean.to("cpu")).to("mps") * scale
+        anchor_scores = (anc_flat.float() @ q_mean.float()) * scale
     else:
         anchor_scores = (anc_flat @ q_mean) * scale         # [M]
 
@@ -106,7 +106,7 @@ def adaptive_k(
 
     # Compute softmax-entropy over semantic scores
     if q_desc.device.type == "mps":
-        scores = (srl_state.semantic_index.desc_matrix.float().to("cpu") @ q_desc.to("cpu")).to("mps")
+        scores = srl_state.semantic_index.desc_matrix.float() @ q_desc.float()
     else:
         scores = srl_state.semantic_index.desc_matrix.float() @ q_desc   # [N]
     probs  = torch.softmax(scores * 5.0, dim=0)                       # temperature-scaled

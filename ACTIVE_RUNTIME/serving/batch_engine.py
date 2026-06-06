@@ -137,11 +137,13 @@ class ContinuousBatchEngine:
         if torch.backends.mps.is_available():
             try:
                 import os
-                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-                os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
-                import psutil
-                _total_mem = psutil.virtual_memory().total
-                torch.mps.set_per_process_memory_fraction(0.95)
+                cfg = getattr(self.wrapper.manager, "config", None)
+                watermark = cfg.mps_watermark if cfg is not None else 0.0
+                approx = "1" if (cfg is not None and cfg.approximate_attn) else "0"
+                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
+                os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = approx
+                if watermark > 0:
+                    torch.mps.set_per_process_memory_fraction(watermark)
             except Exception as e:
                 print(f"[DiffKV] WARNING: Failed to set MPS memory fraction: {e}")
 
@@ -377,9 +379,9 @@ class ContinuousBatchEngine:
                     
                     if mismatch_idx > 32:
                         print(f"[DiffKV BatchEngine] Partially rolling back session {session_id} to token index {mismatch_idx} instead of fully clearing.")
-                        self.wrapper.manager.rollback_session(session_id, mismatch_idx)
+                        self.wrapper.manager.rollback_session(session_id, mismatch_idx, clear_srl=True)
                         if self.draft_wrapper is not None:
-                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", mismatch_idx)
+                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", mismatch_idx, clear_srl=True)
                         req.cached_len = mismatch_idx
                         self.session_token_ids[session_id] = stored_ids[:mismatch_idx]
                     else:
@@ -425,6 +427,16 @@ class ContinuousBatchEngine:
                     self.wrapper.manager.clone_session(best_sid, session_id)
                     if self.draft_wrapper is not None:
                         self.draft_wrapper.manager.clone_session(best_sid + "_draft", session_id + "_draft")
+                    
+                    # If the cloned session's KV cache is longer than the matched prefix length,
+                    # roll it back to match length (e.g. if the matching session was stopped mid-generation).
+                    cloned_len = self.wrapper.manager.get_session_sequence_length(session_id)
+                    if cloned_len > longest_match_len:
+                        print(f"[DiffKV BatchEngine] Cloned session {session_id} has length {cloned_len} tokens, "
+                              f"but matched prefix is {longest_match_len} tokens. Rolling back cloned cache to match length.")
+                        self.wrapper.manager.rollback_session(session_id, longest_match_len, clear_srl=True)
+                        if self.draft_wrapper is not None:
+                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", longest_match_len, clear_srl=True)
                     
                     # Update local token registry
                     self.session_token_ids[session_id] = self.session_token_ids[best_sid][:longest_match_len]
@@ -612,7 +624,10 @@ class ContinuousBatchEngine:
             # • Subsequent turns (cached_len > 0): only the NEW delta tokens are prefilled
             #   (always << 2048), so chunking is never triggered anyway.
             remaining = len(req.prompt_ids) - req.prefill_offset
-            if self.wrapper.device == "mps" or (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"):
+            cfg = getattr(self.wrapper.manager, "config", None)
+            if cfg is not None:
+                chunk_size = min(remaining, cfg.prefill_chunk_size)
+            elif self.wrapper.device == "mps" or (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"):
                 chunk_size = min(remaining, 512)
             elif cached_len == 0:
                 chunk_size = min(remaining, 4096)
@@ -714,7 +729,8 @@ class ContinuousBatchEngine:
 
             if torch.backends.mps.is_available():
                 torch.mps.synchronize()
-                torch.mps.empty_cache()
+                # Commented out per-chunk cache clear to avoid driver latency overhead
+                # torch.mps.empty_cache()
                 await asyncio.sleep(0)
 
             # Double-buffered async compression after each chunk
@@ -723,6 +739,8 @@ class ContinuousBatchEngine:
 
             if req.prefill_offset >= len(req.prompt_ids):
                 req.is_prefilled = True
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
                 
                 # Trigger compression of all deferred prefill blocks now that prefill is complete
                 if hasattr(self.wrapper.manager, "compress_deferred_prefill_blocks"):

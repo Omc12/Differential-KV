@@ -193,12 +193,11 @@ def get_compile_backend() -> Optional[str]:
     Return the best torch.compile backend for the current platform.
 
     - CUDA: 'inductor'  (TorchInductor, CUDA-native kernels)
-    - MPS : 'aot_eager' (AOT-autograd, no code-gen, MPS-compatible)
+    - MPS : 'inductor'
     - CPU : 'aot_eager'
     """
-    if has_cuda():
+    if has_cuda() or has_mps():
         return "inductor"
-    # MPS / CPU: AOT-autograd tracing without kernel codegen
     return "aot_eager"
 
 

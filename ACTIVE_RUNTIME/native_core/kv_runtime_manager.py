@@ -166,7 +166,10 @@ class KVRuntimeManager:
         kv_heads:            int   = None,
         serving_mode:        str   = "balanced",
         tokenizer                  = None,   # HuggingFace tokenizer (for SRL stop words)
+        config:              dict  = None,
     ):
+        from native_core.config import DiffKVConfig
+        self.config      = DiffKVConfig(config)
         self.num_layers  = num_layers
         self.heads       = heads
         self.kv_heads    = kv_heads if kv_heads is not None else heads
@@ -294,6 +297,7 @@ class KVRuntimeManager:
             dtype=torch.float16,
             initial_blocks=256   # Each slot is now micro_block_size (256) rows
         )
+        self.native_pool.config = self.config
 
         # ── SRL: Initialize random projection matrix W_proj ──────────────
         # Fixed at construction time — never updated.
@@ -314,7 +318,7 @@ class KVRuntimeManager:
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
             print("[DiffKV] Auto-detected Apple Silicon / MPS device. Enabling thread-safe CPU background SVD compression.")
 
-        self._async      = async_compression
+        self._async      = self.config.async_svd
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
         if self._async:
             self._compressor.start()
@@ -376,12 +380,11 @@ class KVRuntimeManager:
             self._streaming_mgr.init_session(session_id, self.num_layers, prefill_len=prefill_len)
         # Invalidate mbs cache so a reused session_id gets a fresh value
         self._mbs_cache.pop(session_id, None)
-        # Invalidate GPU block indices cache
-        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
-        for k in keys_to_del:
-            self._indices_gpu_cache.pop(k, None)
+        # Invalidate GPU block indices cache and decode workspace
+        if hasattr(self, 'decode_workspace'):
+            self.decode_workspace.pop(session_id, None)
 
-    def rollback_session(self, session_id: str, target_len: int) -> None:
+    def rollback_session(self, session_id: str, target_len: int, clear_srl: bool = False) -> None:
         """
         Rollback/truncate a session's KV cache to a target sequence length.
         Used by speculative decoding to discard rejected candidate tokens.
@@ -393,20 +396,18 @@ class KVRuntimeManager:
         if session_id in self._session_token_ids:
             self._session_token_ids[session_id] = self._session_token_ids[session_id][:target_len]
 
-        # Invalidate GPU block indices cache for this session
-        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
-        for k in keys_to_del:
-            self._indices_gpu_cache.pop(k, None)
+        # Invalidate GPU block indices cache and block-level caches for this session
+        if hasattr(self, 'decode_workspace') and session_id in self.decode_workspace:
+            session_dict = self.decode_workspace[session_id]
+            session_dict.pop("gathered_kv", None)
+            session_dict.pop("concatenated_K_rot", None)
+            session_dict.pop("V_V_perm", None)
+            session_dict.pop("indices_gpu", None)
+            session_dict.pop("decode_cos_sliced", None)
+            session_dict.pop("decode_sin_sliced", None)
 
-        if hasattr(self, 'decode_workspace'):
-            keys_to_del = [k for k in self.decode_workspace.keys() if k[0] == session_id]
-            for k in keys_to_del:
-                del self.decode_workspace[k]
-
-        if hasattr(self, '_decode_block_cache'):
-            keys_to_del = [k for k in self._decode_block_cache.keys() if k[0] == session_id]
-            for k in keys_to_del:
-                del self._decode_block_cache[k]
+        if clear_srl:
+            self._session_srl.pop(session_id, None)
 
     def set_session_config(self, session_id: str, config: dict):
         if not hasattr(self, "session_configs"):
@@ -536,8 +537,7 @@ class KVRuntimeManager:
             session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
             default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
             default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
-            default_threshold_val = "50"
-            default_threshold = int(_os.environ.get("DIFFKV_SRL_THRESHOLD", default_threshold_val))
+            default_threshold = self.config.srl_threshold
 
             k_min = session_config.get("srl_k_min", default_k_min)
             k_max = session_config.get("srl_k_max", default_k_max)
@@ -728,10 +728,9 @@ class KVRuntimeManager:
                                 self._pending_cpu_blocks = max(0, self._pending_cpu_blocks - 1)
 
     def clear_session(self, session_id: str):
-        # Invalidate GPU block indices cache
-        keys_to_del = [k for k in self._indices_gpu_cache.keys() if k[0] == session_id]
-        for k in keys_to_del:
-            self._indices_gpu_cache.pop(k, None)
+        # Invalidate GPU block indices cache and workspaces
+        if hasattr(self, 'decode_workspace'):
+            self.decode_workspace.pop(session_id, None)
 
         # Free blocks from NativeBlockPool before deleting references
         if hasattr(self, 'native_pool') and self.native_pool is not None:
@@ -748,17 +747,8 @@ class KVRuntimeManager:
                             self.native_pool.free_block(block.pool_idx)
                             block.pool_idx = None
 
-        # Delete workspaces for this session
-        if hasattr(self, 'decode_workspace'):
-            keys_to_del = [k for k in self.decode_workspace.keys() if k[0] == session_id]
-            for k in keys_to_del:
-                del self.decode_workspace[k]
-
-        # Delete pre-categorized blocks cache for this session
-        if hasattr(self, '_decode_block_cache'):
-            keys_to_del = [k for k in self._decode_block_cache.keys() if k[0] == session_id]
-            for k in keys_to_del:
-                del self._decode_block_cache[k]
+        # Workspaces and caches are already cleared by pop(session_id) above
+        pass
 
         if session_id in self.session_blocks:
             del self.session_blocks[session_id]
@@ -1241,31 +1231,36 @@ class KVRuntimeManager:
             cpu_seq_lens = active_meta[compressed_mask, 2]
             max_anchor_idx = int(cpu_anchors.max().item())
             max_valid_len = int(cpu_seq_lens.max().item())
-            cache_key = (session_id, layer_idx)
-            cached_val = self._indices_gpu_cache.get(cache_key)
+            session_dict = self.decode_workspace.setdefault(session_id, {})
+            indices_gpu_cache = session_dict.setdefault("indices_gpu", {})
+            cached_val = indices_gpu_cache.get(layer_idx)
             if cached_val is not None:
                 cached_cpu_ind, cached_gpu_ind, cached_cpu_anc, cached_gpu_anc = cached_val
-                if cached_cpu_ind.shape[0] == cpu_indices.shape[0]:
+                if cached_cpu_ind.shape[0] == cpu_indices.shape[0] and torch.equal(cached_cpu_ind, cpu_indices):
                     block_indices_tensor = cached_gpu_ind
                     anchor_indices_gpu = cached_gpu_anc
                 else:
                     block_indices_tensor = cpu_indices.to(device)
                     anchor_indices_gpu = cpu_anchors.to(device)
-                    self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
+                    indices_gpu_cache[layer_idx] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
             else:
                 block_indices_tensor = cpu_indices.to(device)
                 anchor_indices_gpu = cpu_anchors.to(device)
-                self._indices_gpu_cache[cache_key] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
+                indices_gpu_cache[layer_idx] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
+            anchor_indices_cpu = cpu_anchors
+            block_indices_cpu = cpu_indices
         else:
             block_indices_tensor = None
             anchor_indices_gpu = None
+            anchor_indices_cpu = None
+            block_indices_cpu = None
 
         # Get ALL non-compressed, non-paged blocks as dense context.
         # Phase 32 backwards optimization: since blocks are compressed chronologically,
         # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
         dense_blocks = [block for block in blocks if block.state not in ("COMPRESSED", "PAGED")]
 
-        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len
+        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len, anchor_indices_cpu, block_indices_cpu
 
     def assemble_dense_window_kv(
         self,
@@ -1296,10 +1291,11 @@ class KVRuntimeManager:
                 L_dense += blk.active_k_cpu.shape[2]
 
         # 2. Retrieve or allocate workspaces
-        workspace_key_k = (session_id, "dense_workspace_k", layer_idx)
-        workspace_key_v = (session_id, "dense_workspace_v", layer_idx)
-        workspace_k = self.decode_workspace.get(workspace_key_k)
-        workspace_v = self.decode_workspace.get(workspace_key_v)
+        session_dict = self.decode_workspace.setdefault(session_id, {})
+        dense_k_cache = session_dict.setdefault("dense_workspace_k", {})
+        dense_v_cache = session_dict.setdefault("dense_workspace_v", {})
+        workspace_k = dense_k_cache.get(layer_idx)
+        workspace_v = dense_v_cache.get(layer_idx)
 
         if (workspace_k is None 
             or workspace_k.shape[1] != self.kv_heads 
@@ -1310,8 +1306,8 @@ class KVRuntimeManager:
             alloc_len = ((L_dense + 511) // 512) * 512
             workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
             workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-            self.decode_workspace[workspace_key_k] = workspace_k
-            self.decode_workspace[workspace_key_v] = workspace_v
+            dense_k_cache[layer_idx] = workspace_k
+            dense_v_cache[layer_idx] = workspace_v
 
         # 3. Copy tokens directly into the pre-allocated workspace slices
         curr_idx = 0
@@ -1362,8 +1358,9 @@ class KVRuntimeManager:
             return None, None
 
         # ── 1. Check workspace state and snapshot dirty blocks only ──
-        ws_key = (session_id, layer_idx)
-        ws = self.decode_workspace.get(ws_key)
+        session_dict = self.decode_workspace.setdefault(session_id, {})
+        assembled_kv_cache = session_dict.setdefault("assembled_kv", {})
+        ws = assembled_kv_cache.get(layer_idx)
         need_full_snapshot = (ws is None)
 
         snapshots = []
@@ -1404,8 +1401,7 @@ class KVRuntimeManager:
         total_seq_len = last_block.anchor_idx + 1 + last_token_count
 
         # ── 3. Allocate or resize persistent workspace with vectorized copy ──────
-        ws_key = (session_id, layer_idx)
-        ws = self.decode_workspace.get(ws_key)
+        ws = assembled_kv_cache.get(layer_idx)
         if ws is None:
             # Allocate with 5% headroom to reduce future reallocations while minimising
             # persistent VRAM waste. Reallocation is rare (vectorised GPU copy) and cheap.
@@ -1418,7 +1414,7 @@ class KVRuntimeManager:
                 (1, self.kv_heads, alloc_len, self.head_dim),
                 dtype=dtype, device=self.device
             )
-            self.decode_workspace[ws_key] = (k_ws, v_ws)
+            assembled_kv_cache[layer_idx] = (k_ws, v_ws)
             ws = (k_ws, v_ws)
             # If it's a completely new workspace, all blocks must be written
             for b_snap in snapshots:
@@ -1438,7 +1434,7 @@ class KVRuntimeManager:
             )
             k_ws[..., :old_len, :] = old_k
             v_ws[..., :old_len, :] = old_v
-            self.decode_workspace[ws_key] = (k_ws, v_ws)
+            assembled_kv_cache[layer_idx] = (k_ws, v_ws)
             ws = (k_ws, v_ws)
             # Keep dirty blocks as they are; no need to mark past blocks dirty!
 

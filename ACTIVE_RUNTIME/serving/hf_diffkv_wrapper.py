@@ -207,6 +207,7 @@ class DiffKVHFWrapper:
             micro_block_size=self.micro_block_size,
             serving_mode=self.serving_mode,
             tokenizer=self.tokenizer,    # ← SRL: used for stop word precomputation
+            config=self.config,
         )
         self.manager.model_id = self.model_id
         self.active_session = None
@@ -258,16 +259,16 @@ class DiffKVHFWrapper:
         # For bitsandbytes/GPTQ/AWQ quantized models: skip compile — the custom quantized
         #   Linear layers cause graph breaks that prevent useful compilation.
         # On Windows: TorchInductor requires cl.exe (MSVC). Skip if not available.
-        use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+        use_compile = "1" if self.manager.config.torch_compile else "0"
         if _is_apple_silicon():
-            # macOS/MPS: torch.compile/Dynamo JIT tracing of diffkv_forward causes
-            # severe JIT recompilation loops and Metal command buffer crashes. Force disable it.
-            if use_compile == "1":
-                print("[DiffKV] WARNING: Force-disabling torch.compile on Apple Silicon/MPS for stability (ignoring environment override).")
-            use_compile = "0"
+            # macOS/MPS: torch.compile (even FFN-only compilation) via "aot_eager" or "inductor" backend 
+            # introduces severe python tracing overhead which degrades generation throughput.
+            # Thus, we disable it by default on Apple Silicon.
+            if use_compile == "auto":
+                use_compile = "0"
 
         if use_compile == "0":
-            print("[DiffKV] torch.compile disabled on Apple Silicon/MPS for stability.")
+            print("[DiffKV] torch.compile disabled.")
         elif is_quantized and use_compile != "1":
             print("[DiffKV] Quantized model detected — skipping torch.compile to avoid graph-break errors.")
         else:
@@ -385,7 +386,7 @@ class DiffKVHFWrapper:
         #   1. Eliminates the O(N²) attention VRAM spike from one giant forward.
         #   2. Hides most of the SVD latency inside prefill time.
         #   3. Keeps peak VRAM bounded regardless of prompt length.
-        PREFILL_CHUNK = 512
+        PREFILL_CHUNK = getattr(self.manager, "config", None) and self.manager.config.prefill_chunk_size or 512
         new_ids_list = new_prompt_ids
         total_new = len(new_ids_list)
         outputs = None
