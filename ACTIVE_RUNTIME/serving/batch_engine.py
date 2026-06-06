@@ -108,6 +108,17 @@ class ContinuousBatchEngine:
             draft_plugin = DiffKVAsDraftPlugin(self.draft_wrapper)
             self.speculative_decoder = SpeculativeDecodingPlugin(self.wrapper, draft_plugin)
 
+        if torch.backends.mps.is_available():
+            try:
+                import psutil
+                _total_mem = psutil.virtual_memory().total
+                if _total_mem >= 16 * 1024 ** 3:
+                    torch.mps.set_per_process_memory_fraction(0.6)
+                else:
+                    torch.mps.set_per_process_memory_fraction(0.85)
+            except Exception as e:
+                print(f"[DiffKV] WARNING: Failed to set MPS memory fraction: {e}")
+
         self.tokenizer = self.wrapper.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
         self._alphanumeric_tokens = {}
@@ -556,10 +567,11 @@ class ContinuousBatchEngine:
             
             # Ensure session is registered and metadata initialized at the start of prefill
             if req.prefill_offset == cached_len:
+                max_expected = len(req.prompt_ids) + req.max_tokens + 512
                 if hasattr(self.wrapper.manager, "init_session"):
-                    self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids))
+                    self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
                 if self.draft_wrapper is not None:
-                    self.draft_wrapper.manager.init_session(req.session_id + "_draft", prefill_len=len(req.prompt_ids))
+                    self.draft_wrapper.manager.init_session(req.session_id + "_draft", prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
 
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
@@ -574,7 +586,9 @@ class ContinuousBatchEngine:
             # • Subsequent turns (cached_len > 0): only the NEW delta tokens are prefilled
             #   (always << 2048), so chunking is never triggered anyway.
             remaining = len(req.prompt_ids) - req.prefill_offset
-            if cached_len == 0:
+            if self.wrapper.device == "mps" or (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"):
+                chunk_size = min(remaining, 512)
+            elif cached_len == 0:
                 chunk_size = min(remaining, 4096)
             else:
                 chunk_size = 2048
@@ -638,6 +652,9 @@ class ContinuousBatchEngine:
                     )
                 if hasattr(self.draft_wrapper.manager, "compress_prefill_kv"):
                     self.draft_wrapper.manager.compress_prefill_kv(draft_session_id)
+                if torch.backends.mps.is_available():
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
 
             with torch.no_grad():
                 out = self.wrapper.model(
@@ -647,6 +664,11 @@ class ContinuousBatchEngine:
                 )
 
             req.prefill_offset += actual_len
+
+            if torch.backends.mps.is_available():
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+                await asyncio.sleep(0)
 
             # Double-buffered async compression after each chunk
             if hasattr(self.wrapper.manager, "compress_prefill_kv"):

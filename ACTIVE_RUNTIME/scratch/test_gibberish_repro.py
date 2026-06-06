@@ -1,5 +1,14 @@
 import os
 import sys
+import psutil
+try:
+    _total_mem = psutil.virtual_memory().total
+    if _total_mem >= 16 * 1024 ** 3:
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.3"
+    else:
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+except Exception:
+    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 
 # Set environment variables BEFORE any other imports so they are registered at module load time
 os.environ["DIFFKV_TELEMETRY"] = "1"

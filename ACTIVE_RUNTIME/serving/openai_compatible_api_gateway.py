@@ -1,3 +1,14 @@
+import os
+import psutil
+try:
+    _total_mem = psutil.virtual_memory().total
+    if _total_mem >= 16 * 1024 ** 3:
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.3"
+    else:
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+except Exception:
+    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
 import time
 import uuid
 import json
@@ -761,6 +772,7 @@ def main():
             'block_size':       args.micro_block_size,   # keep in sync
             'serving_mode':     args.serving_mode,
             'mode':             'fp16',
+            'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
         },
         device=_best_device,
         quantization_config=quantization_config,
@@ -777,6 +789,7 @@ def main():
                 'block_size':       args.micro_block_size,   # keep in sync
                 'serving_mode':     args.serving_mode,
                 'mode':             'fp16',
+                'quantization':     'int4' if args.load_in_4bit else ('int8' if args.load_in_8bit else None),
             },
             device=_best_device,
             quantization_config=quantization_config,

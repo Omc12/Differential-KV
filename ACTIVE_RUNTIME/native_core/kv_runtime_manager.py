@@ -362,9 +362,21 @@ class KVRuntimeManager:
 
     # ── Session management ────────────────────────────────────────────────────
 
-    def init_session(self, session_id: str, prefill_len: int = 0):
+    def init_session(self, session_id: str, prefill_len: int = 0, max_tokens_hint: int = None):
         if session_id not in self.session_blocks:
             self.session_blocks[session_id] = {i: [] for i in range(self.num_layers)}
+            
+        # Grow NativeBlockPool if needed for this session
+        if max_tokens_hint is not None and getattr(self, "native_pool", None) is not None:
+            pool = self.native_pool
+            growth_factor = 1.5
+            block_size = self.micro_block_size if self.streaming_ingest else self.block_size
+            block_size = max(block_size, 257)
+            needed_blocks = int((max_tokens_hint / block_size) * self.num_layers * growth_factor)
+            if needed_blocks > pool.current_blocks:
+                print(f"[DiffKV] Preemptively growing block pool from {pool.current_blocks} to {needed_blocks} for session {session_id}")
+                pool._grow_pool(new_blocks=needed_blocks)
+
         if self._streaming_mgr is not None and session_id not in self._streaming_mgr.session_blocks:
             self._streaming_mgr.init_session(session_id, self.num_layers, prefill_len=prefill_len)
         # Invalidate mbs cache so a reused session_id gets a fresh value

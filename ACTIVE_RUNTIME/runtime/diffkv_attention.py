@@ -104,10 +104,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     k_rep = repeat_kv(k, num_key_value_groups)
                     v_rep = repeat_kv(v, num_key_value_groups)
                     
-                    out = F.scaled_dot_product_attention(
-                        q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                        attn_mask=None, dropout_p=0.0, is_causal=True
-                    )
+                    with torch.backends.cuda.sdp_kernel(enable_flash=(q.device.type == "cuda"), enable_math=False, enable_mem_efficient=True):
+                        out = F.scaled_dot_product_attention(
+                            q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                            attn_mask=None, dropout_p=0.0, is_causal=True
+                        )
                     
                     # Compute Log-Sum-Exp manually for local causal attention
                     scale = 1.0 / math.sqrt(head_dim)
@@ -917,10 +918,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     
                                     k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
                                     v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
-                                    out_hist_dense = F.scaled_dot_product_attention(
-                                        curr_q.contiguous(), k_dense_rep.contiguous(), v_dense_rep.contiguous(),
-                                        attn_mask=None, dropout_p=0.0, is_causal=False
-                                    )
+                                    with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=False, enable_mem_efficient=True):
+                                        out_hist_dense = F.scaled_dot_product_attention(
+                                            curr_q.contiguous(), k_dense_rep.contiguous(), v_dense_rep.contiguous(),
+                                            attn_mask=None, dropout_p=0.0, is_causal=False
+                                        )
                                     _scale = 1.0 / math.sqrt(head_dim)
                                     scores_dense = torch.matmul(curr_q * _scale, k_dense_rep.transpose(-2, -1))
                                     lse_hist_dense = torch.logsumexp(scores_dense, dim=-1)
@@ -967,10 +969,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 
                             k_rep = repeat_kv(full_k, num_key_value_groups)
                             v_rep = repeat_kv(full_v, num_key_value_groups)
-                            out_b = F.scaled_dot_product_attention(
-                                curr_q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
-                                attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag
-                            )
+                            with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=False, enable_mem_efficient=True):
+                                out_b = F.scaled_dot_product_attention(
+                                    curr_q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                                    attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag
+                                )
                             attn_outputs.append(out_b)
                             
                             # Capture this chunk's KV (without prev concat)

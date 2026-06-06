@@ -106,13 +106,16 @@ class NativeBlockPool:
         self._ref_counts = [0] * self.current_blocks
         self._last_used = [0.0] * self.current_blocks
 
-    def _grow_pool(self, increment: int = None):
+    def _grow_pool(self, new_blocks: int = None):
         old_blocks = self.current_blocks
         if old_blocks >= self.max_blocks:
             raise RuntimeError(f"NativeBlockPool is out of memory and has reached its absolute maximum limit of {self.max_blocks} blocks!")
         
-        # Grow directly to max_blocks to eliminate subsequent copies and VRAM spikes
-        new_blocks = self.max_blocks
+        if new_blocks is None:
+            new_blocks = min(self.max_blocks, old_blocks + self._grow_increment)
+        else:
+            new_blocks = min(self.max_blocks, max(new_blocks, old_blocks + self._grow_increment))
+            
         added = new_blocks - old_blocks
         if added <= 0:
             return
