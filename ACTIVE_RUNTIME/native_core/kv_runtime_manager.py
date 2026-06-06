@@ -19,10 +19,9 @@ import time
 import sys, os
 import threading
 
-from native_core.sparse_decode.triton_diffkv import TritonDiffKV
+from native_core.sparse_decode.triton_fused_decode import TritonDiffKV
 from native_core.compression.lowrank import compress_lowrank, LowRankDelta
 from native_core.paging.paged_kv_store import PagedKVStore
-from native_core.recon_cache import ReconstructionCache
 from native_core.compression.async_compressor import AsyncCompressor
 
 try:
@@ -308,10 +307,6 @@ class KVRuntimeManager:
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
-        self.recon_cache = None
-
-        # Instantiate ReconstructionPool for high-throughput decode path.
-        self.recon_pool = None
         self.decode_workspace = {}
 
         # On Apple Silicon/MPS, we use thread-safe CPU-only background SVD compression
@@ -541,7 +536,7 @@ class KVRuntimeManager:
             session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
             default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
             default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
-            default_threshold_val = "99999"
+            default_threshold_val = "50"
             default_threshold = int(_os.environ.get("DIFFKV_SRL_THRESHOLD", default_threshold_val))
 
             k_min = session_config.get("srl_k_min", default_k_min)
@@ -574,6 +569,8 @@ class KVRuntimeManager:
             )
             srl_state.nothing_found = nothing_found
             srl_state.current_query_tokens = current_query_tokens
+            if hasattr(self, "_last_prefill_q") and session_id in self._last_prefill_q:
+                srl_state.last_prefill_q = self._last_prefill_q[session_id]
             self._session_srl[session_id] = srl_state
 
             n = len(slot_ids)
@@ -750,22 +747,6 @@ class KVRuntimeManager:
                         if getattr(block, 'pool_idx', None) is not None:
                             self.native_pool.free_block(block.pool_idx)
                             block.pool_idx = None
-
-        # Invalidate slots in ReconstructionPool for blocks of this session
-        if hasattr(self, 'recon_pool') and self.recon_pool is not None:
-            pool_idxs_to_invalidate = []
-            if session_id in self.session_blocks:
-                for layer_idx, blocks in self.session_blocks[session_id].items():
-                    for block in blocks:
-                        if getattr(block, 'pool_idx', None) is not None:
-                            pool_idxs_to_invalidate.append(block.pool_idx)
-            if self._streaming_mgr is not None and session_id in self._streaming_mgr.session_blocks:
-                for layer_idx, blocks in self._streaming_mgr.session_blocks[session_id].items():
-                    for block in blocks:
-                        if getattr(block, 'pool_idx', None) is not None:
-                            pool_idxs_to_invalidate.append(block.pool_idx)
-            if pool_idxs_to_invalidate:
-                self.recon_pool.invalidate_pool_indices(pool_idxs_to_invalidate)
 
         # Delete workspaces for this session
         if hasattr(self, 'decode_workspace'):
@@ -1111,10 +1092,6 @@ class KVRuntimeManager:
 
         # 2. Reset subsystems and clear references
         self.session_blocks.clear()
-        if getattr(self, "recon_cache", None) is not None:
-            self.recon_cache.clear()
-        if hasattr(self, 'recon_pool') and self.recon_pool is not None:
-            self.recon_pool.clear()
         if hasattr(self, 'decode_workspace'):
             self.decode_workspace.clear()
         if hasattr(self, '_decode_block_cache'):
@@ -1504,22 +1481,7 @@ class KVRuntimeManager:
             anchor_v_list.append(b_snap.anchor_kv[0, 1])
 
             if b_snap.U is not None and b_snap.V is not None:
-                pool_idx = b_snap.pool_idx
-                if pool_idx is not None and getattr(self, "recon_pool", None) is not None:
-                    # ZERO-SYNC: check CPU shadow array to avoid PCIe sync
-                    if pool_idx < self.recon_pool.pool_to_slot_cpu.shape[0]:
-                        slot = int(self.recon_pool.pool_to_slot_cpu[pool_idx])
-                    else:
-                        slot = -1
-                    if slot >= 0:
-                        compressed_hits.append((b_snap, slot, b_content_pos))
-                        hit_slots.append(slot)
-                    else:
-                        compressed_misses.append((b_snap, b_content_pos))
-                        miss_pool_idxs.append(pool_idx)
-                else:
-                    compressed_misses.append((b_snap, b_content_pos))
-                    miss_pool_idxs.append(-1)
+                compressed_misses.append((b_snap, b_content_pos))
             elif b_snap.active_k is not None:
                 dense_copies.append((b_snap, b_content_pos, block_len))
             elif b_snap.active_k_cpu is not None:
@@ -1533,31 +1495,9 @@ class KVRuntimeManager:
             k_ws[0, :, pos_t, :] = ak_t.transpose(0, 1)   # [kv_heads, N, head_dim]
             v_ws[0, :, pos_t, :] = av_t.transpose(0, 1)
 
-        # ── 6. Compressed hits — direct slice from ReconstructionPool (Vectorized!) ──
-        if compressed_hits:
-            slots_list = []
-            toks_list = []
-            targets_list = []
-            for b_snap, slot, start_pos in compressed_hits:
-                block_len = b_snap.U.shape[0]
-                slots_list.extend([slot] * block_len)
-                toks_list.extend(range(block_len))
-                targets_list.extend(range(start_pos, start_pos + block_len))
-            
-            slots_t = torch.tensor(slots_list, device=self.device, dtype=torch.long)
-            toks_t = torch.tensor(toks_list, device=self.device, dtype=torch.long)
-            targets_t = torch.tensor(targets_list, device=self.device, dtype=torch.long)
-            
-            K_perm = self.recon_pool.K.permute(0, 2, 1, 3) # [max_cached_blocks, micro_block_size, heads, head_dim]
-            V_perm = self.recon_pool.V.permute(0, 2, 1, 3)
-            
-            k_ws[0, :, targets_t, :] = K_perm[slots_t, toks_t].transpose(0, 1)
-            v_ws[0, :, targets_t, :] = V_perm[slots_t, toks_t].transpose(0, 1)
+        # ── 6. Compressed hits (no-op since recon_pool removed) ────────────────
 
-        if hit_slots and getattr(self, "recon_pool", None) is not None:
-            self.recon_pool.update_lru(hit_slots)
-
-        # ── 7. Compressed misses — batched GEMM then write into pool + ws ─────
+        # ── 7. Compressed misses — batched GEMM then write into ws ─────────────
         if compressed_misses:
             # Group misses by sequence length to handle variable-size adaptive blocks perfectly
             groups = {}
@@ -1602,35 +1542,9 @@ class KVRuntimeManager:
                 recon_k = recon[:, :, 0].permute(0, 2, 1, 3)
                 recon_v = recon[:, :, 1].permute(0, 2, 1, 3)
 
-                grp_pool_idxs = []
-                for b_snap in grp_blocks:
-                    pool_idx = getattr(b_snap.b, 'pool_idx', None)
-                    grp_pool_idxs.append(pool_idx if pool_idx is not None else -1)
-
-                valid_pool_idxs = [p for p in grp_pool_idxs if p >= 0]
-                if valid_pool_idxs and getattr(self, "recon_pool", None) is not None:
-                    alloc_slots = self.recon_pool.allocate_slots(valid_pool_idxs)
-                else:
-                    alloc_slots = []
-
-                slot_iter = iter(alloc_slots)
                 for i, (b_snap, start_pos) in enumerate(zip(grp_blocks, grp_starts)):
                     k_ws[0, :, start_pos:start_pos + seq_len, :] = recon_k[i, :, :seq_len, :]
                     v_ws[0, :, start_pos:start_pos + seq_len, :] = recon_v[i, :, :seq_len, :]
-
-                    pool_idx = grp_pool_idxs[i]
-                    if pool_idx >= 0 and getattr(self, "recon_pool", None) is not None:
-                        slot = next(slot_iter, -1)
-                        if slot >= 0:
-                            self.recon_pool.K[slot, :, :seq_len, :] = recon_k[i, :, :seq_len, :].to(torch.float16)
-                            self.recon_pool.V[slot, :, :seq_len, :] = recon_v[i, :, :seq_len, :].to(torch.float16)
-
-                    if getattr(self, "recon_cache", None) is not None:
-                        self.recon_cache.put(
-                            b_snap.b,
-                            recon_k[i:i+1, :, :seq_len, :].contiguous().clone(),
-                            recon_v[i:i+1, :, :seq_len, :].contiguous().clone(),
-                        )
 
         # ── 8. Dense active blocks — slice copy ───────────────────────────────
         for b_snap, start_pos, block_len in dense_copies:

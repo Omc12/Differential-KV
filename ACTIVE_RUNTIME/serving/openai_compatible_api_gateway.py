@@ -1,13 +1,7 @@
 import os
 import psutil
-try:
-    _total_mem = psutil.virtual_memory().total
-    if _total_mem >= 16 * 1024 ** 3:
-        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.3"
-    else:
-        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-except Exception:
-    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
 
 import time
 import uuid

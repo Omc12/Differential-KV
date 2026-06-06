@@ -117,7 +117,7 @@ def test_native_block_pool():
 
 def test_pytorch_sparse_attn_decode():
     print("[TEST] PyTorch vectorized sparse attention decode fallback ...")
-    from native_core.sparse_decode.triton_sparse_attn import _pytorch_vectorized_sparse_attn_decode
+    from native_core.sparse_decode.triton_fused_decode import _pytorch_vectorized_sparse_attn_decode
     from runtime.native_block_pool import NativeBlockPool
 
     H_q, D = 8, 64

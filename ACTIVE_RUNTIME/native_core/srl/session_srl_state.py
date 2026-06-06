@@ -50,6 +50,7 @@ class SessionSRLState:
     # Set by layer 0, consumed by layers 1–27
     current_step_slots: Optional[torch.Tensor] = None
     current_step_count: int = 0   # decode step counter for validation
+    last_prefill_q: Optional[torch.Tensor] = None
 
     # Per-layer ordered slots (all layers share pool slots → same list for all)
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)

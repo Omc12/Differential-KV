@@ -92,9 +92,35 @@ def _sample_gpu_jit(
     return torch.multinomial(probs, num_samples=1)
 
 
+class CUDAStreamManager:
+    """
+    Manages CUDA streams for concurrent execution of prefill and decode tasks.
+    Uses high-priority stream for decode to minimize latency, and low-priority for prefill.
+    """
+    def __init__(self):
+        self.device_has_cuda = torch.cuda.is_available()
+        if self.device_has_cuda:
+            try:
+                self.decode_stream = torch.cuda.Stream(priority=-1)
+                self.prefill_stream = torch.cuda.Stream(priority=0)
+            except Exception:
+                self.decode_stream = torch.cuda.Stream()
+                self.prefill_stream = torch.cuda.Stream()
+        else:
+            self.decode_stream = None
+            self.prefill_stream = None
+
+    def get_decode_stream(self):
+        return self.decode_stream if self.device_has_cuda else None
+
+    def get_prefill_stream(self):
+        return self.prefill_stream if self.device_has_cuda else None
+
+
 class ContinuousBatchEngine:
     def __init__(self, wrapper, max_batch_size=8, draft_wrapper=None):
         self.wrapper = wrapper
+        self.cuda_stream_manager = CUDAStreamManager()
         self.max_batch_size = max_batch_size
         self.draft_wrapper = draft_wrapper
         self.active_requests: List[BatchRequest] = []
@@ -110,12 +136,12 @@ class ContinuousBatchEngine:
 
         if torch.backends.mps.is_available():
             try:
+                import os
+                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+                os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
                 import psutil
                 _total_mem = psutil.virtual_memory().total
-                if _total_mem >= 16 * 1024 ** 3:
-                    torch.mps.set_per_process_memory_fraction(0.6)
-                else:
-                    torch.mps.set_per_process_memory_fraction(0.85)
+                torch.mps.set_per_process_memory_fraction(0.95)
             except Exception as e:
                 print(f"[DiffKV] WARNING: Failed to set MPS memory fraction: {e}")
 
@@ -296,7 +322,7 @@ class ContinuousBatchEngine:
                 
         # Purge class-level TritonDiffKV reconstruction buffers
         try:
-            from native_core.sparse_decode.triton_diffkv import TritonDiffKV
+            from native_core.sparse_decode.triton_fused_decode import TritonDiffKV
             if hasattr(TritonDiffKV, '_recon_buffers'):
                 TritonDiffKV._recon_buffers.clear()
         except Exception as e:
@@ -637,31 +663,52 @@ class ContinuousBatchEngine:
                         req.session_id + "_draft", chunk_tensor_cpu
                     )
 
-            if self.draft_wrapper is not None:
-                # Run the prefill chunk on the draft model as well
-                draft_session_id = req.session_id + "_draft"
-                draft_input_ids = input_ids.to(self.draft_wrapper.device)
-                draft_position_ids = position_ids.to(self.draft_wrapper.device)
-                self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
-                
+            prefill_stream = self.cuda_stream_manager.get_prefill_stream()
+            if prefill_stream is not None:
+                with torch.cuda.stream(prefill_stream):
+                    if self.draft_wrapper is not None:
+                        draft_session_id = req.session_id + "_draft"
+                        draft_input_ids = input_ids.to(self.draft_wrapper.device)
+                        draft_position_ids = position_ids.to(self.draft_wrapper.device)
+                        self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
+                        with torch.no_grad():
+                            self.draft_wrapper.model(
+                                input_ids=draft_input_ids,
+                                position_ids=draft_position_ids,
+                                use_cache=True
+                            )
+                        if hasattr(self.draft_wrapper.manager, "compress_prefill_kv"):
+                            self.draft_wrapper.manager.compress_prefill_kv(draft_session_id)
+                    with torch.no_grad():
+                        out = self.wrapper.model(
+                            input_ids=input_ids,
+                            position_ids=position_ids,
+                            use_cache=True
+                        )
+            else:
+                if self.draft_wrapper is not None:
+                    draft_session_id = req.session_id + "_draft"
+                    draft_input_ids = input_ids.to(self.draft_wrapper.device)
+                    draft_position_ids = position_ids.to(self.draft_wrapper.device)
+                    self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
+                    with torch.no_grad():
+                        self.draft_wrapper.model(
+                            input_ids=draft_input_ids,
+                            position_ids=draft_position_ids,
+                            use_cache=True
+                        )
+                    if hasattr(self.draft_wrapper.manager, "compress_prefill_kv"):
+                        self.draft_wrapper.manager.compress_prefill_kv(draft_session_id)
+                    if torch.backends.mps.is_available():
+                        torch.mps.synchronize()
+                        torch.mps.empty_cache()
+
                 with torch.no_grad():
-                    self.draft_wrapper.model(
-                        input_ids=draft_input_ids,
-                        position_ids=draft_position_ids,
+                    out = self.wrapper.model(
+                        input_ids=input_ids,
+                        position_ids=position_ids,
                         use_cache=True
                     )
-                if hasattr(self.draft_wrapper.manager, "compress_prefill_kv"):
-                    self.draft_wrapper.manager.compress_prefill_kv(draft_session_id)
-                if torch.backends.mps.is_available():
-                    torch.mps.synchronize()
-                    torch.mps.empty_cache()
-
-            with torch.no_grad():
-                out = self.wrapper.model(
-                    input_ids=input_ids,
-                    position_ids=position_ids,
-                    use_cache=True
-                )
 
             req.prefill_offset += actual_len
 
@@ -759,8 +806,32 @@ class ContinuousBatchEngine:
                         _t_finalize_end = time.perf_counter()
                         print(f"[DiffKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
                               f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms")
+
+                        # ── Pre-warm SRL routing for the first decode step ──
+                        srl_state = _mgr.get_srl_state(_sid)
+                        if srl_state is not None and getattr(srl_state, "last_prefill_q", None) is not None:
+                            pool = getattr(_mgr, "native_pool", None)
+                            if pool is not None:
+                                from native_core.srl.query_router import route_query_fixed_k
+                                import math
+                                q_for_routing = srl_state.last_prefill_q
+                                head_dim = q_for_routing.shape[-1]
+                                _scale = 1.0 / math.sqrt(head_dim)
+                                selected_slots = route_query_fixed_k(
+                                    Q         = q_for_routing,
+                                    srl_state = srl_state,
+                                    pool      = pool,
+                                    scale     = _scale,
+                                    layer_idx = 0,
+                                )
+                                srl_state.current_step_slots = selected_slots
+                                srl_state.current_step_count = 0
+                                if os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                    print(f"[SRL Pre-warm] Pre-warmed routing for session {_sid}: "
+                                          f"selected {selected_slots.numel()}/{srl_state.n_active_blocks()} blocks")
+
                     except Exception as _e:
-                        print(f"[DiffKV BatchEngine] WARNING: SRL index build failed: {_e}")
+                        print(f"[DiffKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}")
                         pass  # SRL index failure is non-fatal; decode continues without routing
 
                 asyncio.ensure_future(_build_srl_index_async())
@@ -844,28 +915,46 @@ class ContinuousBatchEngine:
                 # ── CUDA path: try CUDA graph runner first ──────────────────
                 _ran_graph = False
                 if is_cuda:
-                    runner = getattr(self.wrapper, "_cuda_graph_runner", None)
-                    if runner is not None and runner.is_captured():
-                        try:
-                            out = runner.run(input_ids, position_ids)
-                            _ran_graph = True
-                        except Exception as _ge:
-                            # Shape mismatch or runtime error — fall back to eager
-                            runner.invalidate()
-                    if not _ran_graph:
-                        # First decode step after a new prefill, or after shape change:
-                        # run eagerly (also warms up CUDA graph for next step)
-                        out = self.wrapper.model(
-                            input_ids=input_ids,
-                            position_ids=position_ids,
-                            use_cache=True,
-                        )
-                        # Try to capture for future steps
-                        if runner is not None and not runner.is_captured():
+                    decode_stream = self.cuda_stream_manager.get_decode_stream()
+                    if decode_stream is not None:
+                        with torch.cuda.stream(decode_stream):
+                            runner = getattr(self.wrapper, "_cuda_graph_runner", None)
+                            if runner is not None and runner.is_captured():
+                                try:
+                                    out = runner.run(input_ids, position_ids)
+                                    _ran_graph = True
+                                except Exception as _ge:
+                                    runner.invalidate()
+                            if not _ran_graph:
+                                out = self.wrapper.model(
+                                    input_ids=input_ids,
+                                    position_ids=position_ids,
+                                    use_cache=True,
+                                )
+                                if runner is not None and not runner.is_captured():
+                                    try:
+                                        runner.capture(self.wrapper.model, input_ids, position_ids)
+                                    except Exception:
+                                        pass
+                    else:
+                        runner = getattr(self.wrapper, "_cuda_graph_runner", None)
+                        if runner is not None and runner.is_captured():
                             try:
-                                runner.capture(self.wrapper.model, input_ids, position_ids)
-                            except Exception:
-                                pass   # capture failure is non-fatal — stays in eager mode
+                                out = runner.run(input_ids, position_ids)
+                                _ran_graph = True
+                            except Exception as _ge:
+                                runner.invalidate()
+                        if not _ran_graph:
+                            out = self.wrapper.model(
+                                input_ids=input_ids,
+                                position_ids=position_ids,
+                                use_cache=True,
+                            )
+                            if runner is not None and not runner.is_captured():
+                                try:
+                                    runner.capture(self.wrapper.model, input_ids, position_ids)
+                                except Exception:
+                                    pass
                 else:
                     # ── MPS / CPU path: run normally ────────────────────────
                     # fused_decode_attention_mps() fires automatically inside
@@ -1012,13 +1101,9 @@ class ContinuousBatchEngine:
 
         req.buffer.append(delta_text)
 
-        # Flush at phrase boundaries or every 6 tokens for low latency
-        FLUSH_CHARS = {'.', '!', '?', '\n', '\u3002', '\uff01', '\uff1f', ':', ';'}
-        should_flush = len(req.buffer) >= 6 or any(c in delta_text for c in FLUSH_CHARS)
-
-        if should_flush:
-            req.chunks_queue.put_nowait({
-                "text": "".join(req.buffer),
-                "is_final": False
-            })
-            req.buffer.clear()
+        # Flush immediately for smooth, token-by-token real-time streaming
+        req.chunks_queue.put_nowait({
+            "text": "".join(req.buffer),
+            "is_final": False
+        })
+        req.buffer.clear()

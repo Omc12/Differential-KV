@@ -17,7 +17,7 @@ from typing import Optional, List, Tuple, Any, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from native_core.kv_runtime_manager import KVRuntimeManager
 
-from native_core.sparse_decode.triton_diffkv import TritonDiffKV
+from native_core.sparse_decode.triton_fused_decode import TritonDiffKV
 from runtime.diffkv_attention import apply_diffkv_attention_patch
 
 try:
@@ -42,6 +42,36 @@ except ImportError:
     def _has_cuda(): return torch.cuda.is_available()
     def _has_mps(): return getattr(getattr(torch, 'backends', None), 'mps', None) and torch.backends.mps.is_available()
     def _is_apple_silicon(): return False
+
+def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:
+    if temperature <= 0.01:
+        return torch.argmax(logits, dim=-1)
+    else:
+        scaled = logits / temperature
+        probs = torch.softmax(scaled, dim=-1)
+        if top_p < 1.0:
+            s_probs, s_idx = torch.sort(probs, descending=True, dim=-1)
+            cum = torch.cumsum(s_probs, dim=-1)
+            mask = (cum - s_probs) > top_p
+            s_probs[mask] = 0.0
+            s_probs = s_probs / s_probs.sum(dim=-1, keepdim=True)
+            sample = torch.multinomial(s_probs, 1)
+            return s_idx.gather(-1, sample).squeeze(-1)
+        else:
+            return torch.multinomial(probs, 1).squeeze(-1)
+
+if torch.cuda.is_available():
+    try:
+        _compiled_sample_fn = torch.compile(
+            _sample_logits,
+            backend="inductor",
+            mode="reduce-overhead",
+            fullgraph=False,
+        )
+    except Exception:
+        _compiled_sample_fn = _sample_logits
+else:
+    _compiled_sample_fn = _sample_logits
 
 class DiffKVHFWrapper:
     """
@@ -256,18 +286,23 @@ class DiffKVHFWrapper:
             if _compiler_ok:
                 _backend = _get_compile_backend()
                 _mode    = _get_compile_mode()
-                print(f"[DiffKV] Applying torch.compile(dynamic=True, mode='{_mode}', backend='{_backend}') ...")
+                print(f"[DiffKV] Applying FFN-only layer torch.compile(dynamic=True, mode='{_mode}', backend='{_backend}') ...")
                 try:
-                    self.model = torch.compile(
-                        self.model,
-                        backend=_backend,
-                        mode=_mode,
-                        dynamic=True,       # supports variable chunk/sequence lengths
-                        fullgraph=False,    # allow graph breaks rather than failing
-                    )
-                    print("[DiffKV] torch.compile applied successfully. First request will trigger JIT warmup.")
+                    layers = getattr(self.model, "model", self.model).layers
+                    compiled_count = 0
+                    for layer in layers:
+                        if hasattr(layer, "mlp") and layer.mlp is not None:
+                            layer.mlp = torch.compile(
+                                layer.mlp,
+                                backend=_backend,
+                                mode=_mode,
+                                dynamic=True,
+                                fullgraph=False,
+                            )
+                            compiled_count += 1
+                    print(f"[DiffKV] FFN compilation applied successfully to {compiled_count} layers. First request will trigger JIT warmup.")
                 except Exception as e:
-                    print(f"[DiffKV] WARNING: torch.compile failed ({e}). Running in eager mode.")
+                    print(f"[DiffKV] WARNING: FFN torch.compile failed ({e}). Running in eager mode.")
 
         # ── CUDA Graph Runner ────────────────────────────────────────────────
         # Created here so batch_engine.py can always find it via
@@ -425,21 +460,7 @@ class DiffKVHFWrapper:
                             logits[0, tok_id] *= repetition_penalty
 
             # Sample
-            if temperature <= 0.01:
-                next_id = torch.argmax(logits, dim=-1)
-            else:
-                scaled = logits / temperature
-                probs = torch.softmax(scaled, dim=-1)
-                if top_p < 1.0:
-                    s_probs, s_idx = torch.sort(probs, descending=True, dim=-1)
-                    cum = torch.cumsum(s_probs, dim=-1)
-                    mask = (cum - s_probs) > top_p
-                    s_probs[mask] = 0.0
-                    s_probs = s_probs / s_probs.sum(dim=-1, keepdim=True)
-                    sample = torch.multinomial(s_probs, 1)
-                    next_id = s_idx.gather(-1, sample).squeeze(-1)
-                else:
-                    next_id = torch.multinomial(probs, 1).squeeze(-1)
+            next_id = _compiled_sample_fn(logits, temperature, top_p)
 
             generated.append(next_id.item())
             if next_id.item() in self.stop_token_ids:

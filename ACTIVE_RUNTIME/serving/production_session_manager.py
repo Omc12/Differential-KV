@@ -184,3 +184,65 @@ class ProductionSessionManager:
     def clear_history(self, session_id: str):
         """Clears the conversation history for a session (e.g. on explicit reset)."""
         self.message_histories.pop(session_id, None)
+
+
+class SharedPrefixManager:
+    """
+    Manages reference-counted shared prefix blocks to enable zero-overhead prefix sharing
+    across multiple sessions (e.g., system prompts, few-shot templates).
+    """
+    def __init__(self, kv_manager=None):
+        self.kv_manager = kv_manager
+        # Maps prefix tuple of token IDs to dictionary containing:
+        # - "pool_indices": list of allocated block pool indices
+        # - "ref_count": integer reference count of sessions using it
+        # - "anchor_indices": list of anchor indices for those blocks
+        self.shared_prefixes = {}
+        # Maps session_id -> list of prefix tuples it is currently using
+        self.session_prefixes = {}
+
+    def register_session_prefix(self, session_id: str, prefix_tokens: List[int], pool_indices: List[int], anchor_indices: List[int]):
+        """
+        Register a shared prefix for a session. Increments reference counts.
+        """
+        prefix_key = tuple(prefix_tokens)
+        if prefix_key not in self.shared_prefixes:
+            self.shared_prefixes[prefix_key] = {
+                "pool_indices": pool_indices,
+                "anchor_indices": anchor_indices,
+                "ref_count": 0
+            }
+        
+        self.shared_prefixes[prefix_key]["ref_count"] += 1
+        
+        if session_id not in self.session_prefixes:
+            self.session_prefixes[session_id] = []
+        self.session_prefixes[session_id].append(prefix_key)
+
+    def release_session_prefixes(self, session_id: str):
+        """
+        Release all shared prefixes used by a session. Decrements reference counts,
+        and frees pool blocks if reference count drops to 0.
+        """
+        if session_id not in self.session_prefixes:
+            return
+            
+        prefixes = self.session_prefixes.pop(session_id)
+        for prefix_key in prefixes:
+            if prefix_key in self.shared_prefixes:
+                self.shared_prefixes[prefix_key]["ref_count"] -= 1
+                if self.shared_prefixes[prefix_key]["ref_count"] <= 0:
+                    prefix_data = self.shared_prefixes.pop(prefix_key)
+                    if self.kv_manager is not None and getattr(self.kv_manager, "native_pool", None) is not None:
+                        for pool_idx in prefix_data["pool_indices"]:
+                            try:
+                                self.kv_manager.native_pool.free_block(pool_idx)
+                            except Exception as e:
+                                print(f"[SharedPrefixManager] Warning: failed to free shared block {pool_idx}: {e}")
+
+    def lookup_prefix(self, prefix_tokens: List[int]):
+        """
+        Check if a prefix is already resident in the pool.
+        """
+        prefix_key = tuple(prefix_tokens)
+        return self.shared_prefixes.get(prefix_key)

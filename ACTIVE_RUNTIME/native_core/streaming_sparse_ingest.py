@@ -967,3 +967,64 @@ class StreamingSparseIngestManager:
             total = dense + sparse
             s["sparse_ratio"] = round(sparse / (total + 1e-9), 4)
         return s
+
+
+class DenseWindowRingBuffer:
+    """
+    Utility class to manage a sliding ring buffer of dense tokens.
+    Maintains a fixed VRAM capacity to prevent memory fragmentation and allocations.
+    """
+    def __init__(self, capacity: int, heads: int, head_dim: int, device: str, dtype: torch.dtype):
+        self.capacity = capacity
+        self.heads = heads
+        self.head_dim = head_dim
+        self.device = device
+        self.dtype = dtype
+        
+        # Pre-allocate contiguous memory buffers
+        self.k_buffer = torch.zeros((1, heads, capacity, head_dim), device=device, dtype=dtype)
+        self.v_buffer = torch.zeros((1, heads, capacity, head_dim), device=device, dtype=dtype)
+        self.write_ptr = 0
+        self.valid_len = 0
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        """Append keys and values to the ring buffer, overwriting old entries if full."""
+        if k.dim() == 3:
+            k = k.unsqueeze(0)
+            v = v.unsqueeze(0)
+            
+        seq_len = k.shape[2]
+        if seq_len > self.capacity:
+            k = k[:, :, -self.capacity:]
+            v = v[:, :, -self.capacity:]
+            seq_len = self.capacity
+            
+        end_ptr = (self.write_ptr + seq_len) % self.capacity
+        if self.write_ptr + seq_len <= self.capacity:
+            self.k_buffer[:, :, self.write_ptr:self.write_ptr + seq_len] = k
+            self.v_buffer[:, :, self.write_ptr:self.write_ptr + seq_len] = v
+        else:
+            first_part = self.capacity - self.write_ptr
+            second_part = seq_len - first_part
+            self.k_buffer[:, :, self.write_ptr:] = k[:, :, :first_part]
+            self.k_buffer[:, :, :second_part] = k[:, :, first_part:]
+            self.v_buffer[:, :, self.write_ptr:] = v[:, :, :first_part]
+            self.v_buffer[:, :, :second_part] = v[:, :, first_part:]
+            
+        self.write_ptr = end_ptr
+        self.valid_len = min(self.capacity, self.valid_len + seq_len)
+
+    def get_valid_views(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the active sliding window in chronological order."""
+        if self.valid_len < self.capacity:
+            return self.k_buffer[:, :, :self.valid_len], self.v_buffer[:, :, :self.valid_len]
+        else:
+            k_ordered = torch.cat([self.k_buffer[:, :, self.write_ptr:], self.k_buffer[:, :, :self.write_ptr]], dim=2)
+            v_ordered = torch.cat([self.v_buffer[:, :, self.write_ptr:], self.v_buffer[:, :, :self.write_ptr]], dim=2)
+            return k_ordered, v_ordered
+
+    def reset(self):
+        self.write_ptr = 0
+        self.valid_len = 0
+        self.k_buffer.zero_()
+        self.v_buffer.zero_()

@@ -5,8 +5,8 @@ import math
 import os
 import threading
 from typing import Optional, Tuple
-from native_core.sparse_decode.triton_diffkv import TritonDiffKV
-from native_core.sparse_decode.triton_sparse_attn import (
+from native_core.sparse_decode.triton_fused_decode import (
+    TritonDiffKV,
     native_triton_sparse_attn_decode,
     _prefill_fused_history_attend,
     fused_decode_mps,
@@ -17,7 +17,7 @@ from native_core.sparse_decode.triton_sparse_attn import (
 # DIFFKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
 # DIFFKV_VALIDATE_SRL:  enable accuracy validation mode (0/1, default 0).
 # DIFFKV_VALIDATE_EVERY: validate every N decode steps (default 50).
-_SRL_THRESHOLD    = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "99999"))
+_SRL_THRESHOLD    = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "50"))
 _SRL_VALIDATE     = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
 _SRL_VALIDATE_EVERY = int(os.environ.get("DIFFKV_VALIDATE_EVERY", "50"))
 
@@ -249,6 +249,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                 if use_cache and hasattr(kv_manager, "finalize_compressed_blocks"):
                     kv_manager.finalize_compressed_blocks()
+
+                # Track last prefill token query for SRL router pre-warming
+                if captured_layer_idx == 0 and q_len > 1:
+                    if not hasattr(kv_manager, "_last_prefill_q"):
+                        kv_manager._last_prefill_q = {}
+                    for b_idx, sid in enumerate(session_ids):
+                        if sid != "dummy_session":
+                            kv_manager._last_prefill_q[sid] = unrot_query_states[b_idx, :, -1, :].clone().detach()
 
                 # ==================================================================
                 # PHASE 6 BRANCHING
