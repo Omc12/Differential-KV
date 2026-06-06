@@ -131,7 +131,7 @@ class OpenAICompatibleAPIGateway:
         Open WebUI (and similar clients) send background title/summarization requests
         immediately after each assistant turn. These follow a pattern:
           - Single user message (no prior assistant turns in THIS request)
-          - Message asks for title/summary/label generation in <100 chars
+          - Message asks for title/summary/label generation in <500 chars
           - OR the message contains Open WebUI's standard title generation prompt
         """
         if not messages:
@@ -140,22 +140,76 @@ class OpenAICompatibleAPIGateway:
         if last_msg.get("role") != "user":
             return False
         content = last_msg.get("content", "")
-        # Detect short title/label/summary generation prompts
-        if len(content) < 300:
-            content_lower = content.lower()
-            EPHEMERAL_KEYWORDS = (
-                "generate a title", "create a title", "suggest a title",
-                "write a title", "what is the title", "give a title",
-                "title for this", "title for the",
-                "summarize this conversation", "summarize the conversation",
-                "generate a summary", "create a summary",
-                "label this conversation", "name this conversation",
-                "generate a name", "give this chat a title",
-                "come up with a title", "one line title", "short title",
-            )
-            if any(kw in content_lower for kw in EPHEMERAL_KEYWORDS):
-                return True
+        content_lower = content.lower()
+
+        # Check for title/summarization/naming instructions
+        EPHEMERAL_KEYWORDS = (
+            "title", "summarize", "summary", "label", "name this", "name the", "name of the"
+        )
+        has_keyword = any(kw in content_lower for kw in EPHEMERAL_KEYWORDS)
+        
+        # Check if the prompt contains embedded history (has assistant role markers)
+        has_assistant_marker = (
+            "assistant:" in content_lower or
+            "assistant\n" in content_lower or
+            "<|im_start|>assistant" in content_lower or
+            "assistant role" in content_lower or
+            "bot:" in content_lower or
+            "ai:" in content_lower or
+            "response:" in content_lower
+        )
+        
+        # Heuristic 1: single message containing instructions and assistant responses (embedded history)
+        if len(messages) == 1 and has_keyword and has_assistant_marker:
+            return True
+            
+        # Heuristic 2: short explicit title request (<500 chars)
+        if len(content) < 500 and has_keyword:
+            return True
+
+        # Fallback to standard long keywords matching
+        EPHEMERAL_KEYWORDS_LONG = (
+            "summarizing the chat history",
+            "concise, 3-5 word title",
+            "concise title with an emoji",
+            "emoji summarizing the chat",
+            "generate a concise, 3-5 word title",
+            "generate a concise title with an emoji",
+            'json format: { "title":',
+            'json format: {"title":',
+            "guidelines:\n- the title should clearly represent",
+        )
+        if any(kw in content_lower for kw in EPHEMERAL_KEYWORDS_LONG):
+            return True
+
         return False
+
+    def _optimize_ephemeral_prompt(self, content: str) -> str:
+        """
+        Truncate the chat history in long background title generation requests
+        to make them run instantly and consume negligible memory/computation,
+        without sacrificing title quality.
+        """
+        if len(content) <= 3000:
+            return content
+
+        content_lower = content.lower()
+        for marker in ("chat history:", "conversation history:", "history:", "messages:", "context:"):
+            idx = content_lower.find(marker)
+            if idx != -1:
+                prefix = content[:idx + len(marker)]
+                history = content[idx + len(marker):]
+                if len(history) > 2000:
+                    history = history[:1000] + "\n... [TRUNCATED FOR SPEED] ...\n" + history[-1000:]
+                print(f"[DiffKV Gateway] Optimized long title/summary prompt by truncating embedded chat history "
+                      f"(shrank {len(content)} -> {len(prefix) + len(history)} characters).")
+                return prefix + history
+
+        # Fallback: simple truncation of the middle
+        truncated = content[:1500] + "\n... [TRUNCATED FOR SPEED] ...\n" + content[-1500:]
+        print(f"[DiffKV Gateway] Optimized long title/summary prompt by middle-truncation "
+              f"(shrank {len(content)} -> {len(truncated)} characters).")
+        return truncated
 
     def _setup_routes(self):
 
@@ -176,6 +230,10 @@ class OpenAICompatibleAPIGateway:
                 print(f"[DiffKV Gateway] Detected ephemeral title/summary request. "
                       f"Routing to isolated session {ephemeral_session_id} to protect main KV cache.")
                 session_id = ephemeral_session_id
+                # Optimize/truncate the long user prompt (containing chat history) for the ephemeral request
+                for m in incoming_messages:
+                    if m["role"] == "user":
+                        m["content"] = self._optimize_ephemeral_prompt(m["content"])
             
             # Dynamic matching by prompt message history prefix (essential for standard OpenAI clients like Open WebUI)
             if not is_ephemeral and session_id is None and self.session_manager is not None:
@@ -188,7 +246,10 @@ class OpenAICompatibleAPIGateway:
                         if len(history) == len(prefix_history):
                             match = True
                             for h_msg, p_msg in zip(history, prefix_history):
-                                if h_msg.get("role") != p_msg.get("role") or h_msg.get("content") != p_msg.get("content"):
+                                # Strip trailing/leading whitespace and newlines for robust matching
+                                h_content = h_msg.get("content", "").strip()
+                                p_content = p_msg.get("content", "").strip()
+                                if h_msg.get("role") != p_msg.get("role") or h_content != p_content:
                                     match = False
                                     break
                             if match:
@@ -214,7 +275,10 @@ class OpenAICompatibleAPIGateway:
                                         last_stored_assistant = msg
                                         break
                                 if last_stored_assistant is not None:
-                                    if last_stored_assistant.get("content") == last_incoming_assistant.get("content"):
+                                    # Strip trailing/leading whitespace and newlines for robust matching
+                                    h_last = last_stored_assistant.get("content", "").strip()
+                                    p_last = last_incoming_assistant.get("content", "").strip()
+                                    if h_last == p_last:
                                         session_id = sid
                                         print(f"[DiffKV Gateway] Dynamically matched session {session_id} using fallback last assistant message content match.")
                                         break
@@ -260,7 +324,7 @@ class OpenAICompatibleAPIGateway:
             created_time = int(time.time())
 
             payload = {
-                "messages":           [{"role": m.role, "content": m.content} for m in request.messages],
+                "messages":           incoming_messages,
                 "max_tokens":         request.max_tokens if request.max_tokens is not None else 2048,
                 "temperature":        request.temperature if request.temperature is not None else 0.7,
                 "top_p":              request.top_p if request.top_p is not None else 0.9,

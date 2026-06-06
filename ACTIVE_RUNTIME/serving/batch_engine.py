@@ -103,8 +103,10 @@ class ContinuousBatchEngine:
         self._loop_task = None
 
         if self.draft_wrapper is not None:
-            from native_core.srl.speculative import SpeculativeDecoder
-            self.speculative_decoder = SpeculativeDecoder(self.wrapper, self.draft_wrapper)
+            from plugins.speculative import SpeculativeDecodingPlugin
+            from plugins.diffkv_as_draft import DiffKVAsDraftPlugin
+            draft_plugin = DiffKVAsDraftPlugin(self.draft_wrapper)
+            self.speculative_decoder = SpeculativeDecodingPlugin(self.wrapper, draft_plugin)
 
         self.tokenizer = self.wrapper.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id

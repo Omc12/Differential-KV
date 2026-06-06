@@ -169,9 +169,9 @@ def test_full_pipeline():
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
 
     config = {
-        "rank": 8,
-        "micro_block_size": 16,
-        "serving_mode": "lightweight",
+        "rank": 32,
+        "micro_block_size": 256,
+        "serving_mode": "balanced",
     }
 
     t0 = time.perf_counter()

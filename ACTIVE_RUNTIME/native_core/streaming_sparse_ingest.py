@@ -112,6 +112,8 @@ class StreamingKVBlock:
         pass
 
     def token_count(self) -> int:
+        if self.token_indices:
+            return max(0, len(self.token_indices) - 1)
         if self.active_k is not None:
             return self.active_k.shape[2]
         if self.active_k_cpu is not None:
@@ -344,6 +346,13 @@ class StreamingSparseIngestManager:
                     if block.active_k_cpu is not None:
                         block.active_k_cpu = block.active_k_cpu[:, :, :keep_active, :] if keep_active > 0 else None
                         block.active_v_cpu = block.active_v_cpu[:, :, :keep_active, :] if keep_active > 0 else None
+
+                    if block.U is not None:
+                        block.U = block.U[:keep_active, :]
+                    if block.U_cpu is not None:
+                        block.U_cpu = block.U_cpu[:keep_active, :]
+                    if block.pool_idx is not None and self.native_pool is not None:
+                        self.native_pool.seq_lens[block.pool_idx] = keep_active
 
                     block.dirty = True
                     new_blocks.append(block)

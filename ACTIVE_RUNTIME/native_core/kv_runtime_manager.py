@@ -391,6 +391,16 @@ class KVRuntimeManager:
         for k in keys_to_del:
             self._indices_gpu_cache.pop(k, None)
 
+        if hasattr(self, 'decode_workspace'):
+            keys_to_del = [k for k in self.decode_workspace.keys() if k[0] == session_id]
+            for k in keys_to_del:
+                del self.decode_workspace[k]
+
+        if hasattr(self, '_decode_block_cache'):
+            keys_to_del = [k for k in self._decode_block_cache.keys() if k[0] == session_id]
+            for k in keys_to_del:
+                del self._decode_block_cache[k]
+
     def set_session_config(self, session_id: str, config: dict):
         if not hasattr(self, "session_configs"):
             self.session_configs = {}
@@ -519,7 +529,7 @@ class KVRuntimeManager:
             session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
             default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
             default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
-            default_threshold_val = "15"
+            default_threshold_val = "99999"
             default_threshold = int(_os.environ.get("DIFFKV_SRL_THRESHOLD", default_threshold_val))
 
             k_min = session_config.get("srl_k_min", default_k_min)
@@ -689,7 +699,7 @@ class KVRuntimeManager:
                                     pool_idx=block.pool_idx,
                                     U=block.U,
                                     V=block.V,
-                                    anchor_K=block.anchor_kv[0, 0],
+                                    anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
                                     anchor_V=block.anchor_kv[0, 1],
                                     scale=block.scale,
                                     seq_len=block.U.shape[0]
@@ -1281,31 +1291,59 @@ class KVRuntimeManager:
         ONLY processes non-compressed (ACCUMULATING / SUBMITTED) blocks.
         Compressed blocks are handled by block_indices in the sparse kernel.
 
-        This completely avoids the GEMM reconstruction path in assemble_decode_kv()
-        that was being called unnecessarily for every decode token × every layer.
-
-        Returns
-        -------
-        k_tensor : [1, kv_heads, dense_window_len, head_dim]  or None
-        v_tensor : [1, kv_heads, dense_window_len, head_dim]  or None
+        Pre-allocates static workspace tensors to eliminate torch.cat dynamic malloc
+        and fragmenting allocator memory growth on Apple Silicon (MPS).
         """
         if not dense_blocks:
             return None, None
 
-        device = self.device
-        k_list = []
-        v_list = []
+        # 1. Compute total length of dense tokens
+        L_dense = 0
         for blk in dense_blocks:
-            k_list.append(blk.anchor_kv[:, 0].unsqueeze(2).to(device=device, dtype=dtype))
-            v_list.append(blk.anchor_kv[:, 1].unsqueeze(2).to(device=device, dtype=dtype))
+            L_dense += 1
             if blk.active_k is not None:
-                k_list.append(blk.active_k.to(dtype=dtype))
-                v_list.append(blk.active_v.to(dtype=dtype))
+                L_dense += blk.active_k.shape[2]
             elif getattr(blk, "active_k_cpu", None) is not None:
-                k_list.append(blk.active_k_cpu.to(device=device, dtype=dtype, non_blocking=True))
-                v_list.append(blk.active_v_cpu.to(device=device, dtype=dtype, non_blocking=True))
+                L_dense += blk.active_k_cpu.shape[2]
 
-        return torch.cat(k_list, dim=2), torch.cat(v_list, dim=2)
+        # 2. Retrieve or allocate workspaces
+        workspace_key_k = (session_id, "dense_workspace_k", layer_idx)
+        workspace_key_v = (session_id, "dense_workspace_v", layer_idx)
+        workspace_k = self.decode_workspace.get(workspace_key_k)
+        workspace_v = self.decode_workspace.get(workspace_key_v)
+
+        if (workspace_k is None 
+            or workspace_k.shape[1] != self.kv_heads 
+            or workspace_k.dtype != dtype 
+            or workspace_k.shape[2] < L_dense):
+            
+            # Align allocation length to multiples of 512 to prevent VRAM fragmentation
+            alloc_len = ((L_dense + 511) // 512) * 512
+            workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+            workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+            self.decode_workspace[workspace_key_k] = workspace_k
+            self.decode_workspace[workspace_key_v] = workspace_v
+
+        # 3. Copy tokens directly into the pre-allocated workspace slices
+        curr_idx = 0
+        for blk in dense_blocks:
+            workspace_k[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
+            workspace_v[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
+            curr_idx += 1
+
+            if blk.active_k is not None:
+                active_len = blk.active_k.shape[2]
+                workspace_k[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_k, non_blocking=True)
+                workspace_v[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_v, non_blocking=True)
+                curr_idx += active_len
+            elif getattr(blk, "active_k_cpu", None) is not None:
+                active_len = blk.active_k_cpu.shape[2]
+                workspace_k[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_k_cpu, non_blocking=True)
+                workspace_v[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                curr_idx += active_len
+
+        # 4. Return zero-allocation slice views of the static workspace
+        return workspace_k[:, :, :L_dense], workspace_v[:, :, :L_dense]
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
@@ -1908,7 +1946,7 @@ class KVRuntimeManager:
                             pool_idx=block.pool_idx,
                             U=block.U,
                             V=block.V,
-                            anchor_K=block.anchor_kv[0, 0],
+                            anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
                             anchor_V=block.anchor_kv[0, 1],
                             scale=block.scale,
                             seq_len=block.U.shape[0]
@@ -1928,6 +1966,14 @@ class KVRuntimeManager:
         fp16_bytes = seq_len * feat_dim * 2
         lr_bytes   = U_scaled.numel() * 2 + lr_delta.V.numel() * 2
         self.vram_saved_bytes += (fp16_bytes - lr_bytes)
+
+    def _get_rotated_anchor_k(self, session_id, anchor_k, anchor_idx):
+        """
+        Returns the raw unrotated anchor_k.
+        We apply RoPE at query/decode time to avoid double-rotation during prefill reconstruction.
+        """
+        return anchor_k
+
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 

@@ -18,7 +18,7 @@ Key hardware efficiency wins:
 import torch
 import math
 import os
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import triton
@@ -528,6 +528,156 @@ def fused_decode_attention_mps(
     out_d    = torch.einsum('hr,hrd->hd', w_proj, VV_e)         # [H_q, D]
 
     return (out_anc + out_d).to(Q.dtype)                         # [H_q, D]
+
+
+# ---------------------------------------------------------------------------
+# Part 6b — fused_decode_mps: Production MPS Decode Path
+#
+# Replaces _pytorch_vectorized_sparse_attn_decode on Apple Silicon.
+#
+# Key differences from _pytorch_vectorized_sparse_attn_decode:
+#   1. NO per-token RoPE on compressed blocks (Project-Then-Attend approximation).
+#      Anchor K and SVD delta scores are computed in the unrotated basis.
+#      For tokens far in the past this is a valid approximation — positional
+#      encoding fades in relevance vs. content, and DiffKV's design explicitly
+#      trades this for speed. Dense window tokens still use full RoPE via the
+#      `dense_k` / `dense_v` tensors which are passed pre-rotated.
+#   2. Per-block VK / VV matching the actual pool layout [pool_size, R, H_kv, D].
+#      (fused_decode_attention_mps used a shared-VK design that doesn't match
+#      the pool layout — this function is the correct production path.)
+#   3. Single vectorized gather + batch einsums — zero Python loops over blocks.
+#   4. Online softmax over compressed + dense scores in one call.
+#
+# Pool tensor layout assumptions (from native_block_pool.py):
+#   pool.U          : [P, S_MAX, R]       int8
+#   pool.U_scale    : [P]                  fp16
+#   pool.V_K        : [P, R, H_kv, D]    fp16   (via V_KV[:, 0])
+#   pool.V_V        : [P, R, H_kv, D]    fp16   (via V_KV[:, 1])
+#   pool.anchors_K  : [P, H_kv, D]       fp16   (via anchors_KV[:, 0])
+#   pool.anchors_V  : [P, H_kv, D]       fp16   (via anchors_KV[:, 1])
+#   pool.seq_lens   : [P]                 int32
+#
+# Arguments:
+#   Q             : [H_q, D]             float16  rotated query (post-RoPE)
+#   pool          : NativeBlockPool
+#   block_indices : [N] int64            pool slot IDs for compressed blocks
+#   blk_sizes     : [N] int32            valid token count per compressed block
+#   num_key_value_groups : int           H_q // H_kv (GQA ratio)
+#   dense_k       : [1, H_kv, T, D]     float16  pre-rotated dense window keys
+#   dense_v       : [1, H_kv, T, D]     float16  dense window values
+#
+# Returns : [H_q, D] float16
+# ---------------------------------------------------------------------------
+
+def fused_decode_mps(
+    Q:                    torch.Tensor,
+    pool:                 object,
+    block_indices:        Optional[torch.Tensor],
+    blk_sizes:            Optional[torch.Tensor],
+    num_key_value_groups: int,
+    anchor_indices:       Optional[torch.Tensor] = None,
+    cos:                  Optional[torch.Tensor] = None,
+    sin:                  Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Production-grade vectorized MPS decode attention for DiffKV (compressed blocks only).
+    Returns a tuple of:
+        - O: [H_q, D] attention output tensor
+        - lse: [H_q] logsumexp of the attention scores
+    """
+    H_q, D   = Q.shape
+    gpk      = num_key_value_groups
+    scale    = D ** -0.5
+    q        = Q.float()                         # promote once, work in fp32
+
+    if block_indices is None or block_indices.numel() == 0:
+        return torch.zeros((H_q, D), dtype=Q.dtype, device=Q.device), torch.full((H_q,), float('-inf'), dtype=Q.dtype, device=Q.device)
+
+    N   = block_indices.shape[0]
+    idx = block_indices.long()
+
+    # Vectorized gather — single indexed-read per pool tensor
+    U_a    = pool.U[idx].float() * pool.U_scale[idx].view(N, 1, 1).float()
+    AncK_a = pool.anchors_K[idx].float()      # [N, H_kv, D]
+    AncV_a = pool.anchors_V[idx].float()      # [N, H_kv, D]
+    VK_a   = pool.V_K[idx].float()            # [N, R, H_kv, D]
+    VV_a   = pool.V_V[idx].float()            # [N, R, H_kv, D]
+
+    # Vectorized query-time RoPE rotation for delta keys (VK_a) and anchor keys (AncK_a) at anchor positions
+    if anchor_indices is not None and cos is not None and sin is not None:
+        cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+        sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+        
+        # Get cos/sin at anchor indices and format to [N, 1, 1, D] and [N, 1, D]
+        cos_anc = cos_flat[anchor_indices].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
+        sin_anc = sin_flat[anchor_indices].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
+        
+        cos_anc_2d = cos_flat[anchor_indices].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
+        sin_anc_2d = sin_flat[anchor_indices].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
+        
+        # Apply RoPE: (x * cos) + (rotate_half(x) * sin)
+        def rotate_half(x):
+            x1 = x[..., :x.shape[-1] // 2]
+            x2 = x[..., x.shape[-1] // 2:]
+            return torch.cat((-x2, x1), dim=-1)
+            
+        VK_a = VK_a * cos_anc + rotate_half(VK_a) * sin_anc
+        AncK_a = AncK_a * cos_anc_2d + rotate_half(AncK_a) * sin_anc_2d
+
+    S_comp = U_a.shape[1]                     # S_MAX (padded)
+    R      = U_a.shape[2]
+
+    # GQA expansion — repeat_interleave is a zero-alloc view on MPS
+    AncK_e = AncK_a.repeat_interleave(gpk, dim=1)              # [N, H_q, D]
+    AncV_e = AncV_a.repeat_interleave(gpk, dim=1)              # [N, H_q, D]
+    VK_e   = VK_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
+    VV_e   = VV_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
+
+    # ── Anchor scores : [H_q, N] ─────────────────────────────────────
+    s_anc = torch.einsum('hd,nhd->hn', q, AncK_e) * scale      # [H_q, N]
+
+    # ── Per-block Q projection : [N, H_q, R] ─────────────────────────
+    q_proj_n = torch.einsum('hd,nhrd->nhr', q, VK_e) * scale   # [N, H_q, R]
+
+    # ── Delta scores : [H_q, N, S_MAX] ───────────────────────────────
+    delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)      # [H_q, N, S]
+    delta_s = delta_s * pool.scales[idx].float().view(1, N, 1)
+    # Add anchor score contribution to the body token scores
+    delta_s = delta_s + s_anc.unsqueeze(-1)
+
+    # Mask positions beyond block's valid token count
+    if blk_sizes is not None:
+        s_range   = torch.arange(S_comp, device=Q.device).view(1, 1, -1)
+        valid_msk = s_range < blk_sizes.view(1, N, 1).long()    # [1, N, S]
+        delta_s   = delta_s.masked_fill(~valid_msk, float('-inf'))
+
+    # Flatten to [H_q, N*(1+S_comp)] for global softmax
+    scores = torch.cat(
+        [s_anc.unsqueeze(-1), delta_s], dim=-1
+    ).reshape(H_q, N * (1 + S_comp))
+
+    # LogSumExp
+    lse = torch.logsumexp(scores, dim=-1)
+
+    # Softmax
+    w = torch.softmax(scores, dim=-1)
+
+    W_comp = w.reshape(H_q, N, 1 + S_comp)
+    w_anc  = W_comp[:, :, 0]          # [H_q, N]
+    w_d    = W_comp[:, :, 1:]         # [H_q, N, S_comp]
+
+    O = torch.zeros((H_q, D), device=Q.device, dtype=torch.float32)
+
+    # Anchor contribution
+    O = O + torch.einsum('hn,nhd->hd', w_anc, AncV_e)           # [H_q, D]
+
+    # Delta contribution
+    w_proj = torch.einsum('hns,nsr->nhr', w_d, U_a)             # [N, H_q, R]
+    w_proj = w_proj * pool.scales[idx].float().view(N, 1, 1)
+    O = O + torch.einsum('nhr,nhrd->hd', w_proj, VV_e)          # [H_q, D]
+
+    return O.to(Q.dtype), lse.to(Q.dtype)
+
 
 
 def _pytorch_vectorized_sparse_attn_decode(
