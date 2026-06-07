@@ -376,6 +376,18 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 session_dict["last_slots"] = block_indices.clone() if block_indices is not None else None
                                 current_version = session_dict.get("routing_version", 0) + 1
                                 session_dict["routing_version"] = current_version
+                                # Eagerly clear stale per-layer RoPE slice caches.
+                                # When routing changes, previously cached decode_cos_sliced /
+                                # decode_sin_sliced tensors for all 28 layers are invalid.
+                                # Holding them wastes up to ~95MB VRAM until each layer
+                                # lazily overwrites its own entry. One .clear() here frees
+                                # the entire cache in O(1) before the next forward pass.
+                                cos_c = session_dict.get("decode_cos_sliced")
+                                sin_c = session_dict.get("decode_sin_sliced")
+                                if cos_c is not None:
+                                    cos_c.clear()
+                                if sin_c is not None:
+                                    sin_c.clear()
 
                         # ── Validation mode (DIFFKV_VALIDATE_SRL=1) ───────────────
                         _validate_this_step = (

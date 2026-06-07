@@ -234,36 +234,41 @@ class NativeBlockPool:
 
         U may be unpadded shape (seq_len, dynamic_rank) — we write only as
         many rank columns as U actually has, leaving trailing zeros intact.
-        """
-        # Clear/zero-out the entire slot before writing to prevent stale data corruption from slot reuse
-        self.U[pool_idx] = 0
-        self.V_KV[pool_idx] = 0
 
+        V is a joint [dynamic_rank, 2 * num_kv_heads * head_dim] tensor.
+        The first half of columns is V_K; the second half is V_V.
+        A ValueError is raised (rather than silently corrupted) if V's rank
+        exceeds the pool's allocated rank dimension.
+        """
         pool_max_seq = self.U.shape[1]
         pool_rank    = self.U.shape[2]
+        num_kv       = self.V_KV.shape[3]
+        h_dim        = self.V_KV.shape[4]
+        
         write_seq    = min(seq_len, pool_max_seq)
         write_rank   = min(U.shape[1], pool_rank)
         
-        # Quantize U to int8 with per-block scale (fully vectorized, no sync)
+        if V.shape[0] > pool_rank:
+            raise ValueError(f"V rank {V.shape[0]} exceeds pool rank capacity {pool_rank}")
+
+        self.U[pool_idx] = 0
+        self.V_KV[pool_idx] = 0
+        
+        # Quantize U to int8
         U_sliced = U[:write_seq, :write_rank].float()
         max_abs = U_sliced.abs().max()
         scale_u = torch.clamp(max_abs / 127.0, min=1e-5).to(self.dtype)
-        
-        U_quant = torch.clamp(torch.round(U_sliced / scale_u), -127, 127).to(torch.int8)
-        self.U[pool_idx, :write_seq, :write_rank] = U_quant
+        self.U[pool_idx, :write_seq, :write_rank] = torch.clamp(torch.round(U_sliced / scale_u), -127, 127).to(torch.int8)
         self.U_scale[pool_idx] = scale_u
         
-        rank = min(V.shape[0], pool_rank)
-        num_kv = self.V_K.shape[2]
-        h_dim = self.V_K.shape[3]
+        # Split V_K and V_V
+        vk = V[:write_rank, :num_kv * h_dim].view(write_rank, num_kv, h_dim)
+        vv = V[:write_rank, num_kv * h_dim:].view(write_rank, num_kv, h_dim)
         
-        vk = V[:rank, :num_kv * h_dim].view(rank, num_kv, h_dim)
-        vv = V[:rank, num_kv * h_dim:].view(rank, num_kv, h_dim)
-        
-        self.V_K[pool_idx, :rank] = vk.to(self.dtype)
-        self.V_V[pool_idx, :rank] = vv.to(self.dtype)
-        self.anchors_K[pool_idx] = anchor_K.to(self.dtype)
-        self.anchors_V[pool_idx] = anchor_V.to(self.dtype)
+        self.V_KV[pool_idx, 0, :write_rank] = vk.to(self.dtype)
+        self.V_KV[pool_idx, 1, :write_rank] = vv.to(self.dtype)
+        self.anchors_KV[pool_idx, 0] = anchor_K.to(self.dtype)
+        self.anchors_KV[pool_idx, 1] = anchor_V.to(self.dtype)
         self.scales[pool_idx] = scale
         self.seq_lens[pool_idx] = seq_len
         self.version[pool_idx] += 1
@@ -275,11 +280,11 @@ class NativeBlockPool:
             try:
                 from native_core.srl.chunk_descriptor import compute_descriptor
                 self.desc[pool_idx] = compute_descriptor(
-                    anchor_K = self.anchors_K[pool_idx],           # [kv_heads, D] fp16
-                    U_int8   = self.U[pool_idx, :write_seq, :write_rank],  # [S, R] int8
-                    U_scale  = self.U_scale[pool_idx],             # scalar fp16
-                    V_K      = self.V_K[pool_idx, :rank],          # [R, kv_heads, D] fp16
-                    W_proj   = self.W_proj,                        # [DESC_DIM, D] fp32
+                    anchor_K = self.anchors_KV[pool_idx, 0],              # [kv_heads, D] fp16
+                    U_int8   = self.U[pool_idx, :write_seq, :write_rank], # [S, R] int8
+                    U_scale  = self.U_scale[pool_idx],                    # scalar fp16
+                    V_K      = self.V_KV[pool_idx, 0, :write_rank],       # [R, kv_heads, D] fp16
+                    W_proj   = self.W_proj,                               # [DESC_DIM, D] fp32
                 )
             except Exception:
                 pass  # Descriptor failure is non-fatal — SRL routing degrades gracefully

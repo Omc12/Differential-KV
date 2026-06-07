@@ -11,7 +11,7 @@ async def test_baseline():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     
     MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-    device = "cpu"
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
     
     secret_info = "The secret code word is: ALBATROSS. Remember this secret word.\n\n"
     filler = (

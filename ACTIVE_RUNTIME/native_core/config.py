@@ -68,7 +68,21 @@ class DiffKVConfig:
             "approximate_attn", "DIFFKV_MPS_APPROXIMATE_ATTN", self.approximate_attn, config_dict
         )
 
-        # Print telemetry when verbose/telemetry enabled
+        # 3. Per-layer rank options
+        # early_layer_rank_boost: when True, layers in the first 15% of the network
+        # use up to 2× base_rank to improve syntactic representation quality.
+        # Default: False for backward compatibility.
+        # Enable via: config_dict={'early_layer_rank_boost': True} or DIFFKV_EARLY_LAYER_RANK_BOOST=1
+        self.early_layer_rank_boost = self._get_bool(
+            "early_layer_rank_boost", "DIFFKV_EARLY_LAYER_RANK_BOOST", False, config_dict
+        )
+        # max_rank_early: cap for early-layer rank. 0 = auto (2× base_rank).
+        # Only used when early_layer_rank_boost=True.
+        # Enable via: config_dict={'max_rank_early': 32} or DIFFKV_MAX_RANK_EARLY=32
+        self.max_rank_early = self._get_int(
+            "max_rank_early", "DIFFKV_MAX_RANK_EARLY", 0, config_dict
+        )
+
         verbose = os.environ.get("DIFFKV_TELEMETRY", "0") == "1"
         if verbose:
             print(f"[DiffKV Config] Loaded preset: {self.preset.upper()}")
@@ -80,6 +94,9 @@ class DiffKVConfig:
             print(f"  mps_watermark             = {self.mps_watermark}")
             print(f"  torch_compile             = {self.torch_compile}")
             print(f"  approximate_attn          = {self.approximate_attn}")
+            print(f"  early_layer_rank_boost    = {self.early_layer_rank_boost}")
+            if self.early_layer_rank_boost:
+                print(f"  max_rank_early            = {self.max_rank_early} (0=auto 2×base)")
 
     def _get_bool(self, key: str, env_name: str, default: bool, config_dict: dict) -> bool:
         if key in config_dict:

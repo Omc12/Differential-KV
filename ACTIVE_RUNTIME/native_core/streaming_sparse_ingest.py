@@ -27,7 +27,7 @@ Key guarantees:
 import torch
 import queue
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, ClassVar
 from dataclasses import dataclass, field
 
 try:
@@ -97,6 +97,16 @@ class StreamingKVBlock:
     _active_buf_v: Optional[torch.Tensor] = None
     _active_fill: int = 0   # number of tokens written into the ring buffer
 
+    # ── O(1) metadata index — set at creation, used by update_metadata_state ──
+    # Stores this block's row index in session_metadata[session_id][layer_idx].
+    # Eliminates the O(N) linear scan in update_metadata_state() for each
+    # block's state-change callback (compression, finalize, rollback).
+    _metadata_idx: int = -1   # -1 = not yet assigned
+
+    # ── Configurable thresholds (class level for slot-friendliness) ──
+    short_context_threshold: ClassVar[int] = 256
+    protect_block_zero: ClassVar[bool] = True
+
     def __eq__(self, other):
         return self is other
 
@@ -131,9 +141,9 @@ class StreamingKVBlock:
         # can start compressing — they were previously locked dense unnecessarily.
         # Also protect blocks flagged with outliers (e.g. key activation > 20.0) from SVD
         # compression to prevent attention sink corruption.
-        if self.anchor_idx == 0 or self.is_outlier:
+        if (self.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or self.is_outlier:
             return False
-        if self.anchor_idx + self.token_count() < 256:
+        if self.anchor_idx + self.token_count() < StreamingKVBlock.short_context_threshold:
             return False
         return (
             self.state == "ACCUMULATING"
@@ -143,10 +153,10 @@ class StreamingKVBlock:
 _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False) -> bool:
-    if block.anchor_idx == 0 or block.is_outlier:
+    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier:
         return False
     toks = block.token_count()
-    if block.anchor_idx + toks < 256:
+    if block.anchor_idx + toks < StreamingKVBlock.short_context_threshold:
         return False
         
     is_patched = (StreamingKVBlock.is_compression_eligible != _original_is_compression_eligible)
@@ -191,6 +201,9 @@ class StreamingSparseIngestManager:
         dense_anchor_only: bool = True,
         native_pool = None,
         device: str = "cuda",
+        recency_window: int = 512,
+        short_context_threshold: int = 256,
+        protect_block_zero: bool = True,
     ):
         self.compressor = compressor
         self.compress_fn = compress_fn
@@ -198,6 +211,11 @@ class StreamingSparseIngestManager:
         self.dense_anchor_only = dense_anchor_only
         self.native_pool = native_pool
         self.device = device
+        self.recency_window = recency_window
+        self.short_context_threshold = short_context_threshold
+        self.protect_block_zero = protect_block_zero
+        StreamingKVBlock.short_context_threshold = short_context_threshold
+        StreamingKVBlock.protect_block_zero = protect_block_zero
         self.manager = None
 
         # session_id -> layer_idx -> List[StreamingKVBlock]
@@ -390,13 +408,21 @@ class StreamingSparseIngestManager:
         metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
 
     def update_metadata_state(self, session_id: str, layer_idx: int, block):
-        blocks = self.session_blocks.get(session_id, {}).get(layer_idx, [])
-        block_idx = -1
-        for idx, b in enumerate(blocks):
-            if b is block:
-                block_idx = idx
-                break
-        if block_idx == -1:
+        """
+        O(1) metadata state update using the block's pre-assigned _metadata_idx.
+
+        Falls back to O(N) linear scan only when _metadata_idx is not set
+        (e.g. blocks created before this optimization was deployed).
+        """
+        block_idx = getattr(block, "_metadata_idx", -1)
+        if block_idx < 0:
+            # Fallback: legacy O(N) scan for blocks without _metadata_idx
+            blocks = self.session_blocks.get(session_id, {}).get(layer_idx, [])
+            for idx, b in enumerate(blocks):
+                if b is block:
+                    block_idx = idx
+                    break
+        if block_idx < 0:
             return
         metadata = self.session_metadata.get(session_id, {}).get(layer_idx)
         if metadata is not None and block_idx < metadata.shape[0]:
@@ -466,6 +492,7 @@ class StreamingSparseIngestManager:
                     _active_buf_k=buf_k,
                     _active_buf_v=buf_v,
                     _active_fill=0,
+                    _metadata_idx=len(blocks),   # O(1) metadata index
                 )
                 # Flag outlier if the anchor key exceeds the threshold
                 new_block.is_outlier = False
@@ -519,10 +546,10 @@ class StreamingSparseIngestManager:
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and b.active_k is not None:
                     is_last = (idx == len(blocks) - 1)
-                    if _is_block_compression_eligible(b, is_last_block=is_last) and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
+                    if _is_block_compression_eligible(b, is_last_block=is_last) and (b.anchor_idx + b.token_count()) < (current_seq_len - self.recency_window):
                         self._submit_block_for_compression(b)
                         self.update_metadata_block(session_id, layer_idx, idx, b)
-                    elif b.is_outlier and (b.anchor_idx + b.token_count()) < (current_seq_len - 512):
+                    elif b.is_outlier and (b.anchor_idx + b.token_count()) < (current_seq_len - self.recency_window):
                         # Outlier blocks skip SVD (to preserve attention quality) but their
                         # dense active_k/v tensors can be offloaded to CPU once they've left
                         # the recency window. The assemble_dense_window_kv() path handles
@@ -641,8 +668,8 @@ class StreamingSparseIngestManager:
 
                     # Check if the block is eligible for immediate compression.
                     # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
-                    # Only submit block if it lies outside the rolling dense recency window (512 tokens).
-                    if anchor_idx > 0 and (anchor_idx + block_capacity) < (total_seq_len - 512):
+                    # Only submit block if it lies outside the rolling dense recency window.
+                    if (anchor_idx > 0 or not self.protect_block_zero) and (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
                         new_block.state = "SUBMITTED"
                         full_blocks_to_compress.append(new_block)
                     else:
@@ -727,6 +754,7 @@ class StreamingSparseIngestManager:
                     block.session_id = session_id
                     block.layer_idx = layer_idx
                     bi = base_block_idx + i
+                    block._metadata_idx = bi     # O(1) fast-path index
                     metadata[bi, 0] = int(block.pool_idx) if block.pool_idx is not None else -1
                     metadata[bi, 1] = int(block.anchor_idx)
                     metadata[bi, 2] = block.token_count()
@@ -938,7 +966,7 @@ class StreamingSparseIngestManager:
                 last_block = first_layer_blocks[-1]
                 total_seq_len = last_block.anchor_idx + last_block.token_count()
 
-        if total_seq_len < 256:
+        if total_seq_len < self.short_context_threshold:
             return  # No blocks are eligible
 
         # 2. Iterate over each layer
@@ -947,7 +975,7 @@ class StreamingSparseIngestManager:
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and b.active_k is not None:
                     if _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1)):
-                        if (b.anchor_idx + b.token_count()) < (total_seq_len - 512):
+                        if (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window):
                             b.state = "SUBMITTED"
                             blocks_to_compress.append(b)
                             self.update_metadata_state(session_id, layer_idx, b)

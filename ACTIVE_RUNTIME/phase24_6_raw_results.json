@@ -1,15 +1,15 @@
 {
   "model": "Qwen/Qwen2.5-0.5B-Instruct",
-  "model_weight_mb": 992.56,
-  "allocator_overhead_mb": 4.509999999999991,
+  "model_weight_mb": 1056.48,
+  "allocator_overhead_mb": 1074.6999999999998,
   "sessions": [
     {
       "label": "short_prompt",
       "prompt_tokens": 32,
-      "model_weight_mb": 992.56,
-      "peak_prefill_mb": 1003.7,
-      "kv_overhead_mb": 11.1400000000001,
-      "post_gc_reserved_mb": 1006.63,
+      "model_weight_mb": 1056.48,
+      "peak_prefill_mb": 1074.2,
+      "kv_overhead_mb": 17.720000000000027,
+      "post_gc_reserved_mb": 2100.04,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0
@@ -17,10 +17,10 @@
     {
       "label": "medium_prompt",
       "prompt_tokens": 128,
-      "model_weight_mb": 992.56,
-      "peak_prefill_mb": 1008.39,
-      "kv_overhead_mb": 15.830000000000041,
-      "post_gc_reserved_mb": 1008.73,
+      "model_weight_mb": 1056.48,
+      "peak_prefill_mb": 1089.14,
+      "kv_overhead_mb": 32.66000000000008,
+      "post_gc_reserved_mb": 2117.04,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0
@@ -28,10 +28,10 @@
     {
       "label": "long_prompt",
       "prompt_tokens": 512,
-      "model_weight_mb": 992.56,
-      "peak_prefill_mb": 1027.17,
-      "kv_overhead_mb": 34.61000000000013,
-      "post_gc_reserved_mb": 1019.22,
+      "model_weight_mb": 1056.48,
+      "peak_prefill_mb": 1106.46,
+      "kv_overhead_mb": 49.98000000000002,
+      "post_gc_reserved_mb": 2173.09,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0

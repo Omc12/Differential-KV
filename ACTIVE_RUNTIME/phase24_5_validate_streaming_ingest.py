@@ -90,6 +90,9 @@ mgr = StreamingSparseIngestManager(
     compress_fn=mock_compress_fn,
     micro_block_size=MICRO,
     dense_anchor_only=True,
+    recency_window=0,
+    short_context_threshold=0,
+    protect_block_zero=False,
 )
 mgr.init_session(SESSION, NUM_LAYERS)
 
@@ -145,6 +148,11 @@ kv_mgr = KVRuntimeManager(
     micro_block_size=MICRO,
     async_compression=False,  # synchronous for determinism in test
 )
+kv_mgr._streaming_mgr.recency_window = 0
+kv_mgr._streaming_mgr.short_context_threshold = 0
+kv_mgr._streaming_mgr.protect_block_zero = False
+StreamingKVBlock.short_context_threshold = 0
+StreamingKVBlock.protect_block_zero = False
 
 SESSION2 = "kv_mgr_test"
 kv_mgr.init_session(SESSION2)

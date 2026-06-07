@@ -40,27 +40,47 @@ except ImportError:
     def _has_cuda(): return torch.cuda.is_available()
 
 
-def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
+def get_layer_rank(
+    layer_idx: int,
+    num_layers: int,
+    base_rank: int,
+    early_boost: bool = False,
+    max_rank_early: int = 0,
+) -> int:
     """
     Per-layer adaptive rank schedule tuned for Qwen 2.5 1.5B (28 layers).
-    Early layers have broader activation distributions and need higher rank;
+    Early layers have broader activation distributions and benefit from higher rank;
     final layers are more concentrated and can use lower rank.
 
     Schedule is PROPORTIONAL to base_rank so the user's configured rank acts
-    as a hard ceiling (no silent VRAM inflation beyond --rank).
+    as the standard ceiling (no silent VRAM inflation beyond --rank for normal use).
 
-    Old schedule used max(64, base_rank) which silently used rank=64 on early
-    layers even when base_rank=32, doubling VRAM for those layers.
-
-    New schedule (proportional factors of base_rank, clamped to [4, base_rank]):
-      Layers 0-15%:  min(ceil(1.25 * base_rank), base_rank) = base_rank
+    Normal schedule (early_boost=False, default):
+      Layers 0-15%:  base_rank
       Layers 15-50%: base_rank  (no change)
       Layers 50-79%: max(4, round(0.75 * base_rank))
       Layers 79%+:   max(4, round(0.50 * base_rank))
+
+    Boosted schedule (early_boost=True):
+      Layers 0-15%:  min(2 * base_rank, max_rank_early or 2 * base_rank)
+                     Allows early syntactic layers to retain more KV fidelity.
+                     Enable via DIFFKV_EARLY_LAYER_RANK_BOOST=1 or config dict.
+      Layers 15%+:   Same as normal schedule.
+
+    Parameters
+    ----------
+    layer_idx     : index of the current transformer layer (0-indexed)
+    num_layers    : total number of layers in the model
+    base_rank     : user-configured SVD rank (acts as standard ceiling)
+    early_boost   : if True, boost rank for layers 0-15% (default False)
+    max_rank_early: hard cap for boosted early-layer rank; 0 = auto (2 * base_rank)
     """
     ratio = layer_idx / max(num_layers, 1)
-    if ratio < 0.15:       # layers 0-4   for 28-layer model
-        # Early layers: use full base_rank (not higher — user's ceiling)
+    if ratio < 0.15:       # layers 0-4 for 28-layer model
+        if early_boost:
+            # Boost early layers up to 2× base_rank, optionally capped by max_rank_early
+            cap = max_rank_early if max_rank_early > 0 else (2 * base_rank)
+            return min(2 * base_rank, cap)
         return base_rank
     elif ratio < 0.50:     # layers 4-14
         return base_rank
@@ -396,12 +416,12 @@ class KVRuntimeManager:
         if session_id in self._session_token_ids:
             self._session_token_ids[session_id] = self._session_token_ids[session_id][:target_len]
 
-        # Invalidate GPU block indices cache and block-level caches for this session
+        # Invalidate GPU block indices cache and sliced RoPE caches for this session.
+        # Note: concatenated_K_rot and V_V_perm were removed in a prior refactor —
+        # those keys no longer exist in decode_workspace.
         if hasattr(self, 'decode_workspace') and session_id in self.decode_workspace:
             session_dict = self.decode_workspace[session_id]
             session_dict.pop("gathered_kv", None)
-            session_dict.pop("concatenated_K_rot", None)
-            session_dict.pop("V_V_perm", None)
             session_dict.pop("indices_gpu", None)
             session_dict.pop("decode_cos_sliced", None)
             session_dict.pop("decode_sin_sliced", None)
@@ -1803,7 +1823,17 @@ class KVRuntimeManager:
         token_norms = torch.clamp(token_norms, min=1e-5)
         normalized_deltas = deltas / token_norms.unsqueeze(1)
 
-        rank = get_layer_rank(block.layer_idx, self.num_layers, self.rank)
+
+        # Per-layer rank with optional early-layer boost.
+        # self.config is the DiffKVConfig instance set in __init__.
+        _cfg = getattr(self, "config", None)
+        _early_boost     = getattr(_cfg, "early_layer_rank_boost", False)
+        _max_rank_early  = getattr(_cfg, "max_rank_early", 0)
+        _layer_idx_safe  = block.layer_idx if block.layer_idx is not None else 0
+        rank = get_layer_rank(
+            _layer_idx_safe, self.num_layers, self.rank,
+            early_boost=_early_boost, max_rank_early=_max_rank_early,
+        )
         lr_delta = compress_lowrank(normalized_deltas, rank)
 
         # Scale U by token norms to perform token-wise denormalization when reconstructed

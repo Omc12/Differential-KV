@@ -25,10 +25,26 @@ sys.path.insert(0, "./native_core/sparse_decode")
 import torch
 from functools import wraps
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-if DEVICE != "cuda":
-    print("WARNING: No CUDA device. VRAM audit requires GPU.")
+DEVICE = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE not in ("cuda", "mps"):
+    print("WARNING: No CUDA/MPS device. VRAM audit requires GPU.")
     sys.exit(1)
+
+# Apple Silicon / MPS compatibility monkey-patch for CUDA memory profiling
+if DEVICE == "mps":
+    torch.cuda.synchronize = lambda device=None: torch.mps.synchronize()
+    torch.cuda.memory_allocated = lambda device=None: torch.mps.current_allocated_memory()
+    torch.cuda.max_memory_allocated = lambda device=None: torch.mps.current_allocated_memory()
+    torch.cuda.memory_reserved = lambda device=None: torch.mps.driver_allocated_memory()
+    torch.cuda.memory_stats = lambda device=None: {
+        "active_bytes.all.current": torch.mps.current_allocated_memory(),
+        "inactive_split_bytes.all.current": 0,
+        "allocation.all.current": 0,
+        "reserved_bytes.all.current": 0
+    }
+    torch.cuda.reset_peak_memory_stats = lambda device=None: None
+    torch.cuda.empty_cache = lambda: torch.mps.empty_cache()
+    torch.cuda.mem_get_info = lambda device=None: (10 * 1024**3, 16 * 1024**3)
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
