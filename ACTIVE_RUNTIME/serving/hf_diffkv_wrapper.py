@@ -43,6 +43,48 @@ except ImportError:
     def _has_mps(): return getattr(getattr(torch, 'backends', None), 'mps', None) and torch.backends.mps.is_available()
     def _is_apple_silicon(): return False
 
+import traceback
+
+def _patch_tensor_sync_barriers():
+    orig_item = torch.Tensor.item
+    orig_cpu = torch.Tensor.cpu
+    orig_tolist = torch.Tensor.tolist
+
+    _in_sync_check = False
+
+    def patched_item(self):
+        nonlocal _in_sync_check
+        if not _in_sync_check and self.device.type != "cpu":
+            _in_sync_check = True
+            print("[DIFFKV_SYNC_DEBUG] WARNING: Synchronization barrier triggered by .item() call!")
+            traceback.print_stack(limit=5)
+            _in_sync_check = False
+        return orig_item(self)
+
+    def patched_cpu(self, *args, **kwargs):
+        nonlocal _in_sync_check
+        if not _in_sync_check and self.device.type != "cpu":
+            _in_sync_check = True
+            print("[DIFFKV_SYNC_DEBUG] WARNING: Synchronization barrier triggered by .cpu() call!")
+            traceback.print_stack(limit=5)
+            _in_sync_check = False
+        return orig_cpu(self, *args, **kwargs)
+
+    def patched_tolist(self):
+        nonlocal _in_sync_check
+        if not _in_sync_check and self.device.type != "cpu":
+            _in_sync_check = True
+            print("[DIFFKV_SYNC_DEBUG] WARNING: Synchronization barrier triggered by .tolist() call!")
+            traceback.print_stack(limit=5)
+            _in_sync_check = False
+        return orig_tolist(self)
+
+    # Patch them
+    torch.Tensor.item = patched_item
+    torch.Tensor.cpu = patched_cpu
+    torch.Tensor.tolist = patched_tolist
+    print("[DiffKV] DIFFKV_SYNC_DEBUG sync barrier checks enabled.")
+
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:
     if temperature <= 0.01:
         return torch.argmax(logits, dim=-1)
@@ -316,7 +358,16 @@ class DiffKVHFWrapper:
         else:
             self._cuda_graph_runner = None
 
+        if os.environ.get("DIFFKV_SYNC_DEBUG", "0") == "1":
+            _patch_tensor_sync_barriers()
 
+
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     def stop(self):
         """Cleanly release all resources and stop background worker threads."""
@@ -330,8 +381,12 @@ class DiffKVHFWrapper:
                 self.manager._compressor.stop()
 
         # Destroy CUDA graph runner if it was created
-        if hasattr(self, "_cuda_graph_runner"):
-            self._cuda_graph_runner.invalidate()
+        if hasattr(self, "_cuda_graph_runner") and self._cuda_graph_runner is not None:
+            try:
+                self._cuda_graph_runner.invalidate()
+            except Exception:
+                pass
+
 
     @torch.no_grad()
     def generate(
@@ -433,6 +488,11 @@ class DiffKVHFWrapper:
                     break
                 self.manager.finalize_compressed_blocks()
                 _time.sleep(0.002)
+            if self.device == "mps":
+                try:
+                    torch.mps.empty_cache()
+                except Exception:
+                    pass
 
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
@@ -498,29 +558,34 @@ class DiffKVHFWrapper:
                 # The Triton kernel uses pool indices that are static tensors, so
                 # graph capture is safe as long as the block layout doesn't change.
                 # We invalidate the graph whenever a new prefill runs (new session).
-                if not hasattr(self, "_cuda_graph_runner"):
+                if not hasattr(self, "_cuda_graph_runner") or self._cuda_graph_runner is None:
                     self._cuda_graph_runner = CUDAGraphDecodeRunner() if _HAS_CUDA_GRAPH_RUNNER else None
 
-                def _decode_model_fn(input_ids, position_ids, past_key_values, use_cache):
-                    return self.model(
-                        input_ids=input_ids,
-                        position_ids=position_ids,
-                        past_key_values=past_key_values,
-                        use_cache=use_cache,
-                    )
-
-                try:
-                    outputs = self._cuda_graph_runner.run(
-                        _decode_model_fn,
-                        {
-                            "input_ids":      input_ids,
-                            "position_ids":   pos_tensor,
-                            "past_key_values": past_kv,
-                            "use_cache":      torch.tensor(True),  # static scalar
-                        }
-                    )
-                except Exception:
-                    # Graph capture failed (e.g. dynamic Python branching) — fall back to eager
+                if self._cuda_graph_runner is not None:
+                    if not self._cuda_graph_runner.is_captured():
+                        try:
+                            self._cuda_graph_runner.capture(self.model, input_ids, pos_tensor)
+                        except Exception:
+                            pass
+                    
+                    if self._cuda_graph_runner.is_captured():
+                        try:
+                            outputs = self._cuda_graph_runner.run(input_ids, pos_tensor)
+                        except Exception:
+                            outputs = self.model(
+                                input_ids=input_ids,
+                                position_ids=pos_tensor,
+                                past_key_values=past_kv,
+                                use_cache=True,
+                            )
+                    else:
+                        outputs = self.model(
+                            input_ids=input_ids,
+                            position_ids=pos_tensor,
+                            past_key_values=past_kv,
+                            use_cache=True,
+                        )
+                else:
                     outputs = self.model(
                         input_ids=input_ids,
                         position_ids=pos_tensor,

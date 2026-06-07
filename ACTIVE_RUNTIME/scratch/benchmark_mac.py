@@ -210,23 +210,32 @@ def print_comparison_table(context_lengths, std_results, diff_results):
     print("-" * 80)
     
     for ctx in context_lengths:
-        std = std_results[ctx]
-        diff = diff_results[ctx]
+        std = std_results.get(ctx)
+        diff = diff_results.get(ctx)
         
         # Standard rows
-        print(f"{ctx:<8d} | {'Dense':<8} | {std['prefill_s']:>10.3f}s | {std['decode_tps']:>10.1f} | {std['decode_vram_mb']:>12.1f} MB | {'1.0000 (Exact)':<12}")
+        if std is not None:
+            print(f"{ctx:<8d} | {'Dense':<8} | {std['prefill_s']:>10.3f}s | {std['decode_tps']:>10.1f} | {std['decode_vram_mb']:>12.1f} MB | {'1.0000 (Exact)':<12}")
+        else:
+            print(f"{ctx:<8d} | {'Dense':<8} | {'Skipped':>11} | {'Skipped':>10} | {'Skipped (>11GB)':>15} | {'Too Heavy':<12}")
+            
         # DiffKV rows
-        quality_str = f"{diff['avg_cos_sim']:.4f} Cos" if diff['avg_cos_sim'] > 0 else "N/A"
-        print(f"{'':<8} | {'DiffKV':<8} | {diff['prefill_s']:>10.3f}s | {diff['decode_tps']:>10.1f} | {diff['decode_vram_mb']:>12.1f} MB | {quality_str:<12}")
+        if diff is not None:
+            quality_str = f"{diff['avg_cos_sim']:.4f} Cos" if diff['avg_cos_sim'] > 0 else "N/A"
+            print(f"{'':<8} | {'DiffKV':<8} | {diff['prefill_s']:>10.3f}s | {diff['decode_tps']:>10.1f} | {diff['decode_vram_mb']:>12.1f} MB | {quality_str:<12}")
+        else:
+            print(f"{'':<8} | {'DiffKV':<8} | {'N/A':>11} | {'N/A':>10} | {'N/A':>15} | {'N/A':<12}")
         print("-" * 80)
 
 if __name__ == "__main__":
-    context_lengths = [512, 1024, 2048, 4096, 8192]
+    all_context_lengths = [512, 1024, 2048, 4096, 8192]
+    std_context_lengths = [512, 1024, 2048] # Keep under 2048 to prevent 11GB allocator caching
+    diff_context_lengths = [512, 1024, 2048, 4096, 8192]
     
-    print("Running Standard baseline benchmarks...")
-    std_res = benchmark_standard(context_lengths)
+    print("Running Standard baseline benchmarks (up to 2048 context)...")
+    std_res = benchmark_standard(std_context_lengths)
     
-    print("\nRunning DiffKV benchmarks...")
-    diff_res = benchmark_diffkv(context_lengths)
+    print("\nRunning DiffKV benchmarks (up to 8192 context)...")
+    diff_res = benchmark_diffkv(diff_context_lengths)
     
-    print_comparison_table(context_lengths, std_res, diff_res)
+    print_comparison_table(all_context_lengths, std_res, diff_res)

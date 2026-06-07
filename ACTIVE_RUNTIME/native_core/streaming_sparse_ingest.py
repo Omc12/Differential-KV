@@ -24,6 +24,7 @@ Key guarantees:
     5. Attention path falls back to dense gracefully for blocks mid-compression.
 """
 
+import os
 import torch
 import queue
 import threading
@@ -779,6 +780,17 @@ class StreamingSparseIngestManager:
         heads = blocks_list[0].active_k.shape[1]
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
+
+        # GPU-accelerated randomized SVD path (Component 2)
+        if os.environ.get("DIFFKV_GPU_COMPRESS", "0") == "1" and device.type == "cuda":
+            from native_core.compression.lowrank import compress_layer_blocks_gpu
+            _rank = getattr(self.manager, "rank", 16)
+            success = compress_layer_blocks_gpu(blocks_list, _rank, manager=self.manager)
+            if success:
+                with self._stats_lock:
+                    self.stats["total_compressed"] += len(blocks_list)
+                    self.stats["compressions_during_ingest"] += len(blocks_list)
+                return
 
         # Group blocks by active sequence length to handle partial blocks
         from collections import defaultdict

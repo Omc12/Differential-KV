@@ -29,6 +29,11 @@ try:
 except ImportError:
     HAS_TRITON = False
 
+def rotate_half(x):
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
 # ── 1. Fused Triton Kernels ───────────────────────────────────────────────────
 
 if HAS_TRITON:
@@ -772,9 +777,26 @@ def _pytorch_vectorized_sparse_attn_decode(
         else:
             indices = block_indices.long()
             U = pool.U[indices].to(q.dtype) * pool.U_scale[indices].view(-1, 1, 1)
-            V_K = repeat_kv_at_dim(pool.V_K[indices], num_key_value_groups, dim=2)
+            
+            V_K_raw = pool.V_K[indices]
+            anchors_K_raw = pool.anchors_K[indices]
+            
+            if anchor_indices is not None and cos is not None and sin is not None:
+                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                
+                cos_anc = cos_flat[anchor_indices].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
+                sin_anc = sin_flat[anchor_indices].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
+                
+                cos_anc_2d = cos_flat[anchor_indices].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
+                sin_anc_2d = sin_flat[anchor_indices].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
+                
+                V_K_raw = V_K_raw * cos_anc + rotate_half(V_K_raw) * sin_anc
+                anchors_K_raw = anchors_K_raw * cos_anc_2d + rotate_half(anchors_K_raw) * sin_anc_2d
+                
+            V_K = repeat_kv_at_dim(V_K_raw, num_key_value_groups, dim=2)
             V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
-            anchors_K = repeat_kv_at_dim(pool.anchors_K[indices], num_key_value_groups, dim=1)
+            anchors_K = repeat_kv_at_dim(anchors_K_raw, num_key_value_groups, dim=1)
             anchors_V = repeat_kv_at_dim(pool.anchors_V[indices], num_key_value_groups, dim=1)
             scales = pool.scales[indices].view(N, 1, 1)
             seq_lens_t = pool.seq_lens[indices]
@@ -961,18 +983,38 @@ def native_triton_sparse_attn_decode(
                 m_workspace = m_out
                 l_workspace = l_out
             
+            anchors_K_rot = pool.anchors_K
+            V_K_rot = pool.V_K
+            
+            if anchor_indices is not None and cos is not None and sin is not None:
+                indices = block_indices.long()
+                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                
+                cos_anc = cos_flat[anchor_indices].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                sin_anc = sin_flat[anchor_indices].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                
+                cos_anc_2d = cos_flat[anchor_indices].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
+                sin_anc_2d = sin_flat[anchor_indices].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
+                
+                anchors_K_rot = pool.anchors_K.clone()
+                V_K_rot = pool.V_K.clone()
+                
+                V_K_rot[indices] = pool.V_K[indices] * cos_anc + rotate_half(pool.V_K[indices]) * sin_anc
+                anchors_K_rot[indices] = pool.anchors_K[indices] * cos_anc_2d + rotate_half(pool.anchors_K[indices]) * sin_anc_2d
+            
             _fused_sparse_decode_kernel[grid](
-                q_sq, block_indices, pool.anchors_K, pool.anchors_V, pool.V_K, pool.V_V,
+                q_sq, block_indices, anchors_K_rot, pool.anchors_V, V_K_rot, pool.V_V,
                 pool.U, pool.U_scale, pool.scales, pool.seq_lens,
                 out_workspace, m_workspace, l_workspace,
                 q_sq.stride(0), q_sq.stride(1),
-                pool.anchors_K.stride(0), pool.anchors_K.stride(1), pool.anchors_K.stride(2),
+                anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
                 pool.anchors_V.stride(0), pool.anchors_V.stride(1), pool.anchors_V.stride(2),
-                pool.V_K.stride(0), pool.V_K.stride(1), pool.V_K.stride(2), pool.V_K.stride(3),
+                V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
                 pool.V_V.stride(0), pool.V_V.stride(1), pool.V_V.stride(2), pool.V_V.stride(3),
                 pool.U.stride(0), pool.U.stride(1), pool.U.stride(2),
                 out_workspace.stride(0), out_workspace.stride(1),
-                N, H_q, pool.anchors_K.shape[1], num_key_value_groups, D_pad,
+                N, H_q, anchors_K_rot.shape[1], num_key_value_groups, D_pad,
                 R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks
             )
             

@@ -240,3 +240,33 @@ if hasattr(torch, "mps") and not hasattr(torch.mps, "capture_to_graph"):
 
     torch.mps.capture_to_graph = _capture_to_graph
 
+
+def get_true_diffkv_memory_mb() -> dict:
+    """
+    Get true allocated/reserved memory in MB.
+    Returns:
+        dict with keys: 'allocated_mb', 'reserved_mb', 'rss_mb'
+    """
+    res = {'allocated_mb': 0.0, 'reserved_mb': 0.0, 'rss_mb': 0.0}
+    
+    # 1. RSS Memory
+    try:
+        import psutil
+        res['rss_mb'] = psutil.Process().memory_info().rss / 1e6
+    except Exception:
+        pass
+        
+    # 2. Accelerator Memory
+    dev = get_best_device()
+    if dev == "cuda":
+        res['allocated_mb'] = torch.cuda.memory_allocated() / 1e6
+        res['reserved_mb'] = torch.cuda.memory_reserved() / 1e6
+    elif dev == "mps":
+        try:
+            res['allocated_mb'] = torch.mps.current_allocated_memory() / 1e6
+            res['reserved_mb'] = torch.mps.driver_allocated_memory() / 1e6
+        except Exception:
+            pass
+            
+    return res
+
