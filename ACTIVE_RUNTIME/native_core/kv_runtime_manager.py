@@ -1716,7 +1716,9 @@ class KVRuntimeManager:
             last_block.active_v = torch.cat([last_block.active_v, curr_v], dim=2)
 
         # Invalidate recon cache for this block since active_k changed
-        self.recon_cache.invalidate(last_block)
+        recon_cache = getattr(self, "recon_cache", None)
+        if recon_cache is not None:
+            recon_cache.invalidate(last_block)
 
         # Compress oldest full dense blocks outside the recency window
         full_dense = [
@@ -1943,7 +1945,8 @@ class KVRuntimeManager:
 
     def runtime_summary(self) -> dict:
         pager_s = self.pager.summary()
-        recon_s = self.recon_cache.summary()
+        recon_cache = getattr(self, "recon_cache", None)
+        recon_s = recon_cache.summary() if recon_cache is not None else {}
         comp_s  = self._compressor.summary()
         avg_cos   = (self.total_cosine_sim / max(1, self.total_compressions))
         avg_drift = (self.total_norm_drift  / max(1, self.total_compressions))
@@ -1959,3 +1962,4 @@ class KVRuntimeManager:
             "recon_cache":           recon_s,
             "async_compressor":      comp_s,
         }
+
