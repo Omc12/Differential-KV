@@ -497,13 +497,17 @@ class KVRuntimeManager:
             # ── 1. Semantic index ───────────────────────────────────────
             sem_index = build_semantic_index(pool, slot_ids)
 
-            # ── 2. Chunk graph ──────────────────────────────────────────
-            chunk_graph = build_chunk_graph(
-                sem_index.desc_matrix,
-                sem_index.slot_ids,
-                K_semantic=6,
-                K_temporal=2,
-            )
+            # Get session config if any to dynamically set values on SessionSRLState
+            session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
+            default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
+            default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
+            default_threshold = self.config.srl_threshold
+            default_overlap_threshold = float(_os.environ.get("DIFFKV_SRL_OVERLAP_THRESHOLD", "0.15"))
+
+            k_min = session_config.get("srl_k_min", default_k_min)
+            k_max = session_config.get("srl_k_max", default_k_max)
+            routing_threshold = session_config.get("srl_threshold", default_threshold)
+            overlap_threshold = session_config.get("srl_overlap_threshold", default_overlap_threshold)
 
             # ── 3. Inverted token index ─────────────────────────────────
             token_ids_cpu = self._session_token_ids.get(session_id)
@@ -522,6 +526,16 @@ class KVRuntimeManager:
             else:
                 from native_core.srl.inverted_index import InvertedTokenIndex
                 inv_index = InvertedTokenIndex(index={}, important_vocab=set())
+
+            # ── 2. Chunk graph ──────────────────────────────────────────
+            chunk_graph = build_chunk_graph(
+                sem_index.desc_matrix,
+                sem_index.slot_ids,
+                K_semantic=6,
+                K_temporal=2,
+                inv_index=inv_index,
+                overlap_threshold=overlap_threshold,
+            )
 
             # ── 4. Sink blocks (block 0 + special token blocks) ──────────
             sink_blocks: list = []
@@ -553,16 +567,6 @@ class KVRuntimeManager:
                     if sid_special not in sink_blocks:
                         sink_blocks.append(sid_special)
 
-            # Get session config if any to dynamically set values on SessionSRLState
-            session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
-            default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
-            default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
-            default_threshold = self.config.srl_threshold
-
-            k_min = session_config.get("srl_k_min", default_k_min)
-            k_max = session_config.get("srl_k_max", default_k_max)
-            routing_threshold = session_config.get("srl_threshold", default_threshold)
-
             # Enable SRL by default for all models
             if "srl_enabled" not in session_config:
                 session_config["srl_enabled"] = True
@@ -586,6 +590,7 @@ class KVRuntimeManager:
                 k_min             = k_min,
                 k_max             = k_max,
                 routing_threshold = routing_threshold,
+                overlap_threshold = overlap_threshold,
             )
             srl_state.nothing_found = nothing_found
             srl_state.current_query_tokens = current_query_tokens

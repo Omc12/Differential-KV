@@ -39,10 +39,12 @@ class ChunkGraph:
 
 
 def build_chunk_graph(
-    desc_matrix: torch.Tensor,   # [N, DESC_DIM] float16, L2 normalized (from SemanticIndex)
-    slot_ids:    torch.Tensor,   # [N] int32 pool slot IDs (from SemanticIndex)
-    K_semantic:  int = 6,
-    K_temporal:  int = 2,
+    desc_matrix:  torch.Tensor,   # [N, DESC_DIM] float16, L2 normalized (from SemanticIndex)
+    slot_ids:     torch.Tensor,   # [N] int32 pool slot IDs (from SemanticIndex)
+    K_semantic:   int = 6,
+    K_temporal:   int = 2,
+    inv_index:    Optional["InvertedTokenIndex"] = None,
+    overlap_threshold: float = 0.15, # threshold on relative keyword overlap (15%)
 ) -> ChunkGraph:
     """
     Build block-to-block similarity graph.
@@ -52,18 +54,19 @@ def build_chunk_graph(
         slot_ids:    pool slot IDs (same order as desc_matrix rows)
         K_semantic:  number of semantic nearest neighbors per block
         K_temporal:  number of temporal (adjacent-block) neighbors per block
+        inv_index:   Optional MergedTokenDictionary (InvertedTokenIndex) containing vocabularies
+        overlap_threshold: Percentage threshold (0.0 to 1.0) of shared keywords
 
     Returns:
-        ChunkGraph with neighbors[i] = row indices of i's neighbors
+        ChunkGraph with neighbors[i] = row indices of i's neighbors, padded with -1
     """
     N = desc_matrix.shape[0]
-    MAX_NEIGHBORS = K_semantic + K_temporal
 
     if N == 0:
-        return ChunkGraph(neighbors=torch.zeros((0, MAX_NEIGHBORS), dtype=torch.int32))
+        return ChunkGraph(neighbors=torch.zeros((0, 8), dtype=torch.int32))
 
     if N == 1:
-        return ChunkGraph(neighbors=torch.zeros((1, MAX_NEIGHBORS), dtype=torch.int32))
+        return ChunkGraph(neighbors=torch.zeros((1, 8), dtype=torch.int32))
 
     # ── Pairwise cosine similarity ────────────────────────────────────────
     # desc_matrix is already L2-normalized → dot product = cosine similarity
@@ -76,30 +79,63 @@ def build_chunk_graph(
     k_sem = min(K_semantic, N - 1)
     if k_sem > 0:
         _, sem_idx = torch.topk(sim, k=k_sem, dim=1, largest=True, sorted=True)
-        # sem_idx: [N, k_sem]
+        sem_list = sem_idx.tolist()
     else:
-        sem_idx = torch.zeros((N, 0), dtype=torch.long, device=desc_matrix.device)
+        sem_list = [[] for _ in range(N)]
 
     # ── Temporal neighbors (prev/next in chronological order) ─────────────
-    t_neighbors = torch.zeros(N, K_temporal, dtype=torch.long, device=desc_matrix.device)
-    indices = torch.arange(N, device=desc_matrix.device)
-    if K_temporal >= 1:
-        prev_idx = (indices - 1).clamp(min=0)
-        t_neighbors[:, 0] = prev_idx
-    if K_temporal >= 2:
-        next_idx = (indices + 1).clamp(max=N - 1)
-        t_neighbors[:, 1] = next_idx
+    t_neighbors = [[] for _ in range(N)]
+    for i in range(N):
+        if K_temporal >= 1:
+            t_neighbors[i].append(max(0, i - 1))
+        if K_temporal >= 2:
+            t_neighbors[i].append(min(N - 1, i + 1))
 
-    # ── Combine semantic + temporal ───────────────────────────────────────
-    if sem_idx.shape[1] > 0:
-        all_neighbors = torch.cat([sem_idx, t_neighbors], dim=1)   # [N, K_sem + K_temp]
-    else:
-        all_neighbors = t_neighbors
+    # ── Lexical / Keyword Overlap Neighbors ───────────────────────────────
+    lex_neighbors = [[] for _ in range(N)]
+    if inv_index is not None and getattr(inv_index, "chunk_vocabularies", None):
+        slot_list = slot_ids.tolist()
+        vocabs = []
+        for slot in slot_list:
+            if slot in inv_index.chunk_vocabularies:
+                vocabs.append(set(inv_index.chunk_vocabularies[slot].keys()))
+            else:
+                vocabs.append(set())
 
-    # Pad to MAX_NEIGHBORS if needed
-    if all_neighbors.shape[1] < MAX_NEIGHBORS:
-        pad = torch.zeros(N, MAX_NEIGHBORS - all_neighbors.shape[1], dtype=torch.long, device=desc_matrix.device)
-        all_neighbors = torch.cat([all_neighbors, pad], dim=1)
+        for i in range(N):
+            w_i = vocabs[i]
+            len_w_i = len(w_i)
+            if len_w_i == 0:
+                continue
+            for j in range(N):
+                if i == j:
+                    continue
+                w_j = vocabs[j]
+                overlap = len(w_i & w_j)
+                relative_score = overlap / len_w_i
+                if relative_score >= overlap_threshold:
+                    lex_neighbors[i].append(j)
 
-    # Move to CPU (graph is small, accessed by Python during routing)
-    return ChunkGraph(neighbors=all_neighbors.int().cpu())
+    # ── Merge and Deduplicate Per Block (Variable Degree Web) ─────────────
+    merged_neighbors = []
+    max_degree = 0
+    for i in range(N):
+        # Merge semantic, temporal, and lexical connections
+        # Filter out self-loops
+        candidates = sem_list[i] + t_neighbors[i] + lex_neighbors[i]
+        unique_neighbors = list(dict.fromkeys(c for c in candidates if c != i))
+        merged_neighbors.append(unique_neighbors)
+        max_degree = max(max_degree, len(unique_neighbors))
+
+    # Pad all neighbor lists to max_degree with -1 (out-of-bounds sentinel)
+    # Ensure a minimum degree of at least 1 to prevent empty tensor shape issues
+    max_degree = max(1, max_degree)
+    pad_value = -1
+    
+    neighbors_tensor = torch.full((N, max_degree), pad_value, dtype=torch.int32)
+    for i, neighbors_i in enumerate(merged_neighbors):
+        if neighbors_i:
+            neighbors_tensor[i, :len(neighbors_i)] = torch.tensor(neighbors_i, dtype=torch.int32)
+
+    return ChunkGraph(neighbors=neighbors_tensor.cpu())
+

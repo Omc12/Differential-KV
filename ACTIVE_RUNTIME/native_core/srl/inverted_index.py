@@ -21,7 +21,7 @@ Storage: ~240KB for 5000 unique terms × avg 12 blocks per term
 from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -31,9 +31,15 @@ class InvertedTokenIndex:
     """
     Maps token_id → sorted list of pool_slot_ids that contain that token.
     CPU-resident (dict lookup, no GPU needed).
+    
+    Enhanced with:
+      - occurrences: maps token_id → list of (slot_id, absolute_pos, relative_pos)
+      - chunk_vocabularies: maps slot_id → dict of token_id → list of relative_pos
     """
-    index:           Dict[int, List[int]]   # token_id → [pool_slot_id, ...]
-    important_vocab: Set[int]               # token IDs indexed (excludes stop words)
+    index:              Dict[int, List[int]]                   # token_id → [pool_slot_id, ...]
+    important_vocab:    Set[int]                               # token IDs indexed (excludes stop words)
+    occurrences:        Dict[int, List[Tuple[int, int, int]]] = field(default_factory=dict)
+    chunk_vocabularies: Dict[int, Dict[int, List[int]]]       = field(default_factory=dict)
 
 
 def build_inverted_index(
@@ -44,26 +50,17 @@ def build_inverted_index(
     top_n_per_block:  int = 20,         # most important tokens to index per block
 ) -> InvertedTokenIndex:
     """
-    Build a lexical inverted index from prompt token IDs.
+    Build a lexical inverted index from prompt token IDs with exact position tracking.
 
     Each block covers `block_size` tokens (including anchor). The index maps
-    important token IDs to the list of pool slots that contain them.
-
-    Args:
-        token_ids:       Full prompt token ID sequence, CPU tensor [seq_len]
-        slot_ids:        Pool slot IDs in chronological order (len = N_blocks)
-        block_size:      Tokens per block (anchor + active, e.g. 256+1=257)
-        stop_token_ids:  Token IDs to exclude (stop words, punctuation, etc.)
-        top_n_per_block: Max distinct tokens to index per block
-
-    Returns:
-        InvertedTokenIndex ready for decode-time lookup
+    important token IDs to the list of pool slots that contain them and their positions.
     """
     token_list = token_ids.tolist()
     seq_len    = len(token_list)
-    N_blocks   = len(slot_ids)
 
     index: Dict[int, List[int]] = defaultdict(list)
+    occurrences: Dict[int, List[Tuple[int, int, int]]] = defaultdict(list)
+    chunk_vocabularies: Dict[int, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(list))
 
     for i, slot in enumerate(slot_ids):
         # Block i covers tokens [i*block_size, (i+1)*block_size)
@@ -77,16 +74,32 @@ def build_inverted_index(
         # Count non-stop token frequencies in this block
         freq = Counter(t for t in block_toks if t not in stop_token_ids)
 
-        # Take top_n most frequent
+        # Take top_n most frequent for backward-compatibility index
         for tok, _ in freq.most_common(top_n_per_block):
             index[tok].append(slot)
 
-    # Deduplicate (a slot shouldn't appear twice for the same token)
+        # Track absolute and relative positions for all non-stop tokens
+        for rel_pos, tok in enumerate(block_toks):
+            if tok in stop_token_ids:
+                continue
+            abs_pos = start + rel_pos
+            occurrences[tok].append((slot, abs_pos, rel_pos))
+            chunk_vocabularies[slot][tok].append(rel_pos)
+
+    # Deduplicate (a slot shouldn't appear twice for the same token in basic index)
     deduped = {tok: list(dict.fromkeys(slots)) for tok, slots in index.items()}
+    
+    # Convert defaultdicts to regular dicts for session serialization safety
+    final_chunk_vocabs = {
+        slot: {tok: pos_list for tok, pos_list in tok_dict.items()}
+        for slot, tok_dict in chunk_vocabularies.items()
+    }
 
     return InvertedTokenIndex(
-        index           = deduped,
-        important_vocab = set(deduped.keys()),
+        index              = deduped,
+        important_vocab    = set(deduped.keys()),
+        occurrences        = dict(occurrences),
+        chunk_vocabularies = final_chunk_vocabs,
     )
 
 
@@ -111,3 +124,19 @@ def lookup(
         if tok in vocab and tok in idx:
             result.update(idx[tok])
     return result
+
+
+def lookup_occurrences(
+    inv_index:       InvertedTokenIndex,
+    query_token_ids: List[int],
+) -> List[Tuple[int, int, int]]:
+    """
+    Return list of (slot_id, absolute_pos, relative_pos) matching any of the query tokens.
+    """
+    result = []
+    vocab = set(inv_index.occurrences.keys())
+    for tok in query_token_ids:
+        if tok in vocab:
+            result.extend(inv_index.occurrences[tok])
+    return result
+

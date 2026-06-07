@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 
 from native_core.srl.chunk_descriptor import compute_query_descriptor
-from native_core.srl.inverted_index import lookup as inverted_lookup
+from native_core.srl.inverted_index import lookup as inverted_lookup, lookup_occurrences
 
 if TYPE_CHECKING:
     from native_core.srl.session_srl_state import SessionSRLState
@@ -156,16 +156,26 @@ def route_query(
     semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
     semantic_slots   = semantic_slots_t.tolist()
 
-    # ── Step 3: Lexical inverted index lookup ─────────────────────────────
+    # ── Step 3: Lexical inverted index lookup (with positional decay) ─────
     k_lexical   = max(1, int(K * _LEX_FRAC))
     if query_tokens is not None:
         recent_toks = query_tokens
-        lexical_set = inverted_lookup(srl_state.inverted_index, recent_toks)
     else:
         recent_toks = srl_state.recent_generated_tokens[-16:] + getattr(srl_state, "current_query_tokens", [])[-32:]
-        lexical_set = inverted_lookup(srl_state.inverted_index, recent_toks)
 
-    lexical_slots = list(lexical_set)[:k_lexical]
+    from collections import defaultdict
+    matches = lookup_occurrences(srl_state.inverted_index, recent_toks)
+    if matches:
+        L = max(occ[1] for occ in matches)
+        slot_scores = defaultdict(float)
+        decay_factor = 0.999
+        for slot, abs_pos, rel_pos in matches:
+            # Equal treatment with temporal decay
+            slot_scores[slot] += decay_factor ** (L - abs_pos)
+        sorted_lex_slots = sorted(slot_scores.keys(), key=lambda s: slot_scores[s], reverse=True)
+        lexical_slots = sorted_lex_slots[:k_lexical]
+    else:
+        lexical_slots = []
 
     # Lexical slots are populated and merged in step 7 below.
 
