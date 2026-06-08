@@ -234,6 +234,9 @@ Returns:
         py::arg("anchors_K"),
         py::arg("anchors_V"),
         py::arg("seq_lens"),
+        py::arg("scales"),
+        py::arg("cos_anc"),
+        py::arg("sin_anc"),
         py::arg("slot_indices"),
         py::arg("scale"),
         py::arg("n_q_heads"),
@@ -253,6 +256,9 @@ Args:
     anchors_K    : [N_pool, kv_heads, D]      float16 pool.anchors_K
     anchors_V    : [N_pool, kv_heads, D]      float16 pool.anchors_V
     seq_lens     : [N_pool]                   int32   pool.seq_lens
+    scales       : [N_pool]                   float16 pool.scales
+    cos_anc      : [K_active, D]              float32 RoPE cosine at anchor positions
+    sin_anc      : [K_active, D]              float32 RoPE sine at anchor positions
     slot_indices : [K_active]                 int32   selected slots from SRL
     scale        : float  (1 / sqrt(head_dim))
     n_q_heads    : int
@@ -274,6 +280,9 @@ Returns:
         py::arg("anchors_K"),
         py::arg("anchors_V"),
         py::arg("seq_lens"),
+        py::arg("scales"),
+        py::arg("cos_anc"),
+        py::arg("sin_anc"),
         py::arg("slot_indices"),
         py::arg("scale"),
         py::arg("n_q_heads"),
@@ -306,6 +315,9 @@ Returns:
         py::arg("anchors_K"),
         py::arg("anchors_V"),
         py::arg("seq_lens"),
+        py::arg("scales"),
+        py::arg("cos_anc"),
+        py::arg("sin_anc"),
         py::arg("slot_indices"),
         py::arg("scale"),
         py::arg("n_q_heads"),
@@ -340,6 +352,9 @@ Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, a
         py::arg("anchors_K"),
         py::arg("anchors_V"),
         py::arg("seq_lens"),
+        py::arg("scales"),
+        py::arg("cos_anc"),
+        py::arg("sin_anc"),
         py::arg("slot_indices"),
         py::arg("scale"),
         py::arg("n_q_heads"),

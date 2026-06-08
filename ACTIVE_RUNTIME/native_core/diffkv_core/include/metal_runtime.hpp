@@ -16,6 +16,9 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     const torch::Tensor& anchors_K,       // [N_pool, n_kv, D]
     const torch::Tensor& anchors_V,       // [N_pool, n_kv, D]
     const torch::Tensor& seq_lens,        // [N_pool]
+    const torch::Tensor& scales,          // [N_pool]
+    const torch::Tensor& cos_anc,         // [K]
+    const torch::Tensor& sin_anc,         // [K]
     const torch::Tensor& slot_indices,    // [K]
     float scale,
     int n_q_heads,

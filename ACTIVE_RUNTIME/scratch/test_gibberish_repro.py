@@ -16,6 +16,7 @@ os.environ["DIFFKV_SRL_VERBOSE"] = "1"
 os.environ["DIFFKV_SRL_THRESHOLD"] = "15" # Enable SRL routing
 os.environ["DIFFKV_VALIDATE_SRL"] = "1"    # Enable validation
 os.environ["DIFFKV_VALIDATE_EVERY"] = "5"  # Validate every 5 steps
+os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
 import torch
 import asyncio

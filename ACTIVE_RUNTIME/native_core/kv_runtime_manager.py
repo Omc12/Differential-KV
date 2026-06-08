@@ -105,8 +105,8 @@ class KVBlock:
     """Physically stores compressed KV memory for one block of tokens."""
     anchor_idx: int
     anchor_kv:  torch.Tensor          # [1, 2, heads, head_dim]
-    U:          Optional[torch.Tensor] = None   # [block_size, rank]
-    V:          Optional[torch.Tensor] = None   # [rank, feat_dim]
+    _U:          Optional[torch.Tensor] = None   # [block_size, rank]
+    _V:          Optional[torch.Tensor] = None   # [rank, feat_dim]
     scale:      float = 1.0
     token_indices: List[int] = None
     cosine_sim: float = 1.0
@@ -120,6 +120,44 @@ class KVBlock:
     dirty:    bool = True
     _cache_id: Optional[str] = None
     _lock:    threading.Lock = field(default_factory=threading.Lock, repr=False)
+    pool:     Any = None
+
+    @property
+    def U(self):
+        if self._U is not None:
+            return self._U
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.U.shape[2]
+            U_int8 = pool.U[pool_idx, :seq_len, :rank]
+            scale_u = pool.U_scale[pool_idx]
+            return U_int8.to(scale_u.dtype) * scale_u
+        return None
+
+    @U.setter
+    def U(self, val):
+        self._U = val
+
+    @property
+    def V(self):
+        if self._V is not None:
+            return self._V
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.V_KV.shape[2]
+            vk = pool.V_KV[pool_idx, 0, :rank]
+            vv = pool.V_KV[pool_idx, 1, :rank]
+            vk_flat = vk.reshape(rank, -1)
+            vv_flat = vv.reshape(rank, -1)
+            return torch.cat([vk_flat, vv_flat], dim=1)
+        return None
+
+    @V.setter
+    def V(self, val):
+        self._V = val
 
     def __eq__(self, other):
         return self is other
@@ -745,6 +783,7 @@ class KVRuntimeManager:
                             if hasattr(self, 'native_pool') and self.native_pool is not None:
                                 if getattr(block, 'pool_idx', None) is None:
                                     block.pool_idx = self.native_pool.allocate_block()
+                                block.pool = self.native_pool
                                 self.native_pool.write_block(
                                     pool_idx=block.pool_idx,
                                     U=block.U,
@@ -754,6 +793,9 @@ class KVRuntimeManager:
                                     scale=block.scale,
                                     seq_len=block.U.shape[0]
                                 )
+                                # Clear local GPU tensors on block to prevent VRAM leak
+                                block.U = None
+                                block.V = None
 
                             # Mark finalized and decrement pending counter
                             block.state = "COMPRESSED"
@@ -813,6 +855,13 @@ class KVRuntimeManager:
         self._session_token_ids.pop(session_id, None)
         if hasattr(self, "attention_score_cache"):
             self.attention_score_cache.clear_session(session_id)
+        if hasattr(self, "_last_prefill_q"):
+            self._last_prefill_q.pop(session_id, None)
+
+        # Trigger garbage collection and empty MPS/CUDA cache
+        import gc
+        gc.collect()
+        _empty_cache(self.device)
 
     def snapshot_session(self, session_id: str, checkpoint_id: str):
         """
@@ -838,42 +887,51 @@ class KVRuntimeManager:
                 b_snap = copy.copy(b)
                 b_snap._lock = threading.Lock()
                 b_snap.token_indices = list(b.token_indices)
+                b_snap.pool = None
                 
-                # Clone active GPU buffers and re-establish views to ensure complete isolation
+                # Clone active GPU buffers and move to CPU
                 if getattr(b, "_active_buf_k", None) is not None:
-                    b_snap._active_buf_k = b._active_buf_k.clone()
+                    b_snap._active_buf_k = b._active_buf_k.clone().cpu()
                     fill = getattr(b, "_active_fill", 0)
                     if fill > 0:
                         b_snap.active_k = b_snap._active_buf_k[:, :, :fill, :]
                     else:
                         b_snap.active_k = None
                 elif getattr(b, "active_k", None) is not None:
-                    b_snap.active_k = b.active_k.clone()
+                    b_snap.active_k = b.active_k.clone().cpu()
 
                 if getattr(b, "_active_buf_v", None) is not None:
-                    b_snap._active_buf_v = b._active_buf_v.clone()
+                    b_snap._active_buf_v = b._active_buf_v.clone().cpu()
                     fill = getattr(b, "_active_fill", 0)
                     if fill > 0:
                         b_snap.active_v = b_snap._active_buf_v[:, :, :fill, :]
                     else:
                         b_snap.active_v = None
                 elif getattr(b, "active_v", None) is not None:
-                    b_snap.active_v = b.active_v.clone()
+                    b_snap.active_v = b.active_v.clone().cpu()
 
                 # Clone CPU-pinned uncompressed caches
                 if getattr(b, "active_k_cpu", None) is not None:
-                    b_snap.active_k_cpu = b.active_k_cpu.clone()
+                    b_snap.active_k_cpu = b.active_k_cpu.clone().cpu()
                 if getattr(b, "active_v_cpu", None) is not None:
-                    b_snap.active_v_cpu = b.active_v_cpu.clone()
+                    b_snap.active_v_cpu = b.active_v_cpu.clone().cpu()
 
                 if getattr(b, "anchor_kv", None) is not None:
-                    b_snap.anchor_kv = b.anchor_kv.clone()
+                    b_snap.anchor_kv = b.anchor_kv.clone().cpu()
                 if getattr(b, "anchor_kv_cpu", None) is not None:
-                    b_snap.anchor_kv_cpu = b.anchor_kv_cpu.clone()
+                    b_snap.anchor_kv_cpu = b.anchor_kv_cpu.clone().cpu()
 
-                # Increment pool reference counts for compressed blocks
+                # Fetch U and V from pool to keep them in snapshot as CPU tensors
                 if getattr(b, "pool_idx", None) is not None and getattr(self, "native_pool", None) is not None:
-                    self.native_pool.increment_ref(b.pool_idx)
+                    b.pool = self.native_pool
+                    u_gpu = b.U
+                    v_gpu = b.V
+                    if u_gpu is not None:
+                        b_snap._U = u_gpu.cpu()
+                    if v_gpu is not None:
+                        b_snap._V = v_gpu.cpu()
+                    # Mark pool_idx as None so it gets re-allocated upon restore
+                    b_snap.pool_idx = None
 
                 snap_blocks[layer_idx].append(b_snap)
 
@@ -1016,25 +1074,26 @@ class KVRuntimeManager:
                 b_restore.token_indices = list(b.token_indices)
                 
                 # Clone active GPU buffers and re-establish views to ensure complete isolation
+                device = self.device
                 if getattr(b, "_active_buf_k", None) is not None:
-                    b_restore._active_buf_k = b._active_buf_k.clone()
+                    b_restore._active_buf_k = b._active_buf_k.clone().to(device)
                     fill = getattr(b, "_active_fill", 0)
                     if fill > 0:
                         b_restore.active_k = b_restore._active_buf_k[:, :, :fill, :]
                     else:
                         b_restore.active_k = None
                 elif getattr(b, "active_k", None) is not None:
-                    b_restore.active_k = b.active_k.clone()
+                    b_restore.active_k = b.active_k.clone().to(device)
 
                 if getattr(b, "_active_buf_v", None) is not None:
-                    b_restore._active_buf_v = b._active_buf_v.clone()
+                    b_restore._active_buf_v = b._active_buf_v.clone().to(device)
                     fill = getattr(b, "_active_fill", 0)
                     if fill > 0:
                         b_restore.active_v = b_restore._active_buf_v[:, :, :fill, :]
                     else:
                         b_restore.active_v = None
                 elif getattr(b, "active_v", None) is not None:
-                    b_restore.active_v = b.active_v.clone()
+                    b_restore.active_v = b.active_v.clone().to(device)
 
                 # Clone CPU-pinned uncompressed caches
                 if getattr(b, "active_k_cpu", None) is not None:
@@ -1043,13 +1102,28 @@ class KVRuntimeManager:
                     b_restore.active_v_cpu = b.active_v_cpu.clone()
 
                 if getattr(b, "anchor_kv", None) is not None:
-                    b_restore.anchor_kv = b.anchor_kv.clone()
+                    b_restore.anchor_kv = b.anchor_kv.clone().to(device)
                 if getattr(b, "anchor_kv_cpu", None) is not None:
                     b_restore.anchor_kv_cpu = b.anchor_kv_cpu.clone()
 
-                # Increment pool reference counts for compressed blocks
-                if getattr(b, "pool_idx", None) is not None and getattr(self, "native_pool", None) is not None:
-                    self.native_pool.increment_ref(b.pool_idx)
+                # Re-allocate slots in pool for compressed blocks and write CPU tensors back to pool
+                if getattr(b, "_U", None) is not None and getattr(self, "native_pool", None) is not None:
+                    b_restore.pool_idx = self.native_pool.allocate_block()
+                    b_restore.pool = self.native_pool
+                    u_gpu = b._U.to(device)
+                    v_gpu = b._V.to(device)
+                    self.native_pool.write_block(
+                        pool_idx=b_restore.pool_idx,
+                        U=u_gpu,
+                        V=v_gpu,
+                        anchor_K=self._get_rotated_anchor_k(session_id, b_restore.anchor_kv[0, 0], b_restore.anchor_idx),
+                        anchor_V=b_restore.anchor_kv[0, 1],
+                        scale=b_restore.scale,
+                        seq_len=u_gpu.shape[0]
+                    )
+                    # Clear local GPU tensors on block again to prevent VRAM leak
+                    b_restore._U = None
+                    b_restore._V = None
 
                 dest_blocks[layer_idx].append(b_restore)
                 if self._streaming_mgr is not None:
@@ -1997,6 +2071,7 @@ class KVRuntimeManager:
                     try:
                         if getattr(block, 'pool_idx', None) is None:
                             block.pool_idx = self.native_pool.allocate_block()
+                        block.pool = self.native_pool
                         self.native_pool.write_block(
                             pool_idx=block.pool_idx,
                             U=block.U,
@@ -2006,6 +2081,9 @@ class KVRuntimeManager:
                             scale=block.scale,
                             seq_len=block.U.shape[0]
                         )
+                        # Clear local GPU tensors on block to prevent VRAM leak
+                        block.U = None
+                        block.V = None
                     except Exception as e:
                         # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
                         print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")

@@ -1,7 +1,7 @@
 import os
 import psutil
-os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+os.environ.setdefault("DIFFKV_MPS_APPROXIMATE_ATTN", "0")
 
 import time
 import uuid
@@ -419,6 +419,11 @@ class OpenAICompatibleAPIGateway:
                         if hasattr(self.resolver, "cancel"):
                             self.resolver.cancel(session_id, free_kv=False)
                     raise
+                finally:
+                    import gc
+                    from native_core.mac_utils import empty_cache
+                    gc.collect()
+                    empty_cache()
 
         @self.app.post("/v1/sessions")
         async def create_session():
@@ -654,6 +659,11 @@ class OpenAICompatibleAPIGateway:
                 if hasattr(self.resolver, "cancel"):
                     self.resolver.cancel(session_id, free_kv=False)
             raise
+        finally:
+            import gc
+            from native_core.mac_utils import empty_cache
+            gc.collect()
+            empty_cache()
 
     # -----------------------------------------------------------------------
 

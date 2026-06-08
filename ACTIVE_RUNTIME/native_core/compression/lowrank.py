@@ -398,7 +398,11 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         if pool is not None:
             if getattr(block, 'pool_idx', None) is None:
                 block.pool_idx = pool.allocate_block()
+            block.pool = pool
             pool.write_block(block.pool_idx, block.U, block.V, block.anchor_kv[0,0], block.anchor_kv[0,1], block.scale, T_active)
+            # Clear local GPU tensors on block to prevent VRAM leak
+            block.U = None
+            block.V = None
 
         if manager is not None and getattr(manager, "_streaming_mgr", None) is not None:
             manager._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)

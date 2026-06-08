@@ -49,6 +49,34 @@ static torch::Tensor gqa_reduce_q(
              .mean(1);  // [n_kv_heads, D]
 }
 
+// ── Internal helper: RoPE rotate_half ────────────────────────────────────────
+// Implements the half-dimension swap used in standard Rotary Positional Embedding.
+// Input x: [..., D] float32
+// Output:  [..., D] float32 — first half negated and swapped with second half
+static torch::Tensor rotate_half_cpp(const torch::Tensor& x) {
+    const int D    = static_cast<int>(x.size(-1));
+    const int half = D / 2;
+    auto x1 = x.slice(-1, 0, half);     // [..., D/2]
+    auto x2 = x.slice(-1, half, D);     // [..., D/2]
+    return torch::cat({-x2, x1}, /*dim=*/-1);  // [..., D]
+}
+
+// ── Internal helper: apply RoPE to a set of keys given per-slot cos/sin ──────
+// keys:    [K, n_heads, D] float32
+// cos_anc: [K, D]          float32  (already squeezed to per-anchor cosine)
+// sin_anc: [K, D]          float32
+// Returns: [K, n_heads, D] float32  rotated keys
+static torch::Tensor apply_rope_to_keys(
+    const torch::Tensor& keys,       // [K, n_heads, D]
+    const torch::Tensor& cos_anc,    // [K, D]
+    const torch::Tensor& sin_anc     // [K, D]
+) {
+    // Broadcast cos/sin over heads: [K, 1, D]
+    auto c = cos_anc.unsqueeze(1);  // [K, 1, D]
+    auto s = sin_anc.unsqueeze(1);  // [K, 1, D]
+    return keys * c + rotate_half_cpp(keys) * s;  // [K, n_heads, D]
+}
+
 // ── Core implementation ───────────────────────────────────────────────────────
 // Returns (out [H_q, D] float16, lse [H_q] float32).
 static std::tuple<torch::Tensor, torch::Tensor> _decode_attention_impl(
@@ -60,6 +88,9 @@ static std::tuple<torch::Tensor, torch::Tensor> _decode_attention_impl(
     const torch::Tensor& anchors_K,    // [N_pool, n_kv_heads, D] float16
     const torch::Tensor& anchors_V,    // [N_pool, n_kv_heads, D] float16
     const torch::Tensor& seq_lens,     // [N_pool] int32
+    const torch::Tensor& scales,       // [N_pool] float16
+    const torch::Tensor& cos_anc,      // [K_active, D] float32 — RoPE cosine at anchor positions
+    const torch::Tensor& sin_anc,      // [K_active, D] float32 — RoPE sine at anchor positions
     const torch::Tensor& slot_indices, // [K_active] int32
     float scale,
     int n_q_heads,
@@ -83,13 +114,22 @@ static std::tuple<torch::Tensor, torch::Tensor> _decode_attention_impl(
 
     auto slots64 = slot_indices.to(torch::kInt64);  // [K]
 
-    // ── GQA Q-reduction: [H_q, D] → [n_kv_heads, D] float32 ─────────────────
-    auto q_kv = gqa_reduce_q(Q, n_kv_heads);  // [n_kv_heads, D] float32
-
     // ── Gather pool tensors for active slots ──────────────────────────────────
-    // anchors_K gathered: [K, n_kv_heads, D] float16
-    auto anc_K_g = anchors_K.index_select(0, slots64).to(torch::kFloat32);  // [K, n_kv, D]
-    auto anc_V_g = anchors_V.index_select(0, slots64).to(torch::kFloat32);  // [K, n_kv, D]
+    auto anc_K_g_raw = anchors_K.index_select(0, slots64).to(torch::kFloat32);  // [K, n_kv_heads, D]
+    auto anc_V_g = anchors_V.index_select(0, slots64).to(torch::kFloat32);      // [K, n_kv_heads, D]
+
+    // ── On-the-fly RoPE rotation for anchor keys ─────────────────────────────
+    // anchors_K are stored unrotated. Apply RoPE using per-slot cos/sin at anchor positions.
+    // cos_anc: [K, D] — rotate each anchor key by its absolute sequence position.
+    bool has_rope = (cos_anc.defined() && cos_anc.numel() > 0);
+    torch::Tensor anc_K_g;
+    if (has_rope) {
+        auto cos_f = cos_anc.to(torch::kFloat32);  // [K, D]
+        auto sin_f = sin_anc.to(torch::kFloat32);  // [K, D]
+        anc_K_g = apply_rope_to_keys(anc_K_g_raw, cos_f, sin_f);  // [K, n_kv_heads, D]
+    } else {
+        anc_K_g = anc_K_g_raw;
+    }
 
     // U_pool gathered:  [K, S_max, R] int8 → dequantize → [K, S_max, R] float32
     auto U_g_int8 = U_pool.index_select(0, slots64);                        // [K, S_max, R]
@@ -99,55 +139,64 @@ static std::tuple<torch::Tensor, torch::Tensor> _decode_attention_impl(
                         .mul_(u_scales.view({K, 1, 1}));                     // [K, S_max, R]
 
     // VK_pool gathered: [K, R, n_kv_heads, D] float16 → float32
-    auto VK_g = VK_pool.index_select(0, slots64).to(torch::kFloat32);       // [K, R, n_kv, D]
-    auto VV_g = VV_pool.index_select(0, slots64).to(torch::kFloat32);       // [K, R, n_kv, D]
+    auto VK_g_raw = VK_pool.index_select(0, slots64).to(torch::kFloat32);   // [K, R, n_kv_heads, D]
+    // ── On-the-fly RoPE rotation for VK (SVD key basis vectors) ─────────────
+    // VK basis vectors are stored unrotated. Rotate each [n_kv_heads, D] slice
+    // using the corresponding anchor's cos/sin (all basis vectors share the
+    // same position as their anchor — valid for the rank-1 approximation).
+    torch::Tensor VK_g;
+    if (has_rope) {
+        auto cos_f = cos_anc.to(torch::kFloat32);  // [K, D]
+        auto sin_f = sin_anc.to(torch::kFloat32);  // [K, D]
+        // VK_g_raw: [K, R, n_kv_heads, D] — reshape to [K*R, n_kv_heads, D] for batched rotation
+        auto VK_flat = VK_g_raw.reshape({K * rank, n_kv_heads, D});          // [K*R, n_kv_heads, D]
+        // Repeat cos/sin for R ranks: [K, D] → [K*R, D]
+        auto cos_rep = cos_f.unsqueeze(1).expand({K, rank, D}).reshape({K * rank, D});
+        auto sin_rep = sin_f.unsqueeze(1).expand({K, rank, D}).reshape({K * rank, D});
+        VK_g = apply_rope_to_keys(VK_flat, cos_rep, sin_rep).reshape({K, rank, n_kv_heads, D});
+    } else {
+        VK_g = VK_g_raw;
+    }
+    auto VV_g = VV_pool.index_select(0, slots64).to(torch::kFloat32);       // [K, R, n_kv_heads, D]
+    auto slen_g = seq_lens.index_select(0, slots64);                        // [K]
+    auto scales_g = scales.index_select(0, slots64).to(torch::kFloat32);    // [K]
 
-    // seq_lens gathered: [K] int32
-    auto slen_g = seq_lens.index_select(0, slots64).to(torch::kInt32);      // [K]
+    // ── GQA key/value repetition to match n_q_heads ──────────────────────────
+    // Repetition factor: g = n_q_heads / n_kv_heads
+    auto anc_K_expand = anc_K_g.unsqueeze(2).expand({K, n_kv_heads, g, D}).reshape({K, n_q_heads, D});
+    auto anc_V_expand = anc_V_g.unsqueeze(2).expand({K, n_kv_heads, g, D}).reshape({K, n_q_heads, D});
+    auto VK_expand = VK_g.unsqueeze(3).expand({K, rank, n_kv_heads, g, D}).reshape({K, rank, n_q_heads, D});
+    auto VV_expand = VV_g.unsqueeze(3).expand({K, rank, n_kv_heads, g, D}).reshape({K, rank, n_q_heads, D});
 
-    // ── Step 1: Anchor scores — [n_kv_heads, K] ───────────────────────────────
-    // anc_K_g: [K, n_kv, D] → permute → [n_kv, K, D]
-    // q_kv [n_kv, D] × anc_K [n_kv, D, K] → [n_kv, K]
-    auto anc_K_perm = anc_K_g.permute({1, 0, 2});  // [n_kv, K, D]
+    // ── Step 1: Anchor scores — [n_q_heads, K] ───────────────────────────────
+    // anc_K_expand: [K, n_q_heads, D] → permute → [n_q_heads, K, D]
+    // Q [n_q_heads, D] × anc_K [n_q_heads, D, K] → [n_q_heads, K]
+    auto anc_K_perm = anc_K_expand.permute({1, 0, 2});  // [n_q_heads, K, D]
     auto s_anc = torch::bmm(
-        q_kv.unsqueeze(1),    // [n_kv, 1, D]
-        anc_K_perm.permute({0, 2, 1})  // [n_kv, D, K]
-    ).squeeze(1).mul_(scale);  // [n_kv, K]
+        Q.unsqueeze(1).to(torch::kFloat32),    // [n_q_heads, 1, D]
+        anc_K_perm.permute({0, 2, 1})  // [n_q_heads, D, K]
+    ).squeeze(1).mul_(scale);  // [n_q_heads, K]
 
-    // ── Step 2: Q projection into SVD subspace — [n_kv_heads, K, R] ──────────
-    // VK_g: [K, R, n_kv, D] → permute → [n_kv, K, R, D]
-    // q_proj[h, k, r] = q_kv[h] @ VK_g[k, r, h, :]
-    // Batched: for each h, for each k:
-    //   q_kv[h]: [D], VK_g[k, :, h, :]: [R, D]
-    //   q_proj[h, k, :] = VK_g[k, :, h, :] @ q_kv[h] = [R]
-    // Vectorized over k:
-    //   VK_g[:,: , h, :] shape [K, R, D] → q_kv[h] [D] → [K, R] via mv
-    //   Collect over h → [n_kv, K, R]
-    // Efficient: reshape VK_g to [K*R, n_kv*D] ... better:
-    // VK_g [K, R, n_kv, D] → permute to [n_kv, K*R, D] → mm q_kv.T → [n_kv, K*R] → reshape [n_kv, K, R]
-    auto VK_nkv_kr_d = VK_g.permute({2, 0, 1, 3}).reshape({n_kv_heads, K * rank, D});  // [n_kv, K*R, D]
+    // ── Step 2: Q projection into SVD subspace — [n_q_heads, K, R] ──────────
+    // VK_expand: [K, R, n_q_heads, D] → permute → [n_q_heads, K, R, D]
+    // q_proj[h, k, r] = Q[h] @ VK_expand[k, r, h, :]
+    // VK_expand [K, R, n_q_heads, D] → permute to [n_q_heads, K*R, D] → mm Q.T → [n_q_heads, K*R] → reshape [n_q_heads, K, R]
+    auto VK_nq_kr_d = VK_expand.permute({2, 0, 1, 3}).reshape({n_q_heads, K * rank, D});  // [n_q_heads, K*R, D]
     auto q_proj = torch::bmm(
-        VK_nkv_kr_d,                   // [n_kv, K*R, D]
-        q_kv.unsqueeze(2)              // [n_kv, D, 1]
-    ).squeeze(2).reshape({n_kv_heads, K, rank});  // [n_kv, K, R]
+        VK_nq_kr_d,                   // [n_q_heads, K*R, D]
+        Q.unsqueeze(2).to(torch::kFloat32)  // [n_q_heads, D, 1]
+    ).squeeze(2).reshape({n_q_heads, K, rank});  // [n_q_heads, K, R]
 
-    // ── Step 3: Delta scores — [n_kv_heads, K, S_max] ─────────────────────────
+    // ── Step 3: Delta scores — [n_q_heads, K, S_max] ─────────────────────────
     // For each h: q_proj[h, :, :] [K, R] × U_g [K, S_max, R].T → [K, S_max]
-    // Batched over h: stack U_g → [n_kv, K, S_max, R] (via expand) then bmm
-    // OR: since U_g is the same for all heads (pooling), we can:
-    //   U_g: [K, S_max, R] → [1, K*S_max, R] → expanded [n_kv, K*S_max, R]
-    //   q_proj [n_kv, K, R] → [n_kv, K*S_max via broadcast]
-    // Better: reshape as [n_kv, K, R] @ [K, R, S_max] per head-block pair.
-    // Simplest vectorized form:
-    //   q_proj: [n_kv, K, R]
-    //   U_g.permute(0,2,1): [K, R, S_max]
-    //   → For each h: q_proj[h] [K, R] @ U_g.T [K, R, S_max] → [K, S_max]... can't batch K dim.
-    // Use: bmm with shapes [n_kv*K, 1, R] @ [n_kv*K, R, S_max]
-    // Or: einsum("hkr,ksr->hks", q_proj, U_g)
+    // einsum("hkr,ksr->hks", q_proj, U_g)
     auto s_delta = torch::einsum("hkr,ksr->hks",
-                                  {q_proj,           // [n_kv, K, R]
+                                  {q_proj,           // [n_q_heads, K, R]
                                    U_g})             // [K, S_max, R]
-                        .mul_(scale);                // [n_kv, K, S_max]
+                        .mul_(scale);                // [n_q_heads, K, S_max]
+    // Scale delta scores by the block-level scales
+    s_delta.mul_(scales_g.view({1, K, 1}));
+    s_delta.add_(s_anc.unsqueeze(2));
 
     // ── Step 4: Build seq_len mask — [K, S_max] ───────────────────────────────
     // mask[k, t] = 1 if t < seq_lens[k], else 0
@@ -159,85 +208,53 @@ static std::tuple<torch::Tensor, torch::Tensor> _decode_attention_impl(
     auto mask = (t_range.unsqueeze(0) < slen_g.to(torch::kInt32).unsqueeze(1));  // [K, S_max] bool
 
     // ── Step 5: Online softmax over (anchor + masked delta) per head ──────────
-    // Scores: s_anc [n_kv, K], s_delta [n_kv, K, S_max] (masked)
-    //
-    // Set masked positions to -inf before combining for joint softmax.
+    // Scores: s_anc [n_q_heads, K], s_delta [n_q_heads, K, S_max] (masked)
     // Combined: concat anchor (1 token equiv) with deltas along dim -1.
-    // Anchor is always "present" (no masking needed).
-    //
-    // Build joint score matrix: [n_kv, K, 1+S_max] with mask applied to delta part.
     const float NEG_INF_VAL = -1e30f;
 
     // Apply mask to delta scores: set t >= seq_lens to -inf
-    // mask [K, S_max] → expand [n_kv, K, S_max]
-    auto mask_expanded = mask.unsqueeze(0).expand({n_kv_heads, K, S_max});
+    auto mask_expanded = mask.unsqueeze(0).expand({n_q_heads, K, S_max});
     auto s_delta_masked = s_delta.clone();
     s_delta_masked.masked_fill_(~mask_expanded, NEG_INF_VAL);
 
-    // Concat: s_anc [n_kv, K, 1] + s_delta_masked [n_kv, K, S_max] → [n_kv, K, 1+S_max]
+    // Concat: s_anc [n_q_heads, K, 1] + s_delta_masked [n_q_heads, K, S_max] → [n_q_heads, K, 1+S_max]
     auto scores_all = torch::cat(
         {s_anc.unsqueeze(2), s_delta_masked},
         /*dim=*/2
-    );  // [n_kv, K, 1+S_max]
+    );  // [n_q_heads, K, 1+S_max]
 
-    // Flatten K blocks: [n_kv, K*(1+S_max)] → softmax over all blocks jointly
-    auto scores_flat = scores_all.reshape({n_kv_heads, K * (1 + S_max)});
+    // Flatten K blocks: [n_q_heads, K*(1+S_max)] → softmax over all blocks jointly
+    auto scores_flat = scores_all.reshape({n_q_heads, K * (1 + S_max)});
     auto weights = torch::softmax(scores_flat.to(torch::kFloat32), /*dim=*/1)
-                         .reshape({n_kv_heads, K, 1 + S_max});  // [n_kv, K, 1+S_max]
+                         .reshape({n_q_heads, K, 1 + S_max});  // [H_q, K, 1+S_max]
 
     // ── Step 6: Accumulate output values ──────────────────────────────────────
-    // V_anchor:  anc_V_g [K, n_kv, D] → permute → [n_kv, K, D]
-    // V_delta_b: U_g [K, S_max, R] @ VV_g[:,: , h, :] → [n_kv, K, S_max, D]
-    //
-    // anchor weights: weights[:, :, 0]  → [n_kv, K]
-    // delta weights:  weights[:, :, 1:] → [n_kv, K, S_max]
+    // anchor weights: weights[:, :, 0]  → [H_q, K]
+    // delta weights:  weights[:, :, 1:] → [H_q, K, S_max]
+    auto w_anc   = weights.select(2, 0);         // [H_q, K]
+    auto w_delta = weights.slice(2, 1, 1 + S_max);  // [H_q, K, S_max]
 
-    auto w_anc   = weights.select(2, 0);         // [n_kv, K]
-    auto w_delta = weights.slice(2, 1, 1 + S_max);  // [n_kv, K, S_max]
+    auto w_block_sum = w_anc + w_delta.sum(2);   // [H_q, K]
 
-    // Anchor value contribution: anc_V_g [K, n_kv, D] → [n_kv, K, D]
-    auto anc_V_nkv = anc_V_g.permute({1, 0, 2});  // [n_kv, K, D]
-    // Weighted sum over K: [n_kv, K] * [n_kv, K, D] → [n_kv, D]
-    auto out_anchor = (w_anc.unsqueeze(2) * anc_V_nkv).sum(1);  // [n_kv, D]
+    // Anchor value contribution: anc_V_expand [K, H_q, D] → [H_q, K, D]
+    auto anc_V_nq = anc_V_expand.permute({1, 0, 2});  // [H_q, K, D]
+    // Weighted sum over K: [H_q, K] * [H_q, K, D] → [H_q, D]
+    auto out_anchor = (w_block_sum.unsqueeze(2) * anc_V_nq).sum(1);  // [H_q, D]
 
     // Delta value contribution:
-    // V_delta = U_g @ VV_g_flat: U_g [K, S_max, R] @ VV_g [K, R, n_kv*D] → [K, S_max, n_kv, D]
-    // VV_g: [K, R, n_kv, D] → reshape → [K, R, n_kv*D]
-    auto VV_flat = VV_g.reshape({K, rank, n_kv_heads * D});        // [K, R, n_kv*D]
-    // V_reconst = U_g @ VV_flat: [K, S_max, R] @ [K, R, n_kv*D] → [K, S_max, n_kv*D]
+    // VV_expand: [K, R, H_q, D] → reshape → [K, R, H_q*D]
+    auto VV_flat = VV_expand.reshape({K, rank, n_q_heads * D});        // [K, R, H_q*D]
+    // V_reconst = U_g @ VV_flat: [K, S_max, R] @ [K, R, H_q*D] → [K, S_max, H_q*D]
     auto V_reconst = torch::bmm(U_g, VV_flat)
-                         .reshape({K, S_max, n_kv_heads, D})
-                         .permute({2, 0, 1, 3});   // [n_kv, K, S_max, D]
+                         .reshape({K, S_max, n_q_heads, D})
+                         .permute({2, 0, 1, 3});   // [H_q, K, S_max, D]
 
-    // Apply delta weights and mask (V_reconst already 0 at padded positions via weights=-inf→0)
-    // w_delta: [n_kv, K, S_max] → unsqueeze → [n_kv, K, S_max, 1]
-    auto out_delta = (w_delta.unsqueeze(3) * V_reconst).sum({1, 2});  // [n_kv, D]
+    // Apply delta weights, SVD block-level scales, and mask
+    auto w_delta_scaled = w_delta * scales_g.view({1, K, 1});
+    auto out_delta = (w_delta_scaled.unsqueeze(3) * V_reconst).sum({1, 2});  // [H_q, D]
 
-    auto out_kv = (out_anchor + out_delta).to(torch::kFloat16);  // [n_kv, D] float16
-
-    // ── Step 7: GQA expand [n_kv, D] → [H_q, D] ──────────────────────────────
-    torch::Tensor out_q;
-    if (g == 1) {
-        out_q = out_kv;
-    } else {
-        out_q = out_kv.unsqueeze(1)
-                      .expand({n_kv_heads, g, D})
-                      .reshape({n_q_heads, D})
-                      .contiguous();
-    }
-
-    // ── Step 8: LSE — log-sum-exp for LSE-combine with dense window ───────────
-    // LSE per head = logsumexp over the joint score distribution
-    auto lse_kv = torch::logsumexp(scores_flat.to(torch::kFloat32), /*dim=*/1);  // [n_kv]
-    torch::Tensor lse_q;
-    if (g == 1) {
-        lse_q = lse_kv;
-    } else {
-        lse_q = lse_kv.unsqueeze(1)
-                      .expand({n_kv_heads, g})
-                      .reshape({n_q_heads})
-                      .contiguous();
-    }
+    auto out_q = (out_anchor + out_delta).to(torch::kFloat16);  // [H_q, D] float16
+    auto lse_q = torch::logsumexp(scores_flat.to(torch::kFloat32), /*dim=*/1);  // [H_q]
 
     return {out_q, lse_q};
 }
@@ -253,6 +270,9 @@ torch::Tensor decode_attention_aten(
     const torch::Tensor& anchors_K,
     const torch::Tensor& anchors_V,
     const torch::Tensor& seq_lens,
+    const torch::Tensor& scales,
+    const torch::Tensor& cos_anc,
+    const torch::Tensor& sin_anc,
     const torch::Tensor& slot_indices,
     float scale,
     int n_q_heads,
@@ -261,7 +281,7 @@ torch::Tensor decode_attention_aten(
 ) {
     auto [out, lse] = _decode_attention_impl(
         Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-        anchors_K, anchors_V, seq_lens, slot_indices,
+        anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
         scale, n_q_heads, n_kv_heads, rank
     );
     (void)lse;
@@ -277,6 +297,9 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_aten_lse(
     const torch::Tensor& anchors_K,
     const torch::Tensor& anchors_V,
     const torch::Tensor& seq_lens,
+    const torch::Tensor& scales,
+    const torch::Tensor& cos_anc,
+    const torch::Tensor& sin_anc,
     const torch::Tensor& slot_indices,
     float scale,
     int n_q_heads,
@@ -285,7 +308,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_aten_lse(
 ) {
     return _decode_attention_impl(
         Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-        anchors_K, anchors_V, seq_lens, slot_indices,
+        anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
         scale, n_q_heads, n_kv_heads, rank
     );
 }
@@ -303,6 +326,9 @@ torch::Tensor fused_decode_attention_combined(
     const torch::Tensor& anchors_K,
     const torch::Tensor& anchors_V,
     const torch::Tensor& seq_lens,
+    const torch::Tensor& scales,
+    const torch::Tensor& cos_anc,         // [K_active, D] — RoPE cosine at anchor positions
+    const torch::Tensor& sin_anc,         // [K_active, D] — RoPE sine at anchor positions
     const torch::Tensor& slot_indices,
     float scale,
     int n_q_heads,
@@ -323,20 +349,20 @@ torch::Tensor fused_decode_attention_combined(
         if (device.is_mps()) {
             std::tie(out_sparse, lse_sparse) = decode_attention_metal(
                 Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-                anchors_K, anchors_V, seq_lens, slot_indices,
+                anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
                 scale, n_q_heads, n_kv_heads, rank
             );
         } else {
             std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
                 Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-                anchors_K, anchors_V, seq_lens, slot_indices,
+                anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
                 scale, n_q_heads, n_kv_heads, rank
             );
         }
 #else
         std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
             Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-            anchors_K, anchors_V, seq_lens, slot_indices,
+            anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
             scale, n_q_heads, n_kv_heads, rank
         );
 #endif

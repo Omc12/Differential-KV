@@ -499,6 +499,15 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             cos_sliced_arg = cos_sliced_cached
                             sin_sliced_arg = sin_sliced_cached
 
+                        # Compute per-slot anchor cos/sin for C++/Metal on-the-fly RoPE rotation.
+                        # cos_sliced_arg shape: [K, 1+max_seq_len, 1, D] — index 0 on dim1 is the anchor.
+                        # We need [K, D] float32 for the C++ kernel.
+                        _cos_anc_2d = None
+                        _sin_anc_2d = None
+                        if cos_sliced_arg is not None and cos_sliced_arg.numel() > 0:
+                            _cos_anc_2d = cos_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
+                            _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
+
                         # ── MPS Fast Path (Phase 34): fused_decode_mps ─────────────────────────
                         # On MPS (Apple Silicon), avoid _pytorch_vectorized_sparse_attn_decode
                         # which reconstructs all compressed K tokens from SVD + applies RoPE,
@@ -517,15 +526,19 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 
                                 if dense_k_assembled is not None:
-                                    L_dense = dense_k_assembled.shape[2]
-                                    start_pos = dense_blocks[0].anchor_idx
-                                    _cos = cos_all[:, start_pos : start_pos + L_dense]
-                                    _sin = sin_all[:, start_pos : start_pos + L_dense]
+                                    dense_positions_list = []
+                                    for blk in dense_blocks:
+                                        dense_positions_list.extend(blk.token_indices)
+                                    dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    _cos = cos_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
+                                    _sin = sin_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
                                 else:
                                     _cos = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                     _sin = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
                                 _slots = block_indices if block_indices is not None else torch.empty(0, device=query_states.device, dtype=torch.int32)
+                                _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
 
                                 out_val = _dkv_core.fused_decode_attention_combined(
                                     _q_val,
@@ -540,6 +553,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     pool.anchors_K,
                                     pool.anchors_V,
                                     pool.seq_lens,
+                                    pool.scales.contiguous(),
+                                    _ca,
+                                    _sa,
                                     _slots,
                                     _scale,
                                     num_heads,
@@ -555,17 +571,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 D         = query_states.shape[3]
 
                                 if has_dense:
-                                    # 1. Optimize RoPE Slicing: slice contiguous views directly
-                                    L_dense = dense_k_assembled.shape[2]
-                                    start_pos = dense_blocks[0].anchor_idx
-                                    cos_sliced = cos_all[:, start_pos : start_pos + L_dense]
-                                    sin_sliced = sin_all[:, start_pos : start_pos + L_dense]
-                                    if cos_sliced.dim() == 3:
-                                        cos_dense = cos_sliced.unsqueeze(1) # [1, 1, L_dense, D]
-                                        sin_dense = sin_sliced.unsqueeze(1)
-                                    else:
-                                        cos_dense = cos_sliced.permute(0, 2, 1, 3)
-                                        sin_dense = sin_sliced.permute(0, 2, 1, 3)
+                                    # 1. Optimize RoPE Slicing: gather non-contiguous positions directly
+                                    dense_positions_list = []
+                                    for blk in dense_blocks:
+                                        dense_positions_list.extend(blk.token_indices)
+                                    dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    cos_dense = cos_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
+                                    sin_dense = sin_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
 
                                     # 2. Pre-allocate static workspace for dense_k_rot to eliminate dynamic shape allocations
                                     session_dict = kv_manager.decode_workspace.setdefault(sid, {})
@@ -619,6 +631,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # Phase 2: Custom Metal compute shader path (macOS).
                                     # Falls back to Phase 1 C++ ATen or Python.
                                     _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
+                                    _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                    _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     if _DIFFKV_HAS_METAL_ATTN and pool is not None:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, _ = _decode_attention_metal(
@@ -630,6 +644,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             pool.anchors_K.contiguous(),
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
+                                            pool.scales.contiguous(),
+                                            _ca,
+                                            _sa,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -647,6 +664,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             pool.anchors_K.contiguous(),
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
+                                            pool.scales.contiguous(),
+                                            _ca,
+                                            _sa,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -688,6 +708,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # Phase 2: Custom Metal compute shader path (macOS).
                                     # Falls back to Phase 1 C++ ATen or Python.
                                     _Q_sq = query_states[b_idx, :, 0, :]
+                                    _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                    _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     if _DIFFKV_HAS_METAL_ATTN and pool is not None:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, lse_sparse = _decode_attention_metal(
@@ -699,6 +721,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             pool.anchors_K.contiguous(),
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
+                                            pool.scales.contiguous(),
+                                            _ca,
+                                            _sa,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -716,6 +741,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             pool.anchors_K.contiguous(),
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
+                                            pool.scales.contiguous(),
+                                            _ca,
+                                            _sa,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -781,6 +809,16 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 )
                                 with torch.no_grad():
                                     if _is_mps_decode:
+                                        has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                                        if has_dense:
+                                            dense_positions_list = []
+                                            for blk in dense_blocks:
+                                                dense_positions_list.extend(blk.token_indices)
+                                            dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                            cos_dense = cos_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
+                                            sin_dense = sin_all[0, dense_positions].squeeze().unsqueeze(0).unsqueeze(1)
+                                            dense_k_rot = (dense_k_assembled * cos_dense) + (rotate_half(dense_k_assembled)) * sin_dense
+
                                         _q_val = query_states[b_idx, :, 0, :]
                                         _full_bsizes = pool.seq_lens[_full_bi]
                                         out_sparse_full, lse_sparse_full = fused_decode_mps(

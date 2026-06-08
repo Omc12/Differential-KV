@@ -122,8 +122,8 @@ class StreamingKVBlock:
     active_v_cpu: Optional[torch.Tensor] = None
 
     # Compressed state (set by compressor)
-    U: Optional[torch.Tensor] = None
-    V: Optional[torch.Tensor] = None
+    _U: Optional[torch.Tensor] = None
+    _V: Optional[torch.Tensor] = None
     U_cpu: Optional[torch.Tensor] = None
     V_cpu: Optional[torch.Tensor] = None
     scale: float = 1.0
@@ -141,6 +141,44 @@ class StreamingKVBlock:
     layer_idx: Optional[int] = None
     _cache_id: Optional[str] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    pool: Any = None
+
+    @property
+    def U(self):
+        if self._U is not None:
+            return self._U
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.U.shape[2]
+            U_int8 = pool.U[pool_idx, :seq_len, :rank]
+            scale_u = pool.U_scale[pool_idx]
+            return U_int8.to(scale_u.dtype) * scale_u
+        return None
+
+    @U.setter
+    def U(self, val):
+        self._U = val
+
+    @property
+    def V(self):
+        if self._V is not None:
+            return self._V
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.V_KV.shape[2]
+            vk = pool.V_KV[pool_idx, 0, :rank]
+            vv = pool.V_KV[pool_idx, 1, :rank]
+            vk_flat = vk.reshape(rank, -1)
+            vv_flat = vv.reshape(rank, -1)
+            return torch.cat([vk_flat, vv_flat], dim=1)
+        return None
+
+    @V.setter
+    def V(self, val):
+        self._V = val
 
     # ── Phase 29: Ring buffer fields (Fix #1 — eliminate torch.cat per token) ──
     # Pre-allocated GPU tensor of shape [1, heads, micro_block_size, head_dim].
@@ -427,8 +465,8 @@ class StreamingSparseIngestManager:
                         block.active_k_cpu = block.active_k_cpu[:, :, :keep_active, :] if keep_active > 0 else None
                         block.active_v_cpu = block.active_v_cpu[:, :, :keep_active, :] if keep_active > 0 else None
 
-                    if block.U is not None:
-                        block.U = block.U[:keep_active, :]
+                    if block._U is not None:
+                        block._U = block._U[:keep_active, :]
                     if block.U_cpu is not None:
                         block.U_cpu = block.U_cpu[:keep_active, :]
                     if block.pool_idx is not None and self.native_pool is not None:

@@ -225,20 +225,22 @@ def get_default_dtype(device: Optional[str] = None) -> torch.dtype:
     return torch.bfloat16
 
 
-# Monkeypatch torch.mps.capture_to_graph if it's missing in this PyTorch version
-if hasattr(torch, "mps") and not hasattr(torch.mps, "capture_to_graph"):
-    class _CaptureToGraphContext:
-        def __init__(self):
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            pass
+# Monkeypatch torch.mps.capture_to_graph to prevent graph compilation memory leaks on dynamic shapes
+if hasattr(torch, "mps"):
+    import os
+    if os.environ.get("DIFFKV_MPS_CAPTURE_GRAPH", "0") != "1" or not hasattr(torch.mps, "capture_to_graph"):
+        class _CaptureToGraphContext:
+            def __init__(self):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
 
-    def _capture_to_graph():
-        return _CaptureToGraphContext()
+        def _capture_to_graph():
+            return _CaptureToGraphContext()
 
-    torch.mps.capture_to_graph = _capture_to_graph
+        torch.mps.capture_to_graph = _capture_to_graph
 
 
 def get_true_diffkv_memory_mb() -> dict:

@@ -38,6 +38,11 @@ kernel void decode_attention_metal_kernel(
     device const int32_t& K [[buffer(15)]],
     device const int32_t& D [[buffer(16)]],
     device const float& scale [[buffer(17)]],
+    device const half* scales [[buffer(18)]],            // [N_pool]
+    // RoPE buffers: per-slot anchor cosine and sine [K, D] float32
+    device const float* cos_anc [[buffer(19)]],          // [K, D] float32
+    device const float* sin_anc [[buffer(20)]],          // [K, D] float32
+    device const int32_t& has_rope [[buffer(21)]],       // 1 if RoPE should be applied
 
     uint tg_idx [[threadgroup_position_in_grid]],       // Query head index (0..H_q-1)
     uint tid [[thread_position_in_threadgroup]],        // Thread index within threadgroup
@@ -63,29 +68,42 @@ kernel void decode_attention_metal_kernel(
     threadgroup float red_proj_temp[64 * 32]; // [threads_per_tg, rank] temp buffer
     threadgroup float scores_anc_cached[128]; // cache for anchor scores (up to 128 blocks)
     threadgroup float q_proj_cached[128 * 32]; // cache for query projections (up to 128 blocks)
+    // Shared buffer to hold rotated anchor key for current block [D]
+    threadgroup float ak_rot_shared[128];
 
-    // 1. Cache the GQA-averaged query vector in shared memory
+    // 1. Cache the query vector in shared memory
     for (int d = tid; d < D; d += t_per_tg) {
-        float q_sum = 0.0f;
-        int group_start_head = kv_head * g;
-        for (int j = 0; j < g; ++j) {
-            q_sum += (float)Q[(group_start_head + j) * D + d];
-        }
-        q_shared[d] = q_sum / (float)g;
+        q_shared[d] = (float)Q[tg_idx * D + d];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ── PASS 1: Compute online softmax maximum and denominator ────────────────
     SoftmaxState sm_state = { -1e30f, 0.0f };
+    const int half_d = D / 2;
 
     for (int k = 0; k < K; ++k) {
         int slot_id = slot_indices[k];
         int slen = seq_lens[slot_id];
 
         // 1. Compute anchor dot product score (using all threads to collaborate)
+        for (int d = tid; d < D; d += t_per_tg) {
+            float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+            if (has_rope) {
+                float c = cos_anc[k * D + d];
+                float s = sin_anc[k * D + d];
+                int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                float raw_partner = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + partner];
+                float rot_partner_contrib = (d < half_d) ? -raw_partner : raw_partner;
+                ak_rot_shared[d] = raw_ak * c + rot_partner_contrib * s;
+            } else {
+                ak_rot_shared[d] = raw_ak;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
         float thread_anc_sum = 0.0f;
         for (int d = tid; d < D; d += t_per_tg) {
-            thread_anc_sum += q_shared[d] * (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+            thread_anc_sum += q_shared[d] * ak_rot_shared[d];
         }
         
         // Reduction over threadgroup to get final anchor dot product
@@ -108,7 +126,19 @@ kernel void decode_attention_metal_kernel(
             float proj_val = 0.0f;
             int base_vk_offset = slot_id * rank * n_kv_heads * D + tid * n_kv_heads * D + kv_head * D;
             for (int d = 0; d < D; ++d) {
-                proj_val += q_shared[d] * (float)VK_pool[base_vk_offset + d];
+                float raw_vk = (float)VK_pool[base_vk_offset + d];
+                float vk_rot;
+                if (has_rope) {
+                    float c = cos_anc[k * D + d];
+                    float s = sin_anc[k * D + d];
+                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                    float raw_vk_partner = (float)VK_pool[base_vk_offset + partner];
+                    float rot_partner_contrib = (d < half_d) ? -raw_vk_partner : raw_vk_partner;
+                    vk_rot = raw_vk * c + rot_partner_contrib * s;
+                } else {
+                    vk_rot = raw_vk;
+                }
+                proj_val += q_shared[d] * vk_rot;
             }
             q_proj_shared[tid] = proj_val;
             
@@ -127,13 +157,14 @@ kernel void decode_attention_metal_kernel(
 
         // 4. Process reconstructed tokens
         float scale_u = (float)U_scale_pool[slot_id];
+        float block_scale = (float)scales[slot_id];
         for (int t = tid; t < slen; t += t_per_tg) {
             float delta_sum = 0.0f;
             int u_offset = slot_id * S_max * rank + t * rank;
             for (int r = 0; r < rank; ++r) {
                 delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
             }
-            float t_score = (delta_sum * scale_u) * scale;
+            float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
             sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -180,9 +211,25 @@ kernel void decode_attention_metal_kernel(
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         } else {
+            // Recompute using RoPE-rotated anchor keys
+            for (int d = tid; d < D; d += t_per_tg) {
+                float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                if (has_rope) {
+                    float c = cos_anc[k * D + d];
+                    float s = sin_anc[k * D + d];
+                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                    float raw_partner = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + partner];
+                    float rot_partner_contrib = (d < half_d) ? -raw_partner : raw_partner;
+                    ak_rot_shared[d] = raw_ak * c + rot_partner_contrib * s;
+                } else {
+                    ak_rot_shared[d] = raw_ak;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
             float thread_anc_sum = 0.0f;
             for (int d = tid; d < D; d += t_per_tg) {
-                thread_anc_sum += q_shared[d] * (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                thread_anc_sum += q_shared[d] * ak_rot_shared[d];
             }
             red_m[tid] = thread_anc_sum;
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -198,31 +245,39 @@ kernel void decode_attention_metal_kernel(
                 float proj_val = 0.0f;
                 int base_vk_offset = slot_id * rank * n_kv_heads * D + tid * n_kv_heads * D + kv_head * D;
                 for (int d = 0; d < D; ++d) {
-                    proj_val += q_shared[d] * (float)VK_pool[base_vk_offset + d];
+                    float raw_vk = (float)VK_pool[base_vk_offset + d];
+                    float vk_rot;
+                    if (has_rope) {
+                        float c = cos_anc[k * D + d];
+                        float s = sin_anc[k * D + d];
+                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        float raw_vk_partner = (float)VK_pool[base_vk_offset + partner];
+                        float rot_partner_contrib = (d < half_d) ? -raw_vk_partner : raw_vk_partner;
+                        vk_rot = raw_vk * c + rot_partner_contrib * s;
+                    } else {
+                        vk_rot = raw_vk;
+                    }
+                    proj_val += q_shared[d] * vk_rot;
                 }
                 q_proj_shared[tid] = proj_val;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
-        // 2. Accumulate anchor contribution
+        // 2. Compute local sum of weights and projected weights for deltas
         float w_anc = exp(score_anc * scale - global_m) / max(global_d, 1e-9f);
-        for (int d = tid; d < D; d += t_per_tg) {
-            thread_val[d] += w_anc * (float)anchors_V[slot_id * n_kv_heads * D + kv_head * D + d];
-        }
-
-        // 3. Compute local sum of weights and projected weights for deltas
         float local_sum_w = 0.0f;
         float local_w_proj[32] = { 0.0f }; // Support up to Rank = 32
         
         float scale_u = (float)U_scale_pool[slot_id];
+        float block_scale = (float)scales[slot_id];
         for (int t = tid; t < slen; t += t_per_tg) {
             float delta_sum = 0.0f;
             int u_offset = slot_id * S_max * rank + t * rank;
             for (int r = 0; r < rank; ++r) {
                 delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
             }
-            float t_score = (delta_sum * scale_u) * scale;
+            float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
             float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
             
             local_sum_w += w_t;
@@ -261,15 +316,19 @@ kernel void decode_attention_metal_kernel(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // 4. Add block value contributions to thread_val
+        // 3. Add block value contributions to thread_val
+        float w_total_anc = w_anc + red_sum_w;
         for (int d = tid; d < D; d += t_per_tg) {
+            // Anchor component (base for all tokens in block)
+            thread_val[d] += w_total_anc * (float)anchors_V[slot_id * n_kv_heads * D + kv_head * D + d];
+
             // SVD basis component
             float svd_v_contribution = 0.0f;
             int base_vv_offset = slot_id * rank * n_kv_heads * D + kv_head * D + d;
             for (int r = 0; r < rank; ++r) {
                 svd_v_contribution += red_w_proj[r] * (float)VV_pool[base_vv_offset + r * n_kv_heads * D];
             }
-            thread_val[d] += svd_v_contribution;
+            thread_val[d] += svd_v_contribution * block_scale;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }

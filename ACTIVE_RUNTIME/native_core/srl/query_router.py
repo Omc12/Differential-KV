@@ -175,7 +175,7 @@ def route_query(
     if query_tokens is not None:
         recent_toks = query_tokens
     else:
-        recent_toks = srl_state.recent_generated_tokens[-16:] + getattr(srl_state, "current_query_tokens", [])[-32:]
+        recent_toks = srl_state.recent_generated_tokens[-32:] + getattr(srl_state, "current_query_tokens", [])[-128:]
 
     from collections import defaultdict
     inv_index = srl_state.inverted_index
@@ -187,6 +187,7 @@ def route_query(
             for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
                 all_abs_positions.append(abs_pos)
                 
+    rare_lex_slots = []
     if all_abs_positions:
         L = max(all_abs_positions)
         slot_scores = defaultdict(float)
@@ -208,6 +209,17 @@ def route_query(
             
         sorted_lex_slots = sorted(slot_scores.keys(), key=lambda s: slot_scores[s], reverse=True)
         lexical_slots = sorted_lex_slots[:k_lexical]
+
+        # Extract rare keyword matches (IDF >= 2.0)
+        rare_slots_with_scores = defaultdict(float)
+        for tok in recent_toks:
+            if tok in inv_index.occurrences:
+                idf_val = inv_index.idf.get(tok, 1.0)
+                if idf_val >= 2.0:
+                    for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                        rare_slots_with_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
+        if rare_slots_with_scores:
+            rare_lex_slots = sorted(rare_slots_with_scores.keys(), key=lambda s: rare_slots_with_scores[s], reverse=True)
     else:
         lexical_slots = []
 
@@ -217,10 +229,9 @@ def route_query(
     idx_map   = srl_state.semantic_index
     neighbors = srl_state.chunk_graph.neighbors   # [N, MAX_DEGREE] CPU int32
 
-    # Seed expansion with both top-3 semantic and top-2 lexical matches
-    top_sem_slots = semantic_slots_t[:3].tolist() if semantic_slots_t.numel() > 0 else []
-    top_lex_slots = lexical_slots[:2]
-    seeds = list(dict.fromkeys(top_sem_slots + top_lex_slots))
+    # Seed expansion with top-5 semantic, top-10 rare lexical, and top-5 lexical matches
+    top_sem_slots = semantic_slots_t[:5].tolist() if semantic_slots_t.numel() > 0 else []
+    seeds = list(dict.fromkeys(top_sem_slots + rare_lex_slots[:10] + lexical_slots[:5]))
 
     if seeds and neighbors.shape[0] > 0:
         seeds_tensor = torch.tensor(seeds, dtype=torch.int32)
@@ -240,8 +251,8 @@ def route_query(
 
     graph_slots: List[int]
     if graph_slots_t is not None and graph_slots_t.numel() > 0:
-        # Deduplicate preserving order (unique_consecutive would need sort; use unique here)
-        graph_slots_t = torch.unique(graph_slots_t)[:k_graph]
+        # Deduplicate preserving order
+        graph_slots_t = torch.unique(graph_slots_t)[:max(k_graph, 20)]
         graph_slots   = graph_slots_t.tolist()
     else:
         graph_slots = []
@@ -253,9 +264,9 @@ def route_query(
     # ── Step 6: Sink blocks (always include: block 0 + special tokens) ────
     sink = srl_state.sink_blocks
 
-    # ── Step 7: Merge and deduplicate (order: sink → semantic → lexical → graph → recent) ─
+    # ── Step 7: Merge and deduplicate (order: sink → rare_lex → graph → semantic → lexical → recent) ─
     combined = list(dict.fromkeys(
-        sink + semantic_slots + lexical_slots + graph_slots + recent_slots
+        sink + rare_lex_slots + graph_slots + semantic_slots + lexical_slots + recent_slots
     ))[:K]
 
     if N - len(combined) <= 2:

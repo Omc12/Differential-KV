@@ -394,18 +394,27 @@ def _attend_and_reconstruct_v_compiled(
 
         p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)
         O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)
+        print(f"[DEBUG INTERNALS] O_anchor_fused[0][0]: {O_anchor_fused[0][0].item()}")
         O_final = O_final + O_anchor_fused.to(P_anchor.dtype)
 
         P_U_flat = P_U.reshape(N * H_q, 1, R)
         if V_V_perm is None:
             V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
         O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()
+        print(f"[DEBUG INTERNALS] O_delta.sum(0)[0][0]: {O_delta.sum(0)[0][0].item()}")
         O_final = O_final + O_delta.sum(0).to(P_anchor.dtype)
 
     if S_dense > 0:
+        print(f"[DEBUG INTERNALS] P_dense shape: {list(P_dense.shape)}, v_dense_rep shape: {list(v_dense_rep.shape)}")
+        print(f"[DEBUG INTERNALS] P_dense sum per head: {P_dense.sum(dim=-1).tolist()}")
+        print(f"[DEBUG INTERNALS] P_dense[0, 500:505]: {P_dense[0, 500:505].tolist()}")
+        print(f"[DEBUG INTERNALS] v_dense_rep sum: {v_dense_rep.sum().item()}")
         O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1)
+        print(f"[DEBUG INTERNALS] O_dense_total[:, 0]: {O_dense_total[:, 0].tolist()}")
         O_final = O_final + O_dense_total.to(P_anchor.dtype)
 
+    print(f"[DEBUG INTERNALS] O_final shape: {list(O_final.shape)}")
+    print(f"[DEBUG INTERNALS] O_final[0][0]: {O_final[0][0].item()}")
     return O_final
 
 _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
@@ -664,8 +673,11 @@ def fused_decode_mps(
     w_anc  = W_comp[:, :, 0]
     w_d    = W_comp[:, :, 1:]
 
+    # Scale the base/anchor value by the total attention weight of all tokens in the block
+    w_block_sum = w_anc + w_d.sum(dim=-1)
+
     O = torch.zeros((H_q, D), device=Q.device, dtype=torch.float32)
-    O = O + torch.einsum('hn,nhd->hd', w_anc, AncV_e)
+    O = O + torch.einsum('hn,nhd->hd', w_block_sum, AncV_e)
 
     w_proj = torch.einsum('hns,nsr->nhr', w_d, U_a)
     w_proj = w_proj * pool.scales[idx].float().view(N, 1, 1)
@@ -867,11 +879,16 @@ def _pytorch_vectorized_sparse_attn_decode(
         k_dense_rep = repeat_kv_at_dim(full_k_rot, num_key_value_groups, dim=1)
         v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1)
         scores_dense = torch.sum(q * k_dense_rep, dim=-1).squeeze(0) * inv_scale
+        print(f"[DEBUG INTERNALS] scores_dense[:, 0]: {scores_dense[:, 0].tolist()}")
     else:
         S_dense = 0
         scores_dense = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
 
+    print(f"[DEBUG INTERNALS] shapes: anchor={list(scores_anchor.shape)}, comp={list(scores_compressed.shape)}, dense={list(scores_dense.shape)}")
+    print(f"[DEBUG INTERNALS] scores_compressed[0, :20]: {scores_compressed[0, :20].tolist()}")
     scores_all = torch.cat([scores_anchor, scores_compressed, scores_dense], dim=-1)
+    print(f"[DEBUG INTERNALS] scores_all[2, 710:720]: {scores_all[2, 710:720].tolist()}")
+    print(f"[DEBUG INTERNALS] scores_dense[2, :5]: {scores_dense[2, :5].tolist()}")
     
     if diagnostics:
         has_nan = torch.isnan(scores_all).any().item()
@@ -883,7 +900,7 @@ def _pytorch_vectorized_sparse_attn_decode(
             if has_posinf:
                 scores_all[scores_all == float('inf')] = 1e4
 
-    probs_all = torch.nn.functional.softmax(scores_all, dim=-1)
+    probs_all = torch.nn.functional.softmax(scores_all.float(), dim=-1).to(scores_all.dtype)
     P_anchor, P_comp, P_dense = torch.split(probs_all, [N, N * block_capacity, S_dense], dim=-1)
 
     O_final = _attend_and_reconstruct_v(

@@ -158,9 +158,9 @@ def main():
     print(f"Delta Scores (Approx vs Exact) Mean Diff: {diff_delta_scores.mean().item():.6f}")
     
     # Compare final outputs from both python calls
-    from native_core.sparse_decode.triton_sparse_attn import _pytorch_vectorized_sparse_attn_decode, fused_decode_mps
+    from native_core.sparse_decode.triton_fused_decode import _pytorch_vectorized_sparse_attn_decode, fused_decode_mps
     out_exact = _pytorch_vectorized_sparse_attn_decode(
-        q=q_sq.unsqueeze(0).unsqueeze(2),
+        q=q_sq.unsqueeze(0).unsqueeze(2).to(pool.anchors_K.dtype),
         block_indices=pool_indices_t,
         pool=pool,
         dense_blocks=[],
@@ -176,7 +176,7 @@ def main():
     ).squeeze(0).squeeze(1)
     
     out_fused, _ = fused_decode_mps(
-        Q=q_sq,
+        Q=q_sq.to(pool.anchors_K.dtype),
         pool=pool,
         block_indices=pool_indices_t,
         blk_sizes=blk_sizes,
