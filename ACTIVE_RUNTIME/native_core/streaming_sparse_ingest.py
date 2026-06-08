@@ -28,6 +28,7 @@ import os
 import torch
 import queue
 import threading
+import re
 from typing import Dict, List, Optional, Tuple, ClassVar
 from dataclasses import dataclass, field
 
@@ -46,6 +47,56 @@ except ImportError:
 # Module-level constant — avoids re-creating this dict on every metadata write call
 # (previously created fresh inside update_metadata_block every token × every layer)
 _STATE_CODES = {"ACCUMULATING": 0, "SUBMITTED": 1, "COMPRESSED": 2, "PAGED": 3}
+
+# ── Precision-sensitive token detection ────────────────────────────────────────
+# These patterns flag blocks whose tokens require EXACT key representations.
+# Blocks matching any of these patterns are exempted from SVD compression so that
+# the model can attend to them faithfully during decode.
+#
+# INTENTIONALLY NARROW: Only exact-value tokens that cannot be reconstructed
+# approximately are exempted. Broad rules (math operators, LaTeX, quoted text)
+# caused 40-60%% of blocks in technical papers to be exempt, spiking CPU RAM
+# from ~3-4 GB to ~7-8 GB. Only rare, high-precision patterns are exempted.
+
+_STOP_WORDS_COMPRESS = {
+    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you',
+    "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself',
+    'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her',
+    'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them',
+    'their', 'theirs', 'themselves', 'a', 'an', 'the', 'and', 'but',
+    'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for',
+    'with', 'about', 'against', 'between', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+    'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further',
+    'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how',
+    'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other',
+    'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
+    'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'now',
+    'should', "should've", 'would', 'could', 'may', 'might', 'must',
+    'shall', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing',
+    'get', 'got', 'make', 'made', 'go', 'went', 'take', 'took',
+    'see', 'saw', 'say', 'said', 'use', 'used', 'find', 'found',
+    'question', 'answer', 'text', 'context', 'information', 'prompt',
+    'query', 'assistant', 'system', 'user', 'file', 'document', 'page',
+    'line', 'passage', 'following', 'please', 'write', 'read',
+    'describe', 'explain', 'summarize', 'extract', 'retrieve', 'give',
+    'tell', 'show', 'list', 'what', 'who', 'whom', 'which', 'detail',
+    'details', 'brief', 'exact', 'exactly', 'correct', 'correctly',
+    'true', 'false', 'yes', 'no'
+}
+
+# Narrow precision patterns: ONLY match patterns that (a) appear rarely in
+# normal prose and (b) require exact attention for faithful reproduction.
+_RE_LONG_DIGITS     = re.compile(r'\d{5,}')          # 5+ digit codes / IDs (rare)
+# Scientific notation: 1.23e+4, 2.998e8, 6.02E23 — never in prose
+_RE_SCI_NOTATION    = re.compile(r'\d+\.?\d*[eE][+\-]?\d+')
+# Unicode-only math symbols: π, ∑, ∞, ≤, ±, etc. — NEVER in normal prose
+_RE_UNICODE_MATH    = re.compile(
+    r'[\u221a\u2211\u222b\u2202\u03c0\u03a0\u03a3\u221e\u2264\u2265\u2260\u00b1\u00f7\u00d7]'
+)
+# Content words for short-digit query overlap check
+_RE_WORD_TOKENS     = re.compile(r'\b[a-z0-9]{2,}\b')
 
 
 @dataclass(slots=True)
@@ -442,88 +493,77 @@ class StreamingSparseIngestManager:
             metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
 
     def _should_skip_compression(self, session_id: str, anchor_idx: int, block_capacity: int) -> bool:
+        """
+        Return True if this block should be kept DENSE (skipping SVD compression).
+
+        Uses a NARROW ruleset intentionally — broad rules (math operators, LaTeX,
+        quoted strings) exempt 40-60%% of blocks in technical papers, causing
+        3-4× CPU RAM growth. Only patterns that are rare in prose AND require
+        exact attention for faithful reproduction are included:
+
+          1. Long digit sequences (≥5 digits): IDs, timestamps, DOIs.
+          2. Scientific notation: 1.23e+4, 2.998e8 — never appear in prose.
+          3. Unicode math symbols: π, ∑, ∞, ≤, ± — never in normal prose.
+          4. Short digits (≥2) that overlap with current query keywords.
+        """
         if self.manager is None or getattr(self.manager, "tokenizer", None) is None:
             return False
         session_tok_dict = getattr(self.manager, "_session_token_ids", {})
         token_ids_cpu = session_tok_dict.get(session_id)
         if token_ids_cpu is None:
             return False
-        
+
         start = anchor_idx
         end = min(start + block_capacity, len(token_ids_cpu))
         if start >= end:
             return False
-            
+
         block_toks = token_ids_cpu[start:end].tolist()
-        
+
         try:
-            # Decode the entire block's tokens together to handle split tokens
-            block_text = self.manager.tokenizer.decode(block_toks).lower()
-            import re
+            block_text = self.manager.tokenizer.decode(block_toks)
+            block_text_lc = block_text.lower()
+
+            # Rule 1: Long digit codes (IDs, years+, zip codes, DOIs) — always exempt
+            if _RE_LONG_DIGITS.search(block_text):
+                return True
+
+            # Rule 2: Scientific notation — always exempt (1.23e+4, 2.998e8)
+            if _RE_SCI_NOTATION.search(block_text):
+                return True
+
+            # Rule 3: Unicode math symbols — always exempt (π, ∑, ∞, ≤, ±, etc.)
+            if _RE_UNICODE_MATH.search(block_text):
+                return True
+
+            # Rule 4: Short digits (≥2 digits) with query-word overlap
             digit_parts = re.findall(r'\d+', block_text)
-            if digit_parts:
-                # Rule 1: Exempt blocks containing long digit codes (length >= 5)
-                if any(len(part) >= 5 for part in digit_parts):
-                    return True
-                # Rule 2: Exempt blocks containing short digit codes (length >= 2) with dynamic query overlap
-                if any(len(part) >= 2 for part in digit_parts):
-                    # Lazily retrieve and cache query keywords
-                    query_words = self.session_query_words.get(session_id)
-                    if query_words is None:
-                        prefill_len = self.session_prefill_lens.get(session_id, 0)
-                        if prefill_len <= 0:
-                            prefill_len = len(token_ids_cpu)
-                        
-                        query_start = max(0, prefill_len - 128)
-                        query_toks = token_ids_cpu[query_start:prefill_len].tolist()
-                        if query_toks:
-                            query_text = self.manager.tokenizer.decode(query_toks).lower()
-                            
-                            STOP_WORDS = {
-                                'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd",
-                                'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers',
-                                'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'a', 'an', 'the',
-                                'and', 'but', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
-                                'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
-                                'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
-                                'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
-                                'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'now',
-                                'should', "should've", 'would', 'could', 'may', 'might', 'must', 'shall', 'am', 'is', 'are', 'was', 'were',
-                                'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'get', 'got', 'make',
-                                'made', 'go', 'went', 'take', 'took', 'see', 'saw', 'say', 'said', 'use', 'used', 'find', 'found',
-                                'question', 'answer', 'text', 'context', 'information', 'prompt', 'query', 'assistant', 'system', 'user',
-                                'file', 'document', 'page', 'line', 'passage', 'following', 'above', 'below', 'please', 'write', 'read',
-                                'describe', 'explain', 'summarize', 'find', 'extract', 'retrieve', 'give', 'tell', 'show', 'list', 'what',
-                                'who', 'whom', 'where', 'when', 'why', 'how', 'which', 'detail', 'details', 'brief', 'exact', 'exactly',
-                                'correct', 'correctly', 'true', 'false', 'yes', 'no'
-                            }
-                            query_words = {w for w in re.findall(r'\b[a-z0-9]{2,}\b', query_text) if w not in STOP_WORDS}
-                        else:
-                            query_words = set()
-                        self.session_query_words[session_id] = query_words
-                    
-                    if query_words:
-                        STOP_WORDS = {
-                            'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd",
-                            'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers',
-                            'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'a', 'an', 'the',
-                            'and', 'but', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
-                            'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
-                            'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
-                            'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
-                            'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'now',
-                            'should', "should've", 'would', 'could', 'may', 'might', 'must', 'shall', 'am', 'is', 'are', 'was', 'were',
-                            'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'get', 'got', 'make',
-                            'made', 'go', 'went', 'take', 'took', 'see', 'saw', 'say', 'said', 'use', 'used', 'find', 'found',
-                            'question', 'answer', 'text', 'context', 'information', 'prompt', 'query', 'assistant', 'system', 'user',
-                            'file', 'document', 'page', 'line', 'passage', 'following', 'above', 'below', 'please', 'write', 'read',
-                            'describe', 'explain', 'summarize', 'find', 'extract', 'retrieve', 'give', 'tell', 'show', 'list', 'what',
-                            'who', 'whom', 'where', 'when', 'why', 'how', 'which', 'detail', 'details', 'brief', 'exact', 'exactly',
-                            'correct', 'correctly', 'true', 'false', 'yes', 'no'
+            if any(len(p) >= 2 for p in digit_parts):
+                query_words = self.session_query_words.get(session_id)
+                if query_words is None:
+                    prefill_len = self.session_prefill_lens.get(session_id, 0)
+                    if prefill_len <= 0:
+                        prefill_len = len(token_ids_cpu)
+                    query_start = max(0, prefill_len - 128)
+                    query_toks = token_ids_cpu[query_start:prefill_len].tolist()
+                    if query_toks:
+                        query_text = self.manager.tokenizer.decode(query_toks).lower()
+                        query_words = {
+                            w for w in _RE_WORD_TOKENS.findall(query_text)
+                            if w not in _STOP_WORDS_COMPRESS
                         }
-                        block_words = {w for w in re.findall(r'\b[a-z0-9]{2,}\b', block_text) if w not in STOP_WORDS}
-                        if block_words & query_words:
-                            return True
+                    else:
+                        query_words = set()
+                    self.session_query_words[session_id] = query_words
+
+                if query_words:
+                    block_words = {
+                        w for w in _RE_WORD_TOKENS.findall(block_text_lc)
+                        if w not in _STOP_WORDS_COMPRESS
+                    }
+                    if block_words & query_words:
+                        return True
+
         except Exception:
             pass
         return False

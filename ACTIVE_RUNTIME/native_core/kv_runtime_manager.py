@@ -55,11 +55,16 @@ def get_layer_rank(
     Schedule is PROPORTIONAL to base_rank so the user's configured rank acts
     as the standard ceiling (no silent VRAM inflation beyond --rank for normal use).
 
-    Normal schedule (early_boost=False, default):
-      Layers 0-15%:  base_rank
-      Layers 15-50%: base_rank  (no change)
-      Layers 50-79%: max(4, round(0.75 * base_rank))
-      Layers 79%+:   max(4, round(0.50 * base_rank))
+    Normal schedule (early_boost=False, default, base_rank=16):
+      Layers 0-15%:   base_rank          (e.g. 16)
+      Layers 15-50%:  base_rank          (e.g. 16)
+      Layers 50-79%:  max(8, 0.75 * base_rank)   (e.g. 12)
+      Layers 79%+:    max(8, 0.50 * base_rank)   (e.g. 8)
+
+    Minimum floor raised from 4 -> 6 for mid layers and 4 -> 8 for final layers:
+    at rank 4 the SVD approximation for formula/number blocks degrades enough
+    that digit sequences cannot be reproduced reliably. rank 8 is the practical
+    minimum for faithful exact-value recall.
 
     Boosted schedule (early_boost=True):
       Layers 0-15%:  min(2 * base_rank, max_rank_early or 2 * base_rank)
@@ -84,10 +89,10 @@ def get_layer_rank(
         return base_rank
     elif ratio < 0.50:     # layers 4-14
         return base_rank
-    elif ratio < 0.79:     # layers 14-22 — slightly reduced
-        return max(4, round(0.75 * base_rank))
-    else:                  # layers 22-28 — concentrated final layers
-        return max(4, round(0.50 * base_rank))
+    elif ratio < 0.79:     # layers 14-22 — slightly reduced, min floor raised to 6
+        return max(6, round(0.75 * base_rank))
+    else:                  # layers 22-28 — concentrated final layers, min floor raised to 8
+        return max(8, round(0.50 * base_rank))
 
 
 
@@ -358,6 +363,11 @@ class KVRuntimeManager:
                 micro_block_size=self.micro_block_size,
                 dense_anchor_only=True,
                 native_pool=self.native_pool,
+                # Extended from 512 → 1024 to prevent long-form generation drift.
+                # At 512, the model's own decode tokens past position 512 get SVD'd,
+                # causing quality to degrade mid-response. 1024 covers typical response
+                # lengths while adding only ~56MB GPU VRAM on Qwen 0.5B.
+                recency_window=1024,
             )
             self._streaming_mgr.manager = self
         else:
