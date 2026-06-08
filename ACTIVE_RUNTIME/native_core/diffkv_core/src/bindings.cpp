@@ -26,6 +26,7 @@
 
 #ifdef DIFFKV_APPLE
 #include "compressor_cpu.hpp"
+#include "metal_runtime.hpp"
 #endif
 
 namespace py = pybind11;
@@ -291,6 +292,30 @@ Returns:
 )doc"
     );
 
+    m.def("fused_decode_attention_combined",
+        &diffkv::fused_decode_attention_combined,
+        py::arg("Q"),
+        py::arg("dense_k"),
+        py::arg("dense_v"),
+        py::arg("cos_dense"),
+        py::arg("sin_dense"),
+        py::arg("U_pool"),
+        py::arg("U_scale_pool"),
+        py::arg("VK_pool"),
+        py::arg("VV_pool"),
+        py::arg("anchors_K"),
+        py::arg("anchors_V"),
+        py::arg("seq_lens"),
+        py::arg("slot_indices"),
+        py::arg("scale"),
+        py::arg("n_q_heads"),
+        py::arg("n_kv_heads"),
+        py::arg("rank"),
+        R"doc(
+Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, and LSE combination into a single C++ call.
+)doc"
+    );
+
     // ── Version / platform capability flags ───────────────────────────────────
     m.attr("__version__")        = "1.1.0";
     m.attr("HAS_DECODE_ATTN")    = true;
@@ -298,12 +323,35 @@ Returns:
 #ifdef DIFFKV_CUDA
     m.attr("HAS_CUDA_PAGING")    = true;
     m.attr("HAS_CPU_COMPRESSOR") = false;
+    m.attr("HAS_METAL_ATTN")     = false;
 #else
     m.attr("HAS_CUDA_PAGING")    = false;
 #ifdef DIFFKV_APPLE
     m.attr("HAS_CPU_COMPRESSOR") = true;
+    m.attr("HAS_METAL_ATTN")     = true;
+
+    m.def("decode_attention_metal",
+        &diffkv::decode_attention_metal,
+        py::arg("Q"),
+        py::arg("U_pool"),
+        py::arg("U_scale_pool"),
+        py::arg("VK_pool"),
+        py::arg("VV_pool"),
+        py::arg("anchors_K"),
+        py::arg("anchors_V"),
+        py::arg("seq_lens"),
+        py::arg("slot_indices"),
+        py::arg("scale"),
+        py::arg("n_q_heads"),
+        py::arg("n_kv_heads"),
+        py::arg("rank"),
+        R"doc(
+Launch custom Metal Compute Shader for fused Project-Then-Attend decode attention.
+)doc"
+    );
 #else
     m.attr("HAS_CPU_COMPRESSOR") = false;
+    m.attr("HAS_METAL_ATTN")     = false;
 #endif
 #endif
 

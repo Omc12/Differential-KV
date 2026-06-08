@@ -27,6 +27,10 @@
 #include <cmath>
 #include <limits>
 
+#ifdef DIFFKV_APPLE
+#include "metal_runtime.hpp"
+#endif
+
 namespace diffkv {
 
 // ── Internal helper: GQA query reduction ─────────────────────────────────────
@@ -284,6 +288,125 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_aten_lse(
         anchors_K, anchors_V, seq_lens, slot_indices,
         scale, n_q_heads, n_kv_heads, rank
     );
+}
+
+torch::Tensor fused_decode_attention_combined(
+    const torch::Tensor& Q,               // [H_q, D]
+    const torch::Tensor& dense_k,         // [1, H_kv, L_dense, D] or [H_kv, L_dense, D]
+    const torch::Tensor& dense_v,         // [1, H_kv, L_dense, D] or [H_kv, L_dense, D]
+    const torch::Tensor& cos_dense,       // [1, 1, L_dense, D] or [L_dense, D]
+    const torch::Tensor& sin_dense,       // [1, 1, L_dense, D] or [L_dense, D]
+    const torch::Tensor& U_pool,
+    const torch::Tensor& U_scale_pool,
+    const torch::Tensor& VK_pool,
+    const torch::Tensor& VV_pool,
+    const torch::Tensor& anchors_K,
+    const torch::Tensor& anchors_V,
+    const torch::Tensor& seq_lens,
+    const torch::Tensor& slot_indices,
+    float scale,
+    int n_q_heads,
+    int n_kv_heads,
+    int rank
+) {
+    const auto device = Q.device();
+    const int D = Q.size(1);
+    const int H_q = n_q_heads;
+    const int H_kv = n_kv_heads;
+    const int g = H_q / H_kv;
+
+    // ── 1. Sparse Attention ──
+    torch::Tensor out_sparse, lse_sparse;
+    bool has_sparse = (slot_indices.defined() && slot_indices.numel() > 0);
+    if (has_sparse) {
+#ifdef DIFFKV_APPLE
+        if (device.is_mps()) {
+            std::tie(out_sparse, lse_sparse) = decode_attention_metal(
+                Q, U_pool, U_scale_pool, VK_pool, VV_pool,
+                anchors_K, anchors_V, seq_lens, slot_indices,
+                scale, n_q_heads, n_kv_heads, rank
+            );
+        } else {
+            std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
+                Q, U_pool, U_scale_pool, VK_pool, VV_pool,
+                anchors_K, anchors_V, seq_lens, slot_indices,
+                scale, n_q_heads, n_kv_heads, rank
+            );
+        }
+#else
+        std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
+            Q, U_pool, U_scale_pool, VK_pool, VV_pool,
+            anchors_K, anchors_V, seq_lens, slot_indices,
+            scale, n_q_heads, n_kv_heads, rank
+        );
+#endif
+    }
+
+    // ── 2. Dense Attention ──
+    torch::Tensor out_dense, lse_dense;
+    bool has_dense = (dense_k.defined() && dense_k.numel() > 0);
+    if (has_dense) {
+        auto dk = (dense_k.dim() == 4) ? dense_k.squeeze(0) : dense_k; // [H_kv, L_dense, D]
+        auto dv = (dense_v.dim() == 4) ? dense_v.squeeze(0) : dense_v; // [H_kv, L_dense, D]
+
+        // cos_dense and sin_dense may have shape [1, 1, L_dense, D] or [L_dense, D].
+        // We squeeze and unsqueeze to get [1, L_dense, D] for broadcasting with dk [H_kv, L_dense, D].
+        auto cos_view = cos_dense.squeeze().unsqueeze(0); // [1, L_dense, D]
+        auto sin_view = sin_dense.squeeze().unsqueeze(0); // [1, L_dense, D]
+
+        auto k_half = torch::empty_like(dk);
+        int half_d = D / 2;
+        k_half.slice(2, 0, half_d) = -dk.slice(2, half_d, D);
+        k_half.slice(2, half_d, D) = dk.slice(2, 0, half_d);
+        auto dense_k_rot = dk.mul(cos_view).addcmul(k_half, sin_view);
+
+        // repeat_kv to match n_q_heads
+        auto k_rep = dense_k_rot.unsqueeze(1).expand({H_kv, g, dense_k_rot.size(1), D}).reshape({H_q, dense_k_rot.size(1), D});
+        auto v_rep = dv.unsqueeze(1).expand({H_kv, g, dv.size(1), D}).reshape({H_q, dv.size(1), D});
+
+        if (has_dense && !has_sparse) {
+            // Fast path: bypass all manual softmax math and call native torch::scaled_dot_product_attention
+            // shapes expected: [B, H, L_q, D]
+            auto q_sdpa = Q.unsqueeze(0).unsqueeze(2); // [1, H_q, 1, D]
+            auto k_sdpa = k_rep.unsqueeze(0); // [1, H_q, L_dense, D]
+            auto v_sdpa = v_rep.unsqueeze(0); // [1, H_q, L_dense, D]
+
+            auto out_sdpa = torch::scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa,
+                /*attn_mask=*/{},
+                /*dropout_p=*/0.0,
+                /*is_causal=*/false,
+                /*scale=*/scale
+            );
+            out_dense = out_sdpa.squeeze(2).squeeze(0); // [H_q, D]
+        } else {
+            // scores = batch matmul (k_rep @ Q.unsqueeze(2)) -> [H_q, L_dense, 1] -> squeeze to [H_q, L_dense]
+            auto scores = torch::bmm(k_rep, Q.unsqueeze(2)).squeeze(2).mul(scale);
+
+            // Consolidate manual math to native torch::softmax and torch::logsumexp
+            auto w = torch::softmax(scores, -1);
+            out_dense = torch::bmm(w.unsqueeze(1), v_rep).squeeze(1); // [H_q, D]
+            lse_dense = torch::logsumexp(scores, -1); // [H_q]
+        }
+    }
+
+    // ── 3. Combine ──
+    if (has_dense && has_sparse) {
+        auto lse_max = torch::maximum(lse_dense, lse_sparse);
+        auto w_dense = torch::exp(lse_dense - lse_max);
+        auto w_sparse = torch::exp(lse_sparse - lse_max);
+        auto denom = w_dense + w_sparse;
+
+        auto out_final = (out_dense.to(torch::kFloat32) * w_dense.unsqueeze(1) + 
+                          out_sparse.to(torch::kFloat32) * w_sparse.unsqueeze(1)) / denom.unsqueeze(1);
+        return out_final.to(torch::kFloat16);
+    } else if (has_dense) {
+        return out_dense.to(torch::kFloat16);
+    } else if (has_sparse) {
+        return out_sparse.to(torch::kFloat16);
+    } else {
+        return torch::zeros({H_q, D}, torch::TensorOptions().dtype(torch::kFloat16).device(device));
+    }
 }
 
 } // namespace diffkv

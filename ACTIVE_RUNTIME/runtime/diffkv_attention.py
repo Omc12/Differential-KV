@@ -31,9 +31,12 @@ try:
     _DIFFKV_CORE_AVAILABLE    = True
     _DIFFKV_HAS_DECODE_ATTN   = getattr(_dkv_core, "HAS_DECODE_ATTN", False)
     _DIFFKV_HAS_SRL_ROUTER    = getattr(_dkv_core, "HAS_SRL_ROUTER", False)
+    _DIFFKV_HAS_METAL_ATTN    = getattr(_dkv_core, "HAS_METAL_ATTN", False)
     if _DIFFKV_HAS_DECODE_ATTN:
         _decode_attention_aten     = _dkv_core.decode_attention_aten
         _decode_attention_aten_lse = _dkv_core.decode_attention_aten_lse
+    if _DIFFKV_HAS_METAL_ATTN:
+        _decode_attention_metal    = _dkv_core.decode_attention_metal
     if _DIFFKV_HAS_SRL_ROUTER:
         _cpp_anchor_screen         = _dkv_core.anchor_screen
         _cpp_semantic_search       = _dkv_core.semantic_search_topk
@@ -42,6 +45,7 @@ except ImportError:
     _DIFFKV_CORE_AVAILABLE    = False
     _DIFFKV_HAS_DECODE_ATTN   = False
     _DIFFKV_HAS_SRL_ROUTER    = False
+    _DIFFKV_HAS_METAL_ATTN    = False
 
 # ── SRL routing configuration ─────────────────────────────────────────────────
 # DIFFKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
@@ -506,156 +510,246 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         # Dense window tokens still receive exact pre-rotated attention.
                         _is_mps_decode = (query_states.device.type == "mps" and pool is not None and os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN", "0") == "1")
                         if _is_mps_decode:
-                            # ── Separate Dense SDPA and Compressed fused_decode_mps combined via LSE ──
-                            has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
-                            has_comp  = (block_indices is not None and block_indices.numel() > 0)
-                            H_q       = query_states.shape[1]
-                            D         = query_states.shape[3]
-
-                            if has_dense:
-                                # 1. Optimize RoPE Slicing: slice contiguous views directly
-                                L_dense = dense_k_assembled.shape[2]
-                                start_pos = dense_blocks[0].anchor_idx
-                                cos_sliced = cos_all[:, start_pos : start_pos + L_dense]
-                                sin_sliced = sin_all[:, start_pos : start_pos + L_dense]
-                                if cos_sliced.dim() == 3:
-                                    cos_dense = cos_sliced.unsqueeze(1) # [1, 1, L_dense, D]
-                                    sin_dense = sin_sliced.unsqueeze(1)
+                            if _DIFFKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined"):
+                                _scale = 1.0 / math.sqrt(head_dim)
+                                _q_val = query_states[b_idx, :, 0, :]
+                                _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
+                                _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
+                                
+                                if dense_k_assembled is not None:
+                                    L_dense = dense_k_assembled.shape[2]
+                                    start_pos = dense_blocks[0].anchor_idx
+                                    _cos = cos_all[:, start_pos : start_pos + L_dense]
+                                    _sin = sin_all[:, start_pos : start_pos + L_dense]
                                 else:
-                                    cos_dense = cos_sliced.permute(0, 2, 1, 3)
-                                    sin_dense = sin_sliced.permute(0, 2, 1, 3)
+                                    _cos = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
+                                    _sin = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
-                                # 2. Pre-allocate static workspace for dense_k_rot to eliminate dynamic shape allocations
-                                session_dict = kv_manager.decode_workspace.setdefault(sid, {})
-                                dense_k_rot_cache = session_dict.setdefault("dense_workspace_k_rot", {})
-                                workspace_k_rot = dense_k_rot_cache.get(captured_layer_idx)
-                                if (workspace_k_rot is None 
-                                    or workspace_k_rot.shape[1] != num_key_value_heads 
-                                    or workspace_k_rot.dtype != query_states.dtype 
-                                    or workspace_k_rot.shape[2] < L_dense):
-                                    alloc_len = ((L_dense + 511) // 512) * 512
-                                    workspace_k_rot = torch.zeros((1, num_key_value_heads, alloc_len, head_dim), 
-                                                                  device=query_states.device, dtype=query_states.dtype)
-                                    dense_k_rot_cache[captured_layer_idx] = workspace_k_rot
+                                _slots = block_indices if block_indices is not None else torch.empty(0, device=query_states.device, dtype=torch.int32)
 
-                                dense_k_rot = workspace_k_rot[:, :, :L_dense]
-                                # Compute RoPE in-place in the pre-allocated slice
-                                torch.mul(dense_k_assembled, cos_dense, out=dense_k_rot)
-                                dense_k_rot.addcmul_(rotate_half(dense_k_assembled), sin_dense)
-                            else:
-                                dense_k_rot = None
-
-                            if not has_dense and not has_comp:
-                                attn_out_b = torch.zeros((1, H_q, 1, D), dtype=query_states.dtype, device=query_states.device)
-                            elif has_dense and not has_comp:
-                                # Dense window only: use standard SDPA
-                                k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
-                                attn_out_b = F.scaled_dot_product_attention(
-                                    query_states[b_idx:b_idx+1], k_rep, v_rep,
-                                    is_causal=False,
+                                out_val = _dkv_core.fused_decode_attention_combined(
+                                    _q_val,
+                                    _dk,
+                                    _dv,
+                                    _cos.contiguous(),
+                                    _sin.contiguous(),
+                                    pool.U,
+                                    pool.U_scale,
+                                    pool.V_K,
+                                    pool.V_V,
+                                    pool.anchors_K,
+                                    pool.anchors_V,
+                                    pool.seq_lens,
+                                    _slots,
+                                    _scale,
+                                    num_heads,
+                                    num_key_value_heads,
+                                    kv_manager.rank,
                                 )
-                            elif has_comp and not has_dense:
-                                # Compressed history only.
-                                # Phase 1 fast path: C++ ATen Project-Then-Attend (no Python GIL overhead).
-                                # Falls back to fused_decode_mps if extension not built.
-                                _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
-                                if _DIFFKV_HAS_DECODE_ATTN and pool is not None:
-                                    _scale = 1.0 / math.sqrt(head_dim)
-                                    out_sparse = _decode_attention_aten(
-                                        _Q_sq.contiguous(),
-                                        pool.U.contiguous(),
-                                        pool.U_scale.contiguous(),
-                                        pool.V_K.contiguous(),
-                                        pool.V_V.contiguous(),
-                                        pool.anchors_K.contiguous(),
-                                        pool.anchors_V.contiguous(),
-                                        pool.seq_lens.contiguous(),
-                                        block_indices.contiguous(),
-                                        _scale,
-                                        num_heads,
-                                        num_key_value_heads,
-                                        kv_manager.rank,
-                                    )  # [H_q, D] float16
-                                else:
-                                    # Python fallback
-                                    _bsizes = pool.seq_lens[block_indices]
-                                    out_sparse, _ = fused_decode_mps(
-                                        Q                    = _Q_sq,
-                                        pool                 = pool,
-                                        block_indices        = block_indices,
-                                        blk_sizes            = _bsizes,
-                                        num_key_value_groups = num_key_value_groups,
-                                        anchor_indices       = anchor_indices,
-                                        cos                  = cos_all,
-                                        sin                  = sin_all,
-                                    )
-                                attn_out_b = out_sparse.unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
+                                attn_out_b = out_val.unsqueeze(0).unsqueeze(2)
                             else:
-                                # Both present: run independently and combine via LSE
-                                # 1. Dense SDPA path
-                                k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
-                                out_dense = F.scaled_dot_product_attention(
-                                    query_states[b_idx:b_idx+1], k_rep, v_rep,
-                                    is_causal=False,
-                                )  # [1, H_q, 1, D]
+                                # ── Separate Dense SDPA and Compressed fused_decode_mps combined via LSE ──
+                                has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                                has_comp  = (block_indices is not None and block_indices.numel() > 0)
+                                H_q       = query_states.shape[1]
+                                D         = query_states.shape[3]
 
-                                # 2. LSE for dense scores (in fp16 to avoid large fp32 promotions)
-                                _q = query_states[b_idx, :, 0, :]
-                                _kd = k_rep[0]
-                                _scale = (D ** -0.5)
-                                scores_dense = torch.einsum('hd,htd->ht', _q, _kd) * _scale  # [H_q, T]
-                                lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
+                                if has_dense:
+                                    # 1. Optimize RoPE Slicing: slice contiguous views directly
+                                    L_dense = dense_k_assembled.shape[2]
+                                    start_pos = dense_blocks[0].anchor_idx
+                                    cos_sliced = cos_all[:, start_pos : start_pos + L_dense]
+                                    sin_sliced = sin_all[:, start_pos : start_pos + L_dense]
+                                    if cos_sliced.dim() == 3:
+                                        cos_dense = cos_sliced.unsqueeze(1) # [1, 1, L_dense, D]
+                                        sin_dense = sin_sliced.unsqueeze(1)
+                                    else:
+                                        cos_dense = cos_sliced.permute(0, 2, 1, 3)
+                                        sin_dense = sin_sliced.permute(0, 2, 1, 3)
 
-                                # 3. Compressed history path — with LSE for combination.
-                                # Phase 1 fast path: C++ ATen decode (returns LSE directly).
-                                _Q_sq = query_states[b_idx, :, 0, :]
-                                if _DIFFKV_HAS_DECODE_ATTN and pool is not None:
-                                    _scale = 1.0 / math.sqrt(head_dim)
-                                    out_sparse, lse_sparse = _decode_attention_aten_lse(
-                                        _Q_sq.contiguous(),
-                                        pool.U.contiguous(),
-                                        pool.U_scale.contiguous(),
-                                        pool.V_K.contiguous(),
-                                        pool.V_V.contiguous(),
-                                        pool.anchors_K.contiguous(),
-                                        pool.anchors_V.contiguous(),
-                                        pool.seq_lens.contiguous(),
-                                        block_indices.contiguous(),
-                                        _scale,
-                                        num_heads,
-                                        num_key_value_heads,
-                                        kv_manager.rank,
-                                    )  # [H_q, D] float16, [H_q] float32
+                                    # 2. Pre-allocate static workspace for dense_k_rot to eliminate dynamic shape allocations
+                                    session_dict = kv_manager.decode_workspace.setdefault(sid, {})
+                                    dense_k_rot_cache = session_dict.setdefault("dense_workspace_k_rot", {})
+                                    workspace_k_rot = dense_k_rot_cache.get(captured_layer_idx)
+                                    if (workspace_k_rot is None 
+                                        or workspace_k_rot.shape[1] != num_key_value_heads 
+                                        or workspace_k_rot.dtype != query_states.dtype 
+                                        or workspace_k_rot.shape[2] < L_dense):
+                                        alloc_len = ((L_dense + 511) // 512) * 512
+                                        workspace_k_rot = torch.zeros((1, num_key_value_heads, alloc_len, head_dim), 
+                                                                      device=query_states.device, dtype=query_states.dtype)
+                                        dense_k_rot_cache[captured_layer_idx] = workspace_k_rot
+
+                                    # 2b. Pre-allocate static workspace for dense_k_half to avoid rotate_half allocations
+                                    dense_k_half_cache = session_dict.setdefault("dense_workspace_k_half", {})
+                                    workspace_k_half = dense_k_half_cache.get(captured_layer_idx)
+                                    if (workspace_k_half is None 
+                                        or workspace_k_half.shape[1] != num_key_value_heads 
+                                        or workspace_k_half.dtype != query_states.dtype 
+                                        or workspace_k_half.shape[2] < L_dense):
+                                        alloc_len = ((L_dense + 511) // 512) * 512
+                                        workspace_k_half = torch.zeros((1, num_key_value_heads, alloc_len, head_dim), 
+                                                                       device=query_states.device, dtype=query_states.dtype)
+                                        dense_k_half_cache[captured_layer_idx] = workspace_k_half
+                                    
+                                    dense_k_half = workspace_k_half[:, :, :L_dense]
+                                    half_d = head_dim // 2
+                                    dense_k_half[..., :half_d] = -dense_k_assembled[..., half_d:]
+                                    dense_k_half[..., half_d:] = dense_k_assembled[..., :half_d]
+
+                                    dense_k_rot = workspace_k_rot[:, :, :L_dense]
+                                    # Compute RoPE in-place in the pre-allocated slice
+                                    torch.mul(dense_k_assembled, cos_dense, out=dense_k_rot)
+                                    dense_k_rot.addcmul_(dense_k_half, sin_dense)
                                 else:
-                                    # Python fallback
-                                    _bsizes = pool.seq_lens[block_indices]
-                                    out_sparse, lse_sparse = fused_decode_mps(
-                                        Q                    = _Q_sq,
-                                        pool                 = pool,
-                                        block_indices        = block_indices,
-                                        blk_sizes            = _bsizes,
-                                        num_key_value_groups = num_key_value_groups,
-                                        anchor_indices       = anchor_indices,
-                                        cos                  = cos_all,
-                                        sin                  = sin_all,
-                                    )  # [H_q, D], [H_q]
+                                    dense_k_rot = None
 
-                                # 4. Combine outputs via LSE
-                                out_dense_hd = out_dense[0, :, 0, :].float()
-                                out_sparse_fp32 = out_sparse.float()
-                                lse_dense = lse_dense.to(torch.float32)
-                                lse_sparse = lse_sparse.to(torch.float32)
+                                if not has_dense and not has_comp:
+                                    attn_out_b = torch.zeros((1, H_q, 1, D), dtype=query_states.dtype, device=query_states.device)
+                                elif has_dense and not has_comp:
+                                    # Dense window only: use standard SDPA
+                                    k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
+                                    v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                    attn_out_b = F.scaled_dot_product_attention(
+                                        query_states[b_idx:b_idx+1], k_rep, v_rep,
+                                        is_causal=False,
+                                    )
+                                elif has_comp and not has_dense:
+                                    # Compressed history only.
+                                    # Phase 2: Custom Metal compute shader path (macOS).
+                                    # Falls back to Phase 1 C++ ATen or Python.
+                                    _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
+                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None:
+                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        out_sparse, _ = _decode_attention_metal(
+                                            _Q_sq.contiguous(),
+                                            pool.U.contiguous(),
+                                            pool.U_scale.contiguous(),
+                                            pool.V_K.contiguous(),
+                                            pool.V_V.contiguous(),
+                                            pool.anchors_K.contiguous(),
+                                            pool.anchors_V.contiguous(),
+                                            pool.seq_lens.contiguous(),
+                                            block_indices.contiguous(),
+                                            _scale,
+                                            num_heads,
+                                            num_key_value_heads,
+                                            kv_manager.rank,
+                                        )
+                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        out_sparse = _decode_attention_aten(
+                                            _Q_sq.contiguous(),
+                                            pool.U.contiguous(),
+                                            pool.U_scale.contiguous(),
+                                            pool.V_K.contiguous(),
+                                            pool.V_V.contiguous(),
+                                            pool.anchors_K.contiguous(),
+                                            pool.anchors_V.contiguous(),
+                                            pool.seq_lens.contiguous(),
+                                            block_indices.contiguous(),
+                                            _scale,
+                                            num_heads,
+                                            num_key_value_heads,
+                                            kv_manager.rank,
+                                        )  # [H_q, D] float16
+                                    else:
+                                        # Python fallback
+                                        _bsizes = pool.seq_lens[block_indices]
+                                        out_sparse, _ = fused_decode_mps(
+                                            Q                    = _Q_sq,
+                                            pool                 = pool,
+                                            block_indices        = block_indices,
+                                            blk_sizes            = _bsizes,
+                                            num_key_value_groups = num_key_value_groups,
+                                            anchor_indices       = anchor_indices,
+                                            cos                  = cos_all,
+                                            sin                  = sin_all,
+                                        )
+                                    attn_out_b = out_sparse.unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
+                                else:
+                                    # Both present: run independently and combine via LSE
+                                    # 1. Dense SDPA path
+                                    k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
+                                    v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                    out_dense = F.scaled_dot_product_attention(
+                                        query_states[b_idx:b_idx+1], k_rep, v_rep,
+                                        is_causal=False,
+                                    )  # [1, H_q, 1, D]
 
-                                lse_max = torch.maximum(lse_dense, lse_sparse)
-                                w_dense = torch.exp(lse_dense - lse_max)
-                                w_sparse = torch.exp(lse_sparse - lse_max)
-                                denom = w_dense + w_sparse
+                                    # 2. LSE for dense scores (in fp16 to avoid large fp32 promotions)
+                                    _q = query_states[b_idx, :, 0, :]
+                                    _kd = k_rep[0]
+                                    _scale = (D ** -0.5)
+                                    scores_dense = torch.matmul(_kd, _q.unsqueeze(-1)).squeeze(-1) * _scale  # [H_q, T]
+                                    lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
 
-                                out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
-                                             out_sparse_fp32 * w_sparse.unsqueeze(-1)) / denom.unsqueeze(-1)
-                                attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
+                                    # 3. Compressed history path — with LSE for combination.
+                                    # Phase 2: Custom Metal compute shader path (macOS).
+                                    # Falls back to Phase 1 C++ ATen or Python.
+                                    _Q_sq = query_states[b_idx, :, 0, :]
+                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None:
+                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        out_sparse, lse_sparse = _decode_attention_metal(
+                                            _Q_sq.contiguous(),
+                                            pool.U.contiguous(),
+                                            pool.U_scale.contiguous(),
+                                            pool.V_K.contiguous(),
+                                            pool.V_V.contiguous(),
+                                            pool.anchors_K.contiguous(),
+                                            pool.anchors_V.contiguous(),
+                                            pool.seq_lens.contiguous(),
+                                            block_indices.contiguous(),
+                                            _scale,
+                                            num_heads,
+                                            num_key_value_heads,
+                                            kv_manager.rank,
+                                        )
+                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        out_sparse, lse_sparse = _decode_attention_aten_lse(
+                                            _Q_sq.contiguous(),
+                                            pool.U.contiguous(),
+                                            pool.U_scale.contiguous(),
+                                            pool.V_K.contiguous(),
+                                            pool.V_V.contiguous(),
+                                            pool.anchors_K.contiguous(),
+                                            pool.anchors_V.contiguous(),
+                                            pool.seq_lens.contiguous(),
+                                            block_indices.contiguous(),
+                                            _scale,
+                                            num_heads,
+                                            num_key_value_heads,
+                                            kv_manager.rank,
+                                        )  # [H_q, D] float16, [H_q] float32
+                                    else:
+                                        # Python fallback
+                                        _bsizes = pool.seq_lens[block_indices]
+                                        out_sparse, lse_sparse = fused_decode_mps(
+                                            Q                    = _Q_sq,
+                                            pool                 = pool,
+                                            block_indices        = block_indices,
+                                            blk_sizes            = _bsizes,
+                                            num_key_value_groups = num_key_value_groups,
+                                            anchor_indices       = anchor_indices,
+                                            cos                  = cos_all,
+                                            sin                  = sin_all,
+                                        )  # [H_q, D], [H_q]
+
+                                    # 4. Combine outputs via LSE
+                                    out_dense_hd = out_dense[0, :, 0, :].float()
+                                    out_sparse_fp32 = out_sparse.float()
+                                    lse_dense = lse_dense.to(torch.float32)
+                                    lse_sparse = lse_sparse.to(torch.float32)
+
+                                    lse_max = torch.maximum(lse_dense, lse_sparse)
+                                    w_dense = torch.exp(lse_dense - lse_max)
+                                    w_sparse = torch.exp(lse_sparse - lse_max)
+                                    denom = w_dense + w_sparse
+
+                                    out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
+                                                 out_sparse_fp32 * w_sparse.unsqueeze(-1)) / denom.unsqueeze(-1)
+                                    attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
                         else:
                             attn_out_b = native_triton_sparse_attn_decode(
                                 q=query_states[b_idx:b_idx+1],
@@ -724,7 +818,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             
                                             _kd = k_rep[0]
                                             _scale = (query_states.shape[3] ** -0.5)
-                                            scores_dense = torch.einsum('hd,htd->ht', _q_val, _kd) * _scale
+                                            scores_dense = torch.matmul(_kd, _q_val.unsqueeze(-1)).squeeze(-1) * _scale
                                             lse_dense_val = torch.logsumexp(scores_dense.float(), dim=-1)
                                             
                                             out_dense_hd = out_dense_val[0, :, 0, :].float()

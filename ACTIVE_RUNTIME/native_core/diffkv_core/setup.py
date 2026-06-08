@@ -31,6 +31,64 @@ torch.utils.cpp_extension._check_cuda_version = lambda *args, **kwargs: None
 this_dir = os.path.dirname(os.path.abspath(__file__))
 include_dir = os.path.join(this_dir, "include")
 
+# ── Generate embedded Metal library byte array (Mac-only) ──────────────────────
+def generate_embedded_metallib():
+    if sys.platform != "darwin":
+        return
+    
+    metal_src = os.path.join(this_dir, "metal", "diffkv_decode.metal")
+    air_file = os.path.join(this_dir, "diffkv_decode.air")
+    lib_file = os.path.join(this_dir, "diffkv.metallib")
+    header_file = os.path.join(this_dir, "src", "diffkv_metallib.hpp")
+    
+    # Check if Metal source exists
+    if not os.path.exists(metal_src):
+        # Write dummy header if source is missing to avoid compiler errors
+        if not os.path.exists(header_file):
+            with open(header_file, "w") as f:
+                f.write("#pragma once\nunsigned int diffkv_metallib_len = 0;\nunsigned char diffkv_metallib[] = { 0 };\n")
+        return
+        
+    try:
+        print("[DiffKV Build] Compiling Metal shader to AIR...")
+        subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-c", metal_src, "-o", air_file], check=True)
+        
+        print("[DiffKV Build] Compiling AIR to metallib...")
+        subprocess.run(["xcrun", "-sdk", "macosx", "metallib", air_file, "-o", lib_file], check=True)
+        
+        # Read the binary metallib
+        with open(lib_file, "rb") as f:
+            data = f.read()
+            
+        # Write C++ header file
+        print(f"[DiffKV Build] Embedding {len(data)} bytes of metallib into C++ header...")
+        with open(header_file, "w") as f:
+            f.write("#pragma once\n")
+            f.write(f"unsigned int diffkv_metallib_len = {len(data)};\n")
+            f.write("unsigned char diffkv_metallib[] = {\n")
+            # Write as hex chunks (16 bytes per line)
+            hex_bytes = [f"0x{b:02x}" for b in data]
+            for i in range(0, len(hex_bytes), 16):
+                f.write("    " + ", ".join(hex_bytes[i:i+16]) + ",\n")
+            f.write("};\n")
+            
+        # Clean up temporary files
+        if os.path.exists(air_file):
+            os.remove(air_file)
+        if os.path.exists(lib_file):
+            os.remove(lib_file)
+        print("[DiffKV Build] Embedded metallib successfully.")
+        
+    except Exception as e:
+        print(f"[DiffKV Build] WARNING: Failed to compile Metal library ({e}).")
+        # Write fallback dummy header so C++ compilation does not fail
+        if not os.path.exists(header_file):
+            with open(header_file, "w") as f:
+                f.write("#pragma once\nunsigned int diffkv_metallib_len = 0;\nunsigned char diffkv_metallib[] = { 0 };\n")
+
+# Run generator before setuptools setup()
+generate_embedded_metallib()
+
 # ── Shared sources (both platforms) ──────────────────────────────────────────
 SHARED_SOURCES = [
     "src/srl_router.cpp",
@@ -44,12 +102,13 @@ if sys.platform == "darwin":
 
     MAC_SOURCES = SHARED_SOURCES + [
         "src/compressor_thread_cpu.cpp",   # Accelerate LAPACK SVD
+        "src/metal_runtime.mm",            # Custom Metal runtime
     ]
 
-    # Compiler flags for C++17 + Accelerate framework
+    # Compiler flags for C++20 + Accelerate framework
     # -DDIFFKV_APPLE=1 gates platform-specific code in bindings.cpp and headers
     MAC_CXX_FLAGS = [
-        "-std=c++17",
+        "-std=c++20",
         "-O3",
         "-DDIFFKV_APPLE=1",
         "-fvisibility=hidden",      # Required for pybind11 on Mac
@@ -59,6 +118,7 @@ if sys.platform == "darwin":
     # Accelerate not needed: torch::linalg::svd on CPU dispatches to it internally
     MAC_LINK_FLAGS = [
         "-framework", "Foundation",
+        "-framework", "Metal",
     ]
 
     ext = CppExtension(

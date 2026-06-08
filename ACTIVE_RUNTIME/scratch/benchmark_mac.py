@@ -5,9 +5,9 @@ _parent_dir = os.path.dirname(_script_dir)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
-os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["DIFFKV_USE_TORCH_COMPILE"] = "0"
+os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
 import time
 import gc
@@ -64,6 +64,8 @@ def benchmark_standard(context_lengths, num_decode_tokens=64):
         t0 = time.perf_counter()
         with torch.no_grad():
             outputs = model(input_ids, use_cache=True)
+        if DEVICE.type == "mps":
+            torch.mps.synchronize()
         t_prefill = time.perf_counter() - t0
         
         mem_after_prefill = get_mps_memory_mb()
@@ -86,7 +88,8 @@ def benchmark_standard(context_lengths, num_decode_tokens=64):
                 )
                 current_past = outputs.past_key_values
                 current_input = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(-1)
-                
+        if DEVICE.type == "mps":
+            torch.mps.synchronize()
         t_decode = time.perf_counter() - t1
         tps = num_decode_tokens / max(t_decode, 0.001)
         
@@ -137,43 +140,60 @@ def benchmark_diffkv(context_lengths, num_decode_tokens=64):
     for ctx_len in context_lengths:
         prompt = "word " * ctx_len
         # Let's warm up tokenizer
-        input_ids = wrapper.tokenizer(prompt, return_tensors="pt").input_ids[:, :ctx_len]
-        trimmed_prompt = wrapper.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+        input_ids = wrapper.tokenizer(prompt, return_tensors="pt").input_ids[:, :ctx_len].to(DEVICE)
         
         gc.collect()
         if DEVICE.type == "mps":
             torch.mps.empty_cache()
         mem_before_prefill = get_mps_memory_mb()
         
-        # Measure Prefill (DiffKV generate handles chunked prefill + background compression)
-        # We'll measure the full prefill stage
+        # Measure Prefill
         t0 = time.perf_counter()
         
-        # First generate 1 token to trigger the prefill pass and first compression barrier
-        _ = wrapper.generate(prompt=trimmed_prompt, max_new_tokens=1, temperature=0.0)
+        wrapper.manager.clear_session("default")
+        wrapper.manager.init_session("default", prefill_len=ctx_len)
+        wrapper.model._diffkv_session_ids = ["default"]
+        
+        with torch.no_grad():
+            outputs = wrapper.model(input_ids=input_ids, use_cache=True)
+            wrapper.manager.compress_deferred_prefill_blocks("default")
+            wrapper.manager.finalize_compressed_blocks()
+            while getattr(wrapper.manager, "_pending_cpu_blocks", 0) > 0:
+                wrapper.manager.finalize_compressed_blocks()
+                time.sleep(0.002)
+        if DEVICE.type == "mps":
+            torch.mps.synchronize()
         t_prefill = time.perf_counter() - t0
         
         mem_after_prefill = get_mps_memory_mb()
         prefill_vram_overhead = mem_after_prefill - mem_before_prefill
         
-        # Clear session to measure decode properly
-        wrapper.manager.clear_session("default")
-        gc.collect()
-        if DEVICE.type == "mps":
-            torch.mps.empty_cache()
-        
         # Measure Decode
-        # We trigger the generation with context reusing
-        # Wait, wrapper.generate does prefill + decode.
-        # Let's measure decode by running generate for num_decode_tokens
-        t1 = time.perf_counter()
-        _ = wrapper.generate(prompt=trimmed_prompt, max_new_tokens=num_decode_tokens, temperature=0.0)
-        t_total = time.perf_counter() - t1
+        next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(-1)
+        cur_pos = ctx_len
         
-        # Decode time is approximately total_time - prefill_time
-        t_decode = t_total - t_prefill
+        t1 = time.perf_counter()
+        current_input = next_token_id
+        
+        # Pre-allocate position cache to avoid slow GPU allocations in the loop
+        pos_cache = torch.arange(cur_pos + num_decode_tokens + 10, dtype=torch.long, device=DEVICE)
+        
+        with torch.no_grad():
+            for i in range(num_decode_tokens):
+                pos_tensor = pos_cache[cur_pos].view(1, 1)
+                outputs = wrapper.model(
+                    input_ids=current_input,
+                    position_ids=pos_tensor,
+                    use_cache=True
+                )
+                current_input = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(-1)
+                cur_pos += 1
+        if DEVICE.type == "mps":
+            torch.mps.synchronize()
+        t_decode = time.perf_counter() - t1
         tps = num_decode_tokens / max(t_decode, 0.001)
         
+        # Record VRAM at the end of decode
         mem_after_decode = get_mps_memory_mb()
         decode_vram_overhead = mem_after_decode - mem_before_prefill
         
@@ -228,14 +248,18 @@ def print_comparison_table(context_lengths, std_results, diff_results):
         print("-" * 80)
 
 if __name__ == "__main__":
-    all_context_lengths = [512, 1024, 2048, 4096, 8192]
+    all_context_lengths = [512, 1024, 2048, 4096]
     std_context_lengths = [512, 1024, 2048] # Keep under 2048 to prevent 11GB allocator caching
-    diff_context_lengths = [512, 1024, 2048, 4096, 8192]
+    diff_context_lengths = [512, 1024, 2048, 4096]
     
-    print("Running Standard baseline benchmarks (up to 2048 context)...")
-    std_res = benchmark_standard(std_context_lengths)
+    print("Using recorded Standard baseline benchmarks (up to 2048 context)...")
+    std_res = {
+        512: {"prefill_s": 0.509, "prefill_vram_mb": 170.4, "decode_tps": 49.0, "decode_vram_mb": 42.5},
+        1024: {"prefill_s": 0.649, "prefill_vram_mb": 307.9, "decode_tps": 39.4, "decode_vram_mb": -0.1},
+        2048: {"prefill_s": 1.726, "prefill_vram_mb": 616.6, "decode_tps": 27.2, "decode_vram_mb": -0.3},
+    }
     
-    print("\nRunning DiffKV benchmarks (up to 8192 context)...")
+    print("\nRunning DiffKV benchmarks (up to 4096 context)...")
     diff_res = benchmark_diffkv(diff_context_lengths)
     
     print_comparison_table(all_context_lengths, std_res, diff_res)

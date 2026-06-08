@@ -66,6 +66,13 @@ def two_level_gate(
     if N <= k_pass:
         return slot_ids
 
+    try:
+        import diffkv_core as _dkv_core
+        if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
+            return _dkv_core.anchor_screen(Q, pool.anchors_K, slot_ids, scale, k_pass)
+    except ImportError:
+        pass
+
     # GQA: average query over heads → [D]
     q_mean = Q.float().mean(dim=0)                      # [D]
 
@@ -148,7 +155,14 @@ def route_query(
         return torch.tensor([], dtype=torch.int32, device=Q.device)
 
     # ── Step 1: Adaptive K ────────────────────────────────────────────────
-    q_desc = compute_query_descriptor(Q, pool.W_proj)   # [DESC_DIM] float32, on device
+    try:
+        import diffkv_core as _dkv_core
+        if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
+            q_desc = _dkv_core.compute_query_desc(Q, pool.W_proj)
+        else:
+            q_desc = compute_query_descriptor(Q, pool.W_proj)
+    except ImportError:
+        q_desc = compute_query_descriptor(Q, pool.W_proj)
     K      = adaptive_k(q_desc, srl_state, N)
 
     # ── Step 2: Semantic ANN search ───────────────────────────────────────

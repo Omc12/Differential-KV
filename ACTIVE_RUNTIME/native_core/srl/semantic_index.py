@@ -90,6 +90,14 @@ class SemanticIndex:
             return torch.tensor([], dtype=torch.int32, device=q_desc.device)
 
         k = min(k, N)
+        try:
+            import diffkv_core as _dkv_core
+            if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
+                top_k_indices = _dkv_core.semantic_search_topk(q_desc, self.desc_matrix, k)
+                return self.slot_ids[top_k_indices]
+        except ImportError:
+            pass
+
         # Cast query to float16 to match desc_matrix dtype — faster matmul
         q16 = q_desc.half().to(self.desc_matrix.device)
         if q16.device.type == "mps":

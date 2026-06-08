@@ -106,4 +106,24 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_aten_lse(
     int rank
 );
 
+torch::Tensor fused_decode_attention_combined(
+    const torch::Tensor& Q,
+    const torch::Tensor& dense_k,
+    const torch::Tensor& dense_v,
+    const torch::Tensor& cos_dense,
+    const torch::Tensor& sin_dense,
+    const torch::Tensor& U_pool,
+    const torch::Tensor& U_scale_pool,
+    const torch::Tensor& VK_pool,
+    const torch::Tensor& VV_pool,
+    const torch::Tensor& anchors_K,
+    const torch::Tensor& anchors_V,
+    const torch::Tensor& seq_lens,
+    const torch::Tensor& slot_indices,
+    float scale,
+    int n_q_heads,
+    int n_kv_heads,
+    int rank
+);
+
 } // namespace diffkv

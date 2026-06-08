@@ -741,16 +741,11 @@ class StreamingSparseIngestManager:
                 stacked_anchors = torch.stack([anchors_k, anchors_v], dim=2).permute(3, 0, 2, 1, 4)
                 
                 # Consolidated copy of stacked anchors to CPU in a single step (zero round-trips!)
-                stacked_anchors_cpu = stacked_anchors.cpu()
+                stacked_anchors_cpu = stacked_anchors.to("cpu", non_blocking=True)
 
                 # Extract active states: [num_full_blocks, 1, heads, r_mbs, head_dim]
                 active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
                 active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
-
-                # Precompute max key token values for all full blocks in a vectorized way on GPU,
-                # and move to CPU in a single transfer to eliminate nested round-trips!
-                k_max_per_block = k_reshaped.abs().max(dim=4).values.max(dim=3).values.max(dim=1).values[0]
-                k_max_per_block_cpu = k_max_per_block.to("cpu").tolist()
 
                 # Pre-allocate NativeBlockPool indices in a single batch call!
                 pool_indices = []
@@ -824,7 +819,7 @@ class StreamingSparseIngestManager:
                 new_block = StreamingKVBlock(
                     anchor_idx=anchor_idx,
                     anchor_kv=anchor_kv,
-                    anchor_kv_cpu=anchor_kv.cpu(),
+                    anchor_kv_cpu=anchor_kv.to("cpu", non_blocking=True),
                     micro_block_size=r_mbs,
                     token_indices=token_indices,
                     pool_idx=pool_idx,
@@ -834,8 +829,6 @@ class StreamingSparseIngestManager:
                     new_block.active_k = blk_active_k.clone()
                     new_block.active_v = blk_active_v.clone()
 
-                # Outlier check (single GPU-CPU transfer for the entire partial block slice)
-                k_max_val = region_k[:, :, L_full:].abs().max().item()
                 new_block.is_outlier = False
 
                 # Check for compression exemption

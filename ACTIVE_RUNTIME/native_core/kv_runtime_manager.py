@@ -338,9 +338,10 @@ class KVRuntimeManager:
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
             print("[DiffKV] Auto-detected Apple Silicon / MPS device. Disabling async background SVD for thread-safety.")
             self._async = False
-            # Force approximate attention off on MPS to prevent gibberish outputs
+            # Force approximate attention off on MPS only if not explicitly enabled
             import os as _local_os
-            _local_os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
+            if _local_os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
+                _local_os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
         else:
             self._async = self.config.async_svd
 
@@ -1264,19 +1265,20 @@ class KVRuntimeManager:
             session_dict = self.decode_workspace.setdefault(session_id, {})
             indices_gpu_cache = session_dict.setdefault("indices_gpu", {})
             cached_val = indices_gpu_cache.get(layer_idx)
+            cpu_indices_key = tuple(cpu_indices.tolist())
             if cached_val is not None:
-                cached_cpu_ind, cached_gpu_ind, cached_cpu_anc, cached_gpu_anc = cached_val
-                if cached_cpu_ind.shape[0] == cpu_indices.shape[0] and torch.equal(cached_cpu_ind, cpu_indices):
+                cached_key, cached_gpu_ind, cached_gpu_anc = cached_val
+                if cached_key == cpu_indices_key:
                     block_indices_tensor = cached_gpu_ind
                     anchor_indices_gpu = cached_gpu_anc
                 else:
                     block_indices_tensor = cpu_indices.to(device)
                     anchor_indices_gpu = cpu_anchors.to(device)
-                    indices_gpu_cache[layer_idx] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
+                    indices_gpu_cache[layer_idx] = (cpu_indices_key, block_indices_tensor, anchor_indices_gpu)
             else:
                 block_indices_tensor = cpu_indices.to(device)
                 anchor_indices_gpu = cpu_anchors.to(device)
-                indices_gpu_cache[layer_idx] = (cpu_indices, block_indices_tensor, cpu_anchors, anchor_indices_gpu)
+                indices_gpu_cache[layer_idx] = (cpu_indices_key, block_indices_tensor, anchor_indices_gpu)
         else:
             block_indices_tensor = None
             anchor_indices_gpu = None
@@ -1323,35 +1325,79 @@ class KVRuntimeManager:
         workspace_k = dense_k_cache.get(layer_idx)
         workspace_v = dense_v_cache.get(layer_idx)
 
-        if (workspace_k is None 
+        dense_start_pos_dict = session_dict.setdefault("dense_start_pos", {})
+        last_start_pos = dense_start_pos_dict.get(layer_idx)
+        start_pos = dense_blocks[0].anchor_idx
+
+        new_alloc = (workspace_k is None 
             or workspace_k.shape[1] != self.kv_heads 
             or workspace_k.dtype != dtype 
-            or workspace_k.shape[2] < L_dense):
-            
-            # Align allocation length to multiples of 512 to prevent VRAM fragmentation
-            alloc_len = ((L_dense + 511) // 512) * 512
-            workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-            workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-            dense_k_cache[layer_idx] = workspace_k
-            dense_v_cache[layer_idx] = workspace_v
+            or workspace_k.shape[2] < L_dense
+            or last_start_pos is None
+            or last_start_pos != start_pos)
 
-        # 3. Copy tokens directly into the pre-allocated workspace slices
+        if new_alloc:
+            # Align allocation length to multiples of 512 to prevent VRAM fragmentation
+            if workspace_k is None or workspace_k.shape[2] < L_dense:
+                alloc_len = ((L_dense + 511) // 512) * 512
+                workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+                workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+                dense_k_cache[layer_idx] = workspace_k
+                dense_v_cache[layer_idx] = workspace_v
+            dense_start_pos_dict[layer_idx] = start_pos
+
+        dense_offsets = session_dict.setdefault("dense_offsets", {})
+
+        # 3. Copy only dirty blocks directly into the pre-allocated workspace slices
         curr_idx = 0
         for blk in dense_blocks:
-            workspace_k[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
-            workspace_v[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
-            curr_idx += 1
+            key = (layer_idx, blk.anchor_idx)
+            if new_alloc:
+                dense_offsets[key] = curr_idx
+                workspace_k[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
+                workspace_v[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
 
-            if blk.active_k is not None:
-                active_len = blk.active_k.shape[2]
-                workspace_k[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_k, non_blocking=True)
-                workspace_v[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_v, non_blocking=True)
-                curr_idx += active_len
-            elif getattr(blk, "active_k_cpu", None) is not None:
-                active_len = blk.active_k_cpu.shape[2]
-                workspace_k[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_k_cpu, non_blocking=True)
-                workspace_v[:, :, curr_idx : curr_idx + active_len].copy_(blk.active_v_cpu, non_blocking=True)
-                curr_idx += active_len
+                if blk.active_k is not None:
+                    active_len = blk.active_k.shape[2]
+                    workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k, non_blocking=True)
+                    workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v, non_blocking=True)
+                    curr_idx += 1 + active_len
+                elif getattr(blk, "active_k_cpu", None) is not None:
+                    active_len = blk.active_k_cpu.shape[2]
+                    workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
+                    workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                    curr_idx += 1 + active_len
+                else:
+                    curr_idx += 1
+                
+                blk.dirty = False
+            else:
+                offset = dense_offsets.get(key)
+                if offset is None:
+                    offset = curr_idx
+                    dense_offsets[key] = offset
+
+                if blk.dirty:
+                    workspace_k[:, :, offset : offset + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
+                    workspace_v[:, :, offset : offset + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
+
+                    if blk.active_k is not None:
+                        active_len = blk.active_k.shape[2]
+                        workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k, non_blocking=True)
+                        workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v, non_blocking=True)
+                    elif getattr(blk, "active_k_cpu", None) is not None:
+                        active_len = blk.active_k_cpu.shape[2]
+                        workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
+                        workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                    
+                    blk.dirty = False
+
+                if blk.active_k is not None:
+                    curr_idx = offset + 1 + blk.active_k.shape[2]
+                elif getattr(blk, "active_k_cpu", None) is not None:
+                    curr_idx = offset + 1 + blk.active_k_cpu.shape[2]
+                else:
+                    curr_idx = offset + 1
 
         # 4. Return zero-allocation slice views of the static workspace
         return workspace_k[:, :, :L_dense], workspace_v[:, :, :L_dense]

@@ -15,7 +15,7 @@ def main():
     wrapper = DiffKVHFWrapper(MODEL, config={"rank": 32, "micro_block_size": 256}, device=device)
     
     base_text = "The quick brown fox jumps over the lazy dog. " * 100  # ~900 tokens
-    long_prompt = (base_text + "\n\n") * 8 + "\n\nBased on the text above, answer this question: What does the fox jump over?"
+    long_prompt = (base_text + "\n\n") * 1 + "\n\nBased on the text above, answer this question: What does the fox jump over?"
     
     print("\nRunning prefill...")
     session_id = "default"

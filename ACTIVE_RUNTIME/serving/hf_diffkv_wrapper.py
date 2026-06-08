@@ -172,13 +172,21 @@ class DiffKVHFWrapper:
                 print("[DiffKV] WARNING: bitsandbytes not installed — cannot use NF4 4-bit. "
                       "Install with: pip install bitsandbytes. Falling back to fp16.")
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            device_map=device,
-            trust_remote_code=True,
-            quantization_config=quantization_config
-        )
+        if device == "mps":
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+                quantization_config=quantization_config
+            ).to("mps")
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                device_map=device,
+                trust_remote_code=True,
+                quantization_config=quantization_config
+            )
 
         self.model.eval()
         
@@ -506,6 +514,10 @@ class DiffKVHFWrapper:
         # CRITICAL FIX: track the absolute sequence position for each decode step.
         cur_pos = cached_len + prefill_len
 
+        # Pre-allocate position cache to avoid slow GPU allocations in the loop
+        max_total_len = cur_pos + max_new_tokens + 10
+        pos_cache = torch.arange(max_total_len, dtype=torch.long, device=self.device)
+
         for _ in range(max_new_tokens):
             # Repetition penalty
             if repetition_penalty != 1.0:
@@ -538,7 +550,7 @@ class DiffKVHFWrapper:
             # Pass the correct absolute position so RoPE rotates at the right angle.
             # past_key_values is always None (DiffKV manages KV internally), so without
             # this the model would wrongly use position 0 for every decode token.
-            pos_tensor = torch.tensor([[cur_pos]], dtype=torch.long, device=self.device)
+            pos_tensor = pos_cache[cur_pos].view(1, 1)
             input_ids = next_id.unsqueeze(0)
 
             # Finalize any completed CPU background compressions
