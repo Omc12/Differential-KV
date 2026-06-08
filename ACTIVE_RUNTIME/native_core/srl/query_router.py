@@ -98,8 +98,8 @@ def adaptive_k(
     Simple query ("hi") → entropy near 0 → K ≈ k_min (20)
     Complex query ("explain the algorithm") → higher entropy → K up to k_max
     """
-    k_min = max(srl_state.k_min, min(20, N_total))
     k_max = min(srl_state.k_max, N_total)
+    k_min = min(max(srl_state.k_min, int(0.15 * N_total)), k_max)
 
     if N_total <= k_min:
         return N_total
@@ -177,7 +177,7 @@ def route_query(
         L = max(all_abs_positions)
         slot_scores = defaultdict(float)
         slot_matched_toks = defaultdict(set)
-        decay_factor = 0.999
+        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "0.999"))
         
         for tok in recent_toks:
             if tok in inv_index.occurrences:
@@ -254,7 +254,10 @@ def route_query(
     # ── Step 8: Level-1 anchor reranking over combined set ────────────────
     combined_tensor = torch.tensor(combined, dtype=torch.long, device=Q.device)
     if combined_tensor.shape[0] > K:
-        combined_tensor = two_level_gate(Q, pool, combined_tensor, scale, k_pass=K)
+        if hasattr(pool, "anchors_K"):
+            combined_tensor = two_level_gate(Q, pool, combined_tensor, scale, k_pass=K)
+        else:
+            combined_tensor = combined_tensor[:K]
 
     srl_state.current_step_count += 1
     return combined_tensor.to(torch.int32)

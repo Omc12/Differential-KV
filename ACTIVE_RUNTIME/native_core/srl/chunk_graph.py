@@ -94,6 +94,7 @@ def build_chunk_graph(
     # ── Lexical / Keyword Overlap Neighbors ───────────────────────────────
     lex_neighbors = [[] for _ in range(N)]
     if inv_index is not None and getattr(inv_index, "chunk_vocabularies", None):
+        import os as _local_os
         slot_list = slot_ids.tolist()
         vocabs = []
         for slot in slot_list:
@@ -107,6 +108,7 @@ def build_chunk_graph(
             len_w_i = len(w_i)
             if len_w_i == 0:
                 continue
+            candidates_i = []
             for j in range(N):
                 if i == j:
                     continue
@@ -114,7 +116,10 @@ def build_chunk_graph(
                 overlap = len(w_i & w_j)
                 relative_score = overlap / len_w_i
                 if relative_score >= overlap_threshold:
-                    lex_neighbors[i].append(j)
+                    candidates_i.append((j, relative_score))
+            
+            # Connect all blocks exceeding the threshold (unlimited degree web)
+            lex_neighbors[i] = [c[0] for c in candidates_i]
 
     # ── Merge and Deduplicate Per Block (Variable Degree Web) ─────────────
     merged_neighbors = []

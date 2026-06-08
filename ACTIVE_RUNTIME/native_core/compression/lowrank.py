@@ -390,6 +390,8 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.dynamic_rank = k
         block.active_k = None
         block.active_v = None
+        block._active_buf_k = None
+        block._active_buf_v = None
         block.state = "COMPRESSED"
         block.dirty = True
 

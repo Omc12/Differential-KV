@@ -1901,6 +1901,8 @@ class KVRuntimeManager:
                     block.active_v = None
                     block.active_k_cpu = None
                     block.active_v_cpu = None
+                    block._active_buf_k = None
+                    block._active_buf_v = None
                     block.dirty    = True
 
                     if hasattr(block, 'state'):
@@ -1917,6 +1919,8 @@ class KVRuntimeManager:
                 block.active_v = None
                 block.active_k_cpu = None
                 block.active_v_cpu = None
+                block._active_buf_k = None
+                block._active_buf_v = None
                 block.dirty    = True
 
                 if hasattr(block, 'state'):

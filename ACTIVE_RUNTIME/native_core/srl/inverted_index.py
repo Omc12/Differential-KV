@@ -42,6 +42,7 @@ class InvertedTokenIndex:
     occurrences:        Dict[int, List[Tuple[int, int, int]]] = field(default_factory=dict)
     chunk_vocabularies: Dict[int, Dict[int, List[int]]]       = field(default_factory=dict)
     idf:                Dict[int, float]                      = field(default_factory=dict)
+    block_size:         int                                   = 256
 
 
 def build_inverted_index(
@@ -111,6 +112,7 @@ def build_inverted_index(
         occurrences        = dict(occurrences),
         chunk_vocabularies = final_chunk_vocabs,
         idf                = idf,
+        block_size         = block_size,
     )
 
 

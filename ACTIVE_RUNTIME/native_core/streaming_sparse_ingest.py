@@ -234,6 +234,12 @@ class StreamingSparseIngestManager:
         # cloned before being enqueued into the async compressor — breaking aliasing).
         self.session_staging_buffers: Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
+        # session_id -> prefill_len
+        self.session_prefill_lens: Dict[str, int] = {}
+
+        # session_id -> cached query words set
+        self.session_query_words: Dict[str, set] = {}
+
         # Telemetry
         self.stats = {
             "total_blocks_created": 0,
@@ -250,6 +256,7 @@ class StreamingSparseIngestManager:
             self.session_blocks[session_id] = {i: [] for i in range(num_layers)}
         if session_id not in self.session_metadata:
             self.session_metadata[session_id] = {}
+        self.session_prefill_lens[session_id] = prefill_len
         if session_id not in self.session_micro_block_sizes:
             if prefill_len > 0:
                 if prefill_len < 256:
@@ -320,6 +327,8 @@ class StreamingSparseIngestManager:
         self.session_metadata.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
         self.session_staging_buffers.pop(session_id, None)
+        self.session_prefill_lens.pop(session_id, None)
+        self.session_query_words.pop(session_id, None)
 
     def rollback_session(self, session_id: str, target_len: int) -> None:
         """
@@ -447,18 +456,76 @@ class StreamingSparseIngestManager:
             
         block_toks = token_ids_cpu[start:end].tolist()
         
-        # Check each token ID
-        for tok_id in block_toks:
-            try:
-                # Decode the token ID to string
-                s = self.manager.tokenizer.decode([tok_id])
-                # We exempt any block where any token contains digit characters.
-                # This guarantees that any numbers/digits (which may be needle codes)
-                # are kept dense with 100% exact attention.
-                if any(c.isdigit() for c in s):
+        try:
+            # Decode the entire block's tokens together to handle split tokens
+            block_text = self.manager.tokenizer.decode(block_toks).lower()
+            import re
+            digit_parts = re.findall(r'\d+', block_text)
+            if digit_parts:
+                # Rule 1: Exempt blocks containing long digit codes (length >= 5)
+                if any(len(part) >= 5 for part in digit_parts):
                     return True
-            except Exception:
-                pass
+                # Rule 2: Exempt blocks containing short digit codes (length >= 2) with dynamic query overlap
+                if any(len(part) >= 2 for part in digit_parts):
+                    # Lazily retrieve and cache query keywords
+                    query_words = self.session_query_words.get(session_id)
+                    if query_words is None:
+                        prefill_len = self.session_prefill_lens.get(session_id, 0)
+                        if prefill_len <= 0:
+                            prefill_len = len(token_ids_cpu)
+                        
+                        query_start = max(0, prefill_len - 128)
+                        query_toks = token_ids_cpu[query_start:prefill_len].tolist()
+                        if query_toks:
+                            query_text = self.manager.tokenizer.decode(query_toks).lower()
+                            
+                            STOP_WORDS = {
+                                'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd",
+                                'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers',
+                                'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'a', 'an', 'the',
+                                'and', 'but', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
+                                'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+                                'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
+                                'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+                                'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'now',
+                                'should', "should've", 'would', 'could', 'may', 'might', 'must', 'shall', 'am', 'is', 'are', 'was', 'were',
+                                'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'get', 'got', 'make',
+                                'made', 'go', 'went', 'take', 'took', 'see', 'saw', 'say', 'said', 'use', 'used', 'find', 'found',
+                                'question', 'answer', 'text', 'context', 'information', 'prompt', 'query', 'assistant', 'system', 'user',
+                                'file', 'document', 'page', 'line', 'passage', 'following', 'above', 'below', 'please', 'write', 'read',
+                                'describe', 'explain', 'summarize', 'find', 'extract', 'retrieve', 'give', 'tell', 'show', 'list', 'what',
+                                'who', 'whom', 'where', 'when', 'why', 'how', 'which', 'detail', 'details', 'brief', 'exact', 'exactly',
+                                'correct', 'correctly', 'true', 'false', 'yes', 'no'
+                            }
+                            query_words = {w for w in re.findall(r'\b[a-z0-9]{2,}\b', query_text) if w not in STOP_WORDS}
+                        else:
+                            query_words = set()
+                        self.session_query_words[session_id] = query_words
+                    
+                    if query_words:
+                        STOP_WORDS = {
+                            'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd",
+                            'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers',
+                            'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'a', 'an', 'the',
+                            'and', 'but', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
+                            'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+                            'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
+                            'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+                            'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'now',
+                            'should', "should've", 'would', 'could', 'may', 'might', 'must', 'shall', 'am', 'is', 'are', 'was', 'were',
+                            'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'get', 'got', 'make',
+                            'made', 'go', 'went', 'take', 'took', 'see', 'saw', 'say', 'said', 'use', 'used', 'find', 'found',
+                            'question', 'answer', 'text', 'context', 'information', 'prompt', 'query', 'assistant', 'system', 'user',
+                            'file', 'document', 'page', 'line', 'passage', 'following', 'above', 'below', 'please', 'write', 'read',
+                            'describe', 'explain', 'summarize', 'find', 'extract', 'retrieve', 'give', 'tell', 'show', 'list', 'what',
+                            'who', 'whom', 'where', 'when', 'why', 'how', 'which', 'detail', 'details', 'brief', 'exact', 'exactly',
+                            'correct', 'correctly', 'true', 'false', 'yes', 'no'
+                        }
+                        block_words = {w for w in re.findall(r'\b[a-z0-9]{2,}\b', block_text) if w not in STOP_WORDS}
+                        if block_words & query_words:
+                            return True
+        except Exception:
+            pass
         return False
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
@@ -531,7 +598,7 @@ class StreamingSparseIngestManager:
                 # Check for compression exemption
                 if self._should_skip_compression(session_id, anchor_idx, 1):
                     new_block.skip_compression = True
-                    if layer_idx == 0:
+                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                         print(f"[DiffKV Ingest] Decode block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD (contains digit/number)")
                 
                 blocks.append(new_block)
@@ -573,7 +640,7 @@ class StreamingSparseIngestManager:
                 new_tok_pos = current_block.anchor_idx + len(current_block.token_indices)
                 if self._should_skip_compression(session_id, new_tok_pos, 1):
                     current_block.skip_compression = True
-                    if layer_idx == 0:
+                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                         print(f"[DiffKV Ingest] Decode block anchor_idx={current_block.anchor_idx} layer={layer_idx}: Exempted from SVD (appended digit/number)")
 
             current_block.dirty = True
@@ -714,7 +781,7 @@ class StreamingSparseIngestManager:
                     # Check for compression exemption
                     if self._should_skip_compression(session_id, anchor_idx, block_capacity):
                         new_block.skip_compression = True
-                        if layer_idx == 0:
+                        if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                             print(f"[DiffKV Ingest] Block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
                     # Check if the block is eligible for immediate compression.
@@ -774,7 +841,7 @@ class StreamingSparseIngestManager:
                 # Check for compression exemption
                 if self._should_skip_compression(session_id, anchor_idx, len(token_indices)):
                     new_block.skip_compression = True
-                    if layer_idx == 0:
+                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                         print(f"[DiffKV Ingest] Partial block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
                 # SVD compression is deferred during prefill to ensure exact attention.
