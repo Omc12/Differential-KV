@@ -1,7 +1,7 @@
 import os
 import psutil
-os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
-os.environ.setdefault("DIFFKV_MPS_APPROXIMATE_ATTN", "0")
+# Environment defaults for MPS/Metal are managed dynamically by the config preset.
+
 
 import time
 import uuid
@@ -66,9 +66,9 @@ class OpenAICompatibleAPIGateway:
                     while True:
                         try:
                             # Prune idle sessions every 60 seconds.
-                            # Timeout is 1800 seconds (30 minutes).
+                            # Timeout is 600 seconds (10 minutes).
                             await asyncio.sleep(60)
-                            session_manager.cleanup_idle_sessions(idle_timeout_seconds=1800)
+                            session_manager.cleanup_idle_sessions(idle_timeout_seconds=600)
                         except asyncio.CancelledError:
                             break
                         except Exception as e:
@@ -420,6 +420,14 @@ class OpenAICompatibleAPIGateway:
                             self.resolver.cancel(session_id, free_kv=False)
                     raise
                 finally:
+                    if is_ephemeral:
+                        try:
+                            if hasattr(self.resolver, "_free_session_kv"):
+                                self.resolver._free_session_kv(session_id)
+                            elif kv_manager is not None and hasattr(kv_manager, "clear_session"):
+                                kv_manager.clear_session(session_id)
+                        except Exception:
+                            pass
                     import gc
                     from native_core.mac_utils import empty_cache
                     gc.collect()
@@ -660,6 +668,15 @@ class OpenAICompatibleAPIGateway:
                     self.resolver.cancel(session_id, free_kv=False)
             raise
         finally:
+            if is_ephemeral:
+                try:
+                    kv_mgr = getattr(getattr(self.resolver, "wrapper", None), "manager", None)
+                    if hasattr(self.resolver, "_free_session_kv"):
+                        self.resolver._free_session_kv(session_id)
+                    elif kv_mgr is not None and hasattr(kv_mgr, "clear_session"):
+                        kv_mgr.clear_session(session_id)
+                except Exception:
+                    pass
             import gc
             from native_core.mac_utils import empty_cache
             gc.collect()
@@ -778,6 +795,25 @@ def main():
     except ImportError:
         _best_device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f'[DiffKV] Auto-selected device: {_best_device}')
+    
+    # ── Configure MPS high watermark ratio early before allocator is initialized ──
+    if _best_device == "mps":
+        try:
+            from native_core.config import DiffKVConfig
+            cfg = DiffKVConfig({"preset": args.preset})
+            watermark = cfg.mps_watermark
+            if watermark > 0.0:
+                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
+                os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = str(round(watermark * 0.8, 2))
+                print(f"[DiffKV] Configured PYTORCH_MPS_HIGH_WATERMARK_RATIO={watermark}, LOW_WATERMARK_RATIO={round(watermark * 0.8, 2)}")
+                torch.mps.set_per_process_memory_fraction(watermark)
+            else:
+                os.environ.pop("PYTORCH_MPS_HIGH_WATERMARK_RATIO", None)
+                os.environ.pop("PYTORCH_MPS_LOW_WATERMARK_RATIO", None)
+                print("[DiffKV] MPS watermark set to default (no override)")
+        except Exception as e:
+            print(f"[DiffKV] WARNING: Failed to configure MPS memory defaults: {e}")
+
     wrapper = DiffKVHFWrapper(
         args.model,
         config={

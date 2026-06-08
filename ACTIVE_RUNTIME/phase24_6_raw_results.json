@@ -1,15 +1,15 @@
 {
   "model": "Qwen/Qwen2.5-0.5B-Instruct",
   "model_weight_mb": 1056.48,
-  "allocator_overhead_mb": 1074.6999999999998,
+  "allocator_overhead_mb": 1057.48,
   "sessions": [
     {
       "label": "short_prompt",
       "prompt_tokens": 32,
       "model_weight_mb": 1056.48,
-      "peak_prefill_mb": 1074.2,
-      "kv_overhead_mb": 17.720000000000027,
-      "post_gc_reserved_mb": 2100.04,
+      "peak_prefill_mb": 1076.07,
+      "kv_overhead_mb": 19.589999999999918,
+      "post_gc_reserved_mb": 2100.02,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0
@@ -18,9 +18,9 @@
       "label": "medium_prompt",
       "prompt_tokens": 128,
       "model_weight_mb": 1056.48,
-      "peak_prefill_mb": 1089.14,
-      "kv_overhead_mb": 32.66000000000008,
-      "post_gc_reserved_mb": 2117.04,
+      "peak_prefill_mb": 1089.13,
+      "kv_overhead_mb": 32.65000000000009,
+      "post_gc_reserved_mb": 2117.17,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0
@@ -29,9 +29,9 @@
       "label": "long_prompt",
       "prompt_tokens": 512,
       "model_weight_mb": 1056.48,
-      "peak_prefill_mb": 1106.46,
-      "kv_overhead_mb": 49.98000000000002,
-      "post_gc_reserved_mb": 2173.09,
+      "peak_prefill_mb": 1106.36,
+      "kv_overhead_mb": 49.87999999999988,
+      "post_gc_reserved_mb": 2172.32,
       "recon_calls": 0,
       "recon_total_mb": 0,
       "decode_recon_calls": 0

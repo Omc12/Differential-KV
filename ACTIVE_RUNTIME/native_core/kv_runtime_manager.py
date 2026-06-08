@@ -1432,12 +1432,39 @@ class KVRuntimeManager:
 
         dense_offsets = session_dict.setdefault("dense_offsets", {})
 
+        # Fix 1: Detect block growth between decode steps.
+        # dense_offsets stores (offset, expected_active_len) per (layer_idx, anchor_idx).
+        # If any block has grown (e.g. 26→27 tokens since last alloc), the old offset's
+        # slot is too small — force new_alloc=True so we recompute all offsets and copy
+        # all blocks into a freshly-laid-out workspace.  This prevents the
+        #   RuntimeError: tensor a (26) must match tensor b (27)
+        # crash that killed responses mid-generation in long chat sessions.
+        if not new_alloc:
+            for blk in dense_blocks:
+                key = (layer_idx, blk.anchor_idx)
+                cached_entry = dense_offsets.get(key)
+                if cached_entry is not None and isinstance(cached_entry, tuple):
+                    _cached_offset, _cached_alen = cached_entry
+                    cur_alen = blk.active_k.shape[2] if blk.active_k is not None else (
+                        blk.active_k_cpu.shape[2] if getattr(blk, "active_k_cpu", None) is not None else 0
+                    )
+                    if cur_alen != _cached_alen:
+                        # Block grew — invalidate workspace layout, force full rewrite
+                        new_alloc = True
+                        if workspace_k is not None and workspace_k.shape[2] < L_dense:
+                            alloc_len = ((L_dense + 511) // 512) * 512
+                            workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+                            workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+                            dense_k_cache[layer_idx] = workspace_k
+                            dense_v_cache[layer_idx] = workspace_v
+                        dense_start_pos_dict[layer_idx] = start_pos
+                        break
+
         # 3. Copy only dirty blocks directly into the pre-allocated workspace slices
         curr_idx = 0
         for blk in dense_blocks:
             key = (layer_idx, blk.anchor_idx)
             if new_alloc:
-                dense_offsets[key] = curr_idx
                 workspace_k[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
                 workspace_v[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
 
@@ -1445,21 +1472,28 @@ class KVRuntimeManager:
                     active_len = blk.active_k.shape[2]
                     workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k, non_blocking=True)
                     workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v, non_blocking=True)
+                    dense_offsets[key] = (curr_idx, active_len)  # store (offset, active_len)
                     curr_idx += 1 + active_len
                 elif getattr(blk, "active_k_cpu", None) is not None:
                     active_len = blk.active_k_cpu.shape[2]
                     workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
                     workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                    dense_offsets[key] = (curr_idx, active_len)  # store (offset, active_len)
                     curr_idx += 1 + active_len
                 else:
+                    dense_offsets[key] = (curr_idx, 0)  # anchor only
                     curr_idx += 1
                 
                 blk.dirty = False
             else:
-                offset = dense_offsets.get(key)
-                if offset is None:
+                cached_entry = dense_offsets.get(key)
+                if cached_entry is not None and isinstance(cached_entry, tuple):
+                    offset = cached_entry[0]
+                elif isinstance(cached_entry, int):
+                    offset = cached_entry
+                else:
                     offset = curr_idx
-                    dense_offsets[key] = offset
+                    dense_offsets[key] = (offset, 0)
 
                 if blk.dirty:
                     workspace_k[:, :, offset : offset + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
@@ -1469,10 +1503,14 @@ class KVRuntimeManager:
                         active_len = blk.active_k.shape[2]
                         workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k, non_blocking=True)
                         workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v, non_blocking=True)
+                        dense_offsets[key] = (offset, active_len)
                     elif getattr(blk, "active_k_cpu", None) is not None:
                         active_len = blk.active_k_cpu.shape[2]
                         workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
                         workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                        dense_offsets[key] = (offset, active_len)
+                    else:
+                        dense_offsets[key] = (offset, 0)
                     
                     blk.dirty = False
 

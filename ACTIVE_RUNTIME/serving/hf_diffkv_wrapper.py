@@ -176,9 +176,11 @@ class DiffKVHFWrapper:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
+                device_map={"": "mps"},
                 trust_remote_code=True,
-                quantization_config=quantization_config
-            ).to("mps")
+                quantization_config=quantization_config,
+                low_cpu_mem_usage=True
+            )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,

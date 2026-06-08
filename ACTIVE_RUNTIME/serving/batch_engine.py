@@ -624,15 +624,19 @@ class ContinuousBatchEngine:
             # • Subsequent turns (cached_len > 0): only the NEW delta tokens are prefilled
             #   (always << 2048), so chunking is never triggered anyway.
             remaining = len(req.prompt_ids) - req.prefill_offset
-            cfg = getattr(self.wrapper.manager, "config", None)
-            if cfg is not None:
-                chunk_size = min(remaining, cfg.prefill_chunk_size)
-            elif self.wrapper.device == "mps" or (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"):
-                chunk_size = min(remaining, 512)
-            elif cached_len == 0:
-                chunk_size = min(remaining, 4096)
+            if cached_len == 0:
+                # First turn: process the entire prompt in one single chunk to avoid
+                # cross-chunk causal attention degradation and reconstruction overhead.
+                # Cap at 16384 to avoid OOM on extremely long inputs.
+                chunk_size = min(remaining, 16384)
             else:
-                chunk_size = 2048
+                cfg = getattr(self.wrapper.manager, "config", None)
+                if cfg is not None:
+                    chunk_size = min(remaining, cfg.prefill_chunk_size)
+                elif self.wrapper.device == "mps" or (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"):
+                    chunk_size = min(remaining, 512)
+                else:
+                    chunk_size = 2048
             offset = req.prefill_offset
             chunk_ids = req.prompt_ids[offset : offset + chunk_size]
             actual_len = len(chunk_ids)
@@ -742,7 +746,10 @@ class ContinuousBatchEngine:
                 if torch.backends.mps.is_available():
                     torch.mps.empty_cache()
                 
-                # Trigger compression of all deferred prefill blocks now that prefill is complete
+                # Fix 3: Trigger compression of all deferred prefill blocks now that prefill is complete.
+                # This applies to ALL turns (Turn 1 AND Turn 2+), ensuring newly ingested blocks
+                # from continuation turns get compressed promptly rather than accumulating as dense
+                # blocks that grow the O(n) attention window with each turn.
                 if hasattr(self.wrapper.manager, "compress_deferred_prefill_blocks"):
                     self.wrapper.manager.compress_deferred_prefill_blocks(req.session_id)
                 if self.draft_wrapper is not None and hasattr(self.draft_wrapper.manager, "compress_deferred_prefill_blocks"):
@@ -782,25 +789,33 @@ class ContinuousBatchEngine:
                 async def _build_srl_index_async():
                     _t_srl_start = time.perf_counter()
 
-                    # ── Fast-path for Turn 2+: SRL index already built from Turn 1 ──
+                    # ── Fix 2: Adaptive Turn 2+ SRL rebuild threshold ──────────
                     # When cached_len > 0, this is a continuation turn. The new delta
-                    # tokens (e.g. "hi" = ~11 tokens) generate ~168 new ACCUMULATING blocks
-                    # (micro_block_size × 28 layers). Waiting for SVD of all 168 blocks
-                    # on CPU takes minutes and completely stalls Turn 2 decode start.
-                    #
-                    # Solution: skip the compression barrier and SRL rebuild on Turn 2+.
-                    # The existing SRL index from Turn 1 is still valid for routing —
-                    # the small delta does not materially change the semantic index.
-                    # We only rebuild the SRL index if a significant amount of new blocks
-                    # were added (> 10% of existing blocks, or first turn).
+                    # tokens generate new ACCUMULATING blocks per layer. We skip the
+                    # expensive compression barrier+rebuild by default, but we DO rebuild
+                    # when the block count has grown by >20% since the last build —
+                    # otherwise the SRL router permanently routes to stale Turn-1 blocks
+                    # and quality degrades badly in long sessions (observed in telemetry:
+                    # session grew from 6→12 blocks but router kept returning Turn-1 slots).
                     if not _is_first_turn:
                         srl_state_existing = _mgr.get_srl_state(_sid)
                         if srl_state_existing is not None:
-                            print(f"[DiffKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
-                                  f"({srl_state_existing.n_active_blocks()} blocks). "
-                                  f"Skipping compression barrier and SRL rebuild. "
-                                  f"(saved ~{srl_state_existing.n_active_blocks() * 28 // 1000:.1f}k SVD ops)")
-                            return  # ← decode starts immediately, no wait
+                            n_current = srl_state_existing.n_active_blocks()
+                            # n_blocks_at_build is set whenever we finish building the index
+                            n_at_build = getattr(srl_state_existing, "n_blocks_at_build", n_current)
+                            growth_ratio = (n_current - n_at_build) / max(1, n_at_build)
+                            if growth_ratio < 0.20:
+                                # < 20% growth — fast path, skip rebuild
+                                print(f"[DiffKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
+                                      f"({n_current} blocks, built at {n_at_build}, growth={growth_ratio:.0%}). "
+                                      f"Skipping compression barrier and SRL rebuild. "
+                                      f"(saved ~{n_current * 28 // 1000:.1f}k SVD ops)")
+                                return  # ← decode starts immediately, no wait
+                            else:
+                                # ≥ 20% growth — rebuild needed for accurate routing
+                                print(f"[DiffKV BatchEngine] Turn 2+: SRL index stale for session {_sid} "
+                                      f"({n_current} blocks vs {n_at_build} at build, growth={growth_ratio:.0%}). "
+                                      f"Triggering incremental SRL rebuild.")
 
                     # ── First turn: wait for compression then build SRL ──────────────
                     print(f"[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...")
@@ -827,6 +842,10 @@ class ContinuousBatchEngine:
 
                         # ── Pre-warm SRL routing for the first decode step ──
                         srl_state = _mgr.get_srl_state(_sid)
+                        if srl_state is not None:
+                            # Stamp the block count at build time so the Turn 2+ growth
+                            # threshold check (Fix 2) knows when a rebuild is warranted.
+                            srl_state.n_blocks_at_build = srl_state.n_active_blocks()
                         if srl_state is not None and getattr(srl_state, "last_prefill_q", None) is not None:
                             pool = getattr(_mgr, "native_pool", None)
                             if pool is not None:

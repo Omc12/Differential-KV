@@ -1,0 +1,6916 @@
+[
+  {
+    "timestamp": 0.027091026306152344,
+    "rss_gb": 0.0666656494140625,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 0.5343630313873291,
+    "rss_gb": 0.079071044921875,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 1.0462021827697754,
+    "rss_gb": 0.079071044921875,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 1.552682876586914,
+    "rss_gb": 0.07916259765625,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 2.0607669353485107,
+    "rss_gb": 0.079193115234375,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 2.5709948539733887,
+    "rss_gb": 0.079193115234375,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 3.077225923538208,
+    "rss_gb": 0.079193115234375,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 3.5872609615325928,
+    "rss_gb": 0.079681396484375,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 4.095115900039673,
+    "rss_gb": 0.079681396484375,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 4.6034910678863525,
+    "rss_gb": 0.0791778564453125,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 5.111414909362793,
+    "rss_gb": 0.077545166015625,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 5.624501943588257,
+    "rss_gb": 0.0775909423828125,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 6.134305000305176,
+    "rss_gb": 0.0775909423828125,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 6.647578001022339,
+    "rss_gb": 0.077606201171875,
+    "vms_gb": 416.9657440185547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 7.157128810882568,
+    "rss_gb": 0.0776519775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 7.667604923248291,
+    "rss_gb": 0.077667236328125,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 8.181723833084106,
+    "rss_gb": 0.0776824951171875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 8.69228219985962,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 9.205427885055542,
+    "rss_gb": 0.0776824951171875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 9.714067935943604,
+    "rss_gb": 0.0776824951171875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 10.223170042037964,
+    "rss_gb": 0.0776519775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 10.733083009719849,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 11.241461992263794,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 11.749345064163208,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 12.259508848190308,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 12.769744157791138,
+    "rss_gb": 0.07769775390625,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 13.279874086380005,
+    "rss_gb": 0.0726318359375,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 13.790934085845947,
+    "rss_gb": 0.0711517333984375,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 14.297201871871948,
+    "rss_gb": 0.0710906982421875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 14.803984880447388,
+    "rss_gb": 0.071044921875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 15.317178010940552,
+    "rss_gb": 0.0710296630859375,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 15.82846999168396,
+    "rss_gb": 0.0709991455078125,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 16.33589816093445,
+    "rss_gb": 0.07098388671875,
+    "vms_gb": 416.9667205810547,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 17.042902946472168,
+    "rss_gb": 0.2805938720703125,
+    "vms_gb": 416.97479248046875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 17.756016969680786,
+    "rss_gb": 0.3522796630859375,
+    "vms_gb": 417.14569091796875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 18.465104818344116,
+    "rss_gb": 0.3204498291015625,
+    "vms_gb": 417.1746063232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 19.16944193840027,
+    "rss_gb": 0.3095245361328125,
+    "vms_gb": 417.1751403808594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 19.87505292892456,
+    "rss_gb": 0.144378662109375,
+    "vms_gb": 417.18299865722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 20.581730127334595,
+    "rss_gb": 0.1439056396484375,
+    "vms_gb": 417.18299865722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 21.288402795791626,
+    "rss_gb": 0.20281982421875,
+    "vms_gb": 417.18353271484375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 22.011275053024292,
+    "rss_gb": 0.139190673828125,
+    "vms_gb": 417.18365478515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 22.7168288230896,
+    "rss_gb": 0.1400909423828125,
+    "vms_gb": 417.18370056152344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 23.421601057052612,
+    "rss_gb": 0.1440277099609375,
+    "vms_gb": 417.18418884277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 24.12823796272278,
+    "rss_gb": 0.1661376953125,
+    "vms_gb": 417.19200134277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 24.83652400970459,
+    "rss_gb": 0.151123046875,
+    "vms_gb": 417.19200134277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 25.542059898376465,
+    "rss_gb": 0.167938232421875,
+    "vms_gb": 417.19200134277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 26.249428033828735,
+    "rss_gb": 0.18157958984375,
+    "vms_gb": 417.19981384277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 26.95631504058838,
+    "rss_gb": 0.1816253662109375,
+    "vms_gb": 417.1998596191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 27.661071062088013,
+    "rss_gb": 0.1996002197265625,
+    "vms_gb": 417.2159729003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 28.368252992630005,
+    "rss_gb": 0.203338623046875,
+    "vms_gb": 417.2237854003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 29.074384212493896,
+    "rss_gb": 0.217681884765625,
+    "vms_gb": 417.2315979003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 29.785807132720947,
+    "rss_gb": 0.1814422607421875,
+    "vms_gb": 417.2472229003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 30.49330997467041,
+    "rss_gb": 0.188629150390625,
+    "vms_gb": 417.2394104003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 31.200396060943604,
+    "rss_gb": 0.4062347412109375,
+    "vms_gb": 417.2550811767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 31.90653395652771,
+    "rss_gb": 0.4138641357421875,
+    "vms_gb": 417.2628936767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 32.61125612258911,
+    "rss_gb": 0.3854522705078125,
+    "vms_gb": 417.2790069580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 33.317530155181885,
+    "rss_gb": 0.39263916015625,
+    "vms_gb": 417.2868194580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 34.021697998046875,
+    "rss_gb": 0.42193603515625,
+    "vms_gb": 417.3024444580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 34.72879886627197,
+    "rss_gb": 0.3331451416015625,
+    "vms_gb": 417.3180694580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 35.436172008514404,
+    "rss_gb": 0.2443389892578125,
+    "vms_gb": 417.3336944580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 36.140713930130005,
+    "rss_gb": 0.231170654296875,
+    "vms_gb": 417.318115234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 36.84575700759888,
+    "rss_gb": 0.2273712158203125,
+    "vms_gb": 417.341552734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 37.55292010307312,
+    "rss_gb": 0.2330474853515625,
+    "vms_gb": 417.357666015625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 38.25748610496521,
+    "rss_gb": 0.236114501953125,
+    "vms_gb": 417.381103515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 38.96298599243164,
+    "rss_gb": 0.2480621337890625,
+    "vms_gb": 417.397705078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 39.670243978500366,
+    "rss_gb": 0.2523651123046875,
+    "vms_gb": 417.413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 40.3796648979187,
+    "rss_gb": 0.1710357666015625,
+    "vms_gb": 417.428955078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 41.08255100250244,
+    "rss_gb": 0.1683349609375,
+    "vms_gb": 417.4446258544922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 41.78967809677124,
+    "rss_gb": 0.178009033203125,
+    "vms_gb": 417.4680633544922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 42.47299003601074,
+    "rss_gb": 0.1983642578125,
+    "vms_gb": 417.4451141357422,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 43.18081998825073,
+    "rss_gb": 0.4030914306640625,
+    "vms_gb": 417.49102783203125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 43.886128187179565,
+    "rss_gb": 0.423736572265625,
+    "vms_gb": 417.48423767089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 44.60029315948486,
+    "rss_gb": 0.4513397216796875,
+    "vms_gb": 417.48423767089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 45.307759046554565,
+    "rss_gb": 0.4705352783203125,
+    "vms_gb": 417.51548767089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 46.013436794281006,
+    "rss_gb": 0.234100341796875,
+    "vms_gb": 417.5550842285156,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 46.72714686393738,
+    "rss_gb": 0.279815673828125,
+    "vms_gb": 417.5630187988281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 47.43839192390442,
+    "rss_gb": 0.3199462890625,
+    "vms_gb": 417.5322570800781,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 48.14763808250427,
+    "rss_gb": 0.1707916259765625,
+    "vms_gb": 417.5401153564453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 48.85351085662842,
+    "rss_gb": 0.19189453125,
+    "vms_gb": 417.5869903564453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 49.55802011489868,
+    "rss_gb": 0.190704345703125,
+    "vms_gb": 417.5948028564453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 50.261982917785645,
+    "rss_gb": 0.2087860107421875,
+    "vms_gb": 417.6338653564453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 50.97047281265259,
+    "rss_gb": 0.358673095703125,
+    "vms_gb": 417.5323028564453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 51.67751502990723,
+    "rss_gb": 0.4113006591796875,
+    "vms_gb": 417.5557861328125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 52.38835406303406,
+    "rss_gb": 0.337890625,
+    "vms_gb": 417.5479736328125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 53.09351181983948,
+    "rss_gb": 0.332244873046875,
+    "vms_gb": 417.5992431640625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 53.80454707145691,
+    "rss_gb": 0.189117431640625,
+    "vms_gb": 417.6383514404297,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 54.51127505302429,
+    "rss_gb": 0.3999786376953125,
+    "vms_gb": 417.5758514404297,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 55.21759796142578,
+    "rss_gb": 0.385894775390625,
+    "vms_gb": 417.6079864501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 55.9257230758667,
+    "rss_gb": 0.4181976318359375,
+    "vms_gb": 417.5923614501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 56.62819719314575,
+    "rss_gb": 0.357635498046875,
+    "vms_gb": 417.6079864501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 57.33491897583008,
+    "rss_gb": 0.3376007080078125,
+    "vms_gb": 417.6157989501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 58.04058790206909,
+    "rss_gb": 0.289581298828125,
+    "vms_gb": 417.6553497314453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 58.747984886169434,
+    "rss_gb": 0.296478271484375,
+    "vms_gb": 417.6944580078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 59.455219984054565,
+    "rss_gb": 0.3014373779296875,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 60.1616051197052,
+    "rss_gb": 0.316864013671875,
+    "vms_gb": 417.7257080078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 60.868770122528076,
+    "rss_gb": 0.3295440673828125,
+    "vms_gb": 417.7413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 61.57213807106018,
+    "rss_gb": 0.47503662109375,
+    "vms_gb": 417.6782989501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 62.2809898853302,
+    "rss_gb": 0.3483734130859375,
+    "vms_gb": 417.6782989501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 62.98860692977905,
+    "rss_gb": 0.1849517822265625,
+    "vms_gb": 417.6782989501953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 63.69217777252197,
+    "rss_gb": 0.199615478515625,
+    "vms_gb": 417.6787872314453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 64.39895486831665,
+    "rss_gb": 0.198638916015625,
+    "vms_gb": 417.6788330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 65.10640001296997,
+    "rss_gb": 0.1949920654296875,
+    "vms_gb": 417.6788330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 65.81380081176758,
+    "rss_gb": 0.20660400390625,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 66.52103400230408,
+    "rss_gb": 0.2118988037109375,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 67.22868204116821,
+    "rss_gb": 0.2046661376953125,
+    "vms_gb": 417.7413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 67.93640804290771,
+    "rss_gb": 0.1960601806640625,
+    "vms_gb": 417.7413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 68.6438090801239,
+    "rss_gb": 0.1904449462890625,
+    "vms_gb": 417.7725830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 69.35133481025696,
+    "rss_gb": 0.175506591796875,
+    "vms_gb": 417.8038330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 70.05883502960205,
+    "rss_gb": 0.181549072265625,
+    "vms_gb": 417.6788330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 70.76618385314941,
+    "rss_gb": 0.1959381103515625,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 71.47498178482056,
+    "rss_gb": 0.1645965576171875,
+    "vms_gb": 417.7413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 72.18337106704712,
+    "rss_gb": 0.197265625,
+    "vms_gb": 417.7725830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 72.8906569480896,
+    "rss_gb": 0.182708740234375,
+    "vms_gb": 417.8038330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 73.59936499595642,
+    "rss_gb": 0.1611785888671875,
+    "vms_gb": 417.8038330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 74.3086588382721,
+    "rss_gb": 0.1512908935546875,
+    "vms_gb": 417.8350830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 75.01634097099304,
+    "rss_gb": 0.1775360107421875,
+    "vms_gb": 417.8663330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 75.84771513938904,
+    "rss_gb": 0.184783935546875,
+    "vms_gb": 417.8980712890625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 76.5943968296051,
+    "rss_gb": 0.147491455078125,
+    "vms_gb": 417.8980712890625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 77.30189990997314,
+    "rss_gb": 0.1731414794921875,
+    "vms_gb": 417.6793212890625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 78.00646805763245,
+    "rss_gb": 0.1785125732421875,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 78.71494698524475,
+    "rss_gb": 0.1802825927734375,
+    "vms_gb": 417.7100830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 79.51469898223877,
+    "rss_gb": 0.3201446533203125,
+    "vms_gb": 417.7413330078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 80.21927905082703,
+    "rss_gb": 0.1863250732421875,
+    "vms_gb": 417.7725830078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 81.19438409805298,
+    "rss_gb": 0.182647705078125,
+    "vms_gb": 417.8043670654297,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 81.90330290794373,
+    "rss_gb": 0.1963958740234375,
+    "vms_gb": 417.8121795654297,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 82.61132287979126,
+    "rss_gb": 0.2017822265625,
+    "vms_gb": 417.8439178466797,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 83.31900382041931,
+    "rss_gb": 0.2104949951171875,
+    "vms_gb": 417.8751678466797,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 84.02687692642212,
+    "rss_gb": 0.192535400390625,
+    "vms_gb": 417.9220428466797,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 84.73145914077759,
+    "rss_gb": 0.1965484619140625,
+    "vms_gb": 417.9557800292969,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 85.43658590316772,
+    "rss_gb": 0.2045440673828125,
+    "vms_gb": 417.7057800292969,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 86.14214706420898,
+    "rss_gb": 0.436187744140625,
+    "vms_gb": 417.75303649902344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 86.84976100921631,
+    "rss_gb": 0.4428558349609375,
+    "vms_gb": 417.74522399902344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 87.55700993537903,
+    "rss_gb": 0.2571563720703125,
+    "vms_gb": 417.74522399902344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 88.26620483398438,
+    "rss_gb": 0.4305877685546875,
+    "vms_gb": 417.74620056152344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 88.97766900062561,
+    "rss_gb": 0.2716827392578125,
+    "vms_gb": 417.76182556152344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 89.68546199798584,
+    "rss_gb": 0.2291259765625,
+    "vms_gb": 417.79307556152344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 90.39244890213013,
+    "rss_gb": 0.2756500244140625,
+    "vms_gb": 417.83262634277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 91.1001238822937,
+    "rss_gb": 0.3190765380859375,
+    "vms_gb": 417.83262634277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 91.8071620464325,
+    "rss_gb": 0.226898193359375,
+    "vms_gb": 417.86387634277344,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 92.51020002365112,
+    "rss_gb": 0.2386627197265625,
+    "vms_gb": 417.8951721191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 93.21564483642578,
+    "rss_gb": 0.2247314453125,
+    "vms_gb": 417.9342346191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 93.91944098472595,
+    "rss_gb": 0.4144439697265625,
+    "vms_gb": 417.8404846191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 94.62801098823547,
+    "rss_gb": 0.187347412109375,
+    "vms_gb": 417.7779846191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 95.33607292175293,
+    "rss_gb": 0.2098236083984375,
+    "vms_gb": 417.8404846191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 96.04343509674072,
+    "rss_gb": 0.21527099609375,
+    "vms_gb": 417.7701721191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 96.75235199928284,
+    "rss_gb": 0.188690185546875,
+    "vms_gb": 417.8014221191406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 97.45820903778076,
+    "rss_gb": 0.1903533935546875,
+    "vms_gb": 417.8331604003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 98.17196011543274,
+    "rss_gb": 0.1869659423828125,
+    "vms_gb": 417.8331604003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 98.87852907180786,
+    "rss_gb": 0.1906585693359375,
+    "vms_gb": 417.8644104003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 99.58723783493042,
+    "rss_gb": 0.1922149658203125,
+    "vms_gb": 417.9269104003906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 100.29486584663391,
+    "rss_gb": 0.212158203125,
+    "vms_gb": 417.9582061767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 101.00107908248901,
+    "rss_gb": 0.2176666259765625,
+    "vms_gb": 417.9894561767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 101.70926594734192,
+    "rss_gb": 0.1971282958984375,
+    "vms_gb": 418.0363311767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 102.41685914993286,
+    "rss_gb": 0.20233154296875,
+    "vms_gb": 418.0675811767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 103.12211394309998,
+    "rss_gb": 0.2007293701171875,
+    "vms_gb": 418.1300811767578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 103.8301169872284,
+    "rss_gb": 0.21588134765625,
+    "vms_gb": 417.7868194580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 104.53577017784119,
+    "rss_gb": 0.1924285888671875,
+    "vms_gb": 417.8258819580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 105.24349594116211,
+    "rss_gb": 0.163543701171875,
+    "vms_gb": 417.8571319580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 105.95063495635986,
+    "rss_gb": 0.175872802734375,
+    "vms_gb": 417.8571319580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 106.66254210472107,
+    "rss_gb": 0.1790771484375,
+    "vms_gb": 417.8883819580078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 107.370521068573,
+    "rss_gb": 0.2007598876953125,
+    "vms_gb": 417.958740234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 108.07757306098938,
+    "rss_gb": 0.212615966796875,
+    "vms_gb": 417.989990234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 108.80104804039001,
+    "rss_gb": 0.197845458984375,
+    "vms_gb": 418.021240234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 109.51699304580688,
+    "rss_gb": 0.1844482421875,
+    "vms_gb": 418.052490234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 110.22176575660706,
+    "rss_gb": 0.1934051513671875,
+    "vms_gb": 418.099365234375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 110.92637491226196,
+    "rss_gb": 0.1814727783203125,
+    "vms_gb": 418.131103515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 111.63446807861328,
+    "rss_gb": 0.1966705322265625,
+    "vms_gb": 418.177978515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 112.3423399925232,
+    "rss_gb": 0.2098236083984375,
+    "vms_gb": 417.818603515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 113.04864597320557,
+    "rss_gb": 0.238555908203125,
+    "vms_gb": 417.865478515625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 113.75563287734985,
+    "rss_gb": 0.254669189453125,
+    "vms_gb": 417.9123992919922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 114.46146512031555,
+    "rss_gb": 0.263153076171875,
+    "vms_gb": 417.9827117919922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 115.170902967453,
+    "rss_gb": 0.2168426513671875,
+    "vms_gb": 418.0295867919922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 115.87777090072632,
+    "rss_gb": 0.216217041015625,
+    "vms_gb": 418.0725555419922,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 116.58306407928467,
+    "rss_gb": 0.2023773193359375,
+    "vms_gb": 418.1511688232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 117.29119300842285,
+    "rss_gb": 0.2180328369140625,
+    "vms_gb": 418.1902313232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 117.99940085411072,
+    "rss_gb": 0.4247894287109375,
+    "vms_gb": 418.2371063232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 118.70638799667358,
+    "rss_gb": 0.4249725341796875,
+    "vms_gb": 418.3074188232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 119.41359400749207,
+    "rss_gb": 0.247467041015625,
+    "vms_gb": 418.3464813232422,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 120.1221067905426,
+    "rss_gb": 0.2154083251953125,
+    "vms_gb": 419.35667419433594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 120.82732200622559,
+    "rss_gb": 0.2478485107421875,
+    "vms_gb": 419.35667419433594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 121.53118205070496,
+    "rss_gb": 0.2866058349609375,
+    "vms_gb": 418.90354919433594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 122.23784399032593,
+    "rss_gb": 0.3034515380859375,
+    "vms_gb": 418.90354919433594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 122.94222497940063,
+    "rss_gb": 0.322052001953125,
+    "vms_gb": 418.90403747558594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 123.65036296844482,
+    "rss_gb": 0.3388214111328125,
+    "vms_gb": 418.90403747558594,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 124.35478711128235,
+    "rss_gb": 0.3565521240234375,
+    "vms_gb": 418.9040832519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 125.06315279006958,
+    "rss_gb": 0.3069915771484375,
+    "vms_gb": 418.9040832519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 125.77161121368408,
+    "rss_gb": 0.2741851806640625,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 126.47960090637207,
+    "rss_gb": 0.2838592529296875,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 127.18842911720276,
+    "rss_gb": 0.284912109375,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 127.8971049785614,
+    "rss_gb": 0.279571533203125,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 128.60604906082153,
+    "rss_gb": 0.277557373046875,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 129.3137390613556,
+    "rss_gb": 0.2410736083984375,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 130.02129793167114,
+    "rss_gb": 0.25616455078125,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 130.72931599617004,
+    "rss_gb": 0.28125,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 131.43831491470337,
+    "rss_gb": 0.292572021484375,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 132.146812915802,
+    "rss_gb": 0.3014373779296875,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 132.85553002357483,
+    "rss_gb": 0.295013427734375,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 133.56409811973572,
+    "rss_gb": 0.2725372314453125,
+    "vms_gb": 418.9123840332031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 134.2739131450653,
+    "rss_gb": 0.273895263671875,
+    "vms_gb": 418.9123840332031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 134.98184084892273,
+    "rss_gb": 0.296783447265625,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 135.69112706184387,
+    "rss_gb": 0.28509521484375,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 136.40077900886536,
+    "rss_gb": 0.237548828125,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 137.10774183273315,
+    "rss_gb": 0.2158966064453125,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 137.82126998901367,
+    "rss_gb": 0.236053466796875,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 138.53369688987732,
+    "rss_gb": 0.2321929931640625,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 139.24185180664062,
+    "rss_gb": 0.22906494140625,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 139.94809484481812,
+    "rss_gb": 0.262786865234375,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 140.65678691864014,
+    "rss_gb": 0.2674560546875,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 141.36563301086426,
+    "rss_gb": 0.245635986328125,
+    "vms_gb": 418.9118957519531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 142.07407307624817,
+    "rss_gb": 0.2456207275390625,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 142.78303003311157,
+    "rss_gb": 0.2396240234375,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 143.4918248653412,
+    "rss_gb": 0.250640869140625,
+    "vms_gb": 418.9124298095703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 144.1974220275879,
+    "rss_gb": 0.2667999267578125,
+    "vms_gb": 418.91259765625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 144.90958905220032,
+    "rss_gb": 0.2410430908203125,
+    "vms_gb": 418.91259765625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 145.6171588897705,
+    "rss_gb": 0.229583740234375,
+    "vms_gb": 418.91259765625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 146.32422304153442,
+    "rss_gb": 0.216796875,
+    "vms_gb": 418.91259765625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 147.03798294067383,
+    "rss_gb": 0.2191009521484375,
+    "vms_gb": 418.91285705566406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 147.74619388580322,
+    "rss_gb": 0.240692138671875,
+    "vms_gb": 418.91290283203125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 148.45163893699646,
+    "rss_gb": 0.25958251953125,
+    "vms_gb": 418.91343688964844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 149.15593004226685,
+    "rss_gb": 0.258209228515625,
+    "vms_gb": 418.91343688964844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 149.8622269630432,
+    "rss_gb": 0.2401123046875,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 150.5655448436737,
+    "rss_gb": 0.2408905029296875,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 151.2736918926239,
+    "rss_gb": 0.2626800537109375,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 151.98219895362854,
+    "rss_gb": 0.2922821044921875,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 152.68979716300964,
+    "rss_gb": 0.27996826171875,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 153.39894914627075,
+    "rss_gb": 0.2476348876953125,
+    "vms_gb": 418.91392517089844,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 154.10717105865479,
+    "rss_gb": 0.4504852294921875,
+    "vms_gb": 418.91339111328125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 154.81418585777283,
+    "rss_gb": 0.52044677734375,
+    "vms_gb": 417.2500762939453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 155.51906204223633,
+    "rss_gb": 0.542449951171875,
+    "vms_gb": 417.2344512939453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 156.22679591178894,
+    "rss_gb": 0.5880279541015625,
+    "vms_gb": 417.2735137939453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 156.9339759349823,
+    "rss_gb": 0.6253509521484375,
+    "vms_gb": 417.3047637939453,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 157.64063215255737,
+    "rss_gb": 0.2534027099609375,
+    "vms_gb": 418.2545928955078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 158.3724091053009,
+    "rss_gb": 0.24920654296875,
+    "vms_gb": 418.27252197265625,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 159.080552816391,
+    "rss_gb": 0.432525634765625,
+    "vms_gb": 418.2960205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 159.78370785713196,
+    "rss_gb": 0.4546661376953125,
+    "vms_gb": 417.2964630126953,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 160.49099206924438,
+    "rss_gb": 0.38623046875,
+    "vms_gb": 418.3445129394531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 161.19772386550903,
+    "rss_gb": 0.329864501953125,
+    "vms_gb": 418.3523254394531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 161.9055860042572,
+    "rss_gb": 0.369781494140625,
+    "vms_gb": 418.3523254394531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 162.61401915550232,
+    "rss_gb": 0.3964385986328125,
+    "vms_gb": 418.3601837158203,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 163.32200503349304,
+    "rss_gb": 0.4243927001953125,
+    "vms_gb": 418.3601837158203,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 164.0310971736908,
+    "rss_gb": 0.3454437255859375,
+    "vms_gb": 418.3679962158203,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 164.73967576026917,
+    "rss_gb": 0.2970428466796875,
+    "vms_gb": 418.3679962158203,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 165.44935607910156,
+    "rss_gb": 0.490814208984375,
+    "vms_gb": 418.3596496582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 166.15449595451355,
+    "rss_gb": 0.4854583740234375,
+    "vms_gb": 418.3596496582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 166.86321687698364,
+    "rss_gb": 0.386871337890625,
+    "vms_gb": 418.3596496582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 167.56904697418213,
+    "rss_gb": 0.2990875244140625,
+    "vms_gb": 419.3518371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 168.27712512016296,
+    "rss_gb": 0.3000946044921875,
+    "vms_gb": 418.3518371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 168.98573207855225,
+    "rss_gb": 0.2765350341796875,
+    "vms_gb": 418.3518371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 169.69257187843323,
+    "rss_gb": 0.2974395751953125,
+    "vms_gb": 418.3518371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 170.40062999725342,
+    "rss_gb": 0.2923431396484375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 171.1042070388794,
+    "rss_gb": 0.3123779296875,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 171.8088719844818,
+    "rss_gb": 0.29827880859375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 172.51760506629944,
+    "rss_gb": 0.2941436767578125,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 173.22813391685486,
+    "rss_gb": 0.298095703125,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 173.9377520084381,
+    "rss_gb": 0.2596893310546875,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 174.64291095733643,
+    "rss_gb": 0.2427825927734375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 175.35183691978455,
+    "rss_gb": 0.262298583984375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 176.05717086791992,
+    "rss_gb": 0.2757568359375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 176.76618003845215,
+    "rss_gb": 0.287353515625,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 177.4733371734619,
+    "rss_gb": 0.305816650390625,
+    "vms_gb": 418.3513488769531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 178.18245816230774,
+    "rss_gb": 0.2765045166015625,
+    "vms_gb": 418.3513488769531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 178.8937029838562,
+    "rss_gb": 0.2186126708984375,
+    "vms_gb": 418.3513488769531,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 179.612389087677,
+    "rss_gb": 0.24359130859375,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 180.32157683372498,
+    "rss_gb": 0.23455810546875,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 181.03245210647583,
+    "rss_gb": 0.218963623046875,
+    "vms_gb": 418.3518829345703,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 181.74294900894165,
+    "rss_gb": 0.2635040283203125,
+    "vms_gb": 418.3524169921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 182.452495098114,
+    "rss_gb": 0.2760772705078125,
+    "vms_gb": 418.3524169921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 183.16122603416443,
+    "rss_gb": 0.267120361328125,
+    "vms_gb": 418.3524169921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 183.87314796447754,
+    "rss_gb": 0.2230072021484375,
+    "vms_gb": 418.3524169921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 184.5820369720459,
+    "rss_gb": 0.2119140625,
+    "vms_gb": 418.3524627685547,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 185.29808592796326,
+    "rss_gb": 0.2126312255859375,
+    "vms_gb": 418.3602752685547,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 186.0130259990692,
+    "rss_gb": 0.2068328857421875,
+    "vms_gb": 418.3602752685547,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 186.72284388542175,
+    "rss_gb": 0.220428466796875,
+    "vms_gb": 418.3597412109375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 187.43400692939758,
+    "rss_gb": 0.2055816650390625,
+    "vms_gb": 418.3675537109375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 188.1407721042633,
+    "rss_gb": 0.2315521240234375,
+    "vms_gb": 418.3753662109375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 188.8507010936737,
+    "rss_gb": 0.2160491943359375,
+    "vms_gb": 418.3753662109375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 189.5576958656311,
+    "rss_gb": 0.2265777587890625,
+    "vms_gb": 418.3831787109375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 190.2879638671875,
+    "rss_gb": 0.23089599609375,
+    "vms_gb": 418.3836669921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 190.99448609352112,
+    "rss_gb": 0.2471160888671875,
+    "vms_gb": 418.3914794921875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 191.6996500492096,
+    "rss_gb": 0.3682708740234375,
+    "vms_gb": 418.3914794921875,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 192.40361380577087,
+    "rss_gb": 0.4931640625,
+    "vms_gb": 417.415283203125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 193.11170506477356,
+    "rss_gb": 0.5232696533203125,
+    "vms_gb": 417.407470703125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 193.81779885292053,
+    "rss_gb": 0.5636749267578125,
+    "vms_gb": 417.407470703125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 194.5211319923401,
+    "rss_gb": 0.5874786376953125,
+    "vms_gb": 417.438720703125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 195.22751212120056,
+    "rss_gb": 0.6306610107421875,
+    "vms_gb": 417.415283203125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 195.93574500083923,
+    "rss_gb": 0.5260009765625,
+    "vms_gb": 417.4154052734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 196.65747594833374,
+    "rss_gb": 0.5701446533203125,
+    "vms_gb": 418.4232177734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 197.37292385101318,
+    "rss_gb": 0.2336883544921875,
+    "vms_gb": 418.4310302734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 198.08208298683167,
+    "rss_gb": 0.2602081298828125,
+    "vms_gb": 418.4388427734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 198.7910578250885,
+    "rss_gb": 0.2212677001953125,
+    "vms_gb": 418.4388427734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 199.49570989608765,
+    "rss_gb": 0.2483062744140625,
+    "vms_gb": 418.4388427734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 200.2056279182434,
+    "rss_gb": 0.4445648193359375,
+    "vms_gb": 418.4232177734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 200.91461300849915,
+    "rss_gb": 0.3394927978515625,
+    "vms_gb": 418.4232177734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 201.62346291542053,
+    "rss_gb": 0.2017669677734375,
+    "vms_gb": 418.4232177734375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 202.33247900009155,
+    "rss_gb": 0.2429656982421875,
+    "vms_gb": 418.4237518310547,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 203.0410828590393,
+    "rss_gb": 0.22662353515625,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 203.75061202049255,
+    "rss_gb": 0.262451171875,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 204.4661259651184,
+    "rss_gb": 0.23095703125,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 205.17398715019226,
+    "rss_gb": 0.2315673828125,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 205.88169598579407,
+    "rss_gb": 0.241180419921875,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 206.59209179878235,
+    "rss_gb": 0.2734832763671875,
+    "vms_gb": 418.4237976074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 207.301176071167,
+    "rss_gb": 0.3608856201171875,
+    "vms_gb": 417.4159851074219,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 208.01588821411133,
+    "rss_gb": 0.300140380859375,
+    "vms_gb": 418.43299865722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 208.72182488441467,
+    "rss_gb": 0.33551025390625,
+    "vms_gb": 417.45643615722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 209.4303638935089,
+    "rss_gb": 0.49969482421875,
+    "vms_gb": 417.46424865722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 210.1365671157837,
+    "rss_gb": 0.4935150146484375,
+    "vms_gb": 417.44862365722656,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 210.8440339565277,
+    "rss_gb": 0.1855316162109375,
+    "vms_gb": 418.4521484375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 211.55353808403015,
+    "rss_gb": 0.214630126953125,
+    "vms_gb": 418.4599609375,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 212.26320695877075,
+    "rss_gb": 0.2307586669921875,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 212.97228002548218,
+    "rss_gb": 0.2545928955078125,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 213.68095111846924,
+    "rss_gb": 0.289520263671875,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 214.39131212234497,
+    "rss_gb": 0.3126373291015625,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 215.1030011177063,
+    "rss_gb": 0.3056488037109375,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 215.81269907951355,
+    "rss_gb": 0.22357177734375,
+    "vms_gb": 418.46826171875,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 216.52194714546204,
+    "rss_gb": 0.2563018798828125,
+    "vms_gb": 418.4677276611328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 217.23100900650024,
+    "rss_gb": 0.258148193359375,
+    "vms_gb": 418.4677276611328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 217.95076704025269,
+    "rss_gb": 0.2397918701171875,
+    "vms_gb": 418.4716339111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 218.65795707702637,
+    "rss_gb": 0.230438232421875,
+    "vms_gb": 418.4716339111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 219.3671338558197,
+    "rss_gb": 0.4207916259765625,
+    "vms_gb": 418.4716339111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 220.07577085494995,
+    "rss_gb": 0.260711669921875,
+    "vms_gb": 418.4716339111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 220.78841710090637,
+    "rss_gb": 0.2709197998046875,
+    "vms_gb": 418.4794464111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 221.49747896194458,
+    "rss_gb": 0.29339599609375,
+    "vms_gb": 418.4872589111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 222.20513200759888,
+    "rss_gb": 0.2990570068359375,
+    "vms_gb": 418.4950714111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 222.91487407684326,
+    "rss_gb": 0.2678680419921875,
+    "vms_gb": 418.4950714111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 223.62495684623718,
+    "rss_gb": 0.3864288330078125,
+    "vms_gb": 417.4794464111328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 224.33317184448242,
+    "rss_gb": 0.4896697998046875,
+    "vms_gb": 417.4804229736328,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 225.03994178771973,
+    "rss_gb": 0.5234527587890625,
+    "vms_gb": 417.5063781738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 225.74823999404907,
+    "rss_gb": 0.550628662109375,
+    "vms_gb": 417.5376281738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 226.45575094223022,
+    "rss_gb": 0.5809326171875,
+    "vms_gb": 417.5610656738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 227.16039395332336,
+    "rss_gb": 0.6187286376953125,
+    "vms_gb": 417.5610656738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 227.86893391609192,
+    "rss_gb": 0.6179351806640625,
+    "vms_gb": 417.5923156738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 228.57599401474,
+    "rss_gb": 0.6347503662109375,
+    "vms_gb": 417.5923156738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 229.28325986862183,
+    "rss_gb": 0.46929931640625,
+    "vms_gb": 417.6235656738281,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 229.80167078971863,
+    "rss_gb": 0.5775909423828125,
+    "vms_gb": 417.6313781738281,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 230.3115110397339,
+    "rss_gb": 0.57025146484375,
+    "vms_gb": 417.5610656738281,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 230.8236768245697,
+    "rss_gb": 0.5702972412109375,
+    "vms_gb": 417.5610656738281,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 231.33251404762268,
+    "rss_gb": 0.5411834716796875,
+    "vms_gb": 417.56053161621094,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 231.84428787231445,
+    "rss_gb": 0.5318145751953125,
+    "vms_gb": 417.56053161621094,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 232.35738587379456,
+    "rss_gb": 0.529693603515625,
+    "vms_gb": 417.56053161621094,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 232.8676369190216,
+    "rss_gb": 0.5297088623046875,
+    "vms_gb": 417.56053161621094,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 233.57625198364258,
+    "rss_gb": 0.5991973876953125,
+    "vms_gb": 417.56834411621094,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 234.28436398506165,
+    "rss_gb": 0.6181488037109375,
+    "vms_gb": 417.5690002441406,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 235.01041293144226,
+    "rss_gb": 0.1395416259765625,
+    "vms_gb": 418.5695343017578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 235.72233390808105,
+    "rss_gb": 0.2401580810546875,
+    "vms_gb": 418.5773468017578,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 236.4277000427246,
+    "rss_gb": 0.24603271484375,
+    "vms_gb": 418.5778350830078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 237.13806319236755,
+    "rss_gb": 0.261383056640625,
+    "vms_gb": 418.5856475830078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 237.8779661655426,
+    "rss_gb": 0.259368896484375,
+    "vms_gb": 418.5856475830078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 238.5867099761963,
+    "rss_gb": 0.2671966552734375,
+    "vms_gb": 418.5934600830078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 239.2971498966217,
+    "rss_gb": 0.2935333251953125,
+    "vms_gb": 418.5934600830078,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 240.0075340270996,
+    "rss_gb": 0.3102874755859375,
+    "vms_gb": 418.6007385253906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 240.7169258594513,
+    "rss_gb": 0.2539825439453125,
+    "vms_gb": 418.6007385253906,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 241.42239093780518,
+    "rss_gb": 0.2933502197265625,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 242.13235712051392,
+    "rss_gb": 0.3181610107421875,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 242.84089016914368,
+    "rss_gb": 0.26397705078125,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 243.55187702178955,
+    "rss_gb": 0.25360107421875,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 244.2623369693756,
+    "rss_gb": 0.2641448974609375,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 244.84354496002197,
+    "rss_gb": 0.4566497802734375,
+    "vms_gb": 418.6085205078125,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 245.5487139225006,
+    "rss_gb": 0.4510498046875,
+    "vms_gb": 417.5928955078125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 246.25569796562195,
+    "rss_gb": 0.48626708984375,
+    "vms_gb": 417.5938720703125,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 246.96429681777954,
+    "rss_gb": 0.521575927734375,
+    "vms_gb": 417.6018371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 247.67309498786926,
+    "rss_gb": 0.5540618896484375,
+    "vms_gb": 417.6408996582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 248.38053393363953,
+    "rss_gb": 0.5936279296875,
+    "vms_gb": 417.6643371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 249.0859410762787,
+    "rss_gb": 0.631500244140625,
+    "vms_gb": 417.6799621582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 249.79243111610413,
+    "rss_gb": 0.666748046875,
+    "vms_gb": 417.7033996582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 250.4969048500061,
+    "rss_gb": 0.696441650390625,
+    "vms_gb": 417.6643371582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 251.20433497428894,
+    "rss_gb": 0.402435302734375,
+    "vms_gb": 417.6799621582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 251.9136199951172,
+    "rss_gb": 0.3809814453125,
+    "vms_gb": 417.6955871582031,
+    "runtime_info": {}
+  },
+  {
+    "timestamp": 252.42413687705994,
+    "rss_gb": 0.460906982421875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 252.94029903411865,
+    "rss_gb": 0.1154022216796875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 253.45499396324158,
+    "rss_gb": 0.045745849609375,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 253.97050189971924,
+    "rss_gb": 0.04425048828125,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 254.48113799095154,
+    "rss_gb": 0.043914794921875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 254.99756693840027,
+    "rss_gb": 0.044097900390625,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 255.50921392440796,
+    "rss_gb": 0.04412841796875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 256.0241777896881,
+    "rss_gb": 0.04412841796875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 256.53786277770996,
+    "rss_gb": 0.044158935546875,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 257.0512719154358,
+    "rss_gb": 0.0450286865234375,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 257.56694293022156,
+    "rss_gb": 0.0422210693359375,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 258.08156991004944,
+    "rss_gb": 0.0421905517578125,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 258.60208678245544,
+    "rss_gb": 0.041351318359375,
+    "vms_gb": 417.6565246582031,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 259.11749505996704,
+    "rss_gb": 0.0441131591796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 259.6308469772339,
+    "rss_gb": 0.0441131591796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 260.14470982551575,
+    "rss_gb": 0.04425048828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 260.6573648452759,
+    "rss_gb": 0.043609619140625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 261.1698069572449,
+    "rss_gb": 0.043548583984375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 261.6798138618469,
+    "rss_gb": 0.0426025390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 262.1966531276703,
+    "rss_gb": 0.0426177978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 262.71454310417175,
+    "rss_gb": 0.0424346923828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 263.22829699516296,
+    "rss_gb": 0.042449951171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 263.7431449890137,
+    "rss_gb": 0.042449951171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 264.2557508945465,
+    "rss_gb": 0.04010009765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 264.7706780433655,
+    "rss_gb": 0.04010009765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 265.2856340408325,
+    "rss_gb": 0.04010009765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 265.7940878868103,
+    "rss_gb": 0.04010009765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 266.3057987689972,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 266.8211860656738,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 267.3328130245209,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 267.8470058441162,
+    "rss_gb": 0.0402374267578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 268.3628158569336,
+    "rss_gb": 0.0402374267578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 268.8729751110077,
+    "rss_gb": 0.040191650390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 269.3877549171448,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 269.90600395202637,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 270.42155385017395,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 270.9388179779053,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 271.4529941082001,
+    "rss_gb": 0.0402679443359375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 271.96282291412354,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 272.47461199760437,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 272.9892649650574,
+    "rss_gb": 0.0401611328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 273.505658864975,
+    "rss_gb": 0.0401611328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 274.0238230228424,
+    "rss_gb": 0.040191650390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 274.53794503211975,
+    "rss_gb": 0.0401763916015625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 275.05468702316284,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 275.56935811042786,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 276.0873839855194,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 276.6055018901825,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 277.12531781196594,
+    "rss_gb": 0.0401458740234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 277.63701605796814,
+    "rss_gb": 0.0401763916015625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 278.1522879600525,
+    "rss_gb": 0.0401763916015625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 278.66887187957764,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 279.1877760887146,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 279.70604276657104,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 280.22283697128296,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 280.7392899990082,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 281.2575318813324,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 281.7724258899689,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 282.2857971191406,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 282.79717803001404,
+    "rss_gb": 0.0402069091796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 283.3130087852478,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 283.8294861316681,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 284.3460249900818,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 284.8620719909668,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 285.3785889148712,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 285.8941140174866,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 286.40827798843384,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 286.9258530139923,
+    "rss_gb": 0.04022216796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 287.4512691497803,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 287.96810603141785,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 288.48749899864197,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 289.00407099723816,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 289.5203950405121,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 290.0353238582611,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 290.5479648113251,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 291.0636749267578,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 291.58152198791504,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 292.0943019390106,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 292.6033878326416,
+    "rss_gb": 0.0405120849609375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 293.11583495140076,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 293.627543926239,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 294.14507484436035,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 294.6575119495392,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 295.16921186447144,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 295.67864298820496,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 296.1909828186035,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 296.7069089412689,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 297.2186629772186,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 297.72646594047546,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 298.2429509162903,
+    "rss_gb": 0.0404815673828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 298.7582440376282,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 299.2758598327637,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 299.7880277633667,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 300.3049099445343,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 300.8231999874115,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 301.34276390075684,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 301.8595850467682,
+    "rss_gb": 0.040496826171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 302.3778831958771,
+    "rss_gb": 0.04052734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 302.89859199523926,
+    "rss_gb": 0.04052734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 303.4154899120331,
+    "rss_gb": 0.04052734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 303.9249019622803,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 304.4398159980774,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 304.9627239704132,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 305.4779369831085,
+    "rss_gb": 0.040283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 305.99464297294617,
+    "rss_gb": 0.0402374267578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 306.509064912796,
+    "rss_gb": 0.0402374267578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 307.02454805374146,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 307.54270482063293,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 308.0629189014435,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 308.58105397224426,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 309.0985300540924,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 309.6142740249634,
+    "rss_gb": 0.040252685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 310.1312880516052,
+    "rss_gb": 0.040283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 310.6479947566986,
+    "rss_gb": 0.040283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 311.1714508533478,
+    "rss_gb": 0.0402984619140625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 311.6878569126129,
+    "rss_gb": 0.040313720703125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 312.1978611946106,
+    "rss_gb": 0.040313720703125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 312.7111098766327,
+    "rss_gb": 0.040313720703125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 313.22945618629456,
+    "rss_gb": 0.040313720703125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 313.7487678527832,
+    "rss_gb": 0.040313720703125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 314.2652699947357,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 314.77887201309204,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 315.2931299209595,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 315.81004095077515,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 316.32809495925903,
+    "rss_gb": 0.039947509765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 316.8470530509949,
+    "rss_gb": 0.039947509765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 317.36592984199524,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 317.88498187065125,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 318.40249705314636,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 318.9218668937683,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 319.4425210952759,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 319.95961904525757,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 320.4755630493164,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 320.99729108810425,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 321.51565313339233,
+    "rss_gb": 0.0400390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 322.03097701072693,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 322.5477440357208,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 323.0661768913269,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 323.586816072464,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 324.1086859703064,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 324.62362909317017,
+    "rss_gb": 0.0400543212890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 325.13752698898315,
+    "rss_gb": 0.0400238037109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 325.65429496765137,
+    "rss_gb": 0.0400238037109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 326.17400908470154,
+    "rss_gb": 0.040008544921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 326.6937370300293,
+    "rss_gb": 0.039794921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 327.20735788345337,
+    "rss_gb": 0.03997802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 327.72229504585266,
+    "rss_gb": 0.03997802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 328.24045395851135,
+    "rss_gb": 0.039459228515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 328.7590148448944,
+    "rss_gb": 0.039459228515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 329.27909088134766,
+    "rss_gb": 0.0394744873046875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 329.7942268848419,
+    "rss_gb": 0.0394744873046875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 330.3152530193329,
+    "rss_gb": 0.0370941162109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 330.84108686447144,
+    "rss_gb": 0.0343780517578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 331.3621928691864,
+    "rss_gb": 0.0341339111328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 331.88003611564636,
+    "rss_gb": 0.0341033935546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 332.39494705200195,
+    "rss_gb": 0.0342559814453125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 332.90971994400024,
+    "rss_gb": 0.0335540771484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 333.42652201652527,
+    "rss_gb": 0.034271240234375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 333.9480707645416,
+    "rss_gb": 0.0256500244140625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 334.4641239643097,
+    "rss_gb": 0.033599853515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 334.9922878742218,
+    "rss_gb": 0.0334930419921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 335.5103590488434,
+    "rss_gb": 0.0341796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 336.02786898612976,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 336.54586005210876,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 337.0645480155945,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 337.5821418762207,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 338.1023359298706,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 338.6197319030762,
+    "rss_gb": 0.03424072265625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 339.1367118358612,
+    "rss_gb": 0.0343017578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 339.6578760147095,
+    "rss_gb": 0.0343017578125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 340.178395986557,
+    "rss_gb": 0.034149169921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 340.6973969936371,
+    "rss_gb": 0.034088134765625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 341.21408796310425,
+    "rss_gb": 0.0341796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 341.7363510131836,
+    "rss_gb": 0.0341796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 342.2591869831085,
+    "rss_gb": 0.0341796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 342.77774310112,
+    "rss_gb": 0.0341796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 343.2958650588989,
+    "rss_gb": 0.0342559814453125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 343.81990098953247,
+    "rss_gb": 0.03472900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 344.335342168808,
+    "rss_gb": 0.03472900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 344.8543469905853,
+    "rss_gb": 0.03472900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 345.37432384490967,
+    "rss_gb": 0.03472900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 345.89640498161316,
+    "rss_gb": 0.03472900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 346.41298604011536,
+    "rss_gb": 0.034759521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 346.9309937953949,
+    "rss_gb": 0.034759521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 347.4553530216217,
+    "rss_gb": 0.034759521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 347.9765679836273,
+    "rss_gb": 0.03509521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 348.49646496772766,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 349.0170199871063,
+    "rss_gb": 0.0350799560546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 349.53933215141296,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 350.0638761520386,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 350.5814871788025,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 351.09996795654297,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 351.61961698532104,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 352.1408441066742,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 352.65904688835144,
+    "rss_gb": 0.0351104736328125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 353.1787509918213,
+    "rss_gb": 0.035125732421875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 353.6999318599701,
+    "rss_gb": 0.0351409912109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 354.21519684791565,
+    "rss_gb": 0.0351409912109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 354.735032081604,
+    "rss_gb": 0.0351409912109375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 355.25261783599854,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 355.7676348686218,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 356.289009809494,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 356.80880904197693,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 357.32353615760803,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 357.84425806999207,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 358.36708188056946,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 358.8874979019165,
+    "rss_gb": 0.03515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 359.4093818664551,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 359.92633605003357,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 360.4496428966522,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 360.971577167511,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 361.4943358898163,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 362.01771903038025,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 362.53823685646057,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 363.0597770214081,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 363.5803220272064,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 364.10032510757446,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 364.6163880825043,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 365.13336396217346,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 365.6478970050812,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 366.1703350543976,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 366.693874835968,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 367.2154338359833,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 367.73669600486755,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 368.25625705718994,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 368.77746295928955,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 369.29811096191406,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 369.8190190792084,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 370.3361179828644,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 370.8525638580322,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 371.37666392326355,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 371.8980348110199,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 372.42134714126587,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 372.94229102134705,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 373.46570801734924,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 373.98882699012756,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 374.5118908882141,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 375.0332269668579,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 375.5561668872833,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 376.083860874176,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 376.60682702064514,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 377.1303758621216,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 377.65354180336,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 378.1743149757385,
+    "rss_gb": 0.0351715087890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 378.694228887558,
+    "rss_gb": 0.0348358154296875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 379.2147400379181,
+    "rss_gb": 0.03466796875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 379.7393488883972,
+    "rss_gb": 0.034637451171875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 380.263503074646,
+    "rss_gb": 0.034759521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 380.78527307510376,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 381.30372881889343,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 381.82382583618164,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 382.3467230796814,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 382.86964988708496,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 383.3884210586548,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 383.90800189971924,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 384.4251048564911,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 384.95212388038635,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 385.4742319583893,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 385.99721693992615,
+    "rss_gb": 0.0347900390625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 386.520094871521,
+    "rss_gb": 0.0347747802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 387.0432770252228,
+    "rss_gb": 0.0347747802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 387.56724286079407,
+    "rss_gb": 0.034759521484375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 388.09001898765564,
+    "rss_gb": 0.0347747802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 388.6138639450073,
+    "rss_gb": 0.0347747802734375,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 389.1367349624634,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 389.6526880264282,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 390.17018699645996,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 390.6891551017761,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 391.21126079559326,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 391.73044300079346,
+    "rss_gb": 0.0348052978515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 392.25325298309326,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 392.77107787132263,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 393.29453587532043,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 393.818696975708,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 394.3409779071808,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 394.8635959625244,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 395.3868589401245,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 395.90506386756897,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 396.4222037792206,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 396.94666385650635,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 397.473317861557,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 397.99832701683044,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 398.5227279663086,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 399.04730105400085,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 399.5721871852875,
+    "rss_gb": 0.03009033203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 400.08976578712463,
+    "rss_gb": 0.030059814453125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 400.61328196525574,
+    "rss_gb": 0.02752685546875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 401.1373529434204,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 401.6615478992462,
+    "rss_gb": 0.0256500244140625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 402.1842849254608,
+    "rss_gb": 0.0256500244140625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 402.7073509693146,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 403.2312259674072,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 403.75488901138306,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 404.27309012413025,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 404.7958650588989,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 405.31741309165955,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 405.84106492996216,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 406.36562991142273,
+    "rss_gb": 0.025665283203125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 406.8894028663635,
+    "rss_gb": 0.0256805419921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 407.4150290489197,
+    "rss_gb": 0.0256805419921875,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 407.93887996673584,
+    "rss_gb": 0.0260162353515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 408.4634611606598,
+    "rss_gb": 0.0260162353515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 408.9868941307068,
+    "rss_gb": 0.0260162353515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 409.51047801971436,
+    "rss_gb": 0.0260162353515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 410.0302357673645,
+    "rss_gb": 0.0260162353515625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 410.5531339645386,
+    "rss_gb": 0.025909423828125,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 411.0711929798126,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 411.59386014938354,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 412.11870884895325,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 412.64117407798767,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 413.16533493995667,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  },
+  {
+    "timestamp": 413.68921399116516,
+    "rss_gb": 0.02587890625,
+    "vms_gb": 417.65599060058594,
+    "runtime_info": {
+      "vram_allocated_gb": 0,
+      "cuda_available": false,
+      "mps_available": true,
+      "sampling_mode": "temperature+top_p+repetition_penalty",
+      "streaming_mode": "phrase_group_chunked",
+      "serving_mode": "balanced",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  }
+]

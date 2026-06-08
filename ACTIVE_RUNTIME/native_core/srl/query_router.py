@@ -43,6 +43,9 @@ _LEX_FRAC          = float(os.environ.get("DIFFKV_SRL_LEX_FRAC",  "0.15"))
 _GRAPH_FRAC        = float(os.environ.get("DIFFKV_SRL_GRAPH_FRAC", "0.15"))
 _RECENCY_FRAC      = float(os.environ.get("DIFFKV_SRL_REC_FRAC",  "0.20"))
 _ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "50"))
+# Topic-switch: if the best semantic match falls below this cosine similarity,
+# the query is treated as a new topic and stale rare-lexical seeds are suppressed.
+_TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DIFFKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.25"))
 
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
@@ -170,12 +173,37 @@ def route_query(
     semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
     semantic_slots   = semantic_slots_t.tolist()
 
+    # ── Topic-switch detection ────────────────────────────────────────────
+    # If the best semantic match is weak, this query is likely a new topic.
+    # Suppress stale rare-lexical graph seeds to avoid over-anchoring.
+    _is_topic_switch = False
+    if semantic_slots_t.numel() > 0:
+        desc_matrix = srl_state.semantic_index.desc_matrix
+        top_slot_row = srl_state.semantic_index.slot_to_idx(int(semantic_slots_t[0]))
+        if top_slot_row >= 0:
+            q16 = q_desc.half().to(desc_matrix.device)
+            if q16.device.type == "mps":
+                top_score = float(desc_matrix[top_slot_row].float() @ q16.float())
+            else:
+                top_score = float(desc_matrix[top_slot_row] @ q16)
+            _is_topic_switch = top_score < _TOPIC_SWITCH_THRESHOLD
+
     # ── Step 3: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
+    # FIX (Bug 1): Prioritize current_query_tokens for lexical lookup.
+    # Only use recent_generated_tokens (previous-turn output) as a weak fallback
+    # to avoid contaminating the inverted-index search with stale vocabulary.
     k_lexical   = max(1, int(K * _LEX_FRAC))
     if query_tokens is not None:
         recent_toks = query_tokens
     else:
-        recent_toks = srl_state.recent_generated_tokens[-32:] + getattr(srl_state, "current_query_tokens", [])[-128:]
+        current_q_toks = getattr(srl_state, "current_query_tokens", [])
+        if current_q_toks:
+            # Use only the incoming query tokens — exclude previous-turn outputs.
+            recent_toks = current_q_toks[-128:]
+        else:
+            # Fallback: no explicit query tokens available — use a small tail of
+            # recent generated tokens so we don't completely lose lexical signal.
+            recent_toks = srl_state.recent_generated_tokens[-16:]
 
     from collections import defaultdict
     inv_index = srl_state.inverted_index
@@ -229,9 +257,15 @@ def route_query(
     idx_map   = srl_state.semantic_index
     neighbors = srl_state.chunk_graph.neighbors   # [N, MAX_DEGREE] CPU int32
 
-    # Seed expansion with top-5 semantic, top-10 rare lexical, and top-5 lexical matches
+    # Seed expansion with top-5 semantic + (rare/lex if not a topic switch).
+    # FIX (Bug 2): On topic switch, suppress stale rare-lex seeds so graph
+    # expansion does not fan out from the previous topic's high-IDF vocabulary.
     top_sem_slots = semantic_slots_t[:5].tolist() if semantic_slots_t.numel() > 0 else []
-    seeds = list(dict.fromkeys(top_sem_slots + rare_lex_slots[:10] + lexical_slots[:5]))
+    if _is_topic_switch:
+        # Topic switch: anchor graph expansion only on fresh semantic matches.
+        seeds = list(dict.fromkeys(top_sem_slots))
+    else:
+        seeds = list(dict.fromkeys(top_sem_slots + rare_lex_slots[:10] + lexical_slots[:5]))
 
     if seeds and neighbors.shape[0] > 0:
         seeds_tensor = torch.tensor(seeds, dtype=torch.int32)
@@ -264,9 +298,13 @@ def route_query(
     # ── Step 6: Sink blocks (always include: block 0 + special tokens) ────
     sink = srl_state.sink_blocks
 
-    # ── Step 7: Merge and deduplicate (order: sink → rare_lex → graph → semantic → lexical → recent) ─
+    # ── Step 7: Merge and deduplicate ────────────────────────────────────
+    # FIX (Bug 3): Semantic slots take priority over rare_lex (which may be
+    # stale). On topic switch, rare_lex is zeroed out above; on same-topic
+    # queries it still contributes but doesn't displace semantic hits.
+    # Order: sink → semantic → rare_lex → graph → lexical → recent
     combined = list(dict.fromkeys(
-        sink + rare_lex_slots + graph_slots + semantic_slots + lexical_slots + recent_slots
+        sink + semantic_slots + rare_lex_slots + graph_slots + lexical_slots + recent_slots
     ))[:K]
 
     if N - len(combined) <= 2:
