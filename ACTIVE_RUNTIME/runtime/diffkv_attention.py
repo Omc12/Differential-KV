@@ -13,13 +13,44 @@ from native_core.sparse_decode.triton_fused_decode import (
     HAS_TRITON,
 )
 
-# ── SRL routing configuration ─────────────────────────────────────────
+# ── Phase 1: C++ extension fast path ─────────────────────────────────────────
+# Import diffkv_core C++ extension if built. When available, the hot path uses:
+#   - diffkv_core.anchor_screen()          instead of Python two_level_gate()
+#   - diffkv_core.semantic_search_topk()   instead of SemanticIndex.search()
+#   - diffkv_core.compute_query_desc()     instead of compute_query_descriptor()
+#   - diffkv_core.decode_attention_aten()  instead of fused_decode_mps()
+#   - diffkv_core.decode_attention_aten_lse() for LSE-combine path
+#
+# The extension is built by running:
+#   cd ACTIVE_RUNTIME/native_core/diffkv_core && python setup.py build_ext --inplace
+#
+# Falls back silently to the existing Python paths if the extension is absent
+# or built without the Phase 1 ops. No behavioral change on fallback.
+try:
+    import diffkv_core as _dkv_core
+    _DIFFKV_CORE_AVAILABLE    = True
+    _DIFFKV_HAS_DECODE_ATTN   = getattr(_dkv_core, "HAS_DECODE_ATTN", False)
+    _DIFFKV_HAS_SRL_ROUTER    = getattr(_dkv_core, "HAS_SRL_ROUTER", False)
+    if _DIFFKV_HAS_DECODE_ATTN:
+        _decode_attention_aten     = _dkv_core.decode_attention_aten
+        _decode_attention_aten_lse = _dkv_core.decode_attention_aten_lse
+    if _DIFFKV_HAS_SRL_ROUTER:
+        _cpp_anchor_screen         = _dkv_core.anchor_screen
+        _cpp_semantic_search       = _dkv_core.semantic_search_topk
+        _cpp_query_desc            = _dkv_core.compute_query_desc
+except ImportError:
+    _DIFFKV_CORE_AVAILABLE    = False
+    _DIFFKV_HAS_DECODE_ATTN   = False
+    _DIFFKV_HAS_SRL_ROUTER    = False
+
+# ── SRL routing configuration ─────────────────────────────────────────────────
 # DIFFKV_SRL_THRESHOLD: minimum N_blocks before SRL kicks in (default 50).
 # DIFFKV_VALIDATE_SRL:  enable accuracy validation mode (0/1, default 0).
 # DIFFKV_VALIDATE_EVERY: validate every N decode steps (default 50).
-_SRL_THRESHOLD    = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "50"))
-_SRL_VALIDATE     = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
+_SRL_THRESHOLD      = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "50"))
+_SRL_VALIDATE       = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
 _SRL_VALIDATE_EVERY = int(os.environ.get("DIFFKV_VALIDATE_EVERY", "50"))
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -525,19 +556,40 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     is_causal=False,
                                 )
                             elif has_comp and not has_dense:
-                                # Compressed history only: use fused_decode_mps
+                                # Compressed history only.
+                                # Phase 1 fast path: C++ ATen Project-Then-Attend (no Python GIL overhead).
+                                # Falls back to fused_decode_mps if extension not built.
                                 _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
-                                _bsizes = pool.seq_lens[block_indices]
-                                out_sparse, _ = fused_decode_mps(
-                                    Q                    = _Q_sq,
-                                    pool                 = pool,
-                                    block_indices        = block_indices,
-                                    blk_sizes            = _bsizes,
-                                    num_key_value_groups = num_key_value_groups,
-                                    anchor_indices       = anchor_indices,
-                                    cos                  = cos_all,
-                                    sin                  = sin_all,
-                                )
+                                if _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                    _scale = 1.0 / math.sqrt(head_dim)
+                                    out_sparse = _decode_attention_aten(
+                                        _Q_sq.contiguous(),
+                                        pool.U.contiguous(),
+                                        pool.U_scale.contiguous(),
+                                        pool.V_K.contiguous(),
+                                        pool.V_V.contiguous(),
+                                        pool.anchors_K.contiguous(),
+                                        pool.anchors_V.contiguous(),
+                                        pool.seq_lens.contiguous(),
+                                        block_indices.contiguous(),
+                                        _scale,
+                                        num_heads,
+                                        num_key_value_heads,
+                                        kv_manager.rank,
+                                    )  # [H_q, D] float16
+                                else:
+                                    # Python fallback
+                                    _bsizes = pool.seq_lens[block_indices]
+                                    out_sparse, _ = fused_decode_mps(
+                                        Q                    = _Q_sq,
+                                        pool                 = pool,
+                                        block_indices        = block_indices,
+                                        blk_sizes            = _bsizes,
+                                        num_key_value_groups = num_key_value_groups,
+                                        anchor_indices       = anchor_indices,
+                                        cos                  = cos_all,
+                                        sin                  = sin_all,
+                                    )
                                 attn_out_b = out_sparse.unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
                             else:
                                 # Both present: run independently and combine via LSE
@@ -556,21 +608,41 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 scores_dense = torch.einsum('hd,htd->ht', _q, _kd) * _scale  # [H_q, T]
                                 lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
 
-                                # 3. Compressed history path
+                                # 3. Compressed history path — with LSE for combination.
+                                # Phase 1 fast path: C++ ATen decode (returns LSE directly).
                                 _Q_sq = query_states[b_idx, :, 0, :]
-                                _bsizes = pool.seq_lens[block_indices]
-                                out_sparse, lse_sparse = fused_decode_mps(
-                                    Q                    = _Q_sq,
-                                    pool                 = pool,
-                                    block_indices        = block_indices,
-                                    blk_sizes            = _bsizes,
-                                    num_key_value_groups = num_key_value_groups,
-                                    anchor_indices       = anchor_indices,
-                                    cos                  = cos_all,
-                                    sin                  = sin_all,
-                                )  # [H_q, D], [H_q]
+                                if _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                    _scale = 1.0 / math.sqrt(head_dim)
+                                    out_sparse, lse_sparse = _decode_attention_aten_lse(
+                                        _Q_sq.contiguous(),
+                                        pool.U.contiguous(),
+                                        pool.U_scale.contiguous(),
+                                        pool.V_K.contiguous(),
+                                        pool.V_V.contiguous(),
+                                        pool.anchors_K.contiguous(),
+                                        pool.anchors_V.contiguous(),
+                                        pool.seq_lens.contiguous(),
+                                        block_indices.contiguous(),
+                                        _scale,
+                                        num_heads,
+                                        num_key_value_heads,
+                                        kv_manager.rank,
+                                    )  # [H_q, D] float16, [H_q] float32
+                                else:
+                                    # Python fallback
+                                    _bsizes = pool.seq_lens[block_indices]
+                                    out_sparse, lse_sparse = fused_decode_mps(
+                                        Q                    = _Q_sq,
+                                        pool                 = pool,
+                                        block_indices        = block_indices,
+                                        blk_sizes            = _bsizes,
+                                        num_key_value_groups = num_key_value_groups,
+                                        anchor_indices       = anchor_indices,
+                                        cos                  = cos_all,
+                                        sin                  = sin_all,
+                                    )  # [H_q, D], [H_q]
 
-                                # 4. Combine outputs
+                                # 4. Combine outputs via LSE
                                 out_dense_hd = out_dense[0, :, 0, :].float()
                                 out_sparse_fp32 = out_sparse.float()
                                 lse_dense = lse_dense.to(torch.float32)
