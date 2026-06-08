@@ -35,11 +35,13 @@ class InvertedTokenIndex:
     Enhanced with:
       - occurrences: maps token_id → list of (slot_id, absolute_pos, relative_pos)
       - chunk_vocabularies: maps slot_id → dict of token_id → list of relative_pos
+      - idf: maps token_id → IDF score (rarer tokens have higher weight)
     """
     index:              Dict[int, List[int]]                   # token_id → [pool_slot_id, ...]
     important_vocab:    Set[int]                               # token IDs indexed (excludes stop words)
     occurrences:        Dict[int, List[Tuple[int, int, int]]] = field(default_factory=dict)
     chunk_vocabularies: Dict[int, Dict[int, List[int]]]       = field(default_factory=dict)
+    idf:                Dict[int, float]                      = field(default_factory=dict)
 
 
 def build_inverted_index(
@@ -95,11 +97,20 @@ def build_inverted_index(
         for slot, tok_dict in chunk_vocabularies.items()
     }
 
+    # Precompute IDF for each token to boost rare keyword hits
+    import math
+    N_blocks = max(1, len(slot_ids))
+    idf = {}
+    for tok, occs in occurrences.items():
+        n_containing = len(set(occ[0] for occ in occs))
+        idf[tok] = math.log(N_blocks / n_containing) + 1.0
+
     return InvertedTokenIndex(
         index              = deduped,
         important_vocab    = set(deduped.keys()),
         occurrences        = dict(occurrences),
         chunk_vocabularies = final_chunk_vocabs,
+        idf                = idf,
     )
 
 

@@ -156,7 +156,7 @@ def route_query(
     semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
     semantic_slots   = semantic_slots_t.tolist()
 
-    # ── Step 3: Lexical inverted index lookup (with positional decay) ─────
+    # ── Step 3: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
     k_lexical   = max(1, int(K * _LEX_FRAC))
     if query_tokens is not None:
         recent_toks = query_tokens
@@ -164,46 +164,65 @@ def route_query(
         recent_toks = srl_state.recent_generated_tokens[-16:] + getattr(srl_state, "current_query_tokens", [])[-32:]
 
     from collections import defaultdict
-    matches = lookup_occurrences(srl_state.inverted_index, recent_toks)
-    if matches:
-        L = max(occ[1] for occ in matches)
+    inv_index = srl_state.inverted_index
+    all_abs_positions = []
+    
+    # Track matching positions and IDF values
+    for tok in recent_toks:
+        if tok in inv_index.occurrences:
+            for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                all_abs_positions.append(abs_pos)
+                
+    if all_abs_positions:
+        L = max(all_abs_positions)
         slot_scores = defaultdict(float)
+        slot_matched_toks = defaultdict(set)
         decay_factor = 0.999
-        for slot, abs_pos, rel_pos in matches:
-            # Equal treatment with temporal decay
-            slot_scores[slot] += decay_factor ** (L - abs_pos)
+        
+        for tok in recent_toks:
+            if tok in inv_index.occurrences:
+                # Retrieve precomputed IDF score (rare tokens have higher values)
+                idf_val = inv_index.idf.get(tok, 1.0)
+                for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                    slot_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
+                    slot_matched_toks[slot].add(tok)
+                    
+        # Apply Query Term Coverage boost: scale score by (unique_matches ** 2)
+        for slot in list(slot_scores.keys()):
+            n_unique = len(slot_matched_toks[slot])
+            slot_scores[slot] *= (n_unique ** 2)
+            
         sorted_lex_slots = sorted(slot_scores.keys(), key=lambda s: slot_scores[s], reverse=True)
         lexical_slots = sorted_lex_slots[:k_lexical]
     else:
         lexical_slots = []
 
-    # Lexical slots are populated and merged in step 7 below.
-
-
-
     # ── Step 4: Chunk graph neighborhood expansion (vectorized) ──────────
     k_graph   = max(1, int(K * _GRAPH_FRAC))
     graph_slots_t: Optional[torch.Tensor] = None
     idx_map   = srl_state.semantic_index
-    neighbors = srl_state.chunk_graph.neighbors   # [N, 8] CPU int32
+    neighbors = srl_state.chunk_graph.neighbors   # [N, MAX_DEGREE] CPU int32
 
-    top_sem = semantic_slots_t[:5] if semantic_slots_t.numel() > 0 else semantic_slots_t
-    if top_sem.numel() > 0 and neighbors.shape[0] > 0:
-        # [M] int64 row indices for the top-5 semantic slot IDs (-1 = miss)
-        row_ids = idx_map.slot_to_row_vec(top_sem.cpu().to(torch.int32))   # [M]
+    # Seed expansion with both top-3 semantic and top-2 lexical matches
+    top_sem_slots = semantic_slots_t[:3].tolist() if semantic_slots_t.numel() > 0 else []
+    top_lex_slots = lexical_slots[:2]
+    seeds = list(dict.fromkeys(top_sem_slots + top_lex_slots))
+
+    if seeds and neighbors.shape[0] > 0:
+        seeds_tensor = torch.tensor(seeds, dtype=torch.int32)
+        row_ids = idx_map.slot_to_row_vec(seeds_tensor)                     # [M]
         valid_rows = row_ids[row_ids >= 0]                                  # filter misses
 
         if valid_rows.numel() > 0:
-            # Gather all neighbor row indices in one tensor op: [M_valid, 8]
-            nb_rows = neighbors[valid_rows]                                  # [M_valid, 8] int32
-            # Flatten and remove out-of-bounds entries
-            nb_flat = nb_rows.view(-1).to(torch.int64)                       # [M_valid*8]
+            # Gather all neighbor row indices in one tensor op: [M_valid, MAX_DEGREE]
+            nb_rows = neighbors[valid_rows]
+            nb_flat = nb_rows.view(-1).to(torch.int64)                       # [M_valid*MAX_DEGREE]
             N_idx   = idx_map.slot_ids.shape[0]
             nb_valid = nb_flat[(nb_flat >= 0) & (nb_flat < N_idx)]
             # Translate row indices → pool slot IDs
             if nb_valid.numel() > 0:
                 slot_ids_cpu = idx_map.slot_ids.cpu()
-                graph_slots_t = slot_ids_cpu[nb_valid]                       # [M*8] int32
+                graph_slots_t = slot_ids_cpu[nb_valid]                       # [M_valid*MAX_DEGREE] int32
 
     graph_slots: List[int]
     if graph_slots_t is not None and graph_slots_t.numel() > 0:

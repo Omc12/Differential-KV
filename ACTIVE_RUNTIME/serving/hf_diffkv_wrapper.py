@@ -427,6 +427,8 @@ class DiffKVHFWrapper:
         generated = prompt_ids.copy()
 
         self.manager.init_session(session_id, prefill_len=cached_len + prefill_len)
+        if hasattr(self.manager, "register_prefill_tokens"):
+            self.manager.register_prefill_tokens(session_id, torch.tensor(new_prompt_ids, dtype=torch.long))
         self.model._diffkv_session_ids = [session_id]
 
         # Invalidate CUDA graph runner — new prefill changes pool layout
@@ -475,24 +477,28 @@ class DiffKVHFWrapper:
                 self.manager.compress_prefill_kv(session_id)
 
         # ── Post-prefill compression barrier ────────────────────────────────
+        # Trigger SVD compression for all deferred prefill blocks
+        if hasattr(self.manager, "compress_deferred_prefill_blocks"):
+            self.manager.compress_deferred_prefill_blocks(session_id)
+
         # Drain all background SVD results to the native pool before decode starts.
-        # Since capture_prefill_kv() now streams immediately, all blocks have been
-        # SUBMITTED. We just need to wait for the async compressor to mark them
-        # CPU_COMPRESSED and then finalize (GPU upload) on the main thread.
-        # Timeout: 30 s for very long prompts (research paper, code dumps, etc.)
         if hasattr(self.manager, "finalize_compressed_blocks"):
             _barrier_deadline = _time.monotonic() + 30.0
             while _time.monotonic() < _barrier_deadline:
+                self.manager.finalize_compressed_blocks()
                 pending = getattr(self.manager, "_pending_cpu_blocks", 0)
                 if pending <= 0:
                     break
-                self.manager.finalize_compressed_blocks()
                 _time.sleep(0.002)
             if self.device == "mps":
                 try:
                     torch.mps.empty_cache()
                 except Exception:
                     pass
+
+        # Build SRL index once compression is completed
+        if hasattr(self.manager, "finalize_srl_index"):
+            self.manager.finalize_srl_index(session_id, cached_len=cached_len)
 
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
@@ -524,6 +530,8 @@ class DiffKVHFWrapper:
             next_id = _compiled_sample_fn(logits, temperature, top_p)
 
             generated.append(next_id.item())
+            if hasattr(self.manager, "register_prefill_tokens"):
+                self.manager.register_prefill_tokens(session_id, torch.tensor([next_id.item()], dtype=torch.long))
             if next_id.item() in self.stop_token_ids:
                 break
 

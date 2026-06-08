@@ -199,3 +199,81 @@ def test_query_routing_with_decay():
     
     assert score_3 > score_2
     assert score_2 > score_0
+
+
+def test_idf_and_coverage_boost():
+    # Setup index for testing IDF and Coverage boosting
+    # 4 blocks, block_size = 257
+    slot_ids = [101, 102, 103, 104]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+    block_size = 257
+    tokens = torch.zeros(1028, dtype=torch.long)
+    
+    # Token 1000 is common: occurs in block 0, block 1, block 2 (3 occurrences)
+    tokens[10] = 1000
+    tokens[300] = 1000
+    tokens[600] = 1000
+    
+    # Token 2000 is rare: occurs only in block 3 (1 occurrence)
+    tokens[900] = 2000
+    
+    # Block 1 (slot 102) has token 1000 and token 3000 (2 unique query matches)
+    tokens[310] = 3000
+    # Block 2 (slot 103) has only token 1000 (repeated twice)
+    tokens[610] = 1000
+    
+    inv_index = build_inverted_index(
+        token_ids=tokens,
+        slot_ids=slot_ids,
+        block_size=block_size,
+        stop_token_ids={0},
+        top_n_per_block=5
+    )
+    
+    # 1. Verify IDF: token 2000 (rare) should have higher IDF than token 1000 (common)
+    assert inv_index.idf[2000] > inv_index.idf[1000]
+    
+    # 2. Verify Coverage Boost during route_query
+    # Setup minimal SRL state
+    desc_matrix = torch.randn(4, 64)
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    pool = DummyPool(desc_matrix, slot_ids)
+    pool.W_proj = torch.randn(64, 64)
+    sem_index = build_semantic_index(pool, slot_ids)
+    graph = build_chunk_graph(desc_matrix, slot_ids_t, K_semantic=1, K_temporal=1, inv_index=inv_index, overlap_threshold=0.1)
+    
+    srl_state = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=inv_index,
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[101],
+        k_min=2,
+        k_max=4,
+        routing_threshold=1
+    )
+    
+    # Query contains [1000, 3000]
+    # Block 1 (slot 102) matches BOTH 1000 and 3000 (2 unique matches).
+    # Block 2 (slot 103) matches ONLY 1000 (but has 2 occurrences of it).
+    # Because of coverage boost (2^2 = 4x multiplier for block 1 vs 1^2 = 1x multiplier for block 2),
+    # block 1 (slot 102) should be strongly preferred and ranked ahead of block 2 (slot 103).
+    Q = torch.randn(8, 64)
+    selected_slots = route_query(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0,
+        query_tokens=[1000, 3000]
+    )
+    
+    selected_list = selected_slots.tolist()
+    # Slot 102 should be matched before Slot 103
+    idx_102 = selected_list.index(102) if 102 in selected_list else -1
+    idx_103 = selected_list.index(103) if 103 in selected_list else -1
+    
+    assert idx_102 != -1
+    if idx_103 != -1:
+        assert idx_102 < idx_103  # block 102 is ranked higher
+

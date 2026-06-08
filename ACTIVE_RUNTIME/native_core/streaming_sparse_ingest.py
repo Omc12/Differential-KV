@@ -85,6 +85,7 @@ class StreamingKVBlock:
     pool_idx: Optional[int] = None
     dirty: bool = True
     is_outlier: bool = False
+    skip_compression: bool = False
     session_id: Optional[str] = None
     layer_idx: Optional[int] = None
     _cache_id: Optional[str] = None
@@ -142,7 +143,7 @@ class StreamingKVBlock:
         # can start compressing — they were previously locked dense unnecessarily.
         # Also protect blocks flagged with outliers (e.g. key activation > 20.0) from SVD
         # compression to prevent attention sink corruption.
-        if (self.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or self.is_outlier:
+        if (self.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or self.is_outlier or self.skip_compression:
             return False
         if self.anchor_idx + self.token_count() < StreamingKVBlock.short_context_threshold:
             return False
@@ -154,7 +155,7 @@ class StreamingKVBlock:
 _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False) -> bool:
-    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier:
+    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier or block.skip_compression:
         return False
     toks = block.token_count()
     if block.anchor_idx + toks < StreamingKVBlock.short_context_threshold:
@@ -431,6 +432,35 @@ class StreamingSparseIngestManager:
             metadata[block_idx, 2] = block.token_count()
             metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
 
+    def _should_skip_compression(self, session_id: str, anchor_idx: int, block_capacity: int) -> bool:
+        if self.manager is None or getattr(self.manager, "tokenizer", None) is None:
+            return False
+        session_tok_dict = getattr(self.manager, "_session_token_ids", {})
+        token_ids_cpu = session_tok_dict.get(session_id)
+        if token_ids_cpu is None:
+            return False
+        
+        start = anchor_idx
+        end = min(start + block_capacity, len(token_ids_cpu))
+        if start >= end:
+            return False
+            
+        block_toks = token_ids_cpu[start:end].tolist()
+        
+        # Check each token ID
+        for tok_id in block_toks:
+            try:
+                # Decode the token ID to string
+                s = self.manager.tokenizer.decode([tok_id])
+                # We exempt any block where any token contains digit characters.
+                # This guarantees that any numbers/digits (which may be needle codes)
+                # are kept dense with 100% exact attention.
+                if any(c.isdigit() for c in s):
+                    return True
+            except Exception:
+                pass
+        return False
+
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
     def ingest_chunk(
@@ -498,6 +528,12 @@ class StreamingSparseIngestManager:
                 # Flag outlier if the anchor key exceeds the threshold
                 new_block.is_outlier = False
                 
+                # Check for compression exemption
+                if self._should_skip_compression(session_id, anchor_idx, 1):
+                    new_block.skip_compression = True
+                    if layer_idx == 0:
+                        print(f"[DiffKV Ingest] Decode block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD (contains digit/number)")
+                
                 blocks.append(new_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
 
@@ -531,6 +567,14 @@ class StreamingSparseIngestManager:
             # Update outlier status if incoming key token exceeds the threshold
             if False:
                 current_block.is_outlier = True
+
+            # Update compression exemption status for newly appended token
+            if not current_block.skip_compression:
+                new_tok_pos = current_block.anchor_idx + len(current_block.token_indices)
+                if self._should_skip_compression(session_id, new_tok_pos, 1):
+                    current_block.skip_compression = True
+                    if layer_idx == 0:
+                        print(f"[DiffKV Ingest] Decode block anchor_idx={current_block.anchor_idx} layer={layer_idx}: Exempted from SVD (appended digit/number)")
 
             current_block.dirty = True
             current_block.token_indices.append(
@@ -667,10 +711,16 @@ class StreamingSparseIngestManager:
                     # Outlier check (CPU-local list access, zero sync overhead)
                     new_block.is_outlier = False
 
+                    # Check for compression exemption
+                    if self._should_skip_compression(session_id, anchor_idx, block_capacity):
+                        new_block.skip_compression = True
+                        if layer_idx == 0:
+                            print(f"[DiffKV Ingest] Block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
+
                     # Check if the block is eligible for immediate compression.
                     # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
                     # Only submit block if it lies outside the rolling dense recency window.
-                    if (anchor_idx > 0 or not self.protect_block_zero) and (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
+                    if (anchor_idx > 0 or not self.protect_block_zero) and not new_block.skip_compression and (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
                         new_block.state = "SUBMITTED"
                         full_blocks_to_compress.append(new_block)
                     else:
@@ -720,6 +770,12 @@ class StreamingSparseIngestManager:
                 # Outlier check (single GPU-CPU transfer for the entire partial block slice)
                 k_max_val = region_k[:, :, L_full:].abs().max().item()
                 new_block.is_outlier = False
+
+                # Check for compression exemption
+                if self._should_skip_compression(session_id, anchor_idx, len(token_indices)):
+                    new_block.skip_compression = True
+                    if layer_idx == 0:
+                        print(f"[DiffKV Ingest] Partial block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
                 # SVD compression is deferred during prefill to ensure exact attention.
                 new_block.state = "ACCUMULATING"
@@ -878,10 +934,11 @@ class StreamingSparseIngestManager:
         block.dirty = True
 
         # Non-blocking: copies to CPU immediately, frees GPU as soon as SVD completes
-        submitted = self.compressor.submit(block, k, v) if k is not None else False
+        is_async_active = getattr(self.compressor, "_running", False)
+        submitted = self.compressor.submit(block, k, v) if (k is not None and is_async_active) else False
 
         if not submitted:
-            # Backpressure: compress synchronously
+            # Backpressure or sync mode: compress synchronously
             self.compress_fn(block, k, v)
             block.state = "COMPRESSED"
 

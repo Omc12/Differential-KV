@@ -333,12 +333,17 @@ class KVRuntimeManager:
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
         self.decode_workspace = {}
 
-        # On Apple Silicon/MPS, we use thread-safe CPU-only background SVD compression
-        # to guarantee thread-safety and prevent Metal command encoder / buffer validation crashes.
+        # On Apple Silicon/MPS, we disable async background SVD to guarantee thread-safety
+        # and prevent Metal command encoder / buffer validation crashes.
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
-            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Enabling thread-safe CPU background SVD compression.")
+            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Disabling async background SVD for thread-safety.")
+            self._async = False
+            # Force approximate attention off on MPS to prevent gibberish outputs
+            import os as _local_os
+            _local_os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
+        else:
+            self._async = self.config.async_svd
 
-        self._async      = self.config.async_svd
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
         if self._async:
             self._compressor.start()
@@ -1773,6 +1778,8 @@ class KVRuntimeManager:
         """Synchronous SVD compression (used by AsyncCompressor worker).
         Fixed rank -- simple, stable, predictable.
         """
+        if getattr(block, "skip_compression", False):
+            return
         input_device = k.device
         if input_device.type == "cpu":
             anchor_kv_local = getattr(block, "anchor_kv_cpu", None)
