@@ -9,7 +9,7 @@ def find_gateway_process():
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             cmd = proc.info['cmdline']
-            if cmd and any('openai_compatible_api_gateway.py' in part for part in cmd):
+            if cmd and any('openai_compatible_api_gateway' in part for part in cmd):
                 return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass

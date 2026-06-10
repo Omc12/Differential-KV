@@ -1,8 +1,4 @@
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
-W0610 14:39:47.128000 18213 torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-W0610 14:39:47.153000 18213 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
-W0610 14:39:47.177000 18213 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
 [DiffKV] Auto-selected device: mps
 [DiffKV] Apple Silicon/MPS detected. Automatically wired platform settings:
   - DIFFKV_MPS_APPROXIMATE_ATTN = 1
@@ -10,115 +6,192 @@ W0610 14:39:47.177000 18213 torch/utils/_pytree.py:630] <enum 'ScaleCalculationM
 [DiffKV Debug] Low preset condition matched! Applying platform auto-optimizations...
 [DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS
 [DiffKV] Low preset: auto-adjusting serving_mode from 'balanced' to 'lightweight' to prevent OOM
+[DiffKV] Low preset: auto-adjusting rank from 32 to 16 to prevent attention OOM on long prompts
 Loading DiffKV runtime with model: Qwen/Qwen2.5-1.5B-Instruct...
 [DiffKV Debug] settings: device=mps, preset=low, serving_mode=lightweight, rank=16
   rank=16  micro_block_size=256  serving_mode=lightweight
   max_resident_sessions=4  quantization=none
   [Tip] Set DIFFKV_TELEMETRY=1 to enable VRAM + block state logging
 [DiffKV] MPS watermark set to default (no override)
-[DiffKV] Lazy-initializing tokenizer for model Qwen/Qwen2.5-1.5B-Instruct...
-[DiffKV] Loading model weights on demand: Qwen/Qwen2.5-1.5B-Instruct (device=mps, dtype=torch.float16)...
-[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS
-Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:01<06:42,  1.19s/it]Loading weights:  40%|███▉      | 135/338 [00:01<00:01, 141.86it/s]Loading weights:  61%|██████    | 205/338 [00:01<00:00, 160.54it/s]Loading weights:  75%|███████▍  | 252/338 [00:01<00:00, 160.83it/s]Loading weights:  85%|████████▍ | 287/338 [00:02<00:00, 159.01it/s]Loading weights:  93%|█████████▎| 315/338 [00:02<00:00, 148.05it/s]Loading weights: 100%|██████████| 338/338 [00:02<00:00, 134.14it/s]
-INFO:     Started server process [18213]
+[DiffKV MLX] Low preset: auto-enabling 4-bit quantization
+[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 69775.85it/s]
+INFO:     Started server process [98441]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-[DiffKV] Model parameter count: 1543.7M
-[DiffKV Memory] Device: mps (is_mps=True), Preset: low (is_low=True)
-[DiffKV] MPS + low preset detected: reducing pool budget to 256MB for 1024 expected tokens to fit 4GB MPS limit
-[DiffKV] Auto-detected Apple Silicon / MPS device. Disabling async background SVD for thread-safety.
-Differential KV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
-[DiffKV] torch.compile disabled.
-[DiffKV] CUDAGraphDecodeRunner initialized (MPS/CPU — eager mode only)
-[DiffKV] MPS memory fraction: unlimited (no artificial cap applied).
-[DiffKV] MPS pressure monitor started (threshold: 3000 MB RSS).
-[DiffKV] Heap trimmed. RSS: 319 MB → 319 MB (saved 0 MB)
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+[DiffKV MLX] Loaded model in 1.24s
 Starting Continuous Batching Engine...
 [DiffKV] Idle model unloading configured for 300.0 seconds of inactivity.
 Starting Session Manager...
 Continuous Batching Engine started.
-INFO:     127.0.0.1:53054 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53056 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53060 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-/opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/contextlib.py:109: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
-  self.gen = func(*args, **kwds)
-[Pool] Lazy-allocated 512 slots for ~6725 tokens = 10.6 MB (device=mps)
-INFO:     127.0.0.1:53062 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53064 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53066 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53068 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53070 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53072 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53074 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53077 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53079 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53081 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53083 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53085 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53087 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53089 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53091 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53093 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53095 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53097 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53099 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53101 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53103 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53105 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53107 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53109 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53111 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53113 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53115 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53117 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53119 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53121 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53123 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53125 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53127 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53129 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53131 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53133 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53135 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53137 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53139 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53142 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53144 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53146 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53148 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53150 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53152 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53154 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53156 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53158 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53160 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53162 - "GET /v1/runtime_info HTTP/1.1" 200 OK
 [DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...
-[DiffKV BatchEngine] Compression barrier done in 0.1ms
-INFO:     127.0.0.1:53164 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53166 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-[DiffKV BatchEngine] SRL index built in 1227.1ms | total=1227.3ms
-INFO:     127.0.0.1:53168 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53170 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53172 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53174 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53176 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53178 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53180 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53182 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53184 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53186 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53188 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53190 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53192 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-[DiffKV BatchEngine] Prefix registry confirmed for session 576382e5-f4b6-4566-b93d-98e44212e2de: 6213 tokens (from exact decode-time token IDs).
-INFO:     127.0.0.1:53059 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53194 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     127.0.0.1:53196 - "GET /v1/runtime_info HTTP/1.1" 200 OK
-INFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [18213]
-/opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/resource_tracker.py:297: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-l7rwey75'}
-  warnings.warn(
+[DiffKV BatchEngine] Compression barrier done in 0.0ms
+[DiffKV BatchEngine] SRL index built in 199.3ms | total=199.3ms
+[DiffKV BatchEngine] Prefix registry confirmed for session b40eb4ff-b68b-49a1-9f01-b8de1911cb0f: 47 tokens (from exact decode-time token IDs).
+INFO:     127.0.0.1:54701 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54702 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54703 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54704 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54705 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54706 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54707 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54708 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54709 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54710 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54711 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54713 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54714 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54715 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54716 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54717 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54718 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54719 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54720 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54721 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54722 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54723 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54724 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54725 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54726 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54727 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54728 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54729 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54730 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54731 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54732 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54733 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54734 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54735 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54736 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54740 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54743 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54744 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54745 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54746 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54747 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54748 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54749 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54750 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54751 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54752 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54753 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54754 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54756 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54757 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54758 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54759 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54760 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54761 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...
+[DiffKV BatchEngine] Compression barrier done in 0.0ms
+INFO:     127.0.0.1:54762 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54763 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+[DiffKV BatchEngine] SRL index built in 214.9ms | total=214.9ms
+INFO:     127.0.0.1:54764 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54765 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54766 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54767 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54768 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54769 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54771 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54772 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54773 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+[DiffKV BatchEngine] Prefix registry confirmed for session 2f4a48dc-1ebd-4461-8923-704efd1dc00f: 8501 tokens (from exact decode-time token IDs).
+[DiffKV Gateway] Detected ephemeral title/summary request. Routing to isolated session __ephemeral__0b905401-b0dc-4a49-a058-2c1d36cddf61 to protect main KV cache.
+[DiffKV Gateway] Optimized long title/summary prompt by truncating embedded chat history (shrank 31929 -> 2957 characters).
+[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...
+[DiffKV BatchEngine] Compression barrier done in 0.0ms
+[DiffKV BatchEngine] SRL index built in 226.7ms | total=226.7ms
+INFO:     127.0.0.1:54774 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54775 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54776 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54745 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54777 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+[DiffKV Gateway] Detected ephemeral title/summary request. Routing to isolated session __ephemeral__dd4e1931-a86c-4981-bb38-0b7b1f4faa59 to protect main KV cache.
+[DiffKV Gateway] Optimized long title/summary prompt by truncating embedded chat history (shrank 32206 -> 3234 characters).
+[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...
+[DiffKV BatchEngine] Compression barrier done in 0.0ms
+[DiffKV BatchEngine] SRL index built in 193.9ms | total=193.9ms
+INFO:     127.0.0.1:54778 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54745 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[DiffKV Gateway] Detected ephemeral title/summary request. Routing to isolated session __ephemeral__ff66d1fe-ae27-461b-9af0-c37299d99f92 to protect main KV cache.
+[DiffKV Gateway] Optimized long title/summary prompt by truncating embedded chat history (shrank 31675 -> 2703 characters).
+[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...
+[DiffKV BatchEngine] Compression barrier done in 0.0ms
+[DiffKV BatchEngine] SRL index built in 205.7ms | total=205.8ms
+INFO:     127.0.0.1:54780 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54781 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54745 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54782 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54783 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54784 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54785 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54786 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54787 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54788 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54789 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54790 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54791 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54792 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54794 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54795 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54796 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54797 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54798 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54799 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54800 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54801 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54802 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54803 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54804 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54805 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54806 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54807 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54808 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54809 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54810 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54811 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54812 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54813 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54814 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54815 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54816 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54817 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54818 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54819 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54820 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54821 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54822 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54823 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54824 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54825 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54826 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54827 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54828 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54829 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54831 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54832 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54833 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54834 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54835 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54836 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54837 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54838 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54839 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54840 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54841 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54842 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54843 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54844 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54845 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54846 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54847 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54848 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54849 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54850 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54851 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54852 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54854 - "GET /v1/runtime_info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54857 - "GET /v1/runtime_info HTTP/1.1" 200 OK

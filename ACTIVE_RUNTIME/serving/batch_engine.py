@@ -1094,7 +1094,8 @@ class ContinuousBatchEngine:
                     is_mps = (self.wrapper.device == "mps" or
                               (isinstance(self.wrapper.device, torch.device) and
                                self.wrapper.device.type == "mps"))
-                    if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
+                    is_mlx = getattr(self.wrapper, "is_mlx", False)
+                    if is_mps and not is_mlx and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
                         with torch.mps.capture_to_graph():
                             out = self.wrapper.model(
                                 input_ids=input_ids,

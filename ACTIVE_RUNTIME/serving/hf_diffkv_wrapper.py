@@ -285,7 +285,7 @@ if torch.cuda.is_available():
 else:
     _compiled_sample_fn = _sample_logits
 
-class DiffKVHFWrapper:
+class PyTorchDiffKVHFWrapper:
     """
     Wraps a HuggingFace model to use Differential KV cache.
     """
@@ -906,3 +906,21 @@ class DiffKVHFWrapper:
 
     def __del__(self):
         self.close()
+
+import sys
+try:
+    import mlx.core as mx
+    _HAS_MLX = True
+except ImportError:
+    _HAS_MLX = False
+
+if sys.platform == "darwin" and _HAS_MLX:
+    try:
+        from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper as DiffKVHFWrapper
+        print("[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.")
+    except Exception as e:
+        print(f"[DiffKV] Warning: Failed to import MLX wrapper ({e}), falling back to PyTorch.")
+        DiffKVHFWrapper = PyTorchDiffKVHFWrapper
+else:
+    DiffKVHFWrapper = PyTorchDiffKVHFWrapper
+

@@ -505,7 +505,7 @@ def test_reranker_and_recency_decay():
 
 def test_dynamic_scaling_and_seeds():
     from unittest.mock import patch, MagicMock
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper as DiffKVHFWrapper
 
     # 1. Test model-size dependent configuration defaults in DiffKVHFWrapper
     class DummyConfig:

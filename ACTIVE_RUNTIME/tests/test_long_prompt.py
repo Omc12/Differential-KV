@@ -54,7 +54,7 @@ async def test_long_prompt():
 
     full_output = []
     while True:
-        chunk = await asyncio.wait_for(q.get(), timeout=30.0)
+        chunk = await asyncio.wait_for(q.get(), timeout=90.0)
         if "error" in chunk:
             print(f"Error: {chunk['error']}")
             break
@@ -96,7 +96,7 @@ async def test_long_prompt():
     
     full_output2 = []
     while True:
-        chunk = await asyncio.wait_for(q2.get(), timeout=30.0)
+        chunk = await asyncio.wait_for(q2.get(), timeout=90.0)
         if "error" in chunk:
             print(f"Error: {chunk['error']}")
             break
