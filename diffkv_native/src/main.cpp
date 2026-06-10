@@ -136,6 +136,9 @@ struct ggml_cgraph * build_decode_graph(
     struct ggml_tensor * desc_matrix, // Layer 0 desc_matrix for SRL routing
     struct ggml_tensor * anchors_K,   // Layer 0 anchors_K for SRL routing
     struct ggml_tensor * slots_mask,  // slots_mask to ignore unoccupied slots
+    struct ggml_tensor * host_slots,  // Host-computed candidate slots
+    int srl_k_semantic,
+    int srl_k_keep,
     CustomAttnUserData * userdata,     // Array of size config.n_layer!
     struct ggml_tensor ** out_logits,
     struct ggml_tensor ** out_selected_slots,
@@ -178,14 +181,16 @@ struct ggml_cgraph * build_decode_graph(
             // Compute query descriptor: [desc_dim, 1]
             struct ggml_tensor * q_desc = compute_query_desc(ctx, Q, W_proj);
 
-            // Semantic search topk: [k_semantic, 1]
-            int k_semantic = 16;
-            struct ggml_tensor * candidate_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, k_semantic);
+            // Semantic search topk: [srl_k_semantic, 1]
+            struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
+            struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, srl_k_semantic);
 
-            // Anchor screening: [k_keep]
+            // Concatenate semantic and host slots
+            struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
+
+            // Anchor screening: [srl_k_keep]
             float scale = 1.0f / std::sqrt((float)head_dim);
-            int k_keep = 8;
-            selected_slots = anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, k_keep);
+            selected_slots = anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, srl_k_keep);
 
             // Save selected slots to out parameter
             if (out_selected_slots) {
@@ -455,6 +460,64 @@ int main(int argc, char ** argv) {
     }
 
     model.print_info();
+    
+    // ── SRL configuration (with defaults) ───────────────────────────────────
+    int srl_k_semantic = 32;
+    int srl_k_lexical = 8;
+    int srl_k_graph = 8;
+    int srl_k_recency = 8;
+    int srl_k_keep = 16;
+
+    // Load from env vars
+    if (const char* env = std::getenv("DIFFKV_SRL_K_SEM")) srl_k_semantic = std::stoi(env);
+    if (const char* env = std::getenv("DIFFKV_SRL_K_LEX")) srl_k_lexical = std::stoi(env);
+    if (const char* env = std::getenv("DIFFKV_SRL_K_GRAPH")) srl_k_graph = std::stoi(env);
+    if (const char* env = std::getenv("DIFFKV_SRL_K_RECENCY")) srl_k_recency = std::stoi(env);
+    if (const char* env = std::getenv("DIFFKV_SRL_K_KEEP")) srl_k_keep = std::stoi(env);
+
+    // Also parse from argv
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--srl-k-semantic" && i + 1 < argc) {
+            srl_k_semantic = std::stoi(argv[++i]);
+        } else if (arg == "--srl-k-lexical" && i + 1 < argc) {
+            srl_k_lexical = std::stoi(argv[++i]);
+        } else if (arg == "--srl-k-graph" && i + 1 < argc) {
+            srl_k_graph = std::stoi(argv[++i]);
+        } else if (arg == "--srl-k-recency" && i + 1 < argc) {
+            srl_k_recency = std::stoi(argv[++i]);
+        } else if (arg == "--srl-k-keep" && i + 1 < argc) {
+            srl_k_keep = std::stoi(argv[++i]);
+        }
+    }
+
+    int srl_k_host = 1 + srl_k_recency + srl_k_lexical + 2 * srl_k_lexical + srl_k_graph;
+
+    std::unordered_set<int32_t> stop_token_ids;
+    {
+        std::vector<std::string> stop_words = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "shall", "can", "need",
+            "to", "of", "in", "on", "at", "by", "for", "with", "as",
+            "and", "or", "but", "if", "then", "that", "this", "it",
+            "he", "she", "they", "we", "you", "i", "not", "no",
+            ",", ".", ":", ";", "?", "!", "(", ")", "'", "\"", "-", "\n",
+            "system", "user", "assistant", "im_start", "im_end"
+        };
+        for (const auto & word : stop_words) {
+            auto t = model.tokenize(word, false);
+            for (int32_t tok : t) {
+                stop_token_ids.insert(tok);
+            }
+        }
+        for (int i = 0; i < 200; ++i) {
+            stop_token_ids.insert(i);
+        }
+    }
+
+    diffkv::InvertedIndex inverted_index;
+
 
     // ── Set up CPU Backend ──────────────────────────────────────────────────
     ggml_backend_t backend = ggml_backend_cpu_init();
@@ -565,6 +628,8 @@ int main(int argc, char ** argv) {
     ggml_set_input(W_proj_decode);
     struct ggml_tensor * slots_mask_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_F32, n_slots);
     ggml_set_input(slots_mask_decode);
+    struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
+    ggml_set_input(host_slots_decode);
 
     std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
     for (int l = 0; l < n_layers; ++l) {
@@ -589,7 +654,8 @@ int main(int argc, char ** argv) {
     struct ggml_cgraph * decode_graph = build_decode_graph(
         decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
         kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
-        slots_mask_decode,
+        slots_mask_decode, host_slots_decode,
+        srl_k_semantic, srl_k_keep,
         userdata.data(), &decode_logits, &selected_slots,
         &decode_k_layers, &decode_v_layers
     );
@@ -911,6 +977,18 @@ int main(int argc, char ** argv) {
         generated_tokens.push_back(last_token);
         const int max_generate = 150; // Allow sufficient output length
 
+        std::vector<int32_t> all_tokens = prompt_tokens;
+        all_tokens.push_back(last_token);
+
+        // Populate initial inverted index for all completed blocks in prefill
+        inverted_index.clear();
+        int completed_blocks = L / 64;
+        for (int i = 0; i < completed_blocks; ++i) {
+            std::vector<int32_t> block_tokens(prompt_tokens.begin() + i * 64, prompt_tokens.begin() + i * 64 + 64);
+            inverted_index.add_block_tokens(i, block_tokens, i * 64, stop_token_ids);
+        }
+        inverted_index.recompute_idf(completed_blocks);
+
         int active_slot = (L - 1) / 64;
         int active_block_tokens = L - active_slot * 64;
         if (active_block_tokens == 64) {
@@ -935,6 +1013,143 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
             ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
 
+            // ── Host Candidate Selection (SRL) ──────────────────────────────────────
+            std::vector<int32_t> host_candidates;
+            std::unordered_set<int32_t> seen;
+
+            // 1. Sink blocks
+            host_candidates.push_back(0);
+            seen.insert(0);
+
+            // 2. Recency slots: last K active slots
+            for (int i = std::max(0, active_slot - srl_k_recency); i < active_slot; ++i) {
+                if (!seen.count(i)) {
+                    host_candidates.push_back(i);
+                    seen.insert(i);
+                }
+            }
+
+            // 3. Lexical inverted index lookup using rolling window of last 16 tokens
+            std::vector<int32_t> recent_toks;
+            int start_tok_idx = std::max(0, (int)all_tokens.size() - 16);
+            for (size_t i = start_tok_idx; i < all_tokens.size(); ++i) {
+                recent_toks.push_back(all_tokens[i]);
+            }
+
+            std::unordered_map<int32_t, float> slot_scores;
+            std::unordered_map<int32_t, std::unordered_set<int32_t>> slot_matched_toks;
+            int32_t L_max = 0;
+            bool found_any = false;
+
+            for (int32_t tok : recent_toks) {
+                if (inverted_index.occurrences.count(tok)) {
+                    for (const auto & occ : inverted_index.occurrences[tok]) {
+                        if (occ.abs_pos > L_max) {
+                            L_max = occ.abs_pos;
+                        }
+                        found_any = true;
+                    }
+                }
+            }
+
+            std::vector<int32_t> sorted_lexical_slots;
+            std::vector<int32_t> sorted_rare_lex_slots;
+
+            if (found_any) {
+                float decay_factor = 0.999f;
+                for (int32_t tok : recent_toks) {
+                    if (inverted_index.occurrences.count(tok)) {
+                        float idf_val = inverted_index.idf.count(tok) ? inverted_index.idf[tok] : 1.0f;
+                        for (const auto & occ : inverted_index.occurrences[tok]) {
+                            slot_scores[occ.slot_id] += idf_val * std::pow(decay_factor, L_max - occ.abs_pos);
+                            slot_matched_toks[occ.slot_id].insert(tok);
+                        }
+                    }
+                }
+
+                for (auto & pair : slot_scores) {
+                    int32_t slot = pair.first;
+                    float unique_matches = (float)slot_matched_toks[slot].size();
+                    pair.second *= (unique_matches * unique_matches);
+                }
+
+                for (const auto & pair : slot_scores) {
+                    sorted_lexical_slots.push_back(pair.first);
+                }
+                std::sort(sorted_lexical_slots.begin(), sorted_lexical_slots.end(), [&](int32_t a, int32_t b) {
+                    return slot_scores[a] > slot_scores[b];
+                });
+
+                // Rare keywords lookup
+                std::unordered_map<int32_t, float> rare_slot_scores;
+                for (int32_t tok : recent_toks) {
+                    if (inverted_index.occurrences.count(tok)) {
+                        float idf_val = inverted_index.idf.count(tok) ? inverted_index.idf[tok] : 1.0f;
+                        if (idf_val >= 2.0f) {
+                            for (const auto & occ : inverted_index.occurrences[tok]) {
+                                rare_slot_scores[occ.slot_id] += idf_val * std::pow(decay_factor, L_max - occ.abs_pos);
+                            }
+                        }
+                    }
+                }
+                for (const auto & pair : rare_slot_scores) {
+                    sorted_rare_lex_slots.push_back(pair.first);
+                }
+                std::sort(sorted_rare_lex_slots.begin(), sorted_rare_lex_slots.end(), [&](int32_t a, int32_t b) {
+                    return rare_slot_scores[a] > rare_slot_scores[b];
+                });
+            }
+
+            // Add top lexical slots
+            int lex_added = 0;
+            for (int32_t slot : sorted_lexical_slots) {
+                if (lex_added >= srl_k_lexical) break;
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                    lex_added++;
+                }
+            }
+
+            // Add rare lexical slots
+            int rare_added = 0;
+            for (int32_t slot : sorted_rare_lex_slots) {
+                if (rare_added >= srl_k_lexical * 2) break;
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                    rare_added++;
+                }
+            }
+
+            // 4. Neighborhood graph expansion: linear chunk graph (prev/next slots)
+            std::vector<int32_t> graph_slots;
+            for (int32_t seed : sorted_lexical_slots) {
+                if (seed - 1 >= 0 && seed - 1 < active_slot) {
+                    graph_slots.push_back(seed - 1);
+                }
+                if (seed + 1 >= 0 && seed + 1 < active_slot) {
+                    graph_slots.push_back(seed + 1);
+                }
+            }
+            int graph_added = 0;
+            for (int32_t slot : graph_slots) {
+                if (graph_added >= srl_k_graph) break;
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                    graph_added++;
+                }
+            }
+
+            // Pad host candidates with 0 up to srl_k_host
+            while (host_candidates.size() < (size_t)srl_k_host) {
+                host_candidates.push_back(0);
+            }
+
+            // Upload host candidates to host_slots_decode tensor
+            ggml_backend_tensor_set(host_slots_decode, host_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+
             std::vector<float> slots_mask_host(n_slots, -1e10f);
             int occupied_up_to = active_slot - 1;
             for (int i = 0; i <= occupied_up_to; ++i) {
@@ -944,7 +1159,7 @@ int main(int argc, char ** argv) {
             }
             ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
 
-            int current_k = std::max(0, std::min(8, active_slot));
+            int current_k = std::max(0, std::min(srl_k_keep, active_slot));
             for (int l = 0; l < n_layers; ++l) {
                 userdata[l].K = current_k;
                 userdata[l].active_k_dense = active_k_dense[l].data();
@@ -1001,6 +1216,7 @@ int main(int argc, char ** argv) {
             std::cout << piece << std::flush;
 
             generated_tokens.push_back(next_token);
+            all_tokens.push_back(next_token);
             last_token = next_token;
 
             for (int l = 0; l < n_layers; ++l) {
@@ -1098,6 +1314,13 @@ int main(int argc, char ** argv) {
                         for (float & val : desc) val /= norm;
                         ggml_backend_tensor_set(engine.get_desc_matrix(), desc.data(), active_slot * desc_dim * sizeof(float), desc_dim * sizeof(float));
                     }
+                }
+
+                // Index the completed block
+                if (all_tokens.size() >= (size_t)(active_slot * 64 + 64)) {
+                    std::vector<int32_t> block_tokens(all_tokens.begin() + active_slot * 64, all_tokens.begin() + active_slot * 64 + 64);
+                    inverted_index.add_block_tokens(active_slot, block_tokens, active_slot * 64, stop_token_ids);
+                    inverted_index.recompute_idf(active_slot + 1);
                 }
 
                 active_slot++;
