@@ -284,7 +284,8 @@ void execute_metal_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
     struct ggml_tensor * slot_indices,
-    CustomAttnUserData * data
+    CustomAttnUserData * data,
+    float* lse_sparse_out
 ) {
     init_metal_runtime();
     if (!g_pipeline) {
@@ -421,6 +422,7 @@ void execute_metal_attention(
             // Read sparse output and LSE back
             memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
             memcpy(lse_sparse.data(), lse_buf.contents, n_q_heads * sizeof(float));
+            memcpy(lse_sparse_out, lse_buf.contents, n_q_heads * sizeof(float));
 
             // Run verification of sparse attention
             verify_attention_cpu(
@@ -432,147 +434,7 @@ void execute_metal_attention(
                 has_rope, rope_freq_base
             );
         }
-
-        // ── Dense Window Attention & LSE Combine on CPU ──
-        bool has_dense = (data->active_block_tokens > 0 && data->active_k_dense != nullptr && data->active_v_dense != nullptr);
-        if (has_dense) {
-            int active_block_tokens = data->active_block_tokens;
-            int active_slot = data->active_slot;
-            const float* active_k_dense = data->active_k_dense;
-            const float* active_v_dense = data->active_v_dense;
-            const int g = n_q_heads / n_kv_heads;
-            const int half_d = D / 2;
-
-            // Read anchor positions from engine
-            std::vector<int32_t> anchor_positions_host(ggml_nelements(kv_engine->get_anchor_positions()));
-            ggml_backend_tensor_get(kv_engine->get_anchor_positions(), anchor_positions_host.data(), 0, anchor_positions_host.size() * sizeof(int32_t));
-            int anchor_pos = anchor_positions_host[active_slot];
-
-            // Read anchors_K and anchors_V from engine
-            std::vector<ggml_fp16_t> anchors_K_fp16(ggml_nelements(kv_engine->get_anchors_K()));
-            ggml_backend_tensor_get(kv_engine->get_anchors_K(), anchors_K_fp16.data(), 0, anchors_K_fp16.size() * sizeof(ggml_fp16_t));
-            std::vector<ggml_fp16_t> anchors_V_fp16(ggml_nelements(kv_engine->get_anchors_V()));
-            ggml_backend_tensor_get(kv_engine->get_anchors_V(), anchors_V_fp16.data(), 0, anchors_V_fp16.size() * sizeof(ggml_fp16_t));
-
-            const float* Q_ptr = (const float*)Q->data;
-            std::vector<float> final_output(n_q_heads * D, 0.0f);
-
-            for (int h = 0; h < n_q_heads; ++h) {
-                int kv_head = h / g;
-
-                // Reconstruct K and V for the active block dense tokens
-                std::vector<float> K_dense_rot(active_block_tokens * D);
-                std::vector<float> V_dense(active_block_tokens * D);
-
-                for (int t = 0; t < active_block_tokens; ++t) {
-                    int pos = anchor_pos + t;
-
-                    for (int d = 0; d < D; ++d) {
-                        float raw_k, raw_v;
-                        if (t == 0) {
-                            raw_k = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + d]);
-                            raw_v = ggml_fp16_to_fp32(anchors_V_fp16[active_slot * n_kv_heads * D + kv_head * D + d]);
-                        } else {
-                            // active_k_dense shape: [64, F] where F = n_kv_heads * D
-                            int offset = (t - 1) * n_kv_heads * D + kv_head * D;
-                            raw_k = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + d]) + active_k_dense[offset + d];
-                            raw_v = ggml_fp16_to_fp32(anchors_V_fp16[active_slot * n_kv_heads * D + kv_head * D + d]) + active_v_dense[offset + d];
-                        }
-                        V_dense[t * D + d] = raw_v;
-
-                        if (has_rope) {
-                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                            float raw_partner;
-                            if (t == 0) {
-                                raw_partner = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + partner]);
-                            } else {
-                                int offset = (t - 1) * n_kv_heads * D + kv_head * D;
-                                raw_partner = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + partner]) + active_k_dense[offset + partner];
-                            }
-                            float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
-                            int idx = (d < half_d) ? d : (d - half_d);
-                            float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                            float angle = pos * theta;
-                            K_dense_rot[t * D + d] = raw_k * std::cos(angle) + rot_contrib * std::sin(angle);
-                        } else {
-                            K_dense_rot[t * D + d] = raw_k;
-                        }
-                    }
-                }
-
-                // Compute query-key dot products
-                std::vector<float> scores(active_block_tokens);
-                float max_score = -1e30f;
-                for (int t = 0; t < active_block_tokens; ++t) {
-                    float dot = 0.0f;
-                    for (int d = 0; d < D; ++d) {
-                        dot += Q_ptr[h * D + d] * K_dense_rot[t * D + d];
-                    }
-                    scores[t] = dot * scale;
-                    if (scores[t] > max_score) {
-                        max_score = scores[t];
-                    }
-                }
-
-                // Log-Sum-Exp
-                float sum_exp = 0.0f;
-                for (int t = 0; t < active_block_tokens; ++t) {
-                    sum_exp += std::exp(scores[t] - max_score);
-                }
-                float lse_dense = max_score + std::log(std::max(sum_exp, 1e-9f));
-
-                // Compute dense attention output vector
-                std::vector<float> out_dense(D, 0.0f);
-                for (int t = 0; t < active_block_tokens; ++t) {
-                    float w_t = std::exp(scores[t] - lse_dense);
-                    for (int d = 0; d < D; ++d) {
-                        out_dense[d] += w_t * V_dense[t * D + d];
-                    }
-                }
-
-                // Combine with sparse attention if sparse blocks exist
-                if (K > 0) {
-                    float lse_sparse_val = lse_sparse[h];
-                    float lse_max = std::max(lse_dense, lse_sparse_val);
-                    float w_dense = std::exp(lse_dense - lse_max);
-                    float w_sparse = std::exp(lse_sparse_val - lse_max);
-                    float denom = w_dense + w_sparse;
-
-                    for (int d = 0; d < D; ++d) {
-                        final_output[h * D + d] = (out_dense[d] * w_dense + out_sparse[h * D + d] * w_sparse) / std::max(denom, 1e-9f);
-                    }
-                } else {
-                    for (int d = 0; d < D; ++d) {
-                        final_output[h * D + d] = out_dense[d];
-                    }
-                }
-            }
-            memcpy(dst->data, final_output.data(), n_q_heads * D * sizeof(float));
-        } else {
-            // No dense tokens, copy sparse output directly
-            if (K > 0) {
-                memcpy(dst->data, out_sparse.data(), n_q_heads * D * sizeof(float));
-            } else {
-                memset(dst->data, 0, n_q_heads * D * sizeof(float));
-            }
-        }
     }
-}
-
-void custom_attention_op_callback(
-    struct ggml_tensor * dst,
-    const struct ggml_tensor * Q,
-    const struct ggml_tensor * slot_indices,
-    int ith,
-    int nth,
-    void * userdata
-) {
-    if (ith != 0) return;
-
-    CustomAttnUserData * data = static_cast<CustomAttnUserData*>(userdata);
-    execute_metal_attention(
-        dst, Q, (struct ggml_tensor*)slot_indices, data
-    );
 }
 
 } // namespace diffkv

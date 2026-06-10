@@ -27,6 +27,7 @@ set(SOURCES
     src/diffkv_kv_engine.cpp
     src/diffkv_compressor.cpp
     src/diffkv_srl.cpp
+    src/diffkv_attention.cpp
     src/main.cpp
 )
 

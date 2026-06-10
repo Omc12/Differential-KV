@@ -28,7 +28,8 @@ void execute_metal_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
     struct ggml_tensor * slot_indices,
-    CustomAttnUserData * data
+    CustomAttnUserData * data,
+    float* lse_sparse_out
 );
 
 // GGML callback for custom attention operator

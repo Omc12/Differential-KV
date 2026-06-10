@@ -1,5 +1,7 @@
 #include "diffkv_compressor.hpp"
+#ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
+#endif
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -8,13 +10,9 @@
 
 namespace diffkv {
 
-// Helper function to run SVD using macOS Accelerate LAPACK (sgesdd_)
-// A_input is row-major of shape [S, F].
-// Since LAPACK is column-major, it views A_input as B = A_input^T of shape [F, S] (column-major).
-// LAPACK sgesdd computes B = U_b * S_b * V_b^T.
-// VT_out (row-major [R, F]) corresponds to U_b^T (first R rows of column-major [F, S] or similar).
-// U_out (row-major [S, R]) corresponds to V_b (first R columns of [S, S]).
-static bool run_accelerate_svd(
+#ifndef __APPLE__
+// Jacobi SVD fallback for non-macOS systems (Windows/Linux/CUDA CPU fallback)
+static bool run_cpu_jacobi_svd(
     const float* A_input,
     int S, int F, int R,
     float* U_out,
@@ -38,12 +36,157 @@ static bool run_accelerate_svd(
         return true;
     }
 
+    // 1. Compute C = A * A^T (shape S x S)
+    std::vector<float> C(S * S, 0.0f);
+    for (int i = 0; i < S; ++i) {
+        for (int j = i; j < S; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < F; ++k) {
+                sum += A_input[i * F + k] * A_input[j * F + k];
+            }
+            C[i * S + j] = sum;
+            C[j * S + i] = sum;
+        }
+    }
+
+    // 2. Initialize U (eigenvectors) as identity matrix of size S x S
+    std::vector<float> U(S * S, 0.0f);
+    for (int i = 0; i < S; ++i) U[i * S + i] = 1.0f;
+
+    // 3. Jacobi rotation iterations
+    const int max_sweeps = 50;
+    const float eps = 1e-7f;
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        float off_diag_norm = 0.0f;
+        for (int i = 0; i < S; ++i) {
+            for (int j = i + 1; j < S; ++j) {
+                off_diag_norm += std::abs(C[i * S + j]);
+            }
+        }
+        if (off_diag_norm < eps) break;
+
+        for (int p = 0; p < S - 1; ++p) {
+            for (int q = p + 1; q < S; ++q) {
+                float app = C[p * S + p];
+                float aqq = C[q * S + q];
+                float apq = C[p * S + q];
+
+                if (std::abs(apq) < 1e-15f) continue;
+
+                float theta = (aqq - app) / (2.0f * apq);
+                float t;
+                if (std::abs(theta) < 1e-9f) {
+                    t = 1.0f;
+                } else {
+                    float sign = (theta > 0.0f) ? 1.0f : -1.0f;
+                    t = sign / (std::abs(theta) + std::sqrt(1.0f + theta * theta));
+                }
+                float c = 1.0f / std::sqrt(1.0f + t * t);
+                float s = t * c;
+                float tau = s / (1.0f + c);
+
+                C[p * S + p] = app - t * apq;
+                C[q * S + q] = aqq + t * apq;
+                C[p * S + q] = 0.0f;
+                C[q * S + p] = 0.0f;
+
+                for (int r = 0; r < S; ++r) {
+                    if (r != p && r != q) {
+                        float arp = C[r * S + p];
+                        float arq = C[r * S + q];
+                        C[r * S + p] = c * arp - s * arq;
+                        C[r * S + q] = s * arp + c * arq;
+                        C[p * S + r] = C[r * S + p];
+                        C[q * S + r] = C[r * S + q];
+                    }
+                }
+
+                for (int r = 0; r < S; ++r) {
+                    float urp = U[r * S + p];
+                    float urq = U[r * S + q];
+                    U[r * S + p] = c * urp - s * urq;
+                    U[r * S + q] = s * urp + c * urq;
+                }
+            }
+        }
+    }
+
+    // 4. Eigenvalues to Singular values
+    std::vector<int> indices(S);
+    std::vector<float> temp_S(S);
+    for (int i = 0; i < S; ++i) {
+        indices[i] = i;
+        float val = C[i * S + i];
+        temp_S[i] = (val > 0.0f) ? std::sqrt(val) : 0.0f;
+    }
+
+    // Sort descending
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+        return temp_S[a] > temp_S[b];
+    });
+
+    // Write top R singular values
+    for (int r = 0; r < R; ++r) {
+        S_out[r] = (r < S) ? temp_S[indices[r]] : 0.0f;
+    }
+
+    // Write U_out: shape [S, R] row-major
+    for (int s = 0; s < S; ++s) {
+        for (int r = 0; r < R; ++r) {
+            U_out[s * R + r] = (r < S) ? U[s * S + indices[r]] : 0.0f;
+        }
+    }
+
+    // Compute VT_out: shape [R, F] row-major
+    for (int r = 0; r < R; ++r) {
+        float s_val = S_out[r];
+        float inv_s = (s_val > 1e-8f) ? (1.0f / s_val) : 0.0f;
+        for (int f = 0; f < F; ++f) {
+            float sum = 0.0f;
+            if (r < S) {
+                for (int s = 0; s < S; ++s) {
+                    sum += U[s * S + indices[r]] * A_input[s * F + f];
+                }
+            }
+            VT_out[r * F + f] = sum * inv_s;
+        }
+    }
+
+    return true;
+}
+#endif
+
+// Helper function to run SVD
+static bool run_svd_impl(
+    const float* A_input,
+    int S, int F, int R,
+    float* U_out,
+    float* S_out,
+    float* VT_out
+) {
+#ifdef __APPLE__
+    if (S == 1) {
+        // Analytical SVD for a single row vector
+        float norm = 0.0f;
+        for (int i = 0; i < F; ++i) {
+            norm += A_input[i] * A_input[i];
+        }
+        norm = std::sqrt(norm);
+        if (norm < 1e-8f) norm = 1e-8f;
+
+        S_out[0] = norm;
+        U_out[0] = 1.0f;
+        for (int i = 0; i < F; ++i) {
+            VT_out[i] = A_input[i] / norm;
+        }
+        return true;
+    }
+
     int m = F;
     int n = S;
     int lda = m;
     int ldu = m;
-    int ldvt = S; // Since jobz = "S", LAPACK computes min(M, N) = S singular vectors.
-                  // V_b^T (VT) is S x S, so ldvt is S.
+    int ldvt = S; 
 
     // Copy input matrix because LAPACK sgesdd overwrites its input
     std::vector<float> a_copy(S * F);
@@ -96,24 +239,21 @@ static bool run_accelerate_svd(
     // 1. Copy top R singular values
     std::memcpy(S_out, s_temp.data(), R * sizeof(float));
 
-    // 2. Extract U_out (shape [S, R] row-major) from vt_temp (shape [S, S] column-major, where U_a = V_b).
-    // vt_temp (V_b^T) is stored column-major. So columns of vt_temp correspond to rows of V_b.
-    // Index (r, s) in vt_temp is at s * ldvt + r = s * S + r.
-    // This is identical to U_out[s * R + r] in memory!
+    // 2. Extract U_out (shape [S, R] row-major) from vt_temp.
     for (int s = 0; s < S; ++s) {
         for (int r = 0; r < R; ++r) {
             U_out[s * R + r] = vt_temp[s * S + r];
         }
     }
 
-    // 3. Extract VT_out (shape [R, F] row-major) from u_temp (shape [F, min_dim] column-major truncated to [F, R] column-major).
-    // u_temp (U_b) has shape [F, S] column-major.
-    // The first R columns are stored contiguously as F * R floats.
-    // Index (f, r) in column-major is at r * F + f.
-    // This is identical to VT_out[r * F + f] in memory!
+    // 3. Extract VT_out (shape [R, F] row-major) from u_temp
     std::memcpy(VT_out, u_temp.data(), R * F * sizeof(float));
 
     return true;
+#else
+    // Pure C++ Jacobi SVD fallback for non-macOS systems (Linux/Windows)
+    return run_cpu_jacobi_svd(A_input, S, F, R, U_out, S_out, VT_out);
+#endif
 }
 
 DiffKVCompressor::DiffKVCompressor(DiffKVBlockStateTable& state_table, std::function<bool(int)> alive_cb)
@@ -227,7 +367,7 @@ void DiffKVCompressor::process_job(const CompressJob& job) {
     std::vector<float> VT_joint(svd_dim * joint_F);
 
     // 4. Perform SVD for the joint matrix of actual size S
-    bool ok = run_accelerate_svd(K_V_joint.data(), S, joint_F, svd_dim, U_joint.data(), S_joint.data(), VT_joint.data());
+    bool ok = run_svd_impl(K_V_joint.data(), S, joint_F, svd_dim, U_joint.data(), S_joint.data(), VT_joint.data());
 
     if (!ok) {
         std::cerr << "[Compressor] Error: SVD failed for block " << job.block_id << std::endl;
