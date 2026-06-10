@@ -221,10 +221,10 @@ async def chat_completions(request: ChatCompletionRequest):
 @app.get("/models")
 async def list_models():
     models = [
-        "diffkv-Qwen-Qwen2.5-0.5B-Instruct",
-        "qwen2.5-0.5b-instruct.gguf",
-        "diffkv-qwen2.5-0.5b-instruct",
-        "diffkv-serving"
+        "diffkv-native-Qwen-Qwen2.5-0.5B-Instruct",
+        "diffkv-native-qwen2.5-0.5b-instruct.gguf",
+        "diffkv-native-qwen2.5-0.5b-instruct",
+        "diffkv-native-serving"
     ]
     return {
         "object": "list",
