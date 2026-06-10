@@ -91,44 +91,66 @@ def main():
             print("=========================================================")
             print(f"  PID:              {pid:<10}  |  Elapsed Time: {elapsed:.1f}s")
             print(f"  System RAM (RSS): {rss_gb:6.3f} GB    |  Virtual RAM (VMS): {vms_gb:6.3f} GB")
+            print("---------------------------------------------------------")
             
             if runtime_info:
                 device = runtime_info.get("device", "unknown")
                 serving_mode = runtime_info.get("serving_mode", "unknown")
                 model = runtime_info.get("model", "unknown")
                 
-                print(f"  Device:           {device:<10}  |  Serving Mode:      {serving_mode}")
                 print(f"  Model Loaded:     {model}")
+                print(f"  Device:           {device:<10}  |  Serving Mode:      {serving_mode}")
+                print("---------------------------------------------------------")
+                
+                # Retrieve KV Cache metadata
+                kv_sum = runtime_info.get("kv_summary", {})
+                pager = kv_sum.get("pager", {}) if isinstance(kv_sum, dict) else {}
+                kv_cache_resident_gb = 0.0
+                if pager and isinstance(pager, dict):
+                    kv_cache_resident_gb = pager.get("gpu_resident_mb", 0.0) / 1024.0
+
+                # Determine model weights baseline size (Qwen 0.5B in FP16 is ~0.94 GB)
+                est_weights_gb = 0.94 if "0.5B" in model else (3.1 if "1.5B" in model else 1.5)
                 
                 if device == "mps":
                     mps_allocated = runtime_info.get("mps_allocated_gb", 0.0)
                     mps_driver = runtime_info.get("mps_driver_gb", 0.0)
-                    print(f"  MPS Allocated:    {mps_allocated:6.3f} GB |  MPS Driver (Total): {mps_driver:6.3f} GB")
-                    # Python process overhead
                     python_overhead = max(0.0, rss_gb - mps_allocated)
-                    print(f"  Python Overhead:  {python_overhead:6.3f} GB (RSS - MPS Allocated)")
+                    
+                    # Estimate intermediate activation memory
+                    est_activations_gb = max(0.0, mps_allocated - est_weights_gb - kv_cache_resident_gb)
+                    
+                    print(f"  [RAM Breakdown]")
+                    print(f"    ├─ Python CPU Overhead: {python_overhead:6.3f} GB  (Interpreter, libraries)")
+                    print(f"    ├─ MPS Allocated VRAM:  {mps_allocated:6.3f} GB  (Active GPU tensors)")
+                    print(f"    │   ├─ Model Weights:   {min(est_weights_gb, mps_allocated):6.3f} GB  (Estimated weights)")
+                    print(f"    │   ├─ KV Cache VRAM:   {kv_cache_resident_gb:6.3f} GB  (Hot block residency)")
+                    print(f"    │   └─ Activations/Tmp: {est_activations_gb:6.3f} GB  (Intermediates, context)")
+                    print(f"    └─ MPS Driver Total:    {mps_driver:6.3f} GB  (Unified memory reservation)")
+                    
                 elif device == "cuda":
                     cuda_allocated = runtime_info.get("cuda_allocated_gb", 0.0)
                     cuda_reserved = runtime_info.get("cuda_reserved_gb", 0.0)
-                    print(f"  CUDA Allocated:   {cuda_allocated:6.3f} GB |  CUDA Reserved:     {cuda_reserved:6.3f} GB")
                     python_overhead = max(0.0, rss_gb - cuda_allocated)
-                    print(f"  Python Overhead:  {python_overhead:6.3f} GB (RSS - CUDA Allocated)")
+                    est_activations_gb = max(0.0, cuda_allocated - est_weights_gb - kv_cache_resident_gb)
+                    
+                    print(f"  [VRAM Breakdown]")
+                    print(f"    ├─ Python CPU Overhead: {python_overhead:6.3f} GB")
+                    print(f"    ├─ CUDA Allocated VRAM: {cuda_allocated:6.3f} GB")
+                    print(f"    │   ├─ Model Weights:   {min(est_weights_gb, cuda_allocated):6.3f} GB")
+                    print(f"    │   ├─ KV Cache VRAM:   {kv_cache_resident_gb:6.3f} GB")
+                    print(f"    │   └─ Activations/Tmp: {est_activations_gb:6.3f} GB")
+                    print(f"    └─ CUDA Reserved VRAM:  {cuda_reserved:6.3f} GB")
                 
-                kv_sum = runtime_info.get("kv_summary", {})
+                print("---------------------------------------------------------")
                 if kv_sum:
                     sessions = kv_sum.get("sessions", 0)
                     vram_saved = kv_sum.get("vram_saved_mb", 0.0)
-                    pager = kv_sum.get("pager", {})
-                    active_blocks = 0
-                    total_blocks = 0
-                    if pager and isinstance(pager, dict):
-                        # Pager summary usually contains list of active blocks or sizes
-                        # Let's count keys or read values if present
-                        active_blocks = pager.get("active_blocks", 0)
-                        total_blocks = pager.get("total_blocks", 0)
+                    active_blocks = pager.get("gpu_resident_mb", 0.0) / 2.0 if pager else 0 # approximate block count
+                    total_blocks = pager.get("tracked_blocks", 0) if pager else 0
                     
                     print(f"  Active Sessions:  {sessions:<10} |  VRAM Saved by SVD: {vram_saved:.1f} MB")
-                    print(f"  Pager Blocks:     {active_blocks}/{total_blocks} (Active/Total)")
+                    print(f"  Pager Blocks:     {total_blocks} tracked blocks ({kv_cache_resident_gb * 1024:.1f} MB resident)")
             else:
                 print("  [Server API status: Offline / Starting up...]")
             
