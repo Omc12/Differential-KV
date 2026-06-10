@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from native_core.srl.inverted_index import build_inverted_index, lookup_occurrences
-from native_core.srl.chunk_graph import build_chunk_graph
+from native_core.srl.inverted_index import build_inverted_index, lookup_occurrences, InvertedTokenIndex
+from native_core.srl.chunk_graph import build_chunk_graph, ChunkGraph
 from native_core.srl.semantic_index import build_semantic_index
 from native_core.srl.session_srl_state import SessionSRLState
 from native_core.srl.query_router import route_query, route_query_fixed_k
@@ -276,4 +276,305 @@ def test_idf_and_coverage_boost():
     assert idx_102 != -1
     if idx_103 != -1:
         assert idx_102 < idx_103  # block 102 is ranked higher
+
+
+def test_dynamic_decay_and_weights():
+    # 1. Verify directed/asymmetric weights
+    # slot 101 has vocab {1000, 1001, 1002}
+    # slot 102 has vocab {1000, 1001}
+    # overlap = {1000, 1001} (size 2)
+    # relative overlap 101 -> 102 is 2/3 = 0.667
+    # relative overlap 102 -> 101 is 2/2 = 1.0
+    desc_matrix = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    slot_ids = [101, 102]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+    
+    tokens = torch.zeros(514, dtype=torch.long)
+    # Slot 101 (block 0) tokens:
+    tokens[10] = 1000
+    tokens[11] = 1001
+    tokens[12] = 1002
+    # Slot 102 (block 1) tokens:
+    tokens[257 + 10] = 1000
+    tokens[257 + 11] = 1001
+    
+    inv_index = build_inverted_index(
+        token_ids=tokens,
+        slot_ids=slot_ids,
+        block_size=257,
+        stop_token_ids={0},
+        top_n_per_block=5
+    )
+    
+    # Build graph with overlap threshold = 0.1
+    graph = build_chunk_graph(
+        desc_matrix=desc_matrix,
+        slot_ids=slot_ids_t,
+        K_semantic=1,
+        K_temporal=0,
+        inv_index=inv_index,
+        overlap_threshold=0.1
+    )
+    
+    # Verify weights exist and are asymmetric
+    assert graph.weights is not None
+    # Slot 101 (row 0) has neighbor 102 (row 1)
+    neighbors_0 = graph.neighbors[0].tolist()
+    idx_1_in_0 = neighbors_0.index(1)
+    weight_0_to_1 = float(graph.weights[0, idx_1_in_0])
+    
+    # Slot 102 (row 1) has neighbor 101 (row 0)
+    neighbors_1 = graph.neighbors[1].tolist()
+    idx_0_in_1 = neighbors_1.index(0)
+    weight_1_to_0 = float(graph.weights[1, idx_0_in_1])
+    
+    # Since lex_score(1 -> 0) = 1.0 > lex_score(0 -> 1) = 0.667,
+    # weight_1_to_0 should be strictly greater than weight_0_to_1
+    assert weight_1_to_0 > weight_0_to_1
+
+    # 2. Verify query-dependent decay and degree damping during route_query
+    # We have 8 blocks:
+    # 0 (slot 101) - Seed block (query similarity high: 0.9)
+    # 1 (slot 102) - Connected to 0, but query similarity low: 0.1
+    # 2 (slot 103) - Connected to 0, query similarity high: 0.8
+    # 3 (slot 104) - Hub node connected to 0, 1, 2 (highly connected, query similarity low: 0.15)
+    # 4-7 (slots 105-108) - Unrelated blocks (query similarity low: 0.05)
+    
+    desc_matrix = torch.tensor([
+        [0.9, 0.436],
+        [0.1, 0.995],
+        [0.8, 0.600],
+        [0.15, 0.989],
+        [0.05, 0.998],
+        [0.05, 0.998],
+        [0.05, 0.998],
+        [0.05, 0.998]
+    ], dtype=torch.float32)
+    # Normalize descriptors
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    
+    slot_ids = [101, 102, 103, 104, 105, 106, 107, 108]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+    
+    # Let's build a manual ChunkGraph where:
+    # 0 is neighbors with 1, 2, 3
+    # 1 is neighbors with 0, 3
+    # 2 is neighbors with 0, 3
+    # 3 is neighbors with 0, 1, 2 (hub)
+    # neighbors shape: [8, 3]
+    neighbors_tensor = torch.tensor([
+        [1, 2, 3],
+        [0, 3, -1],
+        [0, 3, -1],
+        [0, 1, 2],
+        [-1, -1, -1],
+        [-1, -1, -1],
+        [-1, -1, -1],
+        [-1, -1, -1]
+    ], dtype=torch.int32)
+    
+    weights_tensor = torch.tensor([
+        [0.8, 0.8, 0.8],
+        [0.8, 0.8, 0.0],
+        [0.8, 0.8, 0.0],
+        [0.8, 0.8, 0.8],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0]
+    ], dtype=torch.float32)
+    
+    graph = ChunkGraph(neighbors=neighbors_tensor, weights=weights_tensor)
+    
+    pool = DummyPool(desc_matrix, slot_ids)
+    # W_proj is identity so query descriptor matches Q
+    pool.W_proj = torch.eye(2)
+    sem_index = build_semantic_index(pool, slot_ids)
+    
+    srl_state = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[],
+        k_min=2,
+        k_max=4,
+        routing_threshold=1,
+        graph_hop_decay=0.5
+    )
+    
+    # Query Q = [1.0, 0.0]
+    Q = torch.tensor([[1.0, 0.0]], dtype=torch.float32) # [1, 2] query
+    
+    # Route query
+    selected = route_query(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    )
+    
+    selected_list = selected.tolist()
+    # Selected list must prefer 103 (high query similarity neighbor of 101)
+    assert 103 in selected_list
+    # And 102 (low similarity neighbor of 101) must not displace 103
+    assert 102 not in selected_list or selected_list.index(103) < selected_list.index(102)
+
+
+def test_reranker_and_recency_decay():
+    # Verify that level-1 reranking and chronological recency decay works correctly.
+    desc_matrix = torch.tensor([
+        [0.8, 0.6],  # 101: older block (high similarity)
+        [0.79, 0.61], # 102: old block (high similarity)
+        [0.7, 0.71], # 103: recent block (medium similarity)
+        [0.0, 1.0]   # 104: not matched
+    ], dtype=torch.float32)
+    # L2 normalize
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    
+    slot_ids = [101, 102, 103, 104]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+    
+    pool = DummyPool(desc_matrix, slot_ids)
+    pool.W_proj = torch.eye(2)
+    # pool.anchors_K needs to be indexed by slot_ids (101 to 104)
+    anchors_K = torch.zeros(105, 1, 2, dtype=torch.float32)
+    anchors_K[slot_ids] = desc_matrix.unsqueeze(1)
+    pool.anchors_K = anchors_K
+    
+    sem_index = build_semantic_index(pool, slot_ids)
+    graph = ChunkGraph(
+        neighbors=torch.tensor([[-1, -1], [-1, -1], [-1, -1], [-1, -1]], dtype=torch.int32),
+        weights=torch.tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
+    )
+    
+    # Query Q = [0.8, 0.6] (matches 101 and 102 very strongly, matches 103 moderately)
+    Q = torch.tensor([[0.8, 0.6]], dtype=torch.float32) # [1, 2] query
+    
+    # 1. Run with srl_age_penalty=0.0 (no decay, select 101 and 102)
+    srl_state_no_decay = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[],
+        k_min=2,
+        k_max=2,
+        routing_threshold=1,
+        srl_age_penalty=0.0
+    )
+    
+    selected_no_decay = route_query(
+        Q=Q,
+        srl_state=srl_state_no_decay,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    ).tolist()
+    
+    assert 101 in selected_no_decay
+    assert 102 in selected_no_decay
+    assert 103 not in selected_no_decay
+
+    # 2. Run with srl_age_penalty=0.1 (decay applies, select 102 and 103, push out 101)
+    srl_state_decay = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[],
+        k_min=2,
+        k_max=2,
+        routing_threshold=1,
+        srl_age_penalty=0.1
+    )
+    
+    selected_decay = route_query(
+        Q=Q,
+        srl_state=srl_state_decay,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    ).tolist()
+    
+    assert 103 in selected_decay
+    assert 102 in selected_decay
+    assert 101 not in selected_decay
+
+
+def test_dynamic_scaling_and_seeds():
+    from unittest.mock import patch, MagicMock
+    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+
+    # 1. Test model-size dependent configuration defaults in DiffKVHFWrapper
+    class DummyConfig:
+        num_hidden_layers = 12
+        num_attention_heads = 8
+        hidden_size = 512
+
+    class DummyLayers:
+        def __init__(self):
+            self.layers = []
+
+    class DummyModel(torch.nn.Module):
+        def __init__(self, num_params):
+            super().__init__()
+            self.param = torch.nn.Parameter(torch.zeros(num_params))
+            self.config = DummyConfig()
+            self.model = DummyLayers()
+
+    class DummyTokenizer:
+        def __init__(self):
+            self.eos_token_id = 2
+            self.unk_token_id = 0
+        def convert_tokens_to_ids(self, word):
+            if word == "<|im_end|>":
+                return 3
+            if word == "<|end_of_text|>":
+                return 4
+            if word == "<|eot_id|>":
+                return 5
+            if word == "</s>":
+                return 6
+            return 0
+
+    dummy_tokenizer = DummyTokenizer()
+
+    # Clear process pollution from other tests that set this globally
+    old_threshold = os.environ.pop("DIFFKV_SRL_THRESHOLD", None)
+    try:
+        # A. Test smaller model (e.g. 500M params)
+        model_500m = DummyModel(500 * 10**6)
+        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_500m), \
+             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DiffKVHFWrapper("mock/qwen-500m", config={"rank": 16})
+            assert wrapper.config["srl_k_min"] == 10
+            assert wrapper.config["srl_k_max"] == 50
+            assert wrapper.config["srl_threshold"] == 25
+
+        # B. Test medium model (e.g. 1.5B params)
+        model_1_5b = DummyModel(1500 * 10**6)
+        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_1_5b), \
+             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DiffKVHFWrapper("mock/qwen-1.5b", config={"rank": 16})
+            assert wrapper.config["srl_k_min"] == 15
+            assert wrapper.config["srl_k_max"] == 100
+            assert wrapper.config["srl_threshold"] == 40
+
+        # C. Test larger model (e.g. 7B params)
+        model_7b = DummyModel(7000 * 10**6)
+        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_7b), \
+             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DiffKVHFWrapper("mock/qwen-7b", config={"rank": 16})
+            assert wrapper.config["srl_k_min"] == 20
+            assert wrapper.config["srl_k_max"] == 200
+            assert wrapper.config["srl_threshold"] == 50
+    finally:
+        if old_threshold is not None:
+            os.environ["DIFFKV_SRL_THRESHOLD"] = old_threshold
+
+
+
+
 

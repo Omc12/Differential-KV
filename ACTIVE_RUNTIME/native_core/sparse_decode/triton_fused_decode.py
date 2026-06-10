@@ -394,27 +394,18 @@ def _attend_and_reconstruct_v_compiled(
 
         p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)
         O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)
-        print(f"[DEBUG INTERNALS] O_anchor_fused[0][0]: {O_anchor_fused[0][0].item()}")
         O_final = O_final + O_anchor_fused.to(P_anchor.dtype)
 
         P_U_flat = P_U.reshape(N * H_q, 1, R)
         if V_V_perm is None:
             V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
         O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()
-        print(f"[DEBUG INTERNALS] O_delta.sum(0)[0][0]: {O_delta.sum(0)[0][0].item()}")
         O_final = O_final + O_delta.sum(0).to(P_anchor.dtype)
 
     if S_dense > 0:
-        print(f"[DEBUG INTERNALS] P_dense shape: {list(P_dense.shape)}, v_dense_rep shape: {list(v_dense_rep.shape)}")
-        print(f"[DEBUG INTERNALS] P_dense sum per head: {P_dense.sum(dim=-1).tolist()}")
-        print(f"[DEBUG INTERNALS] P_dense[0, 500:505]: {P_dense[0, 500:505].tolist()}")
-        print(f"[DEBUG INTERNALS] v_dense_rep sum: {v_dense_rep.sum().item()}")
         O_dense_total = torch.sum(P_dense.unsqueeze(-1) * v_dense_rep.squeeze(0), dim=1)
-        print(f"[DEBUG INTERNALS] O_dense_total[:, 0]: {O_dense_total[:, 0].tolist()}")
         O_final = O_final + O_dense_total.to(P_anchor.dtype)
 
-    print(f"[DEBUG INTERNALS] O_final shape: {list(O_final.shape)}")
-    print(f"[DEBUG INTERNALS] O_final[0][0]: {O_final[0][0].item()}")
     return O_final
 
 _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
@@ -629,11 +620,13 @@ def fused_decode_mps(
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
         sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
         
-        cos_anc = cos_flat[anchor_indices].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
-        sin_anc = sin_flat[anchor_indices].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
+        # Clamp anchor_indices to prevent GPU out of bounds
+        anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+        cos_anc = cos_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
+        sin_anc = sin_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
         
-        cos_anc_2d = cos_flat[anchor_indices].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
-        sin_anc_2d = sin_flat[anchor_indices].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
+        cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
+        sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
         
         def rotate_half(x):
             x1 = x[..., :x.shape[-1] // 2]
@@ -683,7 +676,22 @@ def fused_decode_mps(
     w_proj = w_proj * pool.scales[idx].float().view(N, 1, 1)
     O = O + torch.einsum('nhr,nhrd->hd', w_proj, VV_e)
 
-    return O.to(Q.dtype), lse.to(Q.dtype)
+    if torch.isnan(O).any() or torch.isinf(O).any() or torch.isnan(lse).any():
+        print("[fused_decode_mps DEBUG] NaN/Inf detected!")
+        print(f"q finite: {torch.isfinite(q).all().item()} min: {q.min().item()} max: {q.max().item()}")
+        print(f"AncK_e finite: {torch.isfinite(AncK_e).all().item()} min: {AncK_e.min().item()} max: {AncK_e.max().item()}")
+        print(f"VK_e finite: {torch.isfinite(VK_e).all().item()} min: {VK_e.min().item()} max: {VK_e.max().item()}")
+        print(f"U_a finite: {torch.isfinite(U_a).all().item()} min: {U_a.min().item()} max: {U_a.max().item()}")
+        print(f"scales finite: {torch.isfinite(pool.scales[idx]).all().item()} min: {pool.scales[idx].min().item()} max: {pool.scales[idx].max().item()}")
+        print(f"scale: {scale}")
+        print(f"s_anc finite: {torch.isfinite(s_anc).all().item()}")
+        print(f"q_proj_n finite: {torch.isfinite(q_proj_n).all().item()}")
+        print(f"delta_s finite: {torch.isfinite(delta_s).all().item()}")
+        print(f"scores finite: {torch.isfinite(scores).all().item()}")
+        print(f"lse finite: {torch.isfinite(lse).all().item()}")
+        print(f"w finite: {torch.isfinite(w).all().item()}")
+
+    return O.to(Q.dtype), lse.to(torch.float32)
 
 
 def _pytorch_vectorized_sparse_attn_decode(
@@ -784,6 +792,8 @@ def _pytorch_vectorized_sparse_attn_decode(
             if cached_val is not None and cached_val[0] == current_version:
                 cached_gathered = cached_val[1]
 
+        approximate_attn = os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN", "0") == "1"
+
         if cached_gathered is not None:
             U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t = cached_gathered
         else:
@@ -793,15 +803,20 @@ def _pytorch_vectorized_sparse_attn_decode(
             V_K_raw = pool.V_K[indices]
             anchors_K_raw = pool.anchors_K[indices]
             
-            if anchor_indices is not None and cos is not None and sin is not None:
+            if approximate_attn and anchor_indices is not None and cos is not None and sin is not None:
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                cpu_anc_check = anchor_indices.cpu()
+                if (cpu_anc_check >= cos_flat.shape[0]).any():
+                    print(f"[DiffKV DEBUG] Out of bounds check: layer_idx={layer_idx} anchor_indices={cpu_anc_check.tolist()} cos_flat.shape={list(cos_flat.shape)}", flush=True)
                 
-                cos_anc = cos_flat[anchor_indices].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
-                sin_anc = sin_flat[anchor_indices].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
+                # Clamp anchor_indices to prevent GPU out of bounds
+                anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                cos_anc = cos_flat[anchor_indices_clamped].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
+                sin_anc = sin_flat[anchor_indices_clamped].to(device=V_K_raw.device, dtype=V_K_raw.dtype).unsqueeze(1).unsqueeze(2)
                 
-                cos_anc_2d = cos_flat[anchor_indices].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
-                sin_anc_2d = sin_flat[anchor_indices].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
+                cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
+                sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
                 
                 V_K_raw = V_K_raw * cos_anc + rotate_half(V_K_raw) * sin_anc
                 anchors_K_raw = anchors_K_raw * cos_anc_2d + rotate_half(anchors_K_raw) * sin_anc_2d
@@ -821,16 +836,52 @@ def _pytorch_vectorized_sparse_attn_decode(
         if max_valid_len is None:
             max_valid_len = int(seq_lens_t.max().item())
 
-        # ── Project-Then-Attend formulation (zero-reconstruction, zero dense VRAM) ──
-        # exact anchor score: [H_q, N]
-        scores_anchor = torch.einsum('hd,nhd->hn', q_sq, anchors_K) * inv_scale
-        
-        # Project query to V_K: [N, H_q, R]
-        q_proj = torch.einsum('hd,nrhd->nhr', q_sq, V_K) * inv_scale
-        
-        # Inner product with U: [H_q, N, block_capacity]
-        scores_block = torch.einsum('nhr,nsr->hns', q_proj, U) * scales.view(1, N, 1)
-        scores_block = scores_block + scores_anchor.unsqueeze(-1)
+        # Cast inputs/pool slices to float32 to prevent float16 overflow/inf issues on MPS
+        q_sq_fp32 = q_sq.float()
+        anchors_K_fp32 = anchors_K.float()
+        V_K_fp32 = V_K.float()
+        U_fp32 = U.float()
+
+        has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+
+        if not approximate_attn and has_rope:
+            # ── Exact reconstruction + exact per-token RoPE ──
+            # 1. Reconstruct unrotated keys: [N, S_comp, H_q, D]
+            K_recon_unrot = anchors_K_fp32.unsqueeze(1) + scales.float().unsqueeze(-1) * torch.einsum('nsr,nrhd->nshd', U_fp32, V_K_fp32)
+
+            # 2. Get absolute positions for compressed tokens: [N, S_comp]
+            positions = anchor_indices.unsqueeze(1) + 1 + torch.arange(block_capacity, device=q.device).unsqueeze(0)
+
+            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+            positions_clamped = positions.clamp(min=0, max=cos_flat.shape[0] - 1)
+
+            # 3. Gather cos/sin and rotate: shape [N, S_comp, 1, D]
+            cos_seq = cos_flat[positions_clamped].to(device=K_recon_unrot.device, dtype=K_recon_unrot.dtype).unsqueeze(2)
+            sin_seq = sin_flat[positions_clamped].to(device=K_recon_unrot.device, dtype=K_recon_unrot.dtype).unsqueeze(2)
+
+            K_recon_rot = K_recon_unrot * cos_seq + rotate_half(K_recon_unrot) * sin_seq
+
+            # 4. Rotate anchor keys exactly
+            anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
+            cos_anc = cos_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
+            sin_anc = sin_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
+            anchors_K_rot = anchors_K_fp32 * cos_anc + rotate_half(anchors_K_fp32) * sin_anc
+
+            # 5. Compute exact scores
+            scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_rot) * inv_scale
+            scores_block = torch.einsum('hd,nshd->hns', q_sq_fp32, K_recon_rot) * inv_scale
+        else:
+            # ── Project-Then-Attend formulation (zero-reconstruction, zero dense VRAM) ──
+            # exact anchor score: [H_q, N]
+            scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_fp32) * inv_scale
+            
+            # Project query to V_K: [N, H_q, R]
+            q_proj = torch.einsum('hd,nrhd->nhr', q_sq_fp32, V_K_fp32) * inv_scale
+            
+            # Inner product with U: [H_q, N, block_capacity]
+            scores_block = torch.einsum('nhr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
+            scores_block = scores_block + scores_anchor.unsqueeze(-1)
         
         # Mask out-of-bounds tokens
         s_range = torch.arange(block_capacity, device=q.device).view(1, 1, -1)
@@ -839,8 +890,8 @@ def _pytorch_vectorized_sparse_attn_decode(
         
         scores_compressed = scores_block.reshape(H_q, N * block_capacity)
     else:
-        scores_anchor = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
-        scores_compressed = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
+        scores_anchor = torch.empty((H_q, 0), device=q.device, dtype=torch.float32)
+        scores_compressed = torch.empty((H_q, 0), device=q.device, dtype=torch.float32)
 
     dense_k_parts = []
     dense_v_parts = []
@@ -878,17 +929,12 @@ def _pytorch_vectorized_sparse_attn_decode(
         
         k_dense_rep = repeat_kv_at_dim(full_k_rot, num_key_value_groups, dim=1)
         v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1)
-        scores_dense = torch.sum(q * k_dense_rep, dim=-1).squeeze(0) * inv_scale
-        print(f"[DEBUG INTERNALS] scores_dense[:, 0]: {scores_dense[:, 0].tolist()}")
+        scores_dense = torch.sum(q.float() * k_dense_rep.float(), dim=-1).squeeze(0) * inv_scale
     else:
         S_dense = 0
-        scores_dense = torch.empty((H_q, 0), device=q.device, dtype=q.dtype)
+        scores_dense = torch.empty((H_q, 0), device=q.device, dtype=torch.float32)
 
-    print(f"[DEBUG INTERNALS] shapes: anchor={list(scores_anchor.shape)}, comp={list(scores_compressed.shape)}, dense={list(scores_dense.shape)}")
-    print(f"[DEBUG INTERNALS] scores_compressed[0, :20]: {scores_compressed[0, :20].tolist()}")
     scores_all = torch.cat([scores_anchor, scores_compressed, scores_dense], dim=-1)
-    print(f"[DEBUG INTERNALS] scores_all[2, 710:720]: {scores_all[2, 710:720].tolist()}")
-    print(f"[DEBUG INTERNALS] scores_dense[2, :5]: {scores_dense[2, :5].tolist()}")
     
     if diagnostics:
         has_nan = torch.isnan(scores_all).any().item()
@@ -921,7 +967,7 @@ def _pytorch_vectorized_sparse_attn_decode(
         V_V_perm=None,
     )
 
-    return O_final.unsqueeze(0).unsqueeze(2)
+    return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)
 
 
 def native_triton_sparse_attn_decode(
@@ -1008,11 +1054,13 @@ def native_triton_sparse_attn_decode(
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
                 
-                cos_anc = cos_flat[anchor_indices].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
-                sin_anc = sin_flat[anchor_indices].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                # Clamp anchor_indices to prevent GPU out of bounds
+                anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                cos_anc = cos_flat[anchor_indices_clamped].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                sin_anc = sin_flat[anchor_indices_clamped].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
                 
-                cos_anc_2d = cos_flat[anchor_indices].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
-                sin_anc_2d = sin_flat[anchor_indices].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
+                cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
+                sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
                 
                 anchors_K_rot = pool.anchors_K.clone()
                 V_K_rot = pool.V_K.clone()

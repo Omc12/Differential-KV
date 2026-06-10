@@ -56,9 +56,10 @@ def two_level_gate(
     slot_ids:  torch.Tensor,         # [M] candidate pool slot IDs (int32/int64)
     scale:     float,
     k_pass:    int,                  # how many to keep
+    srl_state: Optional["SessionSRLState"] = None,
 ) -> torch.Tensor:                   # [k_pass] pool slot IDs
     """
-    Cheap anchor-only dot-product screening.
+    Cheap anchor-only dot-product screening with recency-decay scoring.
 
     Loads only pool.anchors_K (small, often in L2 cache) and computes
     a mean-query dot product to rerank the candidate set.
@@ -69,11 +70,15 @@ def two_level_gate(
     if N <= k_pass:
         return slot_ids
 
+    if srl_state is not None:
+        age_penalty_factor = getattr(srl_state, "srl_age_penalty", 0.01)
+    else:
+        age_penalty_factor = float(os.environ.get("DIFFKV_SRL_AGE_PENALTY", "0.01"))
     try:
         import diffkv_core as _dkv_core
-        if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
+        if getattr(_dkv_core, "HAS_SRL_ROUTER", False) and (srl_state is None or age_penalty_factor == 0.0):
             return _dkv_core.anchor_screen(Q, pool.anchors_K, slot_ids, scale, k_pass)
-    except ImportError:
+    except Exception:
         pass
 
     # GQA: average query over heads → [D]
@@ -88,6 +93,24 @@ def two_level_gate(
         anchor_scores = (anc_flat.float() @ q_mean.float()) * scale
     else:
         anchor_scores = (anc_flat @ q_mean) * scale         # [M]
+
+    # Apply chronological age penalty to prevent old concepts from staying over-active
+    if srl_state is not None and srl_state.ordered_slot_ids:
+        ordered_slots = srl_state.ordered_slot_ids
+        n_total = len(ordered_slots)
+        
+        # Build dictionary for O(1) age lookup
+        slot_to_idx = {slot_id: idx for idx, slot_id in enumerate(ordered_slots)}
+        
+        if age_penalty_factor > 0.0:
+            penalties = []
+            for slot_id in slot_ids.tolist():
+                idx = slot_to_idx.get(slot_id, n_total - 1)
+                age = n_total - 1 - idx
+                penalties.append(age * age_penalty_factor)
+                
+            penalties_t = torch.tensor(penalties, dtype=anchor_scores.dtype, device=anchor_scores.device)
+            anchor_scores = anchor_scores - penalties_t
 
     k_keep = min(k_pass, N)
     top_idx = torch.topk(anchor_scores, k=k_keep, largest=True, sorted=True).indices
@@ -168,24 +191,62 @@ def route_query(
         q_desc = compute_query_descriptor(Q, pool.W_proj)
     K      = adaptive_k(q_desc, srl_state, N)
 
-    # ── Step 2: Semantic ANN search ───────────────────────────────────────
+    # ── Step 2: Semantic ANN search (Hierarchical Graph-based Routing) ────
     k_semantic = max(1, int(K * _SEM_FRAC))
-    semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
-    semantic_slots   = semantic_slots_t.tolist()
+    chunk_graph = srl_state.chunk_graph
+    if (getattr(chunk_graph, "parent_landmarks", None) is not None 
+            and chunk_graph.parent_landmarks.numel() > 0):
+        # 1. Score parent landmark blocks
+        parent_slots = chunk_graph.parent_landmarks
+        parent_rows = srl_state.semantic_index.slot_to_row_vec(parent_slots)
+        valid_mask = parent_rows >= 0
+        parent_slots = parent_slots[valid_mask]
+        parent_rows = parent_rows[valid_mask]
+        
+        if parent_rows.numel() > 0:
+            parent_desc = srl_state.semantic_index.desc_matrix[parent_rows.to(srl_state.semantic_index.desc_matrix.device)]
+            q16 = q_desc.half().to(parent_desc.device)
+            if q16.device.type == "mps":
+                scores_parent = parent_desc.float() @ q16.float()
+            else:
+                scores_parent = parent_desc @ q16
+                
+            # Select top landmark parents
+            k_parent = max(1, min(k_semantic // 8, parent_slots.numel()))
+            top_parent_idx = torch.topk(scores_parent, k=k_parent, largest=True, sorted=True).indices
+            selected_parents = parent_slots.to(top_parent_idx.device)[top_parent_idx].tolist()
+            
+            # 2. Gather children blocks for the selected parent landmarks
+            hierarchical_slots = []
+            for parent in selected_parents:
+                hierarchical_slots.append(parent)
+                children = chunk_graph.parent_to_children.get(parent, [])
+                hierarchical_slots.extend(children)
+                
+            semantic_slots_t = torch.tensor(list(dict.fromkeys(hierarchical_slots)), dtype=torch.int32, device=Q.device)
+        else:
+            semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
+    else:
+        semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
+        
+    semantic_slots = semantic_slots_t.tolist()
 
     # ── Topic-switch detection ────────────────────────────────────────────
     # If the best semantic match is weak, this query is likely a new topic.
     # Suppress stale rare-lexical graph seeds to avoid over-anchoring.
+    desc_matrix = srl_state.semantic_index.desc_matrix
+    q16 = q_desc.half().to(desc_matrix.device)
+    if q16.device.type == "mps":
+        sem_scores = desc_matrix.float() @ q16.float()
+    else:
+        sem_scores = desc_matrix @ q16
+    sem_scores_cpu = torch.clamp(sem_scores.float().cpu(), min=0.0)
+
     _is_topic_switch = False
     if semantic_slots_t.numel() > 0:
-        desc_matrix = srl_state.semantic_index.desc_matrix
         top_slot_row = srl_state.semantic_index.slot_to_idx(int(semantic_slots_t[0]))
         if top_slot_row >= 0:
-            q16 = q_desc.half().to(desc_matrix.device)
-            if q16.device.type == "mps":
-                top_score = float(desc_matrix[top_slot_row].float() @ q16.float())
-            else:
-                top_score = float(desc_matrix[top_slot_row] @ q16)
+            top_score = float(sem_scores_cpu[top_slot_row])
             _is_topic_switch = top_score < _TOPIC_SWITCH_THRESHOLD
 
     # ── Step 3: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
@@ -253,41 +314,110 @@ def route_query(
 
     # ── Step 4: Chunk graph neighborhood expansion (vectorized) ──────────
     k_graph   = max(1, int(K * _GRAPH_FRAC))
-    graph_slots_t: Optional[torch.Tensor] = None
     idx_map   = srl_state.semantic_index
     neighbors = srl_state.chunk_graph.neighbors   # [N, MAX_DEGREE] CPU int32
+    weights   = getattr(srl_state.chunk_graph, "weights", None)
+    
+    # Fallback to ones if weights are not yet populated (e.g. legacy test runs)
+    if weights is None:
+        weights = torch.ones_like(neighbors, dtype=torch.float32)
 
-    # Seed expansion with top-5 semantic + (rare/lex if not a topic switch).
-    # FIX (Bug 2): On topic switch, suppress stale rare-lex seeds so graph
-    # expansion does not fan out from the previous topic's high-IDF vocabulary.
-    top_sem_slots = semantic_slots_t[:5].tolist() if semantic_slots_t.numel() > 0 else []
+    # Seed expansion with top semantic + (rare/lex if not a topic switch).
+    # Dynamically scale seeds based on actual fractions to match model capacity.
+    n_sem_seeds = max(1, k_semantic)
+    n_rare_seeds = max(2, int(2 * k_lexical))
+    n_lex_seeds = max(1, k_lexical)
+
+    top_sem_slots = semantic_slots_t[:n_sem_seeds].tolist() if semantic_slots_t.numel() > 0 else []
     if _is_topic_switch:
         # Topic switch: anchor graph expansion only on fresh semantic matches.
         seeds = list(dict.fromkeys(top_sem_slots))
     else:
-        seeds = list(dict.fromkeys(top_sem_slots + rare_lex_slots[:10] + lexical_slots[:5]))
+        seeds = list(dict.fromkeys(top_sem_slots + rare_lex_slots[:n_rare_seeds] + lexical_slots[:n_lex_seeds]))
 
+    graph_slots: List[int] = []
     if seeds and neighbors.shape[0] > 0:
         seeds_tensor = torch.tensor(seeds, dtype=torch.int32)
         row_ids = idx_map.slot_to_row_vec(seeds_tensor)                     # [M]
         valid_rows = row_ids[row_ids >= 0]                                  # filter misses
 
         if valid_rows.numel() > 0:
-            # Gather all neighbor row indices in one tensor op: [M_valid, MAX_DEGREE]
-            nb_rows = neighbors[valid_rows]
-            nb_flat = nb_rows.view(-1).to(torch.int64)                       # [M_valid*MAX_DEGREE]
-            N_idx   = idx_map.slot_ids.shape[0]
-            nb_valid = nb_flat[(nb_flat >= 0) & (nb_flat < N_idx)]
-            # Translate row indices → pool slot IDs
-            if nb_valid.numel() > 0:
+            N_idx = idx_map.slot_ids.shape[0]
+            
+            # Initial activations at seeds: A0
+            A0 = torch.zeros(N_idx, dtype=torch.float32)
+            A0[valid_rows] = sem_scores_cpu[valid_rows]
+            
+            # Retention scaling (query similarity target-damping)
+            # Retention(q, j) = graph_hop_decay * sem_scores_cpu[j]
+            graph_hop_decay = getattr(srl_state, "graph_hop_decay", 0.5)
+            retention = graph_hop_decay * sem_scores_cpu
+            
+            # Calculate node degrees for transition dilution (degree damping)
+            # degree(i) is number of valid (>= 0) neighbors for node i
+            degrees = (neighbors >= 0).sum(dim=1, keepdim=True).float()
+            damping = 1.0 + torch.log(1.0 + degrees)  # [N_idx, 1]
+            
+            # 1-hop propagation: A0 -> A1
+            A1 = torch.zeros(N_idx, dtype=torch.float32)
+            seed_neighbors = neighbors[valid_rows]  # [M_seeds, MAX_DEGREE]
+            seed_weights = weights[valid_rows]      # [M_seeds, MAX_DEGREE]
+            
+            # Dilute transition weights out of seed nodes
+            damped_seed_weights = seed_weights / damping[valid_rows]
+            
+            seed_A0 = A0[valid_rows].unsqueeze(1)    # [M_seeds, 1]
+            propagated_signals_1 = seed_A0 * damped_seed_weights  # [M_seeds, MAX_DEGREE]
+            
+            flat_neighbors_1 = seed_neighbors.view(-1).to(torch.int64)
+            flat_signals_1 = propagated_signals_1.view(-1)
+            
+            valid_mask_1 = (flat_neighbors_1 >= 0) & (flat_neighbors_1 < N_idx)
+            A1.scatter_add_(0, flat_neighbors_1[valid_mask_1], flat_signals_1[valid_mask_1])
+            A1 = A1 * retention
+            
+            # 2-hop propagation: A1 -> A2
+            A2 = torch.zeros(N_idx, dtype=torch.float32)
+            active_rows = torch.where(A1 > 0.0)[0]
+            if active_rows.numel() > 0:
+                active_neighbors = neighbors[active_rows]
+                active_weights = weights[active_rows]
+                
+                # Dilute transition weights out of active nodes
+                damped_active_weights = active_weights / damping[active_rows]
+                
+                active_A1 = A1[active_rows].unsqueeze(1)
+                propagated_signals_2 = active_A1 * damped_active_weights
+                
+                flat_neighbors_2 = active_neighbors.view(-1).to(torch.int64)
+                flat_signals_2 = propagated_signals_2.view(-1)
+                
+                valid_mask_2 = (flat_neighbors_2 >= 0) & (flat_neighbors_2 < N_idx)
+                A2.scatter_add_(0, flat_neighbors_2[valid_mask_2], flat_signals_2[valid_mask_2])
+                A2 = A2 * retention
+                
+            # Total graph score
+            graph_scores = A1 + A2
+            
+            # Exclude seed nodes from the new neighbors selection
+            graph_scores_for_selection = graph_scores.clone()
+            graph_scores_for_selection[valid_rows] = -1e9
+            graph_scores_for_selection[graph_scores <= 0.0] = -1e9
+            
+            # Select top min(k_graph, 20) neighbors based on propagated activation
+            k_g = max(k_graph, 20)
+            top_val, top_nb_idx = torch.topk(graph_scores_for_selection, k=min(k_g, N_idx), largest=True, sorted=True)
+            valid_nb_mask = top_val > -1e9
+            valid_nb_idx = top_nb_idx[valid_nb_mask]
+            
+            if valid_nb_idx.numel() > 0:
                 slot_ids_cpu = idx_map.slot_ids.cpu()
-                graph_slots_t = slot_ids_cpu[nb_valid]                       # [M_valid*MAX_DEGREE] int32
-
-    graph_slots: List[int]
-    if graph_slots_t is not None and graph_slots_t.numel() > 0:
-        # Deduplicate preserving order
-        graph_slots_t = torch.unique(graph_slots_t)[:max(k_graph, 20)]
-        graph_slots   = graph_slots_t.tolist()
+                graph_slots_t = slot_ids_cpu[valid_nb_idx]
+                graph_slots = graph_slots_t.tolist()
+            else:
+                graph_slots = []
+        else:
+            graph_slots = []
     else:
         graph_slots = []
 
@@ -298,14 +428,14 @@ def route_query(
     # ── Step 6: Sink blocks (always include: block 0 + special tokens) ────
     sink = srl_state.sink_blocks
 
-    # ── Step 7: Merge and deduplicate ────────────────────────────────────
+    # ── Step 7: Merge and deduplicate (do NOT slice to K here to enable Level-1 gate reranking) ──
     # FIX (Bug 3): Semantic slots take priority over rare_lex (which may be
     # stale). On topic switch, rare_lex is zeroed out above; on same-topic
     # queries it still contributes but doesn't displace semantic hits.
     # Order: sink → semantic → rare_lex → graph → lexical → recent
     combined = list(dict.fromkeys(
         sink + semantic_slots + rare_lex_slots + graph_slots + lexical_slots + recent_slots
-    ))[:K]
+    ))
 
     if N - len(combined) <= 2:
         combined = srl_state.ordered_slot_ids
@@ -314,13 +444,25 @@ def route_query(
         # Fallback: use all ordered slots (shouldn't happen in practice)
         combined = srl_state.ordered_slot_ids[:K]
 
-    # ── Step 8: Level-1 anchor reranking over combined set ────────────────
-    combined_tensor = torch.tensor(combined, dtype=torch.long, device=Q.device)
-    if combined_tensor.shape[0] > K:
-        if hasattr(pool, "anchors_K"):
-            combined_tensor = two_level_gate(Q, pool, combined_tensor, scale, k_pass=K)
+    # ── Step 8: Level-1 anchor reranking over candidates (preserving sink blocks) ──
+    # We separate sink blocks so they are never filtered out (critical for attention stability).
+    # Reranking is applied only to non-sink candidates.
+    sink_set = set(sink)
+    non_sink_candidates = [s for s in combined if s not in sink_set]
+    
+    k_non_sink = max(0, K - len(sink))
+    non_sink_tensor = torch.tensor(non_sink_candidates, dtype=torch.long, device=Q.device)
+    
+    if non_sink_tensor.shape[0] > k_non_sink:
+        if hasattr(pool, "anchors_K") and k_non_sink > 0:
+            filtered_non_sink = two_level_gate(Q, pool, non_sink_tensor, scale, k_pass=k_non_sink, srl_state=srl_state)
         else:
-            combined_tensor = combined_tensor[:K]
+            filtered_non_sink = non_sink_tensor[:k_non_sink]
+    else:
+        filtered_non_sink = non_sink_tensor
+        
+    sink_tensor = torch.tensor(sink, dtype=torch.int32, device=Q.device)
+    combined_tensor = torch.cat([sink_tensor, filtered_non_sink.to(torch.int32)])
 
     srl_state.current_step_count += 1
     return combined_tensor.to(torch.int32)

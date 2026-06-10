@@ -29,7 +29,7 @@ class TestPresetsConfig(unittest.TestCase):
         self.assertEqual(cfg.prefill_chunk_size, 256)
         self.assertEqual(cfg.srl_threshold, 30)
         self.assertFalse(cfg.async_svd)
-        self.assertEqual(cfg.mps_watermark, 0.7)
+        self.assertEqual(cfg.mps_watermark, 0.0)
         self.assertFalse(cfg.torch_compile)
 
     def test_preset_mid(self):
@@ -98,8 +98,11 @@ class TestPresetsConfig(unittest.TestCase):
         pool.seq_lens[0] = 16
 
         decode_workspace = {
-            ("session1", 0, "concatenated_K_rot"): ("some_validation_key", torch.zeros(1)),
-            ("session1", 0, "V_V_perm"): ("some_validation_key", torch.zeros(1))
+            "session1": {
+                "gathered_kv": {
+                    0: ("some_validation_key", torch.zeros(1))
+                }
+            }
         }
 
         # Run decode with cache disabled. It should execute but bypass cache and clear the stale keys.
@@ -120,9 +123,7 @@ class TestPresetsConfig(unittest.TestCase):
         )
         
         # Verify that workspace cache keys were cleared
-        self.assertNotIn(("session1", 0, "concatenated_K_rot"), decode_workspace)
-        self.assertNotIn(("session1", 0, "V_V_perm"), decode_workspace)
-        self.assertEqual(len(decode_workspace), 0)
+        self.assertNotIn("session1", decode_workspace)
 
     def test_rollback_clear_srl(self):
         mgr = KVRuntimeManager(

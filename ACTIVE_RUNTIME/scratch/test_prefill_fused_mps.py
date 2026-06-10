@@ -1,6 +1,6 @@
 import torch
 import math
-from native_core.sparse_decode.triton_sparse_attn import _prefill_fused_history_attend
+from native_core.sparse_decode.triton_fused_decode import _prefill_fused_history_attend
 
 def test():
     device = "mps"

@@ -1,5 +1,6 @@
 import os
 import sys
+os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
 import torch
 import math
 
@@ -38,7 +39,13 @@ def analyze_kv_scales():
     # In hf_diffkv_wrapper.py, capture_prefill_kv captures the KV in wrapper.manager._prefill_kv_capture[sid][layer_idx]
     sid = "default"
     cap_dict = getattr(wrapper.manager, "_prefill_kv_capture", {})
-    session_cap = cap_dict.get(sid, {})
+    print(f"DEBUG: cap_dict type={type(cap_dict)} has keys: {list(cap_dict.keys())}")
+    if len(cap_dict) > 0:
+        first_key = list(cap_dict.keys())[0]
+        print(f"DEBUG: first key layers: {list(cap_dict[first_key].keys())}")
+        session_cap = cap_dict[first_key]
+    else:
+        session_cap = {}
     
     if not session_cap:
         print("Error: No prefill KV captured!")

@@ -859,10 +859,18 @@ class StreamingSparseIngestManager:
 
                     # Check if the block is eligible for immediate compression.
                     # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
-                    # Only submit block if it lies outside the rolling dense recency window.
-                    if (anchor_idx > 0 or not self.protect_block_zero) and not new_block.skip_compression and (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
-                        new_block.state = "SUBMITTED"
-                        full_blocks_to_compress.append(new_block)
+                    # Only submit block if it lies outside the rolling dense recency window, or if immediate prefill compression is active.
+                    _immediate_prefill = os.environ.get("DIFFKV_IMMEDIATE_PREFILL_COMPRESS", "1") == "1"
+                    if (anchor_idx > 0 or not self.protect_block_zero) and not new_block.skip_compression:
+                        if _immediate_prefill or (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
+                            new_block.state = "SUBMITTED"
+                            full_blocks_to_compress.append(new_block)
+                            # Free GPU anchor immediately — CPU copy already taken via stacked_anchors_cpu.
+                            # Keeping the GPU tensor wastes 1 token × heads × head_dim × FP16 per block per layer.
+                            # For 240 blocks × 28 layers this is ~100 MB of needless GPU resident memory.
+                            new_block.anchor_kv = None
+                        else:
+                            new_block.state = "ACCUMULATING"
                     else:
                         new_block.state = "ACCUMULATING"
 
@@ -1020,11 +1028,14 @@ class StreamingSparseIngestManager:
                 torch.mps.synchronize()
             
             for idx, block in enumerate(group):
-                # Slice to the exact actual shape (unpadded) to avoid running SVD on 4x larger padded buffers
-                k_cpu_slice = k_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
-                v_cpu_slice = v_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
-     
+                if getattr(block, "skip_compression", False):
+                    continue
+
                 if is_async_active:
+                    # Slice to the exact actual shape (unpadded) to avoid running SVD on 4x larger padded buffers
+                    k_cpu_slice = k_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
+                    v_cpu_slice = v_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
+
                     # Store CPU-pinned uncompressed tensors on the block immediately
                     block.active_k_cpu = k_cpu_slice.pin_memory() if _is_cuda else k_cpu_slice
                     block.active_v_cpu = v_cpu_slice.pin_memory() if _is_cuda else v_cpu_slice
@@ -1036,12 +1047,9 @@ class StreamingSparseIngestManager:
 
                     self.compressor.submit_cpu(block, k_cpu_slice, v_cpu_slice, _dma_event)
                 else:
-                    # Sync execution directly on the CPU slice
-                    self.compress_fn(block, k_cpu_slice, v_cpu_slice)
+                    # Sync execution directly on the GPU/MPS slices (much faster and avoids CPU fallback bugs)
+                    self.compress_fn(block, block.active_k, block.active_v)
                     block.state = "COMPRESSED"
-                    # Clean up CPU uncompressed tensors
-                    block.active_k_cpu = None
-                    block.active_v_cpu = None
                     if hasattr(self.compressor, "stats"):
                         stats = getattr(self.compressor, "stats")
                         if isinstance(stats, dict) and "sync_fallbacks" in stats:
@@ -1065,6 +1073,7 @@ class StreamingSparseIngestManager:
         _is_cuda = k.is_cuda if k is not None else False
         block.active_k_cpu = (k.cpu().pin_memory() if _is_cuda else k.cpu()) if k is not None else None
         block.active_v_cpu = (v.cpu().pin_memory() if _is_cuda else v.cpu()) if v is not None else None
+        block.anchor_kv_cpu = block.anchor_kv.cpu() if block.anchor_kv is not None else None
         
         # Clear GPU tensors immediately
         block.active_k = None
@@ -1181,6 +1190,8 @@ class StreamingSparseIngestManager:
             blocks_to_compress = []
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and b.active_k is not None:
+                    if getattr(b, "skip_compression", False):
+                        continue
                     if _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1)):
                         if (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window):
                             b.state = "SUBMITTED"

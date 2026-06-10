@@ -1,5 +1,6 @@
 import os
 import sys
+os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

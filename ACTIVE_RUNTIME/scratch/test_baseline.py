@@ -56,11 +56,9 @@ async def test_baseline():
     print("2. DiffKV with SVD Compression only (No Attention Cache)")
     print("==================================================")
     os.environ["DIFFKV_SRL_THRESHOLD"] = "99999"  # disable SRL routing
+    os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "1000"  # Force DiffKV to engage
+    os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"  # Force exact fallback decode
     wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
-    
-    # Set threshold to 2.0 just to be sure
-    wrapper.manager.attention_score_cache.threshold = 2.0
-    
     engine = ContinuousBatchEngine(wrapper, max_batch_size=1)
     engine.start()
     

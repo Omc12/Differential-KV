@@ -116,9 +116,12 @@ if sys.platform == "darwin":
 
     # linker flags — Foundation for Obj-C runtime (needed for Metal in Phase 2)
     # Accelerate not needed: torch::linalg::svd on CPU dispatches to it internally
+    import torch as _torch
+    _torch_lib_dir = os.path.join(os.path.dirname(_torch.__file__), "lib")
     MAC_LINK_FLAGS = [
         "-framework", "Foundation",
         "-framework", "Metal",
+        f"-Wl,-rpath,{_torch_lib_dir}",
     ]
 
     ext = CppExtension(

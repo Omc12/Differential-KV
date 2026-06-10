@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 import psutil
 # Environment defaults for MPS/Metal are managed dynamically by the config preset.
 
@@ -36,6 +37,7 @@ class ChatCompletionRequest(BaseModel):
     srl_threshold: Optional[int] = None
     srl_k_min: Optional[int] = None
     srl_k_max: Optional[int] = None
+    srl_age_penalty: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +237,10 @@ class OpenAICompatibleAPIGateway:
             # matching the main conversation's history and corrupting the KV prefix
             # registry with a title-generation response.
             incoming_messages = [{"role": m.role, "content": m.content} for m in request.messages]
-            is_ephemeral = (session_id is None) and self._is_ephemeral_request(incoming_messages)
+            is_ephemeral = self._is_ephemeral_request(incoming_messages)
             if is_ephemeral:
-                ephemeral_session_id = f"__ephemeral__{uuid.uuid4()}"
+                orig_session_id = session_id or str(uuid.uuid4())
+                ephemeral_session_id = f"__ephemeral__{orig_session_id}"
                 print(f"[DiffKV Gateway] Detected ephemeral title/summary request. "
                       f"Routing to isolated session {ephemeral_session_id} to protect main KV cache.")
                 session_id = ephemeral_session_id
@@ -289,7 +292,7 @@ class OpenAICompatibleAPIGateway:
                                     # Strip trailing/leading whitespace and newlines for robust matching
                                     h_last = last_stored_assistant.get("content", "").strip()
                                     p_last = last_incoming_assistant.get("content", "").strip()
-                                    if h_last == p_last:
+                                    if len(p_last) > 150 and h_last == p_last:
                                         session_id = sid
                                         print(f"[DiffKV Gateway] Dynamically matched session {session_id} using fallback last assistant message content match.")
                                         break
@@ -317,6 +320,8 @@ class OpenAICompatibleAPIGateway:
                     srl_config["srl_k_min"] = request.srl_k_min
                 if request.srl_k_max is not None:
                     srl_config["srl_k_max"] = request.srl_k_max
+                if request.srl_age_penalty is not None:
+                    srl_config["srl_age_penalty"] = request.srl_age_penalty
                 
                 if srl_config:
                     if hasattr(kv_manager, "set_session_config"):
@@ -330,6 +335,8 @@ class OpenAICompatibleAPIGateway:
                             srl_state.k_max = srl_config["srl_k_max"]
                         if "srl_threshold" in srl_config:
                             srl_state.routing_threshold = srl_config["srl_threshold"]
+                        if "srl_age_penalty" in srl_config:
+                            srl_state.srl_age_penalty = srl_config["srl_age_penalty"]
 
             request_id   = f"chatcmpl-{uuid.uuid4()}"
             created_time = int(time.time())
@@ -484,25 +491,90 @@ class OpenAICompatibleAPIGateway:
         @self.app.get("/v1/runtime_info")
         async def runtime_info():
             import torch as _t
+            import psutil
             _cuda_avail = _t.cuda.is_available()
             _mps_avail  = (
                 hasattr(_t.backends, "mps") and _t.backends.mps.is_available()
             )
-            vram_gb = _t.cuda.memory_allocated() / 1024**3 if _cuda_avail else 0
+            
+            # Process memory info
+            process = psutil.Process()
+            rss_gb = process.memory_info().rss / 1e9
+            vms_gb = process.memory_info().vms / 1e9
+            
+            # Hardware specific memory info
+            mps_allocated_gb = 0.0
+            mps_driver_gb = 0.0
+            cuda_allocated_gb = 0.0
+            cuda_reserved_gb = 0.0
+            
+            device = "cpu"
+            kv_manager = None
             serving_mode = "balanced"
             model_id = "diffkv-serving"
+            
             if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
                 w = self.resolver.wrapper
-                serving_mode = getattr(getattr(w, "manager", None), "serving_mode", "balanced")
+                device = getattr(w, "device", "cpu")
+                kv_manager = getattr(w, "manager", None)
+                serving_mode = getattr(kv_manager, "serving_mode", "balanced") if kv_manager else "balanced"
                 model_id = getattr(w, "model_id", model_id)
+                
+            if device == "mps":
+                try:
+                    mps_allocated_gb = _t.mps.current_allocated_memory() / 1e9
+                    mps_driver_gb = _t.mps.driver_allocated_memory() / 1e9
+                except Exception:
+                    pass
+            elif device == "cuda":
+                try:
+                    cuda_allocated_gb = _t.cuda.memory_allocated() / 1e9
+                    cuda_reserved_gb = _t.cuda.memory_reserved() / 1e9
+                except Exception:
+                    pass
+            
+            # Manager runtime summary
+            kv_summary = {}
+            if kv_manager is not None:
+                try:
+                    kv_summary = kv_manager.runtime_summary()
+                except Exception:
+                    pass
+
+            # Sanitize NaN/Inf floats before JSON serialization.
+            # torchao quantization and early compression can produce NaN in
+            # avg_cosine_sim which causes a 500 error and breaks the memory monitor.
+            import math
+            def _sanitize(obj):
+                if isinstance(obj, float):
+                    if math.isnan(obj) or math.isinf(obj):
+                        return 0.0
+                    return obj
+                if isinstance(obj, dict):
+                    return {k: _sanitize(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_sanitize(v) for v in obj]
+                return obj
+
+            kv_summary = _sanitize(kv_summary)
+
             return {
-                "vram_allocated_gb": round(vram_gb, 3),
+                "vram_allocated_gb": round(cuda_allocated_gb if device == "cuda" else mps_allocated_gb, 3),
                 "cuda_available":    _cuda_avail,
                 "mps_available":     _mps_avail,
                 "sampling_mode":     "temperature+top_p+repetition_penalty",
                 "streaming_mode":    "phrase_group_chunked",
                 "serving_mode":      serving_mode,
                 "model":             model_id,
+                # New fields for deep memory analysis
+                "device":            device,
+                "process_rss_gb":    round(rss_gb, 3),
+                "process_vms_gb":    round(vms_gb, 3),
+                "mps_allocated_gb":  round(mps_allocated_gb, 3),
+                "mps_driver_gb":     round(mps_driver_gb, 3),
+                "cuda_allocated_gb": round(cuda_allocated_gb, 3),
+                "cuda_reserved_gb":  round(cuda_reserved_gb, 3),
+                "kv_summary":        kv_summary
             }
 
         @self.app.get("/v1/sessions/{session_id}/srl")
@@ -528,6 +600,7 @@ class OpenAICompatibleAPIGateway:
                     "k_min": session_config.get("srl_k_min", 20),
                     "k_max": session_config.get("srl_k_max", 200),
                     "routing_threshold": session_config.get("srl_threshold", default_threshold),
+                    "srl_age_penalty": session_config.get("srl_age_penalty", 0.01),
                 }
             
             # Extract stats safely
@@ -539,6 +612,7 @@ class OpenAICompatibleAPIGateway:
                 "k_min": srl_state.k_min,
                 "k_max": srl_state.k_max,
                 "routing_threshold": srl_state.routing_threshold,
+                "srl_age_penalty": srl_state.srl_age_penalty,
                 "call_count": srl_state.call_count,
                 "current_step_count": srl_state.current_step_count,
                 "miss_rate": round(srl_state.recent_miss_rate, 4),
@@ -594,8 +668,20 @@ class OpenAICompatibleAPIGateway:
             queue = await self.resolver.submit(session_id, payload_copy)
             
             full_text = []
+            # ── SSE Keepalive: prevent HTTP connection timeouts during long prefill ──
+            # On MPS, prefilling a long prompt (e.g. 6K tokens) can take 30-60 seconds
+            # with zero output — causing uvicorn/nginx/clients to kill the connection.
+            # We poll the queue with a 5-second timeout and send SSE comment pings
+            # (":ping\n\n") to keep the connection alive. These are valid in SSE spec
+            # and are silently ignored by OpenAI-compatible clients.
+            KEEPALIVE_INTERVAL_S = 5.0
             while True:
-                chunk = await queue.get()
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_INTERVAL_S)
+                except asyncio.TimeoutError:
+                    # No token yet — send keepalive comment to prevent connection drop
+                    yield b": ping\n\n"
+                    continue
                 
                 if "error" in chunk:
                     yield f"data: {json.dumps({'error': chunk['error']})}\n\n".encode()
@@ -708,11 +794,53 @@ class OpenAICompatibleAPIGateway:
 # ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
+def check_and_preload_allocator():
+    import os
+    import sys
+    
+    # Check if already preloaded
+    if os.environ.get("MIMALLOC_PRELOADED") == "1":
+        return
+        
+    mimalloc_paths = []
+    preload_env_var = None
+    
+    if sys.platform == "darwin":
+        # Bypassed on macOS because preloading libmimalloc intercepts system allocations
+        # inside Apple libraries (like Metal/MPS driver) causing a SIGBUS (exit code 138) crash on startup.
+        return
+    elif sys.platform.startswith("linux"):
+        mimalloc_paths = [
+            "/usr/lib/x86_64-linux-gnu/libmimalloc.so.2",
+            "/usr/lib/libmimalloc.so.2",
+            "/usr/local/lib/libmimalloc.so",
+        ]
+        preload_env_var = "LD_PRELOAD"
+        
+    found_path = None
+    for path in mimalloc_paths:
+        if os.path.exists(path):
+            found_path = path
+            break
+            
+    if found_path and preload_env_var:
+        print(f"[DiffKV Allocator] Found mimalloc at {found_path}. Automatically preloading for memory compaction...")
+        env = os.environ.copy()
+        env[preload_env_var] = found_path
+        env["MIMALLOC_PRELOADED"] = "1"
+        try:
+            os.execve(sys.executable, [sys.executable] + sys.argv, env)
+        except Exception as e:
+            print(f"[DiffKV Allocator] WARNING: Failed to re-execute with mimalloc: {e}")
+
 def main():
     import argparse
     import uvicorn
     import os
     import sys
+    
+    # ── Automatically detect and preload mimalloc ──
+    check_and_preload_allocator()
     
     _runtime_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _runtime_dir not in sys.path:
@@ -728,6 +856,7 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--rank', type=int, default=32,
                         help='SVD rank for KV compression. Higher = better quality, more VRAM. '
+                             'Must be strictly less than model head_dim (e.g. capped at 32 for head_dim 64 to prevent gibberish). '
                              'Recommended: 16 for balanced, 32 for quality, 8 for VRAM-constrained.')
     parser.add_argument('--micro-block-size', type=int, default=256,
                         help='Tokens per compressed KV block. S=256 gives 5.2x compression ratio. '
@@ -763,9 +892,50 @@ def main():
     # Disable tokenizer parallelism warnings
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-    # ── Build quantization config ──────────────────────────────────────────────────
+    # Auto-detect best device: CUDA → MPS (Apple Silicon) → CPU
+    try:
+        from native_core.mac_utils import get_best_device as _gbd
+        _best_device = _gbd()
+    except ImportError:
+        _best_device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f'[DiffKV] Auto-selected device: {_best_device}')
+
+    # Apply global platform defaults early in environment
+    if _best_device == "mps":
+        if os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
+            os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
+        if os.environ.get("DIFFKV_USE_TORCH_COMPILE") is None:
+            os.environ["DIFFKV_USE_TORCH_COMPILE"] = "0"
+        print("[DiffKV] Apple Silicon/MPS detected. Automatically wired platform settings:")
+        print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
+        print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
+
+    # ── Platform-specific auto-optimization for 'low' preset ──
+    if args.preset == "low":
+        print(f'[DiffKV Debug] Low preset condition matched! Applying platform auto-optimizations...')
+        
+        # 1. Quantization auto-enable (INT8 on MPS via torchao, INT4 on CUDA via bitsandbytes)
+        if not args.load_in_4bit and not args.load_in_8bit:
+            if _best_device == "cuda":
+                args.load_in_4bit = True
+                print("[DiffKV] Low preset + CUDA: auto-enabling 4-bit weight quantization (bitsandbytes) to save VRAM")
+            elif _best_device == "mps":
+                print("[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
+                
+        # 2. Serving mode auto-adjustment
+        if args.serving_mode not in ["lightweight"]:
+            original_mode = args.serving_mode
+            args.serving_mode = "lightweight"
+            print(f"[DiffKV] Low preset: auto-adjusting serving_mode from '{original_mode}' to 'lightweight' to prevent OOM")
+            
+        # 3. Rank auto-adjustment
+        if args.rank == 32:  # Only auto-adjust if using default rank
+            args.rank = 16
+            print(f"[DiffKV] Low preset: auto-adjusting rank from 32 to 16 to prevent attention OOM on long prompts")
+
+    # ── Build quantization config (CUDA/bitsandbytes only) ──────────────────────────
     quantization_config = None
-    if args.load_in_4bit or args.load_in_8bit:
+    if (args.load_in_4bit or args.load_in_8bit) and _best_device == "cuda":
         try:
             from transformers import BitsAndBytesConfig
             if args.load_in_4bit:
@@ -780,21 +950,15 @@ def main():
                 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
                 print("[DiffKV] Weight quantization: 8-bit LLM.int8 (bitsandbytes) — weight VRAM reduced ~50%")
         except ImportError:
-            print("[DiffKV] WARNING: bitsandbytes not installed. Falling back to full precision.")
+            print("[DiffKV] WARNING: bitsandbytes not installed. Falling back to full precision on CUDA.")
             print("[DiffKV]   Install with: pip install bitsandbytes")
             quantization_config = None
 
     print(f'Loading DiffKV runtime with model: {args.model}...')
+    print(f'[DiffKV Debug] settings: device={_best_device}, preset={args.preset}, serving_mode={args.serving_mode}, rank={args.rank}')
     print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
     print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
     print(f'  [Tip] Set DIFFKV_TELEMETRY=1 to enable VRAM + block state logging')
-    # Auto-detect best device: CUDA → MPS (Apple Silicon) → CPU
-    try:
-        from native_core.mac_utils import get_best_device as _gbd
-        _best_device = _gbd()
-    except ImportError:
-        _best_device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f'[DiffKV] Auto-selected device: {_best_device}')
     
     # ── Configure MPS high watermark ratio early before allocator is initialized ──
     if _best_device == "mps":
@@ -858,7 +1022,11 @@ def main():
     
     gateway = OpenAICompatibleAPIGateway(resolver=engine, session_manager=session_manager)
     
-    uvicorn.run(gateway.app, host=args.host, port=args.port)
+    # Increase keep-alive timeout to 300s (5 min) to prevent connection drops during
+    # long prefill phases (e.g. 6K-token paper ingestion can take 60-90 seconds on MPS).
+    # The default keep_alive=5s is far too short for LLM workloads.
+    uvicorn.run(gateway.app, host=args.host, port=args.port,
+                timeout_keep_alive=300, h11_max_incomplete_event_size=16 * 1024 * 1024)
 
 if __name__ == '__main__':
     main()

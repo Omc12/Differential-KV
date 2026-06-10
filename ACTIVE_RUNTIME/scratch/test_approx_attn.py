@@ -10,13 +10,13 @@ try:
 except Exception:
     os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 
-# Set environment variables BEFORE any other imports so they are registered at module load time
+# Set environment variables BEFORE any other imports
 os.environ["DIFFKV_TELEMETRY"] = "1"
 os.environ["DIFFKV_SRL_VERBOSE"] = "1"
 os.environ["DIFFKV_SRL_THRESHOLD"] = "15" # Enable SRL routing
 os.environ["DIFFKV_VALIDATE_SRL"] = "1"    # Enable validation
 os.environ["DIFFKV_VALIDATE_EVERY"] = "5"  # Validate every 5 steps
-os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "0"
+os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
 import torch
 import asyncio

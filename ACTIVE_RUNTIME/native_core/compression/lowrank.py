@@ -320,13 +320,10 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         if not torch.isfinite(deltas).all():
             deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Vectorized scale computation and normalization on GPU (Phase 41)
-    # This prevents the scale factor from being applied twice (which caused deviation on long contexts),
-    # and reduces N_blocks CUDA syncs (.item() in loop) down to exactly 1 CPU copy.
-    scales_t = deltas.abs().max(dim=-1)[0].max(dim=-1)[0]  # [N_blocks]
-    scales_t = torch.clamp(scales_t, min=1e-9)
-    deltas_normalized = deltas / scales_t.view(N_blocks, 1, 1)
-    scales_cpu = scales_t.cpu()
+    # Token-wise Norm-Normalization (row-wise) on GPU (Phase 41)
+    token_norms = deltas.norm(dim=2)  # [N_blocks, T_active]
+    token_norms = torch.clamp(token_norms, min=1e-5)
+    deltas_normalized = deltas / token_norms.unsqueeze(2)
 
     # 3. Batched Randomized SVD — O(T × rank × feat) instead of O(T² × feat)
     #    This is ~30x faster than full SVD for typical rank=8, T=256, feat=256.
@@ -377,16 +374,13 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     pool = getattr(manager, "native_pool", None) if manager is not None else None
     for i, block in enumerate(blocks_list):
         k = ranks[i]
-        # Unpadded U/V — shape (T_active, k) and (k, feat_dim).
-        # No zero-padding: pool.write_block() handles variable-rank writes via
-        # min(U.shape[1], pool_rank) guards, and GEMM reconstruction slices
-        # stacked_U[:, :, :max_k] / stacked_V[:, :max_k, :] from dynamic_rank.
         u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)  # [T_active, k]
+        u_k = u_k * token_norms[i].unsqueeze(1)               # Scale U by token norms
         v_k = Vh_fp16[i, :k, :]                                # [k, feat_dim]
 
         block.U = u_k.contiguous()
         block.V = v_k.contiguous()
-        block.scale = scales_cpu[i].item()  # local CPU read - zero CUDA sync!
+        block.scale = 1.0
         block.dynamic_rank = k
         block.active_k = None
         block.active_v = None

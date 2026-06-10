@@ -1,0 +1,48 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+W0609 15:38:22.247000 2115 torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+W0609 15:38:22.273000 2115 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0609 15:38:22.294000 2115 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+
+======================================================================
+DiffKV vs Dense VRAM/TPS Benchmark on MPS
+Model: Qwen/Qwen2.5-0.5B-Instruct
+DIFFKV_ENGAGE_THRESHOLD: 512
+DIFFKV_MPS_APPROXIMATE_ATTN: (auto, will be set by KVRuntimeManager)
+======================================================================
+
+[STEP 1] Loading model...
+Loading weights:   0%|          | 0/290 [00:00<?, ?it/s]Loading weights:   0%|          | 1/290 [00:00<03:52,  1.24it/s]Loading weights:  80%|████████  | 232/290 [00:00<00:00, 346.59it/s]Loading weights: 100%|██████████| 290/290 [00:01<00:00, 289.07it/s]
+  Model: 24 layers, 14 Q-heads, 2 KV-heads, head_dim=64
+[DiffKV] Auto-detected Apple Silicon / MPS device. Disabling async background SVD for thread-safety.
+[DiffKV] Enabled MPS approximate attention fast-path (fused_decode_mps). Set DIFFKV_MPS_APPROXIMATE_ATTN=0 to disable.
+  MPS Approximate Attn: 1
+
+[STEP 2] Running DENSE baseline...
+  Dense  | ctx= 1024 | prefill=  168.3ms | TPS= 31.8 | KV VRAM= 308.8MB | peak=1253.3MB
+  Dense  | ctx= 2048 | prefill=  868.1ms | TPS= 22.0 | KV VRAM= 320.8MB | peak=1560.9MB
+  Dense  | ctx= 4096 | prefill= 3073.5ms | TPS=  3.9 | KV VRAM= 641.5MB | peak=2456.5MB
+  Dense  | ctx= 8192 | OOM!
+
+[STEP 3] Applying DiffKV attention patch...
+Differential KV Attention Interception Applied. [Phase 29: Zero-overhead decode active]
+  Patch applied.
+
+[STEP 4] Running DiffKV benchmarks...
+  DiffKV | ctx= 1024 | OOM!
+  DiffKV | ctx= 2048 | OOM!
+  DiffKV | ctx= 4096 | OOM!
+  DiffKV | ctx= 8192 | OOM!
+
+====================================================================================================
+FINAL COMPARISON TABLE (MPS / Apple Silicon)
+====================================================================================================
+   Ctx | Dense TPS | DiffKV TPS |    TPS Δ |  Dense KV | DiffKV KV | VRAM Saved | Peak Dense | Peak DiffKV
+----------------------------------------------------------------------------------------------------
+  1024 |      31.8 |        OOM |      N/A |   308.8MB |       OOM |        N/A |   1253.3MB |         OOM
+  2048 |      22.0 |        OOM |      N/A |   320.8MB |       OOM |        N/A |   1560.9MB |         OOM
+  4096 |       3.9 |        OOM |      N/A |   641.5MB |       OOM |        N/A |   2456.5MB |         OOM
+  8192 |       OOM |        OOM |      N/A |       OOM |       OOM |        N/A |        OOM |         OOM
+====================================================================================================
+
+Results saved to: /Users/omchimurkar1/Desktop/Differential-KV/benchmark_v2_results.json

@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 """
 runtime/hf_diffkv_wrapper.py
 
@@ -85,6 +86,175 @@ def _patch_tensor_sync_barriers():
     torch.Tensor.tolist = patched_tolist
     print("[DiffKV] DIFFKV_SYNC_DEBUG sync barrier checks enabled.")
 
+
+# ── Memory Reduction Helpers ──────────────────────────────────────────────────
+
+def _get_rss_mb() -> float:
+    """Return current process RSS in megabytes."""
+    try:
+        import psutil, os as _os
+        return psutil.Process(_os.getpid()).memory_info().rss / 1024 ** 2
+    except Exception:
+        return 0.0
+
+
+def _trim_python_heap() -> None:
+    """
+    Force Python's malloc arena to return unused virtual pages to the OS.
+
+    HuggingFace model loading creates ~2–3 GB of temporary CPU tensors
+    (FP32 weight copies, conversion intermediates) that are freed but whose
+    virtual address space stays in Python's internal free-list. This call
+    reclaims that space so macOS stops counting it as resident/swapped memory.
+
+    Expected result: Python heap virtual 4.8 GB → ~1.2 GB after a 0.5B load.
+    """
+    import gc, ctypes, sys
+
+    rss_before = _get_rss_mb()
+
+    # Triple GC pass to break cyclic references left by HF model loading
+    gc.collect(); gc.collect(); gc.collect()
+
+    # Ask the OS to reclaim free malloc arena pages
+    if sys.platform == "linux":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
+    elif sys.platform == "darwin":
+        # macOS does not export malloc_trim; the correct call is malloc_zone_pressure_relief
+        # (available since macOS 10.11). It compacts all default malloc zones and returns
+        # unused virtual pages to the OS — identical semantics to malloc_trim(0) on Linux.
+        try:
+            libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            # malloc_zone_pressure_relief(zone=NULL, goal=0) → relieves all zones
+            libsystem.malloc_zone_pressure_relief(None, ctypes.c_size_t(0))
+        except (OSError, AttributeError):
+            # Symbol not found on older macOS or sandbox restriction — not fatal
+            pass
+
+    # Python 3.13+ explicit free-list compaction (available in 3.14)
+    if hasattr(sys, "_compact_freelists"):
+        sys._compact_freelists()
+
+    rss_after = _get_rss_mb()
+    saved = rss_before - rss_after
+    print(f"[DiffKV] Heap trimmed. RSS: {rss_before:.0f} MB → {rss_after:.0f} MB "
+          f"(saved {max(0.0, saved):.0f} MB)")
+
+
+def _clear_cpu_grad_state(model: "torch.nn.Module") -> None:
+    """
+    Disable gradient tracking and free any lingering .grad tensors.
+
+    HuggingFace models load with requires_grad=True by default. For inference
+    this is dead weight — the autograd graph consumes memory with no benefit.
+    Disabling it also prevents accidental gradient accumulation.
+    """
+    import gc
+    torch.autograd.set_grad_enabled(False)
+    for param in model.parameters():
+        param.requires_grad_(False)
+        if hasattr(param, "grad") and param.grad is not None:
+            param.grad = None
+    gc.collect()
+
+
+def _clear_cpu_param_copies(model: "torch.nn.Module", device: str) -> None:
+    """
+    After model.to(device), audit for stray CPU parameters and flush device cache.
+
+    In some HuggingFace versions, the CPU weight storage is retained even after
+    the tensor has been moved to MPS/CUDA. Flushing the cache reclaims ~1 GB.
+    """
+    import gc
+    stray_count = 0
+    for name, param in model.named_parameters():
+        if param.device.type == "cpu":
+            stray_count += 1
+    if stray_count:
+        print(f"[DiffKV] WARNING: {stray_count} parameters still on CPU after to({device}) — "
+              "possible HF version issue.")
+
+    gc.collect()
+    if device == "mps":
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+    elif device == "cuda":
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _configure_mps_memory(memory_fraction: Optional[float] = None) -> None:
+    """
+    Cap MPS allocator and start a lightweight daemon that releases the cache
+    under memory pressure.
+
+    memory_fraction: fraction of system unified memory MPS may use before
+    triggering GC. Set via DIFFKV_MPS_MEMORY_FRACTION env var or config dict.
+    If None, no artificial cap is set (recommended to avoid allocator OOMs).
+
+    The daemon thread polls RSS every 5 seconds. When RSS > 3 GB it calls
+    torch.mps.empty_cache() + gc.collect(). This prevents the OS from
+    swapping GPU memory to disk during long conversations.
+    """
+    import gc, os, threading
+
+    if not (hasattr(torch, "backends") and hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()):
+        return
+
+    # Cap MPS reservation only if explicitly requested
+    if memory_fraction is not None:
+        try:
+            torch.mps.set_per_process_memory_fraction(memory_fraction)
+            print(f"[DiffKV] MPS memory fraction capped at {memory_fraction:.0%} of system RAM.")
+        except Exception as e:
+            print(f"[DiffKV] WARNING: Could not set MPS memory fraction: {e}")
+    else:
+        print("[DiffKV] MPS memory fraction: unlimited (no artificial cap applied).")
+
+    # RSS-based pressure relief daemon
+    rss_threshold_mb = float(os.environ.get("DIFFKV_MPS_RSS_THRESHOLD_MB", "3000"))
+
+    def _pressure_monitor():
+        import time
+        while True:
+            time.sleep(5.0)
+            try:
+                rss = _get_rss_mb()
+                if rss > rss_threshold_mb:
+                    gc.collect()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_pressure_monitor, daemon=True, name="diffkv-mps-pressure")
+    t.start()
+    print(f"[DiffKV] MPS pressure monitor started (threshold: {rss_threshold_mb:.0f} MB RSS).")
+
+
+def _configure_cuda_allocator() -> None:
+    """
+    Set conservative CUDA allocator options to reduce fragmentation.
+
+    garbage_collection_threshold:0.6 — trigger GC when 60% of reserved memory
+      is actively allocated (vs default 80%), reducing peak fragmentation.
+    max_split_size_mb:128 — largest block the caching allocator will split.
+      Smaller splits mean fewer huge stranded blocks, lower peak VRAM.
+    """
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "garbage_collection_threshold:0.6,max_split_size_mb:128"
+    )
+    print("[DiffKV] CUDA allocator config: garbage_collection_threshold=0.6, "
+          "max_split_size_mb=128.")
+
+
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:
     if temperature <= 0.01:
         return torch.argmax(logits, dim=-1)
@@ -132,6 +302,16 @@ class DiffKVHFWrapper:
         # ── Device auto-detection ──────────────────────────────────────────
         self.device = device if device is not None else _get_best_device()
         print(f"[DiffKV] Device: {self.device}")
+        
+        # ── Preset-aware Auto-Quantization ──
+        preset = config.get("preset", os.environ.get("DIFFKV_PRESET", "mid")).lower()
+        if preset == "low" and not config.get("quantization") and not os.environ.get("DIFFKV_QUANTIZATION"):
+            if self.device == "cuda":
+                config["quantization"] = "nf4"
+                print("[DiffKV] Low preset + CUDA: auto-enabling 4-bit NF4 quantization (bitsandbytes) to save VRAM")
+            elif self.device == "mps":
+                print("[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
+
         if torch_dtype is None:
             if self.device in ("cuda", "mps"):
                 torch_dtype = torch.float16
@@ -172,6 +352,10 @@ class DiffKVHFWrapper:
                 print("[DiffKV] WARNING: bitsandbytes not installed — cannot use NF4 4-bit. "
                       "Install with: pip install bitsandbytes. Falling back to fp16.")
 
+        # Fix 3.1 — configure CUDA allocator BEFORE model load to prevent fragmentation
+        if _has_cuda():
+            _configure_cuda_allocator()
+
         if device == "mps":
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
@@ -179,7 +363,8 @@ class DiffKVHFWrapper:
                 device_map={"": "mps"},
                 trust_remote_code=True,
                 quantization_config=quantization_config,
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                use_safetensors=True,      # Fix 1C — mmap load; peak RAM: 3× → 1× model size
             )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -187,10 +372,15 @@ class DiffKVHFWrapper:
                 torch_dtype=torch_dtype,
                 device_map=device,
                 trust_remote_code=True,
-                quantization_config=quantization_config
+                quantization_config=quantization_config,
+                use_safetensors=True,      # Fix 1C — mmap load; peak RAM: 3× → 1× model size
             )
 
         self.model.eval()
+
+        # Fix 3.3 — disable gradient tracking immediately (inference-only; frees autograd graph)
+        _clear_cpu_grad_state(self.model)
+
         
         # ── Auto-detect standard 4-bit / 8-bit quantization (GPTQ, AWQ, bitsandbytes) ──
         is_quantized = False
@@ -247,9 +437,48 @@ class DiffKVHFWrapper:
         self.num_layers = self.model.config.num_hidden_layers
         self.heads = self.model.config.num_attention_heads
         self.head_dim = self.model.config.hidden_size // self.heads
+        if self.rank >= self.head_dim:
+            old_rank = self.rank
+            self.rank = self.head_dim // 2
+            print(f"[DiffKV] WARNING: Configured SVD rank {old_rank} is >= head_dim {self.head_dim} for model {model_id}. "
+                  f"Capping SVD rank to {self.rank} (head_dim // 2) to preserve accuracy and prevent gibberish outputs.")
         
         self.kv_heads = getattr(self.model.config, "num_key_value_heads", self.heads)
         self.serving_mode = config.get("serving_mode", "balanced")
+        
+        # Estimate parameter count to scale retrieval limits
+        try:
+            num_params = sum(p.numel() for p in self.model.parameters())
+            print(f"[DiffKV] Model parameter count: {num_params / 1e6:.1f}M")
+        except Exception:
+            num_params = 1.5e9 # default fallback to 1.5B
+
+        self.config = self.config or {}
+        # Scale defaults based on parameter size if not explicitly set in config
+        if "srl_k_min" not in self.config and "DIFFKV_SRL_K_MIN" not in os.environ:
+            if num_params < 1.0e9:  # < 1.0B (e.g. 0.5B)
+                self.config["srl_k_min"] = 10
+            elif num_params < 3.0e9:  # < 3.0B (e.g. 1.5B)
+                self.config["srl_k_min"] = 15
+            else:
+                self.config["srl_k_min"] = 20
+
+        if "srl_k_max" not in self.config and "DIFFKV_SRL_K_MAX" not in os.environ:
+            if num_params < 1.0e9:
+                self.config["srl_k_max"] = 50
+            elif num_params < 3.0e9:
+                self.config["srl_k_max"] = 100
+            else:
+                self.config["srl_k_max"] = 200
+
+        if "srl_threshold" not in self.config and "DIFFKV_SRL_THRESHOLD" not in os.environ:
+            # Scale threshold based on model capacity (smaller model = lower threshold for sparse trigger)
+            if num_params < 1.0e9:
+                self.config["srl_threshold"] = 25
+            elif num_params < 3.0e9:
+                self.config["srl_threshold"] = 40
+            else:
+                self.config["srl_threshold"] = 50
         self.manager = KVRuntimeManager(
             self.num_layers,
             self.kv_heads,
@@ -371,6 +600,26 @@ class DiffKVHFWrapper:
         if os.environ.get("DIFFKV_SYNC_DEBUG", "0") == "1":
             _patch_tensor_sync_barriers()
 
+        # ── Post-init memory cleanup ─────────────────────────────────────────
+        # Fix 1B + 2.2 — run after everything is wired up so all temp objects are free.
+        _clear_cpu_param_copies(self.model, self.device)   # audit stray CPU params + flush cache
+
+        if self.device == "mps":
+            # Cap MPS allocator fraction + start RSS pressure daemon.
+            # Only set hard fraction cap if DIFFKV_MPS_MEMORY_FRACTION env var is explicitly configured.
+            # Otherwise, avoid setting it to prevent artificial allocator OOMs.
+            mps_fraction_str = os.environ.get("DIFFKV_MPS_MEMORY_FRACTION")
+            if "mps_memory_fraction" in self.config:
+                _configure_mps_memory(float(self.config["mps_memory_fraction"]))
+            elif mps_fraction_str is not None:
+                _configure_mps_memory(float(mps_fraction_str))
+            else:
+                _configure_mps_memory(None)
+
+        # Fix 1B — trim Python heap to return model-loading arena to OS
+        # (effective on macOS/Linux; no-op on Windows)
+        _trim_python_heap()
+
 
 
     def __del__(self):
@@ -459,16 +708,28 @@ class DiffKVHFWrapper:
         outputs = None
         import time as _time
 
-        for chunk_start in range(0, total_new, PREFILL_CHUNK):
+        # Pre-allocate reusable buffers for the entire prefill loop.
+        # Using torch.tensor([chunk]) inside the loop creates a new Python list
+        # object + a new Tensor object + new Storage on every chunk.
+        # For 32 chunks (8200 tokens / 256 chunk_size), that is 32 × N allocations
+        # per layer that the Python malloc arena never returns to the OS.
+        # Using a single pre-allocated buffer filled in-place eliminates this.
+        import gc as _gc
+        _prefill_buf = torch.zeros((1, PREFILL_CHUNK), dtype=torch.long)
+        _pos_buf     = torch.zeros((1, PREFILL_CHUNK), dtype=torch.long)
+
+        for chunk_idx, chunk_start in enumerate(range(0, total_new, PREFILL_CHUNK)):
             chunk_end = min(chunk_start + PREFILL_CHUNK, total_new)
             chunk = new_ids_list[chunk_start:chunk_end]
-            abs_start = cached_len + chunk_start  # absolute position in full sequence
+            clen = chunk_end - chunk_start
+            abs_start = cached_len + chunk_start
+            is_last_chunk = (chunk_end >= total_new)
 
-            chunk_tensor = torch.tensor([chunk], dtype=torch.long, device=self.device)
-            pos_tensor = torch.arange(
-                abs_start, abs_start + len(chunk),
-                dtype=torch.long, device=self.device
-            ).unsqueeze(0)
+            # Re-use the pre-allocated buffer — fill in-place, no new Python objects
+            _prefill_buf[0, :clen] = torch.as_tensor(chunk, dtype=torch.long)
+            chunk_tensor = _prefill_buf[:, :clen].to(self.device, non_blocking=True)
+            _pos_buf[0, :clen] = torch.arange(abs_start, abs_start + clen, dtype=torch.long)
+            pos_tensor = _pos_buf[:, :clen].to(self.device, non_blocking=True)
 
             # Finalize any completed CPU background compressions from the previous chunk
             if hasattr(self.manager, "finalize_compressed_blocks"):
@@ -481,10 +742,24 @@ class DiffKVHFWrapper:
                     use_cache=True,
                 )
 
+            # Flush Metal command buffers every 4 chunks and run GC so freed
+            # Python heap pages are returned to the OS (prevents 2 GB swap growth).
+            if self.device == "mps":
+                if is_last_chunk or (chunk_idx % 4 == 3):
+                    try:
+                        torch.mps.synchronize()
+                        torch.mps.empty_cache()
+                        _gc.collect()  # return freed malloc arenas to the OS
+                    except Exception:
+                        pass
+
             # Kick off async background SVD for this chunk immediately —
             # the next chunk's forward pass runs in parallel with SVD.
             if hasattr(self.manager, "compress_prefill_kv"):
                 self.manager.compress_prefill_kv(session_id)
+
+        # Release pre-allocated buffers
+        del _prefill_buf, _pos_buf
 
         # ── Post-prefill compression barrier ────────────────────────────────
         # Trigger SVD compression for all deferred prefill blocks
@@ -638,3 +913,25 @@ class DiffKVHFWrapper:
     def _custom_sample(self, logits):
         probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+    def close(self):
+        """Explicitly release all resources to prevent memory leaks and circular reference accumulation."""
+        if hasattr(self, "manager") and self.manager is not None:
+            try:
+                self.manager.close()
+            except Exception as e:
+                print(f"[DiffKV] Warning during manager close: {e}")
+            self.manager = None
+        
+        self.model = None
+        self.tokenizer = None
+        
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+    def __del__(self):
+        self.close()

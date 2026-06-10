@@ -41,73 +41,134 @@ class NativeBlockPool:
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
         initial_blocks: int = 512,
+        num_layers: int = 28,
+        lazy: bool = False,
     ):
-        # ── Compute a lean startup footprint ─────────────────────────────────
-        # Actual bytes per block in the pool.
-        bytes_per_block = (
-            max_seq_len * rank * 1 +           # U  (int8)
-            rank * num_kv_heads * head_dim * 2 * 2 +  # V_K + V_V (fp16)
-            num_kv_heads * head_dim * 2 * 2 +  # anchors K + V (fp16)
-            6 + 2                              # scales (2B) + seq_lens (4B) + U_scale (2B)
-        )
+        # ── Phase 1: Record config — NO GPU tensors allocated yet if lazy ────────────
+        # Allocation is deferred to ensure_allocated(n_tokens), called by
+        # KVRuntimeManager.create_session() once the actual context length
+        # is known. This prevents the pool from consuming 185 MB at startup
+        # for a 512-token session where there is nothing to compress.
+        self.max_blocks      = max_blocks
+        self.num_kv_heads    = num_kv_heads
+        self.head_dim        = head_dim
+        self.rank            = rank
+        self.max_seq_len     = max_seq_len
+        self.device          = device
+        self.dtype           = dtype
+        self.initial_blocks  = initial_blocks
+        self.num_layers      = num_layers
 
-        # Base rank schedule and config setup
         _is_mps = (str(device) == "mps" or
                    (isinstance(device, torch.device) and device.type == "mps"))
-        _startup_target_bytes = 64 * 1024 * 1024 if _is_mps else 256 * 1024 * 1024
-        # Smaller default initial_blocks on MPS
-        if _is_mps and initial_blocks > 128:
-            initial_blocks = 128
-
-        # Target startup footprint, but never more than max_blocks and
-        # never less than initial_blocks. The pool grows lazily via _grow_pool().
-        # For unit tests (where max_blocks is very small), we honor initial_blocks exactly.
-        if max_blocks <= 64:
-            computed_initial = initial_blocks
-        else:
-            computed_initial = max(
-                initial_blocks,
-                min(max_blocks, _startup_target_bytes // max(bytes_per_block, 1))
-            )
-
-        self.max_blocks     = max_blocks
-        self.initial_blocks = computed_initial
-        self.current_blocks = self.initial_blocks
-        self.device = device
-        self.dtype  = dtype
-        # Growth increment: coarser on CUDA (512), finer on MPS (128) to
-        # keep peak spikes small on unified-memory devices.
         self._grow_increment = 128 if _is_mps else 512
+        self._is_mps         = _is_mps
 
-        # Allocate pools (fused contiguous allocation layout)
-        self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=device, dtype=torch.int8)
-        self.U_scale    = torch.zeros((self.current_blocks,), device=device, dtype=self.dtype)
-        self.V_KV       = torch.zeros((self.current_blocks, 2, rank, num_kv_heads, head_dim), device=device, dtype=self.dtype)
-        self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=device, dtype=self.dtype)
-        self.scales     = torch.zeros((self.current_blocks,), device=device, dtype=self.dtype)
-        self.seq_lens   = torch.zeros((self.current_blocks,), device=device, dtype=torch.int32)
-
-        # ── SRL descriptor tensor ─────────────────────────────────────────────
-        # desc[i] is a 64-dim semantic fingerprint for pool slot i.
-        # Written by write_block() after each SVD compression.
-        # Used by SemanticIndex for ANN search during decode routing.
-        self.desc = torch.zeros(
-            (self.current_blocks, _SRL_DESC_DIM), device=device, dtype=torch.float16
+        # Bytes per block — used for n_blocks computation in ensure_allocated
+        self._bytes_per_block = (
+            max_seq_len * rank * 1 +              # U  (int8)
+            rank * num_kv_heads * head_dim * 2 * 2 +  # V_K + V_V (fp16)
+            num_kv_heads * head_dim * 2 * 2 +     # anchors K + V (fp16)
+            6 + 2                                 # scales (2B) + seq_lens (4B) + U_scale (2B)
         )
 
-        # Random projection matrix [DESC_DIM, head_dim] — set by KVRuntimeManager
-        # after construction (needs head_dim which is known at pool init).
-        # Initialized here as None; KVRuntimeManager sets it immediately after.
+        # Default token hint used as fallback when ensure_allocated is called
+        # without an explicit context length (e.g. from _grow_pool before first session).
+        _startup_target_bytes = 64 * 1024 * 1024 if _is_mps else 256 * 1024 * 1024
+        self._default_token_hint = _startup_target_bytes // max(self._bytes_per_block, 1) * max_seq_len
+
+        # Allocation state — nothing on GPU until ensure_allocated() is called
+        self._allocated      = False
+        self.current_blocks  = 0
+
+        # Allocator state (populated by ensure_allocated or eager allocation)
+        self._free_indices     = []
+        self._free_indices_set = set()
+        self._ref_counts       = []
+        self._last_used        = []
+        self.version           = []
+
+        # Random projection matrix — set by KVRuntimeManager after construction
         self.W_proj: torch.Tensor = None  # type: ignore[assignment]
 
-        # Block allocator state
-        self._free_indices = list(range(self.current_blocks - 1, -1, -1))
+        self.lazy = lazy
+        if not lazy:
+            self._allocate_tensors(initial_blocks)
+            self._allocated = True
+
+    # ── Phase 2: Actual GPU allocation ───────────────────────────────────────
+    def ensure_allocated(self, n_tokens: int = None) -> None:
+        """
+        Allocate pool tensors sized to *n_tokens* of context.
+
+        Called by KVRuntimeManager.create_session() with the actual prefill
+        length so the pool is sized to what the session will actually need,
+        not a fixed worst-case. Safe to call multiple times — no-op after
+        first allocation (use _grow_pool to expand).
+
+        n_tokens: estimated total tokens this session will produce.
+                  None → use the default startup hint.
+        """
+        if self._allocated:
+            return  # Already allocated — nothing to do
+
+        if n_tokens is None or n_tokens <= 0:
+            n_tokens = self._default_token_hint
+
+        # n_blocks = blocks needed across all layers with 1.5x headroom, clamped to [64, max_blocks]
+        n_raw = max(1, int(n_tokens / self.max_seq_len) * self.num_layers)
+        n_desired = int(n_raw * 1.5)
+        
+        # CRITICAL FIX: Respect the max_blocks budget that was set based on MPS memory constraints
+        # Start with a smaller initial allocation and let it grow on demand via _grow_pool
+        # Initial allocation: min(n_desired, max_blocks // 2, 512)
+        # This prevents upfront allocation of the full budget when a large prompt comes in
+        n_blocks = max(64, min(n_desired, self.max_blocks // 2, 512))
+
+        self._allocate_tensors(n_blocks)
+        self._allocated = True
+        print(f"[Pool] Lazy-allocated {n_blocks} slots for ~{n_tokens} tokens "
+              f"= {self._pool_mb():.1f} MB (device={self.device})")
+
+    def _allocate_tensors(self, n_blocks: int) -> None:
+        """Allocate (or re-allocate) all pool tensors at *n_blocks* size."""
+        self.current_blocks = n_blocks
+        self.U          = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=torch.int8)
+        self.U_scale    = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
+        self.V_KV       = torch.zeros((n_blocks, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.anchors_KV = torch.zeros((n_blocks, 2, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.scales     = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
+        self.seq_lens   = torch.zeros((n_blocks,), device=self.device, dtype=torch.int32)
+        self.desc       = torch.zeros((n_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
+
+        self._free_indices     = list(range(n_blocks - 1, -1, -1))
         self._free_indices_set = set(self._free_indices)
-        self._ref_counts = [0] * self.current_blocks
-        self._last_used = [0.0] * self.current_blocks
-        self.version = [0] * self.current_blocks
+        self._ref_counts       = [0] * n_blocks
+        self._last_used        = [0.0] * n_blocks
+        self.version           = [0] * n_blocks
+
+        # Re-attach W_proj at the new size if it was already set
+        if self.W_proj is not None and self.W_proj.device != torch.device("cpu"):
+            pass  # W_proj is a [DESC_DIM, head_dim] matrix — shape is independent of n_blocks
+
+    def _pool_mb(self) -> float:
+        """Current pool VRAM usage in megabytes."""
+        total = 0
+        for attr in ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                total += t.numel() * t.element_size()
+        return total / 1024 ** 2
+
+    def _ensure(self) -> None:
+        """Guard used by all access methods to trigger lazy allocation if needed."""
+        if not self._allocated:
+            self.ensure_allocated()
+
+
 
     def _grow_pool(self, new_blocks: int = None):
+        self._ensure()  # Trigger lazy allocation if pool not yet created
         old_blocks = self.current_blocks
         if old_blocks >= self.max_blocks:
             raise RuntimeError(f"NativeBlockPool is out of memory and has reached its absolute maximum limit of {self.max_blocks} blocks!")
@@ -121,11 +182,11 @@ class NativeBlockPool:
         if added <= 0:
             return
             
-        num_kv_heads = self.V_KV.shape[3]
-        head_dim = self.V_KV.shape[4]
-        rank = self.V_KV.shape[2]
-        max_seq_len = self.U.shape[1]
-        
+        num_kv_heads = self.num_kv_heads
+        head_dim     = self.head_dim
+        rank         = self.rank
+        max_seq_len  = self.max_seq_len
+
         # ── Release old memory BEFORE allocating new tensors ──────────────
         # Running gc+empty_cache here helps the GPU allocator reclaim the
         # old pool pages before the new (larger) tensors are created, cutting
@@ -173,6 +234,7 @@ class NativeBlockPool:
         
     def allocate_block(self) -> int:
         import time as _time
+        self._ensure()  # Trigger lazy allocation if pool not yet created
         if not self._free_indices:
             self._grow_pool()
             if not self._free_indices:
@@ -240,6 +302,21 @@ class NativeBlockPool:
         A ValueError is raised (rather than silently corrupted) if V's rank
         exceeds the pool's allocated rank dimension.
         """
+        self._ensure()  # Trigger lazy allocation if pool not yet created
+        import math as _math
+        
+        # Sanitize inputs to prevent NaN/Inf propagation
+        if not torch.isfinite(U).all():
+            U = torch.nan_to_num(U, nan=0.0, posinf=65504.0, neginf=-65504.0)
+        if not torch.isfinite(V).all():
+            V = torch.nan_to_num(V, nan=0.0, posinf=65504.0, neginf=-65504.0)
+        if not torch.isfinite(anchor_K).all():
+            anchor_K = torch.nan_to_num(anchor_K, nan=0.0, posinf=65504.0, neginf=-65504.0)
+        if not torch.isfinite(anchor_V).all():
+            anchor_V = torch.nan_to_num(anchor_V, nan=0.0, posinf=65504.0, neginf=-65504.0)
+        if not _math.isfinite(scale):
+            scale = 1.0
+
         pool_max_seq = self.U.shape[1]
         pool_rank    = self.U.shape[2]
         num_kv       = self.V_KV.shape[3]
@@ -291,32 +368,28 @@ class NativeBlockPool:
 
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
-        self.current_blocks = self.initial_blocks
-        self._free_indices = list(range(self.current_blocks - 1, -1, -1))
-        self._free_indices_set = set(self._free_indices)
-        self._ref_counts = [0] * self.current_blocks
-        self._last_used = [0.0] * self.current_blocks
-        self.version = [0] * self.current_blocks
-        
-        num_kv_heads = self.V_KV.shape[3]
-        head_dim = self.V_KV.shape[4]
-        rank = self.V_KV.shape[2]
-        max_seq_len = self.U.shape[1]
-        
-        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc
+        # Free old tensors before re-allocating
+        for attr in ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc"):
+            if hasattr(self, attr):
+                delattr(self, attr)
         gc.collect()
         _empty_cache(self.device)
 
-        self.U          = torch.zeros((self.current_blocks, max_seq_len, rank), device=self.device, dtype=torch.int8)
-        self.U_scale    = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
-        self.V_KV       = torch.zeros((self.current_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        self.anchors_KV = torch.zeros((self.current_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        self.scales     = torch.zeros((self.current_blocks,), device=self.device, dtype=self.dtype)
-        self.seq_lens   = torch.zeros((self.current_blocks,), device=self.device, dtype=torch.int32)
-        self.desc       = torch.zeros((self.current_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
+        self._allocated = False
+        self.current_blocks = 0
+        self._free_indices     = []
+        self._free_indices_set = set()
+        self._ref_counts       = []
+        self._last_used        = []
+        self.version           = []
+
+        if not self.lazy:
+            self._allocate_tensors(self.initial_blocks)
+            self._allocated = True
 
         gc.collect()
         _empty_cache(self.device)
+
 
     # Contiguous property views for backward-compatibility with callers/kernels
     @property

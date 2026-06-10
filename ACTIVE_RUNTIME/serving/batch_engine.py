@@ -139,9 +139,13 @@ class ContinuousBatchEngine:
                 import os
                 cfg = getattr(self.wrapper.manager, "config", None)
                 watermark = cfg.mps_watermark if cfg is not None else 0.0
-                approx = "1" if (cfg is not None and cfg.approximate_attn) else "0"
+                if cfg is not None:
+                    approx = "1" if cfg.approximate_attn else "0"
+                    os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = approx
+                else:
+                    if os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
+                        os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
                 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
-                os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = approx
                 if watermark > 0:
                     torch.mps.set_per_process_memory_fraction(watermark)
             except Exception as e:
@@ -158,6 +162,7 @@ class ContinuousBatchEngine:
         # Track decode steps for periodic memory sweeps
         self.decode_steps_since_gc = 0
         self._prefill_input_buf = None
+        self._prefill_pos_buf   = None
 
     # ── VRAM instrumentation ────────────────────────────────────────────
 
@@ -497,6 +502,36 @@ class ContinuousBatchEngine:
 
             try:
                 await self._step()
+            except RuntimeError as e:
+                error_msg = str(e)
+                print(f"Error in batch step: {error_msg}")
+                
+                # Provide helpful guidance for MPS out of memory errors
+                if "MPS backend out of memory" in error_msg:
+                    print("\n" + "="*80)
+                    print("[DiffKV] MPS OUT OF MEMORY ERROR")
+                    print("="*80)
+                    print("Your Apple Silicon GPU has exceeded its 4GB memory limit.")
+                    print("\nQuick fixes:")
+                    print("  1. Restart with --preset low (enables aggressive memory reduction)")
+                    print("  2. Use --serving-mode lightweight (reduces pool allocation)")
+                    print("  3. Reduce --rank to 16 or 8 (smaller compression footprint)")
+                    print("  4. Add --load-in-4bit (reduces model weights by 70%)")
+                    print("\nRecommended command:")
+                    print("  python serving/openai_compatible_api_gateway.py \\")
+                    print("    --model Qwen/Qwen2.5-0.5B-Instruct \\")
+                    print("    --preset low \\")
+                    print("    --serving-mode lightweight \\")
+                    print("    --rank 16")
+                    print("="*80 + "\n")
+                
+                import traceback
+                traceback.print_exc()
+                for req in self.active_requests:
+                    req.chunks_queue.put_nowait({"error": error_msg, "is_final": True})
+                    req.is_finished = True
+                    self._free_session_kv(req.session_id)
+                self.active_requests.clear()
             except Exception as e:
                 print(f"Error in batch step: {e}")
                 import traceback
@@ -625,10 +660,30 @@ class ContinuousBatchEngine:
             #   (always << 2048), so chunking is never triggered anyway.
             remaining = len(req.prompt_ids) - req.prefill_offset
             if cached_len == 0:
-                # First turn: process the entire prompt in one single chunk to avoid
-                # cross-chunk causal attention degradation and reconstruction overhead.
-                # Cap at 16384 to avoid OOM on extremely long inputs.
-                chunk_size = min(remaining, 16384)
+                # First turn: process the prompt in chunks.
+                # Cap at 2048 on MPS to prevent prefill memory spikes, otherwise 16384.
+                is_mps = (self.wrapper.device == "mps" or 
+                          (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"))
+                
+                # Check if DiffKV is bypassed for this session (length < engage threshold)
+                from runtime.diffkv_attention import _get_engage_threshold
+                is_bypassed = len(req.prompt_ids) < _get_engage_threshold()
+                
+                if is_bypassed:
+                    max_chunk = 16384
+                else:
+                    env_chunk = os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE")
+                    if env_chunk is not None:
+                        max_chunk = int(env_chunk)
+                    else:
+                        cfg = getattr(self.wrapper.manager, "config", None)
+                        if cfg is not None:
+                            max_chunk = cfg.prefill_chunk_size
+                        elif is_mps:
+                            max_chunk = 512
+                        else:
+                            max_chunk = 2048
+                chunk_size = min(remaining, max_chunk)
             else:
                 cfg = getattr(self.wrapper.manager, "config", None)
                 if cfg is not None:
@@ -641,9 +696,11 @@ class ContinuousBatchEngine:
             chunk_ids = req.prompt_ids[offset : offset + chunk_size]
             actual_len = len(chunk_ids)
             is_last_chunk = (offset + actual_len >= len(req.prompt_ids))
+            # Track chunk index for periodic MPS flush (prevents Metal cmd buffer accumulation)
+            _prefill_chunk_idx = offset // chunk_size if chunk_size > 0 else 0
 
 
-            # Lazy pre-allocation of a single pinned-memory input buffer (reused across all chunks)
+            # Lazy pre-allocation of reusable input + position buffers (one allocation for entire prefill)
             _use_pinned = (self.wrapper.device == "cuda" or
                            (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
             if self._prefill_input_buf is None or self._prefill_input_buf.shape[1] < chunk_size:
@@ -651,15 +708,16 @@ class ContinuousBatchEngine:
                     self._prefill_input_buf = torch.zeros((1, chunk_size), dtype=torch.long).pin_memory()
                 else:
                     self._prefill_input_buf = torch.zeros((1, chunk_size), dtype=torch.long)
+            if not hasattr(self, '_prefill_pos_buf') or self._prefill_pos_buf is None or self._prefill_pos_buf.shape[1] < chunk_size:
+                self._prefill_pos_buf = torch.zeros((1, chunk_size), dtype=torch.long)
 
-            # In-place fill of the reusable buffer — zero allocation per chunk
+            # In-place fill of reusable buffers — zero new Python objects per chunk
             self._prefill_input_buf[0, :actual_len] = torch.as_tensor(chunk_ids, dtype=torch.long)
             input_ids = self._prefill_input_buf[:, :actual_len].to(self.wrapper.device, non_blocking=True)
 
-            position_ids = torch.arange(
-                offset, offset + actual_len,
-                dtype=torch.long, device=self.wrapper.device
-            ).unsqueeze(0)
+            # Re-use position buffer in-place instead of torch.arange() per chunk
+            self._prefill_pos_buf[0, :actual_len] = torch.arange(offset, offset + actual_len, dtype=torch.long)
+            position_ids = self._prefill_pos_buf[:, :actual_len].to(self.wrapper.device, non_blocking=True)
 
             # Fix 3: Only flush completed CPU compressions on the LAST chunk.
             # Previously this was called every chunk, blocking each chunk against the
@@ -671,9 +729,8 @@ class ContinuousBatchEngine:
 
             # ── SRL: register token IDs for this chunk before forward pass ────
             if hasattr(self.wrapper.manager, "register_prefill_tokens"):
-                # chunk_ids is a plain Python list — convert to CPU tensor
-                import torch as _torch_srl
-                chunk_tensor_cpu = _torch_srl.tensor(chunk_ids, dtype=_torch_srl.long)
+                # Re-use the already-filled _prefill_input_buf slice (CPU) — no extra allocation
+                chunk_tensor_cpu = self._prefill_input_buf[0, :actual_len]
                 self.wrapper.manager.register_prefill_tokens(
                     req.session_id, chunk_tensor_cpu
                 )
@@ -733,9 +790,16 @@ class ContinuousBatchEngine:
 
             if torch.backends.mps.is_available():
                 torch.mps.synchronize()
-                # Commented out per-chunk cache clear to avoid driver latency overhead
-                # torch.mps.empty_cache()
+                # Flush Metal command buffers every 4 chunks to prevent accumulation.
+                # Without this, 32 chunks × ~80 MB Metal intermediates = ~2.5 GB driver overhead.
+                # Every-4 balances RAM usage vs dispatch latency (4 chunks = 1024 tokens between flushes).
+                if is_last_chunk or (_prefill_chunk_idx % 4 == 3):
+                    torch.mps.empty_cache()
+                    import gc as _gc; _gc.collect()  # return freed malloc arenas to the OS
                 await asyncio.sleep(0)
+
+            # position_ids was filled from a reusable buffer; only need to drop the device view
+            del input_ids, position_ids
 
             # Double-buffered async compression after each chunk
             if hasattr(self.wrapper.manager, "compress_prefill_kv"):
@@ -869,6 +933,8 @@ class ContinuousBatchEngine:
 
                     except Exception as _e:
                         print(f"[DiffKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}")
+                        import traceback
+                        traceback.print_exc()
                         pass  # SRL index failure is non-fatal; decode continues without routing
 
                 asyncio.ensure_future(_build_srl_index_async())

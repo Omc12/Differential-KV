@@ -69,6 +69,7 @@ async def run_gateway_srl_test():
             "srl_threshold": 10,  # low threshold to test custom setting
             "srl_k_min": 15,
             "srl_k_max": 150,
+            "srl_age_penalty": 0.05,
             "max_tokens": 10,
             "temperature": 0.0
         }
@@ -91,6 +92,7 @@ async def run_gateway_srl_test():
         assert srl_info_after["k_min"] == 15
         assert srl_info_after["k_max"] == 150
         assert srl_info_after["routing_threshold"] == 10
+        assert srl_info_after["srl_age_penalty"] == 0.05
         
         print("\n[PASS] Dynamic SRL configuration and endpoint successfully verified!")
 

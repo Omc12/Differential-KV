@@ -1,0 +1,60 @@
+{
+  "dense": {
+    "1024": {
+      "tps": 33.24,
+      "kv_vram_mb": 308.8,
+      "peak_mb": 1254.1,
+      "prefill_ms": 74.1,
+      "actual_ctx": 1024
+    },
+    "2048": {
+      "tps": 24.1,
+      "kv_vram_mb": 320.8,
+      "peak_mb": 1561.3,
+      "prefill_ms": 991.2,
+      "actual_ctx": 2048
+    },
+    "4096": {
+      "tps": 5.46,
+      "kv_vram_mb": 641.5,
+      "peak_mb": 2459.1,
+      "prefill_ms": 3295.2,
+      "actual_ctx": 4096
+    },
+    "8192": {
+      "oom": true,
+      "actual_ctx": 8192
+    }
+  },
+  "diffkv": {
+    "1024": {
+      "tps": 37.72,
+      "kv_vram_mb": 12.9,
+      "peak_mb": 958.8,
+      "prefill_ms": 44.6,
+      "actual_ctx": 1024
+    },
+    "2048": {
+      "tps": 26.79,
+      "kv_vram_mb": 23.6,
+      "peak_mb": 969.7,
+      "prefill_ms": 879.6,
+      "actual_ctx": 2048
+    },
+    "4096": {
+      "tps": 6.3,
+      "kv_vram_mb": 307.6,
+      "peak_mb": 1166.2,
+      "prefill_ms": 8541.7,
+      "actual_ctx": 4096
+    },
+    "8192": {
+      "tps": 4.62,
+      "kv_vram_mb": 877.2,
+      "peak_mb": 1434.4,
+      "prefill_ms": 16148.7,
+      "actual_ctx": 8192
+    }
+  },
+  "model": "Qwen/Qwen2.5-0.5B-Instruct"
+}

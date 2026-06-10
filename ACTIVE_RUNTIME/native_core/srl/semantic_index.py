@@ -94,7 +94,7 @@ class SemanticIndex:
             import diffkv_core as _dkv_core
             if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
                 top_k_indices = _dkv_core.semantic_search_topk(q_desc, self.desc_matrix, k)
-                return self.slot_ids[top_k_indices]
+                return self.slot_ids.to(top_k_indices.device)[top_k_indices]
         except ImportError:
             pass
 
@@ -106,7 +106,7 @@ class SemanticIndex:
             scores = self.desc_matrix @ q16                  # [N]
 
         top_k_indices = torch.topk(scores, k=k, largest=True, sorted=True).indices
-        return self.slot_ids[top_k_indices]              # pool slot IDs
+        return self.slot_ids.to(top_k_indices.device)[top_k_indices]              # pool slot IDs
 
 
 def build_semantic_index(

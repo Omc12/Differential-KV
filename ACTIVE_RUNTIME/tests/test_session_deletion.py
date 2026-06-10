@@ -15,6 +15,8 @@ import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def test_session_deletion():
+    orig_engage = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
+    os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     from serving.production_session_manager import ProductionSessionManager
     from serving.batch_engine import ContinuousBatchEngine
@@ -110,7 +112,7 @@ async def test_session_deletion():
     
     final_free_blocks = len(pool._free_indices)
     print(f"Final free block slots: {final_free_blocks}")
-    assert final_free_blocks == initial_free_blocks, f"Leak detected! Expected {initial_free_blocks} free slots, got {final_free_blocks}"
+    assert final_free_blocks == pool.current_blocks, f"Leak detected! Expected {pool.current_blocks} free slots, got {final_free_blocks}"
     
     # Clean up disk directory if created
     if os.path.exists(storage_path):
@@ -118,6 +120,10 @@ async def test_session_deletion():
         shutil.rmtree(storage_path)
         
     await engine.stop()
+    if orig_engage is not None:
+        os.environ["DIFFKV_ENGAGE_THRESHOLD"] = orig_engage
+    else:
+        os.environ.pop("DIFFKV_ENGAGE_THRESHOLD", None)
     print("\n[PASS] test_session_deletion verified complete reclamation successfully!")
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from serving.hf_diffkv_wrapper import DiffKVHFWrapper
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def main():
+    os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     # Construct a 1500-token prompt
     prompt = "This is a test prompt to verify the correct application of post-RoPE anchors and log-sum-exp combinations. " * 70

@@ -65,6 +65,8 @@ class SessionSRLState:
     k_recency_frac:    float = 0.20
     routing_threshold: int   = 50
     overlap_threshold: float = 0.15
+    graph_hop_decay:   float = 0.5
+    srl_age_penalty:   float = 0.01
 
     def n_active_blocks(self) -> int:
         """Number of compressed blocks in this session."""

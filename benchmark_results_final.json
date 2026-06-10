@@ -1,0 +1,70 @@
+{
+  "dense": {
+    "1024": {
+      "tps": 30.62,
+      "kv_vram_mb": 308.8,
+      "peak_mb": 1253.6,
+      "prefill_ms": 75.8,
+      "actual_ctx": 1024
+    },
+    "2048": {
+      "tps": 22.34,
+      "kv_vram_mb": 320.8,
+      "peak_mb": 1560.9,
+      "prefill_ms": 927.0,
+      "actual_ctx": 2048
+    },
+    "4096": {
+      "tps": 3.64,
+      "kv_vram_mb": 641.5,
+      "peak_mb": 2459.1,
+      "prefill_ms": 3006.4,
+      "actual_ctx": 4096
+    },
+    "8192": {
+      "tps": null,
+      "kv_vram_mb": null,
+      "peak_mb": null,
+      "prefill_ms": null,
+      "actual_ctx": 8192,
+      "oom": true
+    }
+  },
+  "diffkv": {
+    "1024": {
+      "tps": 8.39,
+      "kv_vram_mb": 40.3,
+      "peak_mb": 1033.5,
+      "prefill_ms": 2800.3,
+      "actual_ctx": 1024
+    },
+    "2048": {
+      "tps": 7.11,
+      "kv_vram_mb": 99.7,
+      "peak_mb": 1077.4,
+      "prefill_ms": 5525.8,
+      "actual_ctx": 2048
+    },
+    "4096": {
+      "tps": 5.32,
+      "kv_vram_mb": 385.1,
+      "peak_mb": 1198.7,
+      "prefill_ms": 9189.3,
+      "actual_ctx": 4096
+    },
+    "8192": {
+      "tps": 3.2,
+      "kv_vram_mb": 882.1,
+      "peak_mb": 1384.1,
+      "prefill_ms": 37121.5,
+      "actual_ctx": 8192
+    }
+  },
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "contexts": [
+    1024,
+    2048,
+    4096,
+    8192
+  ]
+}
