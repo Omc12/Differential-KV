@@ -67,6 +67,11 @@ public:
             states_[i].store(BlockState::Freed, std::memory_order_relaxed);
     }
 
+    void clear() {
+        for (size_t i = 0; i < MAX_BLOCKS; ++i)
+            states_[i].store(BlockState::Freed, std::memory_order_relaxed);
+    }
+
     bool transition(uint32_t block_id, BlockState expected, BlockState desired) {
         if (block_id >= MAX_BLOCKS)
             throw std::out_of_range("block_id out of range");

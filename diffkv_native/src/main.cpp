@@ -534,268 +534,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Define prompt and tokenize
-    std::string prompt = "Explain SVD.";
-    if (argc >= 3) {
-        prompt = argv[2];
-    }
-    // Wrap prompt in Qwen2.5 instruction chat template for proper instruction following
-    std::string chat_prompt =
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n" + prompt + "<|im_end|>\n"
-        "<|im_start|>assistant\n";
-    std::cout << "[DiffKV Native] Prompt: \"" << prompt << "\"" << std::endl;
-    std::vector<int32_t> prompt_tokens = model.tokenize(chat_prompt, true);
-    if (prompt_tokens.empty()) {
-        std::cerr << "Error: Tokenization returned empty list!" << std::endl;
-        compressor.stop();
-        ggml_backend_free(backend);
-        return 1;
-    }
-
-    std::cout << "[DiffKV Native] Prompt tokens (" << prompt_tokens.size() << "): ";
-    for (int32_t t : prompt_tokens) std::cout << t << " ";
-    std::cout << "\n";
-
-    int L = prompt_tokens.size();
+    // Allocate persistent dense vectors and tables
     int F_test = kv_heads * head_dim;
-
-    // ── 1. PREFILL PHASE (Single pass causal attention) ──
-    std::cout << "[DiffKV Native] Running Prefill phase in a single step..." << std::endl;
-
-    struct ggml_init_params prefill_params = {
-        /*.mem_size   =*/ 4 * 1024 * 1024,
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
-    };
-    struct ggml_context * prefill_ctx = ggml_init(prefill_params);
-    if (!prefill_ctx) {
-        std::cerr << "Failed to initialize prefill context!" << std::endl;
-        compressor.stop();
-        ggml_backend_free(backend);
-        return 1;
-    }
-
-    struct ggml_tensor * input_tokens_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, L);
-    ggml_set_input(input_tokens_prefill);
-    struct ggml_tensor * positions_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, L);
-    ggml_set_input(positions_prefill);
-    struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, L, L);
-    ggml_set_input(mask_prefill);
-
-    struct ggml_tensor * prefill_logits = nullptr;
-    std::vector<struct ggml_tensor *> prefill_k_layers(n_layers, nullptr);
-    std::vector<struct ggml_tensor *> prefill_v_layers(n_layers, nullptr);
-    struct ggml_cgraph * prefill_graph = build_prefill_graph(
-        prefill_ctx, model, input_tokens_prefill, positions_prefill, mask_prefill,
-        &prefill_logits, &prefill_k_layers, &prefill_v_layers
-    );
-    ggml_set_output(prefill_logits);
-
-    ggml_gallocr_t prefill_galloc = ggml_gallocr_new(buft);
-    if (!prefill_galloc || !ggml_gallocr_alloc_graph(prefill_galloc, prefill_graph)) {
-        std::cerr << "Failed to allocate memory for prefill graph!" << std::endl;
-        ggml_free(prefill_ctx);
-        compressor.stop();
-        ggml_backend_free(backend);
-        return 1;
-    }
-
-    // Set inputs for prefill
-    ggml_backend_tensor_set(input_tokens_prefill, prompt_tokens.data(), 0, L * sizeof(int32_t));
-
-    std::vector<int32_t> pos_host(L);
-    for (int i = 0; i < L; ++i) pos_host[i] = i;
-    ggml_backend_tensor_set(positions_prefill, pos_host.data(), 0, L * sizeof(int32_t));
-
-    std::vector<ggml_fp16_t> mask_host(L * L, ggml_fp32_to_fp16(0.0f));
-    for (int i = 0; i < L; ++i) {
-        for (int j = i + 1; j < L; ++j) {
-            mask_host[i * L + j] = ggml_fp32_to_fp16(-INFINITY);
-        }
-    }
-    ggml_backend_tensor_set(mask_prefill, mask_host.data(), 0, mask_host.size() * sizeof(ggml_fp16_t));
-
-    if (ggml_backend_graph_compute(backend, prefill_graph) != GGML_STATUS_SUCCESS) {
-        std::cerr << "Error: Prefill graph compute failed!" << std::endl;
-        ggml_gallocr_free(prefill_galloc);
-        ggml_free(prefill_ctx);
-        compressor.stop();
-        ggml_backend_free(backend);
-        return 1;
-    }
-
-    // Retrieve raw K/V activations
-    std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test));
-    std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test));
-    for (int l = 0; l < n_layers; ++l) {
-        ggml_backend_tensor_get(prefill_k_layers[l], k_activations[l].data(), 0, L * F_test * sizeof(float));
-        ggml_backend_tensor_get(prefill_v_layers[l], v_activations[l].data(), 0, L * F_test * sizeof(float));
-    }
-
-    // Segment activations into blocks and enqueue SVD compression
-    int num_blocks = (L + 63) / 64;
     std::vector<std::vector<float>> active_k_dense(n_layers, std::vector<float>(64 * F_test, 0.0f));
     std::vector<std::vector<float>> active_v_dense(n_layers, std::vector<float>(64 * F_test, 0.0f));
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
     std::vector<std::vector<int32_t>> seq_lens_by_layer(n_layers, std::vector<int32_t>(n_slots, 0));
 
-    for (int block_idx = 0; block_idx < num_blocks; ++block_idx) {
-        int block_start = block_idx * 64;
-        int block_len = std::min(64, L - block_start);
-
-        for (int l = 0; l < n_layers; ++l) {
-            auto & engine = *kv_engines[l];
-            float* k_block = &k_activations[l][block_start * F_test];
-            float* v_block = &v_activations[l][block_start * F_test];
-
-            // 1. Set Anchor (first token of block)
-            std::vector<ggml_fp16_t> k_fp16(F_test);
-            std::vector<ggml_fp16_t> v_fp16(F_test);
-            for (int i = 0; i < F_test; ++i) {
-                k_fp16[i] = ggml_fp32_to_fp16(k_block[i]);
-                v_fp16[i] = ggml_fp32_to_fp16(v_block[i]);
-            }
-            ggml_backend_tensor_set(engine.get_anchors_K(), k_fp16.data(), block_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-            ggml_backend_tensor_set(engine.get_anchors_V(), v_fp16.data(), block_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-
-            // Record the actual sequence position of this block's anchor token
-            int32_t anchor_pos = block_start;
-            ggml_backend_tensor_set(engine.get_anchor_positions(), &anchor_pos, block_idx * sizeof(int32_t), sizeof(int32_t));
-
-            engine.get_state_table().transition(block_idx, BlockState::Freed, BlockState::DenseResident);
-
-            // 2. Set deltas relative to anchor and submit to compressor
-            if (block_len == 64) {
-                for (int t = 1; t < block_len; ++t) {
-                    int offset = (t - 1) * F_test;
-                    for (int i = 0; i < F_test; ++i) {
-                        active_k_dense[l][offset + i] = k_block[t * F_test + i] - k_block[i];
-                        active_v_dense[l][offset + i] = v_block[t * F_test + i] - v_block[i];
-                    }
-                }
-
-                engine.get_state_table().transition(block_idx, BlockState::DenseResident, BlockState::Compressing);
-
-                int p_key = l * 10000 + block_idx;
-                persistent_k_dense[p_key] = active_k_dense[l];
-                persistent_v_dense[p_key] = active_v_dense[l];
-
-                CompressJob job;
-                job.session_id = 42;
-                job.block_id = block_idx;
-                job.block_size = block_len - 1;
-                job.feat_dim = F_test;
-                job.rank = rank;
-                job.dense_k_ptr = persistent_k_dense[p_key].data();
-                job.dense_v_ptr = persistent_v_dense[p_key].data();
-
-                job.out_u_ptr = reinterpret_cast<int8_t*>(engine.get_U()->data) + block_idx * 64 * rank;
-                job.out_u_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_U_scale()->data) + block_idx;
-                job.out_vk_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VK()->data) + block_idx * rank * F_test;
-                job.out_vv_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VV()->data) + block_idx * rank * F_test;
-                job.out_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_scales()->data) + block_idx;
-                job.state_table = &engine.get_state_table();
-
-                compressor.submit(job);
-
-                seq_lens_by_layer[l][block_idx] = 63;
-            } else {
-                if (block_len > 1) {
-                    for (int t = 1; t < block_len; ++t) {
-                        int offset = (t - 1) * F_test;
-                        for (int i = 0; i < F_test; ++i) {
-                            active_k_dense[l][offset + i] = k_block[t * F_test + i] - k_block[i];
-                            active_v_dense[l][offset + i] = v_block[t * F_test + i] - v_block[i];
-                        }
-                    }
-                    int p_key = l * 10000 + block_idx;
-                    persistent_k_dense[p_key] = active_k_dense[l];
-                    persistent_v_dense[p_key] = active_v_dense[l];
-                }
-                seq_lens_by_layer[l][block_idx] = 0;
-            }
-            ggml_backend_tensor_set(engine.get_seq_lens(), seq_lens_by_layer[l].data(), 0, seq_lens_by_layer[l].size() * sizeof(int32_t));
-
-            // 3. Compute Mean Key Descriptor for Layer 0
-            if (l == 0) {
-                std::vector<float> avg_k(F_test, 0.0f);
-                for (int i = 0; i < F_test; ++i) {
-                    for (int t = 0; t < block_len; ++t) {
-                        avg_k[i] += k_block[t * F_test + i];
-                    }
-                    avg_k[i] /= block_len;
-                }
-
-                std::vector<float> desc(desc_dim, 0.0f);
-                for (int r = 0; r < desc_dim; ++r) {
-                    float sum = 0.0f;
-                    for (int c = 0; c < head_dim; ++c) {
-                        sum += avg_k[c] * W_proj_host[r * head_dim + c];
-                    }
-                    desc[r] = sum;
-                }
-                float sum_sq = 0.0f;
-                for (float val : desc) sum_sq += val * val;
-                float norm = std::sqrt(sum_sq) + 1e-8f;
-                for (float & val : desc) val /= norm;
-                ggml_backend_tensor_set(engine.get_desc_matrix(), desc.data(), block_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
-            }
-        }
-    }
-
-    // Wait for SVD compressions to catch up
-    std::cout << "[DiffKV Native] Waiting for background SVD compressor to catch up..." << std::endl;
-    for (int s = 0; s < num_blocks; ++s) {
-        auto start_time = std::chrono::steady_clock::now();
-        while (true) {
-            bool all_done = true;
-            for (int l = 0; l < n_layers; ++l) {
-                BlockState st = kv_engines[l]->get_state_table().get(s);
-                if (st != BlockState::CompressedResident && st != BlockState::DenseResident) {
-                    all_done = false;
-                    break;
-                }
-            }
-            if (all_done) break;
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_time
-            ).count();
-            if (elapsed > 4000) {
-                std::cerr << "Warning: Timeout waiting for compression of slot " << s << std::endl;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-    }
-
-    // Sample the next token from prefill logits (greedy argmax on last token)
-    std::vector<float> prefill_output_logits(n_vocab);
-    ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), (L - 1) * n_vocab * sizeof(float), n_vocab * sizeof(float));
-
-    std::vector<std::pair<float, int>> prefill_top_k;
-    for (int i = 0; i < n_vocab; ++i) {
-        prefill_top_k.push_back({prefill_output_logits[i], i});
-    }
-    std::sort(prefill_top_k.begin(), prefill_top_k.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
-        return a.first > b.first;
-    });
-
-    std::cout << "\n[Prefill Phase Top predictions]:\n";
-    for (int k = 0; k < 5; ++k) {
-        std::cout << "  " << k << ": \"" << model.token_to_piece(prefill_top_k[k].second) << "\" (id: " << prefill_top_k[k].second << ", logit: " << prefill_top_k[k].first << ")\n";
-    }
-
-    int32_t first_decode_token = prefill_top_k[0].second;
-
-    // Clean up prefill graph memory
-    ggml_gallocr_free(prefill_galloc);
-    ggml_free(prefill_ctx);
-
-    // ── 2. DECODE PHASE (Autoregressive sparse attention) ──
+    // Decode graph can be initialized once before the prompt loop
     std::cout << "[DiffKV Native] Preparing Decode Graph..." << std::endl;
-
     struct ggml_init_params decode_params = {
         /*.mem_size   =*/ 4 * 1024 * 1024,
         /*.mem_buffer =*/ nullptr,
@@ -805,6 +553,7 @@ int main(int argc, char ** argv) {
     if (!decode_ctx) {
         std::cerr << "Failed to initialize decode context!" << std::endl;
         compressor.stop();
+        ggml_backend_free(backend);
         return 1;
     }
 
@@ -817,7 +566,6 @@ int main(int argc, char ** argv) {
     struct ggml_tensor * slots_mask_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_F32, n_slots);
     ggml_set_input(slots_mask_decode);
 
-    // Initialize userdata for decode
     std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         userdata[l].kv_engine = kv_engines[l].get();
@@ -826,7 +574,7 @@ int main(int argc, char ** argv) {
         userdata[l].n_kv_heads = model.get_config().n_head_kv;
         userdata[l].rank = rank;
         userdata[l].S_max = 64;
-        userdata[l].K = std::min(8, num_blocks);
+        userdata[l].K = 0; // updated dynamically
         userdata[l].D = head_dim;
         userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
         userdata[l].has_rope = true;
@@ -853,214 +601,234 @@ int main(int argc, char ** argv) {
         std::cerr << "Failed to allocate memory for decode graph!" << std::endl;
         ggml_free(decode_ctx);
         compressor.stop();
+        ggml_backend_free(backend);
         return 1;
     }
 
     // Upload W_proj
     ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
 
-    // Start autoregressive loop
-    std::cout << "[DiffKV Native] Starting Autoregressive Generation..." << std::endl;
-    std::cout << "[Response] " << std::flush;
+    bool interactive = (argc < 3 || std::string(argv[2]) == "-");
 
-    int32_t last_token = first_decode_token;
-    std::string first_piece = model.token_to_piece(last_token);
-    std::cout << first_piece << std::flush;
-
-    std::vector<int32_t> generated_tokens;
-    generated_tokens.push_back(last_token);
-    const int max_generate = 50;
-
-    int active_slot = (L - 1) / 64;
-    int active_block_tokens = L - active_slot * 64;
-    if (active_block_tokens == 64) {
-        active_slot++;
-        active_block_tokens = 0;
-    }
-
-    // Restore active delta dense buffers if continuing a block
-    for (int l = 0; l < n_layers; ++l) {
-        int p_key = l * 10000 + active_slot;
-        if (active_block_tokens > 0 && persistent_k_dense.count(p_key)) {
-            active_k_dense[l] = persistent_k_dense[p_key];
-            active_v_dense[l] = persistent_v_dense[p_key];
+    while (true) {
+        std::string prompt;
+        if (interactive) {
+            std::cout << "__READY__" << std::endl;
+            if (!std::getline(std::cin, prompt)) {
+                break;
+            }
+            if (prompt.empty() || prompt == "exit" || prompt == "quit") {
+                break;
+            }
         } else {
+            prompt = argv[2];
+        }
+
+        // Reset KV cache state for all layers
+        for (int l = 0; l < n_layers; ++l) {
+            auto & engine = *kv_engines[l];
+            engine.get_state_table().clear();
+            
+            std::vector<ggml_fp16_t> zero_f16(head_dim * kv_heads * n_slots, ggml_fp32_to_fp16(0.0f));
+            std::vector<int32_t> zero_i32(n_slots, 0);
+            std::vector<int8_t> zero_i8(64 * rank * n_slots, 0);
+            
+            ggml_backend_tensor_set(engine.get_anchors_K(), zero_f16.data(), 0, zero_f16.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_anchors_V(), zero_f16.data(), 0, zero_f16.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_VK(), zero_f16.data(), 0, zero_f16.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_VV(), zero_f16.data(), 0, zero_f16.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_U_scale(), zero_f16.data(), 0, n_slots * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_scales(), zero_f16.data(), 0, n_slots * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(engine.get_seq_lens(), zero_i32.data(), 0, n_slots * sizeof(int32_t));
+            ggml_backend_tensor_set(engine.get_anchor_positions(), zero_i32.data(), 0, n_slots * sizeof(int32_t));
+            ggml_backend_tensor_set(engine.get_U(), zero_i8.data(), 0, zero_i8.size() * sizeof(int8_t));
+        }
+
+        for (int l = 0; l < n_layers; ++l) {
             std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
             std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
         }
-    }
-
-    for (int step = 0; step < max_generate; ++step) {
-        int current_pos = L + step;
-
-        ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
-        ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
-
-        // Set slots mask: 0.0f for occupied compressed slots (<= active_slot - 1), -1e10f for unoccupied/dense slots
-        std::vector<float> slots_mask_host(n_slots, -1e10f);
-        int occupied_up_to = active_slot - 1;
-        for (int i = 0; i <= occupied_up_to; ++i) {
-            if (i >= 0 && i < n_slots) {
-                slots_mask_host[i] = 0.0f;
-            }
-        }
-        ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
-
-        // Update K and dense active window parameters in userdata dynamically
-        int current_k = std::max(0, std::min(8, active_slot));
+        persistent_k_dense.clear();
+        persistent_v_dense.clear();
         for (int l = 0; l < n_layers; ++l) {
-            userdata[l].K = current_k;
-            userdata[l].active_k_dense = active_k_dense[l].data();
-            userdata[l].active_v_dense = active_v_dense[l].data();
-            userdata[l].active_block_tokens = active_block_tokens;
-            userdata[l].active_slot = active_slot;
+            std::fill(seq_lens_by_layer[l].begin(), seq_lens_by_layer[l].end(), 0);
         }
 
-        if (ggml_backend_graph_compute(backend, decode_graph) != GGML_STATUS_SUCCESS) {
-            std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
-            break;
+        // Wrap prompt in Qwen2.5 instruction chat template
+        std::string chat_prompt =
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n" + prompt + "<|im_end|>\n"
+            "<|im_start|>assistant\n";
+        
+        if (!interactive) {
+            std::cout << "[DiffKV Native] Prompt: \"" << prompt << "\"" << std::endl;
         }
 
-        // (slot selection debug logging removed)
-
-        // Sample next token greedy
-        std::vector<float> output_logits(n_vocab);
-        ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
-
-        // Apply repetition penalty (1.15) — penalise tokens already generated
-        constexpr float REP_PENALTY = 1.15f;
-        for (int32_t tok : generated_tokens) {
-            if (tok >= 0 && tok < n_vocab) {
-                float& l = output_logits[tok];
-                l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
-            }
-        }
-        // Also penalise the current input token
-        if (last_token >= 0 && last_token < n_vocab) {
-            float& l = output_logits[last_token];
-            l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
+        std::vector<int32_t> prompt_tokens = model.tokenize(chat_prompt, true);
+        if (prompt_tokens.empty()) {
+            std::cerr << "Error: Tokenization returned empty list!" << std::endl;
+            if (!interactive) break;
+            continue;
         }
 
-        // Print top-5 predictions for debugging
-        struct LogitPair {
-            int id;
-            float val;
+        if (!interactive) {
+            std::cout << "[DiffKV Native] Prompt tokens (" << prompt_tokens.size() << "): ";
+            for (int32_t t : prompt_tokens) std::cout << t << " ";
+            std::cout << "\n";
+        }
+
+        int L = prompt_tokens.size();
+
+        // ── 1. PREFILL PHASE ──
+        if (!interactive) {
+            std::cout << "[DiffKV Native] Running Prefill phase in a single step..." << std::endl;
+        }
+
+        struct ggml_init_params prefill_params = {
+            /*.mem_size   =*/ 4 * 1024 * 1024,
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
         };
-        std::vector<LogitPair> logits_sorted(n_vocab);
-        for (int i = 0; i < n_vocab; ++i) {
-            logits_sorted[i] = { i, output_logits[i] };
-        }
-        std::sort(logits_sorted.begin(), logits_sorted.end(), [](const LogitPair& a, const LogitPair& b) {
-            return a.val > b.val;
-        });
-        std::cout << "\n[Step " << step << " Top predictions]:\n";
-        for (int i = 0; i < std::min(5, n_vocab); ++i) {
-            std::cout << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].id) << "\" (id: " << logits_sorted[i].id << ", logit: " << logits_sorted[i].val << ")\n";
-        }
-
-        // Greedy argmax
-        int32_t next_token = logits_sorted[0].id;
-        float best_logit = logits_sorted[0].val;
-
-        if (model.is_eog_token(next_token) || next_token == model.token_eos()) {
-            std::cout << " [EOS]" << std::endl;
+        struct ggml_context * prefill_ctx = ggml_init(prefill_params);
+        if (!prefill_ctx) {
+            std::cerr << "Failed to initialize prefill context!" << std::endl;
             break;
         }
 
-        std::string piece = model.token_to_piece(next_token);
-        std::cout << piece << std::flush;
+        struct ggml_tensor * input_tokens_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, L);
+        ggml_set_input(input_tokens_prefill);
+        struct ggml_tensor * positions_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, L);
+        ggml_set_input(positions_prefill);
+        struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, L, L);
+        ggml_set_input(mask_prefill);
 
-        generated_tokens.push_back(next_token);
-        last_token = next_token;
+        struct ggml_tensor * prefill_logits = nullptr;
+        std::vector<struct ggml_tensor *> prefill_k_layers(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> prefill_v_layers(n_layers, nullptr);
+        struct ggml_cgraph * prefill_graph = build_prefill_graph(
+            prefill_ctx, model, input_tokens_prefill, positions_prefill, mask_prefill,
+            &prefill_logits, &prefill_k_layers, &prefill_v_layers
+        );
+        ggml_set_output(prefill_logits);
 
-        // Ingest next token's projected keys and values into the block pool for all layers
+        ggml_gallocr_t prefill_galloc = ggml_gallocr_new(buft);
+        if (!prefill_galloc || !ggml_gallocr_alloc_graph(prefill_galloc, prefill_graph)) {
+            std::cerr << "Failed to allocate memory for prefill graph!" << std::endl;
+            ggml_free(prefill_ctx);
+            break;
+        }
+
+        ggml_backend_tensor_set(input_tokens_prefill, prompt_tokens.data(), 0, L * sizeof(int32_t));
+
+        std::vector<int32_t> pos_host(L);
+        for (int i = 0; i < L; ++i) pos_host[i] = i;
+        ggml_backend_tensor_set(positions_prefill, pos_host.data(), 0, L * sizeof(int32_t));
+
+        std::vector<ggml_fp16_t> mask_host(L * L, ggml_fp32_to_fp16(0.0f));
+        for (int i = 0; i < L; ++i) {
+            for (int j = i + 1; j < L; ++j) {
+                mask_host[i * L + j] = ggml_fp32_to_fp16(-INFINITY);
+            }
+        }
+        ggml_backend_tensor_set(mask_prefill, mask_host.data(), 0, mask_host.size() * sizeof(ggml_fp16_t));
+
+        if (ggml_backend_graph_compute(backend, prefill_graph) != GGML_STATUS_SUCCESS) {
+            std::cerr << "Error: Prefill graph compute failed!" << std::endl;
+            ggml_gallocr_free(prefill_galloc);
+            ggml_free(prefill_ctx);
+            break;
+        }
+
+        std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test));
+        std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test));
         for (int l = 0; l < n_layers; ++l) {
-            auto & engine = *kv_engines[l];
-            std::vector<float> k_host(F_test);
-            std::vector<float> v_host(F_test);
-            ggml_backend_tensor_get(decode_k_layers[l], k_host.data(), 0, F_test * sizeof(float));
-            ggml_backend_tensor_get(decode_v_layers[l], v_host.data(), 0, F_test * sizeof(float));
+            ggml_backend_tensor_get(prefill_k_layers[l], k_activations[l].data(), 0, L * F_test * sizeof(float));
+            ggml_backend_tensor_get(prefill_v_layers[l], v_activations[l].data(), 0, L * F_test * sizeof(float));
+        }
 
-            if (active_block_tokens == 0) {
-                // First token of new block: write as anchor
+        int num_blocks = (L + 63) / 64;
+
+        for (int block_idx = 0; block_idx < num_blocks; ++block_idx) {
+            int block_start = block_idx * 64;
+            int block_len = std::min(64, L - block_start);
+
+            for (int l = 0; l < n_layers; ++l) {
+                auto & engine = *kv_engines[l];
+                float* k_block = &k_activations[l][block_start * F_test];
+                float* v_block = &v_activations[l][block_start * F_test];
+
                 std::vector<ggml_fp16_t> k_fp16(F_test);
                 std::vector<ggml_fp16_t> v_fp16(F_test);
                 for (int i = 0; i < F_test; ++i) {
-                    k_fp16[i] = ggml_fp32_to_fp16(k_host[i]);
-                    v_fp16[i] = ggml_fp32_to_fp16(v_host[i]);
+                    k_fp16[i] = ggml_fp32_to_fp16(k_block[i]);
+                    v_fp16[i] = ggml_fp32_to_fp16(v_block[i]);
                 }
-                ggml_backend_tensor_set(engine.get_anchors_K(), k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                ggml_backend_tensor_set(engine.get_anchors_V(), v_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                // Record actual sequence position of this decode block's anchor token (only once, from layer 0)
-                if (l == 0) {
-                    int32_t anchor_seq_pos = current_pos;
-                    for (int ll = 0; ll < n_layers; ++ll) {
-                        ggml_backend_tensor_set(kv_engines[ll]->get_anchor_positions(), &anchor_seq_pos, active_slot * sizeof(int32_t), sizeof(int32_t));
+                ggml_backend_tensor_set(engine.get_anchors_K(), k_fp16.data(), block_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(engine.get_anchors_V(), v_fp16.data(), block_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+
+                int32_t anchor_pos = block_start;
+                ggml_backend_tensor_set(engine.get_anchor_positions(), &anchor_pos, block_idx * sizeof(int32_t), sizeof(int32_t));
+
+                engine.get_state_table().transition(block_idx, BlockState::Freed, BlockState::DenseResident);
+
+                if (block_len == 64) {
+                    for (int t = 1; t < block_len; ++t) {
+                        int offset = (t - 1) * F_test;
+                        for (int i = 0; i < F_test; ++i) {
+                            active_k_dense[l][offset + i] = k_block[t * F_test + i] - k_block[i];
+                            active_v_dense[l][offset + i] = v_block[t * F_test + i] - v_block[i];
+                        }
                     }
+
+                    engine.get_state_table().transition(block_idx, BlockState::DenseResident, BlockState::Compressing);
+
+                    int p_key = l * 10000 + block_idx;
+                    persistent_k_dense[p_key] = active_k_dense[l];
+                    persistent_v_dense[p_key] = active_v_dense[l];
+
+                    CompressJob job;
+                    job.session_id = 42;
+                    job.block_id = block_idx;
+                    job.block_size = block_len - 1;
+                    job.feat_dim = F_test;
+                    job.rank = rank;
+                    job.dense_k_ptr = persistent_k_dense[p_key].data();
+                    job.dense_v_ptr = persistent_v_dense[p_key].data();
+
+                    job.out_u_ptr = reinterpret_cast<int8_t*>(engine.get_U()->data) + block_idx * 64 * rank;
+                    job.out_u_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_U_scale()->data) + block_idx;
+                    job.out_vk_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VK()->data) + block_idx * rank * F_test;
+                    job.out_vv_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VV()->data) + block_idx * rank * F_test;
+                    job.out_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_scales()->data) + block_idx;
+                    job.state_table = &engine.get_state_table();
+
+                    compressor.submit(job);
+
+                    seq_lens_by_layer[l][block_idx] = 63;
+                } else {
+                    if (block_len > 1) {
+                        for (int t = 1; t < block_len; ++t) {
+                            int offset = (t - 1) * F_test;
+                            for (int i = 0; i < F_test; ++i) {
+                                active_k_dense[l][offset + i] = k_block[t * F_test + i] - k_block[i];
+                                active_v_dense[l][offset + i] = v_block[t * F_test + i] - v_block[i];
+                            }
+                        }
+                        int p_key = l * 10000 + block_idx;
+                        persistent_k_dense[p_key] = active_k_dense[l];
+                        persistent_v_dense[p_key] = active_v_dense[l];
+                    }
+                    seq_lens_by_layer[l][block_idx] = 0;
                 }
-                engine.get_state_table().transition(active_slot, BlockState::Freed, BlockState::DenseResident);
-            } else {
-                // Subsequent token: compute delta relative to anchor.
-                // The block may be DenseResident (not yet compressed) or CompressedResident
-                // (if it was compressed from a previous decode step). Only transition if compressed.
-                BlockState cur_state = engine.get_state_table().get(active_slot);
-                if (cur_state == BlockState::CompressedResident) {
-                    engine.get_state_table().transition(active_slot, BlockState::CompressedResident, BlockState::DenseResident);
-                }
-                // (if DenseResident, no transition needed — we can write directly)
-
-                std::vector<ggml_fp16_t> anchor_k_fp16(F_test);
-                ggml_backend_tensor_get(engine.get_anchors_K(), anchor_k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                std::vector<ggml_fp16_t> anchor_v_fp16(F_test);
-                ggml_backend_tensor_get(engine.get_anchors_V(), anchor_v_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-
-                int offset = (active_block_tokens - 1) * F_test;
-                for (int i = 0; i < F_test; ++i) {
-                    active_k_dense[l][offset + i] = k_host[i] - ggml_fp16_to_fp32(anchor_k_fp16[i]);
-                    active_v_dense[l][offset + i] = v_host[i] - ggml_fp16_to_fp32(anchor_v_fp16[i]);
-                }
-            }
-        }
-
-        active_block_tokens++;
-        if (active_block_tokens == 64) {
-            // Trigger synchronous SVD compression for the completed block before moving to the next slot
-            for (int l = 0; l < n_layers; ++l) {
-                auto & engine = *kv_engines[l];
-                engine.get_state_table().transition(active_slot, BlockState::DenseResident, BlockState::Compressing);
-
-                CompressJob job;
-                job.session_id = 42;
-                job.block_id = active_slot;
-                job.block_size = 63; // active_block_tokens - 1
-                job.feat_dim = F_test;
-                job.rank = rank;
-                job.dense_k_ptr = active_k_dense[l].data();
-                job.dense_v_ptr = active_v_dense[l].data();
-
-                job.out_u_ptr = reinterpret_cast<int8_t*>(engine.get_U()->data) + active_slot * 64 * rank;
-                job.out_u_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_U_scale()->data) + active_slot;
-                job.out_vk_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VK()->data) + active_slot * rank * F_test;
-                job.out_vv_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VV()->data) + active_slot * rank * F_test;
-                job.out_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_scales()->data) + active_slot;
-                job.state_table = &engine.get_state_table();
-
-                compressor.compress_sync(job);
-
-                seq_lens_by_layer[l][active_slot] = 63;
                 ggml_backend_tensor_set(engine.get_seq_lens(), seq_lens_by_layer[l].data(), 0, seq_lens_by_layer[l].size() * sizeof(int32_t));
 
                 if (l == 0) {
-                    // Update mean key descriptor for Layer 0
-                    std::vector<float> avg_k(head_dim, 0.0f);
-                    std::vector<ggml_fp16_t> anchor_k_fp16(F_test);
-                    ggml_backend_tensor_get(engine.get_anchors_K(), anchor_k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                    for (int i = 0; i < head_dim; ++i) {
-                        avg_k[i] += ggml_fp16_to_fp32(anchor_k_fp16[i]);
-                        for (int t = 0; t < 63; ++t) {
-                            avg_k[i] += active_k_dense[0][t * F_test + i];
+                    std::vector<float> avg_k(F_test, 0.0f);
+                    for (int i = 0; i < F_test; ++i) {
+                        for (int t = 0; t < block_len; ++t) {
+                            avg_k[i] += k_block[t * F_test + i];
                         }
-                        avg_k[i] /= 64;
+                        avg_k[i] /= block_len;
                     }
 
                     std::vector<float> desc(desc_dim, 0.0f);
@@ -1075,20 +843,280 @@ int main(int argc, char ** argv) {
                     for (float val : desc) sum_sq += val * val;
                     float norm = std::sqrt(sum_sq) + 1e-8f;
                     for (float & val : desc) val /= norm;
-                    ggml_backend_tensor_set(engine.get_desc_matrix(), desc.data(), active_slot * desc_dim * sizeof(float), desc_dim * sizeof(float));
+                    ggml_backend_tensor_set(engine.get_desc_matrix(), desc.data(), block_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
                 }
             }
+        }
 
+        if (!interactive) {
+            std::cout << "[DiffKV Native] Waiting for background SVD compressor to catch up..." << std::endl;
+        }
+        for (int s = 0; s < num_blocks; ++s) {
+            auto start_time = std::chrono::steady_clock::now();
+            while (true) {
+                bool all_done = true;
+                for (int l = 0; l < n_layers; ++l) {
+                    BlockState st = kv_engines[l]->get_state_table().get(s);
+                    if (st != BlockState::CompressedResident && st != BlockState::DenseResident) {
+                        all_done = false;
+                        break;
+                    }
+                }
+                if (all_done) break;
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start_time
+                ).count();
+                if (elapsed > 4000) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+
+        std::vector<float> prefill_output_logits(n_vocab);
+        ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), (L - 1) * n_vocab * sizeof(float), n_vocab * sizeof(float));
+
+        std::vector<std::pair<float, int>> prefill_top_k;
+        for (int i = 0; i < n_vocab; ++i) {
+            prefill_top_k.push_back({prefill_output_logits[i], i});
+        }
+        std::sort(prefill_top_k.begin(), prefill_top_k.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+            return a.first > b.first;
+        });
+
+        if (!interactive) {
+            std::cout << "\n[Prefill Phase Top predictions]:\n";
+            for (int k = 0; k < 5; ++k) {
+                std::cout << "  " << k << ": \"" << model.token_to_piece(prefill_top_k[k].second) << "\" (id: " << prefill_top_k[k].second << ", logit: " << prefill_top_k[k].first << ")\n";
+            }
+        }
+
+        int32_t first_decode_token = prefill_top_k[0].second;
+
+        ggml_gallocr_free(prefill_galloc);
+        ggml_free(prefill_ctx);
+
+        // ── 2. DECODE PHASE ──
+        if (interactive) {
+            std::cout << "__RESPONSE__" << std::endl;
+        } else {
+            std::cout << "[Response] " << std::flush;
+        }
+
+        int32_t last_token = first_decode_token;
+        std::string first_piece = model.token_to_piece(last_token);
+        std::cout << first_piece << std::flush;
+
+        std::vector<int32_t> generated_tokens;
+        generated_tokens.push_back(last_token);
+        const int max_generate = 150; // Allow sufficient output length
+
+        int active_slot = (L - 1) / 64;
+        int active_block_tokens = L - active_slot * 64;
+        if (active_block_tokens == 64) {
             active_slot++;
             active_block_tokens = 0;
-            // Clear active buffers for next block
-            for (int l = 0; l < n_layers; ++l) {
+        }
+
+        for (int l = 0; l < n_layers; ++l) {
+            int p_key = l * 10000 + active_slot;
+            if (active_block_tokens > 0 && persistent_k_dense.count(p_key)) {
+                active_k_dense[l] = persistent_k_dense[p_key];
+                active_v_dense[l] = persistent_v_dense[p_key];
+            } else {
                 std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
                 std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
             }
         }
+
+        for (int step = 0; step < max_generate; ++step) {
+            int current_pos = L + step;
+
+            ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
+            ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
+
+            std::vector<float> slots_mask_host(n_slots, -1e10f);
+            int occupied_up_to = active_slot - 1;
+            for (int i = 0; i <= occupied_up_to; ++i) {
+                if (i >= 0 && i < n_slots) {
+                    slots_mask_host[i] = 0.0f;
+                }
+            }
+            ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
+
+            int current_k = std::max(0, std::min(8, active_slot));
+            for (int l = 0; l < n_layers; ++l) {
+                userdata[l].K = current_k;
+                userdata[l].active_k_dense = active_k_dense[l].data();
+                userdata[l].active_v_dense = active_v_dense[l].data();
+                userdata[l].active_block_tokens = active_block_tokens;
+                userdata[l].active_slot = active_slot;
+            }
+
+            if (ggml_backend_graph_compute(backend, decode_graph) != GGML_STATUS_SUCCESS) {
+                std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
+                break;
+            }
+
+            std::vector<float> output_logits(n_vocab);
+            ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+
+            constexpr float REP_PENALTY = 1.15f;
+            for (int32_t tok : generated_tokens) {
+                if (tok >= 0 && tok < n_vocab) {
+                    float& l = output_logits[tok];
+                    l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
+                }
+            }
+            if (last_token >= 0 && last_token < n_vocab) {
+                float& l = output_logits[last_token];
+                l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
+            }
+
+            std::vector<std::pair<float, int>> logits_sorted;
+            for (int i = 0; i < n_vocab; ++i) {
+                logits_sorted.push_back({output_logits[i], i});
+            }
+            std::sort(logits_sorted.begin(), logits_sorted.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                return a.first > b.first;
+            });
+
+            if (!interactive) {
+                std::cout << "\n[Step " << step << " Top predictions]:\n";
+                for (int i = 0; i < std::min(5, n_vocab); ++i) {
+                    std::cout << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].second) << "\" (id: " << logits_sorted[i].second << ", logit: " << logits_sorted[i].first << ")\n";
+                }
+            }
+
+            int32_t next_token = logits_sorted[0].second;
+
+            if (model.is_eog_token(next_token) || next_token == model.token_eos()) {
+                if (!interactive) {
+                    std::cout << " [EOS]" << std::endl;
+                }
+                break;
+            }
+
+            std::string piece = model.token_to_piece(next_token);
+            std::cout << piece << std::flush;
+
+            generated_tokens.push_back(next_token);
+            last_token = next_token;
+
+            for (int l = 0; l < n_layers; ++l) {
+                auto & engine = *kv_engines[l];
+                std::vector<float> k_host(F_test);
+                std::vector<float> v_host(F_test);
+                ggml_backend_tensor_get(decode_k_layers[l], k_host.data(), 0, F_test * sizeof(float));
+                ggml_backend_tensor_get(decode_v_layers[l], v_host.data(), 0, F_test * sizeof(float));
+
+                if (active_block_tokens == 0) {
+                    std::vector<ggml_fp16_t> k_fp16(F_test);
+                    std::vector<ggml_fp16_t> v_fp16(F_test);
+                    for (int i = 0; i < F_test; ++i) {
+                        k_fp16[i] = ggml_fp32_to_fp16(k_host[i]);
+                        v_fp16[i] = ggml_fp32_to_fp16(v_host[i]);
+                    }
+                    ggml_backend_tensor_set(engine.get_anchors_K(), k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                    ggml_backend_tensor_set(engine.get_anchors_V(), v_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                    if (l == 0) {
+                        int32_t anchor_seq_pos = current_pos;
+                        for (int ll = 0; ll < n_layers; ++ll) {
+                            ggml_backend_tensor_set(kv_engines[ll]->get_anchor_positions(), &anchor_seq_pos, active_slot * sizeof(int32_t), sizeof(int32_t));
+                        }
+                    }
+                    engine.get_state_table().transition(active_slot, BlockState::Freed, BlockState::DenseResident);
+                } else {
+                    BlockState cur_state = engine.get_state_table().get(active_slot);
+                    if (cur_state == BlockState::CompressedResident) {
+                        engine.get_state_table().transition(active_slot, BlockState::CompressedResident, BlockState::DenseResident);
+                    }
+
+                    std::vector<ggml_fp16_t> anchor_k_fp16(F_test);
+                    ggml_backend_tensor_get(engine.get_anchors_K(), anchor_k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                    std::vector<ggml_fp16_t> anchor_v_fp16(F_test);
+                    ggml_backend_tensor_get(engine.get_anchors_V(), anchor_v_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+
+                    int offset = (active_block_tokens - 1) * F_test;
+                    for (int i = 0; i < F_test; ++i) {
+                        active_k_dense[l][offset + i] = k_host[i] - ggml_fp16_to_fp32(anchor_k_fp16[i]);
+                        active_v_dense[l][offset + i] = v_host[i] - ggml_fp16_to_fp32(anchor_v_fp16[i]);
+                    }
+                }
+            }
+
+            active_block_tokens++;
+            if (active_block_tokens == 64) {
+                for (int l = 0; l < n_layers; ++l) {
+                    auto & engine = *kv_engines[l];
+                    engine.get_state_table().transition(active_slot, BlockState::DenseResident, BlockState::Compressing);
+
+                    CompressJob job;
+                    job.session_id = 42;
+                    job.block_id = active_slot;
+                    job.block_size = 63;
+                    job.feat_dim = F_test;
+                    job.rank = rank;
+                    job.dense_k_ptr = active_k_dense[l].data();
+                    job.dense_v_ptr = active_v_dense[l].data();
+
+                    job.out_u_ptr = reinterpret_cast<int8_t*>(engine.get_U()->data) + active_slot * 64 * rank;
+                    job.out_u_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_U_scale()->data) + active_slot;
+                    job.out_vk_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VK()->data) + active_slot * rank * F_test;
+                    job.out_vv_ptr = reinterpret_cast<ggml_fp16_t*>(engine.get_VV()->data) + active_slot * rank * F_test;
+                    job.out_scale = reinterpret_cast<ggml_fp16_t*>(engine.get_scales()->data) + active_slot;
+                    job.state_table = &engine.get_state_table();
+
+                    compressor.compress_sync(job);
+
+                    seq_lens_by_layer[l][active_slot] = 63;
+                    ggml_backend_tensor_set(engine.get_seq_lens(), seq_lens_by_layer[l].data(), 0, seq_lens_by_layer[l].size() * sizeof(int32_t));
+
+                    if (l == 0) {
+                        std::vector<float> avg_k(head_dim, 0.0f);
+                        std::vector<ggml_fp16_t> anchor_k_fp16(F_test);
+                        ggml_backend_tensor_get(engine.get_anchors_K(), anchor_k_fp16.data(), active_slot * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                        for (int i = 0; i < head_dim; ++i) {
+                            avg_k[i] += ggml_fp16_to_fp32(anchor_k_fp16[i]);
+                            for (int t = 0; t < 63; ++t) {
+                                avg_k[i] += active_k_dense[0][t * F_test + i];
+                            }
+                            avg_k[i] /= 64;
+                        }
+
+                        std::vector<float> desc(desc_dim, 0.0f);
+                        for (int r = 0; r < desc_dim; ++r) {
+                            float sum = 0.0f;
+                            for (int c = 0; c < head_dim; ++c) {
+                                sum += avg_k[c] * W_proj_host[r * head_dim + c];
+                            }
+                            desc[r] = sum;
+                        }
+                        float sum_sq = 0.0f;
+                        for (float val : desc) sum_sq += val * val;
+                        float norm = std::sqrt(sum_sq) + 1e-8f;
+                        for (float & val : desc) val /= norm;
+                        ggml_backend_tensor_set(engine.get_desc_matrix(), desc.data(), active_slot * desc_dim * sizeof(float), desc_dim * sizeof(float));
+                    }
+                }
+
+                active_slot++;
+                active_block_tokens = 0;
+                for (int l = 0; l < n_layers; ++l) {
+                    std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
+                    std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+                }
+            }
+        }
+        std::cout << std::endl;
+        if (interactive) {
+            std::cout << "__FINISH__" << std::endl;
+        }
+
+        if (!interactive) {
+            break;
+        }
     }
-    std::cout << std::endl;
 
     // Stop compressor and cleanup
     compressor.stop();
