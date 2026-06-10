@@ -475,10 +475,9 @@ def _prefill_fused_history_attend(
     Q = q.shape[2]
     D = q.shape[3]
 
-    V_K_flat = V_K.float().reshape(N, R, H * D)
-    deltas_k_flat = torch.bmm(U.float(), V_K_flat)
-    deltas_k = (deltas_k_flat.reshape(N, S, H, D)
-                * scales.view(N, 1, 1, 1).float()).to(q.dtype)
+    V_K_flat = V_K.reshape(N, R, H * D)
+    deltas_k_flat = torch.bmm(U, V_K_flat)
+    deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1)
 
     K_unrot_full = torch.cat(
         [anchors_K.unsqueeze(1), anchors_K.unsqueeze(1) + deltas_k], dim=1
@@ -493,8 +492,8 @@ def _prefill_fused_history_attend(
     K_rot_full = (K_unrot_full * cos_s.unsqueeze(2)
                   + K_rotated  * sin_s.unsqueeze(2))
 
-    q_hqd = q.float().squeeze(0).reshape(H, Q, D)
-    K_hnd = K_rot_full.float().permute(2, 0, 1, 3).reshape(H, N * (1 + S), D)
+    q_hqd = q.squeeze(0).reshape(H, Q, D).float()
+    K_hnd = K_rot_full.permute(2, 0, 1, 3).reshape(H, N * (1 + S), D).float()
     scores_flat = torch.bmm(q_hqd, K_hnd.transpose(1, 2)) * inv_scale
     scores = scores_flat.reshape(H, Q, N, 1 + S)
 
@@ -504,30 +503,30 @@ def _prefill_fused_history_attend(
         (~valid).unsqueeze(0).unsqueeze(0), float('-inf')
     )
 
-    scores_f = scores.reshape(H, Q, N * (1 + S))
+    scores_f = scores.reshape(H, Q, N * (1 + S)).float()
     lse_hist  = torch.logsumexp(scores_f, dim=-1)
     weights_f = torch.softmax(scores_f, dim=-1)
-    weights   = weights_f.reshape(H, Q, N, 1 + S)
+    weights   = weights_f.reshape(H, Q, N, 1 + S).to(q.dtype)
 
     w_anchor = weights[:, :, :, 0]
     w_delta  = weights[:, :, :, 1:]
     p_total  = w_anchor + w_delta.sum(dim=-1)
 
-    anc_v_hnd = anchors_V.permute(1, 0, 2).float()
-    out_anchor = torch.bmm(p_total.float(), anc_v_hnd)
+    anc_v_hnd = anchors_V.permute(1, 0, 2)
+    out_anchor = torch.bmm(p_total, anc_v_hnd)
 
-    w_delta_perm = w_delta.float().permute(2, 0, 1, 3)
+    w_delta_perm = w_delta.permute(2, 0, 1, 3)
     w_delta_flat = w_delta_perm.reshape(N, H * Q, S)
-    W_proj_flat = torch.bmm(w_delta_flat, U.float())
-    W_proj_flat = W_proj_flat * scales.float().view(N, 1, 1)
+    W_proj_flat = torch.bmm(w_delta_flat, U)
+    W_proj_flat = W_proj_flat * scales.view(N, 1, 1)
     W_proj = W_proj_flat.reshape(N, H, Q, R).permute(1, 2, 0, 3)
 
-    V_V_t  = V_V.float().permute(2, 0, 1, 3)
+    V_V_t  = V_V.permute(2, 0, 1, 3)
     W_proj_flat2 = W_proj.reshape(H, Q, N * R)
     V_V_t_flat2 = V_V_t.contiguous().reshape(H, N * R, D)
     out_delta = torch.bmm(W_proj_flat2, V_V_t_flat2)
 
-    out_hist = (out_anchor + out_delta).to(q.dtype).unsqueeze(0)
+    out_hist = (out_anchor + out_delta).unsqueeze(0)
     lse_out  = lse_hist.to(q.dtype).unsqueeze(0)
 
     lse_padded = lse_out.unsqueeze(-1).expand(1, H, Q, D)

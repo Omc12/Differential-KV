@@ -42,7 +42,7 @@ def get_process_memory_info(proc):
 async def query_ollama(prompt, length, num_tokens=30):
     url = "http://localhost:11434/api/generate"
     data = {
-        "model": "qwen2.5:0.5b-instruct-fp16",
+        "model": "qwen2.5:1.5b-instruct-fp16",
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -71,7 +71,7 @@ async def query_ollama(prompt, length, num_tokens=30):
 async def query_diffkv(prompt, num_tokens=30):
     url = "http://localhost:8000/v1/chat/completions"
     data = {
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": num_tokens,
         "temperature": 0.0
@@ -164,6 +164,36 @@ async def run_ollama_benchmark(lengths):
             
         # Let Ollama settle
         time.sleep(3.0)
+
+    # Force unload model from Ollama
+    print("Unloading Ollama model...")
+    try:
+        url = "http://localhost:11434/api/generate"
+        data = {
+            "model": "qwen2.5:1.5b-instruct-fp16",
+            "prompt": "",
+            "keep_alive": 0
+        }
+        req = urllib.request.Request(
+            url, 
+            data=json.dumps(data).encode('utf-8'), 
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            response.read()
+        print("Successfully sent unload request to Ollama.")
+    except Exception as e:
+        print(f"Warning: Failed to send unload request to Ollama: {e}")
+
+    # Terminate runner if still present
+    runner = find_ollama_runner()
+    if runner is not None:
+        try:
+            runner.terminate()
+            runner.wait(timeout=5)
+            print("Terminated lingering Ollama runner process.")
+        except Exception:
+            pass
         
     return results
 
@@ -171,52 +201,57 @@ async def run_diffkv_benchmark(lengths):
     print("\n=== BENCHMARKING DIFFKV ===")
     results = {}
     
-    # Start DiffKV server in background
-    print("Starting DiffKV API Gateway server...")
-    cmd = [
-        "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_venv/bin/python3",
-        "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME/serving/openai_compatible_api_gateway.py",
-        "--preset", "low",
-        "--rank", "16"
-    ]
-    env = os.environ.copy()
-    env["PYTHONPATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME"
-    env["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
-    env["DIFFKV_USE_TORCH_COMPILE"] = "0"
-    
-    proc_srv = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-    
-    # Wait for server to start
-    gateway_proc = None
-    for i in range(40):
-        time.sleep(1.0)
-        gateway_proc = find_gateway_process()
-        if gateway_proc is not None:
-            # Check if port 8000 is responding
+    for length in lengths:
+        print(f"\nTesting context length: {length} tokens...")
+        
+        # Start DiffKV server in background
+        print("Starting DiffKV API Gateway server...")
+        cmd = [
+            "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_venv/bin/python3",
+            "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME/serving/openai_compatible_api_gateway.py",
+            "--model", "Qwen/Qwen2.5-1.5B-Instruct",
+            "--preset", "low",
+            "--rank", "16"
+        ]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME"
+        env["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
+        env["DIFFKV_USE_TORCH_COMPILE"] = "0"
+        
+        log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_log.txt")
+        log_file = open(log_path, "w")
+        proc_srv = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        # Wait for server to start
+        gateway_proc = None
+        for i in range(120):
+            time.sleep(1.0)
+            gateway_proc = find_gateway_process()
+            if gateway_proc is not None:
+                # Check if port 8000 is responding
+                info = get_diffkv_runtime_info()
+                if info:
+                    print(f"DiffKV server started on PID: {gateway_proc.pid}")
+                    break
+        else:
+            print("Error starting DiffKV server!")
+            proc_srv.terminate()
+            log_file.close()
+            continue
+            
+        try:
+            # Baseline idle memory
+            base_rss, _ = get_process_memory_info(gateway_proc)
             info = get_diffkv_runtime_info()
-            if info:
-                print(f"DiffKV server started on PID: {gateway_proc.pid}")
-                break
-    else:
-        print("Error starting DiffKV server!")
-        proc_srv.terminate()
-        return {}
-        
-    try:
-        # Baseline idle memory
-        base_rss, _ = get_process_memory_info(gateway_proc)
-        info = get_diffkv_runtime_info()
-        base_mps_driver = info.get("mps_driver_gb", 0.0) * 1024.0
-        print(f"DiffKV Idle CPU RSS: {base_rss:.1f} MB | MPS Driver: {base_mps_driver:.1f} MB")
-        
-        for length in lengths:
-            print(f"\nTesting context length: {length} tokens...")
+            base_mps_driver = info.get("mps_driver_gb", 0.0) * 1024.0
+            print(f"DiffKV Idle CPU RSS: {base_rss:.1f} MB | MPS Driver: {base_mps_driver:.1f} MB")
+            
             word_count = int(length / 1.3)
             dummy_prompt = "hello " * word_count
             
@@ -255,8 +290,6 @@ async def run_diffkv_benchmark(lengths):
                 peak_mps = max(mps_samples) if mps_samples else base_mps_driver
                 
                 # In macOS, the footprint is CPU RSS + MPS Driver.
-                # Let's compute both the total physical memory footprint (RSS + MPS)
-                # and just the VRAM/MPS component.
                 total_footprint = peak_rss + peak_mps
                 delta_footprint = total_footprint - (base_rss + base_mps_driver)
                 
@@ -269,15 +302,16 @@ async def run_diffkv_benchmark(lengths):
                     "time_s": elapsed
                 }
                 
-            # Settle server & force gc
-            get_diffkv_runtime_info() # triggers server internal cleanup if any
+        finally:
+            # Kill server
+            print("Shutting down DiffKV server...")
+            proc_srv.terminate()
+            proc_srv.wait()
+            try:
+                log_file.close()
+            except Exception:
+                pass
             time.sleep(3.0)
-            
-    finally:
-        # Kill server
-        print("\nShutting down DiffKV server...")
-        proc_srv.terminate()
-        proc_srv.wait()
         
     return results
 
@@ -292,7 +326,7 @@ async def main():
     
     # Print comparison table
     print("\n" + "="*80)
-    print("                 REAL-WORLD BENCHMARK RESULTS (Qwen-2.5 0.5B FP16)")
+    print("                 REAL-WORLD BENCHMARK RESULTS (Qwen-2.5 1.5B FP16)")
     print("="*80)
     print(f"{'Length':<10} | {'Ollama Peak RAM':<18} | {'DiffKV VRAM/MPS':<18} | {'DiffKV CPU RSS':<15} | {'DiffKV Total'}")
     print("-"*80)
