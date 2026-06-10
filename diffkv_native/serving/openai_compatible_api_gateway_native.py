@@ -216,3 +216,29 @@ async def chat_completions(request: ChatCompletionRequest):
                 "total_tokens": 0
             }
         }
+
+@app.get("/v1/models")
+@app.get("/models")
+async def list_models():
+    models = [
+        "diffkv-Qwen-Qwen2.5-0.5B-Instruct",
+        "qwen2.5-0.5b-instruct.gguf",
+        "diffkv-qwen2.5-0.5b-instruct",
+        "diffkv-serving"
+    ]
+    return {
+        "object": "list",
+        "data": [{
+            "id": m,
+            "name": m,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "differential-kv"
+        } for m in models]
+    }
+
+@app.get("/health")
+@app.get("/v1/health")
+async def health():
+    return {"status": "ok"}
+
