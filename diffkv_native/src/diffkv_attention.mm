@@ -45,7 +45,7 @@ static void init_metal_runtime() {
     if (!g_pipeline) {
         std::cerr << "[Metal Attention] Error creating Compute Pipeline State: " << [[error localizedDescription] UTF8String] << std::endl;
     } else {
-        std::cout << "[Metal Attention] Successfully initialized Metal runtime and compiled shader library." << std::endl;
+        std::cerr << "[Metal Attention] Successfully initialized Metal runtime and compiled shader library." << std::endl;
     }
 }
 

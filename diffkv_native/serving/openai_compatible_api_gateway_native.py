@@ -76,9 +76,9 @@ class SubprocessWrapper:
             buffer += char
             if "__RESPONSE__" in buffer:
                 response_started = True
-                buffer = buffer.replace("__RESPONSE__", "")
+                buffer = "" # Discard everything before and including __RESPONSE__
 
-        # 2. Yield any remaining chars in the buffer
+        # 2. Yield any remaining chars in the buffer (should be empty now)
         if buffer:
             yield buffer
             buffer = ""
