@@ -296,12 +296,62 @@ class DiffKVHFWrapper:
         device: str = None,   # None → auto-detect (CUDA / MPS / CPU)
         quantization_config: Any = None,
         torch_dtype: torch.dtype = None,  # None → auto (fp16 on GPU/MPS, bf16 on CPU)
+        lazy: bool = False,
     ):
         self.model_id = model_id
-        self.config = config
-        # ── Device auto-detection ──────────────────────────────────────────
+        self.config = config or {}
+        self._quantization_config = quantization_config
+        self._torch_dtype_arg = torch_dtype
         self.device = device if device is not None else _get_best_device()
-        print(f"[DiffKV] Device: {self.device}")
+        self.lazy = lazy
+        
+        self.mode = self.config.get("mode", "fp16")
+        self.block_size = self.config.get("block_size", 256)      # S=256 → 5.2× compression
+        self.rank = self.config.get("rank", 16)
+        self.micro_block_size = self.config.get("micro_block_size", 256)
+        
+        print(f"[DiffKV] Lazy-initializing tokenizer for model {model_id}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        self._alphanumeric_tokens = {}
+        
+        # Initialize stop token IDs from tokenizer
+        self.stop_token_ids = set()
+        eos_id = self.tokenizer.eos_token_id
+        if isinstance(eos_id, list):
+            self.stop_token_ids.update(eos_id)
+        elif isinstance(eos_id, int):
+            self.stop_token_ids.add(eos_id)
+            
+        special_words = ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
+        for word in special_words:
+            tok_id = self.tokenizer.convert_tokens_to_ids(word)
+            if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
+                self.stop_token_ids.add(tok_id)
+
+        self.model = None
+        self.manager = None
+        self.active_session = None
+
+        if not self.lazy:
+            self.ensure_loaded()
+
+    def ensure_loaded(self):
+        if self.model is not None:
+            return
+
+        model_id = self.model_id
+        config = self.config
+        device = self.device
+        quantization_config = self._quantization_config
+        
+        torch_dtype = self._torch_dtype_arg
+        if torch_dtype is None:
+            if self.device in ("cuda", "mps"):
+                torch_dtype = torch.float16
+            else:
+                torch_dtype = torch.bfloat16
+
+        print(f"[DiffKV] Loading model weights on demand: {model_id} (device={self.device}, dtype={torch_dtype})...")
         
         # ── Preset-aware Auto-Quantization ──
         preset = config.get("preset", os.environ.get("DIFFKV_PRESET", "mid")).lower()
@@ -312,28 +362,8 @@ class DiffKVHFWrapper:
             elif self.device == "mps":
                 print("[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
 
-        if torch_dtype is None:
-            if self.device in ("cuda", "mps"):
-                torch_dtype = torch.float16
-            else:
-                torch_dtype = torch.bfloat16
-        self.mode = config.get("mode", "fp16")
-        self.block_size = config.get("block_size", 256)      # S=256 → 5.2× compression
-        self.rank = config.get("rank", 16)
-        self.micro_block_size = config.get("micro_block_size", 256)
-
-        
-        print(f"Loading model {model_id} (device={self.device}, dtype={torch_dtype})...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-        self._alphanumeric_tokens = {}
-
         # ── 4-bit NF4 loading (BitsAndBytes) ──────────────────────────────────
-        # Triggered by config["quantization"] == "nf4" or DIFFKV_QUANTIZATION=nf4.
-        # Reduces Qwen 2.5 1.5B from 3.1 GB → ~1.2 GB VRAM.
-        # Only available on CUDA (bitsandbytes has no MPS support yet).
-        _quant_type_early = config.get(
-            "quantization", os.environ.get("DIFFKV_QUANTIZATION", "")
-        )
+        _quant_type_early = config.get("quantization", os.environ.get("DIFFKV_QUANTIZATION", ""))
         if (quantization_config is None
                 and _quant_type_early == "nf4"
                 and _has_cuda()):
@@ -343,16 +373,13 @@ class DiffKVHFWrapper:
                     load_in_4bit=True,
                     bnb_4bit_quant_type="nf4",
                     bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,   # 2nd quantization step: -15% more VRAM
+                    bnb_4bit_use_double_quant=True,
                 )
-                torch_dtype = torch.bfloat16   # compute dtype must match
-                print("[DiffKV] 4-bit NF4 quantization enabled (BitsAndBytes). "
-                      "Model VRAM: ~1.2 GB vs 3.1 GB BF16.")
+                torch_dtype = torch.bfloat16
+                print("[DiffKV] 4-bit NF4 quantization enabled (BitsAndBytes).")
             except ImportError:
-                print("[DiffKV] WARNING: bitsandbytes not installed — cannot use NF4 4-bit. "
-                      "Install with: pip install bitsandbytes. Falling back to fp16.")
+                print("[DiffKV] WARNING: bitsandbytes not installed — falling back to fp16.")
 
-        # Fix 3.1 — configure CUDA allocator BEFORE model load to prevent fragmentation
         if _has_cuda():
             _configure_cuda_allocator()
 
@@ -364,7 +391,7 @@ class DiffKVHFWrapper:
                 trust_remote_code=True,
                 quantization_config=quantization_config,
                 low_cpu_mem_usage=True,
-                use_safetensors=True,      # Fix 1C — mmap load; peak RAM: 3× → 1× model size
+                use_safetensors=True,
             )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -373,16 +400,13 @@ class DiffKVHFWrapper:
                 device_map=device,
                 trust_remote_code=True,
                 quantization_config=quantization_config,
-                use_safetensors=True,      # Fix 1C — mmap load; peak RAM: 3× → 1× model size
+                use_safetensors=True,
             )
 
         self.model.eval()
-
-        # Fix 3.3 — disable gradient tracking immediately (inference-only; frees autograd graph)
         _clear_cpu_grad_state(self.model)
 
-        
-        # ── Auto-detect standard 4-bit / 8-bit quantization (GPTQ, AWQ, bitsandbytes) ──
+        # ── Auto-detect standard 4-bit / 8-bit quantization ──
         is_quantized = False
         for name, module in self.model.named_modules():
             module_class = module.__class__.__name__.lower()
@@ -390,7 +414,6 @@ class DiffKVHFWrapper:
                 is_quantized = True
                 break
         
-        # Also check parameters datatype (quantized models might have int8 or int4 weights)
         if not is_quantized:
             for param in self.model.parameters():
                 if param.dtype not in [torch.float16, torch.float32, torch.bfloat16]:
@@ -398,19 +421,15 @@ class DiffKVHFWrapper:
                     break
         
         if is_quantized:
-            print("[DiffKV] Auto-detected already quantized model (GPTQ/AWQ/Bitsandbytes). Skipping torchao post-quantization to avoid conflicts.")
+            print("[DiffKV] Auto-detected already quantized model. Skipping torchao post-quantization.")
         else:
-            # ── Native weight-only quantization (torchao) ──
-            # Skip on MPS/CPU where torchao may not support all ops yet.
             quant_type = config.get("quantization", os.environ.get("DIFFKV_QUANTIZATION"))
             if quant_type in ["int8", "int4"]:
                 if not _has_cuda() and not _has_mps():
-                    print(f"[DiffKV] torchao {quant_type} quantization skipped on CPU — run on GPU/MPS for best performance.")
+                    print(f"[DiffKV] torchao {quant_type} quantization skipped on CPU.")
                 elif _is_apple_silicon() and not _has_cuda():
-                    # MPS: int4 group quantization requires contiguous ops not yet in MPS;
-                    # int8 is generally safe. Attempt it and fall back gracefully.
                     if quant_type == "int4":
-                        print("[DiffKV] int4 quantization on MPS is experimental — attempting, will fall back if unsupported.")
+                        print("[DiffKV] int4 quantization on MPS is experimental.")
                     try:
                         from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
                         cfg = Int8WeightOnlyConfig() if quant_type == "int8" else Int4WeightOnlyConfig()
@@ -422,14 +441,10 @@ class DiffKVHFWrapper:
                 else:
                     try:
                         from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
-                        
                         if quant_type == "int8":
-                            print("[DiffKV] Applying native 8-bit weight-only quantization using torchao...")
                             quantize_(self.model, Int8WeightOnlyConfig())
                         elif quant_type == "int4":
-                            print("[DiffKV] Applying native 4-bit weight-only quantization using torchao...")
                             quantize_(self.model, Int4WeightOnlyConfig())
-                            
                         print("[DiffKV] torchao quantization applied successfully!")
                     except Exception as e:
                         print(f"[DiffKV] WARNING: Failed to apply torchao weight quantization: {e}")
@@ -440,25 +455,22 @@ class DiffKVHFWrapper:
         if self.rank >= self.head_dim:
             old_rank = self.rank
             self.rank = self.head_dim // 2
-            print(f"[DiffKV] WARNING: Configured SVD rank {old_rank} is >= head_dim {self.head_dim} for model {model_id}. "
-                  f"Capping SVD rank to {self.rank} (head_dim // 2) to preserve accuracy and prevent gibberish outputs.")
+            print(f"[DiffKV] WARNING: Capping SVD rank to {self.rank}")
         
         self.kv_heads = getattr(self.model.config, "num_key_value_heads", self.heads)
         self.serving_mode = config.get("serving_mode", "balanced")
         
-        # Estimate parameter count to scale retrieval limits
         try:
             num_params = sum(p.numel() for p in self.model.parameters())
             print(f"[DiffKV] Model parameter count: {num_params / 1e6:.1f}M")
         except Exception:
-            num_params = 1.5e9 # default fallback to 1.5B
+            num_params = 1.5e9
 
         self.config = self.config or {}
-        # Scale defaults based on parameter size if not explicitly set in config
         if "srl_k_min" not in self.config and "DIFFKV_SRL_K_MIN" not in os.environ:
-            if num_params < 1.0e9:  # < 1.0B (e.g. 0.5B)
+            if num_params < 1.0e9:
                 self.config["srl_k_min"] = 10
-            elif num_params < 3.0e9:  # < 3.0B (e.g. 1.5B)
+            elif num_params < 3.0e9:
                 self.config["srl_k_min"] = 15
             else:
                 self.config["srl_k_min"] = 20
@@ -472,79 +484,38 @@ class DiffKVHFWrapper:
                 self.config["srl_k_max"] = 200
 
         if "srl_threshold" not in self.config and "DIFFKV_SRL_THRESHOLD" not in os.environ:
-            # Scale threshold based on model capacity (smaller model = lower threshold for sparse trigger)
             if num_params < 1.0e9:
                 self.config["srl_threshold"] = 25
             elif num_params < 3.0e9:
                 self.config["srl_threshold"] = 40
             else:
                 self.config["srl_threshold"] = 50
+
         self.manager = KVRuntimeManager(
             self.num_layers,
             self.kv_heads,
             self.head_dim,
-            device=device,
+            device=self.device,
             rank=self.rank,
             micro_block_size=self.micro_block_size,
             serving_mode=self.serving_mode,
-            tokenizer=self.tokenizer,    # ← SRL: used for stop word precomputation
+            tokenizer=self.tokenizer,
             config=self.config,
         )
         self.manager.model_id = self.model_id
-        self.active_session = None
         
-        # Collect stop token IDs universally across all loaded models (Qwen, Llama, Mistral, etc.)
-        self.stop_token_ids = set()
-        
-        # 1. Collect from tokenizer.eos_token_id
-        eos_id = self.tokenizer.eos_token_id
-        if isinstance(eos_id, list):
-            self.stop_token_ids.update(eos_id)
-        elif isinstance(eos_id, int):
-            self.stop_token_ids.add(eos_id)
-            
-        # 2. Collect from model generation_config
+        # Load stop token IDs from model config if present
         if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
             model_eos = getattr(self.model.generation_config, "eos_token_id", None)
             if isinstance(model_eos, list):
                 self.stop_token_ids.update(model_eos)
             elif isinstance(model_eos, int):
                 self.stop_token_ids.add(model_eos)
-                
-        # 3. Universally scan tokenizer's special tokens for genuine end-of-turn markers.
-        # IMPORTANT: "<|im_start|>" is intentionally EXCLUDED — it is a message START
-        # marker, not a stop signal. Including it causes premature generation halt when
-        # the model predicts a next-turn prefix (e.g. structured output or roleplay).
-        special_words = ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
-        for word in special_words:
-            tok_id = self.tokenizer.convert_tokens_to_ids(word)
-            if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
-                self.stop_token_ids.add(tok_id)
-                
-        # 4. Fallback standard token
-        if self.tokenizer.eos_token_id is not None:
-            if isinstance(self.tokenizer.eos_token_id, list):
-                self.stop_token_ids.update(self.tokenizer.eos_token_id)
-            else:
-                self.stop_token_ids.add(self.tokenizer.eos_token_id)
-                
-        print(f"[DiffKV] Universal Stop Token IDs initialized: {sorted(list(self.stop_token_ids))}")
-        
-        # Apply Differential KV Attention Interception!
+
         apply_diffkv_attention_patch(self.model, self.manager)
 
-        # ── Torch Compile JIT Fusion (auto-enabled for non-quantized models) ──
-        # dynamic=True: handles variable chunk sizes without recompilation.
-        # mode="reduce-overhead": enables horizontal kernel fusion (RMSNorm+SiLU+linear)
-        #   which gives ~30-40% prefill throughput improvement.
-        # For bitsandbytes/GPTQ/AWQ quantized models: skip compile — the custom quantized
-        #   Linear layers cause graph breaks that prevent useful compilation.
-        # On Windows: TorchInductor requires cl.exe (MSVC). Skip if not available.
         use_compile = "1" if self.manager.config.torch_compile else "0"
         if _is_apple_silicon():
-            # macOS/MPS: torch.compile (even FFN-only compilation) via "aot_eager" or "inductor" backend 
-            # introduces severe python tracing overhead which degrades generation throughput.
-            # Thus, we disable it by default on Apple Silicon.
             if use_compile == "auto":
                 use_compile = "0"
 

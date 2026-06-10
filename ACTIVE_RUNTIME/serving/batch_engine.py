@@ -164,6 +164,14 @@ class ContinuousBatchEngine:
         self._prefill_input_buf = None
         self._prefill_pos_buf   = None
 
+        # Track activity and idle timeouts (similar to Ollama)
+        self.last_active_time = time.time()
+        try:
+            self.idle_timeout_seconds = float(os.environ.get("DIFFKV_MODEL_IDLE_TIMEOUT", "300"))
+        except Exception:
+            self.idle_timeout_seconds = 300.0
+        print(f"[DiffKV] Idle model unloading configured for {self.idle_timeout_seconds} seconds of inactivity.")
+
     # ── VRAM instrumentation ────────────────────────────────────────────
 
     def _log_vram(self, tag: str):
@@ -336,6 +344,13 @@ class ContinuousBatchEngine:
             print(f"[DiffKV] Warning: failed to clear TritonDiffKV reconstruction buffers: {e}")
 
     async def submit(self, session_id: str, payload: Dict) -> asyncio.Queue:
+        # Ensure model is loaded on demand when a request arrives
+        if hasattr(self.wrapper, "ensure_loaded"):
+            self.wrapper.ensure_loaded()
+        if self.draft_wrapper is not None and hasattr(self.draft_wrapper, "ensure_loaded"):
+            self.draft_wrapper.ensure_loaded()
+        self.last_active_time = time.time()
+
         req = BatchRequest(
             session_id=session_id,
             prompt=payload["prompt"],
@@ -487,6 +502,16 @@ class ContinuousBatchEngine:
                     req = await asyncio.wait_for(self.incoming_queue.get(), timeout=0.05)
                     self.active_requests.append(req)
                 except asyncio.TimeoutError:
+                    # Check if the model has been idle too long and should be unloaded to free VRAM
+                    if self.wrapper.model is not None:
+                        idle_time = time.time() - self.last_active_time
+                        if idle_time > self.idle_timeout_seconds:
+                            print(f"\n[DiffKV] Server has been idle for {idle_time:.1f} seconds. "
+                                  f"Unloading model weights from VRAM to free resources...")
+                            if hasattr(self.wrapper, "close"):
+                                self.wrapper.close()
+                            if self.draft_wrapper is not None and hasattr(self.draft_wrapper, "close"):
+                                self.draft_wrapper.close()
                     continue
 
             # 2. Filter out cancelled requests, freeing their KV cache.
@@ -499,6 +524,9 @@ class ContinuousBatchEngine:
 
             if not self.active_requests:
                 continue
+
+            # Update activity timestamp during processing
+            self.last_active_time = time.time()
 
             try:
                 await self._step()
