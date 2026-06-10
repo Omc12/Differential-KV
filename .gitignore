@@ -30,3 +30,11 @@
 
 # Ignore the massive synthetic systems archive completely
 archive/ARCHIVED_SYNTHETIC_SYSTEMS/
+
+# Build directories
+**/build/
+build/
+
+# GGUF models
+*.gguf
+**/qwen2.5-0.5b-instruct.gguf
