@@ -41,7 +41,7 @@ inline bool is_legal_transition(BlockState from, BlockState to) {
         case BlockState::DenseResident:
             return to == BlockState::Compressing;
         case BlockState::Compressing:
-            return to == BlockState::CompressedResident || to == BlockState::Invalid;
+            return to == BlockState::CompressedResident || to == BlockState::Invalid || to == BlockState::DenseResident;
         case BlockState::CompressedResident:
             return to == BlockState::PagingOut || to == BlockState::Freed;
         case BlockState::PagingOut:

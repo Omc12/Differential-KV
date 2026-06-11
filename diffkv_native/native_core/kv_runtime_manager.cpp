@@ -189,6 +189,19 @@ void KVRuntimeManager::ingest_prefill(
         );
     }
     
+    // Sync block states in case any block transitioned (though mostly they will stay Compressing until wait_for_compressor)
+    for (int l = 0; l < n_layers_; ++l) {
+        auto & blocks = ingest_manager_->get_blocks(l);
+        for (auto & block : blocks) {
+            if (block->state == BlockState::Compressing && block->pool_idx != -1) {
+                BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
+                if (current_state != BlockState::Compressing) {
+                    block->state = current_state;
+                }
+            }
+        }
+    }
+
     // Register newly compressed blocks with the pager
     auto & blocks = ingest_manager_->get_blocks(0);
     for (auto & block : blocks) {
@@ -207,6 +220,20 @@ void KVRuntimeManager::ingest_decode(
     int current_pos,
     const std::vector<int32_t>& token_ids
 ) {
+    // 1. Sync states of any compressing blocks from background thread to host blocks
+    for (int l = 0; l < n_layers_; ++l) {
+        auto & blocks = ingest_manager_->get_blocks(l);
+        for (auto & block : blocks) {
+            if (block->state == BlockState::Compressing && block->pool_idx != -1) {
+                BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
+                if (current_state != BlockState::Compressing) {
+                    block->state = current_state;
+                }
+            }
+        }
+    }
+
+    // 2. Ingest token
     for (int l = 0; l < n_layers_; ++l) {
         int r = get_layer_rank(l);
         ingest_manager_->ingest_chunk(
@@ -223,7 +250,20 @@ void KVRuntimeManager::ingest_decode(
         );
     }
     
-    // Register any new compressed blocks
+    // 3. Sync states again in case any block transitioned during ingest_chunk
+    for (int l = 0; l < n_layers_; ++l) {
+        auto & blocks = ingest_manager_->get_blocks(l);
+        for (auto & block : blocks) {
+            if (block->state == BlockState::Compressing && block->pool_idx != -1) {
+                BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
+                if (current_state != BlockState::Compressing) {
+                    block->state = current_state;
+                }
+            }
+        }
+    }
+    
+    // 4. Register any new compressed blocks
     auto & blocks = ingest_manager_->get_blocks(0);
     for (auto & block : blocks) {
         if (block->state == BlockState::CompressedResident) {
@@ -308,9 +348,14 @@ void KVRuntimeManager::wait_for_compressor() {
     for (int l = 0; l < n_layers_; ++l) {
         auto & blocks = ingest_manager_->get_blocks(l);
         for (auto & block : blocks) {
-            if (block->state == BlockState::Compressing) {
+            if (block->state == BlockState::Compressing && block->pool_idx != -1) {
                 auto start_time = std::chrono::steady_clock::now();
-                while (block->state == BlockState::Compressing) {
+                while (true) {
+                    BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
+                    if (current_state != BlockState::Compressing) {
+                        block->state = current_state;
+                        break;
+                    }
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - start_time
                     ).count();
@@ -320,6 +365,14 @@ void KVRuntimeManager::wait_for_compressor() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
+        }
+    }
+    
+    // Register newly compressed blocks with the pager
+    auto & blocks = ingest_manager_->get_blocks(0);
+    for (auto & block : blocks) {
+        if (block->state == BlockState::CompressedResident) {
+            pager_->register_block(block.get(), engines_);
         }
     }
 }

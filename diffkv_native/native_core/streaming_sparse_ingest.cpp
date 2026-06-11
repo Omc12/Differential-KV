@@ -309,7 +309,8 @@ void StreamingSparseIngestManager::ingest_chunk(
             session_token_ids_.resize(position_start + chunk_len);
         }
         for (int t = 0; t < chunk_len; ++t) {
-            session_token_ids_[position_start + t] = token_ids[t];
+            // token_ids is the full prompt vector; use position_start as offset
+            session_token_ids_[position_start + t] = token_ids[position_start + t];
         }
     }
 
@@ -474,8 +475,31 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.out_anchor_v = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_anchors_V()->data) + slot_id * F_test;
     job.state_table = &engines[layer_idx]->get_state_table();
     
-    compressor.submit(job);
-    stats_.total_compressed++;
+    bool async_svd = true;
+    if (const char* env_async = std::getenv("DIFFKV_ASYNC_SVD")) {
+        std::string s(env_async);
+        if (s == "0" || s == "false" || s == "off") {
+            async_svd = false;
+        }
+    } else {
+#ifdef __APPLE__
+        async_svd = false;
+#endif
+    }
+
+    if (async_svd) {
+        bool submitted = compressor.submit(job);
+        if (!submitted) {
+            engines[layer_idx]->get_state_table().transition(slot_id, BlockState::Compressing, BlockState::DenseResident);
+            block->state = BlockState::DenseResident;
+        } else {
+            stats_.total_compressed++;
+        }
+    } else {
+        compressor.compress_sync(job);
+        block->state = engines[layer_idx]->get_state_table().get(slot_id);
+        stats_.total_compressed++;
+    }
 }
 
 } // namespace diffkv

@@ -23,13 +23,23 @@ struct ggml_backend_owner {
     ggml_backend_sched_t sched = nullptr;
 
     ggml_backend_owner() {
-        gpu_backend = ggml_backend_init_best();
+        bool use_gpu = false;
+        if (const char* env_gpu = std::getenv("DIFFKV_USE_GPU")) {
+            if (std::string(env_gpu) == "1") {
+                use_gpu = true;
+            }
+        }
         cpu_backend = ggml_backend_cpu_init();
-        if (!gpu_backend) {
+        if (use_gpu) {
+            gpu_backend = ggml_backend_init_best();
+            if (!gpu_backend) {
+                gpu_backend = cpu_backend;
+            }
+        } else {
             gpu_backend = cpu_backend;
         }
-        ggml_backend_t backends[] = { gpu_backend, cpu_backend };
-        sched = ggml_backend_sched_new(backends, NULL, 2, 8192, false, true);
+        ggml_backend_t backends[] = { gpu_backend };
+        sched = ggml_backend_sched_new(backends, NULL, 1, 8192, false, true);
     }
 
     ~ggml_backend_owner() {
@@ -659,8 +669,8 @@ int main(int argc, char ** argv) {
 
     // Allocate persistent dense vectors and tables
     int F_test = kv_heads * head_dim;
-    std::vector<std::vector<float>> active_k_dense(n_layers, std::vector<float>(64 * F_test, 0.0f));
-    std::vector<std::vector<float>> active_v_dense(n_layers, std::vector<float>(64 * F_test, 0.0f));
+    std::vector<std::vector<float>> active_k_dense(n_layers, std::vector<float>(16384 * F_test, 0.0f));
+    std::vector<std::vector<float>> active_v_dense(n_layers, std::vector<float>(16384 * F_test, 0.0f));
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
     std::vector<std::vector<int32_t>> seq_lens_by_layer(n_layers, std::vector<int32_t>(n_slots, 0));
@@ -759,7 +769,19 @@ int main(int argc, char ** argv) {
         std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test));
         std::vector<float> prefill_output_logits(n_vocab);
 
-        int chunk_size = 2048;  // Larger chunks = fewer graph alloc/compute cycles = faster prefill
+        int chunk_size = 512; // Default to balanced preset size
+        if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
+            std::string p(env_preset);
+            std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (p == "low") {
+                chunk_size = 256;
+            } else if (p == "high") {
+                chunk_size = 2048;
+            }
+        }
+        if (const char* env_pcs = std::getenv("DIFFKV_PREFILL_CHUNK_SIZE")) {
+            try { chunk_size = std::stoi(env_pcs); } catch (...) {}
+        }
         int pos_start = 0;
 
         while (pos_start < L) {
@@ -976,18 +998,53 @@ int main(int argc, char ** argv) {
             }
         }
 
+        std::vector<int> dense_start_positions(n_layers, 0);
+        std::vector<int> total_dense_tokens(n_layers, 0);
+
         for (int l = 0; l < n_layers; ++l) {
             auto & b_list = runtime_manager.get_ingest_manager().get_blocks(l);
-            if (active_block_tokens > 0 && !b_list.empty()) {
-                auto & last_block = b_list.back();
-                std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
-                std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
-                std::memcpy(active_k_dense[l].data(), last_block->active_k.data(), last_block->active_k.size() * sizeof(float));
-                std::memcpy(active_v_dense[l].data(), last_block->active_v.data(), last_block->active_v.size() * sizeof(float));
-            } else {
-                std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
-                std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+            int curr_token_idx = 0;
+            bool found_first = false;
+
+            std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
+            std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+
+            for (auto & block : b_list) {
+                if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                    if (!found_first) {
+                        dense_start_positions[l] = block->anchor_idx;
+                        found_first = true;
+                    }
+
+                    std::memcpy(
+                        active_k_dense[l].data() + curr_token_idx * F_test,
+                        block->anchor_k.data(),
+                        F_test * sizeof(float)
+                    );
+                    std::memcpy(
+                        active_v_dense[l].data() + curr_token_idx * F_test,
+                        block->anchor_v.data(),
+                        F_test * sizeof(float)
+                    );
+                    curr_token_idx++;
+
+                    if (!block->active_k.empty()) {
+                        int active_len = block->active_k.size() / F_test;
+                        std::memcpy(
+                            active_k_dense[l].data() + curr_token_idx * F_test,
+                            block->active_k.data(),
+                            block->active_k.size() * sizeof(float)
+                        );
+                        std::memcpy(
+                            active_v_dense[l].data() + curr_token_idx * F_test,
+                            block->active_v.data(),
+                            block->active_v.size() * sizeof(float)
+                        );
+                        curr_token_idx += active_len;
+                    }
+                }
             }
+            total_dense_tokens[l] = curr_token_idx;
         }
 
         for (int step = 0; step < max_generate; ++step) {
@@ -1055,8 +1112,8 @@ int main(int argc, char ** argv) {
                 userdata[l].K = current_k;
                 userdata[l].active_k_dense = active_k_dense[l].data();
                 userdata[l].active_v_dense = active_v_dense[l].data();
-                userdata[l].active_block_tokens = active_block_tokens;
-                userdata[l].active_slot = physical_active_slot;
+                userdata[l].active_block_tokens = total_dense_tokens[l];
+                userdata[l].active_slot = dense_start_positions[l];
             }
 
 
@@ -1104,6 +1161,13 @@ int main(int argc, char ** argv) {
                 break;
             }
 
+            std::string piece = model.token_to_piece(next_token);
+            std::cout << piece << std::flush;
+
+            generated_tokens.push_back(next_token);
+            all_tokens.push_back(next_token);
+            last_token = next_token;
+
             std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
             std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
             for (int l = 0; l < n_layers; ++l) {
@@ -1129,14 +1193,48 @@ int main(int argc, char ** argv) {
             // Sync active dense buffers for custom attention
             for (int l = 0; l < n_layers; ++l) {
                 auto & b_list = runtime_manager.get_ingest_manager().get_blocks(l);
-                if (active_block_tokens > 0 && !b_list.empty()) {
-                    auto & last_block = b_list.back();
-                    std::memcpy(active_k_dense[l].data(), last_block->active_k.data(), last_block->active_k.size() * sizeof(float));
-                    std::memcpy(active_v_dense[l].data(), last_block->active_v.data(), last_block->active_v.size() * sizeof(float));
-                } else {
-                    std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
-                    std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+                int curr_token_idx = 0;
+                bool found_first = false;
+
+                std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
+                std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+
+                for (auto & block : b_list) {
+                    if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                        if (!found_first) {
+                            dense_start_positions[l] = block->anchor_idx;
+                            found_first = true;
+                        }
+
+                        std::memcpy(
+                            active_k_dense[l].data() + curr_token_idx * F_test,
+                            block->anchor_k.data(),
+                            F_test * sizeof(float)
+                        );
+                        std::memcpy(
+                            active_v_dense[l].data() + curr_token_idx * F_test,
+                            block->anchor_v.data(),
+                            F_test * sizeof(float)
+                        );
+                        curr_token_idx++;
+
+                        if (!block->active_k.empty()) {
+                            int active_len = block->active_k.size() / F_test;
+                            std::memcpy(
+                                active_k_dense[l].data() + curr_token_idx * F_test,
+                                block->active_k.data(),
+                                block->active_k.size() * sizeof(float)
+                            );
+                            std::memcpy(
+                                active_v_dense[l].data() + curr_token_idx * F_test,
+                                block->active_v.data(),
+                                block->active_v.size() * sizeof(float)
+                            );
+                            curr_token_idx += active_len;
+                        }
+                    }
                 }
+                total_dense_tokens[l] = curr_token_idx;
             }
 
             // Index completed block to inverted index

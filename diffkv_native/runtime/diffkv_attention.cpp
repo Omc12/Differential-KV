@@ -18,7 +18,7 @@ void execute_cpu_attention(
     bool has_rope, float rope_freq_base
 ) {
     const float* Q_ptr = Q;
-    const ggml_fp16_t* U = (const ggml_fp16_t*)kv_engine->get_U()->data;
+    const int8_t* U = (const int8_t*)kv_engine->get_U()->data;
     const ggml_fp16_t* U_scale = (const ggml_fp16_t*)kv_engine->get_U_scale()->data;
     const ggml_fp16_t* VK = (const ggml_fp16_t*)kv_engine->get_VK()->data;
     const ggml_fp16_t* VV = (const ggml_fp16_t*)kv_engine->get_VV()->data;
@@ -190,7 +190,7 @@ void custom_attention_op_callback(
     std::vector<float> out_sparse(n_q_heads * D, 0.0f);
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
 
-#ifdef __APPLE__
+#if 0
     // On macOS, run GPU Metal sparse attention
     execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
     
@@ -220,25 +220,14 @@ void custom_attention_op_callback(
 #endif
 
     // ── Dense Window Attention & LSE Combine on CPU ──
-    bool has_dense = (data->active_block_tokens > 0 && data->active_k_dense != nullptr && data->active_v_dense != nullptr);
+    bool has_dense = (data->active_block_tokens > 0 || c != nullptr) && data->active_k_dense != nullptr && data->active_v_dense != nullptr;
     if (has_dense) {
         int active_block_tokens = data->active_block_tokens;
-        int active_slot = data->active_slot;
+        int anchor_pos = data->active_slot; // We passed start position as active_slot
         const float* active_k_dense = data->active_k_dense;
         const float* active_v_dense = data->active_v_dense;
         const int g = n_q_heads / n_kv_heads;
         const int half_d = D / 2;
-
-        // Read anchors_K and anchors_V from engine
-        std::vector<ggml_fp16_t> anchors_K_fp16(ggml_nelements(kv_engine->get_anchors_K()));
-        ggml_backend_tensor_get(kv_engine->get_anchors_K(), anchors_K_fp16.data(), 0, anchors_K_fp16.size() * sizeof(ggml_fp16_t));
-        std::vector<ggml_fp16_t> anchors_V_fp16(ggml_nelements(kv_engine->get_anchors_V()));
-        ggml_backend_tensor_get(kv_engine->get_anchors_V(), anchors_V_fp16.data(), 0, anchors_V_fp16.size() * sizeof(ggml_fp16_t));
-
-        // Read anchor positions from engine
-        std::vector<int32_t> anchor_positions_host(ggml_nelements(kv_engine->get_anchor_positions()));
-        ggml_backend_tensor_get(kv_engine->get_anchor_positions(), anchor_positions_host.data(), 0, anchor_positions_host.size() * sizeof(int32_t));
-        int anchor_pos = anchor_positions_host[active_slot];
 
         // Append current token's key/value if available
         int F_test = n_kv_heads * D;
@@ -263,7 +252,7 @@ void custom_attention_op_callback(
 
             float* active_k_ptr = const_cast<float*>(active_k_dense);
             float* active_v_ptr = const_cast<float*>(active_v_dense);
-            int offset = (active_block_tokens - 1) * F_test;
+            int offset = active_block_tokens * F_test;
             for (int i = 0; i < F_test; ++i) {
                 active_k_ptr[offset + i] = cur_k[i];
                 active_v_ptr[offset + i] = cur_v[i];
@@ -296,26 +285,14 @@ void custom_attention_op_callback(
                 int pos = anchor_pos + t;
 
                 for (int d = 0; d < D; ++d) {
-                    float raw_k, raw_v;
-                    if (t == 0) {
-                        raw_k = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + d]);
-                        raw_v = ggml_fp16_to_fp32(anchors_V_fp16[active_slot * n_kv_heads * D + kv_head * D + d]);
-                    } else {
-                        int offset = (t - 1) * n_kv_heads * D + kv_head * D;
-                        raw_k = active_k_dense[offset + d];
-                        raw_v = active_v_dense[offset + d];
-                    }
+                    int offset = t * n_kv_heads * D + kv_head * D;
+                    float raw_k = active_k_dense[offset + d];
+                    float raw_v = active_v_dense[offset + d];
                     V_dense[t * D + d] = raw_v;
 
                     if (has_rope) {
                         int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_partner;
-                        if (t == 0) {
-                            raw_partner = ggml_fp16_to_fp32(anchors_K_fp16[active_slot * n_kv_heads * D + kv_head * D + partner]);
-                        } else {
-                            int offset = (t - 1) * n_kv_heads * D + kv_head * D;
-                            raw_partner = active_k_dense[offset + partner];
-                        }
+                        float raw_partner = active_k_dense[offset + partner];
                         float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
                         int idx = (d < half_d) ? d : (d - half_d);
                         float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
@@ -361,11 +338,6 @@ void custom_attention_op_callback(
 
             // Combine with sparse attention if sparse blocks exist
             if (K > 0) {
-#ifdef __APPLE__
-                // In apple mode, we retrieve lse_sparse from the GPU memory copy
-                // which was populated in execute_metal_attention.
-                // We'll read it from the local vector copy that we fetched.
-#endif
                 float lse_sparse_val = lse_sparse[h];
                 float lse_max = std::max(lse_dense, lse_sparse_val);
                 float w_dense = std::exp(lse_dense - lse_max);
