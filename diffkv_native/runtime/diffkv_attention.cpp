@@ -28,8 +28,39 @@ void execute_cpu_attention(
     const ggml_fp16_t* scales = (const ggml_fp16_t*)kv_engine->get_scales()->data;
     const int32_t* anchor_positions = (const int32_t*)kv_engine->get_anchor_positions()->data;
 
+    // Deduplicate slots to prevent token double-processing and softmax distortion
+    int n_slots = kv_engine->get_seq_lens()->ne[0];
+    std::vector<int32_t> unique_slots;
+    unique_slots.reserve(K);
+    for (int k = 0; k < K; ++k) {
+        int32_t slot_id = slots[k];
+        if (slot_id >= 0 && slot_id < n_slots) {
+            if (std::find(unique_slots.begin(), unique_slots.end(), slot_id) == unique_slots.end()) {
+                unique_slots.push_back(slot_id);
+            }
+        }
+    }
+    const int32_t* active_slots = unique_slots.data();
+    int active_K = unique_slots.size();
+
     int half_d = D / 2;
     const int g = n_q_heads / n_kv_heads;
+
+    static int call_count = 0;
+    bool should_print = (call_count == 0);
+    if (should_print) {
+        call_count++;
+        std::cerr << "\n[C++ CPU ATTN DEBUG - Layer 0 Step 0]\n";
+        std::cerr << "  D: " << D << ", rank: " << rank << ", K: " << active_K << " (original K: " << K << "), scale: " << scale << ", has_rope: " << has_rope << ", rope_freq_base: " << rope_freq_base << "\n";
+        std::cerr << "  Q[head 0] (first 10):";
+        for (int d = 0; d < 10; ++d) std::cerr << " " << Q_ptr[d];
+        std::cerr << "\n  slots (all active K):";
+        for (int k = 0; k < active_K; ++k) {
+            int slot_id = active_slots[k];
+            std::cerr << " " << slot_id << "(pos=" << anchor_positions[slot_id] << ")";
+        }
+        std::cerr << "\n";
+    }
 
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
@@ -40,14 +71,24 @@ void execute_cpu_attention(
             std::vector<float> q_proj;
             std::vector<float> token_scores;
         };
-        std::vector<SlotScoreInfo> slot_infos(K);
+        std::vector<SlotScoreInfo> slot_infos(active_K);
 
-        for (int k = 0; k < K; ++k) {
-            int slot_id = slots[k];
+        for (int k = 0; k < active_K; ++k) {
+            int slot_id = active_slots[k];
             int slen = seq_lens[slot_id];
             float scale_u = ggml_fp16_to_fp32(U_scale[slot_id]);
             float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
             int anchor_pos = anchor_positions[slot_id];
+
+            if (should_print && h == 0 && k == 0) {
+                std::cerr << "  [Block 0, Head 0]\n";
+                std::cerr << "    slot_id: " << slot_id << ", slen: " << slen << ", scale_u: " << scale_u << ", block_scale: " << block_scale << ", anchor_pos: " << anchor_pos << "\n";
+                std::cerr << "    raw_ak (first 10):";
+                for (int d = 0; d < 10; ++d) {
+                    std::cerr << " " << ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
+                }
+                std::cerr << "\n";
+            }
 
             // 1. Anchor score (rotated by RoPE)
             float score_anc = 0.0f;
@@ -66,6 +107,10 @@ void execute_cpu_attention(
                 score_anc += Q_ptr[h * D + d] * ak_rot;
             }
             slot_infos[k].anchor_score = score_anc;
+
+            if (should_print && h == 0 && k == 0) {
+                std::cerr << "    score_anc: " << score_anc << "\n";
+            }
 
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
@@ -93,6 +138,12 @@ void execute_cpu_attention(
             }
             slot_infos[k].q_proj = q_proj;
 
+            if (should_print && h == 0 && k == 0) {
+                std::cerr << "    q_proj (first 10):";
+                for (int r = 0; r < std::min(10, rank); ++r) std::cerr << " " << q_proj[r];
+                std::cerr << "\n";
+            }
+
             // 3. Delta scores
             slot_infos[k].token_scores.resize(slen);
             for (int t = 0; t < slen; ++t) {
@@ -105,11 +156,17 @@ void execute_cpu_attention(
                 slot_infos[k].token_scores[t] = t_score;
                 if (t_score > max_score) max_score = t_score;
             }
+
+            if (should_print && h == 0 && k == 0) {
+                std::cerr << "    token_scores (first 10):";
+                for (int t = 0; t < std::min(10, slen); ++t) std::cerr << " " << slot_infos[k].token_scores[t];
+                std::cerr << "\n";
+            }
         }
 
         // Softmax denominator
         double sum_exp = 0.0;
-        for (int k = 0; k < K; ++k) {
+        for (int k = 0; k < active_K; ++k) {
             sum_exp += std::exp(slot_infos[k].anchor_score * scale - max_score);
             for (float s : slot_infos[k].token_scores) {
                 sum_exp += std::exp(s - max_score);
@@ -119,8 +176,8 @@ void execute_cpu_attention(
 
         // Pass 2: Accumulate values
         std::vector<double> accum_val(D, 0.0);
-        for (int k = 0; k < K; ++k) {
-            int slot_id = slots[k];
+        for (int k = 0; k < active_K; ++k) {
+            int slot_id = active_slots[k];
             int slen = seq_lens[slot_id];
             float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
             float scale_u = ggml_fp16_to_fp32(U_scale[slot_id]);
@@ -157,6 +214,13 @@ void execute_cpu_attention(
         for (int d = 0; d < D; ++d) {
             cpu_output[h * D + d] = static_cast<float>(accum_val[d]);
         }
+
+        if (should_print && h == 0) {
+            std::cerr << "    lse_sparse[0]: " << lse_sparse[0] << "\n";
+            std::cerr << "    out_sparse[0] (first 10):";
+            for (int d = 0; d < 10; ++d) std::cerr << " " << cpu_output[d];
+            std::cerr << "\n";
+        }
     }
 }
 
@@ -191,12 +255,29 @@ void custom_attention_op_callback(
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
 
 #ifdef __APPLE__
-    // On macOS, run GPU Metal sparse attention
+    // On macOS, run GPU Metal sparse attention unless forced to CPU
+    bool force_cpu_attn = false;
+    if (const char* env_force = std::getenv("DIFFKV_FORCE_CPU_ATTN")) {
+        if (std::string(env_force) == "1") {
+            force_cpu_attn = true;
+        }
+    }
     if (K > 0) {
-        execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
-        
-        // Copy sparse output back for blending on host
-        memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
+        if (!force_cpu_attn) {
+            execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
+            // Copy sparse output back for blending on host
+            memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
+        } else {
+            execute_cpu_attention(
+                (const float*)Q->data,
+                (const int32_t*)slot_indices->data,
+                out_sparse.data(),
+                lse_sparse.data(),
+                kv_engine,
+                n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
+                has_rope, rope_freq_base
+            );
+        }
     }
 #else
     // On non-macOS (CUDA/CPU fallback), run CPU Project-Then-Attend attention

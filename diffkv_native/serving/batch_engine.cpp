@@ -557,7 +557,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         n_slots = std::stoi(env_slots);
     }
     
-    int micro_block_size = 16;
+    int micro_block_size = 64;
     if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }
@@ -602,12 +602,63 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     
     // Initialize session-specific lists if empty
     if (session->active_k_dense.empty()) {
-        session->active_k_dense.assign(n_layers, std::vector<float>(64 * F_test, 0.0f));
-        session->active_v_dense.assign(n_layers, std::vector<float>(64 * F_test, 0.0f));
+        session->active_k_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
+        session->active_v_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
     }
     if (session->seq_lens_by_layer.empty()) {
         session->seq_lens_by_layer.assign(n_layers, std::vector<int32_t>(n_slots, 0));
     }
+
+    auto sync_active_dense_buffers = [&](
+        std::vector<int>& dense_start_positions,
+        std::vector<int>& total_dense_tokens
+    ) {
+        for (int l = 0; l < n_layers; ++l) {
+            auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(l);
+            int curr_token_idx = 0;
+            bool found_first = false;
+
+            std::fill(session->active_k_dense[l].begin(), session->active_k_dense[l].end(), 0.0f);
+            std::fill(session->active_v_dense[l].begin(), session->active_v_dense[l].end(), 0.0f);
+
+            for (auto & block : b_list) {
+                if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                    if (!found_first) {
+                        dense_start_positions[l] = block->anchor_idx;
+                        found_first = true;
+                    }
+
+                    std::memcpy(
+                        session->active_k_dense[l].data() + curr_token_idx * F_test,
+                        block->anchor_k.data(),
+                        F_test * sizeof(float)
+                    );
+                    std::memcpy(
+                        session->active_v_dense[l].data() + curr_token_idx * F_test,
+                        block->anchor_v.data(),
+                        F_test * sizeof(float)
+                    );
+                    curr_token_idx++;
+
+                    if (!block->active_k.empty()) {
+                        int active_len = block->active_k.size() / F_test;
+                        std::memcpy(
+                            session->active_k_dense[l].data() + curr_token_idx * F_test,
+                            block->active_k.data(),
+                            block->active_k.size() * sizeof(float)
+                        );
+                        std::memcpy(
+                            session->active_v_dense[l].data() + curr_token_idx * F_test,
+                            block->active_v.data(),
+                            block->active_v.size() * sizeof(float)
+                        );
+                        curr_token_idx += active_len;
+                    }
+                }
+            }
+            total_dense_tokens[l] = curr_token_idx;
+        }
+    };
     
     // Format full prompt and tokenize
     std::vector<int32_t> prompt_tokens = model_->tokenize(req->prompt, true);
@@ -659,6 +710,32 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         session_manager_->ensure_residency(req->session_id);
         
         runtime_manager_->reset();
+        
+        // Determine adaptive micro-block size matching Python's logic
+        int default_mbs = 64;
+        if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
+            default_mbs = std::stoi(env_mbs);
+        }
+        int adaptive_mbs = default_mbs;
+        if (L > 0) {
+            int raw_target = 16;
+            if (L < 256) {
+                raw_target = 16;
+            } else if (L < 1024) {
+                raw_target = 32;
+            } else if (L < 4096) {
+                raw_target = 64;
+            } else if (L < 8192) {
+                raw_target = 128;
+            } else {
+                raw_target = 256;
+            }
+            int target = std::min(raw_target, default_mbs);
+            adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
+        }
+        session->micro_block_size = adaptive_mbs;
+        runtime_manager_->set_micro_block_size(adaptive_mbs);
+        
         prefill_offset = 0;
     }
     
@@ -842,16 +919,31 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.inverted_index.clear();
     session->srl_state.chunk_graph = diffkv::ChunkGraph();
     session->srl_state.semantic_index = diffkv::SemanticIndex();
+    session->srl_state.recent_generated_tokens.clear();
+    session->srl_state.current_query_tokens.clear();
+    session->srl_state.current_step_slots.clear();
+    session->srl_state.current_step_count = 0;
+    session->srl_state.recent_miss_rate = 0.0f;
+    session->srl_state.k_multiplier = 1.0f;
+    session->srl_state.call_count = 0;
 
     auto & blocks_layer0 = runtime_manager_->get_ingest_manager().get_blocks(0);
     int completed_blocks = blocks_layer0.size();
     if (completed_blocks > 0) {
         std::vector<int32_t> slot_ids(completed_blocks);
         for (int i = 0; i < completed_blocks; ++i) {
-            slot_ids[i] = blocks_layer0[i]->pool_idx;
+            slot_ids[i] = i; // Logical block index
         }
         std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
-        ggml_backend_tensor_get(runtime_manager_->get_engines()[0]->get_desc_matrix(), desc_matrix_host.data(), 0, completed_blocks * desc_dim * sizeof(float));
+        for (int i = 0; i < completed_blocks; ++i) {
+            int slot_id = blocks_layer0[i]->pool_idx;
+            ggml_backend_tensor_get(
+                runtime_manager_->get_engines()[0]->get_desc_matrix(),
+                desc_matrix_host.data() + i * desc_dim,
+                slot_id * desc_dim * sizeof(float),
+                desc_dim * sizeof(float)
+            );
+        }
 
         session->srl_state = build_srl_state_from_blocks(
             desc_matrix_host.data(),
@@ -859,7 +951,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             completed_blocks,
             prompt_tokens.data(),
             L,
-            64, // block_size
+            session->micro_block_size + 1, // block_size
             stop_token_ids_,
             6, // K_semantic
             2, // K_temporal
@@ -882,20 +974,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
     }
     
-    // Copy active token dense embeddings to active buffers
-    for (int l = 0; l < n_layers; ++l) {
-        auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(l);
-        if (session->active_block_tokens > 0 && !b_list.empty()) {
-            auto & last_block = b_list.back();
-            std::fill(session->active_k_dense[l].begin(), session->active_k_dense[l].end(), 0.0f);
-            std::fill(session->active_v_dense[l].begin(), session->active_v_dense[l].end(), 0.0f);
-            std::memcpy(session->active_k_dense[l].data(), last_block->active_k.data(), last_block->active_k.size() * sizeof(float));
-            std::memcpy(session->active_v_dense[l].data(), last_block->active_v.data(), last_block->active_v.size() * sizeof(float));
-        } else {
-            std::fill(session->active_k_dense[l].begin(), session->active_k_dense[l].end(), 0.0f);
-            std::fill(session->active_v_dense[l].begin(), session->active_v_dense[l].end(), 0.0f);
-        }
-    }
+    std::vector<int> dense_start_positions(n_layers, 0);
+    std::vector<int> total_dense_tokens(n_layers, 0);
+    sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
     
     // Decode generation loop
     for (int step = 1; step < req->max_tokens; ++step) {
@@ -945,7 +1026,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             if (i >= 0 && i < (int)blocks.size()) {
                 int slot_id = blocks[i]->pool_idx;
                 if (slot_id >= 0 && slot_id < n_slots) {
-                    slots_mask_host[slot_id] = 0.0f;
+                    if (blocks[i]->state != BlockState::DenseResident && blocks[i]->state != BlockState::Compressing) {
+                        slots_mask_host[slot_id] = 0.0f;
+                    }
                 }
             }
         }
@@ -962,8 +1045,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             userdata[l].K = current_k;
             userdata[l].active_k_dense = session->active_k_dense[l].data();
             userdata[l].active_v_dense = session->active_v_dense[l].data();
-            userdata[l].active_block_tokens = session->active_block_tokens;
-            userdata[l].active_slot = physical_active_slot;
+            userdata[l].active_block_tokens = total_dense_tokens[l];
+            userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
         }
         
         if (ggml_backend_sched_graph_compute(sched_, decode_graph) != GGML_STATUS_SUCCESS) {
@@ -1012,17 +1095,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
         
-        for (int l = 0; l < n_layers; ++l) {
-            auto & b_list_l = runtime_manager_->get_ingest_manager().get_blocks(l);
-            if (session->active_block_tokens > 0 && !b_list_l.empty()) {
-                auto & last_block = b_list_l.back();
-                std::memcpy(session->active_k_dense[l].data(), last_block->active_k.data(), last_block->active_k.size() * sizeof(float));
-                std::memcpy(session->active_v_dense[l].data(), last_block->active_v.data(), last_block->active_v.size() * sizeof(float));
-            } else {
-                std::fill(session->active_k_dense[l].begin(), session->active_k_dense[l].end(), 0.0f);
-                std::fill(session->active_v_dense[l].begin(), session->active_v_dense[l].end(), 0.0f);
-            }
-        }
+        sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
         
         if (session->active_block_tokens == 0 && session->active_slot > old_active_slot) {
             int prev_slot = old_active_slot;
@@ -1039,7 +1112,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 update_srl_from_compressed_block(
                     session->srl_state,
                     desc.data(),
-                    block->pool_idx,
+                    prev_slot, // Logical index
                     block->token_indices.data(),
                     block->token_count(),
                     block->anchor_idx,
@@ -1050,10 +1123,18 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 auto & all_blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
                 int cur_N = all_blocks.size();
                 std::vector<int32_t> cur_slots(cur_N);
-                for (int i = 0; i < cur_N; ++i) cur_slots[i] = all_blocks[i]->pool_idx;
+                for (int i = 0; i < cur_N; ++i) cur_slots[i] = i; // Logical indices
 
                 std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                ggml_backend_tensor_get(runtime_manager_->get_engines()[0]->get_desc_matrix(), cur_desc_matrix.data(), 0, cur_N * desc_dim * sizeof(float));
+                for (int i = 0; i < cur_N; ++i) {
+                    int slot_id = all_blocks[i]->pool_idx;
+                    ggml_backend_tensor_get(
+                        runtime_manager_->get_engines()[0]->get_desc_matrix(),
+                        cur_desc_matrix.data() + i * desc_dim,
+                        slot_id * desc_dim * sizeof(float),
+                        desc_dim * sizeof(float)
+                    );
+                }
 
                 session->srl_state.chunk_graph = build_chunk_graph(
                     cur_desc_matrix.data(),

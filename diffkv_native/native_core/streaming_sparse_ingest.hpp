@@ -99,6 +99,10 @@ public:
         std::swap(stats_, other_stats);
     }
 
+    void set_micro_block_size(int size) {
+        micro_block_size_ = size;
+    }
+
 private:
     int next_anchor_idx(int layer_idx) const;
     void submit_block_for_compression(

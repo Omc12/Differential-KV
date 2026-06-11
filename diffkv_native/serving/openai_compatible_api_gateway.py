@@ -57,6 +57,7 @@ class SubprocessWrapper:
             stderr=None,   # inherit stderr so logs go to terminal
             text=False,
             bufsize=0,
+            env=os.environ,
         )
 
         # Drain stdout until __READY__
@@ -156,15 +157,19 @@ class SubprocessWrapper:
         loop.call_soon_threadsafe(out_queue.put_nowait, {"prefill_done": True, "text": ""})
 
         # Yield any bytes that arrived with or after __RESPONSE__
+        import codecs
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
         if buf:
-            text = buf.decode("utf-8", errors="replace")
-            # Check if FINISH is already in this fragment
-            if _SENTINEL_FINISH.decode() in text:
-                final = text.split(_SENTINEL_FINISH.decode())[0]
-                if final:
-                    loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final})
+            if _SENTINEL_FINISH in buf:
+                final_bytes = buf.split(_SENTINEL_FINISH)[0]
+                final_text = decoder.decode(final_bytes, final=True)
+                if final_text:
+                    loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_text})
                 loop.call_soon_threadsafe(out_queue.put_nowait, None)
                 return
+            
+            text = decoder.decode(buf)
             if text:
                 loop.call_soon_threadsafe(out_queue.put_nowait, {"text": text})
 
@@ -177,19 +182,18 @@ class SubprocessWrapper:
                     # Process died — treat as finish
                     break
                 accumulated += b
-                finish_str = _SENTINEL_FINISH.decode()
-                acc_str = accumulated.decode("utf-8", errors="replace")
-                if finish_str in acc_str:
-                    final_part = acc_str.split(finish_str)[0]
-                    if final_part:
-                        loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_part})
+                if _SENTINEL_FINISH in accumulated:
+                    final_bytes = accumulated.split(_SENTINEL_FINISH)[0]
+                    final_text = decoder.decode(final_bytes, final=True)
+                    if final_text:
+                        loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_text})
                     break
                 # Flush safely: keep a tail buffer long enough to hold the sentinel
                 tail_len = len(_SENTINEL_FINISH) + 4
                 if len(accumulated) > tail_len:
                     safe = accumulated[:-tail_len]
                     remaining = accumulated[-tail_len:]
-                    text = safe.decode("utf-8", errors="replace")
+                    text = decoder.decode(safe)
                     if text:
                         loop.call_soon_threadsafe(out_queue.put_nowait, {"text": text})
                     accumulated = remaining
@@ -469,6 +473,12 @@ if __name__ == '__main__':
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "512"
 
     os.environ["DIFFKV_MAX_TOKENS"] = str(args.max_tokens)
+
+    if "DIFFKV_USE_GPU" not in os.environ:
+        os.environ["DIFFKV_USE_GPU"] = "1"
+
+    if "DIFFKV_MICRO_BLOCK_SIZE" not in os.environ:
+        os.environ["DIFFKV_MICRO_BLOCK_SIZE"] = "64"
 
     if "DIFFKV_BINARY_PATH" not in os.environ:
         os.environ["DIFFKV_BINARY_PATH"] = BINARY_PATH_DEFAULT

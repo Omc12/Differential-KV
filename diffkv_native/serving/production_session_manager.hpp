@@ -46,6 +46,7 @@ struct ProductionSession {
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
     InvertedIndex inverted_index;
+    int micro_block_size = 64;
 };
 
 class SharedPrefixManager {

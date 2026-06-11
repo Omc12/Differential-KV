@@ -431,6 +431,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
 
     *params.out_scale = ggml_fp32_to_fp16(scale);
+    if (params.out_seq_len) {
+        *params.out_seq_len = S_deltas;
+    }
 
     return true;
 }

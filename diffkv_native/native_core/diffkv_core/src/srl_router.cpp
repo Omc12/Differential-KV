@@ -31,6 +31,7 @@ inline void cblas_sgemv(
 }
 #endif
 #include <vector>
+#include <unordered_set>
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -121,8 +122,23 @@ void anchor_screen(
 ) {
     if (M <= 0 || k_keep <= 0) return;
 
-    if (M <= k_keep) {
-        std::copy(candidate_slots, candidate_slots + M, out_slots);
+    // Deduplicate candidate slots preserving order
+    std::vector<int32_t> unique_candidates;
+    std::unordered_set<int32_t> seen;
+    for (int m = 0; m < M; ++m) {
+        int32_t slot = candidate_slots[m];
+        if (slot >= 0 && slot < N_pool) {
+            if (!seen.count(slot)) {
+                unique_candidates.push_back(slot);
+                seen.insert(slot);
+            }
+        }
+    }
+    int M_unique = unique_candidates.size();
+
+    if (M_unique <= k_keep) {
+        std::copy(unique_candidates.begin(), unique_candidates.end(), out_slots);
+        std::fill(out_slots + M_unique, out_slots + k_keep, 0); // Pad with 0
         return;
     }
 
@@ -137,11 +153,10 @@ void anchor_screen(
         q_mean[d] /= H_q;
     }
 
-    // 2. Gather anchor keys for candidate slots and average over kv_heads
-    std::vector<float> anc_flat(M * D, 0.0f);
-    for (int m = 0; m < M; ++m) {
-        int slot_id = candidate_slots[m];
-        if (slot_id < 0 || slot_id >= N_pool) continue;
+    // 2. Gather anchor keys for unique candidate slots and average over kv_heads
+    std::vector<float> anc_flat(M_unique * D, 0.0f);
+    for (int m = 0; m < M_unique; ++m) {
+        int slot_id = unique_candidates[m];
         for (int h = 0; h < kv_heads; ++h) {
             int base = slot_id * kv_heads * D + h * D;
             for (int d = 0; d < D; ++d) {
@@ -154,12 +169,12 @@ void anchor_screen(
     }
 
     // 3. Dot product with mean query
-    std::vector<float> scores(M, 0.0f);
-    cblas_sgemv(CblasRowMajor, CblasNoTrans, M, D, scale, anc_flat.data(), D, q_mean.data(), 1, 0.0f, scores.data(), 1);
+    std::vector<float> scores(M_unique, 0.0f);
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, M_unique, D, scale, anc_flat.data(), D, q_mean.data(), 1, 0.0f, scores.data(), 1);
 
     // 4. Top-k sorting
-    int k_clamped = std::min(k_keep, M);
-    std::vector<int32_t> idx(M);
+    int k_clamped = std::min(k_keep, M_unique);
+    std::vector<int32_t> idx(M_unique);
     std::iota(idx.begin(), idx.end(), 0);
     std::partial_sort(idx.begin(), idx.begin() + k_clamped, idx.end(),
                       [&](int32_t a, int32_t b) {
@@ -167,8 +182,9 @@ void anchor_screen(
                       });
 
     for (int i = 0; i < k_clamped; ++i) {
-        out_slots[i] = candidate_slots[idx[i]];
+        out_slots[i] = unique_candidates[idx[i]];
     }
+    std::fill(out_slots + k_clamped, out_slots + k_keep, 0); // Pad with 0 if needed
 }
 
 } // namespace diffkv

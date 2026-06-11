@@ -130,4 +130,47 @@ int NativeBlockPool::get_free_slots_count() {
     return free_slots_.size();
 }
 
+void NativeBlockPool::zero_all_tensors() {
+    if (U_) {
+        std::vector<int8_t> zeros(ggml_nelements(U_), 0);
+        ggml_backend_tensor_set(U_, zeros.data(), 0, zeros.size() * sizeof(int8_t));
+    }
+    if (U_scale_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(U_scale_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(U_scale_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (VK_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(VK_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(VK_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (VV_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(VV_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(VV_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (anchors_K_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(anchors_K_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(anchors_K_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (anchors_V_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(anchors_V_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(anchors_V_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (seq_lens_) {
+        std::vector<int32_t> zeros(ggml_nelements(seq_lens_), 0);
+        ggml_backend_tensor_set(seq_lens_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
+    }
+    if (scales_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(scales_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (desc_matrix_) {
+        std::vector<float> zeros(ggml_nelements(desc_matrix_), 0.0f);
+        ggml_backend_tensor_set(desc_matrix_, zeros.data(), 0, zeros.size() * sizeof(float));
+    }
+    if (anchor_positions_) {
+        std::vector<int32_t> zeros(ggml_nelements(anchor_positions_), 0);
+        ggml_backend_tensor_set(anchor_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
+    }
+}
+
 } // namespace diffkv

@@ -78,6 +78,9 @@ public:
     // Touch slot indexes to trigger reloading from CPU if needed
     void touch_active_slots(const std::vector<int32_t>& active_slots);
 
+    void set_micro_block_size(int size);
+    int get_micro_block_size() const { return micro_block_size_; }
+
     // Getters
     std::vector<std::unique_ptr<NativeBlockPool>>& get_engines() { return engines_; }
     PagedKVStore& get_pager() { return *pager_; }

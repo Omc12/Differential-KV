@@ -100,6 +100,7 @@ void KVRuntimeManager::reset() {
     for (auto & engine : engines_) {
         if (engine) {
             engine->reset_slots();
+            engine->zero_all_tensors();
             engine->get_state_table().clear();
         }
     }
@@ -504,6 +505,13 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
         for (float & val : desc) val /= norm;
         
         ggml_backend_tensor_set(engines_[0]->get_desc_matrix(), desc.data(), block->pool_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
+    }
+}
+
+void KVRuntimeManager::set_micro_block_size(int size) {
+    micro_block_size_ = size;
+    if (ingest_manager_) {
+        ingest_manager_->set_micro_block_size(size);
     }
 }
 

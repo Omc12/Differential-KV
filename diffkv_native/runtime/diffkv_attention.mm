@@ -341,6 +341,20 @@ void execute_metal_attention(
         id<MTLBuffer> lse_buf = nil;
 
         if (K > 0) {
+            int n_slots = kv_engine->get_seq_lens()->ne[0];
+            const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
+            std::vector<int32_t> unique_slots;
+            unique_slots.reserve(K);
+            for (int k = 0; k < K; ++k) {
+                int32_t slot_id = slots_ptr[k];
+                if (slot_id >= 0 && slot_id < n_slots) {
+                    if (std::find(unique_slots.begin(), unique_slots.end(), slot_id) == unique_slots.end()) {
+                        unique_slots.push_back(slot_id);
+                    }
+                }
+            }
+            int active_K = unique_slots.size();
+
             id<MTLCommandBuffer> commandBuffer = [g_queue commandBuffer];
             id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
             [encoder setComputePipelineState:g_pipeline];
@@ -354,13 +368,17 @@ void execute_metal_attention(
             id<MTLBuffer> anchors_k_buf = wrap_tensor(kv_engine->get_anchors_K());
             id<MTLBuffer> anchors_v_buf = wrap_tensor(kv_engine->get_anchors_V());
             id<MTLBuffer> seq_lens_buf = wrap_tensor(kv_engine->get_seq_lens());
-            id<MTLBuffer> slot_indices_buf = wrap_tensor(slot_indices);
+            
+            // Create a new Metal buffer for the deduplicated slot indices
+            id<MTLBuffer> slot_indices_buf = [g_device newBufferWithBytes:unique_slots.data()
+                                                                   length:active_K * sizeof(int32_t)
+                                                                  options:MTLResourceStorageModeShared];
 
             void* temp_out_ptr = nullptr;
             id<MTLBuffer> out_buf = wrap_output_tensor(dst, &temp_out_ptr);
 
             lse_buf = [g_device newBufferWithLength:n_q_heads * sizeof(float)
-                                                          options:MTLResourceStorageModeShared];
+                                                           options:MTLResourceStorageModeShared];
 
             id<MTLBuffer> scales_buf = wrap_tensor(kv_engine->get_scales());
 
@@ -381,7 +399,7 @@ void execute_metal_attention(
             int32_t n_kv_heads_i32 = n_kv_heads;
             int32_t rank_i32 = rank;
             int32_t S_max_i32 = S_max;
-            int32_t K_i32 = K;
+            int32_t K_i32 = active_K;
             int32_t D_i32 = D;
             float scale_f32 = scale;
             int32_t has_rope_i32 = has_rope ? 1 : 0;
@@ -399,10 +417,9 @@ void execute_metal_attention(
             id<MTLBuffer> cos_anc_buf = g_dummy_rope_buf;
             id<MTLBuffer> sin_anc_buf = g_dummy_rope_buf;
             if (has_rope) {
-                cos_anc_buf = [g_device newBufferWithLength:K * D * sizeof(float) options:MTLResourceStorageModeShared];
-                sin_anc_buf = [g_device newBufferWithLength:K * D * sizeof(float) options:MTLResourceStorageModeShared];
+                cos_anc_buf = [g_device newBufferWithLength:active_K * D * sizeof(float) options:MTLResourceStorageModeShared];
+                sin_anc_buf = [g_device newBufferWithLength:active_K * D * sizeof(float) options:MTLResourceStorageModeShared];
                 
-                const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
                 float* cos_anc_ptr = (float*)cos_anc_buf.contents;
                 float* sin_anc_ptr = (float*)sin_anc_buf.contents;
                 
@@ -410,8 +427,8 @@ void execute_metal_attention(
                 std::vector<int32_t> anchor_positions_host(ggml_nelements(kv_engine->get_anchor_positions()));
                 ggml_backend_tensor_get(kv_engine->get_anchor_positions(), anchor_positions_host.data(), 0, anchor_positions_host.size() * sizeof(int32_t));
                 
-                for (int k = 0; k < K; ++k) {
-                    int slot_id = slots_ptr[k];
+                for (int k = 0; k < active_K; ++k) {
+                    int slot_id = unique_slots[k];
                     // Use the actual sequence position of the anchor token (not slot_id * 64)
                     int anchor_idx = anchor_positions_host[slot_id];
                     

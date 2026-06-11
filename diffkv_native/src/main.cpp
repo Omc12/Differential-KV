@@ -3,6 +3,10 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <algorithm>
+#include <unordered_set>
+#include <random>
+#include <map>
 #include "runtime/diffkv_model.hpp"
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -39,8 +43,12 @@ struct ggml_backend_owner {
         } else {
             gpu_backend = cpu_backend;
         }
-        ggml_backend_t backends[] = { gpu_backend };
-        sched = ggml_backend_sched_new(backends, NULL, 1, 8192, false, true);
+        std::vector<ggml_backend_t> backends;
+        if (gpu_backend && gpu_backend != cpu_backend) {
+            backends.push_back(gpu_backend);
+        }
+        backends.push_back(cpu_backend);
+        sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), 8192, false, true);
     }
 
     ~ggml_backend_owner() {
@@ -64,23 +72,22 @@ struct ggml_backend_owner {
 // token_positions: absolute position of each token, length = num_tokens.
 // k_raw: flat buffer [num_tokens * kv_heads * head_dim], F32, layout [tok, head, dim].
 // k_rotated: output buffer, same shape.
-static void apply_rope_neox_cpu(
+static void apply_rope_neox_cpu_fast(
     const float* k_raw, float* k_rotated,
-    const std::vector<int32_t>& token_positions,
-    int num_tokens, int kv_heads, int head_dim,
-    float rope_freq_base
+    const float* cos_table, const float* sin_table,
+    int num_tokens, int kv_heads, int head_dim
 ) {
     const int D    = head_dim;
     const int half = D / 2;
     for (int t = 0; t < num_tokens; ++t) {
-        int pos = token_positions[t];
+        const float* cos_t = cos_table + t * half;
+        const float* sin_t = sin_table + t * half;
         for (int h = 0; h < kv_heads; ++h) {
             const float* src = k_raw     + (t * kv_heads + h) * D;
             float*       dst = k_rotated + (t * kv_heads + h) * D;
             for (int i = 0; i < half; ++i) {
-                float theta  = (float)pos / std::pow(rope_freq_base, 2.0f * i / D);
-                float cos_th = std::cos(theta);
-                float sin_th = std::sin(theta);
+                float cos_th = cos_t[i];
+                float sin_th = sin_t[i];
                 float x      = src[i];
                 float y      = src[i + half];
                 dst[i]        = x * cos_th - y * sin_th;
@@ -795,7 +802,7 @@ int main(int argc, char ** argv) {
     int n_vocab = model.get_config().n_vocab;
     int n_layers = model.get_config().n_layer;
 
-    int micro_block_size = 16;
+    int micro_block_size = 64;
     if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }
@@ -868,10 +875,13 @@ int main(int argc, char ** argv) {
 
 
     bool interactive = (argc < 3 || std::string(argv[2]) == "-");
+    bool is_warmup_run = true;
 
     while (true) {
         std::string prompt;
-        if (interactive) {
+        if (is_warmup_run) {
+            prompt = "warmup";
+        } else if (interactive) {
             std::cout << "__READY__" << std::endl;
             if (!std::getline(std::cin, prompt)) {
                 break;
@@ -911,6 +921,13 @@ int main(int argc, char ** argv) {
         srl_state.inverted_index.clear();
         srl_state.chunk_graph = diffkv::ChunkGraph();
         srl_state.semantic_index = diffkv::SemanticIndex();
+        srl_state.recent_generated_tokens.clear();
+        srl_state.current_query_tokens.clear();
+        srl_state.current_step_slots.clear();
+        srl_state.current_step_count = 0;
+        srl_state.recent_miss_rate = 0.0f;
+        srl_state.k_multiplier = 1.0f;
+        srl_state.call_count = 0;
         for (int l = 0; l < n_layers; ++l) {
             std::fill(seq_lens_by_layer[l].begin(), seq_lens_by_layer[l].end(), 0);
         }
@@ -952,6 +969,29 @@ int main(int argc, char ** argv) {
                       << ". Truncating prompt." << std::endl;
             L = n_slots * 64;
             prompt_tokens.resize(L);
+        }
+
+        // ── Adaptive micro-block size (matches Python ACTIVE_RUNTIME logic) ──────
+        {
+            int raw_target;
+            if (L < 256) {
+                raw_target = 16;
+            } else if (L < 1024) {
+                raw_target = 32;
+            } else if (L < 4096) {
+                raw_target = 64;
+            } else if (L < 8192) {
+                raw_target = 128;
+            } else {
+                raw_target = 256;
+            }
+            int target = std::min(raw_target, micro_block_size);
+            int adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
+            if (adaptive_mbs != micro_block_size) {
+                std::cerr << "[DiffKV Native] Adaptive micro_block_size: " << micro_block_size
+                          << " -> " << adaptive_mbs << " (L=" << L << ")" << std::endl;
+            }
+            runtime_manager.set_micro_block_size(adaptive_mbs);
         }
 
         // ── 1. PREFILL PHASE ──
@@ -1101,16 +1141,34 @@ int main(int argc, char ** argv) {
                 std::vector<int32_t> prior_positions(pos_start);
                 for (int t = 0; t < pos_start; ++t) prior_positions[t] = t;
 
+                // Precompute cos and sin lookup tables to avoid redundant math function calls
+                int half_dim = head_dim / 2;
+                std::vector<float> inv_freq(half_dim);
+                for (int i = 0; i < half_dim; ++i) {
+                    inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+                }
+                std::vector<float> cos_table(pos_start * half_dim);
+                std::vector<float> sin_table(pos_start * half_dim);
+                for (int t = 0; t < pos_start; ++t) {
+                    float pos = (float)prior_positions[t];
+                    for (int i = 0; i < half_dim; ++i) {
+                        float theta = pos * inv_freq[i];
+                        cos_table[t * half_dim + i] = std::cos(theta);
+                        sin_table[t * half_dim + i] = std::sin(theta);
+                    }
+                }
+
                 // Temporary buffer for RoPE-rotated prior K (all prior tokens, one layer at a time)
                 std::vector<float> prior_k_rotated(pos_start * F_test);
 
                 for (int l = 0; l < n_layers; ++l) {
-                    // Apply RoPE to raw K from k_activations → prior_k_rotated
-                    apply_rope_neox_cpu(
+                    // Apply RoPE to raw K from k_activations → prior_k_rotated using lookup tables
+                    apply_rope_neox_cpu_fast(
                         k_activations[l].data(),   // raw K [pos_start, F_test]
                         prior_k_rotated.data(),    // output
-                        prior_positions, pos_start, kv_heads, head_dim,
-                        model.get_config().rope_freq_base
+                        cos_table.data(),
+                        sin_table.data(),
+                        pos_start, kv_heads, head_dim
                     );
                     // Upload RoPE-rotated prior K to GGML tensor [head_dim, kv_heads, pos_start]
                     // Data layout after rotation: [tok][head][dim] = [pos_start * kv_heads * head_dim]
@@ -1260,21 +1318,27 @@ int main(int argc, char ** argv) {
         ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
         std::cerr << " OK" << std::endl;
 
-        if (interactive) {
-            std::cout << "__RESPONSE__" << std::endl;
-        } else {
-            std::cout << "[Response] " << std::flush;
+        if (!is_warmup_run) {
+            if (interactive) {
+                std::cout << "__RESPONSE__" << std::endl;
+            } else {
+                std::cout << "[Response] " << std::flush;
+            }
         }
 
         int32_t last_token = first_decode_token;
         std::string first_piece = model.token_to_piece(last_token);
-        std::cout << first_piece << std::flush;
+        if (!is_warmup_run) {
+            std::cout << first_piece << std::flush;
+        }
 
         std::vector<int32_t> generated_tokens;
         generated_tokens.push_back(last_token);
         // max_generate: default 2048, overridable via DIFFKV_MAX_TOKENS env var or request
         int max_generate = 2048;
-        if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
+        if (is_warmup_run) {
+            max_generate = 2;
+        } else if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
             max_generate = std::max(1, std::stoi(env_mt));
         }
 
@@ -1293,10 +1357,18 @@ int main(int argc, char ** argv) {
         if (completed_blocks > 0) {
             std::vector<int32_t> slot_ids(completed_blocks);
             for (int i = 0; i < completed_blocks; ++i) {
-                slot_ids[i] = blocks_layer0[i]->pool_idx;
+                slot_ids[i] = i; // Logical block index
             }
             std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
-            ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), desc_matrix_host.data(), 0, completed_blocks * desc_dim * sizeof(float));
+            for (int i = 0; i < completed_blocks; ++i) {
+                int slot_id = blocks_layer0[i]->pool_idx;
+                ggml_backend_tensor_get(
+                    runtime_manager.get_engines()[0]->get_desc_matrix(),
+                    desc_matrix_host.data() + i * desc_dim,
+                    slot_id * desc_dim * sizeof(float),
+                    desc_dim * sizeof(float)
+                );
+            }
 
             srl_state = build_srl_state_from_blocks(
                 desc_matrix_host.data(),
@@ -1304,7 +1376,7 @@ int main(int argc, char ** argv) {
                 completed_blocks,
                 prompt_tokens.data(),
                 L,
-                64, // block_size
+                runtime_manager.get_micro_block_size() + 1, // block_size (adaptive)
                 stop_token_ids,
                 6, // K_semantic
                 2, // K_temporal
@@ -1420,7 +1492,9 @@ int main(int argc, char ** argv) {
                 if (i >= 0 && i < (int)blocks.size()) {
                     int slot_id = blocks[i]->pool_idx;
                     if (slot_id >= 0 && slot_id < n_slots) {
-                        slots_mask_host[slot_id] = 0.0f;
+                        if (blocks[i]->state != BlockState::DenseResident && blocks[i]->state != BlockState::Compressing) {
+                            slots_mask_host[slot_id] = 0.0f;
+                        }
                     }
                 }
             }
@@ -1440,7 +1514,7 @@ int main(int argc, char ** argv) {
                 userdata[l].active_k_dense = active_k_dense[l].data();
                 userdata[l].active_v_dense = active_v_dense[l].data();
                 userdata[l].active_block_tokens = total_dense_tokens[l];
-                userdata[l].active_slot = dense_start_positions[l];
+                userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
             }
 
 
@@ -1489,7 +1563,9 @@ int main(int argc, char ** argv) {
             }
 
             std::string piece = model.token_to_piece(next_token);
-            std::cout << piece << std::flush;
+            if (!is_warmup_run) {
+                std::cout << piece << std::flush;
+            }
 
             srl_state.update_generated_tokens(next_token);
             generated_tokens.push_back(next_token);
@@ -1581,7 +1657,7 @@ int main(int argc, char ** argv) {
                     update_srl_from_compressed_block(
                         srl_state,
                         desc.data(),
-                        block->pool_idx,
+                        prev_slot, // Logical index
                         block->token_indices.data(),
                         block->token_count(),
                         block->anchor_idx,
@@ -1592,10 +1668,18 @@ int main(int argc, char ** argv) {
                     auto & all_blocks = runtime_manager.get_ingest_manager().get_blocks(0);
                     int cur_N = all_blocks.size();
                     std::vector<int32_t> cur_slots(cur_N);
-                    for (int i = 0; i < cur_N; ++i) cur_slots[i] = all_blocks[i]->pool_idx;
+                    for (int i = 0; i < cur_N; ++i) cur_slots[i] = i; // Logical indices
 
                     std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                    ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), cur_desc_matrix.data(), 0, cur_N * desc_dim * sizeof(float));
+                    for (int i = 0; i < cur_N; ++i) {
+                        int slot_id = all_blocks[i]->pool_idx;
+                        ggml_backend_tensor_get(
+                            runtime_manager.get_engines()[0]->get_desc_matrix(),
+                            cur_desc_matrix.data() + i * desc_dim,
+                            slot_id * desc_dim * sizeof(float),
+                            desc_dim * sizeof(float)
+                        );
+                    }
 
                     srl_state.chunk_graph = build_chunk_graph(
                         cur_desc_matrix.data(),
@@ -1613,13 +1697,20 @@ int main(int argc, char ** argv) {
                 }
             }
         }
-        std::cout << std::endl;
-        if (interactive) {
-            std::cout << "__FINISH__" << std::endl;
+        if (!is_warmup_run) {
+            std::cout << std::endl;
+            if (interactive) {
+                std::cout << "__FINISH__" << std::endl;
+            }
         }
 
         // Free decode context — must happen before next iteration rebuilds it
         ggml_free(decode_ctx);
+
+        if (is_warmup_run) {
+            is_warmup_run = false;
+            continue;
+        }
 
         if (!interactive) {
             break;

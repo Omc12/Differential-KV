@@ -83,6 +83,7 @@ static void read_vec(std::istream& is, std::vector<T>& vec) {
 static void serialize_metadata(const std::shared_ptr<ProductionSession>& session, std::ostream& os) {
     os << "{\n";
     os << "  \"session_id\": \"" << session->session_id << "\",\n";
+    os << "  \"micro_block_size\": " << session->micro_block_size << ",\n";
     os << "  \"created_at\": " << std::fixed << std::setprecision(6) << session->created_at << ",\n";
     os << "  \"last_accessed\": " << session->last_accessed << ",\n";
     os << "  \"status\": \"" << session->status << "\",\n";
@@ -248,6 +249,8 @@ static std::shared_ptr<ProductionSession> parse_metadata(std::istream& is) {
                 session->last_accessed = std::stod(val);
             } else if (key == "status") {
                 session->status = val;
+            } else if (key == "micro_block_size") {
+                session->micro_block_size = std::stoi(val);
             }
         }
     }
@@ -529,6 +532,7 @@ std::string ProductionSessionManager::create_session_with_id_locked(const std::s
     if (kv_manager_) {
         int n_layers = kv_manager_->get_engines().size();
         session->layers_blocks.resize(n_layers);
+        session->micro_block_size = kv_manager_->get_micro_block_size();
     }
 
     // Call internal ensure residency (assumes mutex_ is held)
@@ -726,6 +730,9 @@ void ProductionSessionManager::ensure_residency(const std::string& session_id) {
             kv_manager_->get_pager().swap_state(it->second->pager_entries, it->second->pager_stats);
         }
         current_active_session_id_ = session_id;
+    }
+    if (kv_manager_) {
+        kv_manager_->set_micro_block_size(it->second->micro_block_size);
     }
 }
 

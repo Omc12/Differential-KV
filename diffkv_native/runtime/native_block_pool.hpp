@@ -39,6 +39,7 @@ public:
     void free_slot(int slot_id);
     void reset_slots();
     int get_free_slots_count();
+    void zero_all_tensors();
 
 private:
     int n_slots_ = 0;

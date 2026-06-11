@@ -473,6 +473,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.out_scale = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_scales()->data) + slot_id;
     job.out_anchor_k = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_anchors_K()->data) + slot_id * F_test;
     job.out_anchor_v = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_anchors_V()->data) + slot_id * F_test;
+    job.out_seq_len = reinterpret_cast<int32_t*>(engines[layer_idx]->get_seq_lens()->data) + slot_id;
     job.state_table = &engines[layer_idx]->get_state_table();
     
     bool async_svd = true;
@@ -481,10 +482,6 @@ void StreamingSparseIngestManager::submit_block_for_compression(
         if (s == "0" || s == "false" || s == "off") {
             async_svd = false;
         }
-    } else {
-#ifdef __APPLE__
-        async_svd = false;
-#endif
     }
 
     if (async_svd) {
