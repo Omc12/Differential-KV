@@ -198,9 +198,13 @@ void StreamingSparseIngestManager::clear() {
     }
     query_words_.clear();
     stats_ = Stats();
+    session_token_ids_.clear();
 }
 
 void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines) {
+    if (target_len < (int)session_token_ids_.size()) {
+        session_token_ids_.resize(target_len);
+    }
     for (int l = 0; l < n_layers_; ++l) {
         auto & blocks = layers_blocks_[l];
         std::vector<std::unique_ptr<StreamingKVBlock>> kept;
@@ -299,6 +303,16 @@ void StreamingSparseIngestManager::ingest_chunk(
     int rank,
     PagedKVStore* pager
 ) {
+    // Append newly ingested chunk of token IDs to session_token_ids_ on layer 0.
+    if (layer_idx == 0) {
+        if (position_start + chunk_len > (int)session_token_ids_.size()) {
+            session_token_ids_.resize(position_start + chunk_len);
+        }
+        for (int t = 0; t < chunk_len; ++t) {
+            session_token_ids_[position_start + t] = token_ids[t];
+        }
+    }
+
     auto & blocks = layers_blocks_[layer_idx];
     int F_test = engines[layer_idx]->get_VK()->ne[0] * engines[layer_idx]->get_VK()->ne[1];
     
@@ -350,30 +364,55 @@ void StreamingSparseIngestManager::ingest_chunk(
             std::memcpy(block->active_k.data() + active_offset, k_chunk + t * F_test, F_test * sizeof(float));
             std::memcpy(block->active_v.data() + active_offset, v_chunk + t * F_test, F_test * sizeof(float));
             block->token_indices.push_back(position_start + t);
-            
-            // Check compression eligibility when micro-block fills up
-            if (block->token_count() == 1 + micro_block_size_) {
-                // Determine token range
-                std::vector<int32_t> block_toks(token_ids.begin() + block->anchor_idx, token_ids.begin() + block->anchor_idx + block->token_count());
-                
-                bool skip = false;
-                if (block->anchor_idx == 0 && protect_block_zero_) {
-                    skip = true;
-                } else if (block->anchor_idx + block->token_count() < short_context_threshold_) {
-                    skip = true;
+        }
+    }
+    
+    // Scan and submit blocks that have fallen out of the recency window
+    int current_seq_len = position_start + chunk_len;
+    bool immediate_prefill = true;
+    if (const char* env_p = std::getenv("DIFFKV_IMMEDIATE_PREFILL_COMPRESS")) {
+        if (std::string(env_p) == "0") {
+            immediate_prefill = false;
+        }
+    }
+
+    for (size_t idx = 0; idx < blocks.size(); ++idx) {
+        auto & b = blocks[idx];
+        if (b->state == BlockState::DenseResident && b->token_count() == 1 + micro_block_size_ && !b->skip_compression) {
+            bool skip = false;
+            if (b->anchor_idx == 0 && protect_block_zero_) {
+                skip = true;
+            } else if (b->anchor_idx + b->token_count() < short_context_threshold_) {
+                skip = true;
+            } else {
+                if (b->anchor_idx + b->token_count() <= (int)session_token_ids_.size()) {
+                    std::vector<int32_t> block_toks(
+                        session_token_ids_.begin() + b->anchor_idx,
+                        session_token_ids_.begin() + b->anchor_idx + b->token_count()
+                    );
+                    skip = should_skip_compression(b->anchor_idx, block_toks);
                 } else {
-                    skip = should_skip_compression(block->anchor_idx, block_toks);
+                    skip = true;
                 }
-                
-                if (skip) {
-                    block->skip_compression = true;
-                } else {
-                    submit_block_for_compression(layer_idx, blocks.size() - 1, engines, compressor, rank);
+            }
+
+            if (skip) {
+                b->skip_compression = true;
+            } else {
+                bool should_compress = false;
+                if (chunk_len > 1 && immediate_prefill) {
+                    should_compress = true;
+                } else if (b->anchor_idx + b->token_count() < current_seq_len - recency_window_) {
+                    should_compress = true;
+                }
+
+                if (should_compress) {
+                    submit_block_for_compression(layer_idx, idx, engines, compressor, rank);
                 }
             }
         }
     }
-    
+
     // Recount dense tokens
     uint64_t current_dense = 0;
     for (auto & b : blocks) {

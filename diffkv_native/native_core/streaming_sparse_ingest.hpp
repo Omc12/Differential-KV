@@ -120,6 +120,7 @@ private:
     std::unordered_set<std::string> stopwords_;
     std::unordered_set<std::string> query_words_;
     Stats stats_;
+    std::vector<int32_t> session_token_ids_;
 };
 
 } // namespace diffkv

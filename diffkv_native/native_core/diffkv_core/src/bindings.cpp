@@ -139,6 +139,9 @@ void diffkv_decode_attention(
     const uint16_t* anchors_K,
     const uint16_t* anchors_V,
     const int32_t*  seq_lens,
+    const uint16_t* scales,
+    const float*    cos_anc,
+    const float*    sin_anc,
     const int32_t*  slot_indices,
     int K_active,
     int N_pool, int S_max, int R,
@@ -147,7 +150,8 @@ void diffkv_decode_attention(
     float* out
 ) {
     diffkv::decode_attention(Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-                              anchors_K, anchors_V, seq_lens, slot_indices,
+                              anchors_K, anchors_V, seq_lens, scales,
+                              cos_anc, sin_anc, slot_indices,
                               K_active, N_pool, S_max, R, H_q, kv_heads, D,
                               scale, out);
 }

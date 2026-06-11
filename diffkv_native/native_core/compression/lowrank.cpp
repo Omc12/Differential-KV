@@ -173,12 +173,12 @@ bool run_svd_driver(
     int n = S;
     int lda = m;
     int ldu = m;
-    int ldvt = S; 
+    int min_dim = std::min(S, F);
+    int ldvt = min_dim; 
 
     std::vector<float> a_copy(S * F);
     std::memcpy(a_copy.data(), A_input, S * F * sizeof(float));
 
-    int min_dim = std::min(S, F);
     std::vector<float> s_temp(min_dim);
     std::vector<float> u_temp(m * min_dim); 
     std::vector<float> vt_temp(min_dim * n); 
@@ -224,7 +224,7 @@ bool run_svd_driver(
 
     for (int s = 0; s < S; ++s) {
         for (int r = 0; r < R; ++r) {
-            U_out[s * R + r] = vt_temp[s * S + r];
+            U_out[s * R + r] = vt_temp[s * min_dim + r];
         }
     }
 
@@ -372,11 +372,33 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         return false;
     }
 
+    // Energy-preserving dynamic rank selection
+    float total_energy = 0.0f;
+    for (int r = 0; r < svd_dim; ++r) {
+        total_energy += S_joint[r] * S_joint[r];
+    }
+
+    int k_dynamic = svd_dim;
+    if (total_energy > 1e-9f) {
+        float cum_energy = 0.0f;
+        float threshold = 0.999f * total_energy;
+        for (int r = 0; r < svd_dim; ++r) {
+            cum_energy += S_joint[r] * S_joint[r];
+            if (cum_energy >= threshold) {
+                k_dynamic = std::max(4, std::min(r + 1, R));
+                break;
+            }
+        }
+    }
+
     std::vector<float> U_scaled(S_deltas * R, 0.0f);
     float max_abs = 0.0f;
     for (int s = 0; s < S_deltas; ++s) {
         for (int r = 0; r < svd_dim; ++r) {
-            float val = U_joint[s * svd_dim + r] * S_joint[r] * token_norms[s];
+            float val = 0.0f;
+            if (r < k_dynamic) {
+                val = U_joint[s * svd_dim + r] * S_joint[r] * token_norms[s];
+            }
             U_scaled[s * R + r] = val;
             if (std::abs(val) > max_abs) {
                 max_abs = std::abs(val);
@@ -400,9 +422,11 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     std::memset(params.out_vk_ptr, 0, R * F * sizeof(ggml_fp16_t));
     std::memset(params.out_vv_ptr, 0, R * F * sizeof(ggml_fp16_t));
     for (int r = 0; r < svd_dim; ++r) {
-        for (int f = 0; f < F; ++f) {
-            params.out_vk_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + f]);
-            params.out_vv_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + F + f]);
+        if (r < k_dynamic) {
+            for (int f = 0; f < F; ++f) {
+                params.out_vk_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + f]);
+                params.out_vv_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + F + f]);
+            }
         }
     }
 

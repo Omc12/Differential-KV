@@ -125,9 +125,7 @@ inline std::vector<int32_t> two_level_gate(
         if (srl_state) {
             auto it = slot_to_age.find(slot);
             if (it != slot_to_age.end()) {
-                penalty = age_penalty_coeff
-                        * static_cast<float>(it->second)
-                        / static_cast<float>(max_age);
+                penalty = age_penalty_coeff * static_cast<float>(it->second);
             }
         }
 
@@ -323,12 +321,44 @@ inline std::vector<int32_t> route_query(
         std::vector<float> sem_scores_cpu(N, 0.0f);
         sem_idx.get_all_scores(q_desc.data(), sem_scores_cpu.data());
 
-        // Build set of seed row indices
-        std::unordered_set<int32_t> seed_slots_set(sem_slots.begin(), sem_slots.end());
+        // Determine seeds (semantic + lexical/rare lexical if not topic switch)
+        std::vector<int32_t> seeds;
+        int n_sem_seeds = std::max(1, k_semantic);
+        int n_rare_seeds = std::max(2, (int)(2 * k_lexical));
+        int n_lex_seeds = std::max(1, k_lexical);
+
+        std::vector<int32_t> top_sem_slots;
+        for (int i = 0; i < std::min(n_sem_seeds, (int)sem_slots.size()); ++i) {
+            top_sem_slots.push_back(sem_slots[i]);
+        }
+
+        bool is_topic_switch = (best_sem_score < 0.25f);
+        std::unordered_set<int32_t> seed_set;
+        auto add_seed = [&](int32_t slot) {
+            if (seed_set.find(slot) == seed_set.end()) {
+                seed_set.insert(slot);
+                seeds.push_back(slot);
+            }
+        };
+
+        for (int32_t s : top_sem_slots) {
+            add_seed(s);
+        }
+
+        if (!is_topic_switch) {
+            for (int i = 0; i < std::min(n_rare_seeds, (int)rare_lex_slots.size()); ++i) {
+                add_seed(rare_lex_slots[i]);
+            }
+            for (int i = 0; i < std::min(n_lex_seeds, (int)lex_slots.size()); ++i) {
+                add_seed(lex_slots[i]);
+            }
+        }
+
         std::vector<float> A0(N, 0.0f);
         for (int i = 0; i < N; ++i) {
-            if (seed_slots_set.count(sem_idx.slot_ids[i]))
+            if (seed_set.count(sem_idx.slot_ids[i])) {
                 A0[i] = sem_scores_cpu[i];
+            }
         }
 
         // retention[i] = graph_hop_decay * sem_scores_cpu[i]
@@ -344,7 +374,7 @@ inline std::vector<int32_t> route_query(
         // graph_scores = A1 + A2, exclude seed rows
         std::vector<std::pair<float, int32_t>> gscore_slots;
         for (int i = 0; i < N; ++i) {
-            if (seed_slots_set.count(sem_idx.slot_ids[i])) continue;
+            if (seed_set.count(sem_idx.slot_ids[i])) continue;
             float gs = A1[i] + A2[i];
             if (gs > 0.0f)
                 gscore_slots.push_back({gs, sem_idx.slot_ids[i]});
@@ -436,6 +466,39 @@ inline std::vector<int32_t> route_query(
     srl_state.current_step_count = static_cast<int>(result.size());
 
     return result;
+}
+
+inline std::vector<int32_t> route_query_fixed_k(
+    const float*            Q,           // [H * D]
+    int                     H,
+    int                     D,
+    SessionSRLState&        srl_state,
+    const BlockPoolInterface& pool,
+    float                   scale,
+    int                     layer_idx,
+    const std::vector<int>* query_tokens = nullptr
+) {
+    std::vector<int32_t> selected = route_query(Q, H, D, srl_state, pool, scale, layer_idx, query_tokens);
+    int k_fixed = 64;
+    if (const char* env_k = std::getenv("DIFFKV_SRL_K_FIXED")) {
+        k_fixed = std::atoi(env_k);
+    }
+    
+    if (selected.empty()) {
+        return std::vector<int32_t>(k_fixed, 0);
+    }
+    
+    if ((int)selected.size() >= k_fixed) {
+        selected.resize(k_fixed);
+        return selected;
+    }
+    
+    int pad_count = k_fixed - selected.size();
+    int32_t last_val = selected.back();
+    for (int i = 0; i < pad_count; ++i) {
+        selected.push_back(last_val);
+    }
+    return selected;
 }
 
 } // namespace diffkv

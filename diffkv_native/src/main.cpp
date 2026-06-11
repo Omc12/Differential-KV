@@ -1102,7 +1102,9 @@ int main(int argc, char ** argv) {
                     std::cerr << " [EOS]" << std::endl;
                 }
                 break;
-                    std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
+            }
+
+            std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
             std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
             for (int l = 0; l < n_layers; ++l) {
                 ggml_backend_tensor_get(decode_k_layers[l], decode_k[l].data(), 0, F_test * sizeof(float));
@@ -1148,7 +1150,8 @@ int main(int argc, char ** argv) {
                 }
                 // Update semantic descriptors
                 runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
-            }          for (int l = 0; l < n_layers; ++l) {
+
+                for (int l = 0; l < n_layers; ++l) {
                     std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
                     std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
                 }

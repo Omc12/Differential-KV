@@ -47,6 +47,9 @@ void decode_attention(
     const uint16_t* anchors_K,       // [N_pool, kv_heads, D]
     const uint16_t* anchors_V,       // [N_pool, kv_heads, D]
     const int32_t*  seq_lens,        // [N_pool]
+    const uint16_t* scales,          // [N_pool]
+    const float*    cos_anc,         // [K_active, D]
+    const float*    sin_anc,         // [K_active, D]
     const int32_t*  slot_indices,    // [K_active]
     int K_active,
     int N_pool, int S_max, int R,
@@ -61,6 +64,7 @@ void decode_attention(
     }
 
     const int g = H_q / kv_heads;
+    const int half_d = D / 2;
 
     // Local buffers to avoid allocations inside the head loop
     std::vector<float> VK_local(R * D);
@@ -88,21 +92,40 @@ void decode_attention(
             if (S_k < 0) S_k = 0;
 
             float scale_u = U_scale_pool[slot_id];
+            float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
 
-            // 1. Compute Anchor score (unrotated/rotated as Q is already rotated)
+            // 1. Compute Anchor score with RoPE
             float score_anc = 0.0f;
             for (int d = 0; d < D; ++d) {
-                float ak_val = ggml_fp16_to_fp32(anchors_K[slot_id * kv_heads * D + kv_head * D + d]);
-                score_anc += q_h[d] * ak_val;
+                float raw_ak = ggml_fp16_to_fp32(anchors_K[slot_id * kv_heads * D + kv_head * D + d]);
+                float ak_rot = raw_ak;
+                if (cos_anc && sin_anc) {
+                    float c = cos_anc[k * D + d];
+                    float s = sin_anc[k * D + d];
+                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                    float raw_partner = ggml_fp16_to_fp32(anchors_K[slot_id * kv_heads * D + kv_head * D + partner]);
+                    float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
+                    ak_rot = raw_ak * c + rot_contrib * s;
+                }
+                score_anc += q_h[d] * ak_rot;
             }
             float s_anc_scaled = score_anc * scale;
 
-            // 2. Query projection into SVD subspace
-            // Dequantize VK_pool slice for this block and kv_head
+            // 2. Query projection into SVD subspace with RoPE
             for (int r = 0; r < R; ++r) {
                 int offset = slot_id * R * kv_heads * D + r * kv_heads * D + kv_head * D;
                 for (int d = 0; d < D; ++d) {
-                    VK_local[r * D + d] = ggml_fp16_to_fp32(VK_pool[offset + d]);
+                    float raw_vk = ggml_fp16_to_fp32(VK_pool[offset + d]);
+                    float vk_rot = raw_vk;
+                    if (cos_anc && sin_anc) {
+                        float c = cos_anc[k * D + d];
+                        float s = sin_anc[k * D + d];
+                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        float raw_vk_partner = ggml_fp16_to_fp32(VK_pool[offset + partner]);
+                        float rot_contrib = (d < half_d) ? -raw_vk_partner : raw_vk_partner;
+                        vk_rot = raw_vk * c + rot_contrib * s;
+                    }
+                    VK_local[r * D + d] = vk_rot;
                 }
             }
 
@@ -127,7 +150,7 @@ void decode_attention(
             // Local max score in block k
             float M_local = s_anc_scaled;
             for (int t = 0; t < S_k; ++t) {
-                float t_score = (s_delta_vec[t] + score_anc) * scale;
+                float t_score = (s_delta_vec[t] * block_scale + score_anc) * scale;
                 if (t_score > M_local) {
                     M_local = t_score;
                 }
@@ -138,10 +161,10 @@ void decode_attention(
             float E_sum = E_anc;
             w_token_vec.resize(S_k);
             for (int t = 0; t < S_k; ++t) {
-                float t_score = (s_delta_vec[t] + score_anc) * scale;
+                float t_score = (s_delta_vec[t] * block_scale + score_anc) * scale;
                 float E_t = std::exp(t_score - M_local);
                 E_sum += E_t;
-                w_token_vec[t] = E_t; // stored normalized by M_local, not E_sum yet
+                w_token_vec[t] = E_t;
             }
 
             // Online softmax update stats
@@ -181,7 +204,7 @@ void decode_attention(
             }
 
             for (int d = 0; d < D; ++d) {
-                float V_local_d = w_total_anc * V_anc[d] + V_svd[d];
+                float V_local_d = w_total_anc * V_anc[d] + V_svd[d] * block_scale;
                 o_h[d] = o_h[d] * alpha + V_local_d * beta;
             }
 

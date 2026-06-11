@@ -111,6 +111,10 @@ void NativeBlockPool::free_slot(int slot_id) {
     if (std::find(free_slots_.begin(), free_slots_.end(), slot_id) == free_slots_.end()) {
         free_slots_.push_back(slot_id);
     }
+    state_table_.force_invalidate(slot_id);
+    if (state_table_.get(slot_id) == BlockState::Invalid) {
+        state_table_.transition(slot_id, BlockState::Invalid, BlockState::Freed);
+    }
 }
 
 void NativeBlockPool::reset_slots() {

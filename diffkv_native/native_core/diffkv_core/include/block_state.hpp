@@ -53,7 +53,7 @@ inline bool is_legal_transition(BlockState from, BlockState to) {
         case BlockState::Invalid:
             return to == BlockState::Freed;
         case BlockState::Freed:
-            return false; // Terminal state
+            return to == BlockState::DenseResident;
         default:
             return false;
     }

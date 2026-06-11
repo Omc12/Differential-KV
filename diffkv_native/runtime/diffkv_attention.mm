@@ -33,31 +33,31 @@ static void init_metal_runtime() {
     if (_NSGetExecutablePath(exec_path, &size) == 0) {
         NSString* binPath = [NSString stringWithUTF8String:exec_path];
         NSString* binDir = [binPath stringByDeletingLastPathComponent];
-        path = [binDir stringByAppendingPathComponent:@"../shaders/diffkv_decode.metal"];
+        path = [binDir stringByAppendingPathComponent:@"../native_core/diffkv_core/metal/diffkv_decode.metal"];
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
         if (!source) {
-            path = [binDir stringByAppendingPathComponent:@"shaders/diffkv_decode.metal"];
+            path = [binDir stringByAppendingPathComponent:@"native_core/diffkv_core/metal/diffkv_decode.metal"];
             source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
         }
     }
 
     // 2. Try standard relative paths from CWD
     if (!source) {
-        path = @"../shaders/diffkv_decode.metal";
+        path = @"../native_core/diffkv_core/metal/diffkv_decode.metal";
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
     if (!source) {
-        path = @"shaders/diffkv_decode.metal";
+        path = @"native_core/diffkv_core/metal/diffkv_decode.metal";
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
     if (!source) {
-        path = @"diffkv_native/shaders/diffkv_decode.metal";
+        path = @"diffkv_native/native_core/diffkv_core/metal/diffkv_decode.metal";
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
 
     // 3. Absolute path fallback
     if (!source) {
-        path = @"/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/shaders/diffkv_decode.metal";
+        path = @"/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/native_core/diffkv_core/metal/diffkv_decode.metal";
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
 

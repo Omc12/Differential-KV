@@ -303,15 +303,13 @@ inline float compute_block_overlap(
     const std::unordered_map<int, std::vector<int>>& vocab_a,
     const std::unordered_map<int, std::vector<int>>& vocab_b
 ) {
-    if (vocab_a.empty() || vocab_b.empty()) return 0.0f;
+    if (vocab_a.empty()) return 0.0f;
 
     int intersect = 0;
     for (const auto& kv : vocab_a) {
         if (vocab_b.count(kv.first)) ++intersect;
     }
-    int union_sz = static_cast<int>(vocab_a.size() + vocab_b.size()) - intersect;
-    if (union_sz <= 0) return 0.0f;
-    return static_cast<float>(intersect) / static_cast<float>(union_sz);
+    return static_cast<float>(intersect) / static_cast<float>(vocab_a.size());
 }
 
 } // namespace diffkv
