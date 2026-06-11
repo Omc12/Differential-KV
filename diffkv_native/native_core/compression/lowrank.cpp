@@ -273,14 +273,17 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         }
     }
 
+    std::vector<float> col_sums(F, 0.0f);
+    for (int t = 0; t < S_total; ++t) {
+        for (int i = 0; i < F; ++i) {
+            col_sums[i] += K_f_normed[t * F + i];
+        }
+    }
+
     for (int s = 0; s < S_total; ++s) {
         float centrality = 0.0f;
-        for (int t = 0; t < S_total; ++t) {
-            float dot = 0.0f;
-            for (int i = 0; i < F; ++i) {
-                dot += K_f_normed[s * F + i] * K_f_normed[t * F + i];
-            }
-            centrality += dot;
+        for (int i = 0; i < F; ++i) {
+            centrality += K_f_normed[s * F + i] * col_sums[i];
         }
         scores[s] += centrality * 0.5f;
     }

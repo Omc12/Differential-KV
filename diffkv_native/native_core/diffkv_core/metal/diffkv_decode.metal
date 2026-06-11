@@ -56,12 +56,9 @@ kernel void decode_attention_metal_kernel(
     device const int32_t& D [[buffer(16)]],
     device const float& scale [[buffer(17)]],
     device const half* scales [[buffer(18)]],             // [N_pool] float16 block scales
-    // RoPE buffers: per-slot precomputed [K, D] float32 at anchor positions
-    device const float* cos_anc [[buffer(19)]],           // [K, D]
-    device const float* sin_anc [[buffer(20)]],           // [K, D]
-    device const int32_t& has_rope [[buffer(21)]],
-    device const float& rope_freq_base [[buffer(22)]],    // unused (cos/sin pre-computed on CPU)
-    device const int32_t* anchor_positions [[buffer(23)]], // [N_pool] actual sequence positions
+    device const int32_t& has_rope [[buffer(19)]],
+    device const float& rope_freq_base [[buffer(20)]],    
+    device const int32_t* anchor_positions [[buffer(21)]], // [N_pool] actual sequence positions
 
     uint tg_idx [[threadgroup_position_in_grid]],  // query head index 0..H_q-1
     uint tid [[thread_position_in_threadgroup]],
@@ -76,7 +73,6 @@ kernel void decode_attention_metal_kernel(
 
     // ── Shared memory ─────────────────────────────────────────────────────────
     threadgroup float q_shared[128];       // cached query [D], D <= 128
-    threadgroup float q_proj_shared[32];   // q projection into rank-R space, R <= 32
 
     // Reduction buffers (threadgroup size = 64)
     threadgroup float red_m[64];
@@ -86,10 +82,8 @@ kernel void decode_attention_metal_kernel(
     // Reduction scratch: [64, 32] = 8192 bytes
     threadgroup float red_proj_temp[64 * 32];
 
-    // Cache for anchor scores and q_proj across K blocks — cap at 128
-    // (128 gives headroom for larger contexts)
+    // Cache for anchor scores across K blocks — cap at 128
     threadgroup float scores_anc_cached[128];
-    threadgroup float q_proj_cached[128 * 32]; // [K_cached, rank]
 
     // Shared buffer for rotated anchor key [D]
     threadgroup float ak_rot_shared[128];
@@ -109,14 +103,18 @@ kernel void decode_attention_metal_kernel(
     for (int k = 0; k < K; ++k) {
         int slot_id = slot_indices[k];
         int slen = seq_lens[slot_id];
+        int anchor_pos = anchor_positions[slot_id];
 
         // ── Step 1a: Compute rotated anchor key and store in shared mem ───────
         for (int d = (int)tid; d < D; d += (int)t_per_tg) {
             float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
             if (has_rope) {
-                float c = cos_anc[k * D + d];
-                float s = sin_anc[k * D + d];
                 int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                int idx = (d < half_d) ? d : (d - half_d);
+                float theta = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                float angle = anchor_pos * theta;
+                float c = cos(angle);
+                float s = sin(angle);
                 float raw_partner = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + partner];
                 float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
                 ak_rot_shared[d] = raw_ak * c + rot_contrib * s;
@@ -142,49 +140,52 @@ kernel void decode_attention_metal_kernel(
         // Cache anchor score
         if (tid == 0 && k < 128) scores_anc_cached[k] = score_anc;
 
-        // ── Step 1c: Q projection into rank-R SVD subspace ───────────────────
-        // q_proj[r] = q · rotated_VK[slot_id, r, kv_head, :]
-        if (tid < (uint)rank) {
-            int r = (int)tid;
-            float proj_val = 0.0f;
-            int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-            for (int d = 0; d < D; ++d) {
-                float raw_vk = (float)VK_pool[base_vk_offset + d];
-                float vk_rot;
-                if (has_rope) {
-                    float c = cos_anc[k * D + d];
-                    float s = sin_anc[k * D + d];
-                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                    float raw_vk_partner = (float)VK_pool[base_vk_offset + partner];
-                    float rot_contrib = (d < half_d) ? -raw_vk_partner : raw_vk_partner;
-                    vk_rot = raw_vk * c + rot_contrib * s;
-                } else {
-                    vk_rot = raw_vk;
-                }
-                proj_val += q_shared[d] * vk_rot;
-            }
-            q_proj_shared[r] = proj_val;
-            if (k < 128) q_proj_cached[k * rank + r] = proj_val;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // ── Step 1d: Anchor score → online softmax ────────────────────────────
+        // ── Step 1c: Anchor score → online softmax ────────────────────────────
         if (tid == 0) {
             float s_anc_scaled = score_anc * scale;
             sm_state = merge_softmax_states(sm_state, { s_anc_scaled, 1.0f });
         }
 
-        // ── Step 1e: Delta scores via projection (no per-dim reconstruction) ──
-        // s_t = (q_proj · U_k[t]) * scale_u * block_scale + score_anc
+        // ── Step 1d: Delta scores via exact key reconstruction + per-token RoPE ──
         float scale_u = (float)U_scale_pool[slot_id];
         float block_scale = (float)scales[slot_id];
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
-            float delta_sum = 0.0f;
+            float t_score_sum = 0.0f;
             int u_offset = slot_id * S_max * rank + t * rank;
-            for (int r = 0; r < rank; ++r) {
-                delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
+            for (int d = 0; d < half_d; ++d) {
+                // Partner 1
+                float raw_ak_1 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                float sum_r_vk_1 = 0.0f;
+                for (int r = 0; r < rank; ++r) {
+                    int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    sum_r_vk_1 += (float)U_pool[u_offset + r] * (float)VK_pool[base_vk_offset + d];
+                }
+                float k_unrot_1 = raw_ak_1 + block_scale * scale_u * sum_r_vk_1;
+
+                // Partner 2
+                int d2 = d + half_d;
+                float raw_ak_2 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2];
+                float sum_r_vk_2 = 0.0f;
+                for (int r = 0; r < rank; ++r) {
+                    int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    sum_r_vk_2 += (float)U_pool[u_offset + r] * (float)VK_pool[base_vk_offset + d2];
+                }
+                float k_unrot_2 = raw_ak_2 + block_scale * scale_u * sum_r_vk_2;
+
+                float k_rot_1 = k_unrot_1;
+                float k_rot_2 = k_unrot_2;
+                if (has_rope) {
+                    float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
+                    int pos = anchor_pos + 1 + t;
+                    float angle = pos * theta;
+                    float c = cos(angle);
+                    float s = sin(angle);
+                    k_rot_1 = k_unrot_1 * c - k_unrot_2 * s;
+                    k_rot_2 = k_unrot_2 * c + k_unrot_1 * s;
+                }
+                t_score_sum += q_shared[d] * k_rot_1 + q_shared[d2] * k_rot_2;
             }
-            float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
+            float t_score = t_score_sum * scale;
             sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -219,20 +220,23 @@ kernel void decode_attention_metal_kernel(
         float scale_u = (float)U_scale_pool[slot_id];
         float block_scale = (float)scales[slot_id];
 
-        // Reload anchor score and q_proj from cache or recompute
+        // Reload anchor score from cache or recompute
         float score_anc;
         if (k < 128) {
             score_anc = scores_anc_cached[k];
-            if (tid < (uint)rank) q_proj_shared[tid] = q_proj_cached[k * rank + tid];
             threadgroup_barrier(mem_flags::mem_threadgroup);
         } else {
-            // Recompute: rotate anchor key (k >= 128, rare — only for very long contexts)
+            // Recompute: rotate anchor key (k >= 128, rare)
             for (int d = (int)tid; d < D; d += (int)t_per_tg) {
                 float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
                 if (has_rope) {
-                    float c = cos_anc[k * D + d];
-                    float s = sin_anc[k * D + d];
                     int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                    int idx = (d < half_d) ? d : (d - half_d);
+                    float theta = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                    int anchor_pos = anchor_positions[slot_id];
+                    float angle = anchor_pos * theta;
+                    float c = cos(angle);
+                    float s = sin(angle);
                     float raw_partner = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + partner];
                     float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
                     ak_rot_shared[d] = raw_ak * c + rot_contrib * s;
@@ -251,26 +255,6 @@ kernel void decode_attention_metal_kernel(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
             score_anc = red_m[0];
-
-            if (tid < (uint)rank) {
-                int r = (int)tid;
-                float proj_val = 0.0f;
-                int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_vk = (float)VK_pool[base_vk_offset + d];
-                    float vk_rot;
-                    if (has_rope) {
-                        float c = cos_anc[k * D + d]; float s = sin_anc[k * D + d];
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float rvkp = (float)VK_pool[base_vk_offset + partner];
-                        float rc = (d < half_d) ? -rvkp : rvkp;
-                        vk_rot = raw_vk * c + rc * s;
-                    } else { vk_rot = raw_vk; }
-                    proj_val += q_shared[d] * vk_rot;
-                }
-                q_proj_shared[r] = proj_val;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         // Anchor attention weight
@@ -280,13 +264,44 @@ kernel void decode_attention_metal_kernel(
         float local_sum_w = 0.0f;
         float local_w_proj[32] = { 0.0f };  // per-rank weighted U accumulator
 
+        int anchor_pos = anchor_positions[slot_id];
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
-            float delta_sum = 0.0f;
+            float t_score_sum = 0.0f;
             int u_offset = slot_id * S_max * rank + t * rank;
-            for (int r = 0; r < rank; ++r) {
-                delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
+            for (int d = 0; d < half_d; ++d) {
+                // Partner 1
+                float raw_ak_1 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                float sum_r_vk_1 = 0.0f;
+                for (int r = 0; r < rank; ++r) {
+                    int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    sum_r_vk_1 += (float)U_pool[u_offset + r] * (float)VK_pool[base_vk_offset + d];
+                }
+                float k_unrot_1 = raw_ak_1 + block_scale * scale_u * sum_r_vk_1;
+
+                // Partner 2
+                int d2 = d + half_d;
+                float raw_ak_2 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2];
+                float sum_r_vk_2 = 0.0f;
+                for (int r = 0; r < rank; ++r) {
+                    int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    sum_r_vk_2 += (float)U_pool[u_offset + r] * (float)VK_pool[base_vk_offset + d2];
+                }
+                float k_unrot_2 = raw_ak_2 + block_scale * scale_u * sum_r_vk_2;
+
+                float k_rot_1 = k_unrot_1;
+                float k_rot_2 = k_unrot_2;
+                if (has_rope) {
+                    float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
+                    int pos = anchor_pos + 1 + t;
+                    float angle = pos * theta;
+                    float c = cos(angle);
+                    float s = sin(angle);
+                    k_rot_1 = k_unrot_1 * c - k_unrot_2 * s;
+                    k_rot_2 = k_unrot_2 * c + k_unrot_1 * s;
+                }
+                t_score_sum += q_shared[d] * k_rot_1 + q_shared[d2] * k_rot_2;
             }
-            float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
+            float t_score = t_score_sum * scale;
             float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
             local_sum_w += w_t;
             for (int r = 0; r < rank; ++r) {

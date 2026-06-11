@@ -208,38 +208,47 @@ static bool verify_attention_cpu(
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
 
-            // 2. Query projection (using rotated VK)
-            std::vector<float> q_proj(rank, 0.0f);
-            for (int r = 0; r < rank; ++r) {
-                float proj_val = 0.0f;
-                int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d]);
-                    float vk_rot = raw_vk;
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_partner = ggml_fp16_to_fp32(VK[base_vk_offset + partner]);
-                        float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle = anchor_pos * theta;
-                        vk_rot = raw_vk * std::cos(angle) + rot_contrib * std::sin(angle);
-                    }
-                    proj_val += q_data[h * D + d] * vk_rot;
-                }
-                q_proj[r] = proj_val;
-            }
-            slot_infos[k].q_proj = q_proj;
-
-            // 3. Delta scores
+            // 2. Exact reconstruction + per-token RoPE
             slot_infos[k].token_scores.resize(slen);
             for (int t = 0; t < slen; ++t) {
-                float delta_sum = 0.0f;
+                float t_score_sum = 0.0f;
                 int u_offset = slot_id * S_max * rank + t * rank;
-                for (int r = 0; r < rank; ++r) {
-                    delta_sum += q_proj[r] * static_cast<float>(U[u_offset + r]);
+                for (int d = 0; d < half_d; ++d) {
+                    // Reconstruct partner 1 (d)
+                    float raw_ak_1 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
+                    float sum_r_vk_1 = 0.0f;
+                    for (int r = 0; r < rank; ++r) {
+                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d]);
+                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
+                        sum_r_vk_1 += dequant_u * raw_vk;
+                    }
+                    float k_unrot_1 = raw_ak_1 + block_scale * sum_r_vk_1;
+
+                    // Reconstruct partner 2 (d + half_d)
+                    int d2 = d + half_d;
+                    float raw_ak_2 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2]);
+                    float sum_r_vk_2 = 0.0f;
+                    for (int r = 0; r < rank; ++r) {
+                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d2]);
+                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
+                        sum_r_vk_2 += dequant_u * raw_vk;
+                    }
+                    float k_unrot_2 = raw_ak_2 + block_scale * sum_r_vk_2;
+
+                    float k_rot_1 = k_unrot_1;
+                    float k_rot_2 = k_unrot_2;
+                    if (has_rope) {
+                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
+                        int pos = anchor_pos + 1 + t;
+                        float angle = pos * theta;
+                        k_rot_1 = k_unrot_1 * std::cos(angle) - k_unrot_2 * std::sin(angle);
+                        k_rot_2 = k_unrot_2 * std::cos(angle) + k_unrot_1 * std::sin(angle);
+                    }
+                    t_score_sum += q_data[h * D + d] * k_rot_1 + q_data[h * D + d2] * k_rot_2;
                 }
-                float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
+                float t_score = t_score_sum * scale;
                 slot_infos[k].token_scores[t] = t_score;
                 if (t_score > max_score) max_score = t_score;
             }
@@ -413,44 +422,13 @@ void execute_metal_attention(
             [encoder setBytes:&scale_f32 length:sizeof(scale_f32) atIndex:17];
             [encoder setBuffer:scales_buf offset:0 atIndex:18];
 
-            // Bind RoPE cosine/sine buffers (null/empty if has_rope is false)
-            id<MTLBuffer> cos_anc_buf = g_dummy_rope_buf;
-            id<MTLBuffer> sin_anc_buf = g_dummy_rope_buf;
-            if (has_rope) {
-                cos_anc_buf = [g_device newBufferWithLength:active_K * D * sizeof(float) options:MTLResourceStorageModeShared];
-                sin_anc_buf = [g_device newBufferWithLength:active_K * D * sizeof(float) options:MTLResourceStorageModeShared];
-                
-                float* cos_anc_ptr = (float*)cos_anc_buf.contents;
-                float* sin_anc_ptr = (float*)sin_anc_buf.contents;
-                
-                // Read actual anchor positions from the engine's anchor_positions tensor
-                std::vector<int32_t> anchor_positions_host(ggml_nelements(kv_engine->get_anchor_positions()));
-                ggml_backend_tensor_get(kv_engine->get_anchor_positions(), anchor_positions_host.data(), 0, anchor_positions_host.size() * sizeof(int32_t));
-                
-                for (int k = 0; k < active_K; ++k) {
-                    int slot_id = unique_slots[k];
-                    // Use the actual sequence position of the anchor token (not slot_id * 64)
-                    int anchor_idx = anchor_positions_host[slot_id];
-                    
-                    for (int d = 0; d < D; ++d) {
-                        int half_d = D / 2;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle = anchor_idx * theta;
-                        cos_anc_ptr[k * D + d] = std::cos(angle);
-                        sin_anc_ptr[k * D + d] = std::sin(angle);
-                    }
-                }
-            }
-            [encoder setBuffer:cos_anc_buf offset:0 atIndex:19];
-            [encoder setBuffer:sin_anc_buf offset:0 atIndex:20];
-            [encoder setBytes:&has_rope_i32 length:sizeof(has_rope_i32) atIndex:21];
+            [encoder setBytes:&has_rope_i32 length:sizeof(has_rope_i32) atIndex:19];
             float rope_freq_base_f32 = rope_freq_base;
-            [encoder setBytes:&rope_freq_base_f32 length:sizeof(rope_freq_base_f32) atIndex:22];
+            [encoder setBytes:&rope_freq_base_f32 length:sizeof(rope_freq_base_f32) atIndex:20];
 
             // Bind anchor_positions: [N_pool] int32 with actual sequence positions
             id<MTLBuffer> anchor_positions_buf = wrap_tensor(kv_engine->get_anchor_positions());
-            [encoder setBuffer:anchor_positions_buf offset:0 atIndex:23];
+            [encoder setBuffer:anchor_positions_buf offset:0 atIndex:21];
 
             // Dispatch threads: 1 Threadgroup per Query Head, 64 threads per Threadgroup
             MTLSize threadsPerThreadgroup = MTLSizeMake(64, 1, 1);

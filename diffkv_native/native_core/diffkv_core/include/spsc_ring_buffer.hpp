@@ -42,6 +42,11 @@ public:
                head_.load(std::memory_order_acquire);
     }
 
+    void clear() {
+        head_.store(0, std::memory_order_relaxed);
+        tail_.store(0, std::memory_order_relaxed);
+    }
+
     size_t size() const {
         size_t h = head_.load(std::memory_order_acquire);
         size_t t = tail_.load(std::memory_order_acquire);

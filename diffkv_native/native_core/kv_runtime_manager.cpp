@@ -57,7 +57,9 @@ bool KVRuntimeManager::initialize(
     n_layers_ = n_layers;
     model_ = model;
 
-    std::cerr << "[KVRuntimeManager] Initializing for " << n_layers << " layers..." << std::endl;
+    if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+        std::cerr << "[KVRuntimeManager] Initializing for " << n_layers << " layers..." << std::endl;
+    }
 
     engines_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
@@ -295,11 +297,6 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             seen.insert(sink);
         }
     }
-    // Fallback: always include block 0 if not present
-    if (seen.find(0) == seen.end() && active_slot > 0) {
-        host_candidates.push_back(0);
-        seen.insert(0);
-    }
 
     const auto& ord = srl_state.ordered_slot_ids;
     int n_ord = static_cast<int>(ord.size());
@@ -405,17 +402,19 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
 }
 
 void KVRuntimeManager::wait_for_compressor() {
-    // Collect all unique pool slots that are still Compressing (from layer 0 only —
-    // the compressor works per-slot across all layers simultaneously, so waiting on
-    // layer 0 is sufficient; other layers share the same pool_idx state).
-    auto & blocks_l0 = ingest_manager_->get_blocks(0);
-
-    // First pass: gather all Compressing pool indices
+    // Gather all pool slots that are currently in Compressing state in any layer
+    int n_slots = engines_[0]->get_U()->ne[2];
     std::vector<int> pending_slots;
-    pending_slots.reserve(blocks_l0.size());
-    for (auto & block : blocks_l0) {
-        if (block->state == BlockState::Compressing && block->pool_idx != -1) {
-            pending_slots.push_back(block->pool_idx);
+    for (int pool_idx = 0; pool_idx < n_slots; ++pool_idx) {
+        bool compressing = false;
+        for (int l = 0; l < n_layers_; ++l) {
+            if (engines_[l]->get_state_table().get(pool_idx) == BlockState::Compressing) {
+                compressing = true;
+                break;
+            }
+        }
+        if (compressing) {
+            pending_slots.push_back(pool_idx);
         }
     }
 
@@ -423,10 +422,12 @@ void KVRuntimeManager::wait_for_compressor() {
     // (prevents hanging on pathological cases like SVD thread crash)
     auto global_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (int pool_idx : pending_slots) {
-        while (std::chrono::steady_clock::now() < global_deadline) {
-            BlockState st = engines_[0]->get_state_table().get(pool_idx);
-            if (st != BlockState::Compressing) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        for (int l = 0; l < n_layers_; ++l) {
+            while (std::chrono::steady_clock::now() < global_deadline) {
+                BlockState st = engines_[l]->get_state_table().get(pool_idx);
+                if (st != BlockState::Compressing) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
         }
     }
 

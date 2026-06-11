@@ -160,6 +160,7 @@ void DiffKVCompressorThreadCPU::stop() {
     running_.store(false, std::memory_order_release);
     if (worker_.joinable())
         worker_.join();
+    queue_.clear();
 }
 
 bool DiffKVCompressorThreadCPU::submit(const CompressJobCPU& job) {

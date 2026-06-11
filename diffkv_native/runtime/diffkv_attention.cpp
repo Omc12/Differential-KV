@@ -115,44 +115,47 @@ void execute_cpu_attention(
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
 
-            // 2. Query projection (using rotated VK)
-            std::vector<float> q_proj(rank, 0.0f);
-            for (int r = 0; r < rank; ++r) {
-                float proj_val = 0.0f;
-                int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d]);
-                    float vk_rot = raw_vk;
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_partner = ggml_fp16_to_fp32(VK[base_vk_offset + partner]);
-                        float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle = anchor_pos * theta;
-                        vk_rot = raw_vk * std::cos(angle) + rot_contrib * std::sin(angle);
-                    }
-                    proj_val += Q_ptr[h * D + d] * vk_rot;
-                }
-                q_proj[r] = proj_val;
-            }
-            slot_infos[k].q_proj = q_proj;
-
-            if (should_print && h == 0 && k == 0) {
-                std::cerr << "    q_proj (first 10):";
-                for (int r = 0; r < std::min(10, rank); ++r) std::cerr << " " << q_proj[r];
-                std::cerr << "\n";
-            }
-
-            // 3. Delta scores
+            // 2. Exact reconstruction + per-token RoPE
             slot_infos[k].token_scores.resize(slen);
             for (int t = 0; t < slen; ++t) {
-                float delta_sum = 0.0f;
+                float t_score_sum = 0.0f;
                 int u_offset = slot_id * S_max * rank + t * rank;
-                for (int r = 0; r < rank; ++r) {
-                    delta_sum += q_proj[r] * static_cast<float>(U[u_offset + r]);
+                for (int d = 0; d < half_d; ++d) {
+                    // Reconstruct partner 1 (d)
+                    float raw_ak_1 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
+                    float sum_r_vk_1 = 0.0f;
+                    for (int r = 0; r < rank; ++r) {
+                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d]);
+                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
+                        sum_r_vk_1 += dequant_u * raw_vk;
+                    }
+                    float k_unrot_1 = raw_ak_1 + block_scale * sum_r_vk_1;
+
+                    // Reconstruct partner 2 (d + half_d)
+                    int d2 = d + half_d;
+                    float raw_ak_2 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2]);
+                    float sum_r_vk_2 = 0.0f;
+                    for (int r = 0; r < rank; ++r) {
+                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d2]);
+                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
+                        sum_r_vk_2 += dequant_u * raw_vk;
+                    }
+                    float k_unrot_2 = raw_ak_2 + block_scale * sum_r_vk_2;
+
+                    float k_rot_1 = k_unrot_1;
+                    float k_rot_2 = k_unrot_2;
+                    if (has_rope) {
+                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
+                        int pos = anchor_pos + 1 + t;
+                        float angle = pos * theta;
+                        k_rot_1 = k_unrot_1 * std::cos(angle) - k_unrot_2 * std::sin(angle);
+                        k_rot_2 = k_unrot_2 * std::cos(angle) + k_unrot_1 * std::sin(angle);
+                    }
+                    t_score_sum += Q_ptr[h * D + d] * k_rot_1 + Q_ptr[h * D + d2] * k_rot_2;
                 }
-                float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
+                float t_score = t_score_sum * scale;
                 slot_infos[k].token_scores[t] = t_score;
                 if (t_score > max_score) max_score = t_score;
             }
@@ -295,7 +298,7 @@ void custom_attention_op_callback(
 #endif
 
     // ── Dense Window Attention & LSE Combine on CPU ──
-    bool has_dense = (data->active_block_tokens > 0 || c != nullptr) && data->active_k_dense != nullptr && data->active_v_dense != nullptr;
+    bool has_dense = (data->active_block_tokens > 0 || (c != nullptr && !data->ignore_c)) && data->active_k_dense != nullptr && data->active_v_dense != nullptr;
     if (has_dense) {
         int active_block_tokens = data->active_block_tokens;
         int anchor_pos = data->active_slot; // We passed start position as active_slot
@@ -308,7 +311,7 @@ void custom_attention_op_callback(
         int F_test = n_kv_heads * D;
         std::vector<float> cur_k(F_test);
         std::vector<float> cur_v(F_test);
-        if (c) {
+        if (c && !data->ignore_c) {
             if (c->type == GGML_TYPE_F16) {
                 std::vector<ggml_fp16_t> cur_kv_f16(2 * F_test);
                 ggml_backend_tensor_get(c, cur_kv_f16.data(), 0, 2 * F_test * sizeof(ggml_fp16_t));
@@ -336,6 +339,42 @@ void custom_attention_op_callback(
             active_block_tokens++;
         }
 
+        // Precompute theta values for RoPE
+        std::vector<float> theta(half_d);
+        for (int idx = 0; idx < half_d; ++idx) {
+            theta[idx] = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+        }
+
+        std::vector<std::vector<float>> K_dense_rot_by_kv(n_kv_heads, std::vector<float>(active_block_tokens * D));
+        std::vector<std::vector<float>> V_dense_by_kv(n_kv_heads, std::vector<float>(active_block_tokens * D));
+
+        for (int kv_head = 0; kv_head < n_kv_heads; ++kv_head) {
+            float* K_rot = K_dense_rot_by_kv[kv_head].data();
+            float* V_d = V_dense_by_kv[kv_head].data();
+            for (int t = 0; t < active_block_tokens; ++t) {
+                int pos = (data->active_positions_dense != nullptr) ? data->active_positions_dense[t] : (anchor_pos + t);
+                int t_offset = t * D;
+                int src_offset = t * n_kv_heads * D + kv_head * D;
+
+                for (int d = 0; d < D; ++d) {
+                    float raw_k = active_k_dense[src_offset + d];
+                    float raw_v = active_v_dense[src_offset + d];
+                    V_d[t_offset + d] = raw_v;
+
+                    if (has_rope) {
+                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        float raw_partner = active_k_dense[src_offset + partner];
+                        float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
+                        int idx = (d < half_d) ? d : (d - half_d);
+                        float angle = pos * theta[idx];
+                        K_rot[t_offset + d] = raw_k * std::cos(angle) + rot_contrib * std::sin(angle);
+                    } else {
+                        K_rot[t_offset + d] = raw_k;
+                    }
+                }
+            }
+        }
+
         std::vector<float> Q_fp32(n_q_heads * D);
         if (Q->type == GGML_TYPE_F16) {
             const ggml_fp16_t* Q_fp16 = (const ggml_fp16_t*)Q->data;
@@ -348,36 +387,10 @@ void custom_attention_op_callback(
         const float* Q_ptr = Q_fp32.data();
         std::vector<float> final_output(n_q_heads * D, 0.0f);
 
-
         for (int h = 0; h < n_q_heads; ++h) {
             int kv_head = h / g;
-
-            // Reconstruct K and V for the active block dense tokens
-            std::vector<float> K_dense_rot(active_block_tokens * D);
-            std::vector<float> V_dense(active_block_tokens * D);
-
-            for (int t = 0; t < active_block_tokens; ++t) {
-                int pos = anchor_pos + t;
-
-                for (int d = 0; d < D; ++d) {
-                    int offset = t * n_kv_heads * D + kv_head * D;
-                    float raw_k = active_k_dense[offset + d];
-                    float raw_v = active_v_dense[offset + d];
-                    V_dense[t * D + d] = raw_v;
-
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_partner = active_k_dense[offset + partner];
-                        float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle = pos * theta;
-                        K_dense_rot[t * D + d] = raw_k * std::cos(angle) + rot_contrib * std::sin(angle);
-                    } else {
-                        K_dense_rot[t * D + d] = raw_k;
-                    }
-                }
-            }
+            const float* K_dense_rot = K_dense_rot_by_kv[kv_head].data();
+            const float* V_dense = V_dense_by_kv[kv_head].data();
 
             // Compute query-key dot products
             std::vector<float> scores(active_block_tokens);

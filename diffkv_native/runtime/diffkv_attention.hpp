@@ -19,8 +19,10 @@ struct CustomAttnUserData {
     float rope_freq_base;
     const float * active_k_dense;
     const float * active_v_dense;
+    const int32_t * active_positions_dense = nullptr;
     int active_block_tokens;
     int active_slot;
+    bool ignore_c = false;
 };
 
 // Custom attention launcher for Metal

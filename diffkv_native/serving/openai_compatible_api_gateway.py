@@ -37,6 +37,15 @@ _SENTINEL_READY    = b"__READY__"
 class SubprocessWrapper:
     def __init__(self):
         self.process = None
+        # Per Open-WebUI-session: last prompt tokens sent and how many are cached in KV pool
+        # Matches ACTIVE_RUNTIME's session_token_ids / get_session_sequence_length mechanism
+        self.session_cached_len: dict   = {}  # session_id -> int (tokens resident in binary KV pool)
+        self.session_prompt_text: dict  = {}  # session_id -> last full prompt string sent
+
+    def _clear_session(self, session_id: str):
+        self.session_cached_len.pop(session_id, None)
+        self.session_prompt_text.pop(session_id, None)
+
 
     def start(self):
         if self.process is not None:
@@ -95,32 +104,42 @@ class SubprocessWrapper:
             print("[Server] C++ process died — restarting...", flush=True)
             self.start()
 
-    def query_stream_into_queue(self, prompt: str, max_tokens: int, out_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    def query_stream_into_queue(self, prompt: str, max_tokens: int,
+                                out_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop,
+                                cached_len: int = 0, session_id: str = ""):
         """
         Runs in a background thread.
         Writes prompt to C++ stdin, reads stdout byte-by-byte.
         Puts decoded text chunks into out_queue.
         Puts None when done (signals end-of-stream).
         Puts {"error": msg} dict on fatal errors.
+        Puts {"cached_len": N} when __CACHED__:<N> is received after __FINISH__.
 
         Protocol:
-          C++ stdout: ... __RESPONSE__\\n <tokens...> __FINISH__\\n
+          C++ stdin:  [__CACHED__:<N>\n]  prompt-line\n
+          C++ stdout: ... __RESPONSE__\n <tokens...> __FINISH__\n __CACHED__:<N>\n
         """
         # Auto-restart if process has crashed between requests
         self.ensure_alive()
 
         # Escape newlines and backslashes so the prompt fits on one stdin line.
-        # The C++ binary decodes \\n back to real newlines before tokenizing.
         single_line = prompt.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "")
 
+        # Prepend __CACHED__:<N> prefix if the binary already has tokens in its KV pool
+        # (ACTIVE_RUNTIME prefix reuse: skip re-prefilling already-compressed tokens)
+        if cached_len > 0:
+            stdin_payload = f"__CACHED__:{cached_len}\n{single_line}\n"
+        else:
+            stdin_payload = single_line + "\n"
+
         try:
-            self._write_stdin(single_line + "\n")
+            self._write_stdin(stdin_payload)
         except BrokenPipeError:
-            # Process died mid-write — restart and retry once
             print("[Server] BrokenPipeError writing prompt — restarting C++ process...", flush=True)
+            self._clear_session(session_id)
             try:
                 self.start()
-                self._write_stdin(single_line + "\n")
+                self._write_stdin(stdin_payload)
             except Exception as e2:
                 loop.call_soon_threadsafe(out_queue.put_nowait, {"error": f"failed after restart: {e2}"})
                 loop.call_soon_threadsafe(out_queue.put_nowait, None)
@@ -160,12 +179,49 @@ class SubprocessWrapper:
         import codecs
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
+        _SENTINEL_CACHED_PREFIX = b"__CACHED__:"
+
+        def _extract_cached_from_remainder(remainder: bytes) -> int:
+            """Extract __CACHED__:<N> value from bytes following __FINISH__, returns -1 if not found."""
+            idx = remainder.find(_SENTINEL_CACHED_PREFIX)
+            if idx == -1:
+                return -1
+            end = remainder.find(b"\n", idx + len(_SENTINEL_CACHED_PREFIX))
+            if end == -1:
+                val_bytes = remainder[idx + len(_SENTINEL_CACHED_PREFIX):]
+            else:
+                val_bytes = remainder[idx + len(_SENTINEL_CACHED_PREFIX):end]
+            try:
+                return int(val_bytes.strip())
+            except Exception:
+                return -1
+
+        def _read_cached_from_stdout(proc_stdout) -> int:
+            """Read bytes from stdout until __CACHED__:<N> is found or timeout."""
+            buf = b""
+            for _ in range(200):   # up to 200 bytes before giving up
+                cb = proc_stdout.read(1)
+                if not cb:
+                    break
+                buf += cb
+                if b"\n" in buf and _SENTINEL_CACHED_PREFIX in buf:
+                    break
+            val = _extract_cached_from_remainder(buf)
+            return val
+
         if buf:
             if _SENTINEL_FINISH in buf:
-                final_bytes = buf.split(_SENTINEL_FINISH)[0]
-                final_text = decoder.decode(final_bytes, final=True)
+                parts = buf.split(_SENTINEL_FINISH, 1)
+                final_text = decoder.decode(parts[0], final=True)
                 if final_text:
                     loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_text})
+                remainder = parts[1] if len(parts) > 1 else b""
+                new_cached = _extract_cached_from_remainder(remainder)
+                if new_cached == -1:
+                    new_cached = _read_cached_from_stdout(self.process.stdout)
+                if new_cached >= 0:
+                    loop.call_soon_threadsafe(out_queue.put_nowait, {"cached_len": new_cached})
+                    print(f"[Gateway] Binary KV pool: {new_cached} tokens cached.", flush=True)
                 loop.call_soon_threadsafe(out_queue.put_nowait, None)
                 return
             
@@ -179,16 +235,23 @@ class SubprocessWrapper:
             while True:
                 b = self.process.stdout.read(1)
                 if not b:
-                    # Process died — treat as finish
                     break
                 accumulated += b
                 if _SENTINEL_FINISH in accumulated:
-                    final_bytes = accumulated.split(_SENTINEL_FINISH)[0]
-                    final_text = decoder.decode(final_bytes, final=True)
+                    parts = accumulated.split(_SENTINEL_FINISH, 1)
+                    final_text = decoder.decode(parts[0], final=True)
                     if final_text:
                         loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_text})
+                    # Extract __CACHED__:<N> — may be in accumulated remainder or need fresh read
+                    remainder = parts[1] if len(parts) > 1 else b""
+                    new_cached = _extract_cached_from_remainder(remainder)
+                    if new_cached == -1:
+                        # Not yet buffered — read fresh bytes from stdout
+                        new_cached = _read_cached_from_stdout(self.process.stdout)
+                    if new_cached >= 0:
+                        loop.call_soon_threadsafe(out_queue.put_nowait, {"cached_len": new_cached})
+                        print(f"[Gateway] Binary KV pool: {new_cached} tokens cached.", flush=True)
                     break
-                # Flush safely: keep a tail buffer long enough to hold the sentinel
                 tail_len = len(_SENTINEL_FINISH) + 4
                 if len(accumulated) > tail_len:
                     safe = accumulated[:-tail_len]
@@ -294,7 +357,8 @@ async def chat_completions(request: ChatCompletionRequest):
     messages = list(request.messages) if request.messages else []
 
     # Detect and truncate ephemeral title/summary requests (Open WebUI sends these automatically)
-    if _is_ephemeral(messages):
+    is_ephemeral = _is_ephemeral(messages)
+    if is_ephemeral:
         print(f"[Gateway] Detected ephemeral title/summary request ({sum(len(m.content) for m in messages)} chars total). Truncating.")
         for m in messages:
             if m.role == "user":
@@ -311,29 +375,53 @@ async def chat_completions(request: ChatCompletionRequest):
     request_id   = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
 
+    # ── Session ID: derive from conversation history prefix (ACTIVE_RUNTIME style) ────────────
+    # Use first user message + number of turns to create a stable session key.
+    # Ephemeral requests always get a fresh session so they don't pollute the cache.
+    import hashlib
+    if is_ephemeral or not messages:
+        session_id = "ephemeral"
+    else:
+        # Key on the first user message content (stable across turns of the same conversation)
+        first_user = next((m.content for m in messages if m.role == "user"), "")
+        session_id = hashlib.md5(first_user[:200].encode()).hexdigest()[:16]
 
-    # ── Streaming path ────────────────────────────────────────────────────────
+    # ── Prefix match (ACTIVE_RUNTIME batch_engine.submit logic) ─────────────────────
+    # Check if the current prompt starts with the prompt sent last turn.
+    # Open WebUI sends the FULL conversation each turn, so turn 2's prompt IS
+    # turn 1's prompt with the assistant reply and new user message appended.
+    # We compare the full prev_prompt (not a truncated prefix) for maximum accuracy.
+    cached_len = 0
+    if not is_ephemeral and session_id in wrapper.session_cached_len:
+        prev_prompt = wrapper.session_prompt_text.get(session_id, "")
+        prev_cached  = wrapper.session_cached_len[session_id]
+        if prev_prompt and len(user_prompt) >= len(prev_prompt) and user_prompt.startswith(prev_prompt):
+            # Prompt is a continuation — skip re-prefilling the cached prefix tokens
+            cached_len = prev_cached
+            print(f"[Gateway] Session {session_id}: reusing {cached_len} cached KV tokens "
+                  f"(Turn {len([m for m in messages if m.role=='assistant'])+1})")
+        else:
+            # Prompt diverged — start fresh
+            wrapper._clear_session(session_id)
+            print(f"[Gateway] Session {session_id}: prefix mismatch, starting fresh.")
+
+
+    # ── Streaming path ────────────────────────────────────────────────
     async def stream_generator():
+        nonlocal cached_len
         async with lock:
             loop = asyncio.get_event_loop()
             queue: asyncio.Queue = asyncio.Queue()
 
-            # Set max_tokens env before the thread reads it (C++ already running,
-            # so pass via a wrapper attribute used at query time instead)
-            # We do it by setting DIFFKV_MAX_TOKENS in the environment that the
-            # *next* C++ restart would see. For the current session, the C++
-            # binary uses whatever was set at start time. Best effort: we restart
-            # the C++ binary if max_tokens changed significantly (TODO).
-            # For now: just run — the default is 512 in C++.
-
             def producer():
-                wrapper.query_stream_into_queue(user_prompt, max_tokens, queue, loop)
+                wrapper.query_stream_into_queue(
+                    user_prompt, max_tokens, queue, loop,
+                    cached_len=cached_len, session_id=session_id
+                )
 
             threading.Thread(target=producer, daemon=True).start()
 
             # ── SSE Keepalive: prevent HTTP connection timeout during prefill ──
-            # Matching ACTIVE_RUNTIME: send ": ping\n\n" every 3s while waiting
-            # for __RESPONSE__. Open WebUI drops the connection after ~30s silence.
             KEEPALIVE_S = 3.0
             prefill_done = False
 
@@ -342,7 +430,6 @@ async def chat_completions(request: ChatCompletionRequest):
                     item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_S)
                 except asyncio.TimeoutError:
                     if not prefill_done:
-                        # Still in prefill — send keepalive comment
                         yield b": ping\n\n"
                     continue
 
@@ -356,14 +443,23 @@ async def chat_completions(request: ChatCompletionRequest):
                         "choices": [{"index": 0, "delta": {"content": f"\n[Error: {item['error']}]"}, "finish_reason": "stop"}]
                     }
                     yield f"data: {json.dumps(err_chunk)}\n\n".encode()
+                    wrapper._clear_session(session_id)
                     break
 
                 if isinstance(item, dict) and item.get("prefill_done"):
                     prefill_done = True
-                    # Don't yield anything — just mark that prefill is done
                     text = item.get("text", "")
                     if not text:
                         continue
+
+                # Update session cache after binary reports new KV pool size
+                if isinstance(item, dict) and "cached_len" in item:
+                    new_cached = item["cached_len"]
+                    if not is_ephemeral:
+                        wrapper.session_cached_len[session_id]  = new_cached
+                        wrapper.session_prompt_text[session_id] = user_prompt
+                        print(f"[Gateway] Session {session_id}: updated KV cache to {new_cached} tokens.")
+                    continue  # don't yield this meta item
 
                 text = item.get("text", "") if isinstance(item, dict) else ""
                 if not text:
@@ -376,7 +472,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n".encode()
 
-            # Final done chunks
+            # Final done chunk
             done_chunk = {
                 "id": request_id, "object": "chat.completion.chunk",
                 "created": created_time, "model": request.model,
@@ -392,7 +488,10 @@ async def chat_completions(request: ChatCompletionRequest):
             queue: asyncio.Queue = asyncio.Queue()
 
             def producer():
-                wrapper.query_stream_into_queue(user_prompt, max_tokens, queue, loop)
+                wrapper.query_stream_into_queue(
+                    user_prompt, max_tokens, queue, loop,
+                    cached_len=cached_len, session_id=session_id
+                )
 
             threading.Thread(target=producer, daemon=True).start()
 
@@ -402,6 +501,13 @@ async def chat_completions(request: ChatCompletionRequest):
                 if item is None:
                     break
                 if isinstance(item, dict):
+                    if "cached_len" in item:
+                        new_cached = item["cached_len"]
+                        if not is_ephemeral:
+                            wrapper.session_cached_len[session_id]  = new_cached
+                            wrapper.session_prompt_text[session_id] = user_prompt
+                            print(f"[Gateway] Session {session_id}: updated KV cache to {new_cached} tokens.")
+                        continue
                     t = item.get("text", "")
                     if t:
                         parts.append(t)

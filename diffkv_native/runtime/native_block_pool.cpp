@@ -23,7 +23,9 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     kv_heads_ = kv_heads;
     desc_dim_ = desc_dim;
 
-    std::cerr << "[NativeBlockPool] Initializing Block Pool with " << n_slots << " slots, SVD rank " << rank << " ..." << std::endl;
+    if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+        std::cerr << "[NativeBlockPool] Initializing Block Pool with " << n_slots << " slots, SVD rank " << rank << " ..." << std::endl;
+    }
 
     struct ggml_init_params params = {
         /*.mem_size   =*/ 1 * 1024 * 1024, // 1MB metadata context
@@ -76,10 +78,12 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         return false;
     }
 
-    std::cerr << "[NativeBlockPool] Allocated " 
-              << ggml_backend_buffer_get_size(pool_buffer_) / (1024 * 1024) 
-              << " MB on backend buffer type: " 
-              << ggml_backend_buft_name(buft) << std::endl;
+    if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+        std::cerr << "[NativeBlockPool] Allocated " 
+                  << ggml_backend_buffer_get_size(pool_buffer_) / (1024 * 1024) 
+                  << " MB on backend buffer type: " 
+                  << ggml_backend_buft_name(buft) << std::endl;
+    }
 
     // Initialize all slot states to Freed
     for (int i = 0; i < n_slots; ++i) {

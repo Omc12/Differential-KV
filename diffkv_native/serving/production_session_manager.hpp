@@ -40,6 +40,7 @@ struct ProductionSession {
     std::vector<std::vector<float>> active_k_dense;
     std::vector<std::vector<float>> active_v_dense;
     std::vector<std::vector<int32_t>> seq_lens_by_layer;
+    std::vector<int32_t> active_positions_dense;
     std::vector<int32_t> last_turn_token_prefix;
     int active_slot = 0;
     int active_block_tokens = 0;

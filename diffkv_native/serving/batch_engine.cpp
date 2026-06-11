@@ -160,11 +160,23 @@ static struct ggml_cgraph * build_decode_graph(
     CustomAttnUserData * userdata,     // Array of size config.n_layer!
     struct ggml_tensor ** out_logits,
     struct ggml_tensor ** out_selected_slots,
-    std::vector<struct ggml_tensor *>* k_layers = nullptr,
-    std::vector<struct ggml_tensor *>* v_layers = nullptr
+    struct ggml_tensor ** out_concat_k = nullptr,
+    struct ggml_tensor ** out_concat_v = nullptr
 ) {
     const auto & config = model.get_config();
     struct ggml_cgraph * gf = ggml_new_graph(ctx);
+
+    int F_test = config.n_embd / config.n_head * config.n_head_kv;
+    struct ggml_tensor * concat_k = nullptr;
+    struct ggml_tensor * concat_v = nullptr;
+    if (out_concat_k) {
+        concat_k = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F_test, config.n_layer);
+        *out_concat_k = concat_k;
+    }
+    if (out_concat_v) {
+        concat_v = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F_test, config.n_layer);
+        *out_concat_v = concat_v;
+    }
 
     // 1. Embedding lookup: shape [n_embd, 1]
     struct ggml_tensor * cur = ggml_get_rows(ctx, model.get_token_embd(), input_token);
@@ -187,8 +199,16 @@ static struct ggml_cgraph * build_decode_graph(
         if (layer.bv) v = ggml_add(ctx, v, layer.bv);
 
         // Export raw key/value tensors of each layer (before RoPE)
-        if (k_layers) (*k_layers)[l] = k;
-        if (v_layers) (*v_layers)[l] = v;
+        if (concat_k) {
+            struct ggml_tensor * k_view = ggml_view_1d(ctx, concat_k, F_test, l * F_test * sizeof(float));
+            struct ggml_tensor * copy_k = ggml_cpy(ctx, k, k_view);
+            ggml_build_forward_expand(gf, copy_k);
+        }
+        if (concat_v) {
+            struct ggml_tensor * v_view = ggml_view_1d(ctx, concat_v, F_test, l * F_test * sizeof(float));
+            struct ggml_tensor * copy_v = ggml_cpy(ctx, v, v_view);
+            ggml_build_forward_expand(gf, copy_v);
+        }
 
         // ── SRL Routing Pipeline at Layer 0 ──
         if (l == 0) {
@@ -265,22 +285,13 @@ static struct ggml_cgraph * build_decode_graph(
 
     ggml_build_forward_expand(gf, logits);
 
-    // Keep references to pre-rope layers
-    if (k_layers) {
-        for (int l = 0; l < config.n_layer; ++l) {
-            if ((*k_layers)[l]) {
-                struct ggml_tensor * dummy_k = ggml_view_1d(ctx, (*k_layers)[l], (*k_layers)[l]->ne[0] * (*k_layers)[l]->ne[1], 0);
-                ggml_build_forward_expand(gf, dummy_k);
-            }
-        }
+    if (out_concat_k && *out_concat_k) {
+        struct ggml_tensor * dummy_concat_k = ggml_view_1d(ctx, *out_concat_k, (*out_concat_k)->ne[0] * (*out_concat_k)->ne[1], 0);
+        ggml_build_forward_expand(gf, dummy_concat_k);
     }
-    if (v_layers) {
-        for (int l = 0; l < config.n_layer; ++l) {
-            if ((*v_layers)[l]) {
-                struct ggml_tensor * dummy_v = ggml_view_1d(ctx, (*v_layers)[l], (*v_layers)[l]->ne[0] * (*v_layers)[l]->ne[1], 0);
-                ggml_build_forward_expand(gf, dummy_v);
-            }
-        }
+    if (out_concat_v && *out_concat_v) {
+        struct ggml_tensor * dummy_concat_v = ggml_view_1d(ctx, *out_concat_v, (*out_concat_v)->ne[0] * (*out_concat_v)->ne[1], 0);
+        ggml_build_forward_expand(gf, dummy_concat_v);
     }
 
     return gf;
@@ -578,14 +589,14 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     srl_k_semantic = std::min(srl_k_semantic, n_slots);
     srl_k_keep = std::min(srl_k_keep, n_slots);
     
-    int srl_k_host = 1 + srl_k_recency + srl_k_lexical + 2 * srl_k_lexical + srl_k_graph;
+    int srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
     int F_test = kv_heads * head_dim;
     
     // Initialize W_proj_host
     std::vector<float> W_proj_host(head_dim * desc_dim);
     {
         std::mt19937 rand_gen(42);
-        std::uniform_real_distribution<float> rand_dist(-1.0f, 1.0f);
+        std::normal_distribution<float> rand_dist(0.0f, 1.0f);
         for (int r = 0; r < desc_dim; ++r) {
             float sum_sq = 0.0f;
             for (int c = 0; c < head_dim; ++c) {
@@ -604,11 +615,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
         session->active_v_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
+        session->active_positions_dense.assign(16384, 0);
     }
     if (session->seq_lens_by_layer.empty()) {
         session->seq_lens_by_layer.assign(n_layers, std::vector<int32_t>(n_slots, 0));
     }
 
+    int total_positions = 0;
     auto sync_active_dense_buffers = [&](
         std::vector<int>& dense_start_positions,
         std::vector<int>& total_dense_tokens
@@ -657,6 +670,20 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 }
             }
             total_dense_tokens[l] = curr_token_idx;
+        }
+
+        {
+            auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(0);
+            int curr_pos_idx = 0;
+            std::fill(session->active_positions_dense.begin(), session->active_positions_dense.end(), 0);
+            for (auto & block : b_list) {
+                if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                    for (int32_t t_pos : block->token_indices) {
+                        session->active_positions_dense[curr_pos_idx++] = t_pos;
+                    }
+                }
+            }
+            total_positions = curr_pos_idx;
         }
     };
     
@@ -879,12 +906,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
         userdata[l].has_rope = true;
         userdata[l].rope_freq_base = model_->get_config().rope_freq_base;
+        userdata[l].ignore_c = true;
     }
     
     struct ggml_tensor * decode_logits = nullptr;
     struct ggml_tensor * decode_selected_slots = nullptr;
-    std::vector<struct ggml_tensor *> decode_k_layers(n_layers, nullptr);
-    std::vector<struct ggml_tensor *> decode_v_layers(n_layers, nullptr);
+    struct ggml_tensor * decode_concat_k = nullptr;
+    struct ggml_tensor * decode_concat_v = nullptr;
     
     struct ggml_cgraph * decode_graph = build_decode_graph(
         decode_ctx, *model_, input_token_decode, position_decode, W_proj_decode,
@@ -892,12 +920,16 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         slots_mask_decode, host_slots_decode,
         srl_k_semantic, srl_k_keep,
         userdata.data(), &decode_logits, &decode_selected_slots,
-        &decode_k_layers, &decode_v_layers
+        &decode_concat_k, &decode_concat_v
     );
     ggml_set_output(decode_logits);
     if (decode_selected_slots) ggml_set_output(decode_selected_slots);
+    if (decode_concat_k) ggml_set_output(decode_concat_k);
+    if (decode_concat_v) ggml_set_output(decode_concat_v);
     
     ggml_backend_sched_reset(sched_);
+    if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched_, decode_concat_k, backend_);
+    if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched_, decode_concat_v, backend_);
     if (!ggml_backend_sched_alloc_graph(sched_, decode_graph)) {
         ggml_free(decode_ctx);
         req->set_error("Failed to allocate memory for decode graph");
@@ -928,18 +960,23 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.call_count = 0;
 
     auto & blocks_layer0 = runtime_manager_->get_ingest_manager().get_blocks(0);
-    int completed_blocks = blocks_layer0.size();
-    if (completed_blocks > 0) {
-        std::vector<int32_t> slot_ids(completed_blocks);
-        for (int i = 0; i < completed_blocks; ++i) {
-            slot_ids[i] = i; // Logical block index
+    std::vector<int32_t> compressed_slots;
+    for (int i = 0; i < (int)blocks_layer0.size(); ++i) {
+        if (blocks_layer0[i]->pool_idx != -1 &&
+            (blocks_layer0[i]->state == BlockState::CompressedResident ||
+             blocks_layer0[i]->state == BlockState::CPUResident)) {
+            compressed_slots.push_back(i); // Logical block index
         }
+    }
+    int completed_blocks = compressed_slots.size();
+    if (completed_blocks > 0) {
         std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
-        for (int i = 0; i < completed_blocks; ++i) {
+        for (int j = 0; j < completed_blocks; ++j) {
+            int i = compressed_slots[j];
             int slot_id = blocks_layer0[i]->pool_idx;
             ggml_backend_tensor_get(
                 runtime_manager_->get_engines()[0]->get_desc_matrix(),
-                desc_matrix_host.data() + i * desc_dim,
+                desc_matrix_host.data() + j * desc_dim,
                 slot_id * desc_dim * sizeof(float),
                 desc_dim * sizeof(float)
             );
@@ -947,7 +984,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
         session->srl_state = build_srl_state_from_blocks(
             desc_matrix_host.data(),
-            slot_ids.data(),
+            compressed_slots.data(),
             completed_blocks,
             prompt_tokens.data(),
             L,
@@ -979,6 +1016,15 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
     
     // Decode generation loop
+    int retrieval_interval = 8;
+    if (const char* env_ri = std::getenv("DIFFKV_RETRIEVAL_INTERVAL")) {
+        retrieval_interval = std::max(1, std::stoi(env_ri));
+    }
+    std::vector<int32_t> cached_routed_blocks;
+    std::vector<int32_t> cached_physical_candidates;
+    int last_retrieval_step = -retrieval_interval; // force on first step
+    int last_retrieval_active_slot = -1;
+
     for (int step = 1; step < req->max_tokens; ++step) {
         if (req->cancelled) {
             break;
@@ -988,32 +1034,40 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
         int current_pos = L + step - 1;
         
-        // Host Candidate Selection (SRL)
-        std::vector<int32_t> routed_blocks = runtime_manager_->route_decode_slots(
-            current_pos,
-            all_tokens,
-            session->srl_state,
-            stop_token_ids_,
-            srl_k_recency,
-            srl_k_lexical,
-            srl_k_graph,
-            srl_k_host,
-            session->active_slot
-        );
+        bool do_retrieval = (step - last_retrieval_step >= retrieval_interval) || (session->active_slot != last_retrieval_active_slot);
+        if (do_retrieval) {
+            cached_routed_blocks = runtime_manager_->route_decode_slots(
+                current_pos,
+                all_tokens,
+                session->srl_state,
+                stop_token_ids_,
+                srl_k_recency,
+                srl_k_lexical,
+                srl_k_graph,
+                srl_k_host,
+                session->active_slot
+            );
+            last_retrieval_step = step;
+            last_retrieval_active_slot = session->active_slot;
+
+            // Map block indices to physical pool slot indices
+            cached_physical_candidates.clear();
+            cached_physical_candidates.reserve(srl_k_host);
+            for (int32_t block_idx : cached_routed_blocks) {
+                auto & blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
+                if (block_idx >= 0 && block_idx < (int)blocks.size()) {
+                    cached_physical_candidates.push_back(blocks[block_idx]->pool_idx);
+                } else {
+                    cached_physical_candidates.push_back(0);
+                }
+            }
+        }
+        
+        std::vector<int32_t> routed_blocks = cached_routed_blocks;
+        std::vector<int32_t> physical_candidates = cached_physical_candidates;
         
         // Touch blocks to move from CPU/Disk to GPU VRAM
         runtime_manager_->touch_active_slots(routed_blocks);
-        
-        // Map block indices to physical pool slot indices
-        std::vector<int32_t> physical_candidates;
-        for (int32_t block_idx : routed_blocks) {
-            auto & blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
-            if (block_idx >= 0 && block_idx < (int)blocks.size()) {
-                physical_candidates.push_back(blocks[block_idx]->pool_idx);
-            } else {
-                physical_candidates.push_back(0);
-            }
-        }
         
         ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
         ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
@@ -1045,6 +1099,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             userdata[l].K = current_k;
             userdata[l].active_k_dense = session->active_k_dense[l].data();
             userdata[l].active_v_dense = session->active_v_dense[l].data();
+            userdata[l].active_positions_dense = session->active_positions_dense.data();
             userdata[l].active_block_tokens = total_dense_tokens[l];
             userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
         }
@@ -1073,14 +1128,32 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         std::string piece = model_->token_to_piece(next_token);
         req->push_chunk(piece);
         
+        std::vector<float> concat_k_host(n_layers * F_test);
+        std::vector<float> concat_v_host(n_layers * F_test);
+        ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
+        ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
+
         std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
         std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
         for (int l = 0; l < n_layers; ++l) {
-            ggml_backend_tensor_get(decode_k_layers[l], decode_k[l].data(), 0, F_test * sizeof(float));
-            ggml_backend_tensor_get(decode_v_layers[l], decode_v[l].data(), 0, F_test * sizeof(float));
+            std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
+            std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
         }
         
         runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+
+        // Manual append newly ingested token to host-side dense resident buffers
+        for (int l = 0; l < n_layers; ++l) {
+            int offset = total_dense_tokens[l] * F_test;
+            if (offset + F_test <= (int)session->active_k_dense[l].size()) {
+                std::memcpy(session->active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
+                std::memcpy(session->active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+                total_dense_tokens[l]++;
+            }
+        }
+        if (total_positions < (int)session->active_positions_dense.size()) {
+            session->active_positions_dense[total_positions++] = current_pos;
+        }
         
         int old_active_slot = session->active_slot;
         session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
@@ -1095,9 +1168,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
         
-        sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
-        
         if (session->active_block_tokens == 0 && session->active_slot > old_active_slot) {
+            runtime_manager_->wait_for_compressor();
             int prev_slot = old_active_slot;
             auto & blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
             if (prev_slot >= 0 && prev_slot < (int)blocks.size()) {
@@ -1119,18 +1191,24 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     stop_token_ids_
                 );
 
-                // Rebuild chunk graph
+                // Rebuild chunk graph only over compressed slots
                 auto & all_blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
-                int cur_N = all_blocks.size();
-                std::vector<int32_t> cur_slots(cur_N);
-                for (int i = 0; i < cur_N; ++i) cur_slots[i] = i; // Logical indices
-
+                std::vector<int32_t> cur_slots;
+                for (int i = 0; i < (int)all_blocks.size(); ++i) {
+                    if (all_blocks[i]->pool_idx != -1 &&
+                        (all_blocks[i]->state == BlockState::CompressedResident ||
+                         all_blocks[i]->state == BlockState::CPUResident)) {
+                        cur_slots.push_back(i); // Logical index
+                    }
+                }
+                int cur_N = cur_slots.size();
                 std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                for (int i = 0; i < cur_N; ++i) {
+                for (int j = 0; j < cur_N; ++j) {
+                    int i = cur_slots[j];
                     int slot_id = all_blocks[i]->pool_idx;
                     ggml_backend_tensor_get(
                         runtime_manager_->get_engines()[0]->get_desc_matrix(),
-                        cur_desc_matrix.data() + i * desc_dim,
+                        cur_desc_matrix.data() + j * desc_dim,
                         slot_id * desc_dim * sizeof(float),
                         desc_dim * sizeof(float)
                     );
@@ -1145,6 +1223,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     0.15f
                 );
             }
+            // Sync dense buffers only when block finishes
+            sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
         }
         
         last_token = next_token;

@@ -125,6 +125,7 @@ private:
     std::unordered_set<std::string> query_words_;
     Stats stats_;
     std::vector<int32_t> session_token_ids_;
+    std::vector<size_t> last_compression_scan_idx_;
 };
 
 } // namespace diffkv

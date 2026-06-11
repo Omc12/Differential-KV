@@ -189,6 +189,7 @@ void StreamingSparseIngestManager::initialize(int n_layers, const DiffKVModel* m
     model_ = model;
     n_layers_ = n_layers;
     layers_blocks_.resize(n_layers);
+    last_compression_scan_idx_.assign(n_layers, 0);
     clear();
 }
 
@@ -199,6 +200,7 @@ void StreamingSparseIngestManager::clear() {
     query_words_.clear();
     stats_ = Stats();
     session_token_ids_.clear();
+    last_compression_scan_idx_.assign(n_layers_, 0);  // reset scan pointer on session clear
 }
 
 void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines) {
@@ -242,6 +244,9 @@ void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::uni
             kept.push_back(std::move(block));
         }
         blocks = std::move(kept);
+        if (last_compression_scan_idx_[l] > blocks.size()) {
+            last_compression_scan_idx_[l] = blocks.size();
+        }
     }
 }
 
@@ -368,7 +373,9 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
     
-    // Scan and submit blocks that have fallen out of the recency window
+    // Scan and submit blocks that have fallen out of the recency window.
+    // Start from last_compression_scan_idx_[layer_idx] to avoid re-scanning
+    // already-processed blocks (O(N) → amortized O(1) per block).
     int current_seq_len = position_start + chunk_len;
     bool immediate_prefill = true;
     if (const char* env_p = std::getenv("DIFFKV_IMMEDIATE_PREFILL_COMPRESS")) {
@@ -377,8 +384,12 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
 
-    for (size_t idx = 0; idx < blocks.size(); ++idx) {
-        auto & b = blocks[idx];
+    size_t scan_start = last_compression_scan_idx_[layer_idx];
+    size_t scan_end   = layers_blocks_[layer_idx].size();
+    auto & scan_blocks = layers_blocks_[layer_idx];
+
+    for (size_t idx = scan_start; idx < scan_end; ++idx) {
+        auto & b = scan_blocks[idx];
         if (b->state == BlockState::DenseResident && b->token_count() == 1 + micro_block_size_ && !b->skip_compression) {
             bool skip = false;
             if (b->anchor_idx == 0 && protect_block_zero_) {
@@ -399,6 +410,10 @@ void StreamingSparseIngestManager::ingest_chunk(
 
             if (skip) {
                 b->skip_compression = true;
+                // Advance scan pointer past this permanently-skipped block
+                if (idx == last_compression_scan_idx_[layer_idx]) {
+                    last_compression_scan_idx_[layer_idx]++;
+                }
             } else {
                 bool should_compress = false;
                 if (chunk_len > 1 && immediate_prefill) {
@@ -409,8 +424,15 @@ void StreamingSparseIngestManager::ingest_chunk(
 
                 if (should_compress) {
                     submit_block_for_compression(layer_idx, idx, engines, compressor, rank);
+                    // Advance scan pointer once this block is submitted (won't need re-scanning)
+                    if (idx == last_compression_scan_idx_[layer_idx]) {
+                        last_compression_scan_idx_[layer_idx]++;
+                    }
                 }
             }
+        } else if (b->state != BlockState::DenseResident && idx == last_compression_scan_idx_[layer_idx]) {
+            // Block already compressed or skipped — advance pointer
+            last_compression_scan_idx_[layer_idx]++;
         }
     }
 
