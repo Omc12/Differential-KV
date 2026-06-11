@@ -190,20 +190,14 @@ void custom_attention_op_callback(
     std::vector<float> out_sparse(n_q_heads * D, 0.0f);
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
 
-#if 0
+#ifdef __APPLE__
     // On macOS, run GPU Metal sparse attention
-    execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
-    
-    // Copy sparse output and LSE back for blending
-    memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
-    
-    // Read LSE values back from GPU memory
-    // (Handled internally in execute_metal_attention, which copies lse_sparse buffer)
-    // To access the values, we can temporarily copy them from the verify/blend block or run it directly.
-    // In execute_metal_attention, the lse_sparse vector is filled directly. Let's make execute_metal_attention
-    // return or fill the out_sparse and lse_sparse buffers!
-    // Wait, execute_metal_attention already populates out_sparse and lse_sparse internally!
-    // But since execute_metal_attention writes to dst->data, we can retrieve them there.
+    if (K > 0) {
+        execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
+        
+        // Copy sparse output back for blending on host
+        memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
+    }
 #else
     // On non-macOS (CUDA/CPU fallback), run CPU Project-Then-Attend attention
     if (K > 0) {

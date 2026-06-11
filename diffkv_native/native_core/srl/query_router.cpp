@@ -152,12 +152,12 @@ SessionSRLState build_srl_state_from_blocks(
     int                            block_size,
     const std::unordered_set<int>& stop_tokens,
     // Graph build params
-    int    K_semantic         = 6,
-    int    K_temporal         = 2,
-    float  overlap_threshold  = 0.15f,
+    int    K_semantic,
+    int    K_temporal,
+    float  overlap_threshold,
     // Sink blocks: first and last block slots
-    bool   add_first_as_sink  = true,
-    bool   add_last_as_sink   = true
+    bool   add_first_as_sink,
+    bool   add_last_as_sink
 ) {
     SessionSRLState state;
     if (N == 0) return state;

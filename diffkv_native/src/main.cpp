@@ -11,6 +11,7 @@
 #include "../third_party/llama.cpp/ggml/src/ggml-impl.h"
 #include "runtime/native_block_pool.hpp"
 #include "native_core/srl/diffkv_srl.hpp"
+#include "native_core/srl/query_router.hpp"
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/compression/async_compressor.hpp"
 #include "native_core/kv_runtime_manager.hpp"
@@ -773,7 +774,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    diffkv::InvertedIndex inverted_index;
+    diffkv::SessionSRLState srl_state;
 
 
     // Backend is already initialized at the start of main
@@ -905,7 +906,11 @@ int main(int argc, char ** argv) {
         }
         persistent_k_dense.clear();
         persistent_v_dense.clear();
-        inverted_index.clear();
+        srl_state.ordered_slot_ids.clear();
+        srl_state.sink_blocks.clear();
+        srl_state.inverted_index.clear();
+        srl_state.chunk_graph = diffkv::ChunkGraph();
+        srl_state.semantic_index = diffkv::SemanticIndex();
         for (int l = 0; l < n_layers; ++l) {
             std::fill(seq_lens_by_layer[l].begin(), seq_lens_by_layer[l].end(), 0);
         }
@@ -1276,16 +1281,38 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> all_tokens = prompt_tokens;
         all_tokens.push_back(last_token);
 
-        // Populate initial inverted index for all completed blocks in prefill using runtime_manager
-        inverted_index.clear();
+        // Build initial SessionSRLState for all completed blocks in prefill using runtime_manager
+        srl_state.ordered_slot_ids.clear();
+        srl_state.sink_blocks.clear();
+        srl_state.inverted_index.clear();
+        srl_state.chunk_graph = diffkv::ChunkGraph();
+        srl_state.semantic_index = diffkv::SemanticIndex();
+
         auto & blocks_layer0 = runtime_manager.get_ingest_manager().get_blocks(0);
         int completed_blocks = blocks_layer0.size();
-        for (int i = 0; i < completed_blocks; ++i) {
-            if (i < completed_blocks - 1 || blocks_layer0[i]->token_count() == 1 + micro_block_size) {
-                inverted_index.add_block_tokens(i, blocks_layer0[i]->token_indices, blocks_layer0[i]->anchor_idx, stop_token_ids);
+        if (completed_blocks > 0) {
+            std::vector<int32_t> slot_ids(completed_blocks);
+            for (int i = 0; i < completed_blocks; ++i) {
+                slot_ids[i] = blocks_layer0[i]->pool_idx;
             }
+            std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
+            ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), desc_matrix_host.data(), 0, completed_blocks * desc_dim * sizeof(float));
+
+            srl_state = build_srl_state_from_blocks(
+                desc_matrix_host.data(),
+                slot_ids.data(),
+                completed_blocks,
+                prompt_tokens.data(),
+                L,
+                64, // block_size
+                stop_token_ids,
+                6, // K_semantic
+                2, // K_temporal
+                0.15f, // overlap_threshold
+                true, // add_first_as_sink
+                true  // add_last_as_sink
+            );
         }
-        inverted_index.recompute_idf(completed_blocks);
 
         int active_slot = runtime_manager.get_ingest_manager().get_blocks(0).size() - 1;
         if (active_slot < 0) {
@@ -1358,11 +1385,10 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
             ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
 
-            // ── Host Candidate Selection (SRL) ──────────────────────────────────────
             std::vector<int32_t> routed_blocks = runtime_manager.route_decode_slots(
                 current_pos,
                 all_tokens,
-                inverted_index,
+                srl_state,
                 stop_token_ids,
                 srl_k_recency,
                 srl_k_lexical,
@@ -1465,6 +1491,7 @@ int main(int argc, char ** argv) {
             std::string piece = model.token_to_piece(next_token);
             std::cout << piece << std::flush;
 
+            srl_state.update_generated_tokens(next_token);
             generated_tokens.push_back(next_token);
             all_tokens.push_back(next_token);
             last_token = next_token;
@@ -1538,17 +1565,47 @@ int main(int argc, char ** argv) {
                 total_dense_tokens[l] = curr_token_idx;
             }
 
-            // Index completed block to inverted index
+            // Index completed block to inverted index and rebuild chunk graph
             if (active_block_tokens == 0 && active_slot > old_active_slot) {
                 int prev_slot = old_active_slot;
                 auto & blocks = runtime_manager.get_ingest_manager().get_blocks(0);
                 if (prev_slot >= 0 && prev_slot < (int)blocks.size()) {
                     auto & block = blocks[prev_slot];
-                    inverted_index.add_block_tokens(prev_slot, block->token_indices, block->anchor_idx, stop_token_ids);
-                    inverted_index.recompute_idf(prev_slot + 1);
+                    
+                    // Update descriptors
+                    runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
+
+                    std::vector<float> desc(desc_dim);
+                    ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), desc.data(), block->pool_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
+
+                    update_srl_from_compressed_block(
+                        srl_state,
+                        desc.data(),
+                        block->pool_idx,
+                        block->token_indices.data(),
+                        block->token_count(),
+                        block->anchor_idx,
+                        stop_token_ids
+                    );
+
+                    // Rebuild chunk graph
+                    auto & all_blocks = runtime_manager.get_ingest_manager().get_blocks(0);
+                    int cur_N = all_blocks.size();
+                    std::vector<int32_t> cur_slots(cur_N);
+                    for (int i = 0; i < cur_N; ++i) cur_slots[i] = all_blocks[i]->pool_idx;
+
+                    std::vector<float> cur_desc_matrix(cur_N * desc_dim);
+                    ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), cur_desc_matrix.data(), 0, cur_N * desc_dim * sizeof(float));
+
+                    srl_state.chunk_graph = build_chunk_graph(
+                        cur_desc_matrix.data(),
+                        cur_slots.data(),
+                        cur_N,
+                        6, 2,
+                        &srl_state.inverted_index,
+                        0.15f
+                    );
                 }
-                // Update semantic descriptors
-                runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
 
                 for (int l = 0; l < n_layers; ++l) {
                     std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);

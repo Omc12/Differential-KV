@@ -276,7 +276,7 @@ void KVRuntimeManager::ingest_decode(
 std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     int current_pos,
     const std::vector<int32_t>& token_ids,
-    const InvertedIndex& inverted_index,
+    const SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& stop_token_ids,
     int srl_k_recency,
     int srl_k_lexical,
@@ -287,26 +287,26 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     std::vector<int32_t> host_candidates;
     std::unordered_set<int32_t> seen;
 
-    // 1. Recency window: latest srl_k_recency slots
-    for (int i = 0; i < srl_k_recency; ++i) {
-        int slot = active_slot - 1 - i;
-        if (slot >= 0) {
-            host_candidates.push_back(slot);
-            seen.insert(slot);
+    // 0. Always include sink blocks (first/last blocks, critical for attention sinks)
+    for (int32_t sink : srl_state.sink_blocks) {
+        if (sink >= 0 && sink < active_slot) {
+            host_candidates.push_back(sink);
+            seen.insert(sink);
         }
     }
-
-    // 2. Lexical search slots
-    int query_start = std::max(0, current_pos - 3);
-    std::vector<int32_t> query_tokens;
-    for (int i = query_start; i < current_pos; ++i) {
-        if (i < (int)token_ids.size()) {
-            query_tokens.push_back(token_ids[i]);
-        }
+    // Fallback: always include block 0 if not present
+    if (seen.find(0) == seen.end() && active_slot > 0) {
+        host_candidates.push_back(0);
+        seen.insert(0);
     }
 
-    std::vector<int32_t> lexical_slots = const_cast<InvertedIndex&>(inverted_index).search(query_tokens, srl_k_lexical);
-    for (int32_t slot : lexical_slots) {
+    const auto& ord = srl_state.ordered_slot_ids;
+    int n_ord = static_cast<int>(ord.size());
+
+    // 1. Recency window: latest srl_k_recency slots from ordered slot list
+    int take_r = std::min(srl_k_recency, n_ord);
+    for (int i = n_ord - take_r; i < n_ord; ++i) {
+        int32_t slot = ord[i];
         if (slot >= 0 && slot < active_slot) {
             if (!seen.count(slot)) {
                 host_candidates.push_back(slot);
@@ -315,24 +315,78 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         }
     }
 
-    // 3. Graph adjacency slots
-    std::vector<int32_t> graph_slots;
-    for (int32_t seed : lexical_slots) {
-        if (seed - 1 >= 0 && seed - 1 < active_slot) {
-            graph_slots.push_back(seed - 1);
-        }
-        if (seed + 1 >= 0 && seed + 1 < active_slot) {
-            graph_slots.push_back(seed + 1);
+    // 2. Lexical search slots
+    // Search a wider window of recent history (up to last 128 tokens) for keywords
+    int query_start = std::max(0, current_pos - 128);
+    std::vector<int> query_tokens;
+    for (int i = query_start; i < current_pos; ++i) {
+        if (i < (int)token_ids.size()) {
+            query_tokens.push_back(token_ids[i]);
         }
     }
 
-    int graph_added = 0;
-    for (int32_t slot : graph_slots) {
-        if (graph_added >= srl_k_graph) break;
-        if (!seen.count(slot)) {
-            host_candidates.push_back(slot);
-            seen.insert(slot);
-            graph_added++;
+    auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, 0.999f);
+    std::vector<int32_t> lexical_slots;
+    for (int i = 0; i < std::min(srl_k_lexical, (int)lex_scored.size()); ++i) {
+        int32_t slot = lex_scored[i].first;
+        if (slot >= 0 && slot < active_slot) {
+            lexical_slots.push_back(slot);
+            if (!seen.count(slot)) {
+                host_candidates.push_back(slot);
+                seen.insert(slot);
+            }
+        }
+    }
+
+    // 3. Chunk Graph Adjacency / 2-hop neighborhood expansion
+    const ChunkGraph& g = srl_state.chunk_graph;
+    int N = g.N;
+    if (N > 0 && N == srl_state.n_active_blocks()) {
+        std::vector<float> seed_scores(N, 0.0f);
+        std::unordered_set<int32_t> seed_set;
+
+        // Populate seed activations from lexical match scores
+        for (const auto& pair : lex_scored) {
+            int32_t slot = pair.first;
+            auto it = std::find(ord.begin(), ord.end(), slot);
+            if (it != ord.end()) {
+                int idx = std::distance(ord.begin(), it);
+                if (idx >= 0 && idx < N) {
+                    seed_scores[idx] = pair.second;
+                    seed_set.insert(slot);
+                }
+            }
+        }
+
+        // pointwise decay/retention
+        std::vector<float> retention(N, srl_state.graph_hop_decay);
+
+        // 1-hop propagation
+        std::vector<float> A1 = graph_propagate(g, seed_scores, retention, srl_state.graph_hop_decay);
+        // 2-hop propagation
+        std::vector<float> A2 = graph_propagate(g, A1, retention, srl_state.graph_hop_decay);
+
+        std::vector<std::pair<float, int32_t>> gscore_slots;
+        for (int i = 0; i < N; ++i) {
+            int32_t slot = ord[i];
+            if (seed_set.count(slot)) continue;
+            float gs = A1[i] + A2[i];
+            if (gs > 0.0f && slot >= 0 && slot < active_slot) {
+                gscore_slots.push_back({gs, slot});
+            }
+        }
+
+        int take_g = std::min(srl_k_graph, (int)gscore_slots.size());
+        if (take_g > 0) {
+            std::partial_sort(gscore_slots.begin(), gscore_slots.begin() + take_g, gscore_slots.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (int i = 0; i < take_g; ++i) {
+                int32_t slot = gscore_slots[i].second;
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                }
+            }
         }
     }
 
@@ -341,33 +395,53 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         host_candidates.push_back(0);
     }
 
+    // Cap at srl_k_host
+    if (host_candidates.size() > (size_t)srl_k_host) {
+        host_candidates.resize(srl_k_host);
+    }
+
     return host_candidates;
 }
 
 void KVRuntimeManager::wait_for_compressor() {
+    // Collect all unique pool slots that are still Compressing (from layer 0 only —
+    // the compressor works per-slot across all layers simultaneously, so waiting on
+    // layer 0 is sufficient; other layers share the same pool_idx state).
+    auto & blocks_l0 = ingest_manager_->get_blocks(0);
+
+    // First pass: gather all Compressing pool indices
+    std::vector<int> pending_slots;
+    pending_slots.reserve(blocks_l0.size());
+    for (auto & block : blocks_l0) {
+        if (block->state == BlockState::Compressing && block->pool_idx != -1) {
+            pending_slots.push_back(block->pool_idx);
+        }
+    }
+
+    // Second pass: wait for all pending slots with a global 5-second timeout
+    // (prevents hanging on pathological cases like SVD thread crash)
+    auto global_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (int pool_idx : pending_slots) {
+        while (std::chrono::steady_clock::now() < global_deadline) {
+            BlockState st = engines_[0]->get_state_table().get(pool_idx);
+            if (st != BlockState::Compressing) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+    // Sync block states across all layers
     for (int l = 0; l < n_layers_; ++l) {
         auto & blocks = ingest_manager_->get_blocks(l);
         for (auto & block : blocks) {
             if (block->state == BlockState::Compressing && block->pool_idx != -1) {
-                auto start_time = std::chrono::steady_clock::now();
-                while (true) {
-                    BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
-                    if (current_state != BlockState::Compressing) {
-                        block->state = current_state;
-                        break;
-                    }
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start_time
-                    ).count();
-                    if (elapsed > 60000) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
+                if (current_state != BlockState::Compressing) {
+                    block->state = current_state;
                 }
             }
         }
     }
-    
+
     // Register newly compressed blocks with the pager
     auto & blocks = ingest_manager_->get_blocks(0);
     for (auto & block : blocks) {
@@ -376,6 +450,7 @@ void KVRuntimeManager::wait_for_compressor() {
         }
     }
 }
+
 
 void KVRuntimeManager::touch_active_slots(const std::vector<int32_t>& active_slots) {
     if (active_slots.empty()) return;

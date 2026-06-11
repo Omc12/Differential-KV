@@ -128,14 +128,12 @@ inline float f16_to_float(uint16_t h) noexcept {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// L2-normalize a float array in-place.
 inline void l2_normalize(float* v, int n) noexcept {
     float sq = 0.0f;
     for (int i = 0; i < n; ++i) sq += v[i] * v[i];
-    if (sq > 1e-12f) {
-        float inv = 1.0f / std::sqrt(sq);
-        for (int i = 0; i < n; ++i) v[i] *= inv;
-    }
+    float norm = std::sqrt(sq) + 1e-8f;
+    float inv = 1.0f / norm;
+    for (int i = 0; i < n; ++i) v[i] *= inv;
 }
 
 // ---------------------------------------------------------------------------

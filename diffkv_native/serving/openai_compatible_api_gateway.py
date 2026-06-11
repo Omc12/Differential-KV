@@ -222,16 +222,91 @@ async def lifespan(app: FastAPI):
 app.router.lifespan_context = lifespan
 
 
+# ── Ephemeral request detection (matching ACTIVE_RUNTIME) ────────────────────
+# Open WebUI sends automatic title/summary requests after each turn.
+# These embed the full conversation history (can be 30KB+) and would cause
+# a full prefill of 8000+ tokens — hanging or taking minutes.
+# We detect and truncate them before they hit the C++ binary.
+
+_EPHEMERAL_KEYWORDS = (
+    "title", "summarize", "summary", "label", "name this", "name the",
+    "name of the", "generate a title", "concise title",
+)
+_EPHEMERAL_KEYWORDS_LONG = (
+    "summarizing the chat history",
+    "concise, 3-5 word title",
+    "concise title with an emoji",
+    "emoji summarizing the chat",
+    "generate a concise, 3-5 word title",
+    "generate a concise title with an emoji",
+    'json format: { "title":',
+    'json format: {"title":',
+    "guidelines:\n- the title should clearly represent",
+)
+
+def _is_ephemeral(messages: list) -> bool:
+    if not messages:
+        return False
+    last = messages[-1]
+    if last.role != "user":
+        return False
+    c = last.content.lower()
+    has_kw = any(kw in c for kw in _EPHEMERAL_KEYWORDS)
+    has_history = any(m in c for m in (
+        "assistant:", "assistant\n", "<|im_start|>assistant",
+        "bot:", "ai:", "response:"
+    ))
+    if len(messages) == 1 and has_kw and has_history:
+        return True
+    if len(last.content) < 500 and has_kw:
+        return True
+    if any(kw in last.content.lower() for kw in _EPHEMERAL_KEYWORDS_LONG):
+        return True
+    return False
+
+def _truncate_ephemeral(content: str) -> str:
+    """Truncate embedded chat history in a title/summary request."""
+    if len(content) <= 2000:
+        return content
+    c_lower = content.lower()
+    for marker in ("chat history:", "conversation history:", "history:", "messages:", "context:"):
+        idx = c_lower.find(marker)
+        if idx != -1:
+            prefix = content[:idx + len(marker)]
+            history = content[idx + len(marker):]
+            if len(history) > 1500:
+                history = history[:750] + "\n...[truncated]...\n" + history[-750:]
+            print(f"[Gateway] Truncated ephemeral prompt: {len(content)} → {len(prefix)+len(history)} chars")
+            return prefix + history
+    # Fallback: middle-truncate
+    truncated = content[:1000] + "\n...[truncated]...\n" + content[-1000:]
+    print(f"[Gateway] Middle-truncated ephemeral prompt: {len(content)} → {len(truncated)} chars")
+    return truncated
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    if not request.messages:
+    messages = list(request.messages) if request.messages else []
+
+    # Detect and truncate ephemeral title/summary requests (Open WebUI sends these automatically)
+    if _is_ephemeral(messages):
+        print(f"[Gateway] Detected ephemeral title/summary request ({sum(len(m.content) for m in messages)} chars total). Truncating.")
+        for m in messages:
+            if m.role == "user":
+                m = ChatMessage(role=m.role, content=_truncate_ephemeral(m.content))
+                messages[-1] = m
+                break
+
+    if not messages:
         user_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
     else:
-        user_prompt = format_messages_as_chat(request.messages)
+        user_prompt = format_messages_as_chat(messages)
 
     max_tokens   = request.max_tokens or 512
     request_id   = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
+
 
     # ── Streaming path ────────────────────────────────────────────────────────
     async def stream_generator():

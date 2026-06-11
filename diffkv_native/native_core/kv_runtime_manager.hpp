@@ -5,7 +5,7 @@
 #include "native_core/compression/async_compressor.hpp"
 #include "native_core/paging/paged_kv_store.hpp"
 #include "native_core/streaming_sparse_ingest.hpp"
-#include "native_core/srl/inverted_index.hpp" // For InvertedIndex
+#include "native_core/srl/session_srl_state.hpp" // For SessionSRLState
 #include <vector>
 #include <unordered_set>
 #include <memory>
@@ -60,7 +60,7 @@ public:
     std::vector<int32_t> route_decode_slots(
         int current_pos,
         const std::vector<int32_t>& token_ids,
-        const InvertedIndex& inverted_index,
+        const SessionSRLState& srl_state,
         const std::unordered_set<int32_t>& stop_token_ids,
         int srl_k_recency,
         int srl_k_lexical,

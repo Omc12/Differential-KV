@@ -106,7 +106,7 @@ struct AttentionScoreCache {
                 sq_a += qh[d] * qh[d];
                 sq_b += qh_prev[d] * qh_prev[d];
             }
-            float denom = std::sqrt(sq_a) * std::sqrt(sq_b) + 1e-8f;
+            float denom = (std::sqrt(sq_a) + 1e-8f) * (std::sqrt(sq_b) + 1e-8f);
             float sim   = dot / denom;
 
             if (sim >= threshold) {

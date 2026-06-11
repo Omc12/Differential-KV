@@ -63,7 +63,8 @@ def mock_compress_fn(block, k, v):
     """Mock synchronous compression — logs call and writes U/V."""
     seq_len = k.shape[2]
     feat_dim = 2 * HEADS * HEAD_DIM
-    anchor_flat = block.anchor_kv.reshape(-1).float().to(k.device)
+    anchor = block.anchor_kv if block.anchor_kv is not None else block.anchor_kv_cpu
+    anchor_flat = anchor.reshape(-1).float().to(k.device)
     stacked = torch.stack([k[0].transpose(0,1), v[0].transpose(0,1)], dim=1)
     flat = stacked.reshape(seq_len, feat_dim).float()
     deltas = flat - anchor_flat.unsqueeze(0)

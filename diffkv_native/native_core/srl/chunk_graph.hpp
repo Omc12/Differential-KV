@@ -168,15 +168,13 @@ inline ChunkGraph build_chunk_graph(
                 sim.data(), N);
 
     // ------------------------------------------------------------------
-    // Step 2-5: Build per-node adjacency lists
+    // Step 2-5: Build per-node adjacency lists (exact blended formula)
     // ------------------------------------------------------------------
-    // adj[i]: list of (row_index, blended_weight) -- max capacity enforced later
-    int max_possible_deg = K_semantic + K_temporal + 10;  // rough upper bound
     std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
-
-    // Semantic top-K
     for (int i = 0; i < N; ++i) {
-        // Collect (sim, j) for j != i
+        std::unordered_set<int> unique_cands;
+
+        // 1. Semantic top-K candidates
         std::vector<std::pair<float, int>> sims;
         sims.reserve(N - 1);
         const float* row = sim.data() + i * N;
@@ -185,52 +183,58 @@ inline ChunkGraph build_chunk_graph(
             sims.push_back({row[j], j});
         }
         int k_eff = std::min(K_semantic, static_cast<int>(sims.size()));
-        std::partial_sort(sims.begin(), sims.begin() + k_eff, sims.end(),
-                          [](const auto& a, const auto& b) { return a.first > b.first; });
-
-        for (int t = 0; t < k_eff; ++t) {
-            float sem_score = sims[t].first;
-            int   j         = sims[t].second;
-            // Base weight: semantic component
-            float w = 0.5f * sem_score;
-            insert_neighbor(adj[i], j, w, max_possible_deg);
+        if (k_eff > 0) {
+            std::partial_sort(sims.begin(), sims.begin() + k_eff, sims.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (int t = 0; t < k_eff; ++t) {
+                unique_cands.insert(sims[t].second);
+            }
         }
-    }
 
-    // Temporal neighbours (i-1, i+1)
-    for (int i = 0; i < N; ++i) {
+        // 2. Temporal candidates
         for (int delta : {-1, +1}) {
             int j = i + delta;
-            if (j < 0 || j >= N) continue;
-            float sem_score = sim[i * N + j];
-            float w = 0.5f * sem_score + 0.2f;  // temporal boost
-            insert_neighbor(adj[i], j, w, max_possible_deg);
+            if (j >= 0 && j < N) {
+                unique_cands.insert(j);
+            }
         }
-    }
 
-    // Lexical neighbours (requires chunk_vocabularies in inv_index)
-    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
-        for (int i = 0; i < N; ++i) {
+        // 3. Lexical candidates passing overlap_threshold
+        if (inv_index && !inv_index->chunk_vocabularies.empty()) {
             int32_t slot_i = slot_ids[i];
             auto it_i = inv_index->chunk_vocabularies.find(slot_i);
-            if (it_i == inv_index->chunk_vocabularies.end()) continue;
-            const auto& vocab_i = it_i->second;
-
-            for (int j = 0; j < N; ++j) {
-                if (j == i) continue;
-                int32_t slot_j = slot_ids[j];
-                auto it_j = inv_index->chunk_vocabularies.find(slot_j);
-                if (it_j == inv_index->chunk_vocabularies.end()) continue;
-                const auto& vocab_j = it_j->second;
-
-                float lex_score = compute_block_overlap(vocab_i, vocab_j);
-                if (lex_score <= overlap_threshold) continue;
-
-                float sem_score = sim[i * N + j];
-                bool  adjacent  = (std::abs(i - j) == 1);
-                float w = 0.5f * sem_score + 0.5f * lex_score + (adjacent ? 0.2f : 0.0f);
-                insert_neighbor(adj[i], j, w, max_possible_deg);
+            if (it_i != inv_index->chunk_vocabularies.end()) {
+                const auto& vocab_i = it_i->second;
+                for (int j = 0; j < N; ++j) {
+                    if (j == i) continue;
+                    int32_t slot_j = slot_ids[j];
+                    auto it_j = inv_index->chunk_vocabularies.find(slot_j);
+                    if (it_j != inv_index->chunk_vocabularies.end()) {
+                        float lex_score = compute_block_overlap(vocab_i, it_j->second);
+                        if (lex_score >= overlap_threshold) {
+                            unique_cands.insert(j);
+                        }
+                    }
+                }
             }
+        }
+
+        // Calculate exact blended weights for all candidates
+        for (int j : unique_cands) {
+            float sem_score = std::max(0.0f, sim[i * N + j]);
+            float lex_score = 0.0f;
+            if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                int32_t slot_i = slot_ids[i];
+                int32_t slot_j = slot_ids[j];
+                auto it_i = inv_index->chunk_vocabularies.find(slot_i);
+                auto it_j = inv_index->chunk_vocabularies.find(slot_j);
+                if (it_i != inv_index->chunk_vocabularies.end() && it_j != inv_index->chunk_vocabularies.end()) {
+                    lex_score = compute_block_overlap(it_i->second, it_j->second);
+                }
+            }
+            float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
+            float w = 0.5f * sem_score + 0.5f * lex_score + temporal_boost;
+            adj[i].push_back({j, w});
         }
     }
 
