@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 import time
-import select
+import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -23,11 +23,16 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
-    max_tokens: Optional[int] = 2048
+    max_tokens: Optional[int] = 512
     temperature: Optional[float] = 0.7
 
 BINARY_PATH_DEFAULT = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/build/diffkv_native"
-MODEL_PATH_DEFAULT = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+MODEL_PATH_DEFAULT  = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
+
+# Sentinel bytes
+_SENTINEL_RESPONSE = b"__RESPONSE__"
+_SENTINEL_FINISH   = b"__FINISH__"
+_SENTINEL_READY    = b"__READY__"
 
 class SubprocessWrapper:
     def __init__(self):
@@ -35,100 +40,171 @@ class SubprocessWrapper:
 
     def start(self):
         if self.process is not None:
-            self.process.terminate()
-        
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+
         binary_path = os.getenv("DIFFKV_BINARY_PATH", BINARY_PATH_DEFAULT)
-        model_path = os.getenv("DIFFKV_MODEL_PATH", MODEL_PATH_DEFAULT)
-        
+        model_path  = os.getenv("DIFFKV_MODEL_PATH",  MODEL_PATH_DEFAULT)
+
         print(f"[Server] Launching C++ subprocess: {binary_path} {model_path} -")
         self.process = subprocess.Popen(
             [binary_path, model_path, "-"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=False,  # binary mode; we decode manually with errors='replace'
-            bufsize=0
+            stderr=None,   # inherit stderr so logs go to terminal
+            text=False,
+            bufsize=0,
         )
-        
-        # Read until we see the first "__READY__"
+
+        # Drain stdout until __READY__
+        buf = b""
         while True:
-            line_bytes = self.process.stdout.readline()
-            if not line_bytes:
-                raise RuntimeError("Subprocess failed to start")
-            line = line_bytes.decode("utf-8", errors="replace")
-            if "__READY__" in line:
+            b = self.process.stdout.read(1)
+            if not b:
+                raise RuntimeError("Subprocess failed to start (stdout closed)")
+            buf += b
+            if _SENTINEL_READY in buf:
                 break
         print("[Server] C++ Native process started and ready.")
 
     def stop(self):
         if self.process is not None:
-            self.process.terminate()
-            self.process.wait()
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
             self.process = None
 
     def _write_stdin(self, text: str):
-        """Write text to subprocess stdin (binary mode)."""
+        """Encode and write a single-line prompt to the C++ binary stdin."""
         self.process.stdin.write(text.encode("utf-8"))
         self.process.stdin.flush()
 
-    def _read_byte(self) -> str:
-        """Read one byte from subprocess stdout and decode with replacement."""
-        b = self.process.stdout.read(1)
-        if not b:
-            return ""
-        return b.decode("utf-8", errors="replace")
+    def _is_alive(self) -> bool:
+        """Check if the C++ subprocess is still running."""
+        return self.process is not None and self.process.poll() is None
 
-    def query_stream(self, prompt: str):
-        # Escape real newlines as \\n so the prompt can travel on a single stdin line.
-        # The C++ binary decodes \\n back to real newlines before processing.
-        single_line_prompt = prompt.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "")
-        self._write_stdin(single_line_prompt + "\n")
+    def ensure_alive(self):
+        """Restart the C++ process if it has died."""
+        if not self._is_alive():
+            print("[Server] C++ process died — restarting...", flush=True)
+            self.start()
 
-        # 1. Read until we see "__RESPONSE__"
-        response_started = False
-        buffer = ""
-        while not response_started:
-            char = self._read_byte()
-            if not char:
-                raise RuntimeError("Subprocess exited unexpectedly")
-            buffer += char
-            if "__RESPONSE__" in buffer:
-                response_started = True
-                buffer = ""  # Discard everything before and including __RESPONSE__
+    def query_stream_into_queue(self, prompt: str, max_tokens: int, out_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+        """
+        Runs in a background thread.
+        Writes prompt to C++ stdin, reads stdout byte-by-byte.
+        Puts decoded text chunks into out_queue.
+        Puts None when done (signals end-of-stream).
+        Puts {"error": msg} dict on fatal errors.
 
-        # 2. Yield any remaining chars in the buffer (should be empty now)
-        if buffer:
-            yield buffer
-            buffer = ""
+        Protocol:
+          C++ stdout: ... __RESPONSE__\\n <tokens...> __FINISH__\\n
+        """
+        # Auto-restart if process has crashed between requests
+        self.ensure_alive()
 
-        # 3. Stream from stdout in real-time
-        accumulated = ""
-        while True:
-            char = self._read_byte()
-            if not char:
-                break
-            accumulated += char
-            if "__FINISH__\n" in accumulated:
-                final_part = accumulated.split("__FINISH__\n")[0]
-                yield final_part
-                break
-            else:
-                if len(accumulated) > 12:
-                    yield accumulated[:-12]
-                    accumulated = accumulated[-12:]
+        # Escape newlines and backslashes so the prompt fits on one stdin line.
+        # The C++ binary decodes \\n back to real newlines before tokenizing.
+        single_line = prompt.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "")
+
+        try:
+            self._write_stdin(single_line + "\n")
+        except BrokenPipeError:
+            # Process died mid-write — restart and retry once
+            print("[Server] BrokenPipeError writing prompt — restarting C++ process...", flush=True)
+            try:
+                self.start()
+                self._write_stdin(single_line + "\n")
+            except Exception as e2:
+                loop.call_soon_threadsafe(out_queue.put_nowait, {"error": f"failed after restart: {e2}"})
+                loop.call_soon_threadsafe(out_queue.put_nowait, None)
+                return
+        except Exception as e:
+            loop.call_soon_threadsafe(out_queue.put_nowait, {"error": f"stdin write error: {e}"})
+            loop.call_soon_threadsafe(out_queue.put_nowait, None)
+            return
+
+        # ── Phase 1: wait for __RESPONSE__ ──────────────────────────────────
+        buf = b""
+        try:
+            while True:
+                b = self.process.stdout.read(1)
+                if not b:
+                    loop.call_soon_threadsafe(out_queue.put_nowait, {"error": "process exited before __RESPONSE__"})
+                    loop.call_soon_threadsafe(out_queue.put_nowait, None)
+                    return
+                buf += b
+                if _SENTINEL_RESPONSE in buf:
+                    # Discard everything up to and including the sentinel + newline
+                    after = buf.split(_SENTINEL_RESPONSE, 1)[1]
+                    # Skip the trailing newline of __RESPONSE__\n
+                    if after.startswith(b"\n"):
+                        after = after[1:]
+                    buf = after
+                    break
+        except Exception as e:
+            loop.call_soon_threadsafe(out_queue.put_nowait, {"error": f"read error during prefill: {e}"})
+            loop.call_soon_threadsafe(out_queue.put_nowait, None)
+            return
+
+        # Signal to the async side that prefill is done, generation starting
+        loop.call_soon_threadsafe(out_queue.put_nowait, {"prefill_done": True, "text": ""})
+
+        # Yield any bytes that arrived with or after __RESPONSE__
+        if buf:
+            text = buf.decode("utf-8", errors="replace")
+            # Check if FINISH is already in this fragment
+            if _SENTINEL_FINISH.decode() in text:
+                final = text.split(_SENTINEL_FINISH.decode())[0]
+                if final:
+                    loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final})
+                loop.call_soon_threadsafe(out_queue.put_nowait, None)
+                return
+            if text:
+                loop.call_soon_threadsafe(out_queue.put_nowait, {"text": text})
+
+        # ── Phase 2: stream tokens until __FINISH__ ──────────────────────────
+        accumulated = b""
+        try:
+            while True:
+                b = self.process.stdout.read(1)
+                if not b:
+                    # Process died — treat as finish
+                    break
+                accumulated += b
+                finish_str = _SENTINEL_FINISH.decode()
+                acc_str = accumulated.decode("utf-8", errors="replace")
+                if finish_str in acc_str:
+                    final_part = acc_str.split(finish_str)[0]
+                    if final_part:
+                        loop.call_soon_threadsafe(out_queue.put_nowait, {"text": final_part})
+                    break
+                # Flush safely: keep a tail buffer long enough to hold the sentinel
+                tail_len = len(_SENTINEL_FINISH) + 4
+                if len(accumulated) > tail_len:
+                    safe = accumulated[:-tail_len]
+                    remaining = accumulated[-tail_len:]
+                    text = safe.decode("utf-8", errors="replace")
+                    if text:
+                        loop.call_soon_threadsafe(out_queue.put_nowait, {"text": text})
+                    accumulated = remaining
+        except Exception as e:
+            loop.call_soon_threadsafe(out_queue.put_nowait, {"error": f"read error during generation: {e}"})
+
+        loop.call_soon_threadsafe(out_queue.put_nowait, None)
 
 
 def format_messages_as_chat(messages: list) -> str:
-    """
-    Build a full Qwen2.5 chat-template string from a list of ChatMessage objects.
-    Includes system prompt and all user/assistant turns so the C++ binary has
-    full conversation context without any redundant template wrapping.
-    """
+    """Build a full Qwen2.5 chat-template string from ChatMessage objects."""
     result = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
     for msg in messages:
-        role = msg.role
-        content = msg.content
-        if role in ("system", "user", "assistant"):
-            result += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+        if msg.role in ("system", "user", "assistant"):
+            result += f"<|im_start|>{msg.role}\n{msg.content}<|im_end|>\n"
     result += "<|im_start|>assistant\n"
     return result
 
@@ -145,85 +221,119 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    # Format the FULL conversation history with Qwen2.5 chat template.
-    # The C++ binary detects the <|im_start|> prefix and skips its own template wrapping.
     if not request.messages:
         user_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
     else:
         user_prompt = format_messages_as_chat(request.messages)
 
-
-    request_id = f"chatcmpl-{uuid.uuid4()}"
+    max_tokens   = request.max_tokens or 512
+    request_id   = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
 
+    # ── Streaming path ────────────────────────────────────────────────────────
     async def stream_generator():
-        # Ensure mutual exclusion on the subprocess
         async with lock:
             loop = asyncio.get_event_loop()
-            queue = asyncio.Queue()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            # Set max_tokens env before the thread reads it (C++ already running,
+            # so pass via a wrapper attribute used at query time instead)
+            # We do it by setting DIFFKV_MAX_TOKENS in the environment that the
+            # *next* C++ restart would see. For the current session, the C++
+            # binary uses whatever was set at start time. Best effort: we restart
+            # the C++ binary if max_tokens changed significantly (TODO).
+            # For now: just run — the default is 512 in C++.
 
             def producer():
-                try:
-                    for token in wrapper.query_stream(user_prompt):
-                        loop.call_soon_threadsafe(queue.put_nowait, token)
-                except Exception as e:
-                    print(f"Error in producer: {e}")
-                finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                wrapper.query_stream_into_queue(user_prompt, max_tokens, queue, loop)
 
-            # Start producer thread
-            import threading
             threading.Thread(target=producer, daemon=True).start()
 
-            # Consumer loop
+            # ── SSE Keepalive: prevent HTTP connection timeout during prefill ──
+            # Matching ACTIVE_RUNTIME: send ": ping\n\n" every 3s while waiting
+            # for __RESPONSE__. Open WebUI drops the connection after ~30s silence.
+            KEEPALIVE_S = 3.0
+            prefill_done = False
+
             while True:
-                token = await queue.get()
-                if token is None:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_S)
+                except asyncio.TimeoutError:
+                    if not prefill_done:
+                        # Still in prefill — send keepalive comment
+                        yield b": ping\n\n"
+                    continue
+
+                if item is None:
                     break
-                if not token:
+
+                if isinstance(item, dict) and "error" in item:
+                    err_chunk = {
+                        "id": request_id, "object": "chat.completion.chunk",
+                        "created": created_time, "model": request.model,
+                        "choices": [{"index": 0, "delta": {"content": f"\n[Error: {item['error']}]"}, "finish_reason": "stop"}]
+                    }
+                    yield f"data: {json.dumps(err_chunk)}\n\n".encode()
+                    break
+
+                if isinstance(item, dict) and item.get("prefill_done"):
+                    prefill_done = True
+                    # Don't yield anything — just mark that prefill is done
+                    text = item.get("text", "")
+                    if not text:
+                        continue
+
+                text = item.get("text", "") if isinstance(item, dict) else ""
+                if not text:
                     continue
 
                 chunk_data = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": request.model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": token},
-                        "finish_reason": None
-                    }]
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": created_time, "model": request.model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]
                 }
-                yield f"data: {json.dumps(chunk_data)}\n\n"
+                yield f"data: {json.dumps(chunk_data)}\n\n".encode()
 
-            # Final done chunk
+            # Final done chunks
             done_chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created_time,
-                "model": request.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }]
+                "id": request_id, "object": "chat.completion.chunk",
+                "created": created_time, "model": request.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }
-            yield f"data: {json.dumps(done_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps(done_chunk)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+    # ── Non-streaming path ────────────────────────────────────────────────────
+    async def collect_full():
+        async with lock:
+            loop = asyncio.get_event_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def producer():
+                wrapper.query_stream_into_queue(user_prompt, max_tokens, queue, loop)
+
+            threading.Thread(target=producer, daemon=True).start()
+
+            parts = []
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, dict):
+                    t = item.get("text", "")
+                    if t:
+                        parts.append(t)
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
 
     if request.stream:
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        # Non-streaming mode: collect all tokens
-        async with lock:
-            def run_sync_all():
-                return "".join(wrapper.query_stream(user_prompt))
-            
-            loop = asyncio.get_event_loop()
-            full_response = await loop.run_in_executor(None, run_sync_all)
-
+        full_response = await collect_full()
         return {
             "id": request_id,
             "object": "chat.completion",
@@ -231,32 +341,24 @@ async def chat_completions(request: ChatCompletionRequest):
             "model": request.model,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": full_response
-                },
+                "message": {"role": "assistant", "content": full_response},
                 "finish_reason": "stop"
             }],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            }
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
+
 
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models():
     model_path = os.getenv("DIFFKV_MODEL_PATH", MODEL_PATH_DEFAULT)
     model_name = os.path.splitext(os.path.basename(model_path))[0]
-    model_id = f"diffkv-native-{model_name}"
+    model_id   = f"diffkv-{model_name}"
     return {
         "object": "list",
         "data": [{
-            "id": model_id,
-            "name": model_id,
-            "object": "model",
-            "created": int(time.time()),
+            "id": model_id, "name": model_id,
+            "object": "model", "created": int(time.time()),
             "owned_by": "differential-kv"
         }]
     }
@@ -266,11 +368,11 @@ async def list_models():
 async def health():
     return {"status": "ok"}
 
+
 if __name__ == '__main__':
     import argparse
     import uvicorn
     import sys
-    import os
 
     _runtime_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _runtime_dir not in sys.path:
@@ -281,36 +383,21 @@ if __name__ == '__main__':
     parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid')
-    parser.add_argument('--serving-mode', type=str, choices=['lightweight', 'balanced', 'performance'], default='balanced')
-    parser.add_argument('--micro-block-size', type=int, default=16)
-    parser.add_argument('--gpu-budget-gb', type=float, default=2.0)
-    parser.add_argument('--max-context-slots', type=int, default=512)
+    parser.add_argument('--max-tokens', type=int, default=512)
     args = parser.parse_args()
 
-    # Determine preset based on args or serving mode
-    preset = args.preset
-    if args.serving_mode == 'lightweight':
-        preset = 'low'
-    elif args.serving_mode == 'performance':
-        preset = 'high'
-
-    # Set env variables
-    os.environ["DIFFKV_PRESET"] = preset
-    if preset == 'low':
+    if args.preset == 'low':
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "256"
-    elif preset == 'high':
+    elif args.preset == 'high':
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "2048"
     else:
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "512"
 
-    os.environ["DIFFKV_MICRO_BLOCK_SIZE"] = str(args.micro_block_size)
-    os.environ["DIFFKV_GPU_BUDGET_GB"] = str(args.gpu_budget_gb)
-    os.environ["DIFFKV_MAX_CONTEXT_SLOTS"] = str(args.max_context_slots)
+    os.environ["DIFFKV_MAX_TOKENS"] = str(args.max_tokens)
 
     if "DIFFKV_BINARY_PATH" not in os.environ:
-        os.environ["DIFFKV_BINARY_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/build/diffkv_native"
+        os.environ["DIFFKV_BINARY_PATH"] = BINARY_PATH_DEFAULT
 
-    # Resolve model path
     if "DIFFKV_MODEL_PATH" not in os.environ:
         model_arg = args.model
         if model_arg.endswith(".gguf") and os.path.exists(model_arg):
@@ -320,20 +407,11 @@ if __name__ == '__main__':
         elif "1.5b" in model_arg.lower():
             os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
         else:
-            default_path = os.path.join("/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native", model_arg)
-            if os.path.exists(default_path):
-                os.environ["DIFFKV_MODEL_PATH"] = default_path
-            else:
-                # Fallback to default
-                os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+            os.environ["DIFFKV_MODEL_PATH"] = MODEL_PATH_DEFAULT
 
-    print(f"[DiffKV Native Server] Starting server with configurations:")
-    print(f"  - Model Path:         {os.environ.get('DIFFKV_MODEL_PATH')}")
-    print(f"  - Preset:             {os.environ.get('DIFFKV_PRESET')}")
-    print(f"  - Prefill Chunk Size: {os.environ.get('DIFFKV_PREFILL_CHUNK_SIZE')}")
-    print(f"  - Max Context Slots:  {os.environ.get('DIFFKV_MAX_CONTEXT_SLOTS')}")
-    print(f"  - Micro Block Size:   {os.environ.get('DIFFKV_MICRO_BLOCK_SIZE')}")
-    print(f"  - GPU Budget (GB):    {os.environ.get('DIFFKV_GPU_BUDGET_GB')}")
+    print(f"[DiffKV Native Server] Starting:")
+    print(f"  Model:      {os.environ.get('DIFFKV_MODEL_PATH')}")
+    print(f"  Chunk size: {os.environ.get('DIFFKV_PREFILL_CHUNK_SIZE')}")
+    print(f"  Max tokens: {os.environ.get('DIFFKV_MAX_TOKENS')}")
 
     uvicorn.run(app, host=args.host, port=args.port, reload=False)
-

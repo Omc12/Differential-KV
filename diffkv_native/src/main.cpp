@@ -1190,6 +1190,12 @@ int main(int argc, char ** argv) {
         struct ggml_context * decode_ctx = ggml_init(decode_params);
         if (!decode_ctx) {
             std::cerr << "\n[ERROR] Failed to initialize decode context!" << std::endl;
+            // Always emit sentinels so the gateway doesn't hang waiting for __RESPONSE__
+            if (interactive) {
+                std::cout << "__RESPONSE__" << std::endl;
+                std::cout << "[Error: failed to initialize decode context]" << std::flush;
+                std::cout << "\n__FINISH__" << std::endl;
+            }
             if (!interactive) break; else continue;
         }
 
@@ -1237,7 +1243,12 @@ int main(int argc, char ** argv) {
 
         ggml_backend_sched_reset(sched);
         if (!ggml_backend_sched_alloc_graph(sched, decode_graph)) {
-            std::cerr << "\n[ERROR] Failed to allocate decode graph — skipping prompt." << std::endl;
+            // Always emit sentinels so the gateway doesn't hang waiting for __RESPONSE__
+            if (interactive) {
+                std::cout << "__RESPONSE__" << std::endl;
+                std::cout << "[Error: decode graph allocation failed]" << std::flush;
+                std::cout << "\n__FINISH__" << std::endl;
+            }
             ggml_free(decode_ctx);
             if (!interactive) break; else continue;
         }
