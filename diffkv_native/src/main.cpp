@@ -1355,7 +1355,7 @@ int main(int argc, char ** argv) {
             userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
             userdata[l].has_rope = true;
             userdata[l].rope_freq_base = model.get_config().rope_freq_base;
-            userdata[l].ignore_c = true;
+            userdata[l].ignore_c = false;
         }
 
         struct ggml_tensor * decode_logits = nullptr;

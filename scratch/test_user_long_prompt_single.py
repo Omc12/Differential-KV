@@ -1,0 +1,36 @@
+import urllib.request
+import json
+import time
+
+url = "http://localhost:8000/v1/chat/completions"
+
+long_prompt = """Random Features for Large-Scale Kernel Machines Ali Rahimi and Ben Recht Abstract To accelerate the training of kernel machines, we propose to map the input data to a randomized low-dimensional feature space and then apply existing fast linear methods. Our randomized features are designed so that the inner products of the transformed data are approximately equal to those in the feature space of a user specified shift-invariant kernel. We explore two sets of random features, provide convergence bounds on their ability to approximate various radial basis kernels, and show that in large-scale classification and regression tasks linear machine learning algorithms that use these features outperform state-of-the-art large-scale kernel machines. 1 Introduction Kernel machines such as the Support Vector Machine are attractive because they can approximate any function or decision boundary arbitrarily well with enough training data. Unfortunately, methods that operate on the kernel matrix (Gram matrix) of the data scale poorly with the size of the training dataset. For example, a dataset with half a million training examples might take days to train on modern workstations. On the other hand, specialized algorithms for linear Support Vector Machines and regularized regression run much more quickly when the dimensionality of the data is small because they operate on the covariance matrix rather than the kernel matrix of the training data [1, 2]. We propose a way to combine the advantages of the linear and nonlinear approaches. Inspired by randomized algorithms for approximating kernel matrices (e.g., [3, 4]), we efficiently convert the training and evaluation of any kernel machine into the corresponding operations of a linear machine by mapping data into a relatively low-dimensional randomized feature space. Our experiments show that random features combined with very simple linear learning techniques compete favorably with state-of-the-art kernel-based classification and regression algorithms. Random features significantly reduce the computation needed for training, and obtain similar or better testing error. The kernel trick is a simple way to generate features for algorithms that depend only on the inner product between pairs of input points. It relies on the observation that any positive definite function k(x, y) with x, y in R^d defines an inner product and a lifting phi so that the inner product between lifted datapoints can be quickly computed as <phi(x), phi(y)> = k(x, y). The cost of this convenience is that algorithms access the data only through evaluations of k(x, y), or through the kernel matrix consisting of k applied to all pairs of datapoints. As a result, large training sets incur large computational and storage costs. Instead of relying on the implicit lifting provided by the kernel trick, we propose explicitly mapping the data to a low-dimensional Euclidean inner product space using a randomized feature map z : R^d -> R^D so that the inner product between a pair of transformed points approximates their kernel evaluation: k(x, y) = <phi(x), phi(y)> approx z(x)' z(y). (1) Unlike the kernel's lifting phi, z is low-dimensional. Thus, we can simply transform the input with z, and then apply fast linear learning methods to approximate the answer of the corresponding nonlinear kernel machine. In what follows, we show how to construct feature spaces that uniformly approximate popular shift-invariant kernels k(x - y) to within epsilon with only D = O(d^-2 log 1/epsilon) dimensions, and empirically show that excellent regression and classification performance can be obtained for even smaller D. In addition to giving us access to extremely fast learning algorithms, these randomized feature maps also provide a way to quickly evaluate the machine. With the kernel trick, evaluating the machine at a test point x requires computing f(x) = sum_{i=1}^N c_i k(x_i, x), which requires O(N d) operations to compute and requires retaining much of the dataset unless the machine is very sparse. This is often unacceptable for large datasets. On the other hand, after learning a hyperplane w, a linear machine can be evaluated by simply computing f(x) = w' z(x), which, with the randomized feature maps presented here, requires only O(D + d) operations and storage. We demonstrate two randomized feature maps for approximating shift invariant kernels. Our first randomized map, presented in Section 3, consists of sinusoids randomly drawn from the Fourier transform of the kernel function we seek to approximate. Because this map is smooth, it is wellsuited for interpolation tasks. Our second randomized map, presented in Section 4, partitions the input space using randomly shifted grids at randomly chosen resolutions. This mapping is not smooth, but leverages the proximity between input points, and is well-suited for approximating kernels that depend on the L1 distance between datapoints. Our experiments in Section 5 demonstrate that combining these randomized maps with simple linear learning algorithms competes favorably with state-of-the-art training algorithms in a variety of regression and classification scenarios. 2 Related Work The most popular methods for large-scale kernel machines are decomposition methods for solving Support Vector Machines (SVM). These methods iteratively update a subset of the kernel machine's coefficients using coordinate ascent until KKT conditions are satisfied to within a tolerance [5, 6].
+
+Summarize this text in one sentence."""
+
+payload = {
+    "model": "diffkv-native-qwen2.5-0.5b-instruct",
+    "messages": [{"role": "user", "content": long_prompt}],
+    "stream": False,
+    "max_tokens": 128
+}
+data = json.dumps(payload).encode('utf-8')
+req = urllib.request.Request(
+    url,
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST"
+)
+
+print("Sending request with single long prompt...")
+start = time.time()
+try:
+    with urllib.request.urlopen(req, timeout=120) as response:
+        dur = time.time() - start
+        res_body = response.read().decode('utf-8')
+        res_json = json.loads(res_body)
+        print(f"Success in {dur:.2f}s")
+        print("Response:")
+        print(res_json["choices"][0]["message"]["content"])
+except Exception as e:
+    print(f"Request failed: {e}")
