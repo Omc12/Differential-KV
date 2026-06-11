@@ -1,0 +1,143 @@
+#include "native_core/compression/async_compressor.hpp"
+#include "native_core/compression/lowrank.hpp"
+#include <iostream>
+
+namespace diffkv {
+
+AsyncCompressor::AsyncCompressor(DiffKVBlockStateTable& state_table, std::function<bool(const std::string&)> alive_cb)
+    : state_table_(state_table), alive_cb_(alive_cb) {}
+
+AsyncCompressor::~AsyncCompressor() {
+    stop();
+}
+
+bool AsyncCompressor::start() {
+    if (running_.load(std::memory_order_acquire)) return true;
+    running_.store(true, std::memory_order_release);
+    int num_threads = 2; // Matches PyTorch's background thread configuration
+    workers_.clear();
+    for (int i = 0; i < num_threads; ++i) {
+        workers_.emplace_back(&AsyncCompressor::worker_loop, this);
+    }
+    return true;
+}
+
+void AsyncCompressor::stop() {
+    if (!running_.load(std::memory_order_acquire)) return;
+    running_.store(false, std::memory_order_release);
+    queue_cv_.notify_all();
+    for (auto & worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    workers_.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        std::queue<CompressJob> empty;
+        std::swap(queue_, empty);
+    }
+}
+
+bool AsyncCompressor::submit(const CompressJob& job) {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (queue_.size() >= MAX_QUEUE_SIZE) {
+        queue_overflows_.fetch_add(1, std::memory_order_relaxed);
+        std::cerr << "[Compressor] WARNING: Job queue overflow! SVD job dropped for block " << job.block_id << std::endl;
+        return false;
+    }
+    queue_.push(job);
+    queue_cv_.notify_one();
+    return true;
+}
+
+void AsyncCompressor::compress_sync(const CompressJob& job) {
+    process_job(job);
+}
+
+void AsyncCompressor::worker_loop() {
+    while (running_.load(std::memory_order_acquire)) {
+        CompressJob job;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock, [this] {
+                return !queue_.empty() || !running_.load(std::memory_order_acquire);
+            });
+            if (!running_.load(std::memory_order_acquire) && queue_.empty()) {
+                break;
+            }
+            job = queue_.front();
+            queue_.pop();
+        }
+        process_job(job);
+        jobs_processed_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void AsyncCompressor::process_job(const CompressJob& job) {
+    DiffKVBlockStateTable& active_table = job.state_table ? *job.state_table : state_table_;
+
+    // 1. Check if session is alive
+    if (alive_cb_ && !alive_cb_(job.session_id)) {
+        active_table.force_invalidate(job.block_id);
+        jobs_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // 2. Check if block is in Compressing state
+    BlockState current = active_table.get(job.block_id);
+    if (current != BlockState::Compressing) {
+        jobs_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // 3. Delegate to lowrank block compressor logic
+    LowRankCompressParams params;
+    params.block_id = job.block_id;
+    params.block_size = job.block_size;
+    params.feat_dim = job.feat_dim;
+    params.rank = job.rank;
+    params.head_dim = job.head_dim;
+    params.raw_k_ptr = job.raw_k_ptr;
+    params.raw_v_ptr = job.raw_v_ptr;
+    params.token_ids = job.token_ids;
+    params.stop_token_ids = job.stop_token_ids;
+    params.out_u_ptr = job.out_u_ptr;
+    params.out_u_scale = job.out_u_scale;
+    params.out_vk_ptr = job.out_vk_ptr;
+    params.out_vv_ptr = job.out_vv_ptr;
+    params.out_scale = job.out_scale;
+    params.out_anchor_k = job.out_anchor_k;
+    params.out_anchor_v = job.out_anchor_v;
+
+    bool ok = compress_lowrank_block(params);
+
+    if (!ok) {
+        std::cerr << "[Compressor] Error: SVD failed for block " << job.block_id << std::endl;
+        active_table.force_invalidate(job.block_id);
+        jobs_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // 4. Check session alive again
+    if (alive_cb_ && !alive_cb_(job.session_id)) {
+        active_table.force_invalidate(job.block_id);
+        jobs_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // 5. Atomic transition: Compressing -> CompressedResident
+    bool trans_ok = active_table.transition(
+        job.block_id,
+        BlockState::Compressing,
+        BlockState::CompressedResident
+    );
+
+    if (!trans_ok) {
+        active_table.force_invalidate(job.block_id);
+        jobs_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+} // namespace diffkv
