@@ -56,6 +56,39 @@ struct ggml_backend_owner {
 };
 
 // Helper to build the Qwen 2.5 dense prefill graph using causal flash attention
+// ── CPU RoPE helper ────────────────────────────────────────────────────────
+// Applies NeoX-style rotary position embedding to raw K in-place.
+// Matches the formula: k_rot[d] = k[d]*cos(theta) + k[d+D/2]*sin(theta)
+// for d in [0, D/2), and k_rot[d+D/2] = -k[d]*sin(theta) + k[d+D/2]*cos(theta).
+// token_positions: absolute position of each token, length = num_tokens.
+// k_raw: flat buffer [num_tokens * kv_heads * head_dim], F32, layout [tok, head, dim].
+// k_rotated: output buffer, same shape.
+static void apply_rope_neox_cpu(
+    const float* k_raw, float* k_rotated,
+    const std::vector<int32_t>& token_positions,
+    int num_tokens, int kv_heads, int head_dim,
+    float rope_freq_base
+) {
+    const int D    = head_dim;
+    const int half = D / 2;
+    for (int t = 0; t < num_tokens; ++t) {
+        int pos = token_positions[t];
+        for (int h = 0; h < kv_heads; ++h) {
+            const float* src = k_raw     + (t * kv_heads + h) * D;
+            float*       dst = k_rotated + (t * kv_heads + h) * D;
+            for (int i = 0; i < half; ++i) {
+                float theta  = (float)pos / std::pow(rope_freq_base, 2.0f * i / D);
+                float cos_th = std::cos(theta);
+                float sin_th = std::sin(theta);
+                float x      = src[i];
+                float y      = src[i + half];
+                dst[i]        = x * cos_th - y * sin_th;
+                dst[i + half] = y * cos_th + x * sin_th;
+            }
+        }
+    }
+}
+
 struct ggml_cgraph * build_prefill_graph(
     struct ggml_context * ctx,
     DiffKVModel & model,
@@ -88,8 +121,7 @@ struct ggml_cgraph * build_prefill_graph(
         struct ggml_tensor * v = ggml_mul_mat(ctx, layer.wv, h);
         if (layer.bv) v = ggml_add(ctx, v, layer.bv);
 
-        // Export raw key/value tensors of each layer (before RoPE)
-        if (k_layers) (*k_layers)[l] = k;
+        // Export raw V (no RoPE needed for V)
         if (v_layers) (*v_layers)[l] = v;
 
         // 4. RoPE
@@ -99,6 +131,10 @@ struct ggml_cgraph * build_prefill_graph(
 
         struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, positions, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         struct ggml_tensor * k_rope = ggml_rope_ext(ctx, k_reshaped, positions, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+        // Export RAW K (before RoPE) — matches ACTIVE_RUNTIME Python unrot_key_states.
+        // diffkv_attention.cpp decode callback applies RoPE at query time (has_rope=true).
+        if (k_layers) (*k_layers)[l] = k;
 
         // 5. Permute for Flash Attention
         struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
@@ -161,7 +197,7 @@ struct ggml_cgraph * build_prefill_graph(
     if (k_layers) {
         for (int l = 0; l < config.n_layer; ++l) {
             if ((*k_layers)[l]) {
-                struct ggml_tensor * dummy_k = ggml_view_1d(ctx, (*k_layers)[l], (*k_layers)[l]->ne[0] * (*k_layers)[l]->ne[1], 0);
+                struct ggml_tensor * dummy_k = ggml_view_1d(ctx, (*k_layers)[l], ggml_nelements((*k_layers)[l]), 0);
                 ggml_build_forward_expand(gf, dummy_k);
             }
         }
@@ -169,8 +205,161 @@ struct ggml_cgraph * build_prefill_graph(
     if (v_layers) {
         for (int l = 0; l < config.n_layer; ++l) {
             if ((*v_layers)[l]) {
-                struct ggml_tensor * dummy_v = ggml_view_1d(ctx, (*v_layers)[l], (*v_layers)[l]->ne[0] * (*v_layers)[l]->ne[1], 0);
+                struct ggml_tensor * dummy_v = ggml_view_1d(ctx, (*v_layers)[l], ggml_nelements((*v_layers)[l]), 0);
                 ggml_build_forward_expand(gf, dummy_v);
+            }
+        }
+    }
+
+    return gf;
+}
+
+// ── CHUNKED PREFILL WITH FULL-CONTEXT ATTENTION ────────────────────────────────
+// Matches ACTIVE_RUNTIME Python: each chunk attends to ALL prior chunks' K/V
+// (already RoPE-rotated) plus itself causally. Eliminates the O(N^2) memory
+// spike while preserving exact causal attention semantics.
+struct ggml_cgraph * build_prefill_ctx_graph(
+    struct ggml_context * ctx,
+    DiffKVModel & model,
+    struct ggml_tensor * input_tokens,   // [chunk_len]
+    struct ggml_tensor * positions,      // [chunk_len] — positions for CURRENT chunk only
+    struct ggml_tensor * mask,           // [ctx_len, chunk_len] — full mask
+    // Per-layer prior KV context tensors (RoPE-rotated, shape [head_dim, kv_heads, prior_len])
+    std::vector<struct ggml_tensor *> * prior_k_ctx,
+    std::vector<struct ggml_tensor *> * prior_v_ctx,
+    struct ggml_tensor ** out_logits,
+    std::vector<struct ggml_tensor *>* k_layers = nullptr,
+    std::vector<struct ggml_tensor *>* v_layers = nullptr,
+    bool need_logits = false
+) {
+    const auto & config = model.get_config();
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+
+    // 1. Embedding lookup
+    struct ggml_tensor * cur = ggml_get_rows(ctx, model.get_token_embd(), input_tokens);
+
+    for (int l = 0; l < config.n_layer; ++l) {
+        const auto & layer = model.get_layers()[l];
+
+        // 2. Attention RMSNorm
+        struct ggml_tensor * h = ggml_rms_norm(ctx, cur, config.rms_norm_eps);
+        h = ggml_mul(ctx, h, layer.attn_norm);
+
+        // 3. QKV Projections
+        struct ggml_tensor * q = ggml_mul_mat(ctx, layer.wq, h);
+        if (layer.bq) q = ggml_add(ctx, q, layer.bq);
+        struct ggml_tensor * k = ggml_mul_mat(ctx, layer.wk, h);
+        if (layer.bk) k = ggml_add(ctx, k, layer.bk);
+        struct ggml_tensor * v = ggml_mul_mat(ctx, layer.wv, h);
+        if (layer.bv) v = ggml_add(ctx, v, layer.bv);
+
+        // Export raw V
+        if (v_layers) (*v_layers)[l] = v;
+
+        // 4. RoPE on current chunk only
+        int head_dim = config.n_embd / config.n_head;
+        struct ggml_tensor * q_reshaped = ggml_reshape_3d(ctx, q, head_dim, config.n_head, q->ne[1]);
+        struct ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k, head_dim, config.n_head_kv, k->ne[1]);
+
+        struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, positions, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        struct ggml_tensor * k_rope = ggml_rope_ext(ctx, k_reshaped, positions, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+        // Export RAW (pre-RoPE) K - matching ACTIVE_RUNTIME Python which clones key_states
+        // BEFORE apply_rotary_pos_emb and stores unrot_key_states in blocks/active_k_dense.
+        // RoPE is re-applied at decode time by diffkv_attention.cpp (has_rope=true).
+        // For the prior-context prefill path, caller pre-rotates k_activations in CPU.
+        if (k_layers) (*k_layers)[l] = k;  // raw K, shape [n_embd, chunk_len]
+
+        // 5. Permute Q/K/V of current chunk: [head_dim, kv_heads, chunk_len] -> [head_dim, chunk_len, kv_heads]
+        struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
+        struct ggml_tensor * k_perm = ggml_permute(ctx, k_rope, 0, 2, 1, 3);
+        struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, v->ne[1]);
+        struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
+
+        // 6. Concatenate prior context with current chunk along seq dim (dim=1 in permuted layout)
+        struct ggml_tensor * k_ctx_perm = k_perm;
+        struct ggml_tensor * v_ctx_perm = v_perm;
+        bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
+        if (has_prior) {
+            // prior tensors are already [head_dim, kv_heads, prior_len] — permute to [head_dim, prior_len, kv_heads]
+            struct ggml_tensor * pk = ggml_permute(ctx, (*prior_k_ctx)[l], 0, 2, 1, 3);
+            struct ggml_tensor * pv = ggml_permute(ctx, (*prior_v_ctx)[l], 0, 2, 1, 3);
+            k_ctx_perm = ggml_concat(ctx, pk, k_perm, 1);
+            v_ctx_perm = ggml_concat(ctx, pv, v_perm, 1);
+        }
+
+        // 7. Flash Attention with full context mask
+        float scale_val = 1.0f / std::sqrt((float)head_dim);
+        struct ggml_tensor * attn_out_perm = ggml_flash_attn_ext(ctx, q_perm, k_ctx_perm, v_ctx_perm, mask, scale_val, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn_out_perm, GGML_PREC_F32);
+
+        // 8. Flatten back to [n_embd, chunk_len]
+        struct ggml_tensor * attn_out = ggml_reshape_2d(ctx, attn_out_perm, config.n_embd, q->ne[1]);
+
+        // 9. Output Projection
+        struct ggml_tensor * attn_proj = ggml_mul_mat(ctx, layer.wo, attn_out);
+        if (layer.bo) attn_proj = ggml_add(ctx, attn_proj, layer.bo);
+
+        // 10. Residual
+        cur = ggml_add(ctx, cur, attn_proj);
+
+        // 11. FFN RMSNorm
+        h = ggml_rms_norm(ctx, cur, config.rms_norm_eps);
+        h = ggml_mul(ctx, h, layer.ffn_norm);
+
+        // 12. FFN SwiGLU
+        struct ggml_tensor * gate = ggml_mul_mat(ctx, layer.ffn_gate, h);
+        struct ggml_tensor * up   = ggml_mul_mat(ctx, layer.ffn_up, h);
+        struct ggml_tensor * gate_silu = ggml_silu(ctx, gate);
+        struct ggml_tensor * ffn_out   = ggml_mul(ctx, gate_silu, up);
+        struct ggml_tensor * ffn_proj  = ggml_mul_mat(ctx, layer.ffn_down, ffn_out);
+
+        // 13. Residual
+        cur = ggml_add(ctx, cur, ffn_proj);
+    }
+
+    // 14. Final RMSNorm + logits for last chunk
+    struct ggml_tensor * final_node = cur;
+    if (need_logits) {
+        struct ggml_tensor * final_norm = ggml_rms_norm(ctx, cur, config.rms_norm_eps);
+        final_norm = ggml_mul(ctx, final_norm, model.get_output_norm());
+        int chunk_len = input_tokens->ne[0];
+        struct ggml_tensor * last_token_norm = ggml_view_1d(ctx, final_norm, config.n_embd, (chunk_len - 1) * config.n_embd * sizeof(float));
+        struct ggml_tensor * logits = ggml_mul_mat(ctx, model.get_output(), last_token_norm);
+        *out_logits = logits;
+        final_node = logits;
+    } else {
+        if (out_logits) *out_logits = nullptr;
+    }
+
+    ggml_build_forward_expand(gf, final_node);
+
+    // Keep output tensors alive
+    if (k_layers) {
+        for (int l = 0; l < config.n_layer; ++l) {
+            if ((*k_layers)[l]) {
+                ggml_build_forward_expand(gf, ggml_view_1d(ctx, (*k_layers)[l], ggml_nelements((*k_layers)[l]), 0));
+            }
+        }
+    }
+    if (v_layers) {
+        for (int l = 0; l < config.n_layer; ++l) {
+            if ((*v_layers)[l]) {
+                ggml_build_forward_expand(gf, ggml_view_1d(ctx, (*v_layers)[l], ggml_nelements((*v_layers)[l]), 0));
+            }
+        }
+    }
+    if (prior_k_ctx) {
+        for (int l = 0; l < config.n_layer; ++l) {
+            if ((*prior_k_ctx)[l]) {
+                ggml_build_forward_expand(gf, ggml_view_1d(ctx, (*prior_k_ctx)[l], ggml_nelements((*prior_k_ctx)[l]), 0));
+            }
+        }
+    }
+    if (prior_v_ctx) {
+        for (int l = 0; l < config.n_layer; ++l) {
+            if ((*prior_v_ctx)[l]) {
+                ggml_build_forward_expand(gf, ggml_view_1d(ctx, (*prior_v_ctx)[l], ggml_nelements((*prior_v_ctx)[l]), 0));
             }
         }
     }
@@ -784,11 +973,34 @@ int main(int argc, char ** argv) {
         }
         int pos_start = 0;
 
+        // ── CHUNKED PREFILL WITH FULL PRIOR-CONTEXT ATTENTION ──────────────────
+        // Matches ACTIVE_RUNTIME Python: chunk c attends to ALL tokens [0..pos_start-1]
+        // (via k_activations / v_activations which store RoPE-rotated K / raw V from prior
+        //  chunks) plus itself causally, eliminating the O(N^2) full-prompt graph.
+        //
+        // Per-chunk prior-context tensors live in a persistent ggml_context that is
+        // freed at the end of each iteration and re-created next time.
+        //
+        // k_activations[l] stores RoPE-rotated K (build_prefill_graph exports k_rope).
+        // v_activations[l] stores raw V (no RoPE on V in transformers).
+
+        // Persistent ggml context for prior KV context tensors (lives across sched ops)
+        // NOTE: prior tensors are created inside prefill_ctx each iteration; no separate ctx needed.
+
         while (pos_start < L) {
             int chunk_len = std::min(chunk_size, L - pos_start);
+            int ctx_len   = pos_start + chunk_len;  // total KV context length
+
+            // ── 1. Allocate graph context ──────────────────────────────────────
+            // Memory: graph nodes + prior KV tensors per layer.
+            // Prior K per layer: head_dim * kv_heads * pos_start floats = F_test * pos_start
+            // Prior V per layer: same
+            // 24 layers, ~F_test=128, pos_start up to ~4096 → safe budget 64MB
+            size_t prior_bytes = (size_t)2 * n_layers * pos_start * F_test * sizeof(float);
+            size_t graph_bytes = 8 * 1024 * 1024 + prior_bytes;
 
             struct ggml_init_params prefill_params = {
-                /*.mem_size   =*/ 4 * 1024 * 1024,
+                /*.mem_size   =*/ graph_bytes,
                 /*.mem_buffer =*/ nullptr,
                 /*.no_alloc   =*/ true,
             };
@@ -798,20 +1010,50 @@ int main(int argc, char ** argv) {
                 break;
             }
 
+            // ── 2. Create input tensors ────────────────────────────────────────
             struct ggml_tensor * input_tokens_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, chunk_len);
             ggml_set_input(input_tokens_prefill);
             struct ggml_tensor * positions_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, chunk_len);
             ggml_set_input(positions_prefill);
-            struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, chunk_len, chunk_len);
+
+            // Full-context mask: [ctx_len, chunk_len]
+            // Left part [0..pos_start-1]: 0.0f (current chunk attends fully to all prior tokens)
+            // Right part [pos_start..ctx_len-1]: causal triangle over current chunk
+            struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, ctx_len, chunk_len);
             ggml_set_input(mask_prefill);
 
+            // ── 3. Create prior-context tensors for each layer ─────────────────
+            // These are used only when pos_start > 0.
+            std::vector<struct ggml_tensor *> prior_k_tensors(n_layers, nullptr);
+            std::vector<struct ggml_tensor *> prior_v_tensors(n_layers, nullptr);
+            bool has_prior = (pos_start > 0);
+            if (has_prior) {
+                for (int l = 0; l < n_layers; ++l) {
+                    // prior_k: [F_test, pos_start] stored flat, will be reshaped to [head_dim, kv_heads, pos_start]
+                    // Use ggml_new_tensor_3d with [head_dim, kv_heads, pos_start]
+                    prior_k_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                        head_dim, kv_heads, pos_start);
+                    ggml_set_input(prior_k_tensors[l]);
+                    prior_v_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                        head_dim, kv_heads, pos_start);
+                    ggml_set_input(prior_v_tensors[l]);
+                }
+            }
+
+            // ── 4. Build the graph ────────────────────────────────────────────
             struct ggml_tensor * prefill_logits = nullptr;
             std::vector<struct ggml_tensor *> prefill_k_layers(n_layers, nullptr);
             std::vector<struct ggml_tensor *> prefill_v_layers(n_layers, nullptr);
             bool is_last_chunk = (pos_start + chunk_len >= L);
-            struct ggml_cgraph * prefill_graph = build_prefill_graph(
-                prefill_ctx, model, input_tokens_prefill, positions_prefill, mask_prefill,
-                &prefill_logits, &prefill_k_layers, &prefill_v_layers, is_last_chunk
+
+            struct ggml_cgraph * prefill_graph = build_prefill_ctx_graph(
+                prefill_ctx, model,
+                input_tokens_prefill, positions_prefill, mask_prefill,
+                has_prior ? &prior_k_tensors : nullptr,
+                has_prior ? &prior_v_tensors : nullptr,
+                &prefill_logits,
+                &prefill_k_layers, &prefill_v_layers,
+                is_last_chunk
             );
             if (is_last_chunk && prefill_logits) {
                 ggml_set_output(prefill_logits);
@@ -819,39 +1061,86 @@ int main(int argc, char ** argv) {
 
             ggml_backend_sched_reset(sched);
             if (!ggml_backend_sched_alloc_graph(sched, prefill_graph)) {
-                std::cerr << "Failed to allocate memory for prefill graph!" << std::endl;
+                std::cerr << "Failed to allocate memory for prefill graph (chunk " << pos_start << " / " << L << ")!" << std::endl;
                 ggml_free(prefill_ctx);
                 break;
             }
 
+            // ── 5. Upload inputs ──────────────────────────────────────────────
             ggml_backend_tensor_set(input_tokens_prefill, prompt_tokens.data() + pos_start, 0, chunk_len * sizeof(int32_t));
 
             std::vector<int32_t> pos_host(chunk_len);
             for (int i = 0; i < chunk_len; ++i) pos_host[i] = pos_start + i;
             ggml_backend_tensor_set(positions_prefill, pos_host.data(), 0, chunk_len * sizeof(int32_t));
 
-            std::vector<ggml_fp16_t> mask_host(chunk_len * chunk_len, ggml_fp32_to_fp16(0.0f));
-            for (int i = 0; i < chunk_len; ++i) {
-                for (int j = i + 1; j < chunk_len; ++j) {
-                    mask_host[i * chunk_len + j] = ggml_fp32_to_fp16(-INFINITY);
+            // Build full-context mask
+            std::vector<ggml_fp16_t> mask_host(chunk_len * ctx_len, ggml_fp32_to_fp16(0.0f));
+            for (int qi = 0; qi < chunk_len; ++qi) {
+                // Attend to all prior tokens (positions 0..pos_start-1): already 0.0f
+                // Apply causal mask within current chunk (positions pos_start..ctx_len-1)
+                for (int kj = pos_start; kj < ctx_len; ++kj) {
+                    int chunk_kj = kj - pos_start;
+                    if (chunk_kj > qi) {
+                        mask_host[qi * ctx_len + kj] = ggml_fp32_to_fp16(-INFINITY);
+                    }
                 }
             }
             ggml_backend_tensor_set(mask_prefill, mask_host.data(), 0, mask_host.size() * sizeof(ggml_fp16_t));
 
+            // Upload prior K/V context
+            // k_activations[l] stores RAW (pre-RoPE) K (matching ACTIVE_RUNTIME Python unrot_key_states).
+            // The prefill cross-attention needs RoPE-rotated K at the correct positions.
+            // We apply RoPE on CPU using each token's absolute position before uploading to GPU.
+            if (has_prior) {
+                // Build position vector for all prior tokens [0..pos_start-1]
+                std::vector<int32_t> prior_positions(pos_start);
+                for (int t = 0; t < pos_start; ++t) prior_positions[t] = t;
+
+                // Temporary buffer for RoPE-rotated prior K (all prior tokens, one layer at a time)
+                std::vector<float> prior_k_rotated(pos_start * F_test);
+
+                for (int l = 0; l < n_layers; ++l) {
+                    // Apply RoPE to raw K from k_activations → prior_k_rotated
+                    apply_rope_neox_cpu(
+                        k_activations[l].data(),   // raw K [pos_start, F_test]
+                        prior_k_rotated.data(),    // output
+                        prior_positions, pos_start, kv_heads, head_dim,
+                        model.get_config().rope_freq_base
+                    );
+                    // Upload RoPE-rotated prior K to GGML tensor [head_dim, kv_heads, pos_start]
+                    // Data layout after rotation: [tok][head][dim] = [pos_start * kv_heads * head_dim]
+                    // prior_k_tensors[l] shape is [head_dim, kv_heads, pos_start] (same flat layout)
+                    ggml_backend_tensor_set(prior_k_tensors[l],
+                        prior_k_rotated.data(),
+                        0, pos_start * F_test * sizeof(float));
+                    // V has no RoPE — upload raw V directly
+                    ggml_backend_tensor_set(prior_v_tensors[l],
+                        v_activations[l].data(),
+                        0, pos_start * F_test * sizeof(float));
+                }
+            }
+
+            // ── 6. Run the graph ──────────────────────────────────────────────
             if (ggml_backend_sched_graph_compute(sched, prefill_graph) != GGML_STATUS_SUCCESS) {
-                std::cerr << "Error: Prefill graph compute failed!" << std::endl;
+                std::cerr << "Error: Prefill graph compute failed at pos " << pos_start << "!" << std::endl;
                 ggml_free(prefill_ctx);
                 break;
             }
 
+            // ── 7. Capture raw K/V for decode attention and next chunk's prior context ──
+            // build_prefill_ctx_graph exports raw K (before RoPE) matching ACTIVE_RUNTIME.
+            // k_activations stores raw K → used by decode callback (has_rope=true re-applies RoPE).
+            // For next chunk's prior context, apply_rope_neox_cpu will rotate it at upload time.
             std::vector<std::vector<float>> chunk_k(n_layers, std::vector<float>(chunk_len * F_test));
             std::vector<std::vector<float>> chunk_v(n_layers, std::vector<float>(chunk_len * F_test));
             for (int l = 0; l < n_layers; ++l) {
                 ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
                 ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
+                // Store raw K and raw V in activation buffers
                 std::memcpy(k_activations[l].data() + pos_start * F_test, chunk_k[l].data(), chunk_len * F_test * sizeof(float));
                 std::memcpy(v_activations[l].data() + pos_start * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
             }
+            // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
             runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens);
 
             if (pos_start + chunk_len >= L && prefill_logits) {
@@ -862,6 +1151,7 @@ int main(int argc, char ** argv) {
 
             pos_start += chunk_len;
         }
+
 
         if (!interactive) {
             std::cerr << "[DiffKV Native] Waiting for background SVD compressor to catch up..." << std::endl;
