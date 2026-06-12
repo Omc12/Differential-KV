@@ -48,23 +48,74 @@ async def async_input(prompt: str) -> str:
     def _read():
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError()
+        
+        fd = sys.stdin.fileno()
+        is_tty = sys.stdin.isatty()
+        
+        old_settings = None
+        if is_tty:
+            try:
+                import termios
+                old_settings = termios.tcgetattr(fd)
+                new_settings = termios.tcgetattr(fd)
+                # Disable IEXTEN to prevent Ctrl-O and Ctrl-R interception during copy-paste
+                new_settings[3] &= ~termios.IEXTEN
+                termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+            except Exception:
+                pass
+                
         try:
-            lines = [line]
+            # Wait for standard input to be ready
+            try:
+                r, _, _ = select.select([fd], [], [])
+                if not r:
+                    raise EOFError()
+            except (AttributeError, OSError, select.error):
+                # Fallback if select is not supported on stdin (e.g. Windows)
+                line = sys.stdin.readline()
+                if not line:
+                    raise EOFError()
+                return line
+            
+            # Read first chunk
+            try:
+                chunk = os.read(fd, 8192)
+                if not chunk:
+                    raise EOFError()
+            except OSError:
+                raise EOFError()
+                
+            chunks = [chunk]
+            # Accumulate any immediately available chunks (pasted text)
             while True:
-                r, _, _ = select.select([sys.stdin], [], [], 0.01)
-                if r:
-                    next_line = sys.stdin.readline()
-                    if not next_line:
+                try:
+                    r, _, _ = select.select([fd], [], [], 0.01)
+                    if r:
+                        next_chunk = os.read(fd, 8192)
+                        if not next_chunk:
+                            break
+                        chunks.append(next_chunk)
+                    else:
                         break
-                    lines.append(next_line)
-                else:
+                except (AttributeError, OSError, select.error):
                     break
-            return "".join(lines)
-        except (AttributeError, OSError, select.error):
-            return line
+                    
+            # Decode and clean control characters
+            text = b"".join(chunks).decode("utf-8", errors="replace")
+            cleaned_chars = []
+            for char in text:
+                o = ord(char)
+                if 32 <= o <= 126 or char in ('\n', '\r', '\t'):
+                    cleaned_chars.append(char)
+            return "".join(cleaned_chars)
+            
+        finally:
+            if old_settings is not None:
+                try:
+                    import termios
+                    termios.tcsetattr(fd, termios.TCSANOW, old_settings)
+                except Exception:
+                    pass
 
     try:
         raw_input = await asyncio.to_thread(_read)
