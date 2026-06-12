@@ -14,6 +14,8 @@ Mac/MPS: device is auto-detected (CUDA → MPS → CPU).
 
 import torch
 import torch.nn as nn
+import re
+from collections import Counter
 from typing import Optional, List, Tuple, Any, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from native_core.kv_runtime_manager import KVRuntimeManager
@@ -284,6 +286,70 @@ if torch.cuda.is_available():
         _compiled_sample_fn = _sample_logits
 else:
     _compiled_sample_fn = _sample_logits
+
+def _normalize_references(text: str) -> str:
+    """Normalise citation-list formatting inconsistencies produced by the model."""
+    lines = text.split('\n')
+    
+    # 1. Search for a reference header line
+    header_re = re.compile(r'\b(references?|bibliography|works\s+cited|reference\s+list|sources|citations)\b', re.IGNORECASE)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if len(line) <= 100 and header_re.search(line):
+            header_idx = i
+    
+    # 2. Find matching reference entries
+    ref_entry_re = re.compile(r'^(?:[iI]n\s+)?(?:[*\-•]\s*)?\[\d+\]')
+    unambiguous_re = re.compile(r'^(?:[*\-•]\s*)?\[\d+\]')
+    
+    matching_indices = []
+    unambiguous_indices = []
+    for i, line in enumerate(lines):
+        if header_idx is not None and i <= header_idx:
+            continue
+        stripped = line.strip()
+        if ref_entry_re.match(stripped):
+            matching_indices.append(i)
+            if unambiguous_re.match(stripped):
+                unambiguous_indices.append(i)
+                
+    if header_idx is not None and not matching_indices:
+        matching_indices = []
+        unambiguous_indices = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if ref_entry_re.match(stripped):
+                matching_indices.append(i)
+                if unambiguous_re.match(stripped):
+                    unambiguous_indices.append(i)
+        header_idx = None
+
+    if not matching_indices:
+        return text
+        
+    if header_idx is not None:
+        ref_start_idx = header_idx + 1
+    elif unambiguous_indices:
+        ref_start_idx = unambiguous_indices[0]
+    else:
+        return text
+                
+    body = '\n'.join(lines[:ref_start_idx])
+    ref_block = '\n'.join(lines[ref_start_idx:])
+    
+    pattern = re.compile(
+        r'^\s*'
+        r'(?:[iI]n\s+)?'
+        r'(?:[*\-•]\s*)?'
+        r'(\[\d+\])'
+        r'(?:,\s*|\.\s*|\s+)?',
+        re.MULTILINE
+    )
+    normalized_ref_block = pattern.sub(r'\1 ', ref_block)
+    
+    if body:
+        return body + '\n' + normalized_ref_block
+    return normalized_ref_block
 
 class PyTorchDiffKVHFWrapper:
     """
@@ -767,9 +833,45 @@ class PyTorchDiffKVHFWrapper:
         pos_cache = torch.arange(max_total_len, dtype=torch.long, device=self.device)
 
         for _ in range(max_new_tokens):
-            # Repetition penalty
-            if repetition_penalty != 1.0:
-                for tok_id in set(generated[-64:]):
+            # ── Repetition-loop detection (mirrors batch_engine.py / mlx_diffkv_wrapper.py Fix 2) ──────
+            # Detect tight token-level loops every 10 new tokens.
+            # On detection, widen the penalty window and boost the strength.
+            # After 40 tokens without recovery, force-stop generation.
+            _new_tokens = generated[len(prompt_ids):]  # tokens produced in this call
+            _n_new = len(_new_tokens)
+            _loop_detected = getattr(self, "_hf_loop_detected", False)
+            _loop_idx = getattr(self, "_hf_loop_idx", None)
+
+            if not _loop_detected and _n_new >= 30 and _n_new % 10 == 0:
+                _window = _new_tokens[-80:]
+                _ng = 5
+                if len(_window) >= _ng + 1:
+                    _ngrams = [tuple(_window[i:i + _ng]) for i in range(len(_window) - _ng + 1)]
+                    _top = Counter(_ngrams).most_common(1)[0][1]
+                    if _top / len(_ngrams) >= 0.35:
+                        _loop_detected = True
+                        self._hf_loop_detected = True
+                        self._hf_loop_idx = _n_new
+                        print(
+                            f"[DiffKV HF] WARNING: repetition loop detected at token "
+                            f"{_n_new}. Escalating penalty window to 256 tokens and strength to 1.3x."
+                        )
+
+            if _loop_detected:
+                if _loop_idx is None:
+                    self._hf_loop_idx = _n_new
+                elif _n_new - _loop_idx >= 40:
+                    print(
+                        "[DiffKV HF] WARNING: repetition loop persisted for 40 tokens "
+                        "after detection — forcing EOS."
+                    )
+                    break
+
+            # Repetition penalty (widened window when a loop is active)
+            _pen_window = 256 if _loop_detected else 64
+            _pen_val = max(repetition_penalty, 1.3) if _loop_detected else repetition_penalty
+            if _pen_val != 1.0:
+                for tok_id in set(generated[-_pen_window:]):
                     if tok_id < logits.shape[-1]:
                         # Skip punctuation/newlines/whitespace to avoid suppressing lists/bullets/formatting
                         is_alnum = self._alphanumeric_tokens.get(tok_id)
@@ -782,9 +884,9 @@ class PyTorchDiffKVHFWrapper:
                             continue
 
                         if logits[0, tok_id] > 0:
-                            logits[0, tok_id] /= repetition_penalty
+                            logits[0, tok_id] /= _pen_val
                         else:
-                            logits[0, tok_id] *= repetition_penalty
+                            logits[0, tok_id] *= _pen_val
 
             # Sample
             next_id = _compiled_sample_fn(logits, temperature, top_p)
@@ -876,7 +978,12 @@ class PyTorchDiffKVHFWrapper:
         # Store the generated tokens to the session token cache
         self._session_token_ids[session_id] = generated
 
-        return self.tokenizer.decode(generated, skip_special_tokens=True)
+        # Clear loop detection state for this session after generation completes
+        self._hf_loop_detected = False
+        self._hf_loop_idx = None
+
+        decoded = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return _normalize_references(decoded)
 
     def switch_session(self, session_id: str):
         self.active_session = session_id

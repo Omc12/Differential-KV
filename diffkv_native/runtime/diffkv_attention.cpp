@@ -18,7 +18,7 @@ void execute_cpu_attention(
     float* lse_sparse,
     NativeBlockPool* kv_engine,
     int n_q_heads, int n_kv_heads, int rank, int S_max, int K, int D, float scale,
-    bool has_rope, float rope_freq_base
+    bool has_rope, float rope_freq_base, bool approximate_attn
 ) {
     const float* Q_ptr = Q;
     const int8_t* U = kv_engine->get_host_U();
@@ -87,39 +87,85 @@ void execute_cpu_attention(
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
 
-            // 2. Project-Then-Attend: q_proj[r] = q · VK_rot[r] at anchor pos
-            slot_infos[k].q_proj.resize(rank, 0.0f);
-            for (int r = 0; r < rank; ++r) {
-                float proj = 0.0f;
-                int base_vk = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_vk = ggml_fp16_to_fp32(VK[base_vk + d]);
-                    float vk_rot = raw_vk;
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_vkp = ggml_fp16_to_fp32(VK[base_vk + partner]);
-                        float rot_c = (d < half_d) ? -raw_vkp : raw_vkp;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle = anchor_pos * theta;
-                        vk_rot = raw_vk * std::cos(angle) + rot_c * std::sin(angle);
-                    }
-                    proj += Q_ptr[h * D + d] * vk_rot;
-                }
-                slot_infos[k].q_proj[r] = proj;
-            }
+            if (!approximate_attn) {
+                slot_infos[k].token_scores.resize(slen);
+                for (int t = 0; t < slen; ++t) {
+                    float score_t = 0.0f;
+                    int u_off = slot_id * S_max * rank + t * rank;
+                    int pos = anchor_pos + t + 1;
+                    
+                    for (int d = 0; d < half_d; ++d) {
+                        // Reconstruct d
+                        float raw_k1 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
+                        float delta_k1 = 0.0f;
+                        int vk_base1 = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                        for (int r = 0; r < rank; ++r) {
+                            delta_k1 += (float)U[u_off + r] * ggml_fp16_to_fp32(VK[vk_base1 + r * n_kv_heads * D]);
+                        }
+                        float k_raw1 = raw_k1 + delta_k1 * scale_u * block_scale;
 
-            // 3. Token delta scores
-            slot_infos[k].token_scores.resize(slen);
-            for (int t = 0; t < slen; ++t) {
-                float delta = 0.0f;
-                int u_off = slot_id * S_max * rank + t * rank;
-                for (int r = 0; r < rank; ++r) {
-                    delta += slot_infos[k].q_proj[r] * (float)U[u_off + r];
+                        // Reconstruct d2
+                        int d2 = d + half_d;
+                        float raw_k2 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2]);
+                        float delta_k2 = 0.0f;
+                        int vk_base2 = slot_id * rank * n_kv_heads * D + kv_head * D + d2;
+                        for (int r = 0; r < rank; ++r) {
+                            delta_k2 += (float)U[u_off + r] * ggml_fp16_to_fp32(VK[vk_base2 + r * n_kv_heads * D]);
+                        }
+                        float k_raw2 = raw_k2 + delta_k2 * scale_u * block_scale;
+
+                        // Rotate
+                        float k_rot1 = k_raw1;
+                        float k_rot2 = k_raw2;
+                        if (has_rope) {
+                            float theta = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
+                            float angle = pos * theta;
+                            float cos_a = std::cos(angle);
+                            float sin_a = std::sin(angle);
+                            k_rot1 = k_raw1 * cos_a - k_raw2 * sin_a;
+                            k_rot2 = k_raw2 * cos_a + k_raw1 * sin_a;
+                        }
+                        score_t += Q_ptr[h * D + d] * k_rot1 + Q_ptr[h * D + d2] * k_rot2;
+                    }
+                    float t_score = score_t * scale;
+                    slot_infos[k].token_scores[t] = t_score;
+                    if (t_score > max_score) max_score = t_score;
                 }
-                float t_score = (delta * scale_u * block_scale + score_anc) * scale;
-                slot_infos[k].token_scores[t] = t_score;
-                if (t_score > max_score) max_score = t_score;
+            } else {
+                // 2. Project-Then-Attend: q_proj[r] = q · VK_rot[r] at anchor pos
+                slot_infos[k].q_proj.resize(rank, 0.0f);
+                for (int r = 0; r < rank; ++r) {
+                    float proj = 0.0f;
+                    int base_vk = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk + d]);
+                        float vk_rot = raw_vk;
+                        if (has_rope) {
+                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            float raw_vkp = ggml_fp16_to_fp32(VK[base_vk + partner]);
+                            float rot_c = (d < half_d) ? -raw_vkp : raw_vkp;
+                            int idx = (d < half_d) ? d : (d - half_d);
+                            float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+                            float angle = anchor_pos * theta;
+                            vk_rot = raw_vk * std::cos(angle) + rot_c * std::sin(angle);
+                        }
+                        proj += Q_ptr[h * D + d] * vk_rot;
+                    }
+                    slot_infos[k].q_proj[r] = proj;
+                }
+
+                // 3. Token delta scores
+                slot_infos[k].token_scores.resize(slen);
+                for (int t = 0; t < slen; ++t) {
+                    float delta = 0.0f;
+                    int u_off = slot_id * S_max * rank + t * rank;
+                    for (int r = 0; r < rank; ++r) {
+                        delta += slot_infos[k].q_proj[r] * (float)U[u_off + r];
+                    }
+                    float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+                    slot_infos[k].token_scores[t] = t_score;
+                    if (t_score > max_score) max_score = t_score;
+                }
             }
         }
 
@@ -259,24 +305,29 @@ void custom_attention_op_callback(
     const int D = data->D;
     const int F_kv = n_kv_heads * D;
 
-    std::vector<float> q_host(n_q_heads * D);
-    ggml_backend_tensor_get(Q, q_host.data(), 0, n_q_heads * D * sizeof(float));
+    bool all_reused = false;
+    bool cache_active = (get_global_attn_cache().threshold <= 1.0f);
+    std::vector<float> q_host;
+    if (cache_active) {
+        q_host.resize(n_q_heads * D);
+        ggml_backend_tensor_get(Q, q_host.data(), 0, n_q_heads * D * sizeof(float));
 
-    std::vector<bool> reuse_mask(n_q_heads, false);
-    std::vector<float> out_cached(n_q_heads * D, 0.0f);
-    bool has_cache = get_global_attn_cache().check_and_update(
-        data->session_id,
-        data->layer_idx,
-        q_host.data(),
-        n_q_heads,
-        D,
-        reuse_mask,
-        out_cached
-    );
-    bool all_reused = has_cache && std::all_of(reuse_mask.begin(), reuse_mask.end(), [](bool b) { return b; });
-    if (all_reused) {
-        std::memcpy(dst->data, out_cached.data(), n_q_heads * D * sizeof(float));
-        return;
+        std::vector<bool> reuse_mask(n_q_heads, false);
+        std::vector<float> out_cached(n_q_heads * D, 0.0f);
+        bool has_cache = get_global_attn_cache().check_and_update(
+            data->session_id,
+            data->layer_idx,
+            q_host.data(),
+            n_q_heads,
+            D,
+            reuse_mask,
+            out_cached
+        );
+        all_reused = has_cache && std::all_of(reuse_mask.begin(), reuse_mask.end(), [](bool b) { return b; });
+        if (all_reused) {
+            std::memcpy(dst->data, out_cached.data(), n_q_heads * D * sizeof(float));
+            return;
+        }
     }
 
     // ── Step 1: Append current token K/V to the dense buffer ─────────────────
@@ -331,7 +382,9 @@ void custom_attention_op_callback(
         );
 
 
-        get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+        if (cache_active) {
+            get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+        }
         return;
     }
 #endif
@@ -355,7 +408,7 @@ void custom_attention_op_callback(
             out_sparse.data(), lse_sparse.data(),
             kv_engine,
             n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
-            has_rope, rope_freq_base
+            has_rope, rope_freq_base, data->approximate_attn
         );
     }
 
@@ -366,7 +419,9 @@ void custom_attention_op_callback(
         } else {
             std::memset(dst->data, 0, n_q_heads * D * sizeof(float));
         }
-        get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+        if (cache_active) {
+            get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+        }
         return;
     }
 
@@ -402,7 +457,9 @@ void custom_attention_op_callback(
         }
     }
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
-    get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+    if (cache_active) {
+        get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+    }
 }
 
 } // namespace diffkv

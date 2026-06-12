@@ -1086,6 +1086,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
     ggml_set_input(host_slots_decode);
     
+    bool approx = false;
+    if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
+        approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0);
+    }
+    
     std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
     auto & kv_engines = runtime_manager_->get_engines();
     for (int l = 0; l < n_layers; ++l) {
@@ -1102,6 +1107,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
         userdata[l].has_rope = true;
         userdata[l].rope_freq_base = model_->get_config().rope_freq_base;
+        userdata[l].approximate_attn = approx;
         userdata[l].ignore_c = false;
     }
     
@@ -1298,13 +1304,64 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         std::vector<float> output_logits(n_vocab);
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
         
+        // Construct filtered penalty tokens matching Python runtime logic
+        std::vector<int32_t> penalty_tokens;
+        float penalty_val = req->repetition_penalty;
+        bool prompt_penalty_active = (!prompt_tokens.empty() && req->generated_tokens.size() < 8);
+        if (prompt_penalty_active) {
+            penalty_val = std::max(penalty_val, 1.15f);
+        }
+
+        if (penalty_val != 1.0f) {
+            thread_local std::vector<int8_t> alnum_cache;
+            if (alnum_cache.empty()) {
+                alnum_cache.assign(n_vocab, -1);
+            }
+            auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
+                if (tok_id < 0 || tok_id >= n_vocab) return false;
+                if (alnum_cache[tok_id] != -1) {
+                    return alnum_cache[tok_id] == 1;
+                }
+                std::string piece = model_->token_to_piece(tok_id);
+                bool has_alnum = false;
+                for (char c : piece) {
+                    if (std::isalnum(static_cast<unsigned char>(c))) {
+                        has_alnum = true;
+                        break;
+                    }
+                }
+                alnum_cache[tok_id] = has_alnum ? 1 : 0;
+                return has_alnum;
+            };
+
+            // 1. Add generated tokens (last 64)
+            int gen_start = std::max(0, (int)req->generated_tokens.size() - 64);
+            for (size_t i = gen_start; i < req->generated_tokens.size(); ++i) {
+                int32_t tok = req->generated_tokens[i];
+                if (is_alphanumeric_token(tok)) {
+                    penalty_tokens.push_back(tok);
+                }
+            }
+
+            // 2. Add prompt tokens (last 512) if prompt penalty is active
+            if (prompt_penalty_active) {
+                int prompt_start = std::max(0, (int)prompt_tokens.size() - 512);
+                for (size_t i = prompt_start; i < prompt_tokens.size(); ++i) {
+                    int32_t tok = prompt_tokens[i];
+                    if (is_alphanumeric_token(tok)) {
+                        penalty_tokens.push_back(tok);
+                    }
+                }
+            }
+        }
+
         // Sampling
         int32_t next_token = sample_token(
             output_logits,
             req->temperature,
             req->top_p,
-            req->repetition_penalty,
-            all_tokens
+            penalty_val,
+            penalty_tokens
         );
         
         if (model_->is_eog_token(next_token) || next_token == model_->token_eos()) {

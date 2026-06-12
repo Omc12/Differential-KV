@@ -1037,6 +1037,57 @@ int main(int argc, char ** argv) {
             prompt_tokens.resize(L);
         }
 
+        // Prefix verification guard: if cached_len >= L or if prefix tokens don't match, cache is invalid.
+        bool cache_valid = true;
+        if (cached_len > 0) {
+            if (cached_len >= L) {
+                cache_valid = false;
+            } else if (!session_cached_token_ids.empty()) {
+                int compare_len = std::min(cached_len, (int)session_cached_token_ids.size());
+                for (int i = 0; i < compare_len; ++i) {
+                    if (prompt_tokens[i] != session_cached_token_ids[i]) {
+                        cache_valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!cache_valid) {
+            if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+                std::cerr << "[DiffKV Native] Warning: cached_len mismatch or invalid (" << cached_len 
+                          << " vs L=" << L << "). Resetting KV cache." << std::endl;
+            }
+            cached_len = 0;
+            do_full_reset = true;
+
+            runtime_manager.reset();
+            for (int l = 0; l < n_layers; ++l) {
+                std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
+                std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+            }
+            std::fill(active_positions_dense.begin(), active_positions_dense.end(), 0);
+            total_positions = 0;
+            persistent_k_dense.clear();
+            persistent_v_dense.clear();
+            srl_state.ordered_slot_ids.clear();
+            srl_state.sink_blocks.clear();
+            srl_state.inverted_index.clear();
+            srl_state.chunk_graph = diffkv::ChunkGraph();
+            srl_state.semantic_index = diffkv::SemanticIndex();
+            srl_state.recent_generated_tokens.clear();
+            srl_state.current_query_tokens.clear();
+            srl_state.current_step_slots.clear();
+            srl_state.current_step_count = 0;
+            srl_state.recent_miss_rate = 0.0f;
+            srl_state.k_multiplier = 1.0f;
+            srl_state.call_count = 0;
+            for (int l = 0; l < n_layers; ++l) {
+                std::fill(seq_lens_by_layer[l].begin(), seq_lens_by_layer[l].end(), 0);
+            }
+            session_cached_len = 0;
+            session_cached_token_ids.clear();
+        }
+
         // ── Adaptive micro-block size (matches Python ACTIVE_RUNTIME logic) ──────
         {
             int raw_target;
@@ -1407,6 +1458,11 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
         ggml_set_input(host_slots_decode);
 
+        bool approx = false;
+        if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
+            approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0);
+        }
+
         std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
         for (int l = 0; l < n_layers; ++l) {
             userdata[l].kv_engine = kv_engines[l].get();
@@ -1422,6 +1478,7 @@ int main(int argc, char ** argv) {
             userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
             userdata[l].has_rope = true;
             userdata[l].rope_freq_base = model.get_config().rope_freq_base;
+            userdata[l].approximate_attn = approx;
             userdata[l].ignore_c = false;
         }
 
@@ -1720,15 +1777,44 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
 
             constexpr float REP_PENALTY = 1.15f;
-            for (int32_t tok : generated_tokens) {
+            thread_local std::vector<int8_t> alnum_cache;
+            if (alnum_cache.empty()) {
+                alnum_cache.assign(n_vocab, -1);
+            }
+            auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
+                if (tok_id < 0 || tok_id >= n_vocab) return false;
+                if (alnum_cache[tok_id] != -1) {
+                    return alnum_cache[tok_id] == 1;
+                }
+                std::string piece = model.token_to_piece(tok_id);
+                bool has_alnum = false;
+                for (char c : piece) {
+                    if (std::isalnum(static_cast<unsigned char>(c))) {
+                        has_alnum = true;
+                        break;
+                    }
+                }
+                alnum_cache[tok_id] = has_alnum ? 1 : 0;
+                return has_alnum;
+            };
+
+            std::unordered_set<int32_t> unique_penalized;
+            int gen_start = std::max(0, (int)generated_tokens.size() - 64);
+            for (size_t i = gen_start; i < generated_tokens.size(); ++i) {
+                int32_t tok = generated_tokens[i];
+                if (is_alphanumeric_token(tok)) {
+                    unique_penalized.insert(tok);
+                }
+            }
+            if (is_alphanumeric_token(last_token)) {
+                unique_penalized.insert(last_token);
+            }
+
+            for (int32_t tok : unique_penalized) {
                 if (tok >= 0 && tok < n_vocab) {
                     float& l = output_logits[tok];
                     l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
                 }
-            }
-            if (last_token >= 0 && last_token < n_vocab) {
-                float& l = output_logits[last_token];
-                l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
             }
 
             std::vector<std::pair<float, int>> logits_sorted;

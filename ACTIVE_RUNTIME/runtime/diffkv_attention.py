@@ -728,6 +728,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     for blk in dense_blocks:
                                         dense_positions_list.extend(blk.token_indices)
                                     dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    L_dense = dense_positions.shape[0]
                                     cos_dense = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
                                     sin_dense = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
 

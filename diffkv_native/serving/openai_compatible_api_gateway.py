@@ -41,6 +41,7 @@ class SubprocessWrapper:
         # Matches ACTIVE_RUNTIME's session_token_ids / get_session_sequence_length mechanism
         self.session_cached_len: dict   = {}  # session_id -> int (tokens resident in binary KV pool)
         self.session_prompt_text: dict  = {}  # session_id -> last full prompt string sent
+        self.active_session_id: str     = ""  # session_id currently resident in C++ subprocess cache
 
     def _clear_session(self, session_id: str):
         self.session_cached_len.pop(session_id, None)
@@ -204,8 +205,10 @@ class SubprocessWrapper:
                 if not cb:
                     break
                 buf += cb
-                if b"\n" in buf and _SENTINEL_CACHED_PREFIX in buf:
-                    break
+                idx = buf.find(_SENTINEL_CACHED_PREFIX)
+                if idx != -1:
+                    if b"\n" in buf[idx + len(_SENTINEL_CACHED_PREFIX):]:
+                        break
             val = _extract_cached_from_remainder(buf)
             return val
 
@@ -268,7 +271,10 @@ class SubprocessWrapper:
 
 def format_messages_as_chat(messages: list) -> str:
     """Build a full Qwen2.5 chat-template string from ChatMessage objects."""
-    result = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+    result = ""
+    has_system = any(msg.role == "system" for msg in messages)
+    if not has_system:
+        result += "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
     for msg in messages:
         if msg.role in ("system", "user", "assistant"):
             result += f"<|im_start|>{msg.role}\n{msg.content}<|im_end|>\n"
@@ -276,15 +282,21 @@ def format_messages_as_chat(messages: list) -> str:
     return result
 
 
-# Initialize wrapper
-wrapper = SubprocessWrapper()
+# Initialize dual wrappers for main conversation and ephemeral background requests
+main_wrapper = SubprocessWrapper()
+ephemeral_wrapper = SubprocessWrapper()
+
+main_lock = asyncio.Lock()
+ephemeral_lock = asyncio.Lock()
 
 from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    wrapper.start()
+    main_wrapper.start()
+    # ephemeral_wrapper is started lazily upon first ephemeral request
     yield
-    wrapper.stop()
+    main_wrapper.stop()
+    ephemeral_wrapper.stop()
 
 app.router.lifespan_context = lifespan
 
@@ -296,11 +308,21 @@ app.router.lifespan_context = lifespan
 # We detect and truncate them before they hit the C++ binary.
 
 _EPHEMERAL_KEYWORDS = (
-    "title", "summarize", "summary", "label", "name this", "name the",
+    "title", "label", "name this", "name the",
     "name of the", "generate a title", "concise title",
 )
 _EPHEMERAL_KEYWORDS_LONG = (
+    "suggest 3-5 relevant follow-up questions",
+    "suggest 3-5 relevant follow-up",
+    "user might naturally ask next in this conversation",
+    "questions or prompts that the user might naturally ask",
     "summarizing the chat history",
+    "summarize the chat",
+    "summarize the conversation",
+    "summarize the history",
+    "summary of the chat",
+    "summary of the conversation",
+    "summary of the history",
     "concise, 3-5 word title",
     "concise title with an emoji",
     "emoji summarizing the chat",
@@ -331,24 +353,32 @@ def _is_ephemeral(messages: list) -> bool:
         return True
     return False
 
-def _truncate_ephemeral(content: str) -> str:
-    """Truncate embedded chat history in a title/summary request."""
+def _truncate_message_content(content: str) -> str:
+    """Truncate long context bodies within messages to keep prompts small."""
     if len(content) <= 2000:
         return content
     c_lower = content.lower()
-    for marker in ("chat history:", "conversation history:", "history:", "messages:", "context:"):
+    for marker in ("chat history:", "conversation history:", "history:", "messages:", "context:", "document:", "text:"):
         idx = c_lower.find(marker)
         if idx != -1:
             prefix = content[:idx + len(marker)]
-            history = content[idx + len(marker):]
-            if len(history) > 1500:
-                history = history[:750] + "\n...[truncated]...\n" + history[-750:]
-            print(f"[Gateway] Truncated ephemeral prompt: {len(content)} → {len(prefix)+len(history)} chars")
-            return prefix + history
+            body = content[idx + len(marker):]
+            if len(body) > 1500:
+                body = body[:750] + "\n...[truncated]...\n" + body[-750:]
+            return prefix + body
     # Fallback: middle-truncate
-    truncated = content[:1000] + "\n...[truncated]...\n" + content[-1000:]
-    print(f"[Gateway] Middle-truncated ephemeral prompt: {len(content)} → {len(truncated)} chars")
-    return truncated
+    return content[:1000] + "\n...[truncated]...\n" + content[-1000:]
+
+def _optimize_messages_for_ephemeral(messages: list) -> list:
+    """Truncate long documents embedded in the history of title/follow-up requests."""
+    optimized = []
+    for msg in messages:
+        if msg is messages[-1]:
+            # Keep the final instruction prompt completely intact
+            optimized.append(msg)
+        else:
+            optimized.append(ChatMessage(role=msg.role, content=_truncate_message_content(msg.content)))
+    return optimized
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -356,15 +386,17 @@ def _truncate_ephemeral(content: str) -> str:
 async def chat_completions(request: ChatCompletionRequest):
     messages = list(request.messages) if request.messages else []
 
-    # Detect and truncate ephemeral title/summary requests (Open WebUI sends these automatically)
+    # Detect and truncate ephemeral title/summary/follow-up requests (Open WebUI sends these automatically)
     is_ephemeral = _is_ephemeral(messages)
     if is_ephemeral:
-        print(f"[Gateway] Detected ephemeral title/summary request ({sum(len(m.content) for m in messages)} chars total). Truncating.")
-        for m in messages:
-            if m.role == "user":
-                m = ChatMessage(role=m.role, content=_truncate_ephemeral(m.content))
-                messages[-1] = m
-                break
+        print(f"[Gateway] Detected ephemeral request ({sum(len(m.content) for m in messages)} chars total). Optimizing/Truncating.")
+        messages = _optimize_messages_for_ephemeral(messages)
+        wrapper = ephemeral_wrapper
+        lock = ephemeral_lock
+        ephemeral_wrapper.ensure_alive()
+    else:
+        wrapper = main_wrapper
+        lock = main_lock
 
     if not messages:
         user_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
@@ -386,6 +418,13 @@ async def chat_completions(request: ChatCompletionRequest):
         first_user = next((m.content for m in messages if m.role == "user"), "")
         session_id = hashlib.md5(first_user[:200].encode()).hexdigest()[:16]
 
+    # ── Invalidate previous active session if switching conversation chats ──────────────────
+    if not is_ephemeral:
+        if wrapper.active_session_id and wrapper.active_session_id != session_id:
+            print(f"[Gateway] Main session changed from {wrapper.active_session_id} to {session_id}. Invalidating previous cache.")
+            wrapper._clear_session(wrapper.active_session_id)
+        wrapper.active_session_id = session_id
+
     # ── Prefix match (ACTIVE_RUNTIME batch_engine.submit logic) ─────────────────────
     # Check if the current prompt starts with the prompt sent last turn.
     # Open WebUI sends the FULL conversation each turn, so turn 2's prompt IS
@@ -395,7 +434,7 @@ async def chat_completions(request: ChatCompletionRequest):
     if not is_ephemeral and session_id in wrapper.session_cached_len:
         prev_prompt = wrapper.session_prompt_text.get(session_id, "")
         prev_cached  = wrapper.session_cached_len[session_id]
-        if prev_prompt and len(user_prompt) >= len(prev_prompt) and user_prompt.startswith(prev_prompt):
+        if prev_prompt and len(user_prompt) > len(prev_prompt) and user_prompt.startswith(prev_prompt):
             # Prompt is a continuation — skip re-prefilling the cached prefix tokens
             cached_len = prev_cached
             print(f"[Gateway] Session {session_id}: reusing {cached_len} cached KV tokens "
@@ -424,6 +463,7 @@ async def chat_completions(request: ChatCompletionRequest):
             # ── SSE Keepalive: prevent HTTP connection timeout during prefill ──
             KEEPALIVE_S = 3.0
             prefill_done = False
+            accumulated_response = []
 
             while True:
                 try:
@@ -465,12 +505,19 @@ async def chat_completions(request: ChatCompletionRequest):
                 if not text:
                     continue
 
+                accumulated_response.append(text)
+
                 chunk_data = {
                     "id": request_id, "object": "chat.completion.chunk",
                     "created": created_time, "model": request.model,
                     "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n".encode()
+
+            # Update final prompt text to include the full response
+            if not is_ephemeral:
+                full_reply = "".join(accumulated_response)
+                wrapper.session_prompt_text[session_id] = user_prompt + full_reply
 
             # Final done chunk
             done_chunk = {
@@ -513,7 +560,10 @@ async def chat_completions(request: ChatCompletionRequest):
                         parts.append(t)
                 else:
                     parts.append(str(item))
-            return "".join(parts)
+            full_response = "".join(parts)
+            if not is_ephemeral:
+                wrapper.session_prompt_text[session_id] = user_prompt + full_response
+            return full_response
 
     if request.stream:
         return StreamingResponse(stream_generator(), media_type="text/event-stream")

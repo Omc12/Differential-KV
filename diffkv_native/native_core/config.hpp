@@ -127,7 +127,7 @@ private:
             async_svd               = false;
             mps_watermark           = 0.0f;
             torch_compile           = false;
-            approximate_attn        = kIsMacOS ? true : false;
+            approximate_attn        = false;
             srl_age_penalty         = 0.01f;
             early_layer_rank_boost  = false;
             max_rank_early          = 32;
@@ -140,7 +140,7 @@ private:
             async_svd               = kIsMacOS ? false : true;
             mps_watermark           = 0.0f;
             torch_compile           = kIsMacOS ? false : true;
-            approximate_attn        = kIsMacOS ? true  : false;
+            approximate_attn        = false;
             srl_age_penalty         = 0.01f;
             early_layer_rank_boost  = true;
             max_rank_early          = 64;
@@ -161,7 +161,7 @@ private:
             async_svd               = kIsMacOS ? false : true;
             mps_watermark           = 0.0f;
             torch_compile           = false;
-            approximate_attn        = kIsMacOS ? true  : false;
+            approximate_attn        = false;
             srl_age_penalty         = 0.01f;
             early_layer_rank_boost  = false;
             max_rank_early          = 48;

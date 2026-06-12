@@ -384,6 +384,12 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
 
+    int engage_threshold = 4096;
+    if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+        engage_threshold = std::stoi(env_et);
+    }
+    bool bypass_diffkv = ((int)token_ids.size() < engage_threshold);
+
     size_t scan_start = last_compression_scan_idx_[layer_idx];
     size_t scan_end   = layers_blocks_[layer_idx].size();
     auto & scan_blocks = layers_blocks_[layer_idx];
@@ -392,7 +398,9 @@ void StreamingSparseIngestManager::ingest_chunk(
         auto & b = scan_blocks[idx];
         if (b->state == BlockState::DenseResident && b->token_count() == 1 + micro_block_size_ && !b->skip_compression) {
             bool skip = false;
-            if (b->anchor_idx == 0 && protect_block_zero_) {
+            if (bypass_diffkv) {
+                skip = true;
+            } else if (b->anchor_idx == 0 && protect_block_zero_) {
                 skip = true;
             } else if (b->anchor_idx + b->token_count() < short_context_threshold_) {
                 skip = true;

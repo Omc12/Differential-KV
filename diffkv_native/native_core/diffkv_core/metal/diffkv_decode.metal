@@ -66,6 +66,7 @@ kernel void decode_attention_metal_kernel(
     device const float*   dense_V       [[buffer(23)]],  // [T_dense, n_kv, D] f32
     device const int32_t* dense_positions[[buffer(24)]], // [T_dense] sequence positions
     device const int32_t& T_dense       [[buffer(25)]],  // #dense window tokens
+    device const int32_t& approximate_attn [[buffer(26)]],
 
     uint tg_idx    [[threadgroup_position_in_grid]],  // query head index 0..H_q-1
     uint tid       [[thread_position_in_threadgroup]],
@@ -85,8 +86,7 @@ kernel void decode_attention_metal_kernel(
     threadgroup float red_w_proj[32];         // Reduced w_proj[r]
     threadgroup float red_sum_w;              // Sum of token delta weights
     threadgroup float red_proj_temp[64 * 32]; // [threads × rank] temp for w_proj reduce
-    threadgroup float scores_anc_cached[64];  // Anchor scores cache (≤ 64 blocks)
-    threadgroup float q_proj_cached[64 * 32]; // q_proj cache (≤ 64 blocks × rank ≤ 32)
+    threadgroup float scores_cached[64 * 32]; // Unified token scores cache (≤ 64 blocks × max 32 tokens/block)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
     threadgroup float dense_weights[1024];     // Dense window attention weights [T_dense ≤ 1024]
 
@@ -135,54 +135,98 @@ kernel void decode_attention_metal_kernel(
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         float score_anc = red_m[0];
-        if (tid == 0 && k < 64) scores_anc_cached[k] = score_anc;
-
-        // Step 3: Compute q_proj[r] = q · VK_rot[slot_id, r] (at anchor RoPE)
-        //         This is the Project-Then-Attend key insight: VK rotated at anchor
-        //         position is reused for ALL tokens in the block (avoids per-token
-        //         full key reconstruction).  Only threads 0..rank-1 participate.
-        if (tid < (uint)rank) {
-            float proj_val = 0.0f;
-            int base_vk = slot_id * rank * n_kv_heads * D + (int)tid * n_kv_heads * D + kv_head * D;
-            for (int d = 0; d < D; ++d) {
-                float raw_vk = (float)VK_pool[base_vk + d];
-                float vk_rot;
-                if (has_rope) {
-                    int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                    int   idx     = (d < half_d) ? d : (d - half_d);
-                    float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
-                    float angle   = anchor_pos * theta;
-                    float c = cos(angle), s = sin(angle);
-                    float raw_vkp = (float)VK_pool[base_vk + partner];
-                    float rot_c   = (d < half_d) ? -raw_vkp : raw_vkp;
-                    vk_rot = raw_vk * c + rot_c * s;
-                } else {
-                    vk_rot = raw_vk;
-                }
-                proj_val += q_shared[d] * vk_rot;
-            }
-            q_proj_shared[(int)tid] = proj_val;
-            if (k < 64) q_proj_cached[k * 32 + (int)tid] = proj_val;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Step 4: Anchor score → online softmax (thread 0)
-        if (tid == 0) {
-            sm_state = merge_softmax_states(sm_state, { score_anc * scale, 1.0f });
-        }
-
-        // Step 5: Token delta scores via Project-Then-Attend
-        //         score_t = (q_proj · U[t]) * scale_u * block_scale + score_anc) * scale
+        if (tid == 0 && k < 64) scores_cached[k * 32] = score_anc * scale;
+        
         float scale_u    = (float)U_scale_pool[slot_id];
         float block_scale= (float)scales[slot_id];
-        for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
-            float delta = 0.0f;
-            int u_off = slot_id * S_max * rank + t * rank;
-            for (int r = 0; r < rank; ++r) {
-                delta += q_proj_shared[r] * (float)U_pool[u_off + r];
+
+        if (!approximate_attn) {
+            for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
+                float delta_score = 0.0f;
+                int u_off_base = slot_id * S_max * rank + t * rank;
+                int pos = anchor_pos + t + 1;
+
+                for (int d = 0; d < half_d; ++d) {
+                    float raw_k1 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                    float delta_k1 = 0.0f;
+                    int vk_base1 = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                    for (int r = 0; r < rank; ++r) {
+                        delta_k1 += (float)U_pool[u_off_base + r] * (float)VK_pool[vk_base1 + r * n_kv_heads * D];
+                    }
+                    float k_raw1 = raw_k1 + delta_k1 * scale_u * block_scale;
+
+                    int d2 = d + half_d;
+                    float raw_k2 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2];
+                    float delta_k2 = 0.0f;
+                    int vk_base2 = slot_id * rank * n_kv_heads * D + kv_head * D + d2;
+                    for (int r = 0; r < rank; ++r) {
+                        delta_k2 += (float)U_pool[u_off_base + r] * (float)VK_pool[vk_base2 + r * n_kv_heads * D];
+                    }
+                    float k_raw2 = raw_k2 + delta_k2 * scale_u * block_scale;
+
+                    float k_rot1 = k_raw1;
+                    float k_rot2 = k_raw2;
+                    if (has_rope) {
+                        float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
+                        float angle = pos * theta;
+                        float c = cos(angle), s = sin(angle);
+                        k_rot1 = k_raw1 * c - k_raw2 * s;
+                        k_rot2 = k_raw2 * c + k_raw1 * s;
+                    }
+
+                    delta_score += q_shared[d] * k_rot1 + q_shared[d2] * k_rot2;
+                }
+
+                float t_score = delta_score * scale;
+                if (k < 64 && slen < 31) {
+                    scores_cached[k * 32 + 1 + t] = t_score;
+                }
+                sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
             }
-            float t_score = (delta * scale_u * block_scale + score_anc) * scale;
-            sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
+
+            if (tid == 0) {
+                sm_state = merge_softmax_states(sm_state, { score_anc * scale, 1.0f });
+            }
+        } else {
+            // Step 3: Compute q_proj[r] = q · VK_rot[slot_id, r] (at anchor RoPE)
+            if (tid < (uint)rank) {
+                float proj_val = 0.0f;
+                int base_vk = slot_id * rank * n_kv_heads * D + (int)tid * n_kv_heads * D + kv_head * D;
+                for (int d = 0; d < D; ++d) {
+                    float raw_vk = (float)VK_pool[base_vk + d];
+                    float vk_rot;
+                    if (has_rope) {
+                        int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        int   idx     = (d < half_d) ? d : (d - half_d);
+                        float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                        float angle   = anchor_pos * theta;
+                        float c = cos(angle), s = sin(angle);
+                        float raw_vkp = (float)VK_pool[base_vk + partner];
+                        float rot_c   = (d < half_d) ? -raw_vkp : raw_vkp;
+                        vk_rot = raw_vk * c + rot_c * s;
+                    } else {
+                        vk_rot = raw_vk;
+                    }
+                    proj_val += q_shared[d] * vk_rot;
+                }
+                q_proj_shared[(int)tid] = proj_val;
+                if (k < 64 && slen < 31) scores_cached[k * 32 + 1 + (int)tid] = proj_val;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (tid == 0) {
+                sm_state = merge_softmax_states(sm_state, { score_anc * scale, 1.0f });
+            }
+
+            for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
+                float delta = 0.0f;
+                int u_off = slot_id * S_max * rank + t * rank;
+                for (int r = 0; r < rank; ++r) {
+                    delta += q_proj_shared[r] * (float)U_pool[u_off + r];
+                }
+                float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+                sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -238,21 +282,24 @@ kernel void decode_attention_metal_kernel(
     // ── PASS 2: Accumulate values ─────────────────────────────────────────────
     thread float thread_val[128] = { 0.0f };  // thread-local accumulator [D ≤ 128]
 
-    // 2a. Sparse blocks — use cached q_proj (no re-computation of VK rotation)
+    // 2a. Sparse blocks
     for (int k = 0; k < K; ++k) {
         int slot_id    = slot_indices[k];
         int slen       = seq_lens[slot_id];
         float scale_u  = (float)U_scale_pool[slot_id];
         float block_scale = (float)scales[slot_id];
 
-        float score_anc;
-        if (k < 64) {
-            // Fast path: load from cache
-            score_anc = scores_anc_cached[k];
-            if (tid < (uint)rank) q_proj_shared[(int)tid] = q_proj_cached[k * 32 + (int)tid];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        float score_anc_scaled = 0.0f;
+        bool use_cache = (k < 64 && slen < 31);
+
+        if (use_cache) {
+            score_anc_scaled = scores_cached[k * 32];
+            if (approximate_attn) {
+                if (tid < (uint)rank) q_proj_shared[(int)tid] = scores_cached[k * 32 + 1 + (int)tid];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
         } else {
-            // k >= 64: rare slow path — recompute anchor score and q_proj
+            // k >= 64 or slen >= 31: recompute anchor score
             int anchor_pos = anchor_positions[slot_id];
             for (int d = (int)tid; d < D; d += (int)t_per_tg) {
                 float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
@@ -278,48 +325,97 @@ kernel void decode_attention_metal_kernel(
                 if (tid < stride) red_m[tid] += red_m[tid + stride];
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            score_anc = red_m[0];
+            score_anc_scaled = red_m[0] * scale;
 
-            if (tid < (uint)rank) {
-                float proj_val = 0.0f;
-                int base_vk = slot_id * rank * n_kv_heads * D + (int)tid * n_kv_heads * D + kv_head * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_vk = (float)VK_pool[base_vk + d];
-                    float vk_rot;
-                    if (has_rope) {
-                        int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        int   idx     = (d < half_d) ? d : (d - half_d);
-                        float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
-                        float angle   = anchor_pos * theta;
-                        float c = cos(angle), s = sin(angle);
-                        float raw_vkp = (float)VK_pool[base_vk + partner];
-                        float rot_c   = (d < half_d) ? -raw_vkp : raw_vkp;
-                        vk_rot = raw_vk * c + rot_c * s;
-                    } else {
-                        vk_rot = raw_vk;
+            if (approximate_attn) {
+                if (tid < (uint)rank) {
+                    float proj_val = 0.0f;
+                    int base_vk = slot_id * rank * n_kv_heads * D + (int)tid * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_vk = (float)VK_pool[base_vk + d];
+                        float vk_rot;
+                        if (has_rope) {
+                            int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            int   idx     = (d < half_d) ? d : (d - half_d);
+                            float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                            float angle   = anchor_pos * theta;
+                            float c = cos(angle), s = sin(angle);
+                            float raw_vkp = (float)VK_pool[base_vk + partner];
+                            float rot_c   = (d < half_d) ? -raw_vkp : raw_vkp;
+                            vk_rot = raw_vk * c + rot_c * s;
+                        } else {
+                            vk_rot = raw_vk;
+                        }
+                        proj_val += q_shared[d] * vk_rot;
                     }
-                    proj_val += q_shared[d] * vk_rot;
+                    q_proj_shared[(int)tid] = proj_val;
                 }
-                q_proj_shared[(int)tid] = proj_val;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         // Anchor weight
-        float w_anc = exp(score_anc * scale - global_m) / max(global_d, 1e-9f);
+        float w_anc = exp(score_anc_scaled - global_m) / max(global_d, 1e-9f);
 
         // Token weights + w_proj accumulation
         float local_sum_w = 0.0f;
         float local_w_proj[32] = { 0.0f };
 
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
-            float delta = 0.0f;
-            int u_off = slot_id * S_max * rank + t * rank;
-            for (int r = 0; r < rank; ++r) delta += q_proj_shared[r] * (float)U_pool[u_off + r];
-            float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+            float t_score = 0.0f;
+            if (!approximate_attn) {
+                if (use_cache) {
+                    t_score = scores_cached[k * 32 + 1 + t];
+                } else {
+                    float delta_score = 0.0f;
+                    int u_off_base = slot_id * S_max * rank + t * rank;
+                    int pos = anchor_positions[slot_id] + t + 1;
+
+                    for (int d = 0; d < half_d; ++d) {
+                        float raw_k1 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
+                        float delta_k1 = 0.0f;
+                        int vk_base1 = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                        for (int r = 0; r < rank; ++r) {
+                            delta_k1 += (float)U_pool[u_off_base + r] * (float)VK_pool[vk_base1 + r * n_kv_heads * D];
+                        }
+                        float k_raw1 = raw_k1 + delta_k1 * scale_u * block_scale;
+
+                        int d2 = d + half_d;
+                        float raw_k2 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2];
+                        float delta_k2 = 0.0f;
+                        int vk_base2 = slot_id * rank * n_kv_heads * D + kv_head * D + d2;
+                        for (int r = 0; r < rank; ++r) {
+                            delta_k2 += (float)U_pool[u_off_base + r] * (float)VK_pool[vk_base2 + r * n_kv_heads * D];
+                        }
+                        float k_raw2 = raw_k2 + delta_k2 * scale_u * block_scale;
+
+                        float k_rot1 = k_raw1;
+                        float k_rot2 = k_raw2;
+                        if (has_rope) {
+                            float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
+                            float angle = pos * theta;
+                            float c = cos(angle), s = sin(angle);
+                            k_rot1 = k_raw1 * c - k_raw2 * s;
+                            k_rot2 = k_raw2 * c + k_raw1 * s;
+                        }
+
+                        delta_score += q_shared[d] * k_rot1 + q_shared[d2] * k_rot2;
+                    }
+                    t_score = delta_score * scale;
+                }
+            } else {
+                float delta = 0.0f;
+                int u_off = slot_id * S_max * rank + t * rank;
+                for (int r = 0; r < rank; ++r) delta += q_proj_shared[r] * (float)U_pool[u_off + r];
+                t_score = (delta * scale_u * block_scale + (score_anc_scaled / scale)) * scale;
+            }
+
             float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
             local_sum_w += w_t;
-            for (int r = 0; r < rank; ++r) local_w_proj[r] += w_t * (float)U_pool[u_off + r] * scale_u;
+            int u_off = slot_id * S_max * rank + t * rank;
+            for (int r = 0; r < rank; ++r) {
+                local_w_proj[r] += w_t * (float)U_pool[u_off + r] * scale_u;
+            }
         }
 
         // Reduce sum_w

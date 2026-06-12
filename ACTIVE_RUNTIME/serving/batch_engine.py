@@ -1,9 +1,11 @@
 import asyncio
 import gc
 import os
+import re
 import time
 import threading
 import torch
+from collections import Counter
 from typing import Dict, List, Optional, Any
 from transformers import AutoTokenizer
 
@@ -27,11 +29,144 @@ class BatchRequest:
         self.cancelled = False
         self.decoded_text = ""
         self.prefill_offset = 0
+        # ── Repetition-loop detection state ──────────────────────────────
+        # Tracks whether a token n-gram repetition loop has been detected.
+        # When True, _sample switches to a wider penalty window (256 tokens)
+        # and _emit_token terminates generation early.
+        self.repetition_loop_detected: bool = False
+        self._ngram_window: List[int] = []  # rolling window for n-gram counts
 
     @property
     def total_seq_len(self) -> int:
         """Total tokens seen so far = prompt + all generated tokens."""
         return len(self.prompt_ids) + len(self.generated_ids)
+
+# ---------------------------------------------------------------------------
+# Reference-list normalizer (Fix 1)
+# ---------------------------------------------------------------------------
+
+def _normalize_references(text: str) -> str:
+    """Normalise citation-list formatting inconsistencies produced by the model.
+
+    The model occasionally mixes styles in a single reference list:
+      * [1] Author ...         <- bullet prefix
+      [2] Author ...           <- clean
+      In [3], Author ...       <- "In [N]," prefix
+
+    This function rewrites every entry in the reference block to the clean
+    "[N] Author ..." style, removing leading bullets and "In [N]," prefixes
+    so the list is visually consistent.  The body text outside the reference
+    section is left completely untouched.
+    """
+    lines = text.split('\n')
+    
+    # 1. Search for a reference header line
+    header_re = re.compile(r'\b(references?|bibliography|works\s+cited|reference\s+list|sources|citations)\b', re.IGNORECASE)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if len(line) <= 100 and header_re.search(line):
+            header_idx = i
+            # Keep searching to find the last/most relevant header
+    
+    # 2. Find matching reference entries
+    ref_entry_re = re.compile(r'^(?:[iI]n\s+)?(?:[*\-•]\s*)?\[\d+\]')
+    unambiguous_re = re.compile(r'^(?:[*\-•]\s*)?\[\d+\]')
+    
+    matching_indices = []
+    unambiguous_indices = []
+    for i, line in enumerate(lines):
+        # If header found, only look after the header
+        if header_idx is not None and i <= header_idx:
+            continue
+        stripped = line.strip()
+        if ref_entry_re.match(stripped):
+            matching_indices.append(i)
+            if unambiguous_re.match(stripped):
+                unambiguous_indices.append(i)
+                
+    # If a header was found but no matching entries after it, check the whole text
+    if header_idx is not None and not matching_indices:
+        matching_indices = []
+        unambiguous_indices = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if ref_entry_re.match(stripped):
+                matching_indices.append(i)
+                if unambiguous_re.match(stripped):
+                    unambiguous_indices.append(i)
+        header_idx = None
+
+    if not matching_indices:
+        return text
+        
+    # Determine the start of the reference block.
+    if header_idx is not None:
+        ref_start_idx = header_idx + 1
+    elif unambiguous_indices:
+        # Start at the first unambiguous entry
+        ref_start_idx = unambiguous_indices[0]
+    else:
+        # If no header and no unambiguous entries, do not normalize
+        return text
+                
+    body = '\n'.join(lines[:ref_start_idx])
+    ref_block = '\n'.join(lines[ref_start_idx:])
+    
+    pattern = re.compile(
+        r'^\s*'                   # leading spaces
+        r'(?:[iI]n\s+)?'          # optional "In" or "in"
+        r'(?:[*\-•]\s*)?'         # optional bullet
+        r'(\[\d+\])'              # captured citation [N]
+        r'(?:,\s*|\.\s*|\s+)?',   # optional comma, period, spaces after the citation
+        re.MULTILINE
+    )
+    normalized_ref_block = pattern.sub(r'\1 ', ref_block)
+    
+    if body:
+        return body + '\n' + normalized_ref_block
+    return normalized_ref_block
+
+
+
+# ---------------------------------------------------------------------------
+# Repetition-loop detector (Fix 2)
+# ---------------------------------------------------------------------------
+
+# Minimum number of generated tokens before we bother checking for loops.
+_LOOP_CHECK_MIN_TOKENS = 30
+# N-gram size used for loop detection.
+_LOOP_NGRAM_N = 5
+# If the most-common n-gram occupies more than this fraction of the window,
+# we declare a repetition loop.
+_LOOP_NGRAM_THRESHOLD = 0.35
+# How many of the most recent tokens we inspect for the n-gram analysis.
+_LOOP_NGRAM_WINDOW = 80
+
+
+def _detect_repetition_loop(generated_ids: List[int]) -> bool:
+    """Return True if the recent token stream shows a repetition loop.
+
+    We extract all n-grams from the tail of the generated sequence and
+    flag a loop when a single n-gram dominates ≥35 % of the window.  This
+    is robust against:
+      - exact token-level loops (e.g. ero ero ero ...)
+      - near-repeating patterns with slight variation
+    """
+    n = len(generated_ids)
+    if n < _LOOP_CHECK_MIN_TOKENS:
+        return False
+    window = generated_ids[-_LOOP_NGRAM_WINDOW:]
+    if len(window) < _LOOP_NGRAM_N + 1:
+        return False
+    ngrams = [
+        tuple(window[i:i + _LOOP_NGRAM_N])
+        for i in range(len(window) - _LOOP_NGRAM_N + 1)
+    ]
+    counts = Counter(ngrams)
+    most_common_count = counts.most_common(1)[0][1]
+    ratio = most_common_count / len(ngrams)
+    return ratio >= _LOOP_NGRAM_THRESHOLD
+
 
 @torch.jit.script
 def _sample_gpu_jit(
@@ -1145,8 +1280,24 @@ class ContinuousBatchEngine:
                             _empty()
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
+        # ── Repetition-loop recovery (Fix 2) ────────────────────────────────
+        # When a loop has been detected we widen the penalty window from 64 to
+        # 256 tokens and boost the penalty strength to break the loop faster.
+        if req.repetition_loop_detected:
+            penalty_window = 256
+            penalty_val = max(req.repetition_penalty, 1.3)
+        else:
+            penalty_window = 64
+            # Prompt anti-copy guard for the first 8 generated tokens.
+            if req.prompt_ids and len(req.generated_ids) < 8:
+                penalty_val = max(req.repetition_penalty, 1.15)
+            else:
+                penalty_val = req.repetition_penalty
+
         if req.generated_ids:
-            gen_tensor = torch.tensor(req.generated_ids[-64:], dtype=torch.long, device=logits.device)
+            gen_tensor = torch.tensor(
+                req.generated_ids[-penalty_window:], dtype=torch.long, device=logits.device
+            )
         else:
             gen_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
@@ -1155,13 +1306,11 @@ class ContinuousBatchEngine:
         # instead of immediately reciting the prompt. We use the last 512 prompt tokens
         # to cover the local context, and enforce an anti-copy penalty of at least 1.15
         # even if the request's repetition penalty is unset (1.0).
-        if req.prompt_ids and len(req.generated_ids) < 8:
-            penalty_val = max(req.repetition_penalty, 1.15)
+        if not req.repetition_loop_detected and req.prompt_ids and len(req.generated_ids) < 8:
             prompt_tensor = torch.tensor(
                 req.prompt_ids[-512:], dtype=torch.long, device=logits.device
             )
         else:
-            penalty_val = req.repetition_penalty
             prompt_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
         sampled_tensor = _sample_gpu_jit(
@@ -1180,6 +1329,37 @@ class ContinuousBatchEngine:
 
         is_eos = (token_id in self.stop_token_ids)
         is_max = (len(req.generated_ids) >= req.max_tokens)
+
+        # ── Repetition-loop detection (Fix 2) ────────────────────────────────
+        # Check for n-gram loops every 10 tokens after the minimum warm-up period.
+        # We only escalate once (flip the flag) to avoid spamming the check.
+        if (not req.repetition_loop_detected
+                and not is_eos
+                and not is_max
+                and len(req.generated_ids) % 10 == 0):
+            if _detect_repetition_loop(req.generated_ids):
+                req.repetition_loop_detected = True
+                print(
+                    f"[DiffKV] WARNING: repetition loop detected for session "
+                    f"{req.session_id} at token {len(req.generated_ids)}. "
+                    "Escalating penalty window to 256 tokens and strength to 1.3x."
+                )
+
+        # If a loop persists for more than 40 tokens after detection, terminate early.
+        if req.repetition_loop_detected and not is_eos and not is_max:
+            # Count how many tokens were generated after loop detection began.
+            # We store the detection index lazily on the request object.
+            detection_idx = getattr(req, "_loop_detection_idx", None)
+            if detection_idx is None:
+                req._loop_detection_idx = len(req.generated_ids)
+            elif len(req.generated_ids) - req._loop_detection_idx >= 40:
+                # Force stop: the loop has not resolved in 40 tokens.
+                print(
+                    f"[DiffKV] WARNING: repetition loop for session {req.session_id} "
+                    f"persisted for 40 tokens after detection — forcing EOS."
+                )
+                is_eos = True
+
         if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
             print(f"[DiffKV Debug] Emitting token={token_id} (is_eos={is_eos}, is_max={is_max}) generated_len={len(req.generated_ids)}")
 
@@ -1222,10 +1402,15 @@ class ContinuousBatchEngine:
             except Exception:
                 pass  # Non-fatal
 
-            # Flush whatever is in the buffer and the new delta on finish
-            req.buffer.append(delta_text)
+            # ── Reference-formatting normalisation (Fix 1) ───────────────────
+            # The model sometimes generates inconsistent citation styles within
+            # the same reference list (e.g. "* [1] ...", "[2] ...", "In [3] ...").
+            # We normalise the completed text to a uniform "[N] ..." style.
+            final_buffer_text = delta_text
+            candidate = "".join(req.buffer) + final_buffer_text
+            normalized = _normalize_references(candidate)
             req.chunks_queue.put_nowait({
-                "text": "".join(req.buffer),
+                "text": normalized,
                 "is_final": True
             })
             req.buffer.clear()

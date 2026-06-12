@@ -26,6 +26,7 @@ struct CustomAttnUserData {
     float scale;
     bool has_rope;
     float rope_freq_base;
+    bool approximate_attn = false;
     float * active_k_dense = nullptr;            // mutable — callback appends current token
     float * active_v_dense = nullptr;            // mutable — callback appends current token
     int32_t * active_positions_dense = nullptr;  // mutable — callback writes current_pos

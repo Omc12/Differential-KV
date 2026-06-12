@@ -143,7 +143,7 @@ namespace diffkv {
 
 CustomAttnUserData::CustomAttnUserData()
     : kv_engine(nullptr), session_id(""), layer_idx(-1), slot_indices(nullptr), n_q_heads(0), n_kv_heads(0),
-      rank(0), S_max(0), K(0), D(0), scale(0.0f), has_rope(false), rope_freq_base(0.0f),
+      rank(0), S_max(0), K(0), D(0), scale(0.0f), has_rope(false), rope_freq_base(0.0f), approximate_attn(false),
       active_k_dense(nullptr), active_v_dense(nullptr), active_positions_dense(nullptr),
       active_block_tokens(0), active_slot(0), ignore_c(false), current_pos(0),
       mtl_dense_k(nullptr), mtl_dense_v(nullptr), mtl_dense_pos(nullptr),
@@ -234,6 +234,7 @@ CustomAttnUserData::CustomAttnUserData(CustomAttnUserData&& other) noexcept {
     scale = other.scale;
     has_rope = other.has_rope;
     rope_freq_base = other.rope_freq_base;
+    approximate_attn = other.approximate_attn;
     active_k_dense = other.active_k_dense;
     active_v_dense = other.active_v_dense;
     active_positions_dense = other.active_positions_dense;
@@ -359,6 +360,7 @@ CustomAttnUserData& CustomAttnUserData::operator=(CustomAttnUserData&& other) no
         scale = other.scale;
         has_rope = other.has_rope;
         rope_freq_base = other.rope_freq_base;
+        approximate_attn = other.approximate_attn;
         active_k_dense = other.active_k_dense;
         active_v_dense = other.active_v_dense;
         active_positions_dense = other.active_positions_dense;
@@ -756,6 +758,10 @@ void execute_metal_attention(
         [encoder setBuffer:dense_v_buf    offset:0                      atIndex:23];
         [encoder setBuffer:dense_pos_buf  offset:0                      atIndex:24];
         [encoder setBytes:&T_dense_i32    length:sizeof(T_dense_i32)    atIndex:25];
+
+        // Buffer binding 26 (approximate_attn config, new)
+        int32_t approx_attn_i32 = data->approximate_attn ? 1 : 0;
+        [encoder setBytes:&approx_attn_i32 length:sizeof(approx_attn_i32) atIndex:26];
 
         // 1 threadgroup per query head, 64 threads per threadgroup
         MTLSize threadsPerTG  = MTLSizeMake(64, 1, 1);

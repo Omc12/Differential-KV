@@ -11,8 +11,8 @@ prompt = paper_abstract * 34 + "\n\nBased on the text above, summarize the key c
 payload = {
     "model": "diffkv-native-qwen2.5-0.5b-instruct",
     "messages": [{"role": "user", "content": prompt}],
-    "stream": False,
-    "max_tokens": 128
+    "stream": True,
+    "max_tokens": 256
 }
 data = json.dumps(payload).encode('utf-8')
 req = urllib.request.Request(
@@ -22,15 +22,25 @@ req = urllib.request.Request(
     method="POST"
 )
 
-print("Sending request with large prompt + instruction...")
+print("Sending streaming request to gateway...")
 start = time.time()
 try:
     with urllib.request.urlopen(req, timeout=120) as response:
-        dur = time.time() - start
-        res_body = response.read().decode('utf-8')
-        res_json = json.loads(res_body)
-        print(f"Success in {dur:.2f}s")
-        print("Response:")
-        print(res_json["choices"][0]["message"]["content"])
+        print(f"Connected in {time.time() - start:.2f}s, reading stream:")
+        for line in response:
+            line = line.decode('utf-8').strip()
+            if not line:
+                continue
+            if line.startswith("data:"):
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    print(content, end="", flush=True)
+                except Exception as e:
+                    pass
+        print(f"\nStream completed in {time.time() - start:.2f}s")
 except Exception as e:
     print(f"Request failed: {e}")

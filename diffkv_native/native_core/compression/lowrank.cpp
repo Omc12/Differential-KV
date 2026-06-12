@@ -302,6 +302,13 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
 
     int landmark_idx = 0;
+    float max_score = -1e9f;
+    for (int s = 0; s < S_total; ++s) {
+        if (scores[s] > max_score) {
+            max_score = scores[s];
+            landmark_idx = s;
+        }
+    }
 
     std::vector<float> raw_k_swapped(S_total * F);
     std::vector<float> raw_v_swapped(S_total * F);

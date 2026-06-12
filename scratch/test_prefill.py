@@ -2,7 +2,7 @@ import urllib.request
 import json
 import time
 
-url = "http://127.0.0.1:8001/v1/chat/completions"
+url = "http://127.0.0.1:9099/v1/chat/completions"
 headers = {"Content-Type": "application/json"}
 
 # Place the crucial information at the very beginning of the prompt
