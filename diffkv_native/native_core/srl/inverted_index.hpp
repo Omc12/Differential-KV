@@ -73,7 +73,7 @@ struct InvertedTokenIndex {
             return {};
         }
 
-        float decay_factor = 0.999f;
+        float decay_factor = 1.0f;
         if (const char* env = std::getenv("DIFFKV_SRL_DECAY_FACTOR")) {
             decay_factor = std::stof(env);
         }
@@ -242,7 +242,7 @@ inline std::unordered_set<int32_t> lookup(
 inline std::vector<std::pair<int32_t, float>> score_lexical_slots(
     const InvertedTokenIndex&   inv_index,
     const std::vector<int>&     query_token_ids,
-    float                       decay = 0.999f
+    float                       decay = 1.0f
 ) {
     if (query_token_ids.empty() || inv_index.occurrences.empty())
         return {};

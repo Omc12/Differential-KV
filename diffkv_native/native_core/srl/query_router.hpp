@@ -68,14 +68,6 @@ inline std::vector<int32_t> two_level_gate(
     if (M == 0 || k_pass <= 0) return {};
     int k_eff = std::min(k_pass, M);
 
-    // Compute mean query vector: q_mean [D]
-    std::vector<float> q_mean(D, 0.0f);
-    float inv_H = 1.0f / static_cast<float>(H > 0 ? H : 1);
-    for (int h = 0; h < H; ++h) {
-        const float* qh = Q + h * D;
-        for (int d = 0; d < D; ++d) q_mean[d] += qh[d] * inv_H;
-    }
-
     // Build map: slot_id -> ordered_index for age penalty
     std::unordered_map<int32_t, int> slot_to_age;
     int max_age = 1;
@@ -89,13 +81,16 @@ inline std::vector<int32_t> two_level_gate(
     }
     float age_penalty_coeff = srl_state ? srl_state->srl_age_penalty : 0.01f;
 
-    // Score each candidate via dot product with its anchor key
+    // Score each candidate via GQA head-specific matching with max dot product
     std::vector<std::pair<float, int32_t>> scored; // (score, slot_id)
     scored.reserve(M);
 
+    int group_size = H / pool.kv_heads;
+    if (group_size <= 0) group_size = 1;
+    int dim = std::min(D, pool.head_dim);
+
     for (int32_t slot : candidates) {
         // anchors_K layout: [block_idx, kv_heads, head_dim]
-        // We need the row for this slot. Use slot as block_idx (caller convention).
         if (slot < 0 || slot >= pool.max_blocks) {
             scored.push_back({-1e9f, slot});
             continue;
@@ -103,22 +98,23 @@ inline std::vector<int32_t> two_level_gate(
 
         const float* anchor = pool.anchors_K + (size_t)slot * pool.kv_heads * pool.head_dim;
 
-        // Mean anchor over kv_heads -> [head_dim]
-        std::vector<float> anchor_mean(pool.head_dim, 0.0f);
-        float inv_kv = 1.0f / static_cast<float>(pool.kv_heads > 0 ? pool.kv_heads : 1);
-        for (int kh = 0; kh < pool.kv_heads; ++kh) {
-            const float* ah = anchor + kh * pool.head_dim;
-            for (int d = 0; d < pool.head_dim; ++d)
-                anchor_mean[d] += ah[d] * inv_kv;
-        }
+        float max_dot = -1e9f;
+        for (int h = 0; h < H; ++h) {
+            int kh = h / group_size;
+            if (kh >= pool.kv_heads) kh = pool.kv_heads - 1;
 
-        // dot product with q_mean (both of dim head_dim == D)
-        // If D != head_dim, use the smaller dimension
-        int dim = std::min(D, pool.head_dim);
-        float dot = 0.0f;
-        for (int d = 0; d < dim; ++d)
-            dot += q_mean[d] * anchor_mean[d];
-        dot *= scale;
+            const float* q_h = Q + (size_t)h * D;
+            const float* k_h = anchor + (size_t)kh * pool.head_dim;
+
+            float dot_h = 0.0f;
+            for (int d = 0; d < dim; ++d) {
+                dot_h += q_h[d] * k_h[d];
+            }
+            if (dot_h > max_dot) {
+                max_dot = dot_h;
+            }
+        }
+        float dot = max_dot * scale;
 
         // Age penalty
         float penalty = 0.0f;

@@ -81,18 +81,25 @@ def two_level_gate(
     except Exception:
         pass
 
-    # GQA: average query over heads → [D]
-    q_mean = Q.float().mean(dim=0)                      # [D]
-
-    # Gather anchor keys for candidate slots: [M, kv_heads, D]
+    # GQA Gating: match query heads to corresponding KV heads and take the max dot product
+    H = Q.shape[0]
     slot_long = slot_ids.long()
     anc_K = pool.anchors_K[slot_long].float()           # [M, kv_heads, D]
-    anc_flat = anc_K.mean(dim=1)                        # [M, D] average over kv heads
+    kv_heads = anc_K.shape[1]
+    group_size = max(1, H // kv_heads)
 
-    if q_mean.device.type == "mps":
-        anchor_scores = (anc_flat.float() @ q_mean.float()) * scale
-    else:
-        anchor_scores = (anc_flat @ q_mean) * scale         # [M]
+    # Expand anc_K to [M, H, D] by repeating along the kv_heads dimension
+    anc_K_expanded = anc_K.repeat_interleave(group_size, dim=1)
+    if anc_K_expanded.shape[1] < H:
+        pad_size = H - anc_K_expanded.shape[1]
+        last_head = anc_K_expanded[:, -1:, :]
+        anc_K_expanded = torch.cat([anc_K_expanded, last_head.repeat(1, pad_size, 1)], dim=1)
+    elif anc_K_expanded.shape[1] > H:
+        anc_K_expanded = anc_K_expanded[:, :H, :]
+
+    # Compute dot product per query head: [M, H]
+    scores_per_head = (anc_K_expanded * Q.unsqueeze(0).float()).sum(dim=-1) * scale  # [M, H]
+    anchor_scores = scores_per_head.max(dim=1).values                               # [M]
 
     # Apply chronological age penalty to prevent old concepts from staying over-active
     if srl_state is not None and srl_state.ordered_slot_ids:
@@ -373,7 +380,7 @@ def route_query(
         L = max(all_abs_positions)
         slot_scores = defaultdict(float)
         slot_matched_toks = defaultdict(set)
-        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "0.999"))
+        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "1.0"))
         
         for tok in recent_toks:
             if tok in inv_index.occurrences:

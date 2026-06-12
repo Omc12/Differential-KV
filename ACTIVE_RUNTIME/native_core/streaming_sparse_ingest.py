@@ -95,6 +95,21 @@ _RE_SCI_NOTATION    = re.compile(r'\d+\.?\d*[eE][+\-]?\d+')
 _RE_UNICODE_MATH    = re.compile(
     r'[\u221a\u2211\u222b\u2202\u03c0\u03a0\u03a3\u221e\u2264\u2265\u2260\u00b1\u00f7\u00d7]'
 )
+_RE_LATEX_MATH      = re.compile(
+    r'\$\$|\\\[|\\\(|\\begin\{(?:equation|align|gather|math|displaymath)\}|\\(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|sum|int|prod|partial|nabla|hbar|infty|approx|neq|le|ge|times|div|cdot|sqrt|frac)\b|_\{[^\}]+\}|\^[^\}]+\}'
+)
+_RE_ASCII_EQUATION  = re.compile(
+    r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[-+]?[a-zA-Z0-9_.\(\)\+\-\*\/]+'
+)
+_RE_DEFINITIONS     = re.compile(
+    r'\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b',
+    re.IGNORECASE
+)
+_RE_CLAIMS          = re.compile(
+    r'\b(?:theorem|lemma|proposition|corollary|conjecture|hypothesis|proof)\s+\d+(?:\.\d+)*\b|\bour\s+main\s+contribution\b|\bwe\s+(?:prove|show|demonstrate|argue|conclude|find)\s+that\b|\bour\s+(?:results|analysis)\s+show\b',
+    re.IGNORECASE
+)
+_RE_ACRONYMS        = re.compile(r'\b[A-Z]{2,}\b')
 # Content words for short-digit query overlap check
 _RE_WORD_TOKENS     = re.compile(r'\b[a-z0-9]{2,}\b')
 
@@ -572,6 +587,27 @@ class StreamingSparseIngestManager:
 
             # Rule 3: Unicode math symbols — always exempt (π, ∑, ∞, ≤, ±, etc.)
             if _RE_UNICODE_MATH.search(block_text):
+                return True
+
+            # Rule 3b: LaTeX math formula block — always exempt
+            if _RE_LATEX_MATH.search(block_text):
+                return True
+
+            # Rule 3c: ASCII equation statement — always exempt
+            if _RE_ASCII_EQUATION.search(block_text):
+                return True
+
+            # Rule 3d: Verbatim definitions — always exempt
+            if _RE_DEFINITIONS.search(block_text):
+                return True
+
+            # Rule 3e: Formal claims / theorems — always exempt
+            if _RE_CLAIMS.search(block_text):
+                return True
+
+            # Rule 3f: Acronym density — always exempt
+            acronyms = set(_RE_ACRONYMS.findall(block_text))
+            if len(acronyms) >= 3:
                 return True
 
             # Rule 4: Short digits (≥2 digits) with query-word overlap

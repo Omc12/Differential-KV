@@ -4,8 +4,34 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <regex>
 
 namespace diffkv {
+
+static const std::regex RE_LATEX_MATH(
+    R"(\$\$|\\\[|\\\(|\\begin\{(?:equation|align|gather|math|displaymath)\}|\\(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|sum|int|prod|partial|nabla|hbar|infty|approx|neq|le|ge|times|div|cdot|sqrt|frac)\b|_\{[^\}]+\}|\^[^\}]+\})",
+    std::regex_constants::optimize
+);
+
+static const std::regex RE_ASCII_EQUATION(
+    R"(\b[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[-+]?[a-zA-Z0-9_.\(\)\+\-\*\/]+)",
+    std::regex_constants::optimize
+);
+
+static const std::regex RE_DEFINITIONS(
+    R"(\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b)",
+    std::regex_constants::icase | std::regex_constants::optimize
+);
+
+static const std::regex RE_CLAIMS(
+    R"(\b(?:theorem|lemma|proposition|corollary|conjecture|hypothesis|proof)\s+\d+(?:\.\d+)*\b|\bour\s+main\s+contribution\b|\bwe\s+(?:prove|show|demonstrate|argue|conclude|find)\s+that\b|\bour\s+(?:results|analysis)\s+show\b)",
+    std::regex_constants::icase | std::regex_constants::optimize
+);
+
+static const std::regex RE_ACRONYMS(
+    R"(\b[A-Z]{2,}\b)",
+    std::regex_constants::optimize
+);
 
 static std::vector<uint32_t> decode_utf8(const std::string& str) {
     std::vector<uint32_t> codepoints;
@@ -270,6 +296,39 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
         // Rule 3: Unicode math symbols
         if (check_unicode_math(codepoints)) {
             return true;
+        }
+
+        // Rule 3b: LaTeX math formula block
+        if (std::regex_search(block_text, RE_LATEX_MATH)) {
+            return true;
+        }
+
+        // Rule 3c: ASCII equation statement
+        if (std::regex_search(block_text, RE_ASCII_EQUATION)) {
+            return true;
+        }
+
+        // Rule 3d: Verbatim definitions
+        if (std::regex_search(block_text, RE_DEFINITIONS)) {
+            return true;
+        }
+
+        // Rule 3e: Formal claims / theorems
+        if (std::regex_search(block_text, RE_CLAIMS)) {
+            return true;
+        }
+
+        // Rule 3f: Acronym density — always exempt
+        {
+            auto words_begin = std::sregex_iterator(block_text.begin(), block_text.end(), RE_ACRONYMS);
+            auto words_end = std::sregex_iterator();
+            std::unordered_set<std::string> unique_acronyms;
+            for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+                unique_acronyms.insert(i->str());
+            }
+            if (unique_acronyms.size() >= 3) {
+                return true;
+            }
         }
         
         // Rule 4: Short digits with query word overlap
