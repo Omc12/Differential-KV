@@ -436,17 +436,20 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         return true;
     }
 
-    int k_dynamic = svd_dim;
+    int k_dynamic = R;
     if (total_energy > 1e-9f) {
-        float cum_energy = 0.0f;
-        float threshold = 0.999f * total_energy;
+        float entropy = 0.0f;
         for (int r = 0; r < svd_dim; ++r) {
-            cum_energy += S_joint[r] * S_joint[r];
-            if (cum_energy >= threshold) {
-                k_dynamic = std::max(4, std::min(r + 1, R));
-                break;
-            }
+            float p_i = (S_joint[r] * S_joint[r]) / total_energy;
+            entropy -= p_i * std::log(p_i + 1e-12f);
         }
+        float max_entropy = std::log(static_cast<float>(svd_dim) + 1e-9f);
+        float entropy_ratio = std::min(1.0f, std::max(0.0f, entropy / (max_entropy + 1e-9f)));
+
+        int r_min = params.rank_min;
+        int r_max = params.rank_max;
+        int k_scaled = static_cast<int>(std::round(r_min + entropy_ratio * (r_max - r_min)));
+        k_dynamic = std::max(4, std::min(k_scaled, r_max));
     }
 
     std::vector<float> U_scaled(S_deltas * R, 0.0f);

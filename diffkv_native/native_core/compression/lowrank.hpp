@@ -14,6 +14,8 @@ struct LowRankCompressParams {
     int feat_dim;    // F
     int rank;        // R
     int head_dim;    // D
+    int rank_min = 4;    // R_min
+    int rank_max = 32;    // R_max
     
     // Host-accessible inputs
     const float* raw_k_ptr;

@@ -59,10 +59,10 @@ class LowRankDelta:
         return self.nbytes()
 
 
-def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
+def compress_lowrank(deltas: torch.Tensor, rank: int, r_min: Optional[int] = None, r_max: Optional[int] = None) -> LowRankDelta:
     """
     Compress [n, feat_dim] float32 delta matrix to rank-r approximation.
-    Uses Phase 36 Randomized SVD (rSVD) and Energy-Preserving Dynamic Rank.
+    Uses Phase 36 Randomized SVD (rSVD) and Spectral Entropy dynamic rank scaling.
     """
     assert deltas.dim() == 2
     n, d = deltas.shape
@@ -144,15 +144,26 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
                 shape=(n, d), rank=rank, scale=scale, energy_retained=0.0, dynamic_rank=rank
             )
 
-    # --- Phase 36 Energy-Preserving Dynamic Rank Selection ---
+    if r_min is None:
+        r_min = max(4, rank // 2)
+    if r_max is None:
+        r_max = min(64, int(rank * 1.5))
+
+    # --- Preset-Aware Spectral Entropy Dynamic Rank Selection ---
     total_energy = (S ** 2).sum().item()
     k = rank
     if total_energy > 1e-9:
-        cum = torch.cumsum(S ** 2, dim=0)
-        threshold = 0.999 * total_energy
-        idx = torch.where(cum >= threshold)[0]
-        if idx.numel() > 0:
-            k = max(4, min(int(idx[0].item() + 1), rank))
+        S_sq = S ** 2
+        p = S_sq / total_energy
+        entropy = -torch.sum(p * torch.log(p + 1e-12)).item()
+        
+        # Max possible entropy for svd_dim
+        svd_dim = S.numel()
+        max_entropy = math.log(svd_dim + 1e-9)
+        entropy_ratio = min(1.0, max(0.0, entropy / (max_entropy + 1e-9)))
+        
+        # Scale rank dynamically between r_min and r_max
+        k = max(4, min(int(round(r_min + entropy_ratio * (r_max - r_min))), r_max))
 
     # Slice SVD outputs to dynamic rank k — NO zero-padding.
     # Storing zeros for unused rank slots (rank-k columns) wastes memory proportional

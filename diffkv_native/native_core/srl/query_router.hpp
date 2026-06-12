@@ -461,6 +461,13 @@ inline std::vector<int32_t> route_query(
                 }
             };
             
+            // Prepend top k_lex_reserve exact lexical match slots
+            int k_lex_reserve = std::max(1, std::min(3, k_semantic / 8));
+            int take_reserve = std::min(k_lex_reserve, static_cast<int>(lex_slots.size()));
+            for (int i = 0; i < take_reserve; ++i) {
+                add_to_pri(lex_slots[i]);
+            }
+
             // Step A: Scored/Selected centers + their around slots
             for (int32_t c : selected_centers_vec) {
                 add_to_pri(c);

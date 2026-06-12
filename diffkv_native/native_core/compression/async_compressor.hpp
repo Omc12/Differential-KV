@@ -20,6 +20,8 @@ struct CompressJob {
     int feat_dim;    // F
     int rank;        // R
     int head_dim;    // D
+    int rank_min = 4;
+    int rank_max = 32;
     
     // Host-accessible unified pointers (float32 inputs)
     const float* raw_k_ptr;

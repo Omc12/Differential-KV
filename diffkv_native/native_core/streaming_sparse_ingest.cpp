@@ -549,6 +549,8 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.feat_dim = F_test;
     job.rank = rank;
     job.head_dim = head_dim;
+    job.rank_min = std::max(4, rank / 2);
+    job.rank_max = std::min(64, static_cast<int>(rank * 1.5));
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;

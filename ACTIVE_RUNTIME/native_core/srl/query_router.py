@@ -371,6 +371,11 @@ def route_query(
                     prioritized_slots.append(s)
                     seen.add(s)
 
+            # Prepend top k_lex_reserve exact lexical match slots
+            k_lex_reserve = max(1, min(3, k_semantic // 8))
+            for s in lexical_slots[:k_lex_reserve]:
+                add_slot(s)
+
             # Step A: Highly relevant primary centers and their immediate sentence contexts (Around slots)
             for c in selected_centers:
                 add_slot(c)

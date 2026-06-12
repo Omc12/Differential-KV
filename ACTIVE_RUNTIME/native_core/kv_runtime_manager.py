@@ -2154,7 +2154,9 @@ class KVRuntimeManager:
             _layer_idx_safe, self.num_layers, self.rank,
             early_boost=_early_boost, max_rank_early=_max_rank_early,
         )
-        lr_delta = compress_lowrank(normalized_deltas, rank)
+        r_min = max(4, rank // 2)
+        r_max = min(64, int(rank * 1.5))
+        lr_delta = compress_lowrank(normalized_deltas, rank, r_min=r_min, r_max=r_max)
 
         # Check SVD reconstruction quality
         min_cosine_sim = float(os.environ.get("DIFFKV_MIN_COSINE_SIM", "0.93"))
