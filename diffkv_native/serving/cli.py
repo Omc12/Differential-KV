@@ -301,10 +301,10 @@ class SubprocessWrapper:
         # Drain stdout until __READY__
         buf = b""
         while True:
-            b = self.process.stdout.read(1)
-            if not b:
+            chunk = os.read(self.process.stdout.fileno(), 4096)
+            if not chunk:
                 raise RuntimeError("Subprocess failed to start (stdout closed)")
-            buf += b
+            buf += chunk
             if _SENTINEL_READY in buf:
                 break
         print_system("C++ Native process started and ready.")
@@ -352,12 +352,12 @@ class SubprocessWrapper:
         buf = b""
         try:
             while True:
-                b = self.process.stdout.read(1)
-                if not b:
+                chunk = os.read(self.process.stdout.fileno(), 4096)
+                if not chunk:
                     loop.call_soon_threadsafe(out_queue.put_nowait, {"error": "process exited before __RESPONSE__"})
                     loop.call_soon_threadsafe(out_queue.put_nowait, None)
                     return
-                buf += b
+                buf += chunk
                 if _SENTINEL_RESPONSE in buf:
                     after = buf.split(_SENTINEL_RESPONSE, 1)[1]
                     if after.startswith(b"\n"):
@@ -387,15 +387,18 @@ class SubprocessWrapper:
 
         def _read_cached_from_stdout(proc_stdout) -> int:
             buf = b""
-            for _ in range(200):
-                cb = proc_stdout.read(1)
-                if not cb:
-                    break
-                buf += cb
-                idx = buf.find(_SENTINEL_CACHED_PREFIX)
-                if idx != -1:
-                    if b"\n" in buf[idx + len(_SENTINEL_CACHED_PREFIX):]:
+            for _ in range(5):
+                try:
+                    chunk = os.read(proc_stdout.fileno(), 100)
+                    if not chunk:
                         break
+                    buf += chunk
+                    idx = buf.find(_SENTINEL_CACHED_PREFIX)
+                    if idx != -1:
+                        if b"\n" in buf[idx + len(_SENTINEL_CACHED_PREFIX):]:
+                            break
+                except Exception:
+                    break
             return _extract_cached_from_remainder(buf)
 
         if buf:
@@ -421,10 +424,10 @@ class SubprocessWrapper:
         accumulated = b""
         try:
             while True:
-                b = self.process.stdout.read(1)
-                if not b:
+                chunk = os.read(self.process.stdout.fileno(), 4096)
+                if not chunk:
                     break
-                accumulated += b
+                accumulated += chunk
                 if _SENTINEL_FINISH in accumulated:
                     parts = accumulated.split(_SENTINEL_FINISH, 1)
                     final_text = decoder.decode(parts[0], final=True)
@@ -616,6 +619,8 @@ async def run_direct_mode(args):
     os.environ["DIFFKV_MICRO_BLOCK_SIZE"] = str(args.micro_block_size)
     os.environ["DIFFKV_BINARY_PATH"] = os.path.abspath(args.binary_path)
     os.environ["DIFFKV_MODEL_PATH"] = model_path
+    if "DIFFKV_MPS_APPROXIMATE_ATTN" not in os.environ:
+        os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
     # Start wrapper
     wrapper = SubprocessWrapper(os.environ["DIFFKV_BINARY_PATH"], os.environ["DIFFKV_MODEL_PATH"])

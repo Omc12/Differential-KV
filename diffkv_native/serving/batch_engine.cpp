@@ -1086,9 +1086,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
     ggml_set_input(host_slots_decode);
     
+#ifdef __APPLE__
+    bool approx = true;
+#else
     bool approx = false;
+#endif
     if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
-        approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0);
+        approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0 || std::strcmp(env_approx, "yes") == 0 || std::strcmp(env_approx, "on") == 0);
     }
     
     std::vector<diffkv::CustomAttnUserData> userdata(n_layers);

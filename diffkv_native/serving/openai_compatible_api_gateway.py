@@ -138,10 +138,10 @@ class SubprocessWrapper:
         # Drain stdout until __READY__
         buf = b""
         while True:
-            b = self.process.stdout.read(1)
-            if not b:
+            chunk = os.read(self.process.stdout.fileno(), 4096)
+            if not chunk:
                 raise RuntimeError("Subprocess failed to start (stdout closed)")
-            buf += b
+            buf += chunk
             if _SENTINEL_READY in buf:
                 break
         print("[Server] C++ Native process started and ready.")
@@ -175,7 +175,7 @@ class SubprocessWrapper:
                                 cached_len: int = 0, session_id: str = ""):
         """
         Runs in a background thread.
-        Writes prompt to C++ stdin, reads stdout byte-by-byte.
+        Writes prompt to C++ stdin, reads stdout in chunks.
         Puts decoded text chunks into out_queue.
         Puts None when done (signals end-of-stream).
         Puts {"error": msg} dict on fatal errors.
@@ -219,12 +219,12 @@ class SubprocessWrapper:
         buf = b""
         try:
             while True:
-                b = self.process.stdout.read(1)
-                if not b:
+                chunk = os.read(self.process.stdout.fileno(), 4096)
+                if not chunk:
                     loop.call_soon_threadsafe(out_queue.put_nowait, {"error": "process exited before __RESPONSE__"})
                     loop.call_soon_threadsafe(out_queue.put_nowait, None)
                     return
-                buf += b
+                buf += chunk
                 if _SENTINEL_RESPONSE in buf:
                     # Discard everything up to and including the sentinel + newline
                     after = buf.split(_SENTINEL_RESPONSE, 1)[1]
@@ -265,15 +265,18 @@ class SubprocessWrapper:
         def _read_cached_from_stdout(proc_stdout) -> int:
             """Read bytes from stdout until __CACHED__:<N> is found or timeout."""
             buf = b""
-            for _ in range(200):   # up to 200 bytes before giving up
-                cb = proc_stdout.read(1)
-                if not cb:
-                    break
-                buf += cb
-                idx = buf.find(_SENTINEL_CACHED_PREFIX)
-                if idx != -1:
-                    if b"\n" in buf[idx + len(_SENTINEL_CACHED_PREFIX):]:
+            for _ in range(5):
+                try:
+                    chunk = os.read(proc_stdout.fileno(), 100)
+                    if not chunk:
                         break
+                    buf += chunk
+                    idx = buf.find(_SENTINEL_CACHED_PREFIX)
+                    if idx != -1:
+                        if b"\n" in buf[idx + len(_SENTINEL_CACHED_PREFIX):]:
+                            break
+                except Exception:
+                    break
             val = _extract_cached_from_remainder(buf)
             return val
 
@@ -301,10 +304,10 @@ class SubprocessWrapper:
         accumulated = b""
         try:
             while True:
-                b = self.process.stdout.read(1)
-                if not b:
+                chunk = os.read(self.process.stdout.fileno(), 4096)
+                if not chunk:
                     break
-                accumulated += b
+                accumulated += chunk
                 if _SENTINEL_FINISH in accumulated:
                     parts = accumulated.split(_SENTINEL_FINISH, 1)
                     final_text = decoder.decode(parts[0], final=True)
@@ -698,6 +701,9 @@ if __name__ == '__main__':
 
     if "DIFFKV_USE_GPU" not in os.environ:
         os.environ["DIFFKV_USE_GPU"] = "1"
+
+    if "DIFFKV_MPS_APPROXIMATE_ATTN" not in os.environ:
+        os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
     if "DIFFKV_MICRO_BLOCK_SIZE" not in os.environ:
         os.environ["DIFFKV_MICRO_BLOCK_SIZE"] = "64"

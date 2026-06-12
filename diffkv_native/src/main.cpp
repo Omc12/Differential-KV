@@ -7,6 +7,9 @@
 #include <unordered_set>
 #include <random>
 #include <map>
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#endif
 #include "runtime/diffkv_model.hpp"
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -1158,32 +1161,93 @@ int main(int argc, char ** argv) {
                         int rank = engine->get_U()->ne[0];
                         float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
                         float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
-                        
-                        for (int t = 0; t < block_len; ++t) {
-                            int global_pos = block->anchor_idx + t;
-                            if (global_pos >= cached_len) break;
-                            
-                            if (t == 0) {
-                                for (int f = 0; f < F_test; ++f) {
-                                    k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                    v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
-                                }
-                            } else {
-                                int s = t - 1;
-                                for (int f = 0; f < F_test; ++f) {
-                                    float sum_k = 0.0f;
-                                    float sum_v = 0.0f;
-                                    for (int r = 0; r < rank; ++r) {
-                                        float u_val = (float)engine->get_host_U()[slot_id * 64 * rank + s * rank + r];
-                                        float vk_val = ggml_fp16_to_fp32(engine->get_host_VK()[slot_id * rank * F_test + r * F_test + f]);
-                                        float vv_val = ggml_fp16_to_fp32(engine->get_host_VV()[slot_id * rank * F_test + r * F_test + f]);
-                                        sum_k += (u_val * scale_u) * vk_val;
-                                        sum_v += (u_val * scale_u) * vv_val;
+
+                        // 1. Copy anchor K/V
+                        int global_anchor_pos = block->anchor_idx;
+                        if (global_anchor_pos < cached_len) {
+                            for (int f = 0; f < F_test; ++f) {
+                                k_activations[l][global_anchor_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                v_activations[l][global_anchor_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                            }
+                        }
+
+                        // 2. Compute non-anchor tokens
+                        int non_anchor_len = block_len - 1;
+                        if (non_anchor_len > 0) {
+                            // Pre-convert U to float and scale it
+                            std::vector<float> U_float(non_anchor_len * rank);
+                            const int8_t* u_src = engine->get_host_U() + (slot_id * 64 * rank);
+                            for (int i = 0; i < non_anchor_len * rank; ++i) {
+                                U_float[i] = (float)u_src[i] * scale_u;
+                            }
+
+                            // Pre-convert VK and VV to float
+                            std::vector<float> VK_float(rank * F_test);
+                            std::vector<float> VV_float(rank * F_test);
+                            const ggml_fp16_t* vk_src = engine->get_host_VK() + (slot_id * rank * F_test);
+                            const ggml_fp16_t* vv_src = engine->get_host_VV() + (slot_id * rank * F_test);
+                            for (int i = 0; i < rank * F_test; ++i) {
+                                VK_float[i] = ggml_fp16_to_fp32(vk_src[i]);
+                                VV_float[i] = ggml_fp16_to_fp32(vv_src[i]);
+                            }
+
+                            // Pre-convert anchors to float
+                            std::vector<float> anchor_k_float(F_test);
+                            std::vector<float> anchor_v_float(F_test);
+                            const ggml_fp16_t* ak_src = engine->get_host_anchors_K() + (slot_id * F_test);
+                            const ggml_fp16_t* av_src = engine->get_host_anchors_V() + (slot_id * F_test);
+                            for (int f = 0; f < F_test; ++f) {
+                                anchor_k_float[f] = ggml_fp16_to_fp32(ak_src[f]);
+                                anchor_v_float[f] = ggml_fp16_to_fp32(av_src[f]);
+                            }
+
+                            // Matrix multiplication outputs: delta_K and delta_V
+                            std::vector<float> K_delta(non_anchor_len * F_test, 0.0f);
+                            std::vector<float> V_delta(non_anchor_len * F_test, 0.0f);
+
+#ifdef __APPLE__
+                            // Leverage Accelerate framework's cblas_sgemm for hardware AMX acceleration!
+                            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                        non_anchor_len, F_test, rank,
+                                        1.0f, U_float.data(), rank,
+                                        VK_float.data(), F_test,
+                                        0.0f, K_delta.data(), F_test);
+
+                            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                        non_anchor_len, F_test, rank,
+                                        1.0f, U_float.data(), rank,
+                                        VV_float.data(), F_test,
+                                        0.0f, V_delta.data(), F_test);
+#else
+                            // Optimized CPU fallback loop order: s -> r -> f (sequential memory writes)
+                            for (int s = 0; s < non_anchor_len; ++s) {
+                                for (int r = 0; r < rank; ++r) {
+                                    float u_val = U_float[s * rank + r];
+                                    const float* vk_row = &VK_float[r * F_test];
+                                    const float* vv_row = &VV_float[r * F_test];
+                                    float* k_del_row = &K_delta[s * F_test];
+                                    float* v_del_row = &V_delta[s * F_test];
+                                    for (int f = 0; f < F_test; ++f) {
+                                        k_del_row[f] += u_val * vk_row[f];
+                                        v_del_row[f] += u_val * vv_row[f];
                                     }
-                                    float anchor_k = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                    float anchor_v = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
-                                    k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale;
-                                    v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale;
+                                }
+                            }
+#endif
+
+                            // Add anchor K/V and multiply by block_scale, then store in activations
+                            for (int s = 0; s < non_anchor_len; ++s) {
+                                int global_pos = block->anchor_idx + 1 + s;
+                                if (global_pos >= cached_len) break;
+
+                                float* k_act_row = &k_activations[l][global_pos * F_test];
+                                float* v_act_row = &v_activations[l][global_pos * F_test];
+                                const float* k_del_row = &K_delta[s * F_test];
+                                const float* v_del_row = &V_delta[s * F_test];
+
+                                for (int f = 0; f < F_test; ++f) {
+                                    k_act_row[f] = anchor_k_float[f] + k_del_row[f] * block_scale;
+                                    v_act_row[f] = anchor_v_float[f] + v_del_row[f] * block_scale;
                                 }
                             }
                         }
@@ -1407,22 +1471,32 @@ int main(int argc, char ** argv) {
 
         // Logits already retrieved inside the chunk loop
 
-        std::vector<std::pair<float, int>> prefill_top_k;
-        for (int i = 0; i < n_vocab; ++i) {
-            prefill_top_k.push_back({prefill_output_logits[i], i});
-        }
-        std::sort(prefill_top_k.begin(), prefill_top_k.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
-            return a.first > b.first;
-        });
+        int32_t first_decode_token = 0;
+        if (interactive) {
+            float max_logit = -1e30f;
+            for (int i = 0; i < n_vocab; ++i) {
+                if (prefill_output_logits[i] > max_logit) {
+                    max_logit = prefill_output_logits[i];
+                    first_decode_token = i;
+                }
+            }
+        } else {
+            std::vector<std::pair<float, int>> prefill_top_k;
+            prefill_top_k.reserve(n_vocab);
+            for (int i = 0; i < n_vocab; ++i) {
+                prefill_top_k.push_back({prefill_output_logits[i], i});
+            }
+            std::partial_sort(prefill_top_k.begin(), prefill_top_k.begin() + 5, prefill_top_k.end(),
+                              [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                return a.first > b.first;
+            });
+            first_decode_token = prefill_top_k[0].second;
 
-        if (!interactive) {
             std::cerr << "\n[Prefill Phase Top predictions]:\n";
             for (int k = 0; k < 5; ++k) {
                 std::cerr << "  " << k << ": \"" << model.token_to_piece(prefill_top_k[k].second) << "\" (id: " << prefill_top_k[k].second << ", logit: " << prefill_top_k[k].first << ")\n";
             }
         }
-
-        int32_t first_decode_token = prefill_top_k[0].second;
 
         // Resources already freed inside the chunk loop
 
@@ -1458,9 +1532,15 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
         ggml_set_input(host_slots_decode);
 
+#ifdef __APPLE__
+        bool approx = true;
+#else
         bool approx = false;
+#endif
         if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
-            approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0);
+            approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0 || std::strcmp(env_approx, "yes") == 0 || std::strcmp(env_approx, "on") == 0);
+        } else {
+            // Also check for 0/false/no/off to disable
         }
 
         std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
@@ -1817,22 +1897,32 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            std::vector<std::pair<float, int>> logits_sorted;
-            for (int i = 0; i < n_vocab; ++i) {
-                logits_sorted.push_back({output_logits[i], i});
-            }
-            std::sort(logits_sorted.begin(), logits_sorted.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
-                return a.first > b.first;
-            });
+            int32_t next_token = 0;
+            if (interactive) {
+                float max_logit = -1e30f;
+                for (int i = 0; i < n_vocab; ++i) {
+                    if (output_logits[i] > max_logit) {
+                        max_logit = output_logits[i];
+                        next_token = i;
+                    }
+                }
+            } else {
+                std::vector<std::pair<float, int>> logits_sorted;
+                logits_sorted.reserve(n_vocab);
+                for (int i = 0; i < n_vocab; ++i) {
+                    logits_sorted.push_back({output_logits[i], i});
+                }
+                std::partial_sort(logits_sorted.begin(), logits_sorted.begin() + 5, logits_sorted.end(),
+                                  [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                    return a.first > b.first;
+                });
+                next_token = logits_sorted[0].second;
 
-            if (!interactive) {
                 std::cerr << "\n[Step " << step << " Top predictions]:\n";
                 for (int i = 0; i < std::min(5, n_vocab); ++i) {
                     std::cerr << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].second) << "\" (id: " << logits_sorted[i].second << ", logit: " << logits_sorted[i].first << ")\n";
                 }
             }
-
-            int32_t next_token = logits_sorted[0].second;
 
             if (model.is_eog_token(next_token) || next_token == model.token_eos()) {
                 if (!interactive) {
