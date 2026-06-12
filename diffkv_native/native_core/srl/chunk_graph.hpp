@@ -76,6 +76,8 @@ struct ChunkGraph {
     std::vector<int32_t> role_mapping_tensor;         // [max_slot + 1] int32 role (0=outer, 1=around, 2=center)
     std::vector<int32_t> cluster_centers_tensor;      // [C] int32 slot IDs of cluster centers
     std::vector<int32_t> slot_to_center_tensor;       // [max_slot + 1] int32 slot IDs of center
+    std::vector<int32_t> prime_neighbors;             // [(max_slot + 1) * 3] neighbor slot IDs, padded with -1
+    std::vector<float>   prime_weights;               // [(max_slot + 1) * 3] weights, padded with 0.0f
 
     ChunkGraph() : N(0), max_degree(1), max_children(1) {}
 
@@ -163,6 +165,8 @@ inline ChunkGraph build_chunk_graph(
 
     g.role_mapping_tensor.assign(max_slot + 1, -1);
     g.slot_to_center_tensor.assign(max_slot + 1, -1);
+    g.prime_neighbors.assign((max_slot + 1) * 3, -1);
+    g.prime_weights.assign((max_slot + 1) * 3, 0.0f);
 
     if (N == 0) {
         g.max_degree = 1;
@@ -175,6 +179,9 @@ inline ChunkGraph build_chunk_graph(
     g.parent_landmarks.resize(N, -1);
     g.slot_to_parent_tensor.assign(max_slot + 1, -1);
 
+    int chunk_size = static_cast<int>(std::round(std::sqrt(N * 128)));
+    chunk_size = std::max(256, std::min(1024, chunk_size));
+
     if (block_pool_idxs && block_anchor_idxs
         && block_pool_idxs->size() == (size_t)N
         && block_anchor_idxs->size() == (size_t)N)
@@ -183,14 +190,14 @@ inline ChunkGraph build_chunk_graph(
         std::unordered_map<int, int32_t> group_to_landmark_row;
 
         for (int i = 0; i < N; ++i) {
-            int group_id = (*block_anchor_idxs)[i] / 512;
+            int group_id = (*block_anchor_idxs)[i] / chunk_size;
             if (group_to_landmark_row.find(group_id) == group_to_landmark_row.end()) {
                 group_to_landmark_row[group_id] = i;
             }
         }
 
         for (int i = 0; i < N; ++i) {
-            int group_id = (*block_anchor_idxs)[i] / 512;
+            int group_id = (*block_anchor_idxs)[i] / chunk_size;
             int landmark_row = group_to_landmark_row[group_id];
             int32_t parent_slot = slot_ids[landmark_row];
             int32_t child_slot  = slot_ids[i];
@@ -428,7 +435,7 @@ inline ChunkGraph build_chunk_graph(
         && block_anchor_idxs->size() == (size_t)N) {
         std::unordered_map<int, int32_t> group_to_landmark_row;
         for (int i = 0; i < N; ++i) {
-            int group_id = (*block_anchor_idxs)[i] / 512;
+            int group_id = (*block_anchor_idxs)[i] / chunk_size;
             if (group_to_landmark_row.find(group_id) == group_to_landmark_row.end()) {
                 group_to_landmark_row[group_id] = i;
             }
@@ -510,6 +517,60 @@ inline ChunkGraph build_chunk_graph(
             }
 
             g.role_mapping_tensor[s] = is_around ? 1 : 0;
+        }
+    }
+
+    // ── Build Prime Node similarity graph (inter-cluster graph) ──
+    if (!cluster_centers_list.empty()) {
+        std::unordered_map<int32_t, int> slot_to_row;
+        for (int i = 0; i < N; ++i) {
+            slot_to_row[slot_ids[i]] = i;
+        }
+
+        std::vector<int32_t> valid_parent_slots;
+        std::vector<int> valid_parent_rows;
+        for (int32_t p : cluster_centers_list) {
+            auto it = slot_to_row.find(p);
+            if (it != slot_to_row.end()) {
+                valid_parent_slots.push_back(p);
+                valid_parent_rows.push_back(it->second);
+            }
+        }
+
+        int L = static_cast<int>(valid_parent_slots.size());
+        if (L > 1) {
+            for (int i = 0; i < L; ++i) {
+                int32_t p_slot = valid_parent_slots[i];
+                int r_i = valid_parent_rows[i];
+                const float* desc_i = desc_matrix + r_i * DESC_DIM;
+
+                // Compute similarities with all other parents, keeping only dot >= 0.25f
+                std::vector<std::pair<float, int32_t>> sims;
+                for (int j = 0; j < L; ++j) {
+                    if (i == j) continue;
+                    int r_j = valid_parent_rows[j];
+                    const float* desc_j = desc_matrix + r_j * DESC_DIM;
+                    float dot = 0.0f;
+                    for (int d = 0; d < DESC_DIM; ++d) {
+                        dot += desc_i[d] * desc_j[d];
+                    }
+                    if (dot >= 0.25f) {
+                        sims.push_back({dot, valid_parent_slots[j]});
+                    }
+                }
+
+                // Sort descending by similarity score
+                std::sort(sims.begin(), sims.end(), [](const auto& a, const auto& b) {
+                    return a.first > b.first;
+                });
+
+                // Store top up to 3 links
+                int num_links = std::min(3, static_cast<int>(sims.size()));
+                for (int k = 0; k < num_links; ++k) {
+                    g.prime_neighbors[p_slot * 3 + k] = sims[k].second;
+                    g.prime_weights[p_slot * 3 + k]   = sims[k].first;
+                }
+            }
         }
     }
 

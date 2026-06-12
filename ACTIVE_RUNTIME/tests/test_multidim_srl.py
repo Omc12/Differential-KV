@@ -1,4 +1,5 @@
 import torch
+from dataclasses import dataclass
 import pytest
 import os
 import sys
@@ -9,7 +10,7 @@ from native_core.srl.inverted_index import build_inverted_index, lookup_occurren
 from native_core.srl.chunk_graph import build_chunk_graph, ChunkGraph
 from native_core.srl.semantic_index import build_semantic_index
 from native_core.srl.session_srl_state import SessionSRLState
-from native_core.srl.query_router import route_query, route_query_fixed_k
+from native_core.srl.query_router import route_query, route_query_fixed_k, adaptive_k
 
 
 class DummyPool:
@@ -676,6 +677,116 @@ def test_concentric_query_routing():
     # or it will be ranked lower than 102)
     if 103 in selected_list:
         assert selected_list.index(102) < selected_list.index(103)
+
+
+def test_prime_node_and_adaptive_k():
+    # Construct blocks to create 4 distinct chunks:
+    # chunk 0 (101, 102), chunk 1 (103, 104), chunk 2 (105, 106), chunk 3 (107, 108)
+    @dataclass
+    class DummyBlock:
+        pool_idx: int
+        anchor_idx: int
+
+    blocks = [
+        DummyBlock(pool_idx=101, anchor_idx=0),      # chunk 0 parent
+        DummyBlock(pool_idx=102, anchor_idx=10),     # chunk 0 child
+        DummyBlock(pool_idx=103, anchor_idx=256),    # chunk 1 parent
+        DummyBlock(pool_idx=104, anchor_idx=266),    # chunk 1 child
+        DummyBlock(pool_idx=105, anchor_idx=512),    # chunk 2 parent
+        DummyBlock(pool_idx=106, anchor_idx=522),    # chunk 2 child
+        DummyBlock(pool_idx=107, anchor_idx=768),    # chunk 3 parent
+        DummyBlock(pool_idx=108, anchor_idx=778),    # chunk 3 child
+    ]
+
+    desc_matrix = torch.tensor([
+        [1.0, 0.0],  # 101: parent chunk 0
+        [1.0, 0.0],  # 102: child chunk 0
+        [1.0, 0.0],  # 103: parent chunk 1
+        [1.0, 0.0],  # 104: child chunk 1
+        [0.0, 1.0],  # 105: parent chunk 2
+        [0.0, 1.0],  # 106: child chunk 2
+        [0.0, 1.0],  # 107: parent chunk 3
+        [0.0, 1.0],  # 108: child chunk 3
+    ], dtype=torch.float32)
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    slot_ids = [101, 102, 103, 104, 105, 106, 107, 108]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+
+    graph = build_chunk_graph(
+        desc_matrix=desc_matrix,
+        slot_ids=slot_ids_t,
+        K_semantic=2,
+        K_temporal=0,
+        inv_index=None,
+        overlap_threshold=0.15,
+        blocks=blocks
+    )
+
+    # Verify parent landmarks are correctly registered
+    assert graph.parent_landmarks is not None
+    assert 101 in graph.parent_landmarks.tolist()
+    assert 103 in graph.parent_landmarks.tolist()
+    assert 105 in graph.parent_landmarks.tolist()
+    assert 107 in graph.parent_landmarks.tolist()
+
+    # Under thresholded connections (theta_link = 0.25):
+    # 101 (chunk 0) and 103 (chunk 1) are connected (similarity 1.0 >= 0.25)
+    # 101 and 105 are NOT connected (similarity 0.0 < 0.25)
+    assert graph.prime_neighbors[101, 0] == 103
+    assert graph.prime_neighbors[101, 1] == -1
+    
+    # 105 and 107 are connected (similarity 1.0 >= 0.25)
+    # 105 and 101 are NOT connected (similarity 0.0 < 0.25)
+    assert graph.prime_neighbors[105, 0] == 107
+    assert graph.prime_neighbors[105, 1] == -1
+
+    # Let's test adaptive_k with different queries
+    pool = DummyPool(desc_matrix, slot_ids)
+    pool.W_proj = torch.eye(2)
+    sem_index = build_semantic_index(pool, slot_ids)
+
+    srl_state = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[],
+        k_min=2,
+        k_max=5,
+        routing_threshold=1
+    )
+
+    # Query matching only chunk 0/1 (q = [1.0, 0.0])
+    q_desc_0 = torch.tensor([1.0, 0.0], dtype=torch.float32)
+    k0 = adaptive_k(q_desc_0, srl_state, len(slot_ids))
+
+    # Query matching both groups (q = [0.707, 0.707])
+    q_desc_both = torch.tensor([0.707, 0.707], dtype=torch.float32)
+    k_both = adaptive_k(q_desc_both, srl_state, len(slot_ids))
+
+    # Adaptive scaling should result in k_both > k0
+    assert k_both > k0
+
+    # Verify routing with query Q matching only 101.
+    # Concentric zoning will select active centers 101 and 103 (both score 1.0).
+    # Active centers pull in slots [101, 102, 103, 104] under Center/Around roles.
+    # Unrelated centers 105, 107 and children 106, 108 score 0.0 (below threshold) and are not retrieved.
+    Q = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+    selected = route_query(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    )
+    selected_list = selected.tolist()
+    assert 101 in selected_list
+    assert 102 in selected_list
+    assert 103 in selected_list
+    assert 104 in selected_list
+    assert 105 not in selected_list
+    assert 106 not in selected_list
+
 
 
 

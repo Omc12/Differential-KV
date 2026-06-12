@@ -190,6 +190,48 @@ inline int adaptive_k(
     float k_raw    = srl_state.k_min + (srl_state.k_max - srl_state.k_min) * complexity;
     float k_scaled = k_raw * srl_state.k_multiplier;
 
+    // Calculate C_active (number of active clusters)
+    int C_active = 1;
+    const auto& cg = srl_state.chunk_graph;
+    if (!cg.cluster_centers_tensor.empty()) {
+        std::unordered_map<int32_t, int> slot_to_idx;
+        slot_to_idx.reserve(sem.slot_ids.size());
+        for (size_t i = 0; i < sem.slot_ids.size(); ++i) {
+            slot_to_idx[sem.slot_ids[i]] = static_cast<int>(i);
+        }
+
+        std::vector<float> scores;
+        scores.reserve(cg.cluster_centers_tensor.size());
+        float s_max = 0.0f;
+        for (int32_t p : cg.cluster_centers_tensor) {
+            if (p == -1) continue;
+            auto it = slot_to_idx.find(p);
+            if (it != slot_to_idx.end()) {
+                int row = it->second;
+                const float* desc_ptr = sem.desc_matrix.data() + row * DESC_DIM;
+                float dot = 0.0f;
+                for (int d = 0; d < DESC_DIM; ++d) {
+                    dot += desc_ptr[d] * q_desc[d];
+                }
+                scores.push_back(dot);
+                if (dot > s_max) {
+                    s_max = dot;
+                }
+            }
+        }
+
+        float theta_active = std::max(0.25f, 0.85f * s_max);
+        int active_count = 0;
+        for (float score : scores) {
+            if (score >= theta_active) {
+                active_count++;
+            }
+        }
+        C_active = std::max(1, active_count);
+    }
+
+    k_scaled = k_scaled * (1.0f + 0.35f * std::log(static_cast<float>(C_active)));
+
     int K = static_cast<int>(std::round(k_scaled));
     K = std::max(srl_state.k_min, std::min(srl_state.k_max, K));
     return K;
@@ -294,16 +336,42 @@ inline std::vector<int32_t> route_query(
             
             best_sem_score = center_scores[0].first;
             
-            // Select top cluster centers
-            int k_centers = std::max(1, std::min(k_semantic / 8, static_cast<int>(center_scores.size())));
+            // Select cluster centers with similarity score >= max(0.25f, 0.85f * best_sem_score)
+            float threshold = std::max(0.25f, 0.85f * best_sem_score);
             std::unordered_set<int32_t> selected_centers;
             std::vector<int32_t> selected_centers_vec;
-            for (int idx = 0; idx < k_centers; ++idx) {
-                selected_centers.insert(center_scores[idx].second);
-                selected_centers_vec.push_back(center_scores[idx].second);
+            for (const auto& score_pair : center_scores) {
+                if (score_pair.first >= threshold) {
+                    selected_centers.insert(score_pair.second);
+                    selected_centers_vec.push_back(score_pair.second);
+                }
             }
             
-            // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
+            // If none are >= threshold, fallback to the top center
+            if (selected_centers.empty() && !center_scores.empty()) {
+                selected_centers.insert(center_scores[0].second);
+                selected_centers_vec.push_back(center_scores[0].second);
+            }
+            
+            // Retrieve 1-hop prime neighbors from chunk_graph.prime_neighbors
+            std::unordered_set<int32_t> all_selected_prime_nodes = selected_centers;
+            const auto& prime_neighbors = cg.prime_neighbors;
+            if (!prime_neighbors.empty()) {
+                int max_prime_slots = prime_neighbors.size() / 3;
+                for (int32_t c : selected_centers_vec) {
+                    if (c >= 0 && c < max_prime_slots) {
+                        int base_idx = c * 3;
+                        for (int k = 0; k < 3; ++k) {
+                            int32_t nb = prime_neighbors[base_idx + k];
+                            if (nb != -1) {
+                                all_selected_prime_nodes.insert(nb);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer)
             std::vector<int32_t> around_slots;
             std::vector<int32_t> outer_slots;
             
@@ -311,11 +379,11 @@ inline std::vector<int32_t> route_query(
             const auto& slot_to_center = cg.slot_to_center_tensor;
             
             for (int32_t s : srl_state.semantic_index.slot_ids) {
-                if (selected_centers.count(s)) continue;
+                if (all_selected_prime_nodes.count(s)) continue;
                 
                 if (s >= 0 && s < static_cast<int32_t>(slot_to_center.size())) {
                     int32_t assoc_c = slot_to_center[s];
-                    if (selected_centers.count(assoc_c)) {
+                    if (all_selected_prime_nodes.count(assoc_c)) {
                         int role = role_map[s];
                         if (role == 1) {
                             around_slots.push_back(s);
@@ -330,14 +398,19 @@ inline std::vector<int32_t> route_query(
             std::vector<int32_t> prioritized_slots;
             std::unordered_set<int32_t> seen_prioritized;
             
-            auto add_to_pri = [&](int32_t slot) {
+            auto add_to_pri = [&seen_prioritized, &prioritized_slots](int32_t slot) {
                 if (seen_prioritized.find(slot) == seen_prioritized.end()) {
                     seen_prioritized.insert(slot);
                     prioritized_slots.push_back(slot);
                 }
             };
             
+            // First add the scored/selected centers (highest relevance)
             for (int32_t c : selected_centers_vec) {
+                add_to_pri(c);
+            }
+            // Then add all expanded prime nodes
+            for (int32_t c : all_selected_prime_nodes) {
                 add_to_pri(c);
             }
             for (int32_t s : around_slots) {

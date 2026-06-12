@@ -46,6 +46,8 @@ class ChunkGraph:
     role_mapping_tensor: Optional[torch.Tensor] = None         # [max_slot + 1] int32 CPU-resident role (0=outer, 1=around, 2=center)
     cluster_centers_tensor: Optional[torch.Tensor] = None      # [C] int32 CPU-resident pool slot IDs of cluster centers
     slot_to_center_tensor: Optional[torch.Tensor] = None       # [max_slot + 1] int32 CPU-resident pool slot IDs of center
+    prime_neighbors: Optional[torch.Tensor] = None             # [max_slot + 1, 3] int32 CPU-resident, padded with -1
+    prime_weights: Optional[torch.Tensor] = None               # [max_slot + 1, 3] float32 CPU-resident, padded with 0.0
 
     # Backwards compatibility properties
     @property
@@ -140,10 +142,13 @@ def build_chunk_graph(
     parent_landmarks_tensor = torch.zeros((0,), dtype=torch.int32)
     parent_to_children_tensor = torch.full((max_slot + 1, 1), -1, dtype=torch.int32)
     slot_to_parent_tensor = torch.full((max_slot + 1,), -1, dtype=torch.int32)
+    prime_neighbors = torch.full((max_slot + 1, 3), -1, dtype=torch.int32)
+    prime_weights = torch.zeros((max_slot + 1, 3), dtype=torch.float32)
 
     if blocks is not None and len(blocks) > 0:
-        # Group blocks by chunk (prefill chunk size defaults to 512 tokens)
-        chunk_size = 512
+        # Group blocks by chunk (dynamic chunk size based on pool size N)
+        chunk_size = int((N * 128) ** 0.5)
+        chunk_size = max(256, min(1024, chunk_size))
         chunk_groups = {}
         for b in blocks:
             if getattr(b, "pool_idx", None) is not None:
@@ -187,7 +192,9 @@ def build_chunk_graph(
             slot_to_parent_tensor=slot_to_parent_tensor,
             role_mapping_tensor=role_mapping_tensor,
             cluster_centers_tensor=cluster_centers_tensor,
-            slot_to_center_tensor=slot_to_center_tensor
+            slot_to_center_tensor=slot_to_center_tensor,
+            prime_neighbors=prime_neighbors,
+            prime_weights=prime_weights
         )
 
     if N == 1:
@@ -204,7 +211,9 @@ def build_chunk_graph(
             slot_to_parent_tensor=slot_to_parent_tensor,
             role_mapping_tensor=role_mapping_tensor,
             cluster_centers_tensor=cluster_centers_tensor,
-            slot_to_center_tensor=slot_to_center_tensor
+            slot_to_center_tensor=slot_to_center_tensor,
+            prime_neighbors=prime_neighbors,
+            prime_weights=prime_weights
         )
 
     # Cast to float32 for pairwise similarity dot products
@@ -398,6 +407,42 @@ def build_chunk_graph(
                     
             role_mapping_tensor[s] = 1 if is_around else 0  # 1 = Around, 0 = Outer
 
+    # Build Prime Node similarity graph (inter-cluster graph)
+    if parent_landmarks_tensor.numel() > 0:
+        slot_to_idx = {int(slot): idx for idx, slot in enumerate(slot_ids.tolist())}
+        valid_parent_slots = []
+        valid_parent_idxs = []
+        for p in parent_landmarks_tensor.tolist():
+            if p in slot_to_idx:
+                valid_parent_slots.append(p)
+                valid_parent_idxs.append(slot_to_idx[p])
+        
+        L = len(valid_parent_slots)
+        if L > 1:
+            parent_desc = desc_matrix[valid_parent_idxs].float()  # [L, DESC_DIM]
+            parent_sim = parent_desc @ parent_desc.T  # [L, L]
+            parent_sim.fill_diagonal_(-1.0)
+            
+            for i in range(L):
+                p_slot = valid_parent_slots[i]
+                sims = []
+                for j in range(L):
+                    if i == j:
+                        continue
+                    val = float(parent_sim[i, j].item())
+                    if val >= 0.25:
+                        sims.append((val, valid_parent_slots[j]))
+                
+                # Sort descending by similarity
+                sims.sort(key=lambda x: x[0], reverse=True)
+                
+                # Link at most 3
+                num_links = min(3, len(sims))
+                for k in range(num_links):
+                    val, neighbor_slot = sims[k]
+                    prime_neighbors[p_slot, k] = neighbor_slot
+                    prime_weights[p_slot, k] = val
+
     return ChunkGraph(
         neighbors=neighbors_tensor.cpu(),
         weights=weights_tensor.cpu(),
@@ -406,7 +451,9 @@ def build_chunk_graph(
         slot_to_parent_tensor=slot_to_parent_tensor,
         role_mapping_tensor=role_mapping_tensor.cpu(),
         cluster_centers_tensor=cluster_centers_tensor.cpu(),
-        slot_to_center_tensor=slot_to_center_tensor.cpu()
+        slot_to_center_tensor=slot_to_center_tensor.cpu(),
+        prime_neighbors=prime_neighbors.cpu(),
+        prime_weights=prime_weights.cpu()
     )
 
 

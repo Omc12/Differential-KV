@@ -164,6 +164,26 @@ def adaptive_k(
     # Apply adaptive multiplier (boosted when miss rate is high)
     k_scaled = int(k_raw * srl_state.k_multiplier)
 
+    # Calculate C_active (number of active clusters)
+    C_active = 1
+    chunk_graph = srl_state.chunk_graph
+    if chunk_graph is not None and getattr(chunk_graph, "parent_landmarks", None) is not None and chunk_graph.parent_landmarks.numel() > 0:
+        parent_slots = chunk_graph.parent_landmarks
+        slot_ids = srl_state.semantic_index.slot_ids
+        desc_matrix = srl_state.semantic_index.desc_matrix
+        
+        slot_to_idx = {int(slot): idx for idx, slot in enumerate(slot_ids.tolist())}
+        parent_idxs = [slot_to_idx[p] for p in parent_slots.tolist() if p in slot_to_idx]
+        if parent_idxs:
+            parent_descs = desc_matrix[parent_idxs].to(q_desc.device, dtype=q_desc.dtype)
+            parent_scores = parent_descs @ q_desc
+            S_max = float(parent_scores.max().item()) if parent_scores.numel() > 0 else 0.0
+            theta_active = max(0.25, 0.85 * S_max)
+            C_active = int((parent_scores >= theta_active).sum().item())
+            C_active = max(1, C_active)
+
+    k_scaled = int(k_scaled * (1.0 + 0.35 * math.log(C_active)))
+
     return max(k_min, min(k_max, k_scaled))
 
 
@@ -224,27 +244,43 @@ def route_query(
             else:
                 scores_centers = center_desc @ q16
                 
-            # Select top cluster centers based on semantic similarity
-            k_centers = max(1, min(k_semantic // 8, centers.numel()))
-            top_center_idx = torch.topk(scores_centers, k=k_centers, largest=True, sorted=True).indices
-            selected_centers = centers.to(top_center_idx.device)[top_center_idx].tolist()
-            
-            # 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
+            # Select cluster centers with similarity score >= max(0.25, 0.85 * S_max)
+            s_max_centroid = float(scores_centers.max().item()) if scores_centers.numel() > 0 else 0.0
+            threshold = max(0.25, 0.85 * s_max_centroid)
+            active_mask = scores_centers >= threshold
+            active_indices = torch.where(active_mask)[0]
+            if active_indices.numel() == 0:
+                top_center_idx = torch.topk(scores_centers, k=1, largest=True, sorted=True).indices
+                selected_centers = centers.to(top_center_idx.device)[top_center_idx].tolist()
+            else:
+                selected_centers = centers[active_indices].tolist()
+
+            # Retrieve 1-hop prime neighbors from chunk_graph.prime_neighbors
+            all_selected_prime_nodes = set(selected_centers)
+            prime_neighbors_tensor = chunk_graph.prime_neighbors
+            if prime_neighbors_tensor is not None:
+                for c in selected_centers:
+                    if c < prime_neighbors_tensor.shape[0]:
+                        neighbors = prime_neighbors_tensor[c].tolist()
+                        for nb in neighbors:
+                            if nb != -1:
+                                all_selected_prime_nodes.add(nb)
+
+            # 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer)
             role_map = chunk_graph.role_mapping_tensor
             slot_to_center = chunk_graph.slot_to_center_tensor
             
             around_slots = []
             outer_slots = []
             
-            selected_centers_set = set(selected_centers)
             slot_ids_cpu = srl_state.semantic_index.slot_ids.cpu().tolist()
             for s in slot_ids_cpu:
-                if s in selected_centers_set:
+                if s in all_selected_prime_nodes:
                     continue
-                # check if this slot is associated with one of the selected centers
+                # check if this slot is associated with one of the selected centers or neighbors
                 if s < len(slot_to_center):
                     assoc_c = int(slot_to_center[s].item())
-                    if assoc_c in selected_centers_set:
+                    if assoc_c in all_selected_prime_nodes:
                         role = int(role_map[s].item())
                         if role == 1:
                             around_slots.append(s)
@@ -255,8 +291,12 @@ def route_query(
             prioritized_slots = []
             seen = set()
             
-            # High relevance: Center
+            # High relevance: Center (both the scored ones and their neighbors)
             for c in selected_centers:
+                if c not in seen:
+                    prioritized_slots.append(c)
+                    seen.add(c)
+            for c in all_selected_prime_nodes:
                 if c not in seen:
                     prioritized_slots.append(c)
                     seen.add(c)
