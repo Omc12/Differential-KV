@@ -489,7 +489,7 @@ class ContinuousBatchEngine:
         req = BatchRequest(
             session_id=session_id,
             prompt=payload["prompt"],
-            max_tokens=payload.get("max_tokens", 2048),
+            max_tokens=payload.get("max_tokens", 16384),
             temperature=payload.get("temperature", 0.7),
             top_p=payload.get("top_p", 0.9),
             repetition_penalty=payload.get("repetition_penalty", 1.15)

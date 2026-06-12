@@ -28,7 +28,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
-    max_tokens: Optional[int] = 2048
+    max_tokens: Optional[int] = 16384
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 0.9
     repetition_penalty: Optional[float] = 1.15
@@ -343,7 +343,7 @@ class OpenAICompatibleAPIGateway:
 
             payload = {
                 "messages":           incoming_messages,
-                "max_tokens":         request.max_tokens if request.max_tokens is not None else 2048,
+                "max_tokens":         request.max_tokens if request.max_tokens is not None else 16384,
                 "temperature":        request.temperature if request.temperature is not None else 0.7,
                 "top_p":              request.top_p if request.top_p is not None else 0.9,
                 "repetition_penalty": request.repetition_penalty if request.repetition_penalty is not None else 1.15,

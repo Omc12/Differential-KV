@@ -17,7 +17,7 @@ namespace diffkv {
 struct BatchRequest {
     std::string session_id;
     std::string prompt;
-    int max_tokens = 2048;
+    int max_tokens = 16384;
     float temperature = 0.7f;
     float top_p = 0.9f;
     float repetition_penalty = 1.15f;
@@ -88,7 +88,7 @@ public:
     std::shared_ptr<BatchRequest> submit(
         const std::string& session_id,
         const std::string& prompt,
-        int max_tokens = 2048,
+        int max_tokens = 16384,
         float temperature = 0.7f,
         float top_p = 0.9f,
         float repetition_penalty = 1.15f

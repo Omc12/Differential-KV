@@ -88,7 +88,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
-    max_tokens: Optional[int] = 512
+    max_tokens: Optional[int] = 16384
     temperature: Optional[float] = 0.7
 
 BINARY_PATH_DEFAULT = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/build/diffkv_native"
@@ -468,7 +468,7 @@ async def chat_completions(request: ChatCompletionRequest):
     else:
         user_prompt = format_messages_as_chat(messages)
 
-    max_tokens   = request.max_tokens or 512
+    max_tokens   = request.max_tokens or 16384
     request_id   = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
 
@@ -684,7 +684,7 @@ if __name__ == '__main__':
     parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid')
-    parser.add_argument('--max-tokens', type=int, default=512)
+    parser.add_argument('--max-tokens', type=int, default=16384)
     args = parser.parse_args()
 
     if args.preset == 'low':

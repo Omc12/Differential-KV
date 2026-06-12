@@ -118,6 +118,72 @@ async def async_input(prompt: str) -> str:
         raise
 
 # ---------------------------------------------------------------------------
+# Helper function for automatic, high-capacity pasting
+# ---------------------------------------------------------------------------
+async def run_raw_paste() -> str:
+    import select
+    def _read():
+        fd = sys.stdin.fileno()
+        is_tty = sys.stdin.isatty()
+        
+        old_settings = None
+        if is_tty:
+            try:
+                import termios
+                old_settings = termios.tcgetattr(fd)
+                new_settings = termios.tcgetattr(fd)
+                # Disable ICANON (canonical mode) and ECHO (terminal echoing)
+                new_settings[3] &= ~termios.ICANON
+                new_settings[3] &= ~termios.ECHO
+                termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+            except Exception:
+                pass
+                
+        try:
+            # Phase 1: Wait for first byte to arrive (blocking select)
+            try:
+                r, _, _ = select.select([fd], [], [])
+                if not r:
+                    return ""
+            except (AttributeError, OSError, select.error):
+                return sys.stdin.read()
+                
+            chunks = []
+            # Phase 2: Read chunks until we see a 150ms pause in input
+            while True:
+                try:
+                    chunk = os.read(fd, 8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    
+                    r, _, _ = select.select([fd], [], [], 0.15)
+                    if not r:
+                        break
+                except OSError:
+                    break
+                except (AttributeError, select.error):
+                    break
+                    
+            text = b"".join(chunks).decode("utf-8", errors="replace")
+            cleaned_chars = []
+            for char in text:
+                o = ord(char)
+                if 32 <= o <= 126 or char in ('\n', '\r', '\t'):
+                    cleaned_chars.append(char)
+            return "".join(cleaned_chars)
+            
+        finally:
+            if old_settings is not None:
+                try:
+                    import termios
+                    termios.tcsetattr(fd, termios.TCSANOW, old_settings)
+                except Exception:
+                    pass
+
+    return await asyncio.to_thread(_read)
+
+# ---------------------------------------------------------------------------
 # Text reference normalization (copied from openai_compatible_api_gateway.py)
 # ---------------------------------------------------------------------------
 def _normalize_references(text: str) -> str:
@@ -417,26 +483,13 @@ async def run_client_mode(args):
                 print_system("Conversation reset.")
                 continue
             elif cmd in ["/paste", "/multiline"]:
-                print_system("Entering multiline paste mode. Paste your text below, then type 'EOF' or '///' on a new line to submit. Type '/cancel' to abort.")
-                lines = []
-                while True:
-                    try:
-                        line = await async_input("... ")
-                    except (KeyboardInterrupt, EOFError):
-                        print()
-                        lines = []
-                        break
-                    stripped_line = line.strip()
-                    if stripped_line == "/cancel":
-                        print_system("Multiline input cancelled.")
-                        lines = []
-                        break
-                    if stripped_line in ("EOF", "///"):
-                        break
-                    lines.append(line)
-                if not lines:
+                print_system("Raw paste mode active. Paste your text now (it will automatically submit when pasting completes).")
+                pasted_text = await run_raw_paste()
+                if not pasted_text.strip():
+                    print_system("No text pasted. Cancelled.")
                     continue
-                user_prompt_stripped = "\n".join(lines).strip()
+                print_system(f"Pasted {len(pasted_text)} characters successfully.")
+                user_prompt_stripped = pasted_text.strip()
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Clear chat history and start a new session.")
@@ -604,26 +657,13 @@ async def run_direct_mode(args):
                 print_system("Session and C++ context reset.")
                 continue
             elif cmd in ["/paste", "/multiline"]:
-                print_system("Entering multiline paste mode. Paste your text below, then type 'EOF' or '///' on a new line to submit. Type '/cancel' to abort.")
-                lines = []
-                while True:
-                    try:
-                        line = await async_input("... ")
-                    except (KeyboardInterrupt, EOFError):
-                        print()
-                        lines = []
-                        break
-                    stripped_line = line.strip()
-                    if stripped_line == "/cancel":
-                        print_system("Multiline input cancelled.")
-                        lines = []
-                        break
-                    if stripped_line in ("EOF", "///"):
-                        break
-                    lines.append(line)
-                if not lines:
+                print_system("Raw paste mode active. Paste your text now (it will automatically submit when pasting completes).")
+                pasted_text = await run_raw_paste()
+                if not pasted_text.strip():
+                    print_system("No text pasted. Cancelled.")
                     continue
-                user_prompt_stripped = "\n".join(lines).strip()
+                print_system(f"Pasted {len(pasted_text)} characters successfully.")
+                user_prompt_stripped = pasted_text.strip()
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Reset conversation and clear C++ KV cache.")
@@ -765,7 +805,7 @@ def main():
                         help="Optimization preset (influences chunk prefill size).")
     
     # Generation parameters
-    parser.add_argument('--max-tokens', type=int, default=512,
+    parser.add_argument('--max-tokens', type=int, default=16384,
                         help="Max tokens to generate.")
     parser.add_argument('--temperature', type=float, default=0.7,
                         help="Sampling temperature (client mode only).")

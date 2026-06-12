@@ -14,7 +14,7 @@ struct ChatCompletionRequest {
     std::string model;
     std::vector<ChatMessage> messages;
     bool stream = false;
-    int max_tokens = 2048;
+    int max_tokens = 16384;
     float temperature = 0.7f;
     float top_p = 0.9f;
     float repetition_penalty = 1.15f;
