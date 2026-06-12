@@ -260,99 +260,200 @@ inline std::vector<int32_t> route_query(
     std::vector<int32_t> sem_slots;
     float best_sem_score = 0.00f;
     
-    if (!srl_state.chunk_graph.parent_landmarks.empty() && 
-        !srl_state.chunk_graph.parent_to_children_tensor.empty()) {
-        
-        // 1. Collect unique parent landmarks
-        std::vector<int32_t> parent_slots;
-        std::vector<int> parent_rows;
-        std::unordered_set<int32_t> seen_parents;
-        
-        for (int32_t slot : srl_state.chunk_graph.parent_landmarks) {
-            if (slot >= 0 && seen_parents.find(slot) == seen_parents.end()) {
-                int row = srl_state.semantic_index.slot_to_idx(slot);
-                if (row >= 0) {
-                    seen_parents.insert(slot);
-                    parent_slots.push_back(slot);
-                    parent_rows.push_back(row);
-                }
+    bool concentric_routed = false;
+    const ChunkGraph& cg = srl_state.chunk_graph;
+    
+    if (!cg.cluster_centers_tensor.empty() && !cg.role_mapping_tensor.empty()) {
+        // 1. Score all active cluster centers (centroids)
+        std::vector<int32_t> centers;
+        std::vector<int> center_rows;
+        for (int32_t slot : cg.cluster_centers_tensor) {
+            int row = srl_state.semantic_index.slot_to_idx(slot);
+            if (row >= 0) {
+                centers.push_back(slot);
+                center_rows.push_back(row);
             }
         }
         
-        if (!parent_rows.empty()) {
-            // Score parent landmark blocks using dot product
-            std::vector<std::pair<float, int32_t>> parent_scores;
-            parent_scores.reserve(parent_rows.size());
+        if (!center_rows.empty()) {
+            std::vector<std::pair<float, int32_t>> center_scores;
+            center_scores.reserve(center_rows.size());
             
-            for (size_t idx = 0; idx < parent_rows.size(); ++idx) {
-                int row = parent_rows[idx];
-                int32_t slot = parent_slots[idx];
+            for (size_t idx = 0; idx < center_rows.size(); ++idx) {
+                int row = center_rows[idx];
+                int32_t slot = centers[idx];
                 
                 float dot = 0.0f;
                 const float* desc = srl_state.semantic_index.desc_matrix.data() + (size_t)row * DESC_DIM;
                 for (int d = 0; d < DESC_DIM; ++d) {
                     dot += desc[d] * q_desc[d];
                 }
-                parent_scores.push_back({dot, slot});
+                center_scores.push_back({dot, slot});
             }
             
-            // Sort parent scores descending
-            std::sort(parent_scores.begin(), parent_scores.end(), [](const auto& a, const auto& b) {
+            // Sort center scores descending
+            std::sort(center_scores.begin(), center_scores.end(), [](const auto& a, const auto& b) {
                 return a.first > b.first;
             });
             
-            best_sem_score = parent_scores[0].first;
+            best_sem_score = center_scores[0].first;
             
-            // Select top landmark parents
-            int k_parent = std::max(1, std::min(k_semantic / 8, static_cast<int>(parent_scores.size())));
-            std::vector<int32_t> selected_parents;
-            for (int idx = 0; idx < k_parent; ++idx) {
-                selected_parents.push_back(parent_scores[idx].second);
+            // Select top cluster centers
+            int k_centers = std::max(1, std::min(k_semantic / 8, static_cast<int>(center_scores.size())));
+            std::unordered_set<int32_t> selected_centers;
+            std::vector<int32_t> selected_centers_vec;
+            for (int idx = 0; idx < k_centers; ++idx) {
+                selected_centers.insert(center_scores[idx].second);
+                selected_centers_vec.push_back(center_scores[idx].second);
             }
             
-            // 2. Gather children blocks using flat parent_to_children_tensor vector
-            std::vector<int32_t> hierarchical_slots;
-            int max_children = srl_state.chunk_graph.max_children;
-            const auto& ptc = srl_state.chunk_graph.parent_to_children_tensor;
-            int max_ptc_slots = ptc.size() / max_children;
+            // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
+            std::vector<int32_t> around_slots;
+            std::vector<int32_t> outer_slots;
             
-            for (int32_t parent : selected_parents) {
-                hierarchical_slots.push_back(parent);
-                if (parent >= 0 && parent < max_ptc_slots) {
-                    int base_idx = parent * max_children;
-                    for (int c = 0; c < max_children; ++c) {
-                        int32_t child = ptc[base_idx + c];
-                        if (child != -1) {
-                            hierarchical_slots.push_back(child);
+            const auto& role_map = cg.role_mapping_tensor;
+            const auto& slot_to_center = cg.slot_to_center_tensor;
+            
+            for (int32_t s : srl_state.semantic_index.slot_ids) {
+                if (selected_centers.count(s)) continue;
+                
+                if (s >= 0 && s < static_cast<int32_t>(slot_to_center.size())) {
+                    int32_t assoc_c = slot_to_center[s];
+                    if (selected_centers.count(assoc_c)) {
+                        int role = role_map[s];
+                        if (role == 1) {
+                            around_slots.push_back(s);
+                        } else if (role == 0) {
+                            outer_slots.push_back(s);
                         }
                     }
                 }
             }
             
-            // Deduplicate preserving order
-            std::unordered_set<int32_t> seen_hier;
-            for (int32_t slot : hierarchical_slots) {
-                if (seen_hier.find(slot) == seen_hier.end()) {
-                    seen_hier.insert(slot);
-                    sem_slots.push_back(slot);
+            // 3. Build prioritized list: Center -> Around -> Outer
+            std::vector<int32_t> prioritized_slots;
+            std::unordered_set<int32_t> seen_prioritized;
+            
+            auto add_to_pri = [&](int32_t slot) {
+                if (seen_prioritized.find(slot) == seen_prioritized.end()) {
+                    seen_prioritized.insert(slot);
+                    prioritized_slots.push_back(slot);
                 }
+            };
+            
+            for (int32_t c : selected_centers_vec) {
+                add_to_pri(c);
+            }
+            for (int32_t s : around_slots) {
+                add_to_pri(s);
+            }
+            for (int32_t s : outer_slots) {
+                add_to_pri(s);
             }
             
-            // Limit to k_semantic
+            sem_slots = prioritized_slots;
             if (static_cast<int>(sem_slots.size()) > k_semantic) {
                 sem_slots.resize(k_semantic);
             }
+            concentric_routed = true;
+        }
+    }
+
+    if (!concentric_routed) {
+        if (!srl_state.chunk_graph.parent_landmarks.empty() && 
+            !srl_state.chunk_graph.parent_to_children_tensor.empty()) {
+            
+            // 1. Collect unique parent landmarks
+            std::vector<int32_t> parent_slots;
+            std::vector<int> parent_rows;
+            std::unordered_set<int32_t> seen_parents;
+            
+            for (int32_t slot : srl_state.chunk_graph.parent_landmarks) {
+                if (slot >= 0 && seen_parents.find(slot) == seen_parents.end()) {
+                    int row = srl_state.semantic_index.slot_to_idx(slot);
+                    if (row >= 0) {
+                        seen_parents.insert(slot);
+                        parent_slots.push_back(slot);
+                        parent_rows.push_back(row);
+                    }
+                }
+            }
+            
+            if (!parent_rows.empty()) {
+                // Score parent landmark blocks using dot product
+                std::vector<std::pair<float, int32_t>> parent_scores;
+                parent_scores.reserve(parent_rows.size());
+                
+                for (size_t idx = 0; idx < parent_rows.size(); ++idx) {
+                    int row = parent_rows[idx];
+                    int32_t slot = parent_slots[idx];
+                    
+                    float dot = 0.0f;
+                    const float* desc = srl_state.semantic_index.desc_matrix.data() + (size_t)row * DESC_DIM;
+                    for (int d = 0; d < DESC_DIM; ++d) {
+                        dot += desc[d] * q_desc[d];
+                    }
+                    parent_scores.push_back({dot, slot});
+                }
+                
+                // Sort parent scores descending
+                std::sort(parent_scores.begin(), parent_scores.end(), [](const auto& a, const auto& b) {
+                    return a.first > b.first;
+                });
+                
+                best_sem_score = parent_scores[0].first;
+                
+                // Select top landmark parents
+                int k_parent = std::max(1, std::min(k_semantic / 8, static_cast<int>(parent_scores.size())));
+                std::vector<int32_t> selected_parents;
+                for (int idx = 0; idx < k_parent; ++idx) {
+                    selected_parents.push_back(parent_scores[idx].second);
+                }
+                
+                // 2. Gather children blocks using flat parent_to_children_tensor vector
+                std::vector<int32_t> hierarchical_slots;
+                int max_children = srl_state.chunk_graph.max_children;
+                const auto& ptc = srl_state.chunk_graph.parent_to_children_tensor;
+                int max_ptc_slots = ptc.size() / max_children;
+                
+                for (int32_t parent : selected_parents) {
+                    hierarchical_slots.push_back(parent);
+                    if (parent >= 0 && parent < max_ptc_slots) {
+                        int base_idx = parent * max_children;
+                        for (int c = 0; c < max_children; ++c) {
+                            int32_t child = ptc[base_idx + c];
+                            if (child != -1) {
+                                hierarchical_slots.push_back(child);
+                            }
+                        }
+                    }
+                }
+                
+                // Deduplicate preserving order
+                std::unordered_set<int32_t> seen_hier;
+                for (int32_t slot : hierarchical_slots) {
+                    if (seen_hier.find(slot) == seen_hier.end()) {
+                        seen_hier.insert(slot);
+                        sem_slots.push_back(slot);
+                    }
+                }
+                
+                // Limit to k_semantic
+                if (static_cast<int>(sem_slots.size()) > k_semantic) {
+                    sem_slots.resize(k_semantic);
+                }
+            } else {
+                // Fallback to standard semantic search if no parent landmarks are active
+                auto sem_results = srl_state.semantic_index.search_with_scores(q_desc.data(), k_semantic);
+                best_sem_score = sem_results.empty() ? 0.0f : sem_results[0].second;
+                for (auto& [slot, score] : sem_results) sem_slots.push_back(slot);
+            }
         } else {
-            // Fallback to standard semantic search if no parent landmarks are active
+            // Fallback to standard semantic search
             auto sem_results = srl_state.semantic_index.search_with_scores(q_desc.data(), k_semantic);
             best_sem_score = sem_results.empty() ? 0.0f : sem_results[0].second;
             for (auto& [slot, score] : sem_results) sem_slots.push_back(slot);
         }
-    } else {
-        // Fallback to standard semantic search
-        auto sem_results = srl_state.semantic_index.search_with_scores(q_desc.data(), k_semantic);
-        best_sem_score = sem_results.empty() ? 0.0f : sem_results[0].second;
-        for (auto& [slot, score] : sem_results) sem_slots.push_back(slot);
     }
 
     // -------------------------------------------------------------------

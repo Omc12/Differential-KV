@@ -72,6 +72,11 @@ struct ChunkGraph {
     std::vector<int32_t> slot_to_parent_tensor;
     int max_children = 1;
 
+    // Concentric zoning fields
+    std::vector<int32_t> role_mapping_tensor;         // [max_slot + 1] int32 role (0=outer, 1=around, 2=center)
+    std::vector<int32_t> cluster_centers_tensor;      // [C] int32 slot IDs of cluster centers
+    std::vector<int32_t> slot_to_center_tensor;       // [max_slot + 1] int32 slot IDs of center
+
     ChunkGraph() : N(0), max_degree(1), max_children(1) {}
 
     // ---- Convenience accessors ----
@@ -148,6 +153,17 @@ inline ChunkGraph build_chunk_graph(
     ChunkGraph g;
     g.N = N;
 
+    // Determine max slot ID early for concentric tensor sizing
+    int32_t max_slot = 0;
+    for (int i = 0; i < N; ++i) {
+        if (slot_ids[i] > max_slot) {
+            max_slot = slot_ids[i];
+        }
+    }
+
+    g.role_mapping_tensor.assign(max_slot + 1, -1);
+    g.slot_to_center_tensor.assign(max_slot + 1, -1);
+
     if (N == 0) {
         g.max_degree = 1;
         g.neighbors.assign(1, -1);
@@ -155,133 +171,14 @@ inline ChunkGraph build_chunk_graph(
         return g;
     }
 
-    // ------------------------------------------------------------------
-    // Step 1: Pairwise cosine similarity [N, N] via sgemm.
-    // S = desc_matrix * desc_matrix^T  (both sides already L2-normalised)
-    // S[i,j] = dot(desc[i], desc[j]) = cos_sim(i, j)
-    // ------------------------------------------------------------------
-    std::vector<float> sim(N * N, 0.0f);
-    // cblas_sgemm: C = alpha * A * B + beta * C
-    // A = desc_matrix [N, DESC_DIM], B = desc_matrix^T [DESC_DIM, N]
-    // -> C [N, N]
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                N, N, DESC_DIM,
-                1.0f,
-                desc_matrix, DESC_DIM,
-                desc_matrix, DESC_DIM,
-                0.0f,
-                sim.data(), N);
+    // Initialize hierarchical structures
+    g.parent_landmarks.resize(N, -1);
+    g.slot_to_parent_tensor.assign(max_slot + 1, -1);
 
-    // ------------------------------------------------------------------
-    // Step 2-5: Build per-node adjacency lists (exact blended formula)
-    // ------------------------------------------------------------------
-    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
-    for (int i = 0; i < N; ++i) {
-        std::unordered_set<int> unique_cands;
-
-        // 1. Semantic top-K candidates
-        std::vector<std::pair<float, int>> sims;
-        sims.reserve(N - 1);
-        const float* row = sim.data() + i * N;
-        for (int j = 0; j < N; ++j) {
-            if (j == i) continue;
-            sims.push_back({row[j], j});
-        }
-        int k_eff = std::min(K_semantic, static_cast<int>(sims.size()));
-        if (k_eff > 0) {
-            std::partial_sort(sims.begin(), sims.begin() + k_eff, sims.end(),
-                              [](const auto& a, const auto& b) { return a.first > b.first; });
-            for (int t = 0; t < k_eff; ++t) {
-                unique_cands.insert(sims[t].second);
-            }
-        }
-
-        // 2. Temporal candidates
-        for (int delta : {-1, +1}) {
-            int j = i + delta;
-            if (j >= 0 && j < N) {
-                unique_cands.insert(j);
-            }
-        }
-
-        // 3. Lexical candidates passing overlap_threshold
-        if (inv_index && !inv_index->chunk_vocabularies.empty()) {
-            int32_t slot_i = slot_ids[i];
-            auto it_i = inv_index->chunk_vocabularies.find(slot_i);
-            if (it_i != inv_index->chunk_vocabularies.end()) {
-                const auto& vocab_i = it_i->second;
-                for (int j = 0; j < N; ++j) {
-                    if (j == i) continue;
-                    int32_t slot_j = slot_ids[j];
-                    auto it_j = inv_index->chunk_vocabularies.find(slot_j);
-                    if (it_j != inv_index->chunk_vocabularies.end()) {
-                        float lex_score = compute_block_overlap(vocab_i, it_j->second);
-                        if (lex_score >= overlap_threshold) {
-                            unique_cands.insert(j);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Calculate exact blended weights for all candidates
-        for (int j : unique_cands) {
-            float sem_score = std::max(0.0f, sim[i * N + j]);
-            float lex_score = 0.0f;
-            if (inv_index && !inv_index->chunk_vocabularies.empty()) {
-                int32_t slot_i = slot_ids[i];
-                int32_t slot_j = slot_ids[j];
-                auto it_i = inv_index->chunk_vocabularies.find(slot_i);
-                auto it_j = inv_index->chunk_vocabularies.find(slot_j);
-                if (it_i != inv_index->chunk_vocabularies.end() && it_j != inv_index->chunk_vocabularies.end()) {
-                    lex_score = compute_block_overlap(it_i->second, it_j->second);
-                }
-            }
-            float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
-            float w = 0.5f * sem_score + 0.5f * lex_score + temporal_boost;
-            adj[i].push_back({j, w});
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Step 6: Determine actual max_degree, pad rows with -1
-    // ------------------------------------------------------------------
-    int actual_max = 0;
-    for (int i = 0; i < N; ++i) {
-        // Sort each adjacency list descending by weight and cap
-        auto& row_adj = adj[i];
-        std::sort(row_adj.begin(), row_adj.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
-        actual_max = std::max(actual_max, static_cast<int>(row_adj.size()));
-    }
-    // Ensure at least 1 to avoid zero-size allocation
-    g.max_degree = std::max(1, actual_max);
-
-    g.neighbors.assign((size_t)N * g.max_degree, -1);
-    g.weights.assign((size_t)N * g.max_degree, 0.0f);
-
-    for (int i = 0; i < N; ++i) {
-        const auto& row_adj = adj[i];
-        int base = i * g.max_degree;
-        for (int j = 0; j < static_cast<int>(row_adj.size()); ++j) {
-            g.neighbors[base + j] = row_adj[j].first;
-            g.weights  [base + j] = row_adj[j].second;
-        }
-        // rest remain -1 / 0.0 from initialization
-    }
-
-    // ------------------------------------------------------------------
-    // Step 7: Hierarchical grouping (optional)
-    // Group blocks by anchor_idx // 512 as the "parent" landmark.
-    // block_pool_idxs[i] = pool index for row i
-    // block_anchor_idxs[i] = absolute anchor token position for row i
-    // ------------------------------------------------------------------
     if (block_pool_idxs && block_anchor_idxs
         && block_pool_idxs->size() == (size_t)N
         && block_anchor_idxs->size() == (size_t)N)
     {
-        g.parent_landmarks.resize(N, -1);
-
         // Map: group_id -> first block row (becomes landmark representative)
         std::unordered_map<int, int32_t> group_to_landmark_row;
 
@@ -310,15 +207,6 @@ inline ChunkGraph build_chunk_graph(
             vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
         }
 
-        // Determine max slot ID and size vectors
-        int32_t max_slot = 0;
-        for (int i = 0; i < N; ++i) {
-            if (slot_ids[i] > max_slot) {
-                max_slot = slot_ids[i];
-            }
-        }
-
-        g.slot_to_parent_tensor.assign(max_slot + 1, -1);
         for (int i = 0; i < N; ++i) {
             int32_t child_slot = slot_ids[i];
             g.slot_to_parent_tensor[child_slot] = g.slot_to_parent[child_slot];
@@ -345,6 +233,283 @@ inline ChunkGraph build_chunk_graph(
                     g.parent_to_children_tensor[base_idx + c] = children[c];
                 }
             }
+        }
+    }
+
+    if (N == 1) {
+        g.max_degree = 1;
+        g.neighbors.assign(1, -1);
+        g.weights.assign(1, 0.0f);
+        
+        int32_t slot_s = slot_ids[0];
+        if (slot_s >= 0 && slot_s <= max_slot) {
+            g.role_mapping_tensor[slot_s] = 2; // Center
+            g.slot_to_center_tensor[slot_s] = slot_s;
+        }
+        g.cluster_centers_tensor = {slot_s};
+        return g;
+    }
+
+    // ── Pairwise Cosine Similarity ──
+    std::vector<float> sim(N * N, 0.0f);
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                N, N, DESC_DIM,
+                1.0f,
+                desc_matrix, DESC_DIM,
+                desc_matrix, DESC_DIM,
+                0.0f,
+                sim.data(), N);
+
+    // ── Lexical setup ──
+    std::vector<std::unordered_set<int>> vocabs(N);
+    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+        for (int idx = 0; idx < N; ++idx) {
+            int32_t slot = slot_ids[idx];
+            auto it = inv_index->chunk_vocabularies.find(slot);
+            if (it != inv_index->chunk_vocabularies.end()) {
+                for (const auto& kv : it->second) {
+                    vocabs[idx].insert(kv.first);
+                }
+            }
+        }
+    }
+
+    // ── Handshake Hunting Protocol ──
+    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
+    for (int i = 0; i < N; ++i) {
+        int32_t slot_i = slot_ids[i];
+        
+        // Chunks j < i target i (hunt)
+        for (int j = 0; j < i; ++j) {
+            int32_t slot_j = slot_ids[j];
+            
+            float sim_score = std::max(0.0f, sim[j * N + i]);
+            
+            float lex_score_i_to_j = 0.0f;
+            float lex_score_j_to_i = 0.0f;
+            
+            if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                const auto& v_i = vocabs[i];
+                const auto& v_j = vocabs[j];
+                if (!v_i.empty() || !v_j.empty()) {
+                    int overlap_count = 0;
+                    for (int tok : v_i) {
+                        if (v_j.count(tok)) overlap_count++;
+                    }
+                    if (!v_i.empty()) {
+                        lex_score_i_to_j = static_cast<float>(overlap_count) / static_cast<float>(v_i.size());
+                    }
+                    if (!v_j.empty()) {
+                        lex_score_j_to_i = static_cast<float>(overlap_count) / static_cast<float>(v_j.size());
+                    }
+                }
+            }
+            
+            float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
+            
+            float weight_i_to_j = 0.5f * sim_score + 0.5f * lex_score_i_to_j + temporal_boost;
+            float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
+            
+            bool is_semantic_match = (sim_score >= 0.3f);
+            bool is_lexical_match = (lex_score_i_to_j >= overlap_threshold) || (lex_score_j_to_i >= overlap_threshold);
+            bool is_temporal_match = (std::abs(i - j) == 1);
+            
+            if (is_semantic_match || is_lexical_match || is_temporal_match) {
+                adj[j].push_back({i, weight_j_to_i});
+                adj[i].push_back({j, weight_i_to_j});
+            }
+        }
+    }
+
+    // For backwards compatibility and robustness, add top semantic matches
+    int k_sem = std::min(K_semantic, N - 1);
+    for (int i = 0; i < N; ++i) {
+        std::vector<std::pair<float, int>> sims;
+        sims.reserve(N - 1);
+        const float* row = sim.data() + i * N;
+        for (int j = 0; j < N; ++j) {
+            if (j == i) continue;
+            sims.push_back({row[j], j});
+        }
+        if (k_sem > 0 && !sims.empty()) {
+            std::partial_sort(sims.begin(), sims.begin() + k_sem, sims.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (int t = 0; t < k_sem; ++t) {
+                int j = sims[t].second;
+                bool connected = false;
+                for (const auto& p : adj[i]) {
+                    if (p.first == j) {
+                        connected = true;
+                        break;
+                    }
+                }
+                if (!connected) {
+                    float sim_score = std::max(0.0f, sim[i * N + j]);
+                    float lex_score_i_to_j = 0.0f;
+                    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                        const auto& v_i = vocabs[i];
+                        const auto& v_j = vocabs[j];
+                        if (!v_i.empty()) {
+                            int overlap = 0;
+                            for (int tok : v_i) {
+                                if (v_j.count(tok)) overlap++;
+                            }
+                            lex_score_i_to_j = static_cast<float>(overlap) / static_cast<float>(v_i.size());
+                        }
+                    }
+                    float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
+                    float weight_i_to_j = 0.5f * sim_score + 0.5f * lex_score_i_to_j + temporal_boost;
+                    
+                    adj[i].push_back({j, weight_i_to_j});
+                    
+                    bool reverse_connected = false;
+                    for (const auto& p : adj[j]) {
+                        if (p.first == i) {
+                            reverse_connected = true;
+                            break;
+                        }
+                    }
+                    if (!reverse_connected) {
+                        float lex_score_j_to_i = 0.0f;
+                        if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                            const auto& v_i = vocabs[i];
+                            const auto& v_j = vocabs[j];
+                            if (!v_j.empty()) {
+                                int overlap = 0;
+                                for (int tok : v_i) {
+                                    if (v_j.count(tok)) overlap++;
+                                }
+                                lex_score_j_to_i = static_cast<float>(overlap) / static_cast<float>(v_j.size());
+                            }
+                        }
+                        float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
+                        adj[j].push_back({i, weight_j_to_i});
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate and determine actual max_degree, pad rows with -1
+    int actual_max = 0;
+    for (int i = 0; i < N; ++i) {
+        auto& row_adj = adj[i];
+        std::vector<std::pair<int32_t, float>> uniq;
+        std::unordered_set<int32_t> seen;
+        for (const auto& p : row_adj) {
+            if (p.first != i && seen.find(p.first) == seen.end()) {
+                uniq.push_back(p);
+                seen.insert(p.first);
+            }
+        }
+        row_adj = std::move(uniq);
+        std::sort(row_adj.begin(), row_adj.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        actual_max = std::max(actual_max, static_cast<int>(row_adj.size()));
+    }
+    g.max_degree = std::max(1, actual_max);
+
+    g.neighbors.assign((size_t)N * g.max_degree, -1);
+    g.weights.assign((size_t)N * g.max_degree, 0.0f);
+
+    for (int i = 0; i < N; ++i) {
+        const auto& row_adj = adj[i];
+        int base = i * g.max_degree;
+        for (int j = 0; j < static_cast<int>(row_adj.size()); ++j) {
+            g.neighbors[base + j] = row_adj[j].first;
+            g.weights  [base + j] = row_adj[j].second;
+        }
+    }
+
+    // ── Concentric Cluster Relevance Zoning ──
+    std::vector<int32_t> cluster_centers_list;
+    if (block_pool_idxs && block_anchor_idxs
+        && block_pool_idxs->size() == (size_t)N
+        && block_anchor_idxs->size() == (size_t)N) {
+        std::unordered_map<int, int32_t> group_to_landmark_row;
+        for (int i = 0; i < N; ++i) {
+            int group_id = (*block_anchor_idxs)[i] / 512;
+            if (group_to_landmark_row.find(group_id) == group_to_landmark_row.end()) {
+                group_to_landmark_row[group_id] = i;
+            }
+        }
+        for (const auto& kv : group_to_landmark_row) {
+            cluster_centers_list.push_back(slot_ids[kv.second]);
+        }
+    } else {
+        // Fallback: window of 4
+        for (int i = 0; i < N; i += 4) {
+            cluster_centers_list.push_back(slot_ids[i]);
+        }
+    }
+
+    g.cluster_centers_tensor = cluster_centers_list;
+    std::unordered_set<int32_t> center_set(cluster_centers_list.begin(), cluster_centers_list.end());
+
+    for (int32_t c : cluster_centers_list) {
+        if (c >= 0 && c <= max_slot) {
+            g.role_mapping_tensor[c] = 2; // Center
+            g.slot_to_center_tensor[c] = c;
+        }
+    }
+
+    for (int i = 0; i < N; ++i) {
+        int32_t s = slot_ids[i];
+        if (center_set.count(s)) continue;
+
+        int32_t c = -1;
+        if (block_pool_idxs && block_anchor_idxs && g.slot_to_parent.count(s)) {
+            c = g.slot_to_parent[s];
+        } else {
+            int32_t best_center = -1;
+            int best_dist = 999999;
+            for (int32_t center_candidate : cluster_centers_list) {
+                int dist = std::abs(s - center_candidate);
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_center = center_candidate;
+                }
+            }
+            c = best_center;
+        }
+
+        if (c != -1 && s >= 0 && s <= max_slot) {
+            g.slot_to_center_tensor[s] = c;
+
+            int row_s = i;
+            int row_c = -1;
+            for (int idx = 0; idx < N; ++idx) {
+                if (slot_ids[idx] == c) {
+                    row_c = idx;
+                    break;
+                }
+            }
+
+            bool is_around = false;
+            if (row_c != -1) {
+                float similarity_sc = sim[row_s * N + row_c];
+                bool is_direct_neighbor = false;
+                for (const auto& p : adj[row_c]) {
+                    if (p.first == row_s) {
+                        is_direct_neighbor = true;
+                        break;
+                    }
+                }
+                if (!is_direct_neighbor) {
+                    for (const auto& p : adj[row_s]) {
+                        if (p.first == row_c) {
+                            is_direct_neighbor = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (similarity_sc >= 0.35f || is_direct_neighbor) {
+                    is_around = true;
+                }
+            }
+
+            g.role_mapping_tensor[s] = is_around ? 1 : 0;
         }
     }
 
