@@ -575,6 +575,110 @@ def test_dynamic_scaling_and_seeds():
             os.environ["DIFFKV_SRL_THRESHOLD"] = old_threshold
 
 
+def test_dynamic_handshake_hunting_and_concentric_roles():
+    # Setup sample descriptors for 3 blocks:
+    # block 0 (slot 101): [1.0, 0.0] - center fallback
+    # block 1 (slot 102): [0.95, 0.31] (high similarity to block 0: 0.95)
+    # block 2 (slot 103): [0.1, 0.99] (low similarity to block 0: 0.1)
+    desc_matrix = torch.tensor([
+        [1.0, 0.0],
+        [0.95, 0.312],
+        [0.1, 0.995]
+    ], dtype=torch.float32)
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    slot_ids = torch.tensor([101, 102, 103], dtype=torch.int32)
+    
+    # We will build the chunk graph without passing blocks to trigger fallback zoning
+    graph = build_chunk_graph(
+        desc_matrix=desc_matrix,
+        slot_ids=slot_ids,
+        K_semantic=1,
+        K_temporal=1,
+        inv_index=None,
+        overlap_threshold=0.15,
+        blocks=None
+    )
+    
+    # Verify cluster centers and roles are mapped
+    assert graph.cluster_centers_tensor is not None
+    centers = graph.cluster_centers
+    assert len(centers) > 0
+    # First slot should be center (slot 101)
+    assert 101 in centers
+    
+    # Verify role mapping
+    role_map = graph.role_mapping
+    assert role_map[101] == "center"
+    # Slot 102 should be "around" because similarity of 102 vs 101 is >= 0.35
+    assert role_map[102] == "around"
+    # Slot 103 should be "outer" because similarity of 103 vs 101 is < 0.35
+    assert role_map[103] == "outer"
+    
+    # Verify slot to center mapping
+    slot_to_center = graph.slot_to_center
+    assert slot_to_center[102] == 101
+    assert slot_to_center[103] == 101
+
+
+def test_concentric_query_routing():
+    desc_matrix = torch.tensor([
+        [1.0, 0.0],    # 101: Center
+        [0.9, 0.43],   # 102: Around (similarity 0.90)
+        [0.1, 0.99]    # 103: Outer (similarity 0.10)
+    ], dtype=torch.float32)
+    desc_matrix = desc_matrix / desc_matrix.norm(dim=1, keepdim=True)
+    slot_ids = [101, 102, 103]
+    slot_ids_t = torch.tensor(slot_ids, dtype=torch.int32)
+    
+    # Build graph fallback
+    graph = build_chunk_graph(
+        desc_matrix=desc_matrix,
+        slot_ids=slot_ids_t,
+        K_semantic=2,
+        K_temporal=0,
+        inv_index=None,
+        overlap_threshold=0.15,
+        blocks=None
+    )
+    
+    pool = DummyPool(desc_matrix, slot_ids)
+    pool.W_proj = torch.eye(2)
+    sem_index = build_semantic_index(pool, slot_ids)
+    
+    srl_state = SessionSRLState(
+        semantic_index=sem_index,
+        chunk_graph=graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[],
+        k_min=2,
+        k_max=3,
+        routing_threshold=1
+    )
+    
+    # Query Q matches the center [1.0, 0.0]
+    Q = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+    
+    # Under concentric routing, priority is Center (101) -> Around (102) -> Outer (103)
+    # With K=2, we should retrieve Center (101) and Around (102), but not Outer (103)
+    selected = route_query(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    )
+    
+    selected_list = selected.tolist()
+    assert 101 in selected_list
+    assert 102 in selected_list
+    # Slot 103 should not be in selection (since k_semantic will be selected_list[:k_semantic] before sinks etc,
+    # or it will be ranked lower than 102)
+    if 103 in selected_list:
+        assert selected_list.index(102) < selected_list.index(103)
+
+
+
 
 
 

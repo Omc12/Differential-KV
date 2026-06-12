@@ -194,57 +194,134 @@ def route_query(
     # ── Step 2: Semantic ANN search (Hierarchical Graph-based Routing) ────
     k_semantic = max(1, int(K * _SEM_FRAC))
     chunk_graph = srl_state.chunk_graph
-    if (getattr(chunk_graph, "parent_landmarks", None) is not None 
-            and chunk_graph.parent_landmarks.numel() > 0):
-        # 1. Score parent landmark blocks
-        parent_slots = chunk_graph.parent_landmarks
-        parent_rows = srl_state.semantic_index.slot_to_row_vec(parent_slots)
-        valid_mask = parent_rows >= 0
-        parent_slots = parent_slots[valid_mask]
-        parent_rows = parent_rows[valid_mask]
+    
+    concentric_routed = False
+    semantic_slots = []
+    
+    if (getattr(chunk_graph, "cluster_centers_tensor", None) is not None 
+            and chunk_graph.cluster_centers_tensor.numel() > 0
+            and getattr(chunk_graph, "role_mapping_tensor", None) is not None):
         
-        if parent_rows.numel() > 0:
-            parent_desc = srl_state.semantic_index.desc_matrix[parent_rows.to(srl_state.semantic_index.desc_matrix.device)]
-            q16 = q_desc.half().to(parent_desc.device)
+        # 1. Score all cluster centers (centroids)
+        centers = chunk_graph.cluster_centers_tensor
+        center_rows = srl_state.semantic_index.slot_to_row_vec(centers)
+        valid_mask = center_rows >= 0
+        centers = centers[valid_mask]
+        center_rows = center_rows[valid_mask]
+        
+        if center_rows.numel() > 0:
+            center_desc = srl_state.semantic_index.desc_matrix[center_rows.to(srl_state.semantic_index.desc_matrix.device)]
+            q16 = q_desc.half().to(center_desc.device)
             if q16.device.type == "mps":
-                scores_parent = parent_desc.float() @ q16.float()
+                scores_centers = center_desc.float() @ q16.float()
             else:
-                scores_parent = parent_desc @ q16
+                scores_centers = center_desc @ q16
                 
-            # Select top landmark parents
-            k_parent = max(1, min(k_semantic // 8, parent_slots.numel()))
-            top_parent_idx = torch.topk(scores_parent, k=k_parent, largest=True, sorted=True).indices
-            selected_parents = parent_slots.to(top_parent_idx.device)[top_parent_idx].tolist()
+            # Select top cluster centers based on semantic similarity
+            k_centers = max(1, min(k_semantic // 8, centers.numel()))
+            top_center_idx = torch.topk(scores_centers, k=k_centers, largest=True, sorted=True).indices
+            selected_centers = centers.to(top_center_idx.device)[top_center_idx].tolist()
             
-            # 2. Gather children blocks for the selected parent landmarks
-            selected_parents_t = torch.tensor(selected_parents, dtype=torch.int32, device=chunk_graph.parent_to_children_tensor.device)
-            valid_parents_t = selected_parents_t[selected_parents_t < chunk_graph.parent_to_children_tensor.shape[0]]
+            # 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
+            role_map = chunk_graph.role_mapping_tensor
+            slot_to_center = chunk_graph.slot_to_center_tensor
             
-            if valid_parents_t.numel() > 0:
-                children_tensor = chunk_graph.parent_to_children_tensor[valid_parents_t.long()]
-                children_flat = children_tensor.flatten()
-                valid_children = children_flat[children_flat != -1].tolist()
-            else:
-                valid_children = []
-                
-            hierarchical_slots = []
+            around_slots = []
+            outer_slots = []
+            
+            selected_centers_set = set(selected_centers)
+            slot_ids_cpu = srl_state.semantic_index.slot_ids.cpu().tolist()
+            for s in slot_ids_cpu:
+                if s in selected_centers_set:
+                    continue
+                # check if this slot is associated with one of the selected centers
+                if s < len(slot_to_center):
+                    assoc_c = int(slot_to_center[s].item())
+                    if assoc_c in selected_centers_set:
+                        role = int(role_map[s].item())
+                        if role == 1:
+                            around_slots.append(s)
+                        elif role == 0:
+                            outer_slots.append(s)
+                            
+            # 3. Build prioritized list: Center -> Around -> Outer
+            prioritized_slots = []
             seen = set()
-            for parent in selected_parents:
-                if parent not in seen:
-                    hierarchical_slots.append(parent)
-                    seen.add(parent)
-            for child in valid_children:
-                if child not in seen:
-                    hierarchical_slots.append(child)
-                    seen.add(child)
+            
+            # High relevance: Center
+            for c in selected_centers:
+                if c not in seen:
+                    prioritized_slots.append(c)
+                    seen.add(c)
                     
-            semantic_slots_t = torch.tensor(hierarchical_slots, dtype=torch.int32, device=Q.device)
+            # Mid relevance: Around
+            for s in around_slots:
+                if s not in seen:
+                    prioritized_slots.append(s)
+                    seen.add(s)
+                    
+            # Low relevance: Outer
+            for s in outer_slots:
+                if s not in seen:
+                    prioritized_slots.append(s)
+                    seen.add(s)
+                    
+            semantic_slots = prioritized_slots[:k_semantic]
+            semantic_slots_t = torch.tensor(semantic_slots, dtype=torch.int32, device=Q.device)
+            concentric_routed = True
+
+    if not concentric_routed:
+        if (getattr(chunk_graph, "parent_landmarks", None) is not None 
+                and chunk_graph.parent_landmarks.numel() > 0):
+            # 1. Score parent landmark blocks
+            parent_slots = chunk_graph.parent_landmarks
+            parent_rows = srl_state.semantic_index.slot_to_row_vec(parent_slots)
+            valid_mask = parent_rows >= 0
+            parent_slots = parent_slots[valid_mask]
+            parent_rows = parent_rows[valid_mask]
+            
+            if parent_rows.numel() > 0:
+                parent_desc = srl_state.semantic_index.desc_matrix[parent_rows.to(srl_state.semantic_index.desc_matrix.device)]
+                q16 = q_desc.half().to(parent_desc.device)
+                if q16.device.type == "mps":
+                    scores_parent = parent_desc.float() @ q16.float()
+                else:
+                    scores_parent = parent_desc @ q16
+                    
+                # Select top landmark parents
+                k_parent = max(1, min(k_semantic // 8, parent_slots.numel()))
+                top_parent_idx = torch.topk(scores_parent, k=k_parent, largest=True, sorted=True).indices
+                selected_parents = parent_slots.to(top_parent_idx.device)[top_parent_idx].tolist()
+                
+                # 2. Gather children blocks for the selected parent landmarks
+                selected_parents_t = torch.tensor(selected_parents, dtype=torch.int32, device=chunk_graph.parent_to_children_tensor.device)
+                valid_parents_t = selected_parents_t[selected_parents_t < chunk_graph.parent_to_children_tensor.shape[0]]
+                
+                if valid_parents_t.numel() > 0:
+                    children_tensor = chunk_graph.parent_to_children_tensor[valid_parents_t.long()]
+                    children_flat = children_tensor.flatten()
+                    valid_children = children_flat[children_flat != -1].tolist()
+                else:
+                    valid_children = []
+                    
+                hierarchical_slots = []
+                seen = set()
+                for parent in selected_parents:
+                    if parent not in seen:
+                        hierarchical_slots.append(parent)
+                        seen.add(parent)
+                for child in valid_children:
+                    if child not in seen:
+                        hierarchical_slots.append(child)
+                        seen.add(child)
+                        
+                semantic_slots_t = torch.tensor(hierarchical_slots, dtype=torch.int32, device=Q.device)
+            else:
+                semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
         else:
             semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
-    else:
-        semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
-        
-    semantic_slots = semantic_slots_t.tolist()
+            
+        semantic_slots = semantic_slots_t.tolist()
 
     # ── Topic-switch detection ────────────────────────────────────────────
     # If the best semantic match is weak, this query is likely a new topic.
