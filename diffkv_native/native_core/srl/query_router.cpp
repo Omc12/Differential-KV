@@ -113,6 +113,7 @@ void update_srl_from_compressed_block(
             int abs_pos = start_pos + rel;
             inv.occurrences[tok].emplace_back(slot_id, abs_pos, rel);
             inv.chunk_vocabularies[slot_id][tok].push_back(rel);
+            inv.important_vocab.insert(tok);
         }
         // Recompute IDF
         int N_blocks = state.n_active_blocks();
@@ -125,6 +126,19 @@ void update_srl_from_compressed_block(
             float n_blk   = static_cast<float>(N_blocks);
             inv.idf[tok]  = std::log(n_blk / n_cont) + 1.0f;
         }
+    }
+
+    // 3. Rebuild chunk graph if it was active
+    if (state.chunk_graph.N > 0) {
+        state.chunk_graph = build_chunk_graph(
+            state.semantic_index.desc_matrix.data(),
+            state.semantic_index.slot_ids.data(),
+            state.semantic_index.N,
+            6, // K_semantic
+            2, // K_temporal
+            &state.inverted_index,
+            0.15f // overlap_threshold
+        );
     }
 }
 

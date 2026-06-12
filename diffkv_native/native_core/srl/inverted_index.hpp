@@ -167,7 +167,7 @@ inline InvertedTokenIndex build_inverted_index(
 
     for (int i = 0; i < N; ++i) {
         int32_t slot = slot_ids[i];
-        int tok_start = slot * block_size;
+        int tok_start = i * block_size;
         int tok_end   = std::min(tok_start + block_size, seq_len);
         if (tok_start >= seq_len) break;
 
@@ -206,6 +206,7 @@ inline InvertedTokenIndex build_inverted_index(
 
     for (const auto& kv : inv.occurrences) {
         int tok = kv.first;
+        inv.important_vocab.insert(tok);
         std::unordered_set<int32_t> slots_with_tok;
         for (const auto& occ : kv.second)
             slots_with_tok.insert(std::get<0>(occ));

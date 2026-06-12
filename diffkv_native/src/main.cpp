@@ -835,6 +835,8 @@ int main(int argc, char ** argv) {
         std::cerr << "Failed to initialize KVRuntimeManager!" << std::endl;
         return 1;
     }
+    runtime_manager.get_ingest_manager().set_stop_token_ids(&stop_token_ids);
+    runtime_manager.get_ingest_manager().set_session_id("interactive_session");
     auto & kv_engines = runtime_manager.get_engines();
 
     // Initialize W_proj on host
@@ -957,7 +959,7 @@ int main(int argc, char ** argv) {
         // Each turn: reset compressed pool, re-prefill full prompt from 0, decode.
         // Speed improvement from prefix-skipping requires implementing decompression-
         // based prior context injection (future work).
-        bool do_full_reset = true;
+        bool do_full_reset = (cached_len == 0);
         if (do_full_reset || is_warmup_run) {
             runtime_manager.reset();
 
@@ -1084,12 +1086,77 @@ int main(int argc, char ** argv) {
         if (const char* env_pcs = std::getenv("DIFFKV_PREFILL_CHUNK_SIZE")) {
             try { chunk_size = std::stoi(env_pcs); } catch (...) {}
         }
-        // pos_start = 0: always prefill the full prompt from token 0.
-        // Even on turn 2+, we cannot skip the cached prefix because the prefill graph
-        // has no mechanism to attend to compressed prior blocks (only raw dense K/V
-        // passed as prior_k_tensors). Starting at 0 ensures the model has full causal
-        // context at every position.
-        int pos_start = 0;
+        // Decompress prefix blocks from turn 1 if cached_len > 0
+        if (cached_len > 0) {
+            for (int l = 0; l < n_layers; ++l) {
+                auto & blocks = runtime_manager.get_ingest_manager().get_blocks(l);
+                for (auto & block : blocks) {
+                    if (block->anchor_idx >= cached_len) {
+                        break;
+                    }
+                    int block_len = block->token_count();
+                    
+                    // Touch block to ensure residency
+                    if (block->state == BlockState::CPUResident) {
+                        runtime_manager.get_pager().touch(block.get(), runtime_manager.get_engines());
+                    }
+                    
+                    int slot_id = block->pool_idx;
+                    if (block->state == BlockState::CompressedResident) {
+                        auto & engine = runtime_manager.get_engines()[l];
+                        int rank = engine->get_U()->ne[0];
+                        float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
+                        float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
+                        
+                        for (int t = 0; t < block_len; ++t) {
+                            int global_pos = block->anchor_idx + t;
+                            if (global_pos >= cached_len) break;
+                            
+                            if (t == 0) {
+                                for (int f = 0; f < F_test; ++f) {
+                                    k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                    v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                }
+                            } else {
+                                int s = t - 1;
+                                for (int f = 0; f < F_test; ++f) {
+                                    float sum_k = 0.0f;
+                                    float sum_v = 0.0f;
+                                    for (int r = 0; r < rank; ++r) {
+                                        float u_val = (float)engine->get_host_U()[slot_id * 64 * rank + s * rank + r];
+                                        float vk_val = ggml_fp16_to_fp32(engine->get_host_VK()[slot_id * rank * F_test + r * F_test + f]);
+                                        float vv_val = ggml_fp16_to_fp32(engine->get_host_VV()[slot_id * rank * F_test + r * F_test + f]);
+                                        sum_k += (u_val * scale_u) * vk_val;
+                                        sum_v += (u_val * scale_u) * vv_val;
+                                    }
+                                    float anchor_k = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                    float anchor_v = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                    k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale;
+                                    v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale;
+                                }
+                            }
+                        }
+                    } else {
+                        // DenseResident or Compressing
+                        for (int t = 0; t < block_len; ++t) {
+                            int global_pos = block->anchor_idx + t;
+                            if (global_pos >= cached_len) break;
+                            
+                            if (t == 0) {
+                                std::memcpy(k_activations[l].data() + global_pos * F_test, block->anchor_k.data(), F_test * sizeof(float));
+                                std::memcpy(v_activations[l].data() + global_pos * F_test, block->anchor_v.data(), F_test * sizeof(float));
+                            } else {
+                                int s = t - 1;
+                                std::memcpy(k_activations[l].data() + global_pos * F_test, block->active_k.data() + s * F_test, F_test * sizeof(float));
+                                std::memcpy(v_activations[l].data() + global_pos * F_test, block->active_v.data() + s * F_test, F_test * sizeof(float));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        int pos_start = cached_len;
 
         // ── CHUNKED PREFILL WITH FULL PRIOR-CONTEXT ATTENTION ──────────────────
         // Matches ACTIVE_RUNTIME Python: chunk c attends to ALL tokens [0..pos_start-1]
@@ -1099,9 +1166,7 @@ int main(int argc, char ** argv) {
         // For continuation turns (cached_len > 0): prefill starts at pos_start = cached_len.
         // The first chunk has has_prior = (pos_start > 0) even for turn 2 chunk 1 because
         // pos_start starts at cached_len (e.g. 28 for the "hi" turn). The prior K/V for
-        // those cached tokens are NOT available as raw tensors (they are in compressed pool),
-        // so we set has_prior = false only for the very first chunk of a continuation turn
-        // and rely on the compressed block attention during decode for cross-turn context.
+        // those cached tokens are now decompressed back into k_activations/v_activations.
         //
         // k_activations[l] stores raw K (before RoPE); v_activations[l] stores raw V.
 
@@ -1345,6 +1410,8 @@ int main(int argc, char ** argv) {
         std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
         for (int l = 0; l < n_layers; ++l) {
             userdata[l].kv_engine = kv_engines[l].get();
+            userdata[l].session_id = "interactive_session";
+            userdata[l].layer_idx = l;
             userdata[l].slot_indices = nullptr;
             userdata[l].n_q_heads = model.get_config().n_head;
             userdata[l].n_kv_heads = model.get_config().n_head_kv;
@@ -1434,15 +1501,14 @@ int main(int argc, char ** argv) {
             if (blocks_layer0[i]->pool_idx != -1 &&
                 (blocks_layer0[i]->state == BlockState::CompressedResident ||
                  blocks_layer0[i]->state == BlockState::CPUResident)) {
-                compressed_slots.push_back(i); // Logical block index
+                compressed_slots.push_back(blocks_layer0[i]->pool_idx); // Physical slot ID
             }
         }
         int completed_blocks = compressed_slots.size();
         if (completed_blocks > 0) {
             std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
             for (int j = 0; j < completed_blocks; ++j) {
-                int i = compressed_slots[j];
-                int slot_id = blocks_layer0[i]->pool_idx;
+                int slot_id = compressed_slots[j];
                 ggml_backend_tensor_get(
                     runtime_manager.get_engines()[0]->get_desc_matrix(),
                     desc_matrix_host.data() + j * desc_dim,
@@ -1586,16 +1652,7 @@ int main(int argc, char ** argv) {
                 last_retrieval_active_slot = active_slot;
 
                 // Translate block indices to physical pool slot indices
-                cached_physical_candidates.clear();
-                cached_physical_candidates.reserve(srl_k_host);
-                for (int32_t block_idx : cached_routed_blocks) {
-                    auto & blocks = runtime_manager.get_ingest_manager().get_blocks(0);
-                    if (block_idx >= 0 && block_idx < (int)blocks.size()) {
-                        cached_physical_candidates.push_back(blocks[block_idx]->pool_idx);
-                    } else {
-                        cached_physical_candidates.push_back(0);
-                    }
-                }
+                cached_physical_candidates = cached_routed_blocks;
 
                 if (step == 0 && !is_warmup_run && std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
                     // Diagnostic: print retrieval results before first generated token
@@ -1773,8 +1830,8 @@ int main(int argc, char ** argv) {
                     update_srl_from_compressed_block(
                         srl_state,
                         desc.data(),
-                        prev_slot, // Logical index
-                        block->token_indices.data(),
+                        block->pool_idx, // Physical slot ID
+                        all_tokens.data() + block->anchor_idx, // Correct token IDs
                         block->token_count(),
                         block->anchor_idx,
                         stop_token_ids
@@ -1787,14 +1844,13 @@ int main(int argc, char ** argv) {
                         if (all_blocks[i]->pool_idx != -1 &&
                             (all_blocks[i]->state == BlockState::CompressedResident ||
                              all_blocks[i]->state == BlockState::CPUResident)) {
-                            cur_slots.push_back(i); // Logical index
+                            cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
                         }
                     }
                     int cur_N = cur_slots.size();
                     std::vector<float> cur_desc_matrix(cur_N * desc_dim);
                     for (int j = 0; j < cur_N; ++j) {
-                        int i = cur_slots[j];
-                        int slot_id = all_blocks[i]->pool_idx;
+                        int slot_id = cur_slots[j];
                         ggml_backend_tensor_get(
                             runtime_manager.get_engines()[0]->get_desc_matrix(),
                             cur_desc_matrix.data() + j * desc_dim,

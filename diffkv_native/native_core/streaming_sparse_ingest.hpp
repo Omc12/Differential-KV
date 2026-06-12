@@ -103,6 +103,14 @@ public:
         micro_block_size_ = size;
     }
 
+    void set_stop_token_ids(const std::unordered_set<int32_t>* stop_token_ids) {
+        stop_token_ids_ = stop_token_ids;
+    }
+
+    void set_session_id(const std::string& session_id) {
+        active_session_id_ = session_id;
+    }
+
 private:
     int next_anchor_idx(int layer_idx) const;
     void submit_block_for_compression(
@@ -126,6 +134,8 @@ private:
     Stats stats_;
     std::vector<int32_t> session_token_ids_;
     std::vector<size_t> last_compression_scan_idx_;
+    const std::unordered_set<int32_t>* stop_token_ids_ = nullptr;
+    std::string active_session_id_;
 };
 
 } // namespace diffkv

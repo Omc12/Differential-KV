@@ -34,6 +34,16 @@ namespace diffkv {
 struct AttentionScoreCache {
     float threshold = 2.0f;  // cosine-similarity threshold for reuse (>1 means "never reuse" by default — set to e.g. 0.999 to activate)
 
+    AttentionScoreCache() {
+        if (const char* env_t = std::getenv("DIFFKV_ATTN_CACHE_THRESHOLD")) {
+            try {
+                threshold = std::stof(env_t);
+            } catch (...) {
+                threshold = 2.0f;
+            }
+        }
+    }
+
     // session_id -> layer_idx -> (q_prev, attn_out_prev)
     std::unordered_map<std::string,
         std::unordered_map<int,

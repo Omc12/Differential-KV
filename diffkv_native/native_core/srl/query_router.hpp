@@ -245,7 +245,7 @@ inline std::vector<int32_t> route_query(
     // -------------------------------------------------------------------
     // Step 2: Adaptive K
     // -------------------------------------------------------------------
-    int K = adaptive_k(q_desc.data(), srl_state, N);
+    int K = adaptive_k(q_desc.data(), srl_state, srl_state.n_active_blocks());
 
     // Decompose into per-channel budgets
     auto budget = srl_state.k_components(K);

@@ -46,6 +46,8 @@ typedef std::vector<int32_t, PageAlignedAllocator<int32_t>> AlignedInt32Vector;
 
 struct CustomAttnUserData {
     NativeBlockPool * kv_engine;
+    std::string session_id;
+    int layer_idx = -1;
     struct ggml_tensor * slot_indices;
     int n_q_heads;
     int n_kv_heads;

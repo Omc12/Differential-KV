@@ -142,7 +142,7 @@ static id<MTLBuffer> wrap_output_tensor(struct ggml_tensor* tensor, void** out_t
 namespace diffkv {
 
 CustomAttnUserData::CustomAttnUserData()
-    : kv_engine(nullptr), slot_indices(nullptr), n_q_heads(0), n_kv_heads(0),
+    : kv_engine(nullptr), session_id(""), layer_idx(-1), slot_indices(nullptr), n_q_heads(0), n_kv_heads(0),
       rank(0), S_max(0), K(0), D(0), scale(0.0f), has_rope(false), rope_freq_base(0.0f),
       active_k_dense(nullptr), active_v_dense(nullptr), active_positions_dense(nullptr),
       active_block_tokens(0), active_slot(0), ignore_c(false), current_pos(0),
@@ -222,6 +222,8 @@ CustomAttnUserData::~CustomAttnUserData() {
 
 CustomAttnUserData::CustomAttnUserData(CustomAttnUserData&& other) noexcept {
     kv_engine = other.kv_engine;
+    session_id = std::move(other.session_id);
+    layer_idx = other.layer_idx;
     slot_indices = other.slot_indices;
     n_q_heads = other.n_q_heads;
     n_kv_heads = other.n_kv_heads;
@@ -345,6 +347,8 @@ CustomAttnUserData& CustomAttnUserData::operator=(CustomAttnUserData&& other) no
         }
 
         kv_engine = other.kv_engine;
+        session_id = std::move(other.session_id);
+        layer_idx = other.layer_idx;
         slot_indices = other.slot_indices;
         n_q_heads = other.n_q_heads;
         n_kv_heads = other.n_kv_heads;

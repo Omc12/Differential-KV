@@ -1,4 +1,5 @@
 #include "runtime/diffkv_attention.hpp"
+#include "native_core/srl/attention_cache.hpp"
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -258,6 +259,26 @@ void custom_attention_op_callback(
     const int D = data->D;
     const int F_kv = n_kv_heads * D;
 
+    std::vector<float> q_host(n_q_heads * D);
+    ggml_backend_tensor_get(Q, q_host.data(), 0, n_q_heads * D * sizeof(float));
+
+    std::vector<bool> reuse_mask(n_q_heads, false);
+    std::vector<float> out_cached(n_q_heads * D, 0.0f);
+    bool has_cache = get_global_attn_cache().check_and_update(
+        data->session_id,
+        data->layer_idx,
+        q_host.data(),
+        n_q_heads,
+        D,
+        reuse_mask,
+        out_cached
+    );
+    bool all_reused = has_cache && std::all_of(reuse_mask.begin(), reuse_mask.end(), [](bool b) { return b; });
+    if (all_reused) {
+        std::memcpy(dst->data, out_cached.data(), n_q_heads * D * sizeof(float));
+        return;
+    }
+
     // ── Step 1: Append current token K/V to the dense buffer ─────────────────
     // The dense buffer (active_k_dense / active_v_dense) is a flat CPU array
     // maintained by main.cpp. When ignore_c == false, we append the current
@@ -308,6 +329,7 @@ void custom_attention_op_callback(
             data->active_positions_dense,
             T_dense
         );
+        get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
         return;
     }
 #endif
@@ -342,6 +364,7 @@ void custom_attention_op_callback(
         } else {
             std::memset(dst->data, 0, n_q_heads * D * sizeof(float));
         }
+        get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
         return;
     }
 
@@ -377,6 +400,7 @@ void custom_attention_op_callback(
         }
     }
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
+    get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
 }
 
 } // namespace diffkv

@@ -478,7 +478,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     block->state = BlockState::Compressing;
     
     CompressJob job;
-    job.session_id = 42; // standard session ID
+    job.session_id = active_session_id_.empty() ? "42" : active_session_id_;
     job.block_id = slot_id;
     job.block_size = S_total;
     job.feat_dim = F_test;
@@ -486,6 +486,8 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.head_dim = head_dim;
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
+    job.token_ids = session_token_ids_.data() + block->anchor_idx;
+    job.stop_token_ids = stop_token_ids_;
     
     // Outputs in block pool host mirrors (CUDA compatible)
     job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * rank;

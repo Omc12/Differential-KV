@@ -21,6 +21,32 @@
 
 namespace diffkv {
 
+// k_rotated: output buffer, same shape.
+static void apply_rope_neox_cpu_fast(
+    const float* k_raw, float* k_rotated,
+    const float* cos_table, const float* sin_table,
+    int num_tokens, int kv_heads, int head_dim
+) {
+    const int D    = head_dim;
+    const int half = D / 2;
+    for (int t = 0; t < num_tokens; ++t) {
+        const float* cos_t = cos_table + t * half;
+        const float* sin_t = sin_table + t * half;
+        for (int h = 0; h < kv_heads; ++h) {
+            const float* src = k_raw     + (t * kv_heads + h) * D;
+            float*       dst = k_rotated + (t * kv_heads + h) * D;
+            for (int i = 0; i < half; ++i) {
+                float cos_th = cos_t[i];
+                float sin_th = sin_t[i];
+                float x      = src[i];
+                float y      = src[i + half];
+                dst[i]        = x * cos_th - y * sin_th;
+                dst[i + half] = y * cos_th + x * sin_th;
+            }
+        }
+    }
+}
+
 // Helper to build the Qwen 2.5 dense prefill graph using causal flash attention
 static struct ggml_cgraph * build_prefill_graph(
     struct ggml_context * ctx,
@@ -28,6 +54,8 @@ static struct ggml_cgraph * build_prefill_graph(
     struct ggml_tensor * input_tokens,
     struct ggml_tensor * positions,
     struct ggml_tensor * mask,
+    std::vector<struct ggml_tensor *> * prior_k_ctx,
+    std::vector<struct ggml_tensor *> * prior_v_ctx,
     struct ggml_tensor ** out_logits,
     std::vector<struct ggml_tensor *>* k_layers = nullptr,
     std::vector<struct ggml_tensor *>* v_layers = nullptr,
@@ -72,19 +100,30 @@ static struct ggml_cgraph * build_prefill_graph(
         struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, v->ne[1]);
         struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
 
-        // 6. Flash Attention
+        // 6. Concatenate prior context with current chunk along seq dim (dim=1 in permuted layout)
+        struct ggml_tensor * k_ctx_perm = k_perm;
+        struct ggml_tensor * v_ctx_perm = v_perm;
+        bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
+        if (has_prior) {
+            struct ggml_tensor * pk = ggml_permute(ctx, (*prior_k_ctx)[l], 0, 2, 1, 3);
+            struct ggml_tensor * pv = ggml_permute(ctx, (*prior_v_ctx)[l], 0, 2, 1, 3);
+            k_ctx_perm = ggml_concat(ctx, pk, k_perm, 1);
+            v_ctx_perm = ggml_concat(ctx, pv, v_perm, 1);
+        }
+
+        // 7. Flash Attention
         float scale_val = 1.0f / std::sqrt((float)head_dim);
-        struct ggml_tensor * attn_out_perm = ggml_flash_attn_ext(ctx, q_perm, k_perm, v_perm, mask, scale_val, 0.0f, 0.0f);
+        struct ggml_tensor * attn_out_perm = ggml_flash_attn_ext(ctx, q_perm, k_ctx_perm, v_ctx_perm, mask, scale_val, 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(attn_out_perm, GGML_PREC_F32);
 
-        // 7. Flatten back to [n_embd, q_len]
+        // 8. Flatten back to [n_embd, q_len]
         struct ggml_tensor * attn_out = ggml_reshape_2d(ctx, attn_out_perm, config.n_embd, q->ne[1]);
 
-        // 8. Output Projection (WO)
+        // 9. Output Projection (WO)
         struct ggml_tensor * attn_proj = ggml_mul_mat(ctx, layer.wo, attn_out);
         if (layer.bo) attn_proj = ggml_add(ctx, attn_proj, layer.bo);
 
-        // 9. Residual connection
+        // 10. Residual connection
         cur = ggml_add(ctx, cur, attn_proj);
 
         // 10. FFN RMSNorm
@@ -455,6 +494,7 @@ DiffKVBatchEngine::DiffKVBatchEngine(
     for (int i = 0; i < 200; ++i) {
         stop_token_ids_.insert(i);
     }
+    runtime_manager_->get_ingest_manager().set_stop_token_ids(&stop_token_ids_);
 }
 
 DiffKVBatchEngine::~DiffKVBatchEngine() {
@@ -566,6 +606,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     
     // Re-verify residency and register as active
     session_manager_->ensure_residency(req->session_id);
+    runtime_manager_->get_ingest_manager().set_session_id(req->session_id);
     
     int n_vocab = model_->get_config().n_vocab;
     int n_layers = model_->get_config().n_layer;
@@ -779,17 +820,95 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     
     // ── 1. PREFILL PHASE ──
     int chunk_size = 2048;
+    if (const char* env_pcs = std::getenv("DIFFKV_PREFILL_CHUNK_SIZE")) {
+        try { chunk_size = std::stoi(env_pcs); } catch (...) {}
+    }
     int pos_start = prefill_offset;
+    int cached_len = prefill_offset;
     
     std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test));
     std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test));
     std::vector<float> prefill_output_logits(n_vocab);
     
+    // Decompress prefix blocks from previous turns if cached_len > 0
+    if (cached_len > 0) {
+        for (int l = 0; l < n_layers; ++l) {
+            auto & blocks = runtime_manager_->get_ingest_manager().get_blocks(l);
+            for (auto & block : blocks) {
+                if (block->anchor_idx >= cached_len) {
+                    break;
+                }
+                int block_len = block->token_count();
+                
+                // Touch block to ensure residency
+                if (block->state == BlockState::CPUResident) {
+                    runtime_manager_->get_pager().touch(block.get(), runtime_manager_->get_engines());
+                }
+                
+                int slot_id = block->pool_idx;
+                if (block->state == BlockState::CompressedResident) {
+                    auto & engine = runtime_manager_->get_engines()[l];
+                    int rank = engine->get_U()->ne[0];
+                    float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
+                    float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
+                    
+                    for (int t = 0; t < block_len; ++t) {
+                        int global_pos = block->anchor_idx + t;
+                        if (global_pos >= cached_len) break;
+                        
+                        if (t == 0) {
+                            for (int f = 0; f < F_test; ++f) {
+                                k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                            }
+                        } else {
+                            int s = t - 1;
+                            for (int f = 0; f < F_test; ++f) {
+                                float sum_k = 0.0f;
+                                float sum_v = 0.0f;
+                                for (int r = 0; r < rank; ++r) {
+                                    float u_val = (float)engine->get_host_U()[slot_id * 64 * rank + s * rank + r];
+                                    float vk_val = ggml_fp16_to_fp32(engine->get_host_VK()[slot_id * rank * F_test + r * F_test + f]);
+                                    float vv_val = ggml_fp16_to_fp32(engine->get_host_VV()[slot_id * rank * F_test + r * F_test + f]);
+                                    sum_k += (u_val * scale_u) * vk_val;
+                                    sum_v += (u_val * scale_u) * vv_val;
+                                }
+                                float anchor_k = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                float anchor_v = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale;
+                                v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale;
+                            }
+                        }
+                    }
+                } else {
+                    // DenseResident or Compressing
+                    for (int t = 0; t < block_len; ++t) {
+                        int global_pos = block->anchor_idx + t;
+                        if (global_pos >= cached_len) break;
+                        
+                        if (t == 0) {
+                            std::memcpy(k_activations[l].data() + global_pos * F_test, block->anchor_k.data(), F_test * sizeof(float));
+                            std::memcpy(v_activations[l].data() + global_pos * F_test, block->anchor_v.data(), F_test * sizeof(float));
+                        } else {
+                            int s = t - 1;
+                            std::memcpy(k_activations[l].data() + global_pos * F_test, block->active_k.data() + s * F_test, F_test * sizeof(float));
+                            std::memcpy(v_activations[l].data() + global_pos * F_test, block->active_v.data() + s * F_test, F_test * sizeof(float));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     while (pos_start < L) {
         int chunk_len = std::min(chunk_size, L - pos_start);
+        int ctx_len   = pos_start + chunk_len;  // total KV context length
+        
+        size_t prior_bytes = (size_t)2 * n_layers * pos_start * F_test * sizeof(float);
+        size_t graph_bytes = 8 * 1024 * 1024 + prior_bytes;
         
         struct ggml_init_params prefill_params = {
-            /*.mem_size   =*/ 4 * 1024 * 1024,
+            /*.mem_size   =*/ graph_bytes,
             /*.mem_buffer =*/ nullptr,
             /*.no_alloc   =*/ true,
         };
@@ -803,8 +922,25 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         ggml_set_input(input_tokens_prefill);
         struct ggml_tensor * positions_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, chunk_len);
         ggml_set_input(positions_prefill);
-        struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, chunk_len, chunk_len);
+        
+        int intra_ctx_len = pos_start + chunk_len;
+        struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, intra_ctx_len, chunk_len);
         ggml_set_input(mask_prefill);
+        
+        std::vector<struct ggml_tensor *> prior_k_tensors(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> prior_v_tensors(n_layers, nullptr);
+        bool has_prior = (pos_start > 0);
+        if (has_prior) {
+            int prior_intra_len = pos_start;
+            for (int l = 0; l < n_layers; ++l) {
+                prior_k_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                    head_dim, kv_heads, prior_intra_len);
+                ggml_set_input(prior_k_tensors[l]);
+                prior_v_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                    head_dim, kv_heads, prior_intra_len);
+                ggml_set_input(prior_v_tensors[l]);
+            }
+        }
         
         struct ggml_tensor * prefill_logits = nullptr;
         std::vector<struct ggml_tensor *> prefill_k_layers(n_layers, nullptr);
@@ -813,6 +949,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         
         struct ggml_cgraph * prefill_graph = build_prefill_graph(
             prefill_ctx, *model_, input_tokens_prefill, positions_prefill, mask_prefill,
+            has_prior ? &prior_k_tensors : nullptr,
+            has_prior ? &prior_v_tensors : nullptr,
             &prefill_logits, &prefill_k_layers, &prefill_v_layers, is_last_chunk
         );
         if (is_last_chunk && prefill_logits) {
@@ -832,13 +970,58 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         for (int i = 0; i < chunk_len; ++i) pos_host[i] = pos_start + i;
         ggml_backend_tensor_set(positions_prefill, pos_host.data(), 0, chunk_len * sizeof(int32_t));
         
-        std::vector<ggml_fp16_t> mask_host(chunk_len * chunk_len, ggml_fp32_to_fp16(0.0f));
-        for (int i = 0; i < chunk_len; ++i) {
-            for (int j = i + 1; j < chunk_len; ++j) {
-                mask_host[i * chunk_len + j] = ggml_fp32_to_fp16(-INFINITY);
+        // Build full-context mask
+        int intra_prior = pos_start;
+        std::vector<ggml_fp16_t> mask_host(chunk_len * intra_ctx_len, ggml_fp32_to_fp16(0.0f));
+        for (int qi = 0; qi < chunk_len; ++qi) {
+            for (int kj = intra_prior; kj < intra_ctx_len; ++kj) {
+                int chunk_kj = kj - intra_prior;
+                if (chunk_kj > qi) {
+                    mask_host[qi * intra_ctx_len + kj] = ggml_fp32_to_fp16(-INFINITY);
+                }
             }
         }
         ggml_backend_tensor_set(mask_prefill, mask_host.data(), 0, mask_host.size() * sizeof(ggml_fp16_t));
+        
+        // Upload prior K/V context (from this turn's prior chunks)
+        if (has_prior) {
+            int intra_prior_len = pos_start;
+            std::vector<int32_t> prior_positions(intra_prior_len);
+            for (int t = 0; t < intra_prior_len; ++t) prior_positions[t] = t;
+            
+            int half_dim = head_dim / 2;
+            std::vector<float> inv_freq(half_dim);
+            for (int i = 0; i < half_dim; ++i) {
+                inv_freq[i] = 1.0f / std::pow(model_->get_config().rope_freq_base, 2.0f * i / head_dim);
+            }
+            std::vector<float> cos_table(intra_prior_len * half_dim);
+            std::vector<float> sin_table(intra_prior_len * half_dim);
+            for (int t = 0; t < intra_prior_len; ++t) {
+                float pos = (float)prior_positions[t];
+                for (int i = 0; i < half_dim; ++i) {
+                    float theta = pos * inv_freq[i];
+                    cos_table[t * half_dim + i] = std::cos(theta);
+                    sin_table[t * half_dim + i] = std::sin(theta);
+                }
+            }
+            
+            std::vector<float> prior_k_rotated(intra_prior_len * F_test);
+            for (int l = 0; l < n_layers; ++l) {
+                apply_rope_neox_cpu_fast(
+                    k_activations[l].data(),
+                    prior_k_rotated.data(),
+                    cos_table.data(),
+                    sin_table.data(),
+                    intra_prior_len, kv_heads, head_dim
+                );
+                ggml_backend_tensor_set(prior_k_tensors[l],
+                    prior_k_rotated.data(),
+                    0, intra_prior_len * F_test * sizeof(float));
+                ggml_backend_tensor_set(prior_v_tensors[l],
+                    v_activations[l].data(),
+                    0, intra_prior_len * F_test * sizeof(float));
+            }
+        }
         
         if (ggml_backend_sched_graph_compute(sched_, prefill_graph) != GGML_STATUS_SUCCESS) {
             ggml_free(prefill_ctx);
@@ -907,6 +1090,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     auto & kv_engines = runtime_manager_->get_engines();
     for (int l = 0; l < n_layers; ++l) {
         userdata[l].kv_engine = kv_engines[l].get();
+        userdata[l].session_id = req->session_id;
+        userdata[l].layer_idx = l;
         userdata[l].slot_indices = nullptr;
         userdata[l].n_q_heads = model_->get_config().n_head;
         userdata[l].n_kv_heads = model_->get_config().n_head_kv;
@@ -976,15 +1161,14 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         if (blocks_layer0[i]->pool_idx != -1 &&
             (blocks_layer0[i]->state == BlockState::CompressedResident ||
              blocks_layer0[i]->state == BlockState::CPUResident)) {
-            compressed_slots.push_back(i); // Logical block index
+            compressed_slots.push_back(blocks_layer0[i]->pool_idx); // Physical slot ID
         }
     }
     int completed_blocks = compressed_slots.size();
     if (completed_blocks > 0) {
         std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
         for (int j = 0; j < completed_blocks; ++j) {
-            int i = compressed_slots[j];
-            int slot_id = blocks_layer0[i]->pool_idx;
+            int slot_id = compressed_slots[j];
             ggml_backend_tensor_get(
                 runtime_manager_->get_engines()[0]->get_desc_matrix(),
                 desc_matrix_host.data() + j * desc_dim,
@@ -1062,16 +1246,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             last_retrieval_active_slot = session->active_slot;
 
             // Map block indices to physical pool slot indices
-            cached_physical_candidates.clear();
-            cached_physical_candidates.reserve(srl_k_host);
-            for (int32_t block_idx : cached_routed_blocks) {
-                auto & blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
-                if (block_idx >= 0 && block_idx < (int)blocks.size()) {
-                    cached_physical_candidates.push_back(blocks[block_idx]->pool_idx);
-                } else {
-                    cached_physical_candidates.push_back(0);
-                }
-            }
+            cached_physical_candidates = cached_routed_blocks;
         }
         
         std::vector<int32_t> routed_blocks = cached_routed_blocks;
@@ -1195,8 +1370,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 update_srl_from_compressed_block(
                     session->srl_state,
                     desc.data(),
-                    prev_slot, // Logical index
-                    block->token_indices.data(),
+                    block->pool_idx, // Physical slot ID
+                    session->token_ids.data() + block->anchor_idx, // Correct token IDs
                     block->token_count(),
                     block->anchor_idx,
                     stop_token_ids_
@@ -1209,14 +1384,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     if (all_blocks[i]->pool_idx != -1 &&
                         (all_blocks[i]->state == BlockState::CompressedResident ||
                          all_blocks[i]->state == BlockState::CPUResident)) {
-                        cur_slots.push_back(i); // Logical index
+                        cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
                     }
                 }
                 int cur_N = cur_slots.size();
                 std::vector<float> cur_desc_matrix(cur_N * desc_dim);
                 for (int j = 0; j < cur_N; ++j) {
-                    int i = cur_slots[j];
-                    int slot_id = all_blocks[i]->pool_idx;
+                    int slot_id = cur_slots[j];
                     ggml_backend_tensor_get(
                         runtime_manager_->get_engines()[0]->get_desc_matrix(),
                         cur_desc_matrix.data() + j * desc_dim,

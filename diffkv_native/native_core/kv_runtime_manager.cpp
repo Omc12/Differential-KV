@@ -1,4 +1,5 @@
 #include "native_core/kv_runtime_manager.hpp"
+#include "native_core/srl/chunk_descriptor.hpp"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -458,10 +459,12 @@ void KVRuntimeManager::wait_for_compressor() {
 void KVRuntimeManager::touch_active_slots(const std::vector<int32_t>& active_slots) {
     if (active_slots.empty()) return;
     auto & blocks = ingest_manager_->get_blocks(0);
-    for (int32_t block_idx : active_slots) {
-        if (block_idx >= 0 && block_idx < (int)blocks.size()) {
-            auto & block = blocks[block_idx];
-            pager_->touch(block.get(), engines_);
+    for (int32_t slot_id : active_slots) {
+        for (auto & block : blocks) {
+            if (block->pool_idx == slot_id) {
+                pager_->touch(block.get(), engines_);
+                break;
+            }
         }
     }
 }
@@ -469,44 +472,73 @@ void KVRuntimeManager::touch_active_slots(const std::vector<int32_t>& active_slo
 void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host, int desc_dim, int head_dim) {
     auto & blocks = ingest_manager_->get_blocks(0);
     int F_test = engines_[0]->get_VK()->ne[0] * engines_[0]->get_VK()->ne[1];
+    int kv_heads = engines_[0]->get_VK()->ne[1];
     
     for (size_t b = 0; b < blocks.size(); ++b) {
         auto & block = blocks[b];
         if (block->pool_idx == -1) continue; // paged out
         
-        std::vector<float> avg_k(F_test, 0.0f);
-        int S_total = block->token_count();
-        if (!block->svd_k.empty()) {
-            for (int i = 0; i < F_test; ++i) {
-                for (int t = 0; t < S_total; ++t) {
-                    avg_k[i] += block->svd_k[t * F_test + i];
-                }
-                avg_k[i] /= S_total;
+        int slot_id = block->pool_idx;
+        
+        if (block->state == BlockState::CompressedResident || block->state == BlockState::CPUResident) {
+            auto & engine = engines_[0];
+            int rank = engine->get_U()->ne[0];
+            int S_max = 64; // Block size
+            
+            std::vector<ggml_fp16_t> desc_f16(desc_dim);
+            compute_descriptor(
+                (const uint16_t*)engine->get_host_anchors_K() + slot_id * F_test,
+                engine->get_host_U() + slot_id * S_max * rank,
+                ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]),
+                (const uint16_t*)engine->get_host_VK() + slot_id * rank * F_test,
+                W_proj_host.data(),
+                kv_heads,
+                head_dim,
+                block->token_count() - 1, // S_deltas = seq_len - 1
+                rank,
+                (uint16_t*)desc_f16.data()
+            );
+            
+            std::vector<float> desc(desc_dim);
+            for (int r = 0; r < desc_dim; ++r) {
+                desc[r] = ggml_fp16_to_fp32(desc_f16[r]);
             }
+            ggml_backend_tensor_set(engine->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         } else {
-            for (int i = 0; i < F_test; ++i) {
-                avg_k[i] += block->anchor_k[i];
-                for (size_t t = 0; t < block->active_k.size() / F_test; ++t) {
-                    avg_k[i] += block->active_k[t * F_test + i];
+            std::vector<float> avg_k(F_test, 0.0f);
+            int S_total = block->token_count();
+            if (!block->svd_k.empty()) {
+                for (int i = 0; i < F_test; ++i) {
+                    for (int t = 0; t < S_total; ++t) {
+                        avg_k[i] += block->svd_k[t * F_test + i];
+                    }
+                    avg_k[i] /= S_total;
                 }
-                avg_k[i] /= S_total;
+            } else {
+                for (int i = 0; i < F_test; ++i) {
+                    avg_k[i] += block->anchor_k[i];
+                    for (size_t t = 0; t < block->active_k.size() / F_test; ++t) {
+                        avg_k[i] += block->active_k[t * F_test + i];
+                    }
+                    avg_k[i] /= S_total;
+                }
             }
-        }
-        
-        std::vector<float> desc(desc_dim, 0.0f);
-        for (int r = 0; r < desc_dim; ++r) {
-            float sum = 0.0f;
-            for (int c = 0; c < head_dim; ++c) {
-                sum += avg_k[c] * W_proj_host[r * head_dim + c];
+            
+            std::vector<float> desc(desc_dim, 0.0f);
+            for (int r = 0; r < desc_dim; ++r) {
+                float sum = 0.0f;
+                for (int c = 0; c < head_dim; ++c) {
+                    sum += avg_k[c] * W_proj_host[r * head_dim + c];
+                }
+                desc[r] = sum;
             }
-            desc[r] = sum;
+            float sum_sq = 0.0f;
+            for (float val : desc) sum_sq += val * val;
+            float norm = std::sqrt(sum_sq) + 1e-8f;
+            for (float & val : desc) val /= norm;
+            
+            ggml_backend_tensor_set(engines_[0]->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         }
-        float sum_sq = 0.0f;
-        for (float val : desc) sum_sq += val * val;
-        float norm = std::sqrt(sum_sq) + 1e-8f;
-        for (float & val : desc) val /= norm;
-        
-        ggml_backend_tensor_set(engines_[0]->get_desc_matrix(), desc.data(), block->pool_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
     }
 }
 
