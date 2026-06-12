@@ -67,7 +67,12 @@ struct ChunkGraph {
     // slot_to_parent: child_slot -> parent_slot
     std::unordered_map<int32_t, int32_t> slot_to_parent;
 
-    ChunkGraph() : N(0), max_degree(1) {}
+    // Vectorized flat representations
+    std::vector<int32_t> parent_to_children_tensor;
+    std::vector<int32_t> slot_to_parent_tensor;
+    int max_children = 1;
+
+    ChunkGraph() : N(0), max_degree(1), max_children(1) {}
 
     // ---- Convenience accessors ----
 
@@ -303,6 +308,43 @@ inline ChunkGraph build_chunk_graph(
             auto& vec = kv.second;
             std::sort(vec.begin(), vec.end());
             vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+        }
+
+        // Determine max slot ID and size vectors
+        int32_t max_slot = 0;
+        for (int i = 0; i < N; ++i) {
+            if (slot_ids[i] > max_slot) {
+                max_slot = slot_ids[i];
+            }
+        }
+
+        g.slot_to_parent_tensor.assign(max_slot + 1, -1);
+        for (int i = 0; i < N; ++i) {
+            int32_t child_slot = slot_ids[i];
+            g.slot_to_parent_tensor[child_slot] = g.slot_to_parent[child_slot];
+        }
+
+        // Determine max children per group
+        int max_children = 1;
+        for (const auto& kv : g.parent_to_children) {
+            int size = static_cast<int>(kv.second.size());
+            if (size > max_children) {
+                max_children = size;
+            }
+        }
+        g.max_children = max_children;
+
+        // Allocate parent_to_children_tensor
+        g.parent_to_children_tensor.assign((max_slot + 1) * max_children, -1);
+        for (const auto& kv : g.parent_to_children) {
+            int32_t parent = kv.first;
+            const auto& children = kv.second;
+            if (parent >= 0 && parent <= max_slot) {
+                int base_idx = parent * max_children;
+                for (size_t c = 0; c < children.size(); ++c) {
+                    g.parent_to_children_tensor[base_idx + c] = children[c];
+                }
+            }
         }
     }
 
