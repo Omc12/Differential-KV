@@ -38,6 +38,7 @@ struct CompressJob {
     ggml_fp16_t* out_anchor_k;  // [kv_heads * head_dim] destination in pool anchors_K
     ggml_fp16_t* out_anchor_v;  // [kv_heads * head_dim] destination in pool anchors_V
     int32_t* out_seq_len;
+    bool* out_skip_compression = nullptr;
     DiffKVBlockStateTable* state_table = nullptr;
 };
 

@@ -308,15 +308,7 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
             return true;
         }
 
-        // Rule 3d: Verbatim definitions
-        if (std::regex_search(block_text, RE_DEFINITIONS)) {
-            return true;
-        }
 
-        // Rule 3e: Formal claims / theorems
-        if (std::regex_search(block_text, RE_CLAIMS)) {
-            return true;
-        }
 
         // Rule 3f: Acronym density — always exempt
         {
@@ -561,6 +553,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
+    job.out_skip_compression = &block->skip_compression;
     
     // Outputs in block pool host mirrors (CUDA compatible)
     job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * rank;

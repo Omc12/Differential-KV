@@ -30,6 +30,7 @@ struct LowRankCompressParams {
     ggml_fp16_t* out_anchor_k;
     ggml_fp16_t* out_anchor_v;
     int32_t* out_seq_len;
+    bool* out_skip_compression = nullptr;
 };
 
 // Perform low-rank SVD compression on a block

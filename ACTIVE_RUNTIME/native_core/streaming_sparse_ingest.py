@@ -597,13 +597,7 @@ class StreamingSparseIngestManager:
             if _RE_ASCII_EQUATION.search(block_text):
                 return True
 
-            # Rule 3d: Verbatim definitions — always exempt
-            if _RE_DEFINITIONS.search(block_text):
-                return True
 
-            # Rule 3e: Formal claims / theorems — always exempt
-            if _RE_CLAIMS.search(block_text):
-                return True
 
             # Rule 3f: Acronym density — always exempt
             acronyms = set(_RE_ACRONYMS.findall(block_text))
