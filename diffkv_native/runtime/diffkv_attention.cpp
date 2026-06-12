@@ -329,6 +329,8 @@ void custom_attention_op_callback(
             data->active_positions_dense,
             T_dense
         );
+
+
         get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
         return;
     }

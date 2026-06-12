@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "native_core/diffkv_core/include/block_state.hpp"
+#include "runtime/page_aligned_allocator.hpp"
 
 namespace diffkv {
 
@@ -88,15 +89,15 @@ private:
     struct ggml_tensor * anchor_positions_ = nullptr;  // [n_slots] int32: actual sequence position of each block's anchor
 
     // Host-side mirror buffers
-    std::vector<int8_t> host_U_;
-    std::vector<ggml_fp16_t> host_U_scale_;
-    std::vector<ggml_fp16_t> host_VK_;
-    std::vector<ggml_fp16_t> host_VV_;
-    std::vector<ggml_fp16_t> host_anchors_K_;
-    std::vector<ggml_fp16_t> host_anchors_V_;
-    std::vector<int32_t> host_seq_lens_;
-    std::vector<ggml_fp16_t> host_scales_;
-    std::vector<int32_t> host_anchor_positions_;
+    std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_K_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_V_;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_seq_lens_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_scales_;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_anchor_positions_;
 
     DiffKVBlockStateTable state_table_;
 

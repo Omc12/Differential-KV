@@ -489,7 +489,7 @@ void execute_metal_attention(
 
         // ── Dense window Metal buffers (zero-copy when page-aligned) ───────────
         const int   F_kv        = n_kv_heads * D;
-        const int   T_clamped   = std::min(T_dense, 512);  // kernel shared-mem limit
+        const int   T_clamped   = T_dense;
         
         size_t max_k_bytes   = 16384 * F_kv * sizeof(float);
         size_t max_v_bytes   = 16384 * F_kv * sizeof(float);
@@ -501,27 +501,45 @@ void execute_metal_attention(
 
         if (data->mtl_dense_k) {
             dense_k_buf = (__bridge id<MTLBuffer>)data->mtl_dense_k;
+            if (dense_k_buf.contents != dense_K && T_clamped > 0) {
+                std::memcpy(dense_k_buf.contents, dense_K, T_clamped * F_kv * sizeof(float));
+            }
         } else if (dense_K && T_clamped > 0) {
             dense_k_buf = wrap_cpu_ptr(dense_K, max_k_bytes);
             data->mtl_dense_k = (__bridge_retained void*)dense_k_buf;
+            if (dense_k_buf.contents != dense_K) {
+                std::memcpy(dense_k_buf.contents, dense_K, T_clamped * F_kv * sizeof(float));
+            }
         } else {
             dense_k_buf = g_dummy_rope_buf;
         }
 
         if (data->mtl_dense_v) {
             dense_v_buf = (__bridge id<MTLBuffer>)data->mtl_dense_v;
+            if (dense_v_buf.contents != dense_V && T_clamped > 0) {
+                std::memcpy(dense_v_buf.contents, dense_V, T_clamped * F_kv * sizeof(float));
+            }
         } else if (dense_V && T_clamped > 0) {
             dense_v_buf = wrap_cpu_ptr(dense_V, max_v_bytes);
             data->mtl_dense_v = (__bridge_retained void*)dense_v_buf;
+            if (dense_v_buf.contents != dense_V) {
+                std::memcpy(dense_v_buf.contents, dense_V, T_clamped * F_kv * sizeof(float));
+            }
         } else {
             dense_v_buf = g_dummy_rope_buf;
         }
 
         if (data->mtl_dense_pos) {
             dense_pos_buf = (__bridge id<MTLBuffer>)data->mtl_dense_pos;
+            if (dense_pos_buf.contents != dense_pos && T_clamped > 0) {
+                std::memcpy(dense_pos_buf.contents, dense_pos, T_clamped * sizeof(int32_t));
+            }
         } else if (dense_pos && T_clamped > 0) {
             dense_pos_buf = wrap_cpu_ptr(dense_pos, max_pos_bytes);
             data->mtl_dense_pos = (__bridge_retained void*)dense_pos_buf;
+            if (dense_pos_buf.contents != dense_pos) {
+                std::memcpy(dense_pos_buf.contents, dense_pos, T_clamped * sizeof(int32_t));
+            }
         } else {
             dense_pos_buf = g_dummy_rope_buf;
         }
@@ -555,81 +573,141 @@ void execute_metal_attention(
         id<MTLBuffer> q_buf = nil;
         if (data->mtl_q_buf) {
             q_buf = (__bridge id<MTLBuffer>)data->mtl_q_buf;
+            if (q_buf.contents != Q->data) {
+                std::memcpy(q_buf.contents, Q->data, ggml_nbytes((struct ggml_tensor*)Q));
+            }
         } else {
             q_buf = wrap_tensor((struct ggml_tensor*)Q);
             data->mtl_q_buf = (__bridge_retained void*)q_buf;
+            if (q_buf.contents != Q->data) {
+                std::memcpy(q_buf.contents, Q->data, ggml_nbytes((struct ggml_tensor*)Q));
+            }
         }
 
         id<MTLBuffer> u_pool_buf = nil;
         if (data->mtl_u_pool) {
             u_pool_buf = (__bridge id<MTLBuffer>)data->mtl_u_pool;
+            if (u_pool_buf.contents != engine->get_host_U()) {
+                std::memcpy(u_pool_buf.contents, engine->get_host_U(), ggml_nbytes(engine->get_U()));
+            }
         } else {
-            u_pool_buf = wrap_tensor(engine->get_U());
+            u_pool_buf = wrap_cpu_ptr(engine->get_host_U(), ggml_nbytes(engine->get_U()));
             data->mtl_u_pool = (__bridge_retained void*)u_pool_buf;
+            if (u_pool_buf.contents != engine->get_host_U()) {
+                std::memcpy(u_pool_buf.contents, engine->get_host_U(), ggml_nbytes(engine->get_U()));
+            }
         }
 
         id<MTLBuffer> u_scale_buf = nil;
         if (data->mtl_u_scale) {
             u_scale_buf = (__bridge id<MTLBuffer>)data->mtl_u_scale;
+            if (u_scale_buf.contents != engine->get_host_U_scale()) {
+                std::memcpy(u_scale_buf.contents, engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
+            }
         } else {
-            u_scale_buf = wrap_tensor(engine->get_U_scale());
+            u_scale_buf = wrap_cpu_ptr(engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
             data->mtl_u_scale = (__bridge_retained void*)u_scale_buf;
+            if (u_scale_buf.contents != engine->get_host_U_scale()) {
+                std::memcpy(u_scale_buf.contents, engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
+            }
         }
 
         id<MTLBuffer> vk_pool_buf = nil;
         if (data->mtl_vk_pool) {
             vk_pool_buf = (__bridge id<MTLBuffer>)data->mtl_vk_pool;
+            if (vk_pool_buf.contents != engine->get_host_VK()) {
+                std::memcpy(vk_pool_buf.contents, engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
+            }
         } else {
-            vk_pool_buf = wrap_tensor(engine->get_VK());
+            vk_pool_buf = wrap_cpu_ptr(engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
             data->mtl_vk_pool = (__bridge_retained void*)vk_pool_buf;
+            if (vk_pool_buf.contents != engine->get_host_VK()) {
+                std::memcpy(vk_pool_buf.contents, engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
+            }
         }
 
         id<MTLBuffer> vv_pool_buf = nil;
         if (data->mtl_vv_pool) {
             vv_pool_buf = (__bridge id<MTLBuffer>)data->mtl_vv_pool;
+            if (vv_pool_buf.contents != engine->get_host_VV()) {
+                std::memcpy(vv_pool_buf.contents, engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
+            }
         } else {
-            vv_pool_buf = wrap_tensor(engine->get_VV());
+            vv_pool_buf = wrap_cpu_ptr(engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
             data->mtl_vv_pool = (__bridge_retained void*)vv_pool_buf;
+            if (vv_pool_buf.contents != engine->get_host_VV()) {
+                std::memcpy(vv_pool_buf.contents, engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
+            }
         }
 
         id<MTLBuffer> anchors_k_buf = nil;
         if (data->mtl_anchors_k) {
             anchors_k_buf = (__bridge id<MTLBuffer>)data->mtl_anchors_k;
+            if (anchors_k_buf.contents != engine->get_host_anchors_K()) {
+                std::memcpy(anchors_k_buf.contents, engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
+            }
         } else {
-            anchors_k_buf = wrap_tensor(engine->get_anchors_K());
+            anchors_k_buf = wrap_cpu_ptr(engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
             data->mtl_anchors_k = (__bridge_retained void*)anchors_k_buf;
+            if (anchors_k_buf.contents != engine->get_host_anchors_K()) {
+                std::memcpy(anchors_k_buf.contents, engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
+            }
         }
 
         id<MTLBuffer> anchors_v_buf = nil;
         if (data->mtl_anchors_v) {
             anchors_v_buf = (__bridge id<MTLBuffer>)data->mtl_anchors_v;
+            if (anchors_v_buf.contents != engine->get_host_anchors_V()) {
+                std::memcpy(anchors_v_buf.contents, engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
+            }
         } else {
-            anchors_v_buf = wrap_tensor(engine->get_anchors_V());
+            anchors_v_buf = wrap_cpu_ptr(engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
             data->mtl_anchors_v = (__bridge_retained void*)anchors_v_buf;
+            if (anchors_v_buf.contents != engine->get_host_anchors_V()) {
+                std::memcpy(anchors_v_buf.contents, engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
+            }
         }
 
         id<MTLBuffer> seq_lens_buf = nil;
         if (data->mtl_seq_lens) {
             seq_lens_buf = (__bridge id<MTLBuffer>)data->mtl_seq_lens;
+            if (seq_lens_buf.contents != engine->get_host_seq_lens()) {
+                std::memcpy(seq_lens_buf.contents, engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
+            }
         } else {
-            seq_lens_buf = wrap_tensor(engine->get_seq_lens());
+            seq_lens_buf = wrap_cpu_ptr(engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
             data->mtl_seq_lens = (__bridge_retained void*)seq_lens_buf;
+            if (seq_lens_buf.contents != engine->get_host_seq_lens()) {
+                std::memcpy(seq_lens_buf.contents, engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
+            }
         }
 
         id<MTLBuffer> scales_buf = nil;
         if (data->mtl_scales) {
             scales_buf = (__bridge id<MTLBuffer>)data->mtl_scales;
+            if (scales_buf.contents != engine->get_host_scales()) {
+                std::memcpy(scales_buf.contents, engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
+            }
         } else {
-            scales_buf = wrap_tensor(engine->get_scales());
+            scales_buf = wrap_cpu_ptr(engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
             data->mtl_scales = (__bridge_retained void*)scales_buf;
+            if (scales_buf.contents != engine->get_host_scales()) {
+                std::memcpy(scales_buf.contents, engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
+            }
         }
 
         id<MTLBuffer> anc_pos_buf = nil;
         if (data->mtl_anc_pos) {
             anc_pos_buf = (__bridge id<MTLBuffer>)data->mtl_anc_pos;
+            if (anc_pos_buf.contents != engine->get_host_anchor_positions()) {
+                std::memcpy(anc_pos_buf.contents, engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
+            }
         } else {
-            anc_pos_buf = wrap_tensor(engine->get_anchor_positions());
+            anc_pos_buf = wrap_cpu_ptr(engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
             data->mtl_anc_pos = (__bridge_retained void*)anc_pos_buf;
+            if (anc_pos_buf.contents != engine->get_host_anchor_positions()) {
+                std::memcpy(anc_pos_buf.contents, engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
+            }
         }
 
         // ── Encode and dispatch ───────────────────────────────────────────────

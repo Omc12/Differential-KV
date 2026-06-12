@@ -12,10 +12,10 @@ for force_cpu in ["0", "1"]:
     
     start = time.time()
     res = subprocess.run(
-        ["../diffkv_native/build/diffkv_native", "../diffkv_native/qwen2.5-0.5b-instruct.gguf", long_prompt],
+        ["./diffkv_native/build/diffkv_native", "./diffkv_native/qwen2.5-0.5b-instruct.gguf", long_prompt],
         capture_output=True,
         text=False,
-        env={"DIFFKV_FORCE_CPU_ATTN": force_cpu, "DIFFKV_USE_GPU": "1", "DIFFKV_MICRO_BLOCK_SIZE": "64"}
+        env={"DIFFKV_FORCE_CPU_ATTN": force_cpu, "DIFFKV_USE_GPU": "1", "DIFFKV_MICRO_BLOCK_SIZE": "64", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"}
     )
     dur = time.time() - start
     print(f"Finished in {dur:.2f} seconds.")

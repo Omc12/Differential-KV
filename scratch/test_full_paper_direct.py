@@ -12,14 +12,16 @@ start = time.time()
 res = subprocess.run(
     ["./diffkv_native/build/diffkv_native", "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf", prompt],
     capture_output=True,
-    text=True
+    text=False,
+    env={"DIFFKV_USE_GPU": "1", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"}
 )
 dur = time.time() - start
 
+stdout_str = res.stdout.decode('utf-8', errors='replace')
+stderr_str = res.stderr.decode('utf-8', errors='replace')
+
 print(f"\nFinished in {dur:.2f} seconds.")
 print("=== STDOUT ===")
-print(res.stdout)
+print(stdout_str)
 print("=== STDERR ===")
-stderr_lines = res.stderr.splitlines()
-for line in stderr_lines[-30:]:
-    print(line)
+print(stderr_str)

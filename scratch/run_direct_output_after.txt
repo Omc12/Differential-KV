@@ -1,0 +1,819 @@
+
+==========================================
+Running C++ binary directly with DIFFKV_FORCE_CPU_ATTN=0
+==========================================
+Finished in 3.88 seconds.
+=== STDOUT ===
+[Response] Randomized low-dimensional feature spaces are proposed to accelerate the training of kernel machines, allowing them to approximate any function or decision boundary arbitrarily well with enough data.
+
+=== STDERR ===
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.010 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M3)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  =  5726.63 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M3
+ggml_metal_init: picking default device: Apple M3
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[DiffKV Model] Loading model from GGUF file: ./diffkv_native/qwen2.5-0.5b-instruct.gguf ...
+llama_model_loader: loaded meta data with 28 key-value pairs and 290 tensors from ./diffkv_native/qwen2.5-0.5b-instruct.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen2
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                     general.sampling.top_k i32              = 20
+llama_model_loader: - kv   3:                     general.sampling.top_p f32              = 0.800000
+llama_model_loader: - kv   4:                      general.sampling.temp f32              = 0.700000
+llama_model_loader: - kv   5:                               general.name str              = 7ae557604adf67be50417f59c2c2f167def9a775
+llama_model_loader: - kv   6:                           general.finetune str              = 7ae557604adf67be50417f59c2c2f167def9a775
+llama_model_loader: - kv   7:                         general.size_label str              = 494M
+llama_model_loader: - kv   8:                          qwen2.block_count u32              = 24
+llama_model_loader: - kv   9:                       qwen2.context_length u32              = 32768
+llama_model_loader: - kv  10:                     qwen2.embedding_length u32              = 896
+llama_model_loader: - kv  11:                  qwen2.feed_forward_length u32              = 4864
+llama_model_loader: - kv  12:                 qwen2.attention.head_count u32              = 14
+llama_model_loader: - kv  13:              qwen2.attention.head_count_kv u32              = 2
+llama_model_loader: - kv  14:                       qwen2.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  15:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  16:                          general.file_type u32              = 1
+llama_model_loader: - kv  17:               general.quantization_version u32              = 2
+llama_model_loader: - kv  18:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  19:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  20:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  21:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  22:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  23:                tokenizer.ggml.eos_token_id u32              = 151645
+llama_model_loader: - kv  24:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  25:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  26:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  27:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - type  f32:  121 tensors
+llama_model_loader: - type  f16:  169 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = F16
+print_info: file size   = 942.43 MiB (16.00 BPW) 
+llama_prepare_model_devices: using device MTL0 (Apple M3) (unknown id) - 5460 MiB free
+init_tokenizer: initializing tokenizer for type 2
+load: 0 unused tokens
+load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
+load: control token: 151656 '<|video_pad|>' is not marked as EOG
+load: control token: 151655 '<|image_pad|>' is not marked as EOG
+load: control token: 151653 '<|vision_end|>' is not marked as EOG
+load: control token: 151652 '<|vision_start|>' is not marked as EOG
+load: control token: 151651 '<|quad_end|>' is not marked as EOG
+load: control token: 151649 '<|box_end|>' is not marked as EOG
+load: control token: 151648 '<|box_start|>' is not marked as EOG
+load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
+load: control token: 151644 '<|im_start|>' is not marked as EOG
+load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
+load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
+load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+load: control token: 151660 '<|fim_middle|>' is not marked as EOG
+load: control token: 151654 '<|vision_pad|>' is not marked as EOG
+load: control token: 151650 '<|quad_start|>' is not marked as EOG
+load: printing all EOG tokens:
+load:   - 128247 ('</s>')
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 23
+load: token to piece cache size = 0.9310 MB
+print_info: arch                  = qwen2
+print_info: vocab_only            = 1
+print_info: no_alloc              = 0
+print_info: vocab type            = BPE
+print_info: n_vocab               = 151936
+print_info: n_merges              = 151387
+print_info: BOS token             = 151643 '<|endoftext|>'
+print_info: EOS token             = 151645 '<|im_end|>'
+print_info: EOT token             = 151645 '<|im_end|>'
+print_info: PAD token             = 151643 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
+print_info: FIM MID token         = 151660 '<|fim_middle|>'
+print_info: FIM PAD token         = 151662 '<|fim_pad|>'
+print_info: FIM REP token         = 151663 '<|repo_name|>'
+print_info: FIM SEP token         = 151664 '<|file_sep|>'
+print_info: EOG token             = 128247 '</s>'
+print_info: EOG token             = 151643 '<|endoftext|>'
+print_info: EOG token             = 151645 '<|im_end|>'
+print_info: EOG token             = 151662 '<|fim_pad|>'
+print_info: EOG token             = 151663 '<|repo_name|>'
+print_info: EOG token             = 151664 '<|file_sep|>'
+print_info: max token length      = 256
+llama_model_load: vocab only - skipping tensors
+[DiffKV Model] Allocated weight buffer of size 942 MB on backend: MTL0
+[DiffKV Model] output.weight is tied with token_embd.weight
+[DiffKV Model] Loaded successfully.
+── Model Config Info ──
+  n_vocab:        151936
+  n_embd:         896
+  n_layer:        24
+  n_head:         14
+  n_head_kv:      2
+  n_ff:           4864
+  n_rot:          64 (head_dim: 64)
+  rms_norm_eps:   1.000000e-06
+  rope_freq_base: 1000000.000000
+  n_ctx:          32768
+───────────────────────
+[DiffKV Native] Prompt: "warmup"
+[DiffKV Native] Prompt tokens (21): 151644 8948 198 2610 525 264 10950 17847 13 151645 198 151644 872 198 82597 454 151645 198 151644 77091 198 
+[DiffKV Native] Adaptive micro_block_size: 64 -> 16 (L=21)
+[DiffKV Native] Running Prefill phase in chunks...
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_f16', name = 'kernel_get_rows_f16'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_f16                           0x101676920 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rms_norm_mul_f32_4', name = 'kernel_rms_norm_mul_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_rms_norm_mul_f32_4                     0x1016771a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f32', name = 'kernel_mul_mm_f16_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1      0x101677a20 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0      0x1016782a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rope_neox_f32', name = 'kernel_rope_neox_f32_imrope=0'
+ggml_metal_library_compile_pipeline: loaded kernel_rope_neox_f32_imrope=0                 0x101678b20 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=64      0x101678ea0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_blk', name = 'kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64      0x101679220 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=128_ns20=128_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=128_ns20=128_nsg=4      0x1016795a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0      0x91e20c000 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=0'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=0           0x91e20c380 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0      0x91e20c700 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f16_f32_4', name = 'kernel_mul_mv_f16_f32_4_nsg=4_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f16_f32_4_nsg=4_ne12=1_r2=1_r3=1      0x91e20ce00 | th_max = 1024 | th_width =   32
+[DiffKV Native] Waiting for background SVD compressor to catch up...
+
+[Prefill Phase Top predictions]:
+  0: "Sure" (id: 39814, logit: 20.1571)
+  1: "I" (id: 40, logit: 18.3342)
+  2: "Certainly" (id: 95456, logit: 17.8178)
+  3: "Hello" (id: 9707, logit: 17.7663)
+  4: "As" (id: 2121, logit: 17.411)
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f32', name = 'kernel_cpy_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f32                            0x91e20d500 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sum_rows_f32_f32', name = 'kernel_sum_rows_f32_f32_op=11'
+ggml_metal_library_compile_pipeline: loaded kernel_sum_rows_f32_f32_op=11                 0x91e20d880 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f32_f32_4', name = 'kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1      0x91e20dc00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_l2_norm_f32_f32_4', name = 'kernel_l2_norm_f32_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_l2_norm_f32_f32_4                      0x91e20df80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_f32_i32_desc', name = 'kernel_argsort_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_f32_i32_desc                   0x91e20e300 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_merge_f32_i32_desc', name = 'kernel_argsort_merge_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_merge_f32_i32_desc             0x91e20e680 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f16_f32', name = 'kernel_cpy_f16_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f16_f32                            0x91e20ea00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_concat', name = 'kernel_concat'
+ggml_metal_library_compile_pipeline: loaded kernel_concat                                 0x91e20ed80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_f32', name = 'kernel_cpy_i32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_f32                            0x91e20f100 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_f32', name = 'kernel_get_rows_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_f32                           0x91e20f480 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32', name = 'kernel_unary_f32_f32_op=10_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_op=10_cnt=1              0x91e20f800 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_i32', name = 'kernel_cpy_f32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_i32                            0x91e20fb80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_i32', name = 'kernel_cpy_i32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_i32                            0x91e2e0000 | th_max = 1024 | th_width =   32
+[Metal Attention] Successfully initialized Metal runtime and compiled shader library.
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=1           0x91e2e0e00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0      0x91e2e1180 | th_max = 1024 | th_width =   32
+
+[Step 0 Top predictions]:
+  0: "," (id: 11, logit: 24.299)
+  1: "!" (id: 0, logit: 23.4059)
+  2: "ly" (id: 398, logit: 17.1919)
+  3: " thing" (id: 3166, logit: 16.5558)
+  4: "!
+" (id: 4894, logit: 15.7941)
+
+[Step 1 Top predictions]:
+  0: " I" (id: 358, logit: 21.4647)
+  1: " here" (id: 1588, logit: 21.3892)
+  2: " let" (id: 1077, logit: 18.9069)
+  3: " how" (id: 1246, logit: 18.7475)
+  4: " what" (id: 1128, logit: 18.4617)
+[DiffKV Native] Prompt: "Random Features for Large-Scale Kernel Machines Ali Rahimi and Ben Recht Abstract To accelerate the training of kernel machines, we propose to map the input data to a randomized low-dimensional feature space and then apply existing fast linear methods. Our randomized features are designed so that the inner products of the transformed data are approximately equal to those in the feature space of a user specified shift-invariant kernel. We explore two sets of random features, provide convergence bounds on their ability to approximate various radial basis kernels, and show that in large-scale classification and regression tasks linear machine learning algorithms that use these features outperform state-of-the-art large-scale kernel machines. 1 Introduction Kernel machines such as the Support Vector Machine are attractive because they can approximate any function or decision boundary arbitrarily well with enough training data. Unfortunately, methods that operate on the kernel matrix (Gram matrix) of the data scale poorly with the size of the training dataset. For example, a dataset with half a million training examples might take days to train on modern workstations. On the other hand, specialized algorithms for linear Support Vector Machines and regularized regression run much more quickly when the dimensionality of the data is small because they operate on the covariance matrix rather than the kernel matrix of the training data [1, 2]. We propose a way to combine the advantages of the linear and nonlinear approaches. Inspired by randomized algorithms for approximating kernel matrices (e.g., [3, 4]), we efficiently convert the training and evaluation of any kernel machine into the corresponding operations of a linear machine by mapping data into a relatively low-dimensional randomized feature space. Our experiments show that random features combined with very simple linear learning techniques compete favorably with state-of-the-art kernel-based classification and regression algorithms. Random features significantly reduce the computation needed for training, and obtain similar or better testing error. The kernel trick is a simple way to generate features for algorithms that depend only on the inner product between pairs of input points. It relies on the observation that any positive definite function k(x, y) with x, y in R^d defines an inner product and a lifting phi so that the inner product between lifted datapoints can be quickly computed as <phi(x), phi(y)> = k(x, y). The cost of this convenience is that algorithms access the data only through evaluations of k(x, y), or through the kernel matrix consisting of k applied to all pairs of datapoints. As a result, large training sets incur large computational and storage costs. Instead of relying on the implicit lifting provided by the kernel trick, we propose explicitly mapping the data to a low-dimensional Euclidean inner product space using a randomized feature map z : R^d -> R^D so that the inner product between a pair of transformed points approximates their kernel evaluation: k(x, y) = <phi(x), phi(y)> approx z(x)' z(y). (1) Unlike the kernel's lifting phi, z is low-dimensional. Thus, we can simply transform the input with z, and then apply fast linear learning methods to approximate the answer of the corresponding nonlinear kernel machine. In what follows, we show how to construct feature spaces that uniformly approximate popular shift-invariant kernels k(x - y) to within epsilon with only D = O(d^-2 log 1/epsilon) dimensions, and empirically show that excellent regression and classification performance can be obtained for even smaller D. In addition to giving us access to extremely fast learning algorithms, these randomized feature maps also provide a way to quickly evaluate the machine. With the kernel trick, evaluating the machine at a test point x requires computing f(x) = sum_{i=1}^N c_i k(x_i, x), which requires O(N d) operations to compute and requires retaining much of the dataset unless the machine is very sparse. This is often unacceptable for large datasets. On the other hand, after learning a hyperplane w, a linear machine can be evaluated by simply computing f(x) = w' z(x), which, with the randomized feature maps presented here, requires only O(D + d) operations and storage. We demonstrate two randomized feature maps for approximating shift invariant kernels. Our first randomized map, presented in Section 3, consists of sinusoids randomly drawn from the Fourier transform of the kernel function we seek to approximate. Because this map is smooth, it is wellsuited for interpolation tasks. Our second randomized map, presented in Section 4, partitions the input space using randomly shifted grids at randomly chosen resolutions. This mapping is not smooth, but leverages the proximity between input points, and is well-suited for approximating kernels that depend on the L1 distance between datapoints. Our experiments in Section 5 demonstrate that combining these randomized maps with simple linear learning algorithms competes favorably with state-of-the-art training algorithms in a variety of regression and classification scenarios. 2 Related Work The most popular methods for large-scale kernel machines are decomposition methods for solving Support Vector Machines (SVM). These methods iteratively update a subset of the kernel machine's coefficients using coordinate ascent until KKT conditions are satisfied to within a tolerance [5, 6].
+
+Summarize this abstract in one sentence."
+[DiffKV Native] Prompt tokens (1065): 151644 8948 198 2610 525 264 10950 17847 13 151645 198 151644 872 198 13999 19710 369 20286 6222 2246 36603 43904 14583 32248 24836 323 7355 1032 13920 13513 2014 42780 279 4862 315 10001 12645 11 582 29614 311 2415 279 1946 821 311 264 46241 3347 32420 4565 3550 323 1221 3796 6350 4937 13482 5413 13 5633 46241 4419 525 6188 773 429 279 9179 3871 315 279 23507 821 525 13187 6144 311 1846 304 279 4565 3550 315 264 1196 5189 6407 3419 15969 10001 13 1205 13186 1378 7289 315 4194 4419 11 3410 55441 14262 389 862 5726 311 44868 5257 56836 8037 63515 11 323 1473 429 304 3460 12934 23850 323 30549 9079 13482 5662 6832 25185 429 990 1493 4419 700 28488 1584 8668 10603 37821 3460 12934 10001 12645 13 220 16 28338 36603 12645 1741 438 279 9186 4196 12960 525 18879 1576 807 646 44868 894 729 476 5480 18732 85657 1632 448 3322 4862 821 13 18656 11 5413 429 14476 389 279 10001 6172 320 64225 6172 8 315 279 821 5452 30455 448 279 1379 315 279 4862 10337 13 1752 3110 11 264 10337 448 4279 264 3526 4862 10295 2578 1896 2849 311 5426 389 6481 975 74628 13 1913 279 1008 1424 11 27076 25185 369 13482 9186 4196 43904 323 5792 1506 30549 1598 1753 803 6157 979 279 12871 2719 315 279 821 374 2613 1576 807 14476 389 279 59308 6172 4751 1091 279 10001 6172 315 279 4862 821 508 16 11 220 17 936 1205 29614 264 1616 311 15963 279 22146 315 279 13482 323 73998 19827 13 64825 553 46241 25185 369 9848 78348 10001 35195 320 68 1302 2572 508 18 11 220 19 9719 582 29720 5508 279 4862 323 16460 315 894 10001 5662 1119 279 12159 7525 315 264 13482 5662 553 12731 821 1119 264 12040 3347 32420 46241 4565 3550 13 5633 21204 1473 429 4194 4419 10856 448 1602 4285 13482 6832 12538 20259 4694 2845 448 1584 8668 10603 37821 10001 5980 23850 323 30549 25185 13 10612 4419 11941 7949 279 34447 4362 369 4862 11 323 6851 4428 476 2664 7497 1465 13 576 10001 14068 374 264 4285 1616 311 6923 4419 369 25185 429 6761 1172 389 279 9179 1985 1948 13530 315 1946 3501 13 1084 33644 389 279 21930 429 894 6785 43770 729 595 2075 11 379 8 448 856 11 379 304 431 61 67 18653 458 9179 1985 323 264 32410 22693 773 429 279 9179 1985 1948 29731 61723 14399 646 387 6157 24182 438 366 16827 2075 701 22693 7021 16018 284 595 2075 11 379 568 576 2783 315 419 19132 374 429 25185 2615 279 821 1172 1526 55081 315 595 2075 11 379 701 476 1526 279 10001 6172 30606 315 595 9251 311 678 13530 315 61723 14399 13 1634 264 1102 11 3460 4862 7289 61522 3460 54480 323 5819 7049 13 12090 315 38561 389 279 17995 32410 3897 553 279 10001 14068 11 582 29614 20975 12731 279 821 311 264 3347 32420 21963 50078 9179 1985 3550 1667 264 46241 4565 2415 1147 549 431 61 67 1464 431 61 35 773 429 279 9179 1985 1948 264 6716 315 23507 3501 9848 47471 862 10001 16460 25 595 2075 11 379 8 284 366 16827 2075 701 22693 7021 16018 9848 1147 2075 21636 1147 7021 568 320 16 8 26048 279 10001 594 32410 22693 11 1147 374 3347 32420 13 14301 11 582 646 4936 5165 279 1946 448 1147 11 323 1221 3796 4937 13482 6832 5413 311 44868 279 4226 315 279 12159 73998 10001 5662 13 758 1128 11017 11 582 1473 1246 311 9245 4565 12621 429 77809 44868 5411 6407 3419 15969 63515 595 2075 481 379 8 311 2878 31204 448 1172 422 284 506 1500 49309 17 1487 220 16 14 31767 8 15336 11 323 37869 2673 1473 429 9073 30549 323 23850 5068 646 387 12180 369 1496 9155 422 13 758 5256 311 7086 601 2615 311 9016 4937 6832 25185 11 1493 46241 4565 14043 1083 3410 264 1616 311 6157 15442 279 5662 13 3085 279 10001 14068 11 37563 279 5662 518 264 1273 1459 856 7460 24231 282 2075 8 284 2629 15159 72 28 16 92 61 45 272 5318 595 2075 5318 11 856 701 892 7460 506 8204 294 8 7525 311 12564 323 7460 50010 1753 315 279 10337 7241 279 5662 374 1602 33444 13 1096 374 3545 42985 369 3460 29425 13 1913 279 1008 1424 11 1283 6832 264 17071 19025 289 11 264 13482 5662 646 387 25070 553 4936 24231 282 2075 8 284 289 6 1147 2075 701 892 11 448 279 46241 4565 14043 10449 1588 11 7460 1172 506 5432 488 294 8 7525 323 5819 13 1205 19869 1378 46241 4565 14043 369 9848 78348 6407 57620 63515 13 5633 1156 46241 2415 11 10449 304 11113 220 18 11 17167 315 75814 16960 26618 14764 504 279 88954 5165 315 279 10001 729 582 5931 311 44868 13 9211 419 2415 374 10876 11 432 374 1632 27051 1608 369 36487 9079 13 5633 2086 46241 2415 11 10449 304 11113 220 19 11 46688 279 1946 3550 1667 26618 28973 56349 518 26618 11882 42495 13 1096 12731 374 537 10876 11 714 27505 1134 279 36743 1948 1946 3501 11 323 374 1632 86129 1608 369 9848 78348 63515 429 6761 389 279 444 16 6010 1948 61723 14399 13 5633 21204 304 11113 220 20 19869 429 34171 1493 46241 14043 448 4285 13482 6832 25185 4533 288 4694 2845 448 1584 8668 10603 37821 4862 25185 304 264 8045 315 30549 323 23850 25283 13 220 17 24369 5547 576 1429 5411 5413 369 3460 12934 10001 12645 525 65166 5413 369 21828 9186 4196 43904 320 50 11187 568 4220 5413 5367 7887 2647 264 25993 315 279 10001 5662 594 36829 1667 16184 74989 3080 730 33539 4682 525 19527 311 2878 264 24098 508 20 11 220 21 29562 9190 5612 551 419 8115 304 825 11652 13 151645 198 151644 77091 198 
+[DiffKV Native] Running Prefill phase in chunks...
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f32', name = 'kernel_mul_mm_f16_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1      0x91e2e1500 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=128_ns20=128_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=128_ns20=128_nsg=4      0x91e2e0a80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=64_ns20=64_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=64_ns20=64_nsg=4      0x91e2e0380 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=64_ns20=64_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=64_ns20=64_nsg=4      0x91e2e1c00 | th_max = 1024 | th_width =   32
+[DiffKV Native] Waiting for background SVD compressor to catch up...
+
+[Prefill Phase Top predictions]:
+  0: "Random" (id: 13999, logit: 19.937)
+  1: "This" (id: 1986, logit: 18.6935)
+  2: "We" (id: 1654, logit: 18.426)
+  3: "The" (id: 785, logit: 18.3792)
+  4: "A" (id: 32, logit: 17.7921)
+
+[Step 0 Top predictions]:
+  0: "ized" (id: 1506, logit: 21.6462)
+  1: " features" (id: 4419, logit: 18.9196)
+  2: "ly" (id: 398, logit: 16.912)
+  3: "ization" (id: 2022, logit: 16.8729)
+  4: " feature" (id: 4565, logit: 16.2308)
+
+[Step 1 Top predictions]:
+  0: " low" (id: 3347, logit: 18.8589)
+  1: " features" (id: 4419, logit: 18.6219)
+  2: " kernel" (id: 10001, logit: 17.5914)
+  3: " kernels" (id: 63515, logit: 17.1893)
+  4: " feature" (id: 4565, logit: 16.8584)
+
+[Step 2 Top predictions]:
+  0: "-dimensional" (id: 32420, logit: 25.4796)
+  1: "-d" (id: 1737, logit: 20.9486)
+  2: "-r" (id: 3795, logit: 20.5701)
+  3: " dimensional" (id: 55887, logit: 19.7997)
+  4: "-D" (id: 9420, logit: 19.0969)
+
+[Step 3 Top predictions]:
+  0: " feature" (id: 4565, logit: 21.8603)
+  1: " features" (id: 4419, logit: 20.2192)
+  2: " kernel" (id: 10001, logit: 19.2119)
+  3: " representations" (id: 43613, logit: 17.5708)
+  4: " kernels" (id: 63515, logit: 16.9833)
+
+[Step 4 Top predictions]:
+  0: " spaces" (id: 12621, logit: 22.6244)
+  1: " space" (id: 3550, logit: 20.6044)
+  2: " maps" (id: 14043, logit: 18.7849)
+  3: "-space" (id: 27947, logit: 17.3698)
+  4: " mapping" (id: 12731, logit: 17.222)
+
+[Step 5 Top predictions]:
+  0: " are" (id: 525, logit: 20.6585)
+  1: " can" (id: 646, logit: 20.0647)
+  2: " for" (id: 369, logit: 19.4113)
+  3: " allow" (id: 2138, logit: 19.0491)
+  4: "," (id: 11, logit: 18.8732)
+
+[Step 6 Top predictions]:
+  0: " proposed" (id: 10981, logit: 22.2772)
+  1: " used" (id: 1483, logit: 19.8463)
+  2: " introduced" (id: 11523, logit: 19.7431)
+  3: " presented" (id: 10449, logit: 18.6043)
+  4: " a" (id: 264, logit: 18.5858)
+
+[Step 7 Top predictions]:
+  0: " to" (id: 311, logit: 24.5503)
+  1: " for" (id: 369, logit: 24.3768)
+  2: " as" (id: 438, logit: 23.7416)
+  3: " in" (id: 304, logit: 20.8036)
+  4: " that" (id: 429, logit: 20.2048)
+
+[Step 8 Top predictions]:
+  0: " accelerate" (id: 42780, logit: 22.92)
+  1: " speed" (id: 4628, logit: 22.2708)
+  2: " improve" (id: 7269, logit: 19.7517)
+  3: " map" (id: 2415, logit: 18.7439)
+  4: " efficiently" (id: 29720, logit: 18.1981)
+
+[Step 9 Top predictions]:
+  0: " the" (id: 279, logit: 20.6822)
+  1: " kernel" (id: 10001, logit: 20.2036)
+  2: " training" (id: 4862, logit: 19.2014)
+  3: " large" (id: 3460, logit: 19.0242)
+  4: " learning" (id: 6832, logit: 16.9817)
+
+[Step 10 Top predictions]:
+  0: " training" (id: 4862, logit: 22.4089)
+  1: " kernel" (id: 10001, logit: 18.6117)
+  2: " learning" (id: 6832, logit: 17.5877)
+  3: " computation" (id: 34447, logit: 17.1021)
+  4: " large" (id: 3460, logit: 16.7265)
+
+[Step 11 Top predictions]:
+  0: " of" (id: 315, logit: 22.765)
+  1: " and" (id: 323, logit: 18.6495)
+  2: " process" (id: 1882, logit: 18.5231)
+  3: " time" (id: 882, logit: 16.9257)
+  4: " speed" (id: 4628, logit: 16.5506)
+
+[Step 12 Top predictions]:
+  0: " kernel" (id: 10001, logit: 21.3674)
+  1: " large" (id: 3460, logit: 21.0147)
+  2: " support" (id: 1824, logit: 18.5656)
+  3: " Support" (id: 9186, logit: 17.1124)
+  4: " linear" (id: 13482, logit: 16.9317)
+
+[Step 13 Top predictions]:
+  0: " machines" (id: 12645, logit: 22.8044)
+  1: " machine" (id: 5662, logit: 19.7668)
+  2: "-based" (id: 5980, logit: 19.2367)
+  3: " methods" (id: 5413, logit: 17.4155)
+  4: " SVM" (id: 90009, logit: 16.3204)
+
+[Step 14 Top predictions]:
+  0: "," (id: 11, logit: 19.7755)
+  1: "." (id: 13, logit: 18.8305)
+  2: " and" (id: 323, logit: 18.5)
+  3: " by" (id: 553, logit: 18.441)
+  4: " that" (id: 429, logit: 17.9242)
+
+[Step 15 Top predictions]:
+  0: " allowing" (id: 10693, logit: 19.0607)
+  1: " which" (id: 892, logit: 18.8209)
+  2: " where" (id: 1380, logit: 18.7587)
+  3: " providing" (id: 8241, logit: 18.6333)
+  4: " out" (id: 700, logit: 18.3909)
+
+[Step 16 Top predictions]:
+  0: " them" (id: 1105, logit: 20.224)
+  1: " for" (id: 369, logit: 19.5046)
+  2: " inner" (id: 9179, logit: 19.225)
+  3: " their" (id: 862, logit: 17.5526)
+  4: " linear" (id: 13482, logit: 17.5314)
+
+[Step 17 Top predictions]:
+  0: " to" (id: 311, logit: 22.7085)
+  1: " access" (id: 2615, logit: 18.3215)
+  2: " out" (id: 700, logit: 17.4269)
+  3: " compete" (id: 20259, logit: 16.9076)
+  4: " in" (id: 304, logit: 16.8774)
+
+[Step 18 Top predictions]:
+  0: " approximate" (id: 44868, logit: 20.7889)
+  1: " compete" (id: 20259, logit: 19.9651)
+  2: " scale" (id: 5452, logit: 19.4192)
+  3: " efficiently" (id: 29720, logit: 18.8469)
+  4: " out" (id: 700, logit: 18.8368)
+
+[Step 19 Top predictions]:
+  0: " any" (id: 894, logit: 21.7928)
+  1: " arbitrary" (id: 24168, logit: 20.9455)
+  2: " functions" (id: 5746, logit: 20.8139)
+  3: " radial" (id: 56836, logit: 19.7402)
+  4: " various" (id: 5257, logit: 19.4645)
+
+[Step 20 Top predictions]:
+  0: " function" (id: 729, logit: 22.1842)
+  1: " desired" (id: 12685, logit: 18.2654)
+  2: " non" (id: 2477, logit: 18.0428)
+  3: " given" (id: 2661, logit: 17.6836)
+  4: " arbitrary" (id: 24168, logit: 17.4604)
+
+[Step 21 Top predictions]:
+  0: " or" (id: 476, logit: 21.8821)
+  1: " arbitrarily" (id: 85657, logit: 20.083)
+  2: " and" (id: 323, logit: 19.6493)
+  3: " with" (id: 448, logit: 19.5736)
+  4: " as" (id: 438, logit: 18.3742)
+
+[Step 22 Top predictions]:
+  0: " decision" (id: 5480, logit: 23.8433)
+  1: " boundary" (id: 18732, logit: 21.2862)
+  2: " radial" (id: 56836, logit: 18.0333)
+  3: " regression" (id: 30549, logit: 17.5777)
+  4: " linear" (id: 13482, logit: 17.3274)
+
+[Step 23 Top predictions]:
+  0: " boundary" (id: 18732, logit: 27.0706)
+  1: " boundaries" (id: 22711, logit: 20.4557)
+  2: " bound" (id: 6822, logit: 19.079)
+  3: " rule" (id: 5912, logit: 18.5873)
+  4: "-bound" (id: 49862, logit: 18.5417)
+
+[Step 24 Top predictions]:
+  0: " arbitrarily" (id: 85657, logit: 20.4205)
+  1: " with" (id: 448, logit: 19.8132)
+  2: " as" (id: 438, logit: 18.5334)
+  3: "." (id: 13, logit: 17.6744)
+  4: " well" (id: 1632, logit: 17.6628)
+
+[Step 25 Top predictions]:
+  0: " well" (id: 1632, logit: 25.886)
+  1: "." (id: 13, logit: 20.0714)
+  2: " with" (id: 448, logit: 19.9441)
+  3: " and" (id: 323, logit: 19.8394)
+  4: " accurately" (id: 29257, logit: 19.3699)
+
+[Step 26 Top predictions]:
+  0: " with" (id: 448, logit: 22.4334)
+  1: "." (id: 13, logit: 21.0484)
+  2: " using" (id: 1667, logit: 19.9738)
+  3: " while" (id: 1393, logit: 19.6782)
+  4: " and" (id: 323, logit: 19.6701)
+
+[Step 27 Top predictions]:
+  0: " enough" (id: 3322, logit: 21.4531)
+  1: " a" (id: 264, logit: 19.8397)
+  2: " sufficient" (id: 14016, logit: 19.5519)
+  3: " sufficiently" (id: 38944, logit: 18.0745)
+  4: " less" (id: 2686, logit: 17.5405)
+
+[Step 28 Top predictions]:
+  0: " data" (id: 821, logit: 23.1566)
+  1: " training" (id: 4862, logit: 22.0416)
+  2: " input" (id: 1946, logit: 19.8644)
+  3: " samples" (id: 10469, logit: 18.443)
+  4: " labeled" (id: 29829, logit: 17.8303)
+
+[Step 29 Top predictions]:
+  0: "." (id: 13, logit: 19.3477)
+  1: "<|im_end|>" (id: 151645, logit: 17.9416)
+  2: " while" (id: 1393, logit: 15.6579)
+  3: "," (id: 11, logit: 15.0685)
+  4: ";" (id: 26, logit: 14.572)
+
+[Step 30 Top predictions]:
+  0: "<|im_end|>" (id: 151645, logit: 18.1807)
+  1: " The" (id: 576, logit: 15.2898)
+  2: " Compet" (id: 25440, logit: 14.7092)
+  3: " These" (id: 4220, logit: 14.4365)
+  4: " A" (id: 362, logit: 13.8248)
+ [EOS]
+[DiffKV Native] Text generation completed successfully!
+ggml_metal_free: deallocating
+
+
+==========================================
+Running C++ binary directly with DIFFKV_FORCE_CPU_ATTN=1
+==========================================
+Finished in 3.91 seconds.
+=== STDOUT ===
+[Response] Randomized features for popular kernel machines are proposed to accelerate their training on large datasets.
+
+=== STDERR ===
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.009 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M3)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  =  5726.63 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M3
+ggml_metal_init: picking default device: Apple M3
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[DiffKV Model] Loading model from GGUF file: ./diffkv_native/qwen2.5-0.5b-instruct.gguf ...
+llama_model_loader: loaded meta data with 28 key-value pairs and 290 tensors from ./diffkv_native/qwen2.5-0.5b-instruct.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen2
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                     general.sampling.top_k i32              = 20
+llama_model_loader: - kv   3:                     general.sampling.top_p f32              = 0.800000
+llama_model_loader: - kv   4:                      general.sampling.temp f32              = 0.700000
+llama_model_loader: - kv   5:                               general.name str              = 7ae557604adf67be50417f59c2c2f167def9a775
+llama_model_loader: - kv   6:                           general.finetune str              = 7ae557604adf67be50417f59c2c2f167def9a775
+llama_model_loader: - kv   7:                         general.size_label str              = 494M
+llama_model_loader: - kv   8:                          qwen2.block_count u32              = 24
+llama_model_loader: - kv   9:                       qwen2.context_length u32              = 32768
+llama_model_loader: - kv  10:                     qwen2.embedding_length u32              = 896
+llama_model_loader: - kv  11:                  qwen2.feed_forward_length u32              = 4864
+llama_model_loader: - kv  12:                 qwen2.attention.head_count u32              = 14
+llama_model_loader: - kv  13:              qwen2.attention.head_count_kv u32              = 2
+llama_model_loader: - kv  14:                       qwen2.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  15:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  16:                          general.file_type u32              = 1
+llama_model_loader: - kv  17:               general.quantization_version u32              = 2
+llama_model_loader: - kv  18:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  19:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  20:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  21:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  22:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  23:                tokenizer.ggml.eos_token_id u32              = 151645
+llama_model_loader: - kv  24:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  25:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  26:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  27:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - type  f32:  121 tensors
+llama_model_loader: - type  f16:  169 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = F16
+print_info: file size   = 942.43 MiB (16.00 BPW) 
+llama_prepare_model_devices: using device MTL0 (Apple M3) (unknown id) - 5460 MiB free
+init_tokenizer: initializing tokenizer for type 2
+load: 0 unused tokens
+load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
+load: control token: 151656 '<|video_pad|>' is not marked as EOG
+load: control token: 151655 '<|image_pad|>' is not marked as EOG
+load: control token: 151653 '<|vision_end|>' is not marked as EOG
+load: control token: 151652 '<|vision_start|>' is not marked as EOG
+load: control token: 151651 '<|quad_end|>' is not marked as EOG
+load: control token: 151649 '<|box_end|>' is not marked as EOG
+load: control token: 151648 '<|box_start|>' is not marked as EOG
+load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
+load: control token: 151644 '<|im_start|>' is not marked as EOG
+load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
+load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
+load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+load: control token: 151660 '<|fim_middle|>' is not marked as EOG
+load: control token: 151654 '<|vision_pad|>' is not marked as EOG
+load: control token: 151650 '<|quad_start|>' is not marked as EOG
+load: printing all EOG tokens:
+load:   - 128247 ('</s>')
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 23
+load: token to piece cache size = 0.9310 MB
+print_info: arch                  = qwen2
+print_info: vocab_only            = 1
+print_info: no_alloc              = 0
+print_info: vocab type            = BPE
+print_info: n_vocab               = 151936
+print_info: n_merges              = 151387
+print_info: BOS token             = 151643 '<|endoftext|>'
+print_info: EOS token             = 151645 '<|im_end|>'
+print_info: EOT token             = 151645 '<|im_end|>'
+print_info: PAD token             = 151643 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
+print_info: FIM MID token         = 151660 '<|fim_middle|>'
+print_info: FIM PAD token         = 151662 '<|fim_pad|>'
+print_info: FIM REP token         = 151663 '<|repo_name|>'
+print_info: FIM SEP token         = 151664 '<|file_sep|>'
+print_info: EOG token             = 128247 '</s>'
+print_info: EOG token             = 151643 '<|endoftext|>'
+print_info: EOG token             = 151645 '<|im_end|>'
+print_info: EOG token             = 151662 '<|fim_pad|>'
+print_info: EOG token             = 151663 '<|repo_name|>'
+print_info: EOG token             = 151664 '<|file_sep|>'
+print_info: max token length      = 256
+llama_model_load: vocab only - skipping tensors
+[DiffKV Model] Allocated weight buffer of size 942 MB on backend: MTL0
+[DiffKV Model] output.weight is tied with token_embd.weight
+[DiffKV Model] Loaded successfully.
+── Model Config Info ──
+  n_vocab:        151936
+  n_embd:         896
+  n_layer:        24
+  n_head:         14
+  n_head_kv:      2
+  n_ff:           4864
+  n_rot:          64 (head_dim: 64)
+  rms_norm_eps:   1.000000e-06
+  rope_freq_base: 1000000.000000
+  n_ctx:          32768
+───────────────────────
+[DiffKV Native] Prompt: "warmup"
+[DiffKV Native] Prompt tokens (21): 151644 8948 198 2610 525 264 10950 17847 13 151645 198 151644 872 198 82597 454 151645 198 151644 77091 198 
+[DiffKV Native] Adaptive micro_block_size: 64 -> 16 (L=21)
+[DiffKV Native] Running Prefill phase in chunks...
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_f16', name = 'kernel_get_rows_f16'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_f16                           0x105b2e1a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rms_norm_mul_f32_4', name = 'kernel_rms_norm_mul_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_rms_norm_mul_f32_4                     0x105b2ea20 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f32', name = 'kernel_mul_mm_f16_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1      0x105b2f2a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0      0x105b2fb20 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rope_neox_f32', name = 'kernel_rope_neox_f32_imrope=0'
+ggml_metal_library_compile_pipeline: loaded kernel_rope_neox_f32_imrope=0                 0x105b303a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=64      0x105b30720 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_blk', name = 'kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64      0x105b30aa0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=128_ns20=128_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=128_ns20=128_nsg=4      0x105b30f60 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0      0xb82648000 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=0'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=0           0xb82648380 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0      0xb82648700 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f16_f32_4', name = 'kernel_mul_mv_f16_f32_4_nsg=4_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f16_f32_4_nsg=4_ne12=1_r2=1_r3=1      0xb82648e00 | th_max = 1024 | th_width =   32
+[DiffKV Native] Waiting for background SVD compressor to catch up...
+
+[Prefill Phase Top predictions]:
+  0: "Sure" (id: 39814, logit: 20.1571)
+  1: "I" (id: 40, logit: 18.3342)
+  2: "Certainly" (id: 95456, logit: 17.8178)
+  3: "Hello" (id: 9707, logit: 17.7663)
+  4: "As" (id: 2121, logit: 17.411)
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f32', name = 'kernel_cpy_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f32                            0xb82649500 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sum_rows_f32_f32', name = 'kernel_sum_rows_f32_f32_op=11'
+ggml_metal_library_compile_pipeline: loaded kernel_sum_rows_f32_f32_op=11                 0xb82649880 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f32_f32_4', name = 'kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1      0xb82649c00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_l2_norm_f32_f32_4', name = 'kernel_l2_norm_f32_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_l2_norm_f32_f32_4                      0xb82649f80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_f32_i32_desc', name = 'kernel_argsort_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_f32_i32_desc                   0xb8264a300 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_merge_f32_i32_desc', name = 'kernel_argsort_merge_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_merge_f32_i32_desc             0xb8264a680 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f16_f32', name = 'kernel_cpy_f16_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f16_f32                            0xb8264aa00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_concat', name = 'kernel_concat'
+ggml_metal_library_compile_pipeline: loaded kernel_concat                                 0xb8264ad80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_f32', name = 'kernel_cpy_i32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_f32                            0xb8264b100 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_f32', name = 'kernel_get_rows_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_f32                           0xb8264b480 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32', name = 'kernel_unary_f32_f32_op=10_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_op=10_cnt=1              0xb8264b800 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_i32', name = 'kernel_cpy_f32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_i32                            0xb8264bb80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_i32', name = 'kernel_cpy_i32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_i32                            0xb827a4000 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=1           0xb827a4a80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0      0xb827a4e00 | th_max = 1024 | th_width =   32
+
+[Step 0 Top predictions]:
+  0: "," (id: 11, logit: 24.299)
+  1: "!" (id: 0, logit: 23.4059)
+  2: "ly" (id: 398, logit: 17.1918)
+  3: " thing" (id: 3166, logit: 16.5558)
+  4: "!
+" (id: 4894, logit: 15.7941)
+
+[Step 1 Top predictions]:
+  0: " I" (id: 358, logit: 21.4647)
+  1: " here" (id: 1588, logit: 21.3892)
+  2: " let" (id: 1077, logit: 18.9069)
+  3: " how" (id: 1246, logit: 18.7475)
+  4: " what" (id: 1128, logit: 18.4616)
+[DiffKV Native] Prompt: "Random Features for Large-Scale Kernel Machines Ali Rahimi and Ben Recht Abstract To accelerate the training of kernel machines, we propose to map the input data to a randomized low-dimensional feature space and then apply existing fast linear methods. Our randomized features are designed so that the inner products of the transformed data are approximately equal to those in the feature space of a user specified shift-invariant kernel. We explore two sets of random features, provide convergence bounds on their ability to approximate various radial basis kernels, and show that in large-scale classification and regression tasks linear machine learning algorithms that use these features outperform state-of-the-art large-scale kernel machines. 1 Introduction Kernel machines such as the Support Vector Machine are attractive because they can approximate any function or decision boundary arbitrarily well with enough training data. Unfortunately, methods that operate on the kernel matrix (Gram matrix) of the data scale poorly with the size of the training dataset. For example, a dataset with half a million training examples might take days to train on modern workstations. On the other hand, specialized algorithms for linear Support Vector Machines and regularized regression run much more quickly when the dimensionality of the data is small because they operate on the covariance matrix rather than the kernel matrix of the training data [1, 2]. We propose a way to combine the advantages of the linear and nonlinear approaches. Inspired by randomized algorithms for approximating kernel matrices (e.g., [3, 4]), we efficiently convert the training and evaluation of any kernel machine into the corresponding operations of a linear machine by mapping data into a relatively low-dimensional randomized feature space. Our experiments show that random features combined with very simple linear learning techniques compete favorably with state-of-the-art kernel-based classification and regression algorithms. Random features significantly reduce the computation needed for training, and obtain similar or better testing error. The kernel trick is a simple way to generate features for algorithms that depend only on the inner product between pairs of input points. It relies on the observation that any positive definite function k(x, y) with x, y in R^d defines an inner product and a lifting phi so that the inner product between lifted datapoints can be quickly computed as <phi(x), phi(y)> = k(x, y). The cost of this convenience is that algorithms access the data only through evaluations of k(x, y), or through the kernel matrix consisting of k applied to all pairs of datapoints. As a result, large training sets incur large computational and storage costs. Instead of relying on the implicit lifting provided by the kernel trick, we propose explicitly mapping the data to a low-dimensional Euclidean inner product space using a randomized feature map z : R^d -> R^D so that the inner product between a pair of transformed points approximates their kernel evaluation: k(x, y) = <phi(x), phi(y)> approx z(x)' z(y). (1) Unlike the kernel's lifting phi, z is low-dimensional. Thus, we can simply transform the input with z, and then apply fast linear learning methods to approximate the answer of the corresponding nonlinear kernel machine. In what follows, we show how to construct feature spaces that uniformly approximate popular shift-invariant kernels k(x - y) to within epsilon with only D = O(d^-2 log 1/epsilon) dimensions, and empirically show that excellent regression and classification performance can be obtained for even smaller D. In addition to giving us access to extremely fast learning algorithms, these randomized feature maps also provide a way to quickly evaluate the machine. With the kernel trick, evaluating the machine at a test point x requires computing f(x) = sum_{i=1}^N c_i k(x_i, x), which requires O(N d) operations to compute and requires retaining much of the dataset unless the machine is very sparse. This is often unacceptable for large datasets. On the other hand, after learning a hyperplane w, a linear machine can be evaluated by simply computing f(x) = w' z(x), which, with the randomized feature maps presented here, requires only O(D + d) operations and storage. We demonstrate two randomized feature maps for approximating shift invariant kernels. Our first randomized map, presented in Section 3, consists of sinusoids randomly drawn from the Fourier transform of the kernel function we seek to approximate. Because this map is smooth, it is wellsuited for interpolation tasks. Our second randomized map, presented in Section 4, partitions the input space using randomly shifted grids at randomly chosen resolutions. This mapping is not smooth, but leverages the proximity between input points, and is well-suited for approximating kernels that depend on the L1 distance between datapoints. Our experiments in Section 5 demonstrate that combining these randomized maps with simple linear learning algorithms competes favorably with state-of-the-art training algorithms in a variety of regression and classification scenarios. 2 Related Work The most popular methods for large-scale kernel machines are decomposition methods for solving Support Vector Machines (SVM). These methods iteratively update a subset of the kernel machine's coefficients using coordinate ascent until KKT conditions are satisfied to within a tolerance [5, 6].
+
+Summarize this abstract in one sentence."
+[DiffKV Native] Prompt tokens (1065): 151644 8948 198 2610 525 264 10950 17847 13 151645 198 151644 872 198 13999 19710 369 20286 6222 2246 36603 43904 14583 32248 24836 323 7355 1032 13920 13513 2014 42780 279 4862 315 10001 12645 11 582 29614 311 2415 279 1946 821 311 264 46241 3347 32420 4565 3550 323 1221 3796 6350 4937 13482 5413 13 5633 46241 4419 525 6188 773 429 279 9179 3871 315 279 23507 821 525 13187 6144 311 1846 304 279 4565 3550 315 264 1196 5189 6407 3419 15969 10001 13 1205 13186 1378 7289 315 4194 4419 11 3410 55441 14262 389 862 5726 311 44868 5257 56836 8037 63515 11 323 1473 429 304 3460 12934 23850 323 30549 9079 13482 5662 6832 25185 429 990 1493 4419 700 28488 1584 8668 10603 37821 3460 12934 10001 12645 13 220 16 28338 36603 12645 1741 438 279 9186 4196 12960 525 18879 1576 807 646 44868 894 729 476 5480 18732 85657 1632 448 3322 4862 821 13 18656 11 5413 429 14476 389 279 10001 6172 320 64225 6172 8 315 279 821 5452 30455 448 279 1379 315 279 4862 10337 13 1752 3110 11 264 10337 448 4279 264 3526 4862 10295 2578 1896 2849 311 5426 389 6481 975 74628 13 1913 279 1008 1424 11 27076 25185 369 13482 9186 4196 43904 323 5792 1506 30549 1598 1753 803 6157 979 279 12871 2719 315 279 821 374 2613 1576 807 14476 389 279 59308 6172 4751 1091 279 10001 6172 315 279 4862 821 508 16 11 220 17 936 1205 29614 264 1616 311 15963 279 22146 315 279 13482 323 73998 19827 13 64825 553 46241 25185 369 9848 78348 10001 35195 320 68 1302 2572 508 18 11 220 19 9719 582 29720 5508 279 4862 323 16460 315 894 10001 5662 1119 279 12159 7525 315 264 13482 5662 553 12731 821 1119 264 12040 3347 32420 46241 4565 3550 13 5633 21204 1473 429 4194 4419 10856 448 1602 4285 13482 6832 12538 20259 4694 2845 448 1584 8668 10603 37821 10001 5980 23850 323 30549 25185 13 10612 4419 11941 7949 279 34447 4362 369 4862 11 323 6851 4428 476 2664 7497 1465 13 576 10001 14068 374 264 4285 1616 311 6923 4419 369 25185 429 6761 1172 389 279 9179 1985 1948 13530 315 1946 3501 13 1084 33644 389 279 21930 429 894 6785 43770 729 595 2075 11 379 8 448 856 11 379 304 431 61 67 18653 458 9179 1985 323 264 32410 22693 773 429 279 9179 1985 1948 29731 61723 14399 646 387 6157 24182 438 366 16827 2075 701 22693 7021 16018 284 595 2075 11 379 568 576 2783 315 419 19132 374 429 25185 2615 279 821 1172 1526 55081 315 595 2075 11 379 701 476 1526 279 10001 6172 30606 315 595 9251 311 678 13530 315 61723 14399 13 1634 264 1102 11 3460 4862 7289 61522 3460 54480 323 5819 7049 13 12090 315 38561 389 279 17995 32410 3897 553 279 10001 14068 11 582 29614 20975 12731 279 821 311 264 3347 32420 21963 50078 9179 1985 3550 1667 264 46241 4565 2415 1147 549 431 61 67 1464 431 61 35 773 429 279 9179 1985 1948 264 6716 315 23507 3501 9848 47471 862 10001 16460 25 595 2075 11 379 8 284 366 16827 2075 701 22693 7021 16018 9848 1147 2075 21636 1147 7021 568 320 16 8 26048 279 10001 594 32410 22693 11 1147 374 3347 32420 13 14301 11 582 646 4936 5165 279 1946 448 1147 11 323 1221 3796 4937 13482 6832 5413 311 44868 279 4226 315 279 12159 73998 10001 5662 13 758 1128 11017 11 582 1473 1246 311 9245 4565 12621 429 77809 44868 5411 6407 3419 15969 63515 595 2075 481 379 8 311 2878 31204 448 1172 422 284 506 1500 49309 17 1487 220 16 14 31767 8 15336 11 323 37869 2673 1473 429 9073 30549 323 23850 5068 646 387 12180 369 1496 9155 422 13 758 5256 311 7086 601 2615 311 9016 4937 6832 25185 11 1493 46241 4565 14043 1083 3410 264 1616 311 6157 15442 279 5662 13 3085 279 10001 14068 11 37563 279 5662 518 264 1273 1459 856 7460 24231 282 2075 8 284 2629 15159 72 28 16 92 61 45 272 5318 595 2075 5318 11 856 701 892 7460 506 8204 294 8 7525 311 12564 323 7460 50010 1753 315 279 10337 7241 279 5662 374 1602 33444 13 1096 374 3545 42985 369 3460 29425 13 1913 279 1008 1424 11 1283 6832 264 17071 19025 289 11 264 13482 5662 646 387 25070 553 4936 24231 282 2075 8 284 289 6 1147 2075 701 892 11 448 279 46241 4565 14043 10449 1588 11 7460 1172 506 5432 488 294 8 7525 323 5819 13 1205 19869 1378 46241 4565 14043 369 9848 78348 6407 57620 63515 13 5633 1156 46241 2415 11 10449 304 11113 220 18 11 17167 315 75814 16960 26618 14764 504 279 88954 5165 315 279 10001 729 582 5931 311 44868 13 9211 419 2415 374 10876 11 432 374 1632 27051 1608 369 36487 9079 13 5633 2086 46241 2415 11 10449 304 11113 220 19 11 46688 279 1946 3550 1667 26618 28973 56349 518 26618 11882 42495 13 1096 12731 374 537 10876 11 714 27505 1134 279 36743 1948 1946 3501 11 323 374 1632 86129 1608 369 9848 78348 63515 429 6761 389 279 444 16 6010 1948 61723 14399 13 5633 21204 304 11113 220 20 19869 429 34171 1493 46241 14043 448 4285 13482 6832 25185 4533 288 4694 2845 448 1584 8668 10603 37821 4862 25185 304 264 8045 315 30549 323 23850 25283 13 220 17 24369 5547 576 1429 5411 5413 369 3460 12934 10001 12645 525 65166 5413 369 21828 9186 4196 43904 320 50 11187 568 4220 5413 5367 7887 2647 264 25993 315 279 10001 5662 594 36829 1667 16184 74989 3080 730 33539 4682 525 19527 311 2878 264 24098 508 20 11 220 21 29562 9190 5612 551 419 8115 304 825 11652 13 151645 198 151644 77091 198 
+[DiffKV Native] Running Prefill phase in chunks...
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f32', name = 'kernel_mul_mm_f16_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1      0xb827a4700 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=128_ns20=128_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=128_ns20=128_nsg=4      0xb827a5500 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=64_ns20=64_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=64_ns20=64_nsg=4      0xb827a4380 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk64_dv64', name = 'kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=64_ns20=64_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk64_dv64_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=64_ns20=64_nsg=4      0xb827a5880 | th_max = 1024 | th_width =   32
+[DiffKV Native] Waiting for background SVD compressor to catch up...
+
+[Prefill Phase Top predictions]:
+  0: "Random" (id: 13999, logit: 19.937)
+  1: "This" (id: 1986, logit: 18.6935)
+  2: "We" (id: 1654, logit: 18.426)
+  3: "The" (id: 785, logit: 18.3792)
+  4: "A" (id: 32, logit: 17.7921)
+
+[Step 0 Top predictions]:
+  0: "ized" (id: 1506, logit: 20.6407)
+  1: " features" (id: 4419, logit: 18.5575)
+  2: "ly" (id: 398, logit: 17.305)
+  3: " feature" (id: 4565, logit: 16.9921)
+  4: "ization" (id: 2022, logit: 16.709)
+
+[Step 1 Top predictions]:
+  0: " features" (id: 4419, logit: 19.7493)
+  1: " low" (id: 3347, logit: 18.2275)
+  2: " feature" (id: 4565, logit: 18.1666)
+  3: " maps" (id: 14043, logit: 16.7334)
+  4: " linear" (id: 13482, logit: 16.4085)
+
+[Step 2 Top predictions]:
+  0: " for" (id: 369, logit: 20.8581)
+  1: " are" (id: 525, logit: 20.563)
+  2: "," (id: 11, logit: 19.4359)
+  3: " map" (id: 2415, logit: 18.9867)
+  4: " have" (id: 614, logit: 18.4741)
+
+[Step 3 Top predictions]:
+  0: " popular" (id: 5411, logit: 21.4251)
+  1: " large" (id: 3460, logit: 20.1892)
+  2: " kernel" (id: 10001, logit: 19.9606)
+  3: " fast" (id: 4937, logit: 18.1861)
+  4: " linear" (id: 13482, logit: 17.0544)
+
+[Step 4 Top predictions]:
+  0: " kernel" (id: 10001, logit: 21.1595)
+  1: " large" (id: 3460, logit: 18.3162)
+  2: " machine" (id: 5662, logit: 18.2834)
+  3: " kernels" (id: 63515, logit: 18.0345)
+  4: " linear" (id: 13482, logit: 17.258)
+
+[Step 5 Top predictions]:
+  0: " machines" (id: 12645, logit: 21.4982)
+  1: "-based" (id: 5980, logit: 20.8475)
+  2: " machine" (id: 5662, logit: 20.5946)
+  3: " methods" (id: 5413, logit: 19.4497)
+  4: " learning" (id: 6832, logit: 18.9905)
+
+[Step 6 Top predictions]:
+  0: " are" (id: 525, logit: 18.2999)
+  1: " compete" (id: 20259, logit: 17.9172)
+  2: " can" (id: 646, logit: 17.7535)
+  3: "," (id: 11, logit: 17.4899)
+  4: " like" (id: 1075, logit: 17.1713)
+
+[Step 7 Top predictions]:
+  0: " proposed" (id: 10981, logit: 21.1515)
+  1: " competitive" (id: 14680, logit: 19.6669)
+  2: " designed" (id: 6188, logit: 19.2202)
+  3: " shown" (id: 6839, logit: 18.9053)
+  4: " compared" (id: 7707, logit: 18.8861)
+
+[Step 8 Top predictions]:
+  0: " to" (id: 311, logit: 22.961)
+  1: "," (id: 11, logit: 22.8106)
+  2: " that" (id: 429, logit: 22.318)
+  3: " and" (id: 323, logit: 20.7412)
+  4: " as" (id: 438, logit: 20.6905)
+
+[Step 9 Top predictions]:
+  0: " accelerate" (id: 42780, logit: 21.4303)
+  1: " speed" (id: 4628, logit: 21.0136)
+  2: " scale" (id: 5452, logit: 19.4869)
+  3: " map" (id: 2415, logit: 18.7469)
+  4: " improve" (id: 7269, logit: 18.7426)
+
+[Step 10 Top predictions]:
+  0: " their" (id: 862, logit: 20.8886)
+  1: " training" (id: 4862, logit: 20.3779)
+  2: " the" (id: 279, logit: 20.1659)
+  3: " dataset" (id: 10337, logit: 19.3797)
+  4: " data" (id: 821, logit: 17.941)
+
+[Step 11 Top predictions]:
+  0: " training" (id: 4862, logit: 22.8785)
+  1: " use" (id: 990, logit: 18.3734)
+  2: " dataset" (id: 10337, logit: 18.1841)
+  3: " learning" (id: 6832, logit: 17.9501)
+  4: " large" (id: 3460, logit: 17.8268)
+
+[Step 12 Top predictions]:
+  0: " on" (id: 389, logit: 20.4274)
+  1: "," (id: 11, logit: 19.9049)
+  2: " and" (id: 323, logit: 19.1412)
+  3: "." (id: 13, logit: 19.1197)
+  4: " by" (id: 553, logit: 18.8553)
+
+[Step 13 Top predictions]:
+  0: " large" (id: 3460, logit: 21.9737)
+  1: " high" (id: 1550, logit: 18.8209)
+  2: " datasets" (id: 29425, logit: 18.4235)
+  3: " a" (id: 264, logit: 18.399)
+  4: " popular" (id: 5411, logit: 18.238)
+
+[Step 14 Top predictions]:
+  0: " datasets" (id: 29425, logit: 21.2956)
+  1: "-scale" (id: 12934, logit: 19.259)
+  2: " data" (id: 821, logit: 18.0583)
+  3: " dataset" (id: 10337, logit: 17.9578)
+  4: "," (id: 11, logit: 16.6931)
+
+[Step 15 Top predictions]:
+  0: "." (id: 13, logit: 19.9817)
+  1: "," (id: 11, logit: 19.2041)
+  2: " by" (id: 553, logit: 18.4076)
+  3: " and" (id: 323, logit: 17.0915)
+  4: " while" (id: 1393, logit: 16.9825)
+
+[Step 16 Top predictions]:
+  0: "<|im_end|>" (id: 151645, logit: 17.4346)
+  1: " Popular" (id: 31395, logit: 16.7221)
+  2: " These" (id: 4220, logit: 15.4957)
+  3: " The" (id: 576, logit: 15.3823)
+  4: " They" (id: 2379, logit: 14.2907)
+ [EOS]
+[DiffKV Native] Text generation completed successfully!
+ggml_metal_free: deallocating
+

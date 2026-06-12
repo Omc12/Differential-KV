@@ -88,7 +88,7 @@ kernel void decode_attention_metal_kernel(
     threadgroup float scores_anc_cached[64];  // Anchor scores cache (≤ 64 blocks)
     threadgroup float q_proj_cached[64 * 32]; // q_proj cache (≤ 64 blocks × rank ≤ 32)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
-    threadgroup float dense_weights[512];     // Dense window attention weights [T_dense ≤ 512]
+    threadgroup float dense_weights[1024];     // Dense window attention weights [T_dense ≤ 1024]
 
     // 1. Cache the query into shared memory
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {
@@ -188,8 +188,7 @@ kernel void decode_attention_metal_kernel(
     }
 
     // 1b. Dense window tokens — exact per-token RoPE
-    int T_dense_clamped = min(T_dense, 512);  // cap at shared buffer size
-    for (int t = (int)tid; t < T_dense_clamped; t += (int)t_per_tg) {
+    for (int t = (int)tid; t < T_dense; t += (int)t_per_tg) {
         int pos    = dense_positions[t];
         int base_k = t * n_kv_heads * D + kv_head * D;
         float score = 0.0f;
@@ -358,43 +357,50 @@ kernel void decode_attention_metal_kernel(
     }
 
     // 2b. Dense window tokens
-    if (T_dense_clamped > 0) {
-        // Step A: compute dense weight for each token t (thread t writes dense_weights[t])
-        for (int t = (int)tid; t < T_dense_clamped; t += (int)t_per_tg) {
-            int pos    = dense_positions[t];
-            int base_k = t * n_kv_heads * D + kv_head * D;
-            float score = 0.0f;
-            for (int d = 0; d < D; ++d) {
-                float raw_k = dense_K[base_k + d];
-                float k_rot;
-                if (has_rope) {
-                    int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                    int   idx     = (d < half_d) ? d : (d - half_d);
-                    float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
-                    float angle   = pos * theta;
-                    float c = cos(angle), s = sin(angle);
-                    float raw_p = dense_K[base_k + partner];
-                    float rot_c = (d < half_d) ? -raw_p : raw_p;
-                    k_rot = raw_k * c + rot_c * s;
-                } else {
-                    k_rot = raw_k;
-                }
-                score += q_shared[d] * k_rot;
-            }
-            dense_weights[t] = exp(score * scale - global_m) / max(global_d, 1e-9f);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (T_dense > 0) {
+        const int CHUNK_SIZE = 1024;
+        for (int chunk_start = 0; chunk_start < T_dense; chunk_start += CHUNK_SIZE) {
+            int chunk_end = min(chunk_start + CHUNK_SIZE, T_dense);
+            int chunk_len = chunk_end - chunk_start;
 
-        // Step B: each thread owns d-dimensions d=tid, tid+t_per_tg, ...
-        //         Accumulate: thread_val[d] += sum_t(dense_weights[t] * dense_V[t, d])
-        for (int d = (int)tid; d < D; d += (int)t_per_tg) {
-            float val_accum = 0.0f;
-            for (int t = 0; t < T_dense_clamped; ++t) {
-                val_accum += dense_weights[t] * dense_V[t * n_kv_heads * D + kv_head * D + d];
+            // Step A: compute dense weight for each token in this chunk
+            for (int t = (int)tid; t < chunk_len; t += (int)t_per_tg) {
+                int global_t = chunk_start + t;
+                int pos    = dense_positions[global_t];
+                int base_k = global_t * n_kv_heads * D + kv_head * D;
+                float score = 0.0f;
+                for (int d = 0; d < D; ++d) {
+                    float raw_k = dense_K[base_k + d];
+                    float k_rot;
+                    if (has_rope) {
+                        int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        int   idx     = (d < half_d) ? d : (d - half_d);
+                        float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                        float angle   = pos * theta;
+                        float c = cos(angle), s = sin(angle);
+                        float raw_p = dense_K[base_k + partner];
+                        float rot_c = (d < half_d) ? -raw_p : raw_p;
+                        k_rot = raw_k * c + rot_c * s;
+                    } else {
+                        k_rot = raw_k;
+                    }
+                    score += q_shared[d] * k_rot;
+                }
+                dense_weights[t] = exp(score * scale - global_m) / max(global_d, 1e-9f);
             }
-            thread_val[d] += val_accum;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Step B: Accumulate for the current chunk
+            for (int d = (int)tid; d < D; d += (int)t_per_tg) {
+                float val_accum = 0.0f;
+                for (int t = 0; t < chunk_len; ++t) {
+                    int global_t = chunk_start + t;
+                    val_accum += dense_weights[t] * dense_V[global_t * n_kv_heads * D + kv_head * D + d];
+                }
+                thread_val[d] += val_accum;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     // Write fully combined (sparse + dense) output
