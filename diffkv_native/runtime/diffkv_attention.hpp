@@ -54,6 +54,7 @@ struct CustomAttnUserData {
     void * mtl_seq_lens = nullptr;
     void * mtl_scales = nullptr;
     void * mtl_anc_pos = nullptr;
+    int last_seen_pool_version = -1;
 
     CustomAttnUserData();
     ~CustomAttnUserData();
@@ -97,5 +98,7 @@ void custom_attention_op_callback(
     int nth,
     void * userdata
 );
+
+double get_and_reset_accumulated_wait_ms();
 
 } // namespace diffkv

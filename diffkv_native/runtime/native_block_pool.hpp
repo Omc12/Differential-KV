@@ -48,6 +48,9 @@ public:
     void upload_slot(int slot_id);
     void download_slot(int slot_id);
 
+    int get_pool_version() const { return pool_version_.load(); }
+    void increment_pool_version() { pool_version_.fetch_add(1); }
+
     // Host mirror getters
     const int8_t* get_host_U() const { return host_U_.data(); }
     int8_t* get_host_U() { return host_U_.data(); }
@@ -109,6 +112,7 @@ private:
     // Slot allocator state
     std::vector<int> free_slots_;
     std::mutex slot_mutex_;
+    std::atomic<int> pool_version_{0};
 };
 
 } // namespace diffkv

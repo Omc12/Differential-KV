@@ -102,6 +102,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         free_slots_.push_back(i);
     }
 
+    pool_version_.store(0);
     return true;
 }
 
@@ -130,6 +131,7 @@ void NativeBlockPool::reset_slots() {
         state_table_.force_invalidate(i);
         free_slots_.push_back(i);
     }
+    increment_pool_version();
 }
 
 int NativeBlockPool::get_free_slots_count() {
@@ -189,6 +191,7 @@ void NativeBlockPool::zero_all_tensors() {
         std::vector<int32_t> zeros(ggml_nelements(anchor_positions_), 0);
         ggml_backend_tensor_set(anchor_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
     }
+    increment_pool_version();
 }
 
 void NativeBlockPool::upload_slot(int slot_id) {
@@ -203,6 +206,7 @@ void NativeBlockPool::upload_slot(int slot_id) {
     ggml_backend_tensor_set(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
     ggml_backend_tensor_set(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(anchor_positions_, host_anchor_positions_.data() + slot_id, slot_id * anchor_positions_->nb[0], sizeof(int32_t));
+    increment_pool_version();
 }
 
 void NativeBlockPool::download_slot(int slot_id) {

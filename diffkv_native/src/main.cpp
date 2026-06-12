@@ -1,4 +1,5 @@
 #include <iostream>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -395,7 +396,13 @@ struct ggml_cgraph * build_decode_graph(
     struct ggml_tensor ** out_logits,
     struct ggml_tensor ** out_selected_slots,
     struct ggml_tensor ** out_concat_k = nullptr,
-    struct ggml_tensor ** out_concat_v = nullptr
+    struct ggml_tensor ** out_concat_v = nullptr,
+    bool use_sparse = true,
+    int T_past = 0,
+    int engage_threshold = 2048,
+    struct ggml_tensor ** dense_k_past_inputs = nullptr,
+    struct ggml_tensor ** dense_v_past_inputs = nullptr,
+    struct ggml_tensor * dense_attn_mask = nullptr
 ) {
     const auto & config = model.get_config();
     struct ggml_cgraph * gf = ggml_new_graph(ctx);
@@ -444,59 +451,105 @@ struct ggml_cgraph * build_decode_graph(
             ggml_build_forward_expand(gf, copy_v);
         }
 
-        // ── SRL Routing Pipeline at Layer 0 ──
-        if (l == 0) {
-            int head_dim = config.n_embd / config.n_head;
-            // Reshape Q: [896, 1] -> [head_dim, n_head] = [64, 14]
-            struct ggml_tensor * Q = ggml_reshape_2d(ctx, q, head_dim, config.n_head);
+        struct ggml_tensor * attn_out = nullptr;
 
-            // Compute query descriptor: [desc_dim, 1]
-            struct ggml_tensor * q_desc = compute_query_desc(ctx, Q, W_proj);
+        if (use_sparse) {
+            // ── SRL Routing Pipeline at Layer 0 ──
+            if (l == 0) {
+                int head_dim = config.n_embd / config.n_head;
+                // Reshape Q: [896, 1] -> [head_dim, n_head] = [64, 14]
+                struct ggml_tensor * Q = ggml_reshape_2d(ctx, q, head_dim, config.n_head);
 
-            // Semantic search topk: [srl_k_semantic, 1]
-            struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
-            struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, srl_k_semantic);
+                // Compute query descriptor: [desc_dim, 1]
+                struct ggml_tensor * q_desc = compute_query_desc(ctx, Q, W_proj);
 
-            // Concatenate semantic and host slots
-            struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
+                // Semantic search topk: [srl_k_semantic, 1]
+                struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
+                struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, srl_k_semantic);
 
-            // Anchor screening: [srl_k_keep]
-            float scale = 1.0f / std::sqrt((float)head_dim);
-            selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, srl_k_keep));
+                // Concatenate semantic and host slots
+                struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
 
-            // Save selected slots to out parameter
-            if (out_selected_slots) {
-                *out_selected_slots = selected_slots;
+                // Anchor screening: [srl_k_keep]
+                float scale = 1.0f / std::sqrt((float)head_dim);
+                selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, srl_k_keep));
+
+                // Save selected slots to out parameter
+                if (out_selected_slots) {
+                    *out_selected_slots = selected_slots;
+                }
+
+                // Make sure the selected slots are computed in the graph
+                ggml_build_forward_expand(gf, selected_slots);
             }
 
-            // Make sure the selected slots are computed in the graph
-            ggml_build_forward_expand(gf, selected_slots);
-        }
+            // Apply RoPE to Q for the custom Metal kernel!
+            int head_dim = config.n_embd / config.n_head;
+            struct ggml_tensor * q_reshaped = ggml_reshape_3d(ctx, q, head_dim, config.n_head, 1);
+            struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            struct ggml_tensor * q_rope_flat = ggml_reshape_1d(ctx, q_rope, config.n_embd);
 
-        // Apply RoPE to Q for the custom Metal kernel!
-        int head_dim = config.n_embd / config.n_head;
-        struct ggml_tensor * q_reshaped = ggml_reshape_3d(ctx, q, head_dim, config.n_head, 1);
-        struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        struct ggml_tensor * q_rope_flat = ggml_reshape_1d(ctx, q_rope, config.n_embd);
-
-        // Debug graph build prints removed (moved to stderr, only if needed)
-
-        struct ggml_tensor * attn_out = nullptr;
-        if (userdata && selected_slots) {
-            struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
-            // Reconstruct attention output using the custom Metal kernel!
-            struct ggml_tensor * custom_attn = ggml_map_custom3(
-                ctx, q_rope_flat, selected_slots, kv_concat,
-                custom_attention_op_callback, 1, &userdata[l]
-            );
-            attn_out = custom_attn;
+            if (userdata && selected_slots) {
+                struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
+                // Reconstruct attention output using the custom Metal kernel!
+                struct ggml_tensor * custom_attn = ggml_map_custom3(
+                    ctx, q_rope_flat, selected_slots, kv_concat,
+                    custom_attention_op_callback, 1, &userdata[l]
+                );
+                attn_out = custom_attn;
+            } else {
+                // Fallback placeholder attention
+                struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, config.n_embd / config.n_head, 1, config.n_head_kv);
+                int group_size = config.n_head / config.n_head_kv;
+                struct ggml_tensor * target_repeat = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, config.n_embd / config.n_head, group_size, config.n_head_kv);
+                struct ggml_tensor * v_repeated = ggml_repeat(ctx, v_reshaped, target_repeat);
+                attn_out = ggml_reshape_1d(ctx, v_repeated, config.n_embd);
+            }
         } else {
-            // Fallback placeholder attention
-            struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, config.n_embd / config.n_head, 1, config.n_head_kv);
-            int group_size = config.n_head / config.n_head_kv;
-            struct ggml_tensor * target_repeat = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, config.n_embd / config.n_head, group_size, config.n_head_kv);
-            struct ggml_tensor * v_repeated = ggml_repeat(ctx, v_reshaped, target_repeat);
-            attn_out = ggml_reshape_1d(ctx, v_repeated, config.n_embd);
+            // ── Dense attention fast-path with ggml_flash_attn_ext! ──
+            int head_dim_val = config.n_embd / config.n_head;
+
+            // Create the large past input tensors in the graph context
+            if (dense_k_past_inputs && dense_v_past_inputs) {
+                if (dense_k_past_inputs[l] == nullptr) {
+                    dense_k_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim_val, config.n_head_kv, engage_threshold);
+                    ggml_set_input(dense_k_past_inputs[l]);
+                }
+                if (dense_v_past_inputs[l] == nullptr) {
+                    dense_v_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim_val, config.n_head_kv, engage_threshold);
+                    ggml_set_input(dense_v_past_inputs[l]);
+                }
+            }
+
+            struct ggml_tensor * k_past = dense_k_past_inputs[l];
+            struct ggml_tensor * v_past = dense_v_past_inputs[l];
+
+            // Permute current token
+            struct ggml_tensor * q_reshaped = ggml_reshape_3d(ctx, q, head_dim_val, config.n_head, 1);
+            struct ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k, head_dim_val, config.n_head_kv, 1);
+
+            struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            struct ggml_tensor * k_rope = ggml_rope_ext(ctx, k_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+            struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
+            struct ggml_tensor * k_perm = ggml_permute(ctx, k_rope, 0, 2, 1, 3);
+            struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim_val, config.n_head_kv, 1);
+            struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
+
+            // Permute past
+            struct ggml_tensor * pk = ggml_permute(ctx, k_past, 0, 2, 1, 3);
+            struct ggml_tensor * pv = ggml_permute(ctx, v_past, 0, 2, 1, 3);
+
+            // Concat
+            struct ggml_tensor * k_ctx_perm = ggml_concat(ctx, pk, k_perm, 1);
+            struct ggml_tensor * v_ctx_perm = ggml_concat(ctx, pv, v_perm, 1);
+
+            // Flash attention
+            float scale_val = 1.0f / std::sqrt((float)head_dim_val);
+            struct ggml_tensor * attn_out_perm = ggml_flash_attn_ext(ctx, q_perm, k_ctx_perm, v_ctx_perm, dense_attn_mask, scale_val, 0.0f, 0.0f);
+            ggml_flash_attn_ext_set_prec(attn_out_perm, GGML_PREC_F32);
+
+            attn_out = ggml_reshape_2d(ctx, attn_out_perm, config.n_embd, 1);
         }
 
         // 5. Output Projection (WO)
@@ -946,6 +999,7 @@ int main(int argc, char ** argv) {
     // Allocate persistent dense vectors and tables
     int F_test = kv_heads * head_dim;
     std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
+    std::vector<diffkv::AlignedFloatVector> active_k_dense_rotated(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
     std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
     diffkv::AlignedInt32Vector active_positions_dense(16384, 0);
     int total_positions = 0;
@@ -1587,6 +1641,34 @@ int main(int argc, char ** argv) {
         // Resources already freed inside the chunk loop
 
         // ── 2. DECODE PHASE — rebuild decode graph fresh (avoids sched-ctx pointer corruption) ──
+        int engage_threshold = 2048;
+        if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+            engage_threshold = std::stoi(env_et);
+        }
+        bool decode_use_sparse = (L >= engage_threshold);
+
+        if (!decode_use_sparse) {
+            int half_dim = head_dim / 2;
+            std::vector<float> cos_table_full(L * half_dim);
+            std::vector<float> sin_table_full(L * half_dim);
+            for (int t = 0; t < L; ++t) {
+                for (int i = 0; i < half_dim; ++i) {
+                    float theta = (float)t / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
+                    cos_table_full[t * half_dim + i] = std::cos(theta);
+                    sin_table_full[t * half_dim + i] = std::sin(theta);
+                }
+            }
+            for (int l = 0; l < n_layers; ++l) {
+                apply_rope_neox_cpu_fast(
+                    k_activations[l].data(),
+                    active_k_dense_rotated[l].data(),
+                    cos_table_full.data(),
+                    sin_table_full.data(),
+                    L, kv_heads, head_dim
+                );
+            }
+        }
+
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << "[DiffKV Native] Building fresh decode graph..." << std::flush;
         }
@@ -1617,6 +1699,8 @@ int main(int argc, char ** argv) {
         ggml_set_input(slots_mask_decode);
         struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
         ggml_set_input(host_slots_decode);
+        struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
+        ggml_set_input(dense_attn_mask_decode);
 
 #ifdef __APPLE__
         bool approx = true;
@@ -1625,8 +1709,6 @@ int main(int argc, char ** argv) {
 #endif
         if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
             approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0 || std::strcmp(env_approx, "yes") == 0 || std::strcmp(env_approx, "on") == 0);
-        } else {
-            // Also check for 0/false/no/off to disable
         }
 
         std::vector<diffkv::CustomAttnUserData> userdata(n_layers);
@@ -1645,7 +1727,7 @@ int main(int argc, char ** argv) {
             userdata[l].has_rope = true;
             userdata[l].rope_freq_base = model.get_config().rope_freq_base;
             userdata[l].approximate_attn = approx;
-            userdata[l].ignore_c = false;
+            userdata[l].ignore_c = true;
         }
 
         struct ggml_tensor * decode_logits = nullptr;
@@ -1653,13 +1735,32 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * decode_concat_k = nullptr;
         struct ggml_tensor * decode_concat_v = nullptr;
 
+        struct ggml_init_params dense_past_params = {
+            /*.mem_size   =*/ 4 * 1024 * 1024,
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        struct ggml_context * dense_past_ctx = ggml_init(dense_past_params);
+        std::vector<struct ggml_tensor *> dense_k_past_inputs(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> dense_v_past_inputs(n_layers, nullptr);
+        for (int l = 0; l < n_layers; ++l) {
+            dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+            ggml_set_input(dense_k_past_inputs[l]);
+            dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+            ggml_set_input(dense_v_past_inputs[l]);
+        }
+        ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
+
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
             kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
             slots_mask_decode, host_slots_decode,
             srl_k_semantic, srl_k_keep,
             userdata.data(), &decode_logits, &decode_selected_slots,
-            &decode_concat_k, &decode_concat_v
+            &decode_concat_k, &decode_concat_v,
+            decode_use_sparse, L, engage_threshold,
+            dense_k_past_inputs.data(), dense_v_past_inputs.data(),
+            dense_attn_mask_decode
         );
         ggml_set_output(decode_logits);
         if (decode_selected_slots) ggml_set_output(decode_selected_slots);
@@ -1669,6 +1770,11 @@ int main(int argc, char ** argv) {
         ggml_backend_sched_reset(sched);
         if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
         if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
+        for (int l = 0; l < n_layers; ++l) {
+            if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
+            if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+        }
+        if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
         if (!ggml_backend_sched_alloc_graph(sched, decode_graph)) {
             // Always emit sentinels so the gateway doesn't hang waiting for __RESPONSE__
             if (interactive) {
@@ -1679,7 +1785,9 @@ int main(int argc, char ** argv) {
             ggml_free(decode_ctx);
             if (!interactive) break; else continue;
         }
-        ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
+        if (decode_use_sparse) {
+            ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
+        }
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << " OK" << std::endl;
         }
@@ -1844,16 +1952,139 @@ int main(int argc, char ** argv) {
             total_positions = curr_pos_idx;
         }
 
+        if (!decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                total_dense_tokens[l] = L;
+                std::memcpy(active_k_dense[l].data(), k_activations[l].data(), L * F_test * sizeof(float));
+                std::memcpy(active_v_dense[l].data(), v_activations[l].data(), L * F_test * sizeof(float));
+            }
+            for (int i = 0; i < L; ++i) {
+                active_positions_dense[i] = i;
+            }
+            total_positions = L;
+        }
+
+        const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
+        bool time_decode = (env_td && std::string(env_td) == "1");
+
         for (int step = 0; step < max_generate; ++step) {
+            auto t_step_start = std::chrono::high_resolution_clock::now();
             if (active_slot >= n_slots) {
                 std::cerr << "\n[DiffKV Native] Warning: Context slot capacity reached during decode. Stopping generation." << std::endl;
                 break;
             }
             int current_pos = L + step;
 
+            bool step_use_sparse = (current_pos >= engage_threshold);
+            bool rebuild_needed = (step_use_sparse != decode_use_sparse);
+            if (rebuild_needed) {
+                decode_use_sparse = step_use_sparse;
+                ggml_free(decode_ctx);
+                decode_ctx = ggml_init(decode_params);
+                if (!decode_ctx) {
+                    std::cerr << "\n[ERROR] Failed to re-initialize decode context!" << std::endl;
+                    break;
+                }
+                
+                input_token_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, 1);
+                ggml_set_input(input_token_decode);
+                position_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, 1);
+                ggml_set_input(position_decode);
+                W_proj_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F32, head_dim, desc_dim);
+                ggml_set_input(W_proj_decode);
+                slots_mask_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_F32, n_slots);
+                ggml_set_input(slots_mask_decode);
+                host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
+                ggml_set_input(host_slots_decode);
+                dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
+                ggml_set_input(dense_attn_mask_decode);
+                
+                // Reuse persistent dense K/V input tensors allocated in dense_past_ctx
+                
+                decode_logits = nullptr;
+                decode_selected_slots = nullptr;
+                decode_concat_k = nullptr;
+                decode_concat_v = nullptr;
+                
+                decode_graph = build_decode_graph(
+                    decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
+                    kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
+                    slots_mask_decode, host_slots_decode,
+                    srl_k_semantic, srl_k_keep,
+                    userdata.data(), &decode_logits, &decode_selected_slots,
+                    &decode_concat_k, &decode_concat_v,
+                    decode_use_sparse, current_pos, engage_threshold,
+                    dense_k_past_inputs.data(), dense_v_past_inputs.data(),
+                    dense_attn_mask_decode
+                );
+                ggml_set_output(decode_logits);
+                if (decode_selected_slots) ggml_set_output(decode_selected_slots);
+                if (decode_concat_k) ggml_set_output(decode_concat_k);
+                if (decode_concat_v) ggml_set_output(decode_concat_v);
+                
+                ggml_backend_sched_reset(sched);
+                if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
+                if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
+                for (int l = 0; l < n_layers; ++l) {
+                    if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
+                    if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+                }
+                if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+                if (!ggml_backend_sched_alloc_graph(sched, decode_graph)) {
+                    std::cerr << "Error: Decode graph reallocation failed" << std::endl;
+                    break;
+                }
+                if (decode_use_sparse) {
+                    ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
+                }
+            }
+
             ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
             ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
 
+            if (!decode_use_sparse) {
+                for (int l = 0; l < n_layers; ++l) {
+                    if (dense_k_past_inputs[l] && dense_v_past_inputs[l]) {
+                        if (step == 0) {
+                            ggml_backend_tensor_set(
+                                dense_k_past_inputs[l],
+                                active_k_dense_rotated[l].data(),
+                                0,
+                                current_pos * F_test * sizeof(float)
+                            );
+                            ggml_backend_tensor_set(
+                                dense_v_past_inputs[l],
+                                active_v_dense[l].data(),
+                                0,
+                                current_pos * F_test * sizeof(float)
+                            );
+                        } else {
+                            int prev_idx = current_pos - 1;
+                            ggml_backend_tensor_set(
+                                dense_k_past_inputs[l],
+                                active_k_dense_rotated[l].data() + prev_idx * F_test,
+                                prev_idx * F_test * sizeof(float),
+                                F_test * sizeof(float)
+                            );
+                            ggml_backend_tensor_set(
+                                dense_v_past_inputs[l],
+                                active_v_dense[l].data() + prev_idx * F_test,
+                                prev_idx * F_test * sizeof(float),
+                                F_test * sizeof(float)
+                            );
+                        }
+                    }
+                }
+                std::vector<ggml_fp16_t> dense_mask_host(engage_threshold + 1);
+                for (int i = 0; i < engage_threshold + 1; ++i) {
+                    float val = (i < current_pos || i == engage_threshold) ? 0.0f : -1e10f;
+                    dense_mask_host[i] = ggml_fp32_to_fp16(val);
+                }
+                ggml_backend_tensor_set(dense_attn_mask_decode, dense_mask_host.data(), 0, (engage_threshold + 1) * sizeof(ggml_fp16_t));
+            }
+
+            auto t_before_retrieval = std::chrono::high_resolution_clock::now();
+            auto t_after_retrieval = t_before_retrieval;
             // ── Throttled retrieval ─────────────────────────────────────────
             // Only re-run route_decode_slots every `retrieval_interval` steps.
             // Between re-routes, reuse the cached block list — retrieval results
@@ -1890,6 +2121,7 @@ int main(int argc, char ** argv) {
                     for (int32_t s : srl_state.sink_blocks) std::cerr << s << " ";
                     std::cerr << std::endl;
                 }
+                t_after_retrieval = std::chrono::high_resolution_clock::now();
             }
             std::vector<int32_t> routed_blocks = cached_routed_blocks;
             std::vector<int32_t> physical_candidates = cached_physical_candidates;
@@ -1897,7 +2129,9 @@ int main(int argc, char ** argv) {
             // Touch blocks to ensure CPU Resident blocks are reloaded to GPU
             runtime_manager.touch_active_slots(routed_blocks);
 
-            ggml_backend_tensor_set(host_slots_decode, physical_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+            if (decode_use_sparse) {
+                ggml_backend_tensor_set(host_slots_decode, physical_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+            }
 
             std::vector<float> slots_mask_host(n_slots, -1e10f);
             int occupied_up_to = active_slot - 1;
@@ -1912,7 +2146,9 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
-            ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
+            if (decode_use_sparse) {
+                ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
+            }
 
             int current_k = std::max(0, std::min(srl_k_keep, active_slot));
             
@@ -1934,13 +2170,16 @@ int main(int argc, char ** argv) {
             }
 
 
+            auto t_before_compute = std::chrono::high_resolution_clock::now();
             if (ggml_backend_sched_graph_compute(sched, decode_graph) != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
                 break;
             }
+            auto t_after_compute = std::chrono::high_resolution_clock::now();
 
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+            auto t_after_logits = std::chrono::high_resolution_clock::now();
 
             float rep_penalty = repetition_penalty;
             auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
@@ -2005,10 +2244,12 @@ int main(int argc, char ** argv) {
             all_tokens.push_back(next_token);
             last_token = next_token;
 
+            auto t_before_kv_get = std::chrono::high_resolution_clock::now();
             std::vector<float> concat_k_host(n_layers * F_test);
             std::vector<float> concat_v_host(n_layers * F_test);
             ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
             ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
+            auto t_after_kv_get = std::chrono::high_resolution_clock::now();
 
             std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
             std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
@@ -2019,17 +2260,53 @@ int main(int argc, char ** argv) {
             
             runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens);
 
+            // Compute cos/sin for the current token position: current_pos
+            int half_dim = head_dim / 2;
+            std::vector<float> cos_tok(half_dim);
+            std::vector<float> sin_tok(half_dim);
+            for (int i = 0; i < half_dim; ++i) {
+                float theta = (float)current_pos / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
+                cos_tok[i] = std::cos(theta);
+                sin_tok[i] = std::sin(theta);
+            }
+
             // Manual append newly ingested token to host-side dense resident buffers
             for (int l = 0; l < n_layers; ++l) {
                 int offset = total_dense_tokens[l] * F_test;
                 if (offset + F_test <= (int)active_k_dense[l].size()) {
                     std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
                     std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+
+                    apply_rope_neox_cpu_fast(
+                        decode_k[l].data(),
+                        active_k_dense_rotated[l].data() + offset,
+                        cos_tok.data(),
+                        sin_tok.data(),
+                        1, kv_heads, head_dim
+                    );
+
                     total_dense_tokens[l]++;
                 }
             }
             if (total_positions < (int)active_positions_dense.size()) {
                 active_positions_dense[total_positions++] = current_pos;
+            }
+            auto t_step_end = std::chrono::high_resolution_clock::now();
+
+            if (time_decode) {
+                double total_ms = std::chrono::duration<double, std::milli>(t_step_end - t_step_start).count();
+                double retrieval_ms = std::chrono::duration<double, std::milli>(t_after_retrieval - t_before_retrieval).count();
+                double compute_ms = std::chrono::duration<double, std::milli>(t_after_compute - t_before_compute).count();
+                double logits_ms = std::chrono::duration<double, std::milli>(t_after_logits - t_after_compute).count();
+                double kv_get_ms = std::chrono::duration<double, std::milli>(t_after_kv_get - t_before_kv_get).count();
+                double ingest_ms = std::chrono::duration<double, std::milli>(t_step_end - t_after_kv_get).count();
+                double metal_wait_ms = diffkv::get_and_reset_accumulated_wait_ms();
+                std::cerr << "[Timing Step " << step << "] Retrieval: " << retrieval_ms 
+                          << "ms | Compute: " << compute_ms 
+                          << "ms (Metal Wait: " << metal_wait_ms << "ms) | Logits: " << logits_ms 
+                          << "ms | KV Get: " << kv_get_ms 
+                          << "ms | Ingest: " << ingest_ms 
+                          << "ms | Total: " << total_ms << "ms" << std::endl;
             }
 
             int old_active_slot = active_slot;
@@ -2156,6 +2433,36 @@ int main(int argc, char ** argv) {
                     }
                     total_positions = curr_pos_idx;
                 }
+
+                // Rebuild active_k_dense_rotated for all layers
+                int num_dense = total_positions;
+                if (num_dense > 0) {
+                    int half_dim = head_dim / 2;
+                    std::vector<float> cos_table_rebuild(num_dense * half_dim);
+                    std::vector<float> sin_table_rebuild(num_dense * half_dim);
+                    for (int t = 0; t < num_dense; ++t) {
+                        int pos = active_positions_dense[t];
+                        for (int i = 0; i < half_dim; ++i) {
+                            float theta = (float)pos / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
+                            cos_table_rebuild[t * half_dim + i] = std::cos(theta);
+                            sin_table_rebuild[t * half_dim + i] = std::sin(theta);
+                        }
+                    }
+                    for (int l = 0; l < n_layers; ++l) {
+                        std::fill(active_k_dense_rotated[l].begin(), active_k_dense_rotated[l].end(), 0.0f);
+                        apply_rope_neox_cpu_fast(
+                            active_k_dense[l].data(),
+                            active_k_dense_rotated[l].data(),
+                            cos_table_rebuild.data(),
+                            sin_table_rebuild.data(),
+                            num_dense, kv_heads, head_dim
+                        );
+                    }
+                } else {
+                    for (int l = 0; l < n_layers; ++l) {
+                        std::fill(active_k_dense_rotated[l].begin(), active_k_dense_rotated[l].end(), 0.0f);
+                    }
+                }
             }
         }
         if (!is_warmup_run) {
@@ -2170,6 +2477,8 @@ int main(int argc, char ** argv) {
 
         // Free decode context — must happen before next iteration rebuilds it
         ggml_free(decode_ctx);
+        ggml_backend_buffer_free(dense_past_buffer);
+        ggml_free(dense_past_ctx);
 
         if (is_warmup_run) {
             is_warmup_run = false;
