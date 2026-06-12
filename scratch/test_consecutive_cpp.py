@@ -22,11 +22,13 @@ p = subprocess.Popen(
     env=env
 )
 
-# Read stderr in background
+# Read stderr in background and write to file
 import threading
+f_err = open("scratch/stderr_reuse.log", "wb")
 def read_stderr():
     for line in p.stderr:
-        pass # suppress stderr for cleaner comparison output
+        f_err.write(line)
+        f_err.flush()
 
 threading.Thread(target=read_stderr, daemon=True).start()
 
@@ -111,6 +113,14 @@ p_base = subprocess.Popen(
     bufsize=0,
     env=env
 )
+
+f_base_err = open("scratch/stderr_base.log", "wb")
+def read_base_stderr():
+    for line in p_base.stderr:
+        f_base_err.write(line)
+        f_base_err.flush()
+
+threading.Thread(target=read_base_stderr, daemon=True).start()
 
 buffer = b""
 while True:

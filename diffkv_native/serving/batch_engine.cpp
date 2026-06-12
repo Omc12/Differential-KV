@@ -1305,10 +1305,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
         
         // Construct filtered penalty tokens matching Python runtime logic
+        bool loop_detected = req->repetition_loop_detected;
+        int penalty_window = loop_detected ? 256 : 64;
+        float penalty_val = loop_detected ? std::max(req->repetition_penalty, 1.3f) : req->repetition_penalty;
         std::vector<int32_t> penalty_tokens;
-        float penalty_val = req->repetition_penalty;
+
         bool prompt_penalty_active = (!prompt_tokens.empty() && req->generated_tokens.size() < 8);
-        if (prompt_penalty_active) {
+        if (!loop_detected && prompt_penalty_active) {
             penalty_val = std::max(penalty_val, 1.15f);
         }
 
@@ -1334,8 +1337,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 return has_alnum;
             };
 
-            // 1. Add generated tokens (last 64)
-            int gen_start = std::max(0, (int)req->generated_tokens.size() - 64);
+            // 1. Add generated tokens (last penalty_window)
+            int gen_start = std::max(0, (int)req->generated_tokens.size() - penalty_window);
             for (size_t i = gen_start; i < req->generated_tokens.size(); ++i) {
                 int32_t tok = req->generated_tokens[i];
                 if (is_alphanumeric_token(tok)) {
@@ -1344,7 +1347,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
 
             // 2. Add prompt tokens (last 512) if prompt penalty is active
-            if (prompt_penalty_active) {
+            if (!loop_detected && prompt_penalty_active) {
                 int prompt_start = std::max(0, (int)prompt_tokens.size() - 512);
                 for (size_t i = prompt_start; i < prompt_tokens.size(); ++i) {
                     int32_t tok = prompt_tokens[i];
@@ -1472,6 +1475,69 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         last_token = next_token;
         req->generated_tokens.push_back(next_token);
         all_tokens.push_back(next_token);
+
+        // ── Repetition-loop detection (Fix 2) ────────────────────────────────
+        // Check for n-gram loops every 10 tokens after the minimum warm-up period.
+        int n_new = (int)req->generated_tokens.size();
+        if (!req->repetition_loop_detected && n_new >= 30 && n_new % 10 == 0) {
+            int window_size = std::min(80, n_new);
+            if (window_size >= 6) {
+                std::vector<int32_t> window(req->generated_tokens.end() - window_size, req->generated_tokens.end());
+                
+                struct Ngram5 {
+                    int32_t tokens[5];
+                    bool operator==(const Ngram5& other) const {
+                        return tokens[0] == other.tokens[0] &&
+                               tokens[1] == other.tokens[1] &&
+                               tokens[2] == other.tokens[2] &&
+                               tokens[3] == other.tokens[3] &&
+                               tokens[4] == other.tokens[4];
+                    }
+                };
+                
+                std::vector<std::pair<Ngram5, int>> counts;
+                int total_ngrams = window_size - 5 + 1;
+                for (int i = 0; i < total_ngrams; ++i) {
+                    Ngram5 ng;
+                    for (int j = 0; j < 5; ++j) {
+                        ng.tokens[j] = window[i + j];
+                    }
+                    bool found = false;
+                    for (auto& p : counts) {
+                        if (p.first == ng) {
+                            p.second++;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        counts.push_back({ng, 1});
+                    }
+                }
+                
+                int max_count = 0;
+                for (const auto& p : counts) {
+                    if (p.second > max_count) {
+                        max_count = p.second;
+                    }
+                }
+                
+                if (total_ngrams > 0 && (float)max_count / total_ngrams >= 0.35f) {
+                    req->repetition_loop_detected = true;
+                    req->loop_detection_idx = n_new;
+                    std::cout << "[DiffKV C++] WARNING: repetition loop detected for session "
+                              << req->session_id << " at token " << n_new
+                              << ". Escalating penalty window to 256 tokens and strength to 1.3x." << std::endl;
+                }
+            }
+        }
+        
+        // If a loop persists for more than 40 tokens after detection, terminate early.
+        if (req->repetition_loop_detected && n_new - req->loop_detection_idx >= 40) {
+            std::cout << "[DiffKV C++] WARNING: repetition loop for session " << req->session_id
+                      << " persisted for 40 tokens after detection — forcing EOS." << std::endl;
+            break;
+        }
     }
     
     // Update prefix cache for multi-turn reuse

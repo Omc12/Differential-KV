@@ -5,10 +5,75 @@ import json
 import uuid
 import time
 import threading
+import re
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+
+def _normalize_references(text: str) -> str:
+    """Normalise citation-list formatting inconsistencies produced by the model."""
+    lines = text.split('\n')
+    
+    # 1. Search for a reference header line
+    header_re = re.compile(r'\b(references?|bibliography|works\s+cited|reference\s+list|sources|citations)\b', re.IGNORECASE)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if len(line) <= 100 and header_re.search(line):
+            header_idx = i
+    
+    # 2. Find matching reference entries
+    ref_entry_re = re.compile(r'^(?:[iI]n\s+)?(?:[*\-•]\s*)?\[\d+\]')
+    unambiguous_re = re.compile(r'^(?:[*\-•]\s*)?\[\d+\]')
+    
+    matching_indices = []
+    unambiguous_indices = []
+    for i, line in enumerate(lines):
+        if header_idx is not None and i <= header_idx:
+            continue
+        stripped = line.strip()
+        if ref_entry_re.match(stripped):
+            matching_indices.append(i)
+            if unambiguous_re.match(stripped):
+                unambiguous_indices.append(i)
+                
+    if header_idx is not None and not matching_indices:
+        matching_indices = []
+        unambiguous_indices = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if ref_entry_re.match(stripped):
+                matching_indices.append(i)
+                if unambiguous_re.match(stripped):
+                    unambiguous_indices.append(i)
+        header_idx = None
+
+    if not matching_indices:
+        return text
+        
+    if header_idx is not None:
+        ref_start_idx = header_idx + 1
+    elif unambiguous_indices:
+        ref_start_idx = unambiguous_indices[0]
+    else:
+        return text
+                
+    body = '\n'.join(lines[:ref_start_idx])
+    ref_block = '\n'.join(lines[ref_start_idx:])
+    
+    pattern = re.compile(
+        r'^\s*'
+        r'(?:[iI]n\s+)?'
+        r'(?:[*\-•]\s*)?'
+        r'(\[\d+\])'
+        r'(?:,\s*|\.\s*|\s+)?',
+        re.MULTILINE
+    )
+    normalized_ref_block = pattern.sub(r'\1 ', ref_block)
+    
+    if body:
+        return body + '\n' + normalized_ref_block
+    return normalized_ref_block
 
 app = FastAPI(title="DiffKV C++ Native API Server")
 
@@ -561,9 +626,10 @@ async def chat_completions(request: ChatCompletionRequest):
                 else:
                     parts.append(str(item))
             full_response = "".join(parts)
+            normalized_response = _normalize_references(full_response)
             if not is_ephemeral:
-                wrapper.session_prompt_text[session_id] = user_prompt + full_response
-            return full_response
+                wrapper.session_prompt_text[session_id] = user_prompt + normalized_response
+            return normalized_response
 
     if request.stream:
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
