@@ -39,10 +39,12 @@ input_ids -> HF model forward
 | `native_core/streaming_sparse_ingest.py` | Sparse-first prefill ingest |
 | `native_core/compression/async_compressor.py` | Background SVD thread pool |
 | `native_core/compression/lowrank.py` | SVD low-rank compression |
-| `native_core/sparse_decode/triton_sparse_attn.py` | Triton fused decode kernel |
-| `native_core/sparse_decode/triton_diffkv.py` | Triton reconstruction kernel |
+| `native_core/srl/attention_cache.py` | Head-level query cosine reuse cache |
+| `native_core/srl/chunk_graph.py` | Block-to-block similarity graph construction |
+| `native_core/srl/query_router.py` | Hierarchical graph-based semantic query routing |
+| `native_core/sparse_decode/triton_fused_decode.py` | Triton fused decode kernel / PyTorch fallback attention |
 | `runtime/native_block_pool.py` | Contiguous GPU pool |
-| `runtime/diffkv_attention.py` | HF model attention patch |
+| `runtime/diffkv_attention.py` | HF model attention monkey-patch |
 | `serving/hf_diffkv_wrapper.py` | Model wrapper + generate() |
 | `serving/batch_engine.py` | Continuous batching engine |
 | `serving/openai_compatible_api_gateway.py` | OpenAI-compatible API |

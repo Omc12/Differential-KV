@@ -844,32 +844,41 @@ def _pytorch_vectorized_sparse_attn_decode(
         has_rope = (anchor_indices is not None and cos is not None and sin is not None)
 
         if not approximate_attn and has_rope:
-            # ── Exact reconstruction + exact per-token RoPE ──
-            # 1. Reconstruct unrotated keys: [N, S_comp, H_q, D]
-            K_recon_unrot = anchors_K_fp32.unsqueeze(1) + scales.float().unsqueeze(-1) * torch.einsum('nsr,nrhd->nshd', U_fp32, V_K_fp32)
-
-            # 2. Get absolute positions for compressed tokens: [N, S_comp]
+            # ── Project-Then-Attend formulation with exact per-token RoPE ──
+            # 1. Get absolute positions for compressed tokens: [N, S_comp]
             positions = anchor_indices.unsqueeze(1) + 1 + torch.arange(block_capacity, device=q.device).unsqueeze(0)
 
             cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
             sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
             positions_clamped = positions.clamp(min=0, max=cos_flat.shape[0] - 1)
 
-            # 3. Gather cos/sin and rotate: shape [N, S_comp, 1, D]
-            cos_seq = cos_flat[positions_clamped].to(device=K_recon_unrot.device, dtype=K_recon_unrot.dtype).unsqueeze(2)
-            sin_seq = sin_flat[positions_clamped].to(device=K_recon_unrot.device, dtype=K_recon_unrot.dtype).unsqueeze(2)
+            # 2. Gather cos/sin: shape [N, S_comp, 1, D]
+            cos_seq = cos_flat[positions_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
+            sin_seq = sin_flat[positions_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
 
-            K_recon_rot = K_recon_unrot * cos_seq + rotate_half(K_recon_unrot) * sin_seq
+            # 3. Rotate query backwards for each token position: [N, S_comp, H_q, D]
+            # q_rot(n, s, h, d) = q_sq * cos_seq - rotate_half(q_sq) * sin_seq
+            q_rot = q_sq_fp32.unsqueeze(0).unsqueeze(1) * cos_seq - rotate_half(q_sq_fp32.unsqueeze(0).unsqueeze(1)) * sin_seq
 
-            # 4. Rotate anchor keys exactly
+            # 4. Project rotated query to anchors: [H_q, N, S_comp]
+            term1 = torch.einsum('nshd,nhd->hns', q_rot, anchors_K_fp32) * inv_scale
+
+            # 5. Project rotated query to V_K: [N, S_comp, H_q, R]
+            q_proj = torch.einsum('nshd,nrhd->nshr', q_rot, V_K_fp32) * inv_scale
+
+            # 6. Inner product with U: [H_q, N, S_comp]
+            term2 = torch.einsum('nshr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
+
+            # 7. Total score for blocks
+            scores_block = term1 + term2
+
+            # 8. Rotate anchor keys exactly for the anchor-only scores
             anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
             cos_anc = cos_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
             sin_anc = sin_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
             anchors_K_rot = anchors_K_fp32 * cos_anc + rotate_half(anchors_K_fp32) * sin_anc
 
-            # 5. Compute exact scores
             scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_rot) * inv_scale
-            scores_block = torch.einsum('hd,nshd->hns', q_sq_fp32, K_recon_rot) * inv_scale
         else:
             # ── Project-Then-Attend formulation (zero-reconstruction, zero dense VRAM) ──
             # exact anchor score: [H_q, N]

@@ -1902,31 +1902,17 @@ class KVRuntimeManager:
             v_list.append(block.anchor_kv[:, 1].unsqueeze(2))
 
             if block.U is not None and block.V is not None:
-                # Check reconstruction cache first
-                cached_k, cached_v = None, None
-                if getattr(self, "recon_cache", None) is not None:
-                    cached_k, cached_v = self.recon_cache.get(block)
-                if cached_k is not None:
-                    k_list.append(cached_k)
-                    v_list.append(cached_v)
-                else:
-                    anchor_flat = block.anchor_kv.reshape(-1).to(torch.float16)
-                    recon = TritonDiffKV.reconstruct_lowrank(
-                        block.U, block.V, anchor_flat, scale=block.scale
-                    )
-                    hds  = block.anchor_kv.shape[2]
-                    hdim = block.anchor_kv.shape[3]
-                    recon = recon.view(1, -1, 2, hds, hdim)
-                    # Use .contiguous().clone() so the cached tensors are fully independent:
-                    # .transpose() creates non-contiguous views, and without cloning they'd
-                    # alias reconstruct_lowrank's output which may be reused by a future call.
-                    recon_k = recon[:, :, 0].transpose(1, 2).contiguous().clone()
-                    recon_v = recon[:, :, 1].transpose(1, 2).contiguous().clone()
-                    # Cache for reuse
-                    if getattr(self, "recon_cache", None) is not None:
-                        self.recon_cache.put(block, recon_k, recon_v)
-                    k_list.append(recon_k)
-                    v_list.append(recon_v)
+                anchor_flat = block.anchor_kv.reshape(-1).to(torch.float16)
+                recon = TritonDiffKV.reconstruct_lowrank(
+                    block.U, block.V, anchor_flat, scale=block.scale
+                )
+                hds  = block.anchor_kv.shape[2]
+                hdim = block.anchor_kv.shape[3]
+                recon = recon.view(1, -1, 2, hds, hdim)
+                recon_k = recon[:, :, 0].transpose(1, 2).contiguous().clone()
+                recon_v = recon[:, :, 1].transpose(1, 2).contiguous().clone()
+                k_list.append(recon_k)
+                v_list.append(recon_v)
 
             if block.active_k is not None:
                 k_list.append(block.active_k)
@@ -2002,10 +1988,7 @@ class KVRuntimeManager:
             last_block.active_k = torch.cat([last_block.active_k, curr_k], dim=2)
             last_block.active_v = torch.cat([last_block.active_v, curr_v], dim=2)
 
-        # Invalidate recon cache for this block since active_k changed
-        recon_cache = getattr(self, "recon_cache", None)
-        if recon_cache is not None:
-            recon_cache.invalidate(last_block)
+
 
         # Compress oldest full dense blocks outside the recency window
         full_dense = [
@@ -2281,8 +2264,6 @@ class KVRuntimeManager:
 
     def runtime_summary(self) -> dict:
         pager_s = self.pager.summary()
-        recon_cache = getattr(self, "recon_cache", None)
-        recon_s = recon_cache.summary() if recon_cache is not None else {}
         comp_s  = self._compressor.summary()
         avg_cos   = (self.total_cosine_sim / max(1, self.total_compressions))
         avg_drift = (self.total_norm_drift  / max(1, self.total_compressions))
@@ -2295,7 +2276,6 @@ class KVRuntimeManager:
             "fixed_rank":            self.rank,
             "rank_histogram":        dict(sorted(self.rank_histogram.items())),
             "pager":                 pager_s,
-            "recon_cache":           recon_s,
             "async_compressor":      comp_s,
         }
 
@@ -2340,7 +2320,6 @@ class KVRuntimeManager:
         self._streaming_mgr = None
         self.tokenizer = None
         self.pager = None
-        self.recon_cache = None
 
     def __del__(self):
         self.close()

@@ -39,8 +39,32 @@ class ChunkGraph:
     neighbors: torch.Tensor   # [N, MAX_NEIGHBORS] int32, CPU-resident
     weights:   Optional[torch.Tensor] = None   # [N, MAX_NEIGHBORS] float32, CPU-resident
     parent_landmarks: Optional[torch.Tensor] = None  # [L] int32 CPU-resident pool slot IDs of chunk parents
-    parent_to_children: Optional[dict] = None        # parent slot ID -> list of child slot IDs
-    slot_to_parent: Optional[dict] = None            # slot ID -> parent slot ID
+    parent_to_children_tensor: Optional[torch.Tensor] = None  # [max_slot + 1, max_children] int32, CPU-resident, padded with -1
+    slot_to_parent_tensor: Optional[torch.Tensor] = None      # [max_slot + 1] int32, CPU-resident, padded with -1
+
+    # Backwards compatibility properties
+    @property
+    def parent_to_children(self) -> dict:
+        if self.parent_to_children_tensor is None:
+            return {}
+        d = {}
+        for parent in range(self.parent_to_children_tensor.shape[0]):
+            row = self.parent_to_children_tensor[parent]
+            children = row[row != -1].tolist()
+            if children:
+                d[parent] = children
+        return d
+
+    @property
+    def slot_to_parent(self) -> dict:
+        if self.slot_to_parent_tensor is None:
+            return {}
+        d = {}
+        for slot in range(self.slot_to_parent_tensor.shape[0]):
+            parent = int(self.slot_to_parent_tensor[slot].item())
+            if parent != -1:
+                d[slot] = parent
+        return d
 
 
 def build_chunk_graph(
@@ -69,10 +93,19 @@ def build_chunk_graph(
     """
     N = desc_matrix.shape[0]
 
+    # Find max slot ID dynamically
+    max_slot = 0
+    if slot_ids.numel() > 0:
+        max_slot = max(max_slot, int(slot_ids.max().item()))
+    if blocks:
+        for b in blocks:
+            if getattr(b, "pool_idx", None) is not None:
+                max_slot = max(max_slot, int(b.pool_idx))
+
     # Initialize hierarchical fields
     parent_landmarks_tensor = torch.zeros((0,), dtype=torch.int32)
-    parent_to_children = {}
-    slot_to_parent = {}
+    parent_to_children_tensor = torch.full((max_slot + 1, 1), -1, dtype=torch.int32)
+    slot_to_parent_tensor = torch.full((max_slot + 1,), -1, dtype=torch.int32)
 
     if blocks is not None and len(blocks) > 0:
         # Group blocks by chunk (prefill chunk size defaults to 512 tokens)
@@ -83,15 +116,26 @@ def build_chunk_graph(
                 c_idx = b.anchor_idx // chunk_size
                 chunk_groups.setdefault(c_idx, []).append(b.pool_idx)
                 
+        # Find maximum children count for sizing
+        max_children = 0
+        for group_slots in chunk_groups.values():
+            if len(group_slots) > 1:
+                max_children = max(max_children, len(group_slots) - 1)
+        max_children = max(1, max_children)
+        
+        parent_to_children_tensor = torch.full((max_slot + 1, max_children), -1, dtype=torch.int32)
+        
         parent_landmarks_list = []
         for c_idx in sorted(chunk_groups.keys()):
             group_slots = chunk_groups[c_idx]
             if group_slots:
                 parent = group_slots[0]
                 parent_landmarks_list.append(parent)
-                parent_to_children[parent] = group_slots[1:]
+                children = group_slots[1:]
+                if children:
+                    parent_to_children_tensor[parent, :len(children)] = torch.tensor(children, dtype=torch.int32)
                 for s in group_slots:
-                    slot_to_parent[s] = parent
+                    slot_to_parent_tensor[s] = parent
                     
         parent_landmarks_tensor = torch.tensor(parent_landmarks_list, dtype=torch.int32)
 
@@ -100,8 +144,8 @@ def build_chunk_graph(
             neighbors=torch.zeros((0, 8), dtype=torch.int32),
             weights=torch.zeros((0, 8), dtype=torch.float32),
             parent_landmarks=parent_landmarks_tensor,
-            parent_to_children=parent_to_children,
-            slot_to_parent=slot_to_parent
+            parent_to_children_tensor=parent_to_children_tensor,
+            slot_to_parent_tensor=slot_to_parent_tensor
         )
 
     if N == 1:
@@ -109,8 +153,8 @@ def build_chunk_graph(
             neighbors=torch.zeros((1, 8), dtype=torch.int32),
             weights=torch.zeros((1, 8), dtype=torch.float32),
             parent_landmarks=parent_landmarks_tensor,
-            parent_to_children=parent_to_children,
-            slot_to_parent=slot_to_parent
+            parent_to_children_tensor=parent_to_children_tensor,
+            slot_to_parent_tensor=slot_to_parent_tensor
         )
 
     # ── Pairwise cosine similarity ────────────────────────────────────────
@@ -221,8 +265,8 @@ def build_chunk_graph(
         neighbors=neighbors_tensor.cpu(),
         weights=weights_tensor.cpu(),
         parent_landmarks=parent_landmarks_tensor,
-        parent_to_children=parent_to_children,
-        slot_to_parent=slot_to_parent
+        parent_to_children_tensor=parent_to_children_tensor,
+        slot_to_parent_tensor=slot_to_parent_tensor
     )
 
 

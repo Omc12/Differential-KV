@@ -11,7 +11,7 @@ if _parent_dir not in sys.path:
 
 from native_core.compression.lowrank import compress_lowrank
 from runtime.native_block_pool import NativeBlockPool
-from native_core.sparse_decode.triton_sparse_attn import _pytorch_vectorized_sparse_attn_decode
+from native_core.sparse_decode.triton_fused_decode import _pytorch_vectorized_sparse_attn_decode
 
 def main():
     print("=" * 60)

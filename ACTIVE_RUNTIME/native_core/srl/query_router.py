@@ -217,13 +217,28 @@ def route_query(
             selected_parents = parent_slots.to(top_parent_idx.device)[top_parent_idx].tolist()
             
             # 2. Gather children blocks for the selected parent landmarks
-            hierarchical_slots = []
-            for parent in selected_parents:
-                hierarchical_slots.append(parent)
-                children = chunk_graph.parent_to_children.get(parent, [])
-                hierarchical_slots.extend(children)
+            selected_parents_t = torch.tensor(selected_parents, dtype=torch.int32, device=chunk_graph.parent_to_children_tensor.device)
+            valid_parents_t = selected_parents_t[selected_parents_t < chunk_graph.parent_to_children_tensor.shape[0]]
+            
+            if valid_parents_t.numel() > 0:
+                children_tensor = chunk_graph.parent_to_children_tensor[valid_parents_t.long()]
+                children_flat = children_tensor.flatten()
+                valid_children = children_flat[children_flat != -1].tolist()
+            else:
+                valid_children = []
                 
-            semantic_slots_t = torch.tensor(list(dict.fromkeys(hierarchical_slots)), dtype=torch.int32, device=Q.device)
+            hierarchical_slots = []
+            seen = set()
+            for parent in selected_parents:
+                if parent not in seen:
+                    hierarchical_slots.append(parent)
+                    seen.add(parent)
+            for child in valid_children:
+                if child not in seen:
+                    hierarchical_slots.append(child)
+                    seen.add(child)
+                    
+            semantic_slots_t = torch.tensor(hierarchical_slots, dtype=torch.int32, device=Q.device)
         else:
             semantic_slots_t = srl_state.semantic_index.search(q_desc, k=k_semantic)
     else:

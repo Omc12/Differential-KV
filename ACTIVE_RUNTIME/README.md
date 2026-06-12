@@ -50,15 +50,17 @@ ACTIVE_RUNTIME/
 ├── native_core/
 │   ├── kv_runtime_manager.py            ← Master session/block/compression orchestrator
 │   ├── streaming_sparse_ingest.py       ← Low-latency streaming block ingest
-│   ├── recon_cache.py                   ← LRU reconstruction cache + GPU-resident pool
 │   ├── compression/
 │   │   ├── lowrank.py                   ← SVD low-rank delta compression
 │   │   └── async_compressor.py         ← Background compression thread pool
 │   ├── paging/
 │   │   └── paged_kv_store.py           ← GPU→CPU spillover under memory pressure
+│   ├── srl/
+│   │   ├── attention_cache.py          ← Head-level query cosine similarity reuse cache
+│   │   ├── chunk_graph.py              ← Similarity graph for neighborhood expansion
+│   │   └── query_router.py             ← Hierarchical Graph-based Router
 │   └── sparse_decode/
-│       ├── triton_sparse_attn.py       ← FlashDecoding Triton kernel (SRAM-resident)
-│       └── triton_diffkv.py            ← Fused low-rank reconstruction kernel
+│       └── triton_fused_decode.py       ← Fused low-rank Project-Then-Attend decode (Triton / PyTorch fallback)
 │
 └── docs/
     └── open_webui_integration.md        ← Open WebUI setup guide
