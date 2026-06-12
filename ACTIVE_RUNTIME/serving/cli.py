@@ -44,7 +44,33 @@ def print_metrics(msg):
 # Helper function for non-blocking input
 # ---------------------------------------------------------------------------
 async def async_input(prompt: str) -> str:
-    return await asyncio.to_thread(input, prompt)
+    import select
+    def _read():
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError()
+        try:
+            lines = [line]
+            while True:
+                r, _, _ = select.select([sys.stdin], [], [], 0.01)
+                if r:
+                    next_line = sys.stdin.readline()
+                    if not next_line:
+                        break
+                    lines.append(next_line)
+                else:
+                    break
+            return "".join(lines)
+        except (AttributeError, OSError, select.error):
+            return line
+
+    try:
+        raw_input = await asyncio.to_thread(_read)
+        return raw_input.rstrip("\r\n")
+    except EOFError:
+        raise
 
 # ---------------------------------------------------------------------------
 # Client Mode Helper (talks to running OpenAI compatible API gateway)
@@ -70,8 +96,8 @@ async def run_client_mode(args):
         if not user_prompt_stripped:
             continue
 
-        # Handle Slash Commands
-        if user_prompt_stripped.startswith("/"):
+        # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /)
+        if user_prompt_stripped.startswith("/") and "\n" not in user_prompt_stripped:
             cmd = user_prompt_stripped.split()[0].lower()
             if cmd in ["/exit", "/quit"]:
                 print_system("Exiting client.")
@@ -87,12 +113,34 @@ async def run_client_mode(args):
                 session_id = f"cli-session-{uuid.uuid4().hex[:8]}"
                 print_system(f"Conversation reset. New Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
                 continue
+            elif cmd in ["/paste", "/multiline"]:
+                print_system("Entering multiline paste mode. Paste your text below, then type 'EOF' or '///' on a new line to submit. Type '/cancel' to abort.")
+                lines = []
+                while True:
+                    try:
+                        line = await async_input("... ")
+                    except (KeyboardInterrupt, EOFError):
+                        print()
+                        lines = []
+                        break
+                    stripped_line = line.strip()
+                    if stripped_line == "/cancel":
+                        print_system("Multiline input cancelled.")
+                        lines = []
+                        break
+                    if stripped_line in ("EOF", "///"):
+                        break
+                    lines.append(line)
+                if not lines:
+                    continue
+                user_prompt_stripped = "\n".join(lines).strip()
             elif cmd == "/help":
                 print_system("Available commands:")
-                print("  /reset, /new : Clear chat history and start a new session.")
-                print("  /stats       : Fetch live runtime & memory stats from the server.")
-                print("  /srl         : Fetch Semantic Routing Layer (SRL) details for current session.")
-                print("  /exit, /quit : Close the client.")
+                print("  /reset, /new       : Clear chat history and start a new session.")
+                print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
+                print("  /stats             : Fetch live runtime & memory stats from the server.")
+                print("  /srl               : Fetch Semantic Routing Layer (SRL) details for current session.")
+                print("  /exit, /quit       : Close the client.")
                 continue
             elif cmd == "/stats":
                 print_system("Fetching metrics from server...")
@@ -372,8 +420,8 @@ async def run_direct_mode(args):
             if not user_prompt_stripped:
                 continue
 
-            # Handle Slash Commands
-            if user_prompt_stripped.startswith("/"):
+            # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /)
+            if user_prompt_stripped.startswith("/") and "\n" not in user_prompt_stripped:
                 cmd = user_prompt_stripped.split()[0].lower()
                 if cmd in ["/exit", "/quit"]:
                     print_system("Stopping engine and exiting...")
@@ -386,12 +434,34 @@ async def run_direct_mode(args):
                     messages = []
                     print_system(f"Session reset. New Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
                     continue
+                elif cmd in ["/paste", "/multiline"]:
+                    print_system("Entering multiline paste mode. Paste your text below, then type 'EOF' or '///' on a new line to submit. Type '/cancel' to abort.")
+                    lines = []
+                    while True:
+                        try:
+                            line = await async_input("... ")
+                        except (KeyboardInterrupt, EOFError):
+                            print()
+                            lines = []
+                            break
+                        stripped_line = line.strip()
+                        if stripped_line == "/cancel":
+                            print_system("Multiline input cancelled.")
+                            lines = []
+                            break
+                        if stripped_line in ("EOF", "///"):
+                            break
+                        lines.append(line)
+                    if not lines:
+                        continue
+                    user_prompt_stripped = "\n".join(lines).strip()
                 elif cmd == "/help":
                     print_system("Available commands:")
-                    print("  /reset, /new : Reset current conversation and release KV cache.")
-                    print("  /stats       : Print model details, VRAM, and KV compression diagnostics.")
-                    print("  /srl         : Print Semantic Routing Layer metadata for this session.")
-                    print("  /exit, /quit : Shutdown engine and exit.")
+                    print("  /reset, /new       : Reset current conversation and release KV cache.")
+                    print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
+                    print("  /stats             : Print model details, VRAM, and KV compression diagnostics.")
+                    print("  /srl               : Print Semantic Routing Layer metadata for this session.")
+                    print("  /exit, /quit       : Shutdown engine and exit.")
                     continue
                 elif cmd == "/stats":
                     print_system("Analyzing engine diagnostics...")
