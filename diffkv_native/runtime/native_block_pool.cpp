@@ -87,6 +87,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     host_seq_lens_.resize(ggml_nelements(seq_lens_), 0);
     host_scales_.resize(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
     host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
+    host_desc_matrix_.resize(ggml_nelements(desc_matrix_), 0.0f);
 
     if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
         std::cerr << "[NativeBlockPool] Allocated " 
@@ -98,12 +99,6 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     // Initialize all slot states to Freed
     for (int i = 0; i < n_slots; ++i) {
         state_table_.force_invalidate(i); // sets state to Invalid
-        state_table_.transition(i, BlockState::Invalid, BlockState::Freed);
-    }
-
-    // Populate free list
-    free_slots_.clear();
-    for (int i = 0; i < n_slots; ++i) {
         free_slots_.push_back(i);
     }
 
@@ -123,11 +118,8 @@ int NativeBlockPool::allocate_slot() {
 void NativeBlockPool::free_slot(int slot_id) {
     std::lock_guard<std::mutex> lock(slot_mutex_);
     if (std::find(free_slots_.begin(), free_slots_.end(), slot_id) == free_slots_.end()) {
+        state_table_.force_invalidate(slot_id);
         free_slots_.push_back(slot_id);
-    }
-    state_table_.force_invalidate(slot_id);
-    if (state_table_.get(slot_id) == BlockState::Invalid) {
-        state_table_.transition(slot_id, BlockState::Invalid, BlockState::Freed);
     }
 }
 
@@ -135,6 +127,7 @@ void NativeBlockPool::reset_slots() {
     std::lock_guard<std::mutex> lock(slot_mutex_);
     free_slots_.clear();
     for (int i = 0; i < n_slots_; ++i) {
+        state_table_.force_invalidate(i);
         free_slots_.push_back(i);
     }
 }
@@ -154,6 +147,7 @@ void NativeBlockPool::zero_all_tensors() {
     std::fill(host_seq_lens_.begin(), host_seq_lens_.end(), 0);
     std::fill(host_scales_.begin(), host_scales_.end(), ggml_fp32_to_fp16(0.0f));
     std::fill(host_anchor_positions_.begin(), host_anchor_positions_.end(), 0);
+    std::fill(host_desc_matrix_.begin(), host_desc_matrix_.end(), 0.0f);
 
     if (U_) {
         std::vector<int8_t> zeros(ggml_nelements(U_), 0);

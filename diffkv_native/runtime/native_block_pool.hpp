@@ -21,6 +21,8 @@ public:
 
     bool initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft);
 
+    int get_rank() const { return rank_; }
+
     // Getters for GGML tensors
     struct ggml_tensor * get_U() { return U_; }
     struct ggml_tensor * get_U_scale() { return U_scale_; }
@@ -65,6 +67,8 @@ public:
     ggml_fp16_t* get_host_scales() { return host_scales_.data(); }
     const int32_t* get_host_anchor_positions() const { return host_anchor_positions_.data(); }
     int32_t* get_host_anchor_positions() { return host_anchor_positions_.data(); }
+    const float* get_host_desc_matrix() const { return host_desc_matrix_.data(); }
+    float* get_host_desc_matrix() { return host_desc_matrix_.data(); }
 
 private:
     int n_slots_ = 0;
@@ -98,6 +102,7 @@ private:
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_seq_lens_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_scales_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_anchor_positions_;
+    std::vector<float, PageAlignedAllocator<float>> host_desc_matrix_;
 
     DiffKVBlockStateTable state_table_;
 

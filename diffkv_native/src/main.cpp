@@ -712,6 +712,82 @@ bool verify_attention_cpu(
     }
 }
 
+// Helper function to sample from logits
+int32_t sample_logits(const std::vector<float>& logits, float temp, float top_p, std::mt19937& rng) {
+    if (logits.empty()) return 0;
+    if (temp <= 0.01f) {
+        // Greedy argmax
+        float max_logit = -1e30f;
+        int32_t best_idx = 0;
+        for (size_t i = 0; i < logits.size(); ++i) {
+            if (logits[i] > max_logit) {
+                max_logit = logits[i];
+                best_idx = i;
+            }
+        }
+        return best_idx;
+    }
+
+    // Apply temperature scaling
+    std::vector<double> probs(logits.size());
+    double max_logit = logits[0];
+    for (size_t i = 1; i < logits.size(); ++i) {
+        if (logits[i] > max_logit) {
+            max_logit = logits[i];
+        }
+    }
+
+    double sum = 0.0;
+    for (size_t i = 0; i < logits.size(); ++i) {
+        probs[i] = std::exp((double)(logits[i] - max_logit) / temp);
+        sum += probs[i];
+    }
+    for (size_t i = 0; i < probs.size(); ++i) {
+        probs[i] /= sum;
+    }
+
+    if (top_p < 1.0f) {
+        // Sort indices based on probabilities
+        std::vector<size_t> indices(probs.size());
+        for (size_t i = 0; i < indices.size(); ++i) {
+            indices[i] = i;
+        }
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            return probs[a] > probs[b];
+        });
+
+        double cum_prob = 0.0;
+        bool cut = false;
+        for (size_t idx : indices) {
+            if (cut) {
+                probs[idx] = 0.0;
+            } else {
+                cum_prob += probs[idx];
+                if (cum_prob > top_p) {
+                    cut = true;
+                }
+            }
+        }
+        // Renormalize
+        sum = 0.0;
+        for (double p : probs) {
+            sum += p;
+        }
+        if (sum > 0.0) {
+            for (size_t i = 0; i < probs.size(); ++i) {
+                probs[i] /= sum;
+            }
+        } else {
+            // Fallback: assign 1.0 to the top index
+            std::fill(probs.begin(), probs.end(), 0.0);
+            probs[indices[0]] = 1.0;
+        }
+    }
+
+    std::discrete_distribution<size_t> dist(probs.begin(), probs.end());
+    return dist(rng);
+}
+
 int main(int argc, char ** argv) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <gguf_model_path> [prompt]" << std::endl;
@@ -860,29 +936,8 @@ int main(int argc, char ** argv) {
     }
 
     // Clear pool tensors for all layers
-    std::vector<float> desc_matrix_host(desc_dim * n_slots, 0.0f);
-    std::vector<ggml_fp16_t> anchors_K_host(head_dim * kv_heads * n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<int8_t> U_host(rank * 64 * n_slots, 0);
-    std::vector<ggml_fp16_t> U_scale_host(n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<ggml_fp16_t> VK_host(head_dim * kv_heads * rank * n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<ggml_fp16_t> VV_host(head_dim * kv_heads * rank * n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<ggml_fp16_t> anchors_V_host(head_dim * kv_heads * n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<int32_t> seq_lens_host(n_slots, 0);
-    std::vector<ggml_fp16_t> scales_host(n_slots, ggml_fp32_to_fp16(0.0f));
-    std::vector<int32_t> anchor_positions_host(n_slots, 0);  // Actual sequence position of each block's anchor
-
     for (int l = 0; l < n_layers; ++l) {
-        auto & engine = *kv_engines[l];
-        ggml_backend_tensor_set(engine.get_desc_matrix(), desc_matrix_host.data(), 0, desc_matrix_host.size() * sizeof(float));
-        ggml_backend_tensor_set(engine.get_anchors_K(), anchors_K_host.data(), 0, anchors_K_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_U(), U_host.data(), 0, U_host.size() * sizeof(int8_t));
-        ggml_backend_tensor_set(engine.get_U_scale(), U_scale_host.data(), 0, U_scale_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_VK(), VK_host.data(), 0, VK_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_VV(), VV_host.data(), 0, VV_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_anchors_V(), anchors_V_host.data(), 0, anchors_V_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_seq_lens(), seq_lens_host.data(), 0, seq_lens_host.size() * sizeof(int32_t));
-        ggml_backend_tensor_set(engine.get_scales(), scales_host.data(), 0, scales_host.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine.get_anchor_positions(), anchor_positions_host.data(), 0, anchor_positions_host.size() * sizeof(int32_t));
+        kv_engines[l]->zero_all_tensors();
     }
 
     // Reference SVD compressor from runtime_manager
@@ -907,6 +962,40 @@ int main(int argc, char ** argv) {
 
     bool interactive = (argc < 3 || std::string(argv[2]) == "-");
     bool is_warmup_run = true;
+
+    // Initialize sampling parameters and random engine
+    unsigned int seed = std::random_device{}();
+    if (const char* env_seed = std::getenv("DIFFKV_SEED")) {
+        seed = std::stoul(env_seed);
+    }
+    std::mt19937 sample_rng(seed);
+
+    float temperature = 0.7f;
+    float top_p = 0.9f;
+    float repetition_penalty = 1.15f;
+    if (const char* env_temp = std::getenv("DIFFKV_TEMPERATURE")) {
+        temperature = std::stof(env_temp);
+    }
+    if (const char* env_topp = std::getenv("DIFFKV_TOP_P")) {
+        top_p = std::stof(env_topp);
+    }
+    if (const char* env_rep = std::getenv("DIFFKV_REPETITION_PENALTY")) {
+        repetition_penalty = std::stof(env_rep);
+    }
+
+    // Speed 2: Pre-build alphanumeric cache for vocab tokens
+    std::vector<int8_t> alnum_cache(n_vocab, 0);
+    for (int32_t tok_id = 0; tok_id < n_vocab; ++tok_id) {
+        std::string piece = model.token_to_piece(tok_id);
+        bool has_alnum = false;
+        for (char c : piece) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                has_alnum = true;
+                break;
+            }
+        }
+        alnum_cache[tok_id] = has_alnum ? 1 : 0;
+    }
 
 
     while (true) {
@@ -1285,27 +1374,31 @@ int main(int argc, char ** argv) {
         //
         // k_activations[l] stores raw K (before RoPE); v_activations[l] stores raw V.
 
+        size_t max_prior_bytes = (size_t)2 * n_layers * L * F_test * sizeof(float);
+        size_t max_graph_bytes = 8 * 1024 * 1024 + max_prior_bytes;
+
+        struct ggml_init_params prefill_params = {
+            /*.mem_size   =*/ max_graph_bytes,
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        struct ggml_context * prefill_ctx = ggml_init(prefill_params);
+        if (!prefill_ctx) {
+            std::cerr << "Failed to initialize prefill context!" << std::endl;
+            // Always emit sentinels so the gateway doesn't hang waiting for __RESPONSE__
+            if (interactive) {
+                std::cout << "__RESPONSE__" << std::endl;
+                std::cout << "[Error: failed to initialize prefill context]" << std::flush;
+                std::cout << "\n__FINISH__" << std::endl;
+            }
+            if (!interactive) break; else continue;
+        }
+
         while (pos_start < L) {
             int chunk_len = std::min(chunk_size, L - pos_start);
             int ctx_len   = pos_start + chunk_len;  // total KV context length
 
-            // ── 1. Allocate graph context ──────────────────────────────────────
-            // Memory: graph nodes + prior KV tensors per layer.
-            // Prior K per layer: head_dim * kv_heads * pos_start floats = F_test * pos_start
-            // Prior V per layer: same
-            size_t prior_bytes = (size_t)2 * n_layers * pos_start * F_test * sizeof(float);
-            size_t graph_bytes = 8 * 1024 * 1024 + prior_bytes;
-
-            struct ggml_init_params prefill_params = {
-                /*.mem_size   =*/ graph_bytes,
-                /*.mem_buffer =*/ nullptr,
-                /*.no_alloc   =*/ true,
-            };
-            struct ggml_context * prefill_ctx = ggml_init(prefill_params);
-            if (!prefill_ctx) {
-                std::cerr << "Failed to initialize prefill context!" << std::endl;
-                break;
-            }
+            ggml_reset(prefill_ctx);
 
             // ── 2. Create input tensors ────────────────────────────────────────
             struct ggml_tensor * input_tokens_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, chunk_len);
@@ -1361,7 +1454,6 @@ int main(int argc, char ** argv) {
             ggml_backend_sched_reset(sched);
             if (!ggml_backend_sched_alloc_graph(sched, prefill_graph)) {
                 std::cerr << "Failed to allocate memory for prefill graph (chunk " << pos_start << " / " << L << ")!" << std::endl;
-                ggml_free(prefill_ctx);
                 break;
             }
 
@@ -1432,7 +1524,6 @@ int main(int argc, char ** argv) {
             // ── 6. Run the graph ──────────────────────────────────────────────
             if (ggml_backend_sched_graph_compute(sched, prefill_graph) != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Prefill graph compute failed at pos " << pos_start << "!" << std::endl;
-                ggml_free(prefill_ctx);
                 break;
             }
 
@@ -1457,11 +1548,12 @@ int main(int argc, char ** argv) {
                 ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
             }
 
-            ggml_free(prefill_ctx);
-
             pos_start += chunk_len;
         }
 
+        if (prefill_ctx) {
+            ggml_free(prefill_ctx);
+        }
 
         if (!interactive) {
             std::cerr << "[DiffKV Native] Waiting for background SVD compressor to catch up..." << std::endl;
@@ -1473,13 +1565,7 @@ int main(int argc, char ** argv) {
 
         int32_t first_decode_token = 0;
         if (interactive) {
-            float max_logit = -1e30f;
-            for (int i = 0; i < n_vocab; ++i) {
-                if (prefill_output_logits[i] > max_logit) {
-                    max_logit = prefill_output_logits[i];
-                    first_decode_token = i;
-                }
-            }
+            first_decode_token = sample_logits(prefill_output_logits, temperature, top_p, sample_rng);
         } else {
             std::vector<std::pair<float, int>> prefill_top_k;
             prefill_top_k.reserve(n_vocab);
@@ -1551,7 +1637,7 @@ int main(int argc, char ** argv) {
             userdata[l].slot_indices = nullptr;
             userdata[l].n_q_heads = model.get_config().n_head;
             userdata[l].n_kv_heads = model.get_config().n_head_kv;
-            userdata[l].rank = rank;
+            userdata[l].rank = kv_engines[l]->get_rank();
             userdata[l].S_max = 64;
             userdata[l].K = 0;
             userdata[l].D = head_dim;
@@ -1856,26 +1942,10 @@ int main(int argc, char ** argv) {
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
 
-            constexpr float REP_PENALTY = 1.15f;
-            thread_local std::vector<int8_t> alnum_cache;
-            if (alnum_cache.empty()) {
-                alnum_cache.assign(n_vocab, -1);
-            }
+            float rep_penalty = repetition_penalty;
             auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
                 if (tok_id < 0 || tok_id >= n_vocab) return false;
-                if (alnum_cache[tok_id] != -1) {
-                    return alnum_cache[tok_id] == 1;
-                }
-                std::string piece = model.token_to_piece(tok_id);
-                bool has_alnum = false;
-                for (char c : piece) {
-                    if (std::isalnum(static_cast<unsigned char>(c))) {
-                        has_alnum = true;
-                        break;
-                    }
-                }
-                alnum_cache[tok_id] = has_alnum ? 1 : 0;
-                return has_alnum;
+                return alnum_cache[tok_id] == 1;
             };
 
             std::unordered_set<int32_t> unique_penalized;
@@ -1893,19 +1963,13 @@ int main(int argc, char ** argv) {
             for (int32_t tok : unique_penalized) {
                 if (tok >= 0 && tok < n_vocab) {
                     float& l = output_logits[tok];
-                    l = (l > 0.0f) ? l / REP_PENALTY : l * REP_PENALTY;
+                    l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
                 }
             }
 
             int32_t next_token = 0;
             if (interactive) {
-                float max_logit = -1e30f;
-                for (int i = 0; i < n_vocab; ++i) {
-                    if (output_logits[i] > max_logit) {
-                        max_logit = output_logits[i];
-                        next_token = i;
-                    }
-                }
+                next_token = sample_logits(output_logits, temperature, top_p, sample_rng);
             } else {
                 std::vector<std::pair<float, int>> logits_sorted;
                 logits_sorted.reserve(n_vocab);
@@ -1991,17 +2055,17 @@ int main(int argc, char ** argv) {
             // was created). Rebuilding it every token causes O(N_blocks × N_layers)
             // memcpy per step — dominant CPU overhead when N_blocks is large.
             if (active_block_tokens == 0 && active_slot > old_active_slot) {
-                runtime_manager.wait_for_compressor();
                 int prev_slot = old_active_slot;
                 auto & blocks = runtime_manager.get_ingest_manager().get_blocks(0);
                 if (prev_slot >= 0 && prev_slot < (int)blocks.size()) {
                     auto & block = blocks[prev_slot];
                     
-                    // Update descriptors
+                    // Update descriptors (computes raw averages for Compressing blocks, SVD descriptors for Compressed blocks)
                     runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
 
                     std::vector<float> desc(desc_dim);
-                    ggml_backend_tensor_get(runtime_manager.get_engines()[0]->get_desc_matrix(), desc.data(), block->pool_idx * desc_dim * sizeof(float), desc_dim * sizeof(float));
+                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
+                    std::memcpy(desc.data(), host_desc + block->pool_idx * desc_dim, desc_dim * sizeof(float));
 
                     update_srl_from_compressed_block(
                         srl_state,
@@ -2013,13 +2077,14 @@ int main(int argc, char ** argv) {
                         stop_token_ids
                     );
 
-                    // Rebuild chunk graph only over compressed slots
+                    // Rebuild chunk graph only over compressed slots (including those currently compressing)
                     auto & all_blocks = runtime_manager.get_ingest_manager().get_blocks(0);
                     std::vector<int32_t> cur_slots;
                     for (int i = 0; i < (int)all_blocks.size(); ++i) {
                         if (all_blocks[i]->pool_idx != -1 &&
                             (all_blocks[i]->state == BlockState::CompressedResident ||
-                             all_blocks[i]->state == BlockState::CPUResident)) {
+                             all_blocks[i]->state == BlockState::CPUResident ||
+                             all_blocks[i]->state == BlockState::Compressing)) {
                             cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
                         }
                     }
@@ -2027,10 +2092,9 @@ int main(int argc, char ** argv) {
                     std::vector<float> cur_desc_matrix(cur_N * desc_dim);
                     for (int j = 0; j < cur_N; ++j) {
                         int slot_id = cur_slots[j];
-                        ggml_backend_tensor_get(
-                            runtime_manager.get_engines()[0]->get_desc_matrix(),
+                        std::memcpy(
                             cur_desc_matrix.data() + j * desc_dim,
-                            slot_id * desc_dim * sizeof(float),
+                            host_desc + slot_id * desc_dim,
                             desc_dim * sizeof(float)
                         );
                     }

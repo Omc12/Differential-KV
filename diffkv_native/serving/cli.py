@@ -250,7 +250,7 @@ def _normalize_references(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Format Chat messages for Qwen
 # ---------------------------------------------------------------------------
-def format_messages_as_chat(messages: list) -> str:
+def format_messages_as_chat(messages: list, add_generation_prompt: bool = True) -> str:
     result = ""
     has_system = any(msg.get("role") == "system" for msg in messages)
     if not has_system:
@@ -260,7 +260,8 @@ def format_messages_as_chat(messages: list) -> str:
         content = msg.get("content")
         if role in ("system", "user", "assistant"):
             result += f"<|im_start|>{role}\n{content}<|im_end|>\n"
-    result += "<|im_start|>assistant\n"
+    if add_generation_prompt:
+        result += "<|im_start|>assistant\n"
     return result
 
 # ---------------------------------------------------------------------------
@@ -621,6 +622,9 @@ async def run_direct_mode(args):
     os.environ["DIFFKV_MODEL_PATH"] = model_path
     if "DIFFKV_MPS_APPROXIMATE_ATTN" not in os.environ:
         os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
+    os.environ["DIFFKV_TEMPERATURE"] = str(args.temperature)
+    os.environ["DIFFKV_TOP_P"] = str(args.top_p)
+    os.environ["DIFFKV_REPETITION_PENALTY"] = str(args.repetition_penalty)
 
     # Start wrapper
     wrapper = SubprocessWrapper(os.environ["DIFFKV_BINARY_PATH"], os.environ["DIFFKV_MODEL_PATH"])
@@ -699,6 +703,8 @@ async def run_direct_mode(args):
 
         # Prefix Match Check
         cached_len = 0
+
+
         if wrapper.cached_len > 0 and wrapper.prev_prompt:
             if user_prompt_formatted.startswith(wrapper.prev_prompt):
                 cached_len = wrapper.cached_len
@@ -764,7 +770,7 @@ async def run_direct_mode(args):
             messages.append({"role": "assistant", "content": normalized_response})
             
             # Store prompt + normalized response as the new prev_prompt
-            wrapper.prev_prompt = format_messages_as_chat(messages)
+            wrapper.prev_prompt = format_messages_as_chat(messages, add_generation_prompt=False)
             if new_cached_len >= 0:
                 wrapper.cached_len = new_cached_len
 
@@ -813,7 +819,11 @@ def main():
     parser.add_argument('--max-tokens', type=int, default=16384,
                         help="Max tokens to generate.")
     parser.add_argument('--temperature', type=float, default=0.7,
-                        help="Sampling temperature (client mode only).")
+                        help="Sampling temperature.")
+    parser.add_argument('--top-p', type=float, default=0.9,
+                        help="Top-p sampling probability.")
+    parser.add_argument('--repetition-penalty', type=float, default=1.15,
+                        help="Repetition penalty parameter.")
 
     args = parser.parse_args()
 

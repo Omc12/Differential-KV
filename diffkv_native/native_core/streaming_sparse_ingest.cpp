@@ -355,6 +355,12 @@ void StreamingSparseIngestManager::ingest_chunk(
                 
                 int32_t anchor_pos = new_block->anchor_idx;
                 ggml_backend_tensor_set(engines[layer_idx]->get_anchor_positions(), &anchor_pos, slot_id * sizeof(int32_t), sizeof(int32_t));
+                
+                // Keep host-side mirrors in sync
+                std::copy(k_fp16.begin(), k_fp16.end(), engines[layer_idx]->get_host_anchors_K() + slot_id * F_test);
+                std::copy(v_fp16.begin(), v_fp16.end(), engines[layer_idx]->get_host_anchors_V() + slot_id * F_test);
+                engines[layer_idx]->get_host_anchor_positions()[slot_id] = anchor_pos;
+
                 engines[layer_idx]->get_state_table().transition(slot_id, BlockState::Freed, BlockState::DenseResident);
             }
             

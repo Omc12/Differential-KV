@@ -65,7 +65,8 @@ bool KVRuntimeManager::initialize(
     engines_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         engines_[l] = std::make_unique<NativeBlockPool>();
-        if (!engines_[l]->initialize(n_slots, base_rank_, head_dim, kv_heads, desc_dim, buft)) {
+        int layer_rank = get_layer_rank(l);
+        if (!engines_[l]->initialize(n_slots, layer_rank, head_dim, kv_heads, desc_dim, buft)) {
             std::cerr << "[KVRuntimeManager] Error: Failed to initialize KVEngine for layer " << l << std::endl;
             return false;
         }
@@ -503,6 +504,7 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
             for (int r = 0; r < desc_dim; ++r) {
                 desc[r] = ggml_fp16_to_fp32(desc_f16[r]);
             }
+            std::copy(desc.begin(), desc.end(), engine->get_host_desc_matrix() + slot_id * desc_dim);
             ggml_backend_tensor_set(engine->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         } else {
             std::vector<float> avg_k(F_test, 0.0f);
@@ -537,6 +539,7 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
             float norm = std::sqrt(sum_sq) + 1e-8f;
             for (float & val : desc) val /= norm;
             
+            std::copy(desc.begin(), desc.end(), engines_[0]->get_host_desc_matrix() + slot_id * desc_dim);
             ggml_backend_tensor_set(engines_[0]->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         }
     }
