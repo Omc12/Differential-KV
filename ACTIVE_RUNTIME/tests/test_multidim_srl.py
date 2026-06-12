@@ -729,14 +729,14 @@ def test_prime_node_and_adaptive_k():
     assert 105 in graph.parent_landmarks.tolist()
     assert 107 in graph.parent_landmarks.tolist()
 
-    # Under thresholded connections (theta_link = 0.25):
-    # 101 (chunk 0) and 103 (chunk 1) are connected (similarity 1.0 >= 0.25)
-    # 101 and 105 are NOT connected (similarity 0.0 < 0.25)
+    # Under thresholded connections (theta_link = 0.30):
+    # 101 (chunk 0) and 103 (chunk 1) are connected (similarity 1.0 >= 0.30)
+    # 101 and 105 are NOT connected (similarity 0.0 < 0.30)
     assert graph.prime_neighbors[101, 0] == 103
     assert graph.prime_neighbors[101, 1] == -1
     
-    # 105 and 107 are connected (similarity 1.0 >= 0.25)
-    # 105 and 101 are NOT connected (similarity 0.0 < 0.25)
+    # 105 and 107 are connected (similarity 1.0 >= 0.30)
+    # 105 and 101 are NOT connected (similarity 0.0 < 0.30)
     assert graph.prime_neighbors[105, 0] == 107
     assert graph.prime_neighbors[105, 1] == -1
 

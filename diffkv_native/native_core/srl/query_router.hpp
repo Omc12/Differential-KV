@@ -220,7 +220,7 @@ inline int adaptive_k(
             }
         }
 
-        float theta_active = std::max(0.25f, 0.85f * s_max);
+        float theta_active = std::max(0.30f, 0.85f * s_max);
         int active_count = 0;
         for (float score : scores) {
             if (score >= theta_active) {
@@ -245,9 +245,9 @@ inline int adaptive_k(
 // Pipeline (mirrors Python query_router.py):
 //   1.  Compute q_desc via compute_query_descriptor
 //   2.  adaptive_k -> K
-//   3.  Semantic: semantic_index.search(q_desc, k_semantic)
-//   4.  Topic-switch detection: best_sem_score < 0.25
-//   5.  Lexical: score all matching slots, keep top k_lexical; find rare_lex (IDF>=2)
+//   3.  Lexical: score all matching slots, keep top k_lexical; find rare_lex (IDF>=2)
+//   4.  Semantic: semantic_index.search(q_desc, k_semantic) (with mapped lexical parents)
+//   5.  Topic-switch detection: best_sem_score < 0.30
 //   6.  Graph expansion (2-hop) from semantic seed set
 //   7.  Recency: last k_recency slots
 //   8.  Merge (sink + semantic + rare_lex + graph + lexical + recency), dedup
@@ -293,6 +293,42 @@ inline std::vector<int32_t> route_query(
     int k_recency  = std::max(1, budget.k_recency);
 
     // -------------------------------------------------------------------
+    // Step 2.5: Lexical retrieval + rare lexical
+    // -------------------------------------------------------------------
+    std::vector<int32_t> lex_slots;
+    std::vector<int32_t> rare_lex_slots;
+
+    const std::vector<int>* tok_ptr = query_tokens;
+    if (!tok_ptr && !srl_state.current_query_tokens.empty())
+        tok_ptr = &srl_state.current_query_tokens;
+
+    if (tok_ptr && !tok_ptr->empty()) {
+        float decay = 0.999f;
+        auto lex_scored = score_lexical_slots(srl_state.inverted_index, *tok_ptr, decay);
+
+        int n_lex = static_cast<int>(lex_scored.size());
+        int take_lex = std::min(k_lexical, n_lex);
+        for (int i = 0; i < take_lex; ++i)
+            lex_slots.push_back(lex_scored[i].first);
+
+        std::unordered_set<int32_t> rare_seen;
+        for (int tok : *tok_ptr) {
+            auto idf_it = srl_state.inverted_index.idf.find(tok);
+            if (idf_it == srl_state.inverted_index.idf.end()) continue;
+            if (idf_it->second >= 2.0f) {
+                auto idx_it = srl_state.inverted_index.index.find(tok);
+                if (idx_it == srl_state.inverted_index.index.end()) continue;
+                for (int32_t s : idx_it->second) {
+                    if (!rare_seen.count(s)) {
+                        rare_seen.insert(s);
+                        rare_lex_slots.push_back(s);
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Step 3: Semantic retrieval (Hierarchical Graph-based Routing)
     // -------------------------------------------------------------------
     std::vector<int32_t> sem_slots;
@@ -336,8 +372,8 @@ inline std::vector<int32_t> route_query(
             
             best_sem_score = center_scores[0].first;
             
-            // Select cluster centers with similarity score >= max(0.25f, 0.85f * best_sem_score)
-            float threshold = std::max(0.25f, 0.85f * best_sem_score);
+            // Select cluster centers with similarity score >= max(0.30f, 0.85f * best_sem_score)
+            float threshold = std::max(0.30f, 0.85f * best_sem_score);
             std::unordered_set<int32_t> selected_centers;
             std::vector<int32_t> selected_centers_vec;
             for (const auto& score_pair : center_scores) {
@@ -351,6 +387,25 @@ inline std::vector<int32_t> route_query(
             if (selected_centers.empty() && !center_scores.empty()) {
                 selected_centers.insert(center_scores[0].second);
                 selected_centers_vec.push_back(center_scores[0].second);
+            }
+
+            // Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+            const auto& slot_to_parent = cg.slot_to_parent_tensor;
+            if (!slot_to_parent.empty()) {
+                std::vector<int32_t> all_lex_slots;
+                all_lex_slots.insert(all_lex_slots.end(), lex_slots.begin(), lex_slots.end());
+                all_lex_slots.insert(all_lex_slots.end(), rare_lex_slots.begin(), rare_lex_slots.end());
+                for (int32_t s : all_lex_slots) {
+                    if (s >= 0 && s < static_cast<int32_t>(slot_to_parent.size())) {
+                        int32_t p = slot_to_parent[s];
+                        if (p != -1) {
+                            if (selected_centers.find(p) == selected_centers.end()) {
+                                selected_centers.insert(p);
+                                selected_centers_vec.push_back(p);
+                            }
+                        }
+                    }
+                }
             }
             
             // Retrieve 1-hop prime neighbors from chunk_graph.prime_neighbors
@@ -475,8 +530,29 @@ inline std::vector<int32_t> route_query(
                 // Select top landmark parents
                 int k_parent = std::max(1, std::min(k_semantic / 8, static_cast<int>(parent_scores.size())));
                 std::vector<int32_t> selected_parents;
+                std::unordered_set<int32_t> selected_parents_set;
                 for (int idx = 0; idx < k_parent; ++idx) {
                     selected_parents.push_back(parent_scores[idx].second);
+                    selected_parents_set.insert(parent_scores[idx].second);
+                }
+
+                // Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+                const auto& slot_to_parent = srl_state.chunk_graph.slot_to_parent_tensor;
+                if (!slot_to_parent.empty()) {
+                    std::vector<int32_t> all_lex_slots;
+                    all_lex_slots.insert(all_lex_slots.end(), lex_slots.begin(), lex_slots.end());
+                    all_lex_slots.insert(all_lex_slots.end(), rare_lex_slots.begin(), rare_lex_slots.end());
+                    for (int32_t s : all_lex_slots) {
+                        if (s >= 0 && s < static_cast<int32_t>(slot_to_parent.size())) {
+                            int32_t p = slot_to_parent[s];
+                            if (p != -1) {
+                                if (selected_parents_set.find(p) == selected_parents_set.end()) {
+                                    selected_parents_set.insert(p);
+                                    selected_parents.push_back(p);
+                                }
+                            }
+                        }
+                    }
                 }
                 
                 // 2. Gather children blocks using flat parent_to_children_tensor vector
@@ -528,45 +604,7 @@ inline std::vector<int32_t> route_query(
     // -------------------------------------------------------------------
     // Step 4: Topic-switch detection
     // -------------------------------------------------------------------
-    [[maybe_unused]] bool is_topic_switch = (best_sem_score < 0.25f);
-
-    // -------------------------------------------------------------------
-    // Step 5: Lexical retrieval + rare lexical
-    // -------------------------------------------------------------------
-    std::vector<int32_t> lex_slots;
-    std::vector<int32_t> rare_lex_slots;
-
-    // Use current_query_tokens if query_tokens not provided
-    const std::vector<int>* tok_ptr = query_tokens;
-    if (!tok_ptr && !srl_state.current_query_tokens.empty())
-        tok_ptr = &srl_state.current_query_tokens;
-
-    if (tok_ptr && !tok_ptr->empty()) {
-        float decay = 0.999f;
-        auto lex_scored = score_lexical_slots(srl_state.inverted_index, *tok_ptr, decay);
-
-        int n_lex = static_cast<int>(lex_scored.size());
-        int take_lex = std::min(k_lexical, n_lex);
-        for (int i = 0; i < take_lex; ++i)
-            lex_slots.push_back(lex_scored[i].first);
-
-        // Rare lexical: slots whose best token has IDF >= 2.0
-        std::unordered_set<int32_t> rare_seen;
-        for (int tok : *tok_ptr) {
-            auto idf_it = srl_state.inverted_index.idf.find(tok);
-            if (idf_it == srl_state.inverted_index.idf.end()) continue;
-            if (idf_it->second < 2.0f) continue;
-
-            auto idx_it = srl_state.inverted_index.index.find(tok);
-            if (idx_it == srl_state.inverted_index.index.end()) continue;
-            for (int32_t s : idx_it->second) {
-                if (!rare_seen.count(s)) {
-                    rare_seen.insert(s);
-                    rare_lex_slots.push_back(s);
-                }
-            }
-        }
-    }
+    [[maybe_unused]] bool is_topic_switch = (best_sem_score < 0.30f);
 
     // -------------------------------------------------------------------
     // Step 6: Graph expansion (2-hop) from semantic seed set
@@ -593,7 +631,7 @@ inline std::vector<int32_t> route_query(
             top_sem_slots.push_back(sem_slots[i]);
         }
 
-        bool is_topic_switch = (best_sem_score < 0.25f);
+        bool is_topic_switch = (best_sem_score < 0.30f);
         std::unordered_set<int32_t> seed_set;
         auto add_seed = [&](int32_t slot) {
             if (seed_set.find(slot) == seed_set.end()) {

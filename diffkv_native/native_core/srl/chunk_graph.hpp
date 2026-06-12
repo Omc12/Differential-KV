@@ -544,7 +544,7 @@ inline ChunkGraph build_chunk_graph(
                 int r_i = valid_parent_rows[i];
                 const float* desc_i = desc_matrix + r_i * DESC_DIM;
 
-                // Compute similarities with all other parents, keeping only dot >= 0.25f
+                // Compute similarities with all other parents, keeping only dot >= 0.30f
                 std::vector<std::pair<float, int32_t>> sims;
                 for (int j = 0; j < L; ++j) {
                     if (i == j) continue;
@@ -554,7 +554,7 @@ inline ChunkGraph build_chunk_graph(
                     for (int d = 0; d < DESC_DIM; ++d) {
                         dot += desc_i[d] * desc_j[d];
                     }
-                    if (dot >= 0.25f) {
+                    if (dot >= 0.30f) {
                         sims.push_back({dot, valid_parent_slots[j]});
                     }
                 }

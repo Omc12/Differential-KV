@@ -45,7 +45,7 @@ _RECENCY_FRAC      = float(os.environ.get("DIFFKV_SRL_REC_FRAC",  "0.20"))
 _ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "50"))
 # Topic-switch: if the best semantic match falls below this cosine similarity,
 # the query is treated as a new topic and stale rare-lexical seeds are suppressed.
-_TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DIFFKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.25"))
+_TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DIFFKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.30"))
 
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
@@ -178,7 +178,7 @@ def adaptive_k(
             parent_descs = desc_matrix[parent_idxs].to(q_desc.device, dtype=q_desc.dtype)
             parent_scores = parent_descs @ q_desc
             S_max = float(parent_scores.max().item()) if parent_scores.numel() > 0 else 0.0
-            theta_active = max(0.25, 0.85 * S_max)
+            theta_active = max(0.30, 0.85 * S_max)
             C_active = int((parent_scores >= theta_active).sum().item())
             C_active = max(1, C_active)
 
@@ -218,6 +218,69 @@ def route_query(
         q_desc = compute_query_descriptor(Q, pool.W_proj)
     K      = adaptive_k(q_desc, srl_state, N)
 
+    # ── Step 1.5: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
+    # FIX (Bug 1): Prioritize current_query_tokens for lexical lookup.
+    # Only use recent_generated_tokens (previous-turn output) as a weak fallback
+    # to avoid contaminating the inverted-index search with stale vocabulary.
+    k_lexical   = max(1, int(K * _LEX_FRAC))
+    if query_tokens is not None:
+        recent_toks = query_tokens
+    else:
+        current_q_toks = getattr(srl_state, "current_query_tokens", [])
+        if current_q_toks:
+            # Use only the incoming query tokens — exclude previous-turn outputs.
+            recent_toks = current_q_toks[-128:]
+        else:
+            # Fallback: no explicit query tokens available — use a small tail of
+            # recent generated tokens so we don't completely lose lexical signal.
+            recent_toks = srl_state.recent_generated_tokens[-16:]
+
+    from collections import defaultdict
+    inv_index = srl_state.inverted_index
+    all_abs_positions = []
+    
+    # Track matching positions and IDF values
+    for tok in recent_toks:
+        if tok in inv_index.occurrences:
+            for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                all_abs_positions.append(abs_pos)
+                
+    rare_lex_slots = []
+    if all_abs_positions:
+        L = max(all_abs_positions)
+        slot_scores = defaultdict(float)
+        slot_matched_toks = defaultdict(set)
+        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "1.0"))
+        
+        for tok in recent_toks:
+            if tok in inv_index.occurrences:
+                # Retrieve precomputed IDF score (rare tokens have higher values)
+                idf_val = inv_index.idf.get(tok, 1.0)
+                for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                    slot_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
+                    slot_matched_toks[slot].add(tok)
+                    
+        # Apply Query Term Coverage boost: scale score by (unique_matches ** 2)
+        for slot in list(slot_scores.keys()):
+            n_unique = len(slot_matched_toks[slot])
+            slot_scores[slot] *= (n_unique ** 2)
+            
+        sorted_lex_slots = sorted(slot_scores.keys(), key=lambda s: slot_scores[s], reverse=True)
+        lexical_slots = sorted_lex_slots[:k_lexical]
+
+        # Extract rare keyword matches (IDF >= 2.0)
+        rare_slots_with_scores = defaultdict(float)
+        for tok in recent_toks:
+            if tok in inv_index.occurrences:
+                idf_val = inv_index.idf.get(tok, 1.0)
+                if idf_val >= 2.0:
+                    for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
+                        rare_slots_with_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
+        if rare_slots_with_scores:
+            rare_lex_slots = sorted(rare_slots_with_scores.keys(), key=lambda s: rare_slots_with_scores[s], reverse=True)
+    else:
+        lexical_slots = []
+
     # ── Step 2: Semantic ANN search (Hierarchical Graph-based Routing) ────
     k_semantic = max(1, int(K * _SEM_FRAC))
     chunk_graph = srl_state.chunk_graph
@@ -244,9 +307,9 @@ def route_query(
             else:
                 scores_centers = center_desc @ q16
                 
-            # Select cluster centers with similarity score >= max(0.25, 0.85 * S_max)
+            # Select cluster centers with similarity score >= max(0.30, 0.85 * S_max)
             s_max_centroid = float(scores_centers.max().item()) if scores_centers.numel() > 0 else 0.0
-            threshold = max(0.25, 0.85 * s_max_centroid)
+            threshold = max(0.30, 0.85 * s_max_centroid)
             active_mask = scores_centers >= threshold
             active_indices = torch.where(active_mask)[0]
             if active_indices.numel() == 0:
@@ -254,6 +317,18 @@ def route_query(
                 selected_centers = centers.to(top_center_idx.device)[top_center_idx].tolist()
             else:
                 selected_centers = centers[active_indices].tolist()
+
+            # Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+            lexical_parents = []
+            if getattr(chunk_graph, "slot_to_parent_tensor", None) is not None:
+                for s in (lexical_slots + rare_lex_slots):
+                    if s < chunk_graph.slot_to_parent_tensor.shape[0]:
+                        p = int(chunk_graph.slot_to_parent_tensor[s].item())
+                        if p != -1:
+                            lexical_parents.append(p)
+            for p in lexical_parents:
+                if p not in selected_centers:
+                    selected_centers.append(p)
 
             # Retrieve 1-hop prime neighbors from chunk_graph.prime_neighbors
             all_selected_prime_nodes = set(selected_centers)
@@ -340,6 +415,18 @@ def route_query(
                 top_parent_idx = torch.topk(scores_parent, k=k_parent, largest=True, sorted=True).indices
                 selected_parents = parent_slots.to(top_parent_idx.device)[top_parent_idx].tolist()
                 
+                # Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+                lexical_parents = []
+                if getattr(chunk_graph, "slot_to_parent_tensor", None) is not None:
+                    for s in (lexical_slots + rare_lex_slots):
+                        if s < chunk_graph.slot_to_parent_tensor.shape[0]:
+                            p = int(chunk_graph.slot_to_parent_tensor[s].item())
+                            if p != -1:
+                                lexical_parents.append(p)
+                for p in lexical_parents:
+                    if p not in selected_parents:
+                        selected_parents.append(p)
+                
                 # 2. Gather children blocks for the selected parent landmarks
                 selected_parents_t = torch.tensor(selected_parents, dtype=torch.int32, device=chunk_graph.parent_to_children_tensor.device)
                 valid_parents_t = selected_parents_t[selected_parents_t < chunk_graph.parent_to_children_tensor.shape[0]]
@@ -388,68 +475,7 @@ def route_query(
             top_score = float(sem_scores_cpu[top_slot_row])
             _is_topic_switch = top_score < _TOPIC_SWITCH_THRESHOLD
 
-    # ── Step 3: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
-    # FIX (Bug 1): Prioritize current_query_tokens for lexical lookup.
-    # Only use recent_generated_tokens (previous-turn output) as a weak fallback
-    # to avoid contaminating the inverted-index search with stale vocabulary.
-    k_lexical   = max(1, int(K * _LEX_FRAC))
-    if query_tokens is not None:
-        recent_toks = query_tokens
-    else:
-        current_q_toks = getattr(srl_state, "current_query_tokens", [])
-        if current_q_toks:
-            # Use only the incoming query tokens — exclude previous-turn outputs.
-            recent_toks = current_q_toks[-128:]
-        else:
-            # Fallback: no explicit query tokens available — use a small tail of
-            # recent generated tokens so we don't completely lose lexical signal.
-            recent_toks = srl_state.recent_generated_tokens[-16:]
 
-    from collections import defaultdict
-    inv_index = srl_state.inverted_index
-    all_abs_positions = []
-    
-    # Track matching positions and IDF values
-    for tok in recent_toks:
-        if tok in inv_index.occurrences:
-            for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
-                all_abs_positions.append(abs_pos)
-                
-    rare_lex_slots = []
-    if all_abs_positions:
-        L = max(all_abs_positions)
-        slot_scores = defaultdict(float)
-        slot_matched_toks = defaultdict(set)
-        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "1.0"))
-        
-        for tok in recent_toks:
-            if tok in inv_index.occurrences:
-                # Retrieve precomputed IDF score (rare tokens have higher values)
-                idf_val = inv_index.idf.get(tok, 1.0)
-                for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
-                    slot_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
-                    slot_matched_toks[slot].add(tok)
-                    
-        # Apply Query Term Coverage boost: scale score by (unique_matches ** 2)
-        for slot in list(slot_scores.keys()):
-            n_unique = len(slot_matched_toks[slot])
-            slot_scores[slot] *= (n_unique ** 2)
-            
-        sorted_lex_slots = sorted(slot_scores.keys(), key=lambda s: slot_scores[s], reverse=True)
-        lexical_slots = sorted_lex_slots[:k_lexical]
-
-        # Extract rare keyword matches (IDF >= 2.0)
-        rare_slots_with_scores = defaultdict(float)
-        for tok in recent_toks:
-            if tok in inv_index.occurrences:
-                idf_val = inv_index.idf.get(tok, 1.0)
-                if idf_val >= 2.0:
-                    for slot, abs_pos, rel_pos in inv_index.occurrences[tok]:
-                        rare_slots_with_scores[slot] += idf_val * (decay_factor ** (L - abs_pos))
-        if rare_slots_with_scores:
-            rare_lex_slots = sorted(rare_slots_with_scores.keys(), key=lambda s: rare_slots_with_scores[s], reverse=True)
-    else:
-        lexical_slots = []
 
     # ── Step 4: Chunk graph neighborhood expansion (vectorized) ──────────
     k_graph   = max(1, int(K * _GRAPH_FRAC))

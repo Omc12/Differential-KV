@@ -430,7 +430,7 @@ def build_chunk_graph(
                     if i == j:
                         continue
                     val = float(parent_sim[i, j].item())
-                    if val >= 0.25:
+                    if val >= 0.30:
                         sims.append((val, valid_parent_slots[j]))
                 
                 # Sort descending by similarity
