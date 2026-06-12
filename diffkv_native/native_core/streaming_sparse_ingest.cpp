@@ -487,15 +487,15 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     
-    // Outputs in block pool
-    job.out_u_ptr = reinterpret_cast<int8_t*>(engines[layer_idx]->get_U()->data) + slot_id * 64 * rank;
-    job.out_u_scale = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_U_scale()->data) + slot_id;
-    job.out_vk_ptr = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_VK()->data) + slot_id * rank * F_test;
-    job.out_vv_ptr = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_VV()->data) + slot_id * rank * F_test;
-    job.out_scale = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_scales()->data) + slot_id;
-    job.out_anchor_k = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_anchors_K()->data) + slot_id * F_test;
-    job.out_anchor_v = reinterpret_cast<ggml_fp16_t*>(engines[layer_idx]->get_anchors_V()->data) + slot_id * F_test;
-    job.out_seq_len = reinterpret_cast<int32_t*>(engines[layer_idx]->get_seq_lens()->data) + slot_id;
+    // Outputs in block pool host mirrors (CUDA compatible)
+    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * rank;
+    job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
+    job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * rank * F_test;
+    job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * rank * F_test;
+    job.out_scale = engines[layer_idx]->get_host_scales() + slot_id;
+    job.out_anchor_k = engines[layer_idx]->get_host_anchors_K() + slot_id * F_test;
+    job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;
+    job.out_seq_len = engines[layer_idx]->get_host_seq_lens() + slot_id;
     job.state_table = &engines[layer_idx]->get_state_table();
     
     bool async_svd = true;
@@ -517,6 +517,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     } else {
         compressor.compress_sync(job);
         block->state = engines[layer_idx]->get_state_table().get(slot_id);
+        engines[layer_idx]->upload_slot(slot_id);
         stats_.total_compressed++;
     }
 }

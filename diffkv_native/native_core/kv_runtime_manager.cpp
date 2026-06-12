@@ -428,6 +428,7 @@ void KVRuntimeManager::wait_for_compressor() {
                 if (st != BlockState::Compressing) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
+            engines_[l]->upload_slot(pool_idx);
         }
     }
 

@@ -885,9 +885,9 @@ int main(int argc, char ** argv) {
 
     // Allocate persistent dense vectors and tables
     int F_test = kv_heads * head_dim;
-    std::vector<std::vector<float>> active_k_dense(n_layers, std::vector<float>(16384 * F_test, 0.0f));
-    std::vector<std::vector<float>> active_v_dense(n_layers, std::vector<float>(16384 * F_test, 0.0f));
-    std::vector<int32_t> active_positions_dense(16384, 0);
+    std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
+    std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
+    diffkv::AlignedInt32Vector active_positions_dense(16384, 0);
     int total_positions = 0;
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
@@ -1650,6 +1650,7 @@ int main(int argc, char ** argv) {
                 userdata[l].active_positions_dense = active_positions_dense.data();
                 userdata[l].active_block_tokens = total_dense_tokens[l];
                 userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
+                userdata[l].current_pos = current_pos;  // for Metal dense-window RoPE
             }
 
 

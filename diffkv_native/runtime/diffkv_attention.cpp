@@ -7,7 +7,9 @@
 
 namespace diffkv {
 
-// Standard CPU Project-Then-Attend reference attention implementation
+// ── CPU Project-Then-Attend (reference / non-Apple fallback) ──────────────────
+// Kept for correctness comparison and CUDA/CPU builds.
+// On Apple the Metal kernel in diffkv_attention.mm is used instead.
 void execute_cpu_attention(
     const float* Q,
     const int32_t* slots,
@@ -18,17 +20,17 @@ void execute_cpu_attention(
     bool has_rope, float rope_freq_base
 ) {
     const float* Q_ptr = Q;
-    const int8_t* U = (const int8_t*)kv_engine->get_U()->data;
-    const ggml_fp16_t* U_scale = (const ggml_fp16_t*)kv_engine->get_U_scale()->data;
-    const ggml_fp16_t* VK = (const ggml_fp16_t*)kv_engine->get_VK()->data;
-    const ggml_fp16_t* VV = (const ggml_fp16_t*)kv_engine->get_VV()->data;
-    const ggml_fp16_t* anchors_K = (const ggml_fp16_t*)kv_engine->get_anchors_K()->data;
-    const ggml_fp16_t* anchors_V = (const ggml_fp16_t*)kv_engine->get_anchors_V()->data;
-    const int32_t* seq_lens = (const int32_t*)kv_engine->get_seq_lens()->data;
-    const ggml_fp16_t* scales = (const ggml_fp16_t*)kv_engine->get_scales()->data;
-    const int32_t* anchor_positions = (const int32_t*)kv_engine->get_anchor_positions()->data;
+    const int8_t* U = kv_engine->get_host_U();
+    const ggml_fp16_t* U_scale = kv_engine->get_host_U_scale();
+    const ggml_fp16_t* VK = kv_engine->get_host_VK();
+    const ggml_fp16_t* VV = kv_engine->get_host_VV();
+    const ggml_fp16_t* anchors_K = kv_engine->get_host_anchors_K();
+    const ggml_fp16_t* anchors_V = kv_engine->get_host_anchors_V();
+    const int32_t* seq_lens = kv_engine->get_host_seq_lens();
+    const ggml_fp16_t* scales = kv_engine->get_host_scales();
+    const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
 
-    // Deduplicate slots to prevent token double-processing and softmax distortion
+    // Deduplicate slots
     int n_slots = kv_engine->get_seq_lens()->ne[0];
     std::vector<int32_t> unique_slots;
     unique_slots.reserve(K);
@@ -45,22 +47,6 @@ void execute_cpu_attention(
 
     int half_d = D / 2;
     const int g = n_q_heads / n_kv_heads;
-
-    static int call_count = 0;
-    bool should_print = (call_count == 0);
-    if (should_print) {
-        call_count++;
-        std::cerr << "\n[C++ CPU ATTN DEBUG - Layer 0 Step 0]\n";
-        std::cerr << "  D: " << D << ", rank: " << rank << ", K: " << active_K << " (original K: " << K << "), scale: " << scale << ", has_rope: " << has_rope << ", rope_freq_base: " << rope_freq_base << "\n";
-        std::cerr << "  Q[head 0] (first 10):";
-        for (int d = 0; d < 10; ++d) std::cerr << " " << Q_ptr[d];
-        std::cerr << "\n  slots (all active K):";
-        for (int k = 0; k < active_K; ++k) {
-            int slot_id = active_slots[k];
-            std::cerr << " " << slot_id << "(pos=" << anchor_positions[slot_id] << ")";
-        }
-        std::cerr << "\n";
-    }
 
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
@@ -80,17 +66,7 @@ void execute_cpu_attention(
             float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
             int anchor_pos = anchor_positions[slot_id];
 
-            if (should_print && h == 0 && k == 0) {
-                std::cerr << "  [Block 0, Head 0]\n";
-                std::cerr << "    slot_id: " << slot_id << ", slen: " << slen << ", scale_u: " << scale_u << ", block_scale: " << block_scale << ", anchor_pos: " << anchor_pos << "\n";
-                std::cerr << "    raw_ak (first 10):";
-                for (int d = 0; d < 10; ++d) {
-                    std::cerr << " " << ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
-                }
-                std::cerr << "\n";
-            }
-
-            // 1. Anchor score (rotated by RoPE)
+            // 1. Rotated anchor score
             float score_anc = 0.0f;
             for (int d = 0; d < D; ++d) {
                 float raw_ak = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
@@ -107,63 +83,42 @@ void execute_cpu_attention(
                 score_anc += Q_ptr[h * D + d] * ak_rot;
             }
             slot_infos[k].anchor_score = score_anc;
-
-            if (should_print && h == 0 && k == 0) {
-                std::cerr << "    score_anc: " << score_anc << "\n";
-            }
-
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
 
-            // 2. Exact reconstruction + per-token RoPE
-            slot_infos[k].token_scores.resize(slen);
-            for (int t = 0; t < slen; ++t) {
-                float t_score_sum = 0.0f;
-                int u_offset = slot_id * S_max * rank + t * rank;
-                for (int d = 0; d < half_d; ++d) {
-                    // Reconstruct partner 1 (d)
-                    float raw_ak_1 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d]);
-                    float sum_r_vk_1 = 0.0f;
-                    for (int r = 0; r < rank; ++r) {
-                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d]);
-                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
-                        sum_r_vk_1 += dequant_u * raw_vk;
-                    }
-                    float k_unrot_1 = raw_ak_1 + block_scale * sum_r_vk_1;
-
-                    // Reconstruct partner 2 (d + half_d)
-                    int d2 = d + half_d;
-                    float raw_ak_2 = ggml_fp16_to_fp32(anchors_K[slot_id * n_kv_heads * D + kv_head * D + d2]);
-                    float sum_r_vk_2 = 0.0f;
-                    for (int r = 0; r < rank; ++r) {
-                        int base_vk_offset = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
-                        float raw_vk = ggml_fp16_to_fp32(VK[base_vk_offset + d2]);
-                        float dequant_u = static_cast<float>(U[u_offset + r]) * scale_u;
-                        sum_r_vk_2 += dequant_u * raw_vk;
-                    }
-                    float k_unrot_2 = raw_ak_2 + block_scale * sum_r_vk_2;
-
-                    float k_rot_1 = k_unrot_1;
-                    float k_rot_2 = k_unrot_2;
+            // 2. Project-Then-Attend: q_proj[r] = q · VK_rot[r] at anchor pos
+            slot_infos[k].q_proj.resize(rank, 0.0f);
+            for (int r = 0; r < rank; ++r) {
+                float proj = 0.0f;
+                int base_vk = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                for (int d = 0; d < D; ++d) {
+                    float raw_vk = ggml_fp16_to_fp32(VK[base_vk + d]);
+                    float vk_rot = raw_vk;
                     if (has_rope) {
-                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
-                        int pos = anchor_pos + 1 + t;
-                        float angle = pos * theta;
-                        k_rot_1 = k_unrot_1 * std::cos(angle) - k_unrot_2 * std::sin(angle);
-                        k_rot_2 = k_unrot_2 * std::cos(angle) + k_unrot_1 * std::sin(angle);
+                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        float raw_vkp = ggml_fp16_to_fp32(VK[base_vk + partner]);
+                        float rot_c = (d < half_d) ? -raw_vkp : raw_vkp;
+                        int idx = (d < half_d) ? d : (d - half_d);
+                        float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+                        float angle = anchor_pos * theta;
+                        vk_rot = raw_vk * std::cos(angle) + rot_c * std::sin(angle);
                     }
-                    t_score_sum += Q_ptr[h * D + d] * k_rot_1 + Q_ptr[h * D + d2] * k_rot_2;
+                    proj += Q_ptr[h * D + d] * vk_rot;
                 }
-                float t_score = t_score_sum * scale;
-                slot_infos[k].token_scores[t] = t_score;
-                if (t_score > max_score) max_score = t_score;
+                slot_infos[k].q_proj[r] = proj;
             }
 
-            if (should_print && h == 0 && k == 0) {
-                std::cerr << "    token_scores (first 10):";
-                for (int t = 0; t < std::min(10, slen); ++t) std::cerr << " " << slot_infos[k].token_scores[t];
-                std::cerr << "\n";
+            // 3. Token delta scores
+            slot_infos[k].token_scores.resize(slen);
+            for (int t = 0; t < slen; ++t) {
+                float delta = 0.0f;
+                int u_off = slot_id * S_max * rank + t * rank;
+                for (int r = 0; r < rank; ++r) {
+                    delta += slot_infos[k].q_proj[r] * (float)U[u_off + r];
+                }
+                float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+                slot_infos[k].token_scores[t] = t_score;
+                if (t_score > max_score) max_score = t_score;
             }
         }
 
@@ -177,8 +132,8 @@ void execute_cpu_attention(
         }
         lse_sparse[h] = max_score + std::log(std::max(sum_exp, 1e-9));
 
-        // Pass 2: Accumulate values
-        std::vector<double> accum_val(D, 0.0);
+        // Value accumulation
+        std::vector<double> accum(D, 0.0);
         for (int k = 0; k < active_K; ++k) {
             int slot_id = active_slots[k];
             int slen = seq_lens[slot_id];
@@ -186,272 +141,242 @@ void execute_cpu_attention(
             float scale_u = ggml_fp16_to_fp32(U_scale[slot_id]);
 
             double w_anc = std::exp(slot_infos[k].anchor_score * scale - max_score) / sum_exp;
-            double sum_w_tokens = 0.0;
+            double sum_w = 0.0;
             std::vector<double> w_proj(rank, 0.0);
 
             for (int t = 0; t < slen; ++t) {
                 double w_t = std::exp(slot_infos[k].token_scores[t] - max_score) / sum_exp;
-                sum_w_tokens += w_t;
-                int u_offset = slot_id * S_max * rank + t * rank;
+                sum_w += w_t;
+                int u_off = slot_id * S_max * rank + t * rank;
                 for (int r = 0; r < rank; ++r) {
-                    w_proj[r] += w_t * static_cast<float>(U[u_offset + r]) * scale_u;
+                    w_proj[r] += w_t * (float)U[u_off + r] * scale_u;
                 }
             }
 
-            double w_total_anc = w_anc + sum_w_tokens;
-
+            double w_total = w_anc + sum_w;
             for (int d = 0; d < D; ++d) {
-                double av_val = ggml_fp16_to_fp32(anchors_V[slot_id * n_kv_heads * D + kv_head * D + d]);
-                accum_val[d] += w_total_anc * av_val;
-
-                double svd_v_contrib = 0.0;
-                int base_vv_offset = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                accum[d] += w_total * ggml_fp16_to_fp32(anchors_V[slot_id * n_kv_heads * D + kv_head * D + d]);
+                double svd_v = 0.0;
+                int base_vv = slot_id * rank * n_kv_heads * D + kv_head * D + d;
                 for (int r = 0; r < rank; ++r) {
-                    double vv_val = ggml_fp16_to_fp32(VV[base_vv_offset + r * n_kv_heads * D]);
-                    svd_v_contrib += w_proj[r] * vv_val;
+                    svd_v += w_proj[r] * ggml_fp16_to_fp32(VV[base_vv + r * n_kv_heads * D]);
                 }
-                accum_val[d] += svd_v_contrib * block_scale;
+                accum[d] += svd_v * block_scale;
             }
         }
+        for (int d = 0; d < D; ++d) cpu_output[h * D + d] = (float)accum[d];
+    }
+}
 
-        for (int d = 0; d < D; ++d) {
-            cpu_output[h * D + d] = static_cast<float>(accum_val[d]);
+// ── CPU dense window attention helper (used by CPU fallback path only) ────────
+static void cpu_dense_attention(
+    const float* Q_ptr,          // [n_q_heads, D]
+    const float* active_k_dense, // [T, n_kv, D]
+    const float* active_v_dense, // [T, n_kv, D]
+    const int32_t* positions,    // [T] actual sequence positions (or nullptr)
+    int T, int n_q_heads, int n_kv_heads, int D,
+    float scale, bool has_rope, float rope_freq_base,
+    int anchor_pos,              // fallback start position if positions == nullptr
+    float* out_dense,            // [n_q_heads, D] — written
+    float* lse_dense_out         // [n_q_heads]   — written
+) {
+    const int g = n_q_heads / n_kv_heads;
+    const int half_d = D / 2;
+
+    std::vector<float> theta(half_d);
+    for (int idx = 0; idx < half_d; ++idx) {
+        theta[idx] = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+    }
+
+    // Pre-rotate K for each KV head
+    std::vector<float> K_rot(T * n_kv_heads * D);
+    for (int kv_head = 0; kv_head < n_kv_heads; ++kv_head) {
+        for (int t = 0; t < T; ++t) {
+            int pos = positions ? positions[t] : (anchor_pos + t);
+            int src = t * n_kv_heads * D + kv_head * D;
+            int dst_off = (t * n_kv_heads + kv_head) * D;
+            for (int d = 0; d < D; ++d) {
+                float raw_k = active_k_dense[src + d];
+                if (has_rope) {
+                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                    float raw_p = active_k_dense[src + partner];
+                    float rot_c = (d < half_d) ? -raw_p : raw_p;
+                    int idx = (d < half_d) ? d : (d - half_d);
+                    float angle = pos * theta[idx];
+                    K_rot[dst_off + d] = raw_k * std::cos(angle) + rot_c * std::sin(angle);
+                } else {
+                    K_rot[dst_off + d] = raw_k;
+                }
+            }
         }
+    }
 
-        if (should_print && h == 0) {
-            std::cerr << "    lse_sparse[0]: " << lse_sparse[0] << "\n";
-            std::cerr << "    out_sparse[0] (first 10):";
-            for (int d = 0; d < 10; ++d) std::cerr << " " << cpu_output[d];
-            std::cerr << "\n";
+    for (int h = 0; h < n_q_heads; ++h) {
+        int kv_head = h / g;
+        const float* Kh = K_rot.data() + kv_head * T * D; // not right index
+
+        float max_s = -1e30f;
+        std::vector<float> scores(T);
+        for (int t = 0; t < T; ++t) {
+            float dot = 0.0f;
+            // K_rot layout: [T, n_kv, D] — stride per kv_head
+            const float* k_t = K_rot.data() + (t * n_kv_heads + kv_head) * D;
+            for (int d = 0; d < D; ++d) dot += Q_ptr[h * D + d] * k_t[d];
+            scores[t] = dot * scale;
+            if (scores[t] > max_s) max_s = scores[t];
+        }
+        float sum_e = 0.0f;
+        for (int t = 0; t < T; ++t) sum_e += std::exp(scores[t] - max_s);
+        lse_dense_out[h] = max_s + std::log(std::max(sum_e, 1e-9f));
+
+        for (int d = 0; d < D; ++d) out_dense[h * D + d] = 0.0f;
+        for (int t = 0; t < T; ++t) {
+            float w = std::exp(scores[t] - lse_dense_out[h]);
+            const float* v_t = active_v_dense + (t * n_kv_heads + kv_head) * D;
+            for (int d = 0; d < D; ++d) out_dense[h * D + d] += w * v_t[d];
         }
     }
 }
 
+// ── Main GGML custom-op callback ──────────────────────────────────────────────
 void custom_attention_op_callback(
     struct ggml_tensor * dst,
-    const struct ggml_tensor * a,
-    const struct ggml_tensor * b,
-    const struct ggml_tensor * c,
-    int ith,
-    int nth,
+    const struct ggml_tensor * a,  // Q  [n_q_heads, D]
+    const struct ggml_tensor * b,  // slot_indices [K]
+    const struct ggml_tensor * c,  // kv_concat of current token [2, n_kv, D]
+    int ith, int nth,
     void * userdata
 ) {
     if (ith != 0) return;
 
-    const struct ggml_tensor * Q = a;
-    const struct ggml_tensor * slot_indices = b;
+    const struct ggml_tensor* Q             = a;
+    const struct ggml_tensor* slot_indices  = b;
+    CustomAttnUserData* data = static_cast<CustomAttnUserData*>(userdata);
 
-    CustomAttnUserData * data = static_cast<CustomAttnUserData*>(userdata);
-    int n_q_heads = data->n_q_heads;
-    int n_kv_heads = data->n_kv_heads;
-    int rank = data->rank;
-    int S_max = data->S_max;
-    int K = data->K;
-    int D = data->D;
-    float scale = data->scale;
-    bool has_rope = data->has_rope;
-    float rope_freq_base = data->rope_freq_base;
+    const int n_q_heads = data->n_q_heads;
+    const int n_kv_heads = data->n_kv_heads;
+    const int D = data->D;
+    const int F_kv = n_kv_heads * D;
+
+    // ── Step 1: Append current token K/V to the dense buffer ─────────────────
+    // The dense buffer (active_k_dense / active_v_dense) is a flat CPU array
+    // maintained by main.cpp. When ignore_c == false, we append the current
+    // token's projected K/V here so the Metal kernel can see it.
+    int T_dense = data->active_block_tokens;  // count of tokens already in dense buf
+
+    if (c != nullptr && !data->ignore_c &&
+        data->active_k_dense != nullptr && data->active_v_dense != nullptr) {
+
+        // Read current token K/V from GGML tensor c = ggml_concat(k, v)
+        std::vector<float> cur_kv(2 * F_kv, 0.0f);
+        if (c->type == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> tmp(2 * F_kv);
+            ggml_backend_tensor_get(c, tmp.data(), 0, 2 * F_kv * sizeof(ggml_fp16_t));
+            for (int i = 0; i < 2 * F_kv; ++i) cur_kv[i] = ggml_fp16_to_fp32(tmp[i]);
+        } else {
+            ggml_backend_tensor_get(c, cur_kv.data(), 0, 2 * F_kv * sizeof(float));
+        }
+
+        // Append to dense buffer at slot T_dense
+        float* k_dst = data->active_k_dense + (size_t)T_dense * F_kv;
+        float* v_dst = data->active_v_dense + (size_t)T_dense * F_kv;
+        std::memcpy(k_dst, cur_kv.data(),         F_kv * sizeof(float));
+        std::memcpy(v_dst, cur_kv.data() + F_kv,  F_kv * sizeof(float));
+
+        // Record the actual sequence position for this token so the kernel can
+        // apply exact per-token RoPE.  current_pos is set by main.cpp each step.
+        if (data->active_positions_dense != nullptr) {
+            data->active_positions_dense[T_dense] = data->current_pos;
+        }
+        T_dense++;
+    }
+
+    // ── Step 2: Dispatch GPU or CPU attention ─────────────────────────────────
+#ifdef __APPLE__
+    const char* env_cpu = std::getenv("DIFFKV_FORCE_CPU_ATTN");
+    bool force_cpu = (env_cpu && std::string(env_cpu) == "1");
+
+    if (!force_cpu) {
+        // Unified Metal path: one kernel dispatch handles sparse + dense.
+        // Output is written directly into dst->data.
+        std::vector<float> lse_dummy(n_q_heads, -1e30f);
+        execute_metal_attention(
+            dst, Q, (struct ggml_tensor*)slot_indices, data,
+            lse_dummy.data(),
+            data->active_k_dense,
+            data->active_v_dense,
+            data->active_positions_dense,
+            T_dense
+        );
+        return;
+    }
+#endif
+
+    // ── CPU fallback (non-Apple builds or DIFFKV_FORCE_CPU_ATTN=1) ───────────
+    const int K = data->K;
+    const int rank = data->rank;
+    const int S_max = data->S_max;
+    const float scale = data->scale;
+    const bool has_rope = data->has_rope;
+    const float rope_freq_base = data->rope_freq_base;
     NativeBlockPool* kv_engine = data->kv_engine;
 
-
+    // Sparse attention (CPU Project-Then-Attend)
     std::vector<float> out_sparse(n_q_heads * D, 0.0f);
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
-
-#ifdef __APPLE__
-    // On macOS, run GPU Metal sparse attention unless forced to CPU
-    bool force_cpu_attn = false;
-    if (const char* env_force = std::getenv("DIFFKV_FORCE_CPU_ATTN")) {
-        if (std::string(env_force) == "1") {
-            force_cpu_attn = true;
-        }
-    }
-    if (K > 0) {
-        if (!force_cpu_attn) {
-            execute_metal_attention(dst, Q, (struct ggml_tensor*)slot_indices, data, lse_sparse.data());
-            // Copy sparse output back for blending on host
-            memcpy(out_sparse.data(), dst->data, n_q_heads * D * sizeof(float));
-        } else {
-            execute_cpu_attention(
-                (const float*)Q->data,
-                (const int32_t*)slot_indices->data,
-                out_sparse.data(),
-                lse_sparse.data(),
-                kv_engine,
-                n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
-                has_rope, rope_freq_base
-            );
-        }
-    }
-#else
-    // On non-macOS (CUDA/CPU fallback), run CPU Project-Then-Attend attention
-    if (K > 0) {
+    if (K > 0 && slot_indices && slot_indices->data) {
         execute_cpu_attention(
             (const float*)Q->data,
             (const int32_t*)slot_indices->data,
-            out_sparse.data(),
-            lse_sparse.data(),
+            out_sparse.data(), lse_sparse.data(),
             kv_engine,
             n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
             has_rope, rope_freq_base
         );
     }
-#endif
 
-    // ── Dense Window Attention & LSE Combine on CPU ──
-    bool has_dense = (data->active_block_tokens > 0 || (c != nullptr && !data->ignore_c)) && data->active_k_dense != nullptr && data->active_v_dense != nullptr;
-    if (has_dense) {
-        int active_block_tokens = data->active_block_tokens;
-        int anchor_pos = data->active_slot; // We passed start position as active_slot
-        const float* active_k_dense = data->active_k_dense;
-        const float* active_v_dense = data->active_v_dense;
-        const int g = n_q_heads / n_kv_heads;
-        const int half_d = D / 2;
-
-        // Append current token's key/value if available
-        int F_test = n_kv_heads * D;
-        std::vector<float> cur_k(F_test);
-        std::vector<float> cur_v(F_test);
-        if (c && !data->ignore_c) {
-            if (c->type == GGML_TYPE_F16) {
-                std::vector<ggml_fp16_t> cur_kv_f16(2 * F_test);
-                ggml_backend_tensor_get(c, cur_kv_f16.data(), 0, 2 * F_test * sizeof(ggml_fp16_t));
-                for (int i = 0; i < F_test; ++i) {
-                    cur_k[i] = ggml_fp16_to_fp32(cur_kv_f16[i]);
-                    cur_v[i] = ggml_fp16_to_fp32(cur_kv_f16[F_test + i]);
-                }
-            } else {
-                std::vector<float> cur_kv_f32(2 * F_test);
-                ggml_backend_tensor_get(c, cur_kv_f32.data(), 0, 2 * F_test * sizeof(float));
-                for (int i = 0; i < F_test; ++i) {
-                    cur_k[i] = cur_kv_f32[i];
-                    cur_v[i] = cur_kv_f32[F_test + i];
-                }
-            }
-
-            float* active_k_ptr = const_cast<float*>(active_k_dense);
-            float* active_v_ptr = const_cast<float*>(active_v_dense);
-            int offset = active_block_tokens * F_test;
-            for (int i = 0; i < F_test; ++i) {
-                active_k_ptr[offset + i] = cur_k[i];
-                active_v_ptr[offset + i] = cur_v[i];
-            }
-
-            active_block_tokens++;
-        }
-
-        // Precompute theta values for RoPE
-        std::vector<float> theta(half_d);
-        for (int idx = 0; idx < half_d; ++idx) {
-            theta[idx] = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
-        }
-
-        std::vector<std::vector<float>> K_dense_rot_by_kv(n_kv_heads, std::vector<float>(active_block_tokens * D));
-        std::vector<std::vector<float>> V_dense_by_kv(n_kv_heads, std::vector<float>(active_block_tokens * D));
-
-        for (int kv_head = 0; kv_head < n_kv_heads; ++kv_head) {
-            float* K_rot = K_dense_rot_by_kv[kv_head].data();
-            float* V_d = V_dense_by_kv[kv_head].data();
-            for (int t = 0; t < active_block_tokens; ++t) {
-                int pos = (data->active_positions_dense != nullptr) ? data->active_positions_dense[t] : (anchor_pos + t);
-                int t_offset = t * D;
-                int src_offset = t * n_kv_heads * D + kv_head * D;
-
-                for (int d = 0; d < D; ++d) {
-                    float raw_k = active_k_dense[src_offset + d];
-                    float raw_v = active_v_dense[src_offset + d];
-                    V_d[t_offset + d] = raw_v;
-
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_partner = active_k_dense[src_offset + partner];
-                        float rot_contrib = (d < half_d) ? -raw_partner : raw_partner;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float angle = pos * theta[idx];
-                        K_rot[t_offset + d] = raw_k * std::cos(angle) + rot_contrib * std::sin(angle);
-                    } else {
-                        K_rot[t_offset + d] = raw_k;
-                    }
-                }
-            }
-        }
-
-        std::vector<float> Q_fp32(n_q_heads * D);
-        if (Q->type == GGML_TYPE_F16) {
-            const ggml_fp16_t* Q_fp16 = (const ggml_fp16_t*)Q->data;
-            for (int i = 0; i < n_q_heads * D; ++i) {
-                Q_fp32[i] = ggml_fp16_to_fp32(Q_fp16[i]);
-            }
-        } else {
-            memcpy(Q_fp32.data(), Q->data, n_q_heads * D * sizeof(float));
-        }
-        const float* Q_ptr = Q_fp32.data();
-        std::vector<float> final_output(n_q_heads * D, 0.0f);
-
-        for (int h = 0; h < n_q_heads; ++h) {
-            int kv_head = h / g;
-            const float* K_dense_rot = K_dense_rot_by_kv[kv_head].data();
-            const float* V_dense = V_dense_by_kv[kv_head].data();
-
-            // Compute query-key dot products
-            std::vector<float> scores(active_block_tokens);
-            float max_score = -1e30f;
-            for (int t = 0; t < active_block_tokens; ++t) {
-                float dot = 0.0f;
-                for (int d = 0; d < D; ++d) {
-                    dot += Q_ptr[h * D + d] * K_dense_rot[t * D + d];
-                }
-                scores[t] = dot * scale;
-                if (scores[t] > max_score) {
-                    max_score = scores[t];
-                }
-            }
-
-            // Log-Sum-Exp
-            float sum_exp = 0.0f;
-            for (int t = 0; t < active_block_tokens; ++t) {
-                sum_exp += std::exp(scores[t] - max_score);
-            }
-            float lse_dense = max_score + std::log(std::max(sum_exp, 1e-9f));
-
-            // Compute dense attention output vector
-            std::vector<float> out_dense(D, 0.0f);
-            for (int t = 0; t < active_block_tokens; ++t) {
-                float w_t = std::exp(scores[t] - lse_dense);
-                for (int d = 0; d < D; ++d) {
-                    out_dense[d] += w_t * V_dense[t * D + d];
-                }
-            }
-
-
-
-            // Combine with sparse attention if sparse blocks exist
-            if (K > 0) {
-                float lse_sparse_val = lse_sparse[h];
-                float lse_max = std::max(lse_dense, lse_sparse_val);
-                float w_dense = std::exp(lse_dense - lse_max);
-                float w_sparse = std::exp(lse_sparse_val - lse_max);
-                float denom = w_dense + w_sparse;
-
-                for (int d = 0; d < D; ++d) {
-                    final_output[h * D + d] = (out_dense[d] * w_dense + out_sparse[h * D + d] * w_sparse) / std::max(denom, 1e-9f);
-                }
-            } else {
-                for (int d = 0; d < D; ++d) {
-                    final_output[h * D + d] = out_dense[d];
-                }
-            }
-        }
-        memcpy(dst->data, final_output.data(), n_q_heads * D * sizeof(float));
-    } else {
-        // No dense tokens, copy sparse output directly
-#ifndef __APPLE__
+    if (T_dense == 0) {
+        // No dense tokens: copy sparse output (or zero)
         if (K > 0) {
-            memcpy(dst->data, out_sparse.data(), n_q_heads * D * sizeof(float));
+            std::memcpy(dst->data, out_sparse.data(), n_q_heads * D * sizeof(float));
         } else {
-            memset(dst->data, 0, n_q_heads * D * sizeof(float));
+            std::memset(dst->data, 0, n_q_heads * D * sizeof(float));
         }
-#endif
+        return;
     }
+
+    // Dense window attention
+    std::vector<float> out_dense(n_q_heads * D, 0.0f);
+    std::vector<float> lse_dense(n_q_heads, -1e30f);
+    cpu_dense_attention(
+        (const float*)Q->data,
+        data->active_k_dense, data->active_v_dense,
+        data->active_positions_dense,
+        T_dense, n_q_heads, n_kv_heads, D,
+        scale, has_rope, rope_freq_base,
+        data->active_slot,
+        out_dense.data(), lse_dense.data()
+    );
+
+    // LSE combine
+    std::vector<float> final_out(n_q_heads * D);
+    for (int h = 0; h < n_q_heads; ++h) {
+        float ld = lse_dense[h];
+        float ls = lse_sparse[h];
+        if (K == 0) {
+            // Only dense
+            for (int d = 0; d < D; ++d) final_out[h * D + d] = out_dense[h * D + d];
+        } else {
+            float lse_max = std::max(ld, ls);
+            float wd = std::exp(ld - lse_max);
+            float ws = std::exp(ls - lse_max);
+            float denom = std::max(wd + ws, 1e-9f);
+            for (int d = 0; d < D; ++d) {
+                final_out[h * D + d] = (out_dense[h * D + d] * wd + out_sparse[h * D + d] * ws) / denom;
+            }
+        }
+    }
+    std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
 }
 
 } // namespace diffkv

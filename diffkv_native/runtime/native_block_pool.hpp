@@ -41,6 +41,30 @@ public:
     int get_free_slots_count();
     void zero_all_tensors();
 
+    // Upload/Download specific slot
+    void upload_slot(int slot_id);
+    void download_slot(int slot_id);
+
+    // Host mirror getters
+    const int8_t* get_host_U() const { return host_U_.data(); }
+    int8_t* get_host_U() { return host_U_.data(); }
+    const ggml_fp16_t* get_host_U_scale() const { return host_U_scale_.data(); }
+    ggml_fp16_t* get_host_U_scale() { return host_U_scale_.data(); }
+    const ggml_fp16_t* get_host_VK() const { return host_VK_.data(); }
+    ggml_fp16_t* get_host_VK() { return host_VK_.data(); }
+    const ggml_fp16_t* get_host_VV() const { return host_VV_.data(); }
+    ggml_fp16_t* get_host_VV() { return host_VV_.data(); }
+    const ggml_fp16_t* get_host_anchors_K() const { return host_anchors_K_.data(); }
+    ggml_fp16_t* get_host_anchors_K() { return host_anchors_K_.data(); }
+    const ggml_fp16_t* get_host_anchors_V() const { return host_anchors_V_.data(); }
+    ggml_fp16_t* get_host_anchors_V() { return host_anchors_V_.data(); }
+    const int32_t* get_host_seq_lens() const { return host_seq_lens_.data(); }
+    int32_t* get_host_seq_lens() { return host_seq_lens_.data(); }
+    const ggml_fp16_t* get_host_scales() const { return host_scales_.data(); }
+    ggml_fp16_t* get_host_scales() { return host_scales_.data(); }
+    const int32_t* get_host_anchor_positions() const { return host_anchor_positions_.data(); }
+    int32_t* get_host_anchor_positions() { return host_anchor_positions_.data(); }
+
 private:
     int n_slots_ = 0;
     int rank_ = 0;
@@ -62,6 +86,17 @@ private:
     struct ggml_tensor * scales_ = nullptr;
     struct ggml_tensor * desc_matrix_ = nullptr;
     struct ggml_tensor * anchor_positions_ = nullptr;  // [n_slots] int32: actual sequence position of each block's anchor
+
+    // Host-side mirror buffers
+    std::vector<int8_t> host_U_;
+    std::vector<ggml_fp16_t> host_U_scale_;
+    std::vector<ggml_fp16_t> host_VK_;
+    std::vector<ggml_fp16_t> host_VV_;
+    std::vector<ggml_fp16_t> host_anchors_K_;
+    std::vector<ggml_fp16_t> host_anchors_V_;
+    std::vector<int32_t> host_seq_lens_;
+    std::vector<ggml_fp16_t> host_scales_;
+    std::vector<int32_t> host_anchor_positions_;
 
     DiffKVBlockStateTable state_table_;
 

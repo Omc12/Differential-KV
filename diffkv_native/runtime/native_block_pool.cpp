@@ -78,6 +78,16 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         return false;
     }
 
+    host_U_.resize(ggml_nelements(U_), 0);
+    host_U_scale_.resize(ggml_nelements(U_scale_), ggml_fp32_to_fp16(0.0f));
+    host_VK_.resize(ggml_nelements(VK_), ggml_fp32_to_fp16(0.0f));
+    host_VV_.resize(ggml_nelements(VV_), ggml_fp32_to_fp16(0.0f));
+    host_anchors_K_.resize(ggml_nelements(anchors_K_), ggml_fp32_to_fp16(0.0f));
+    host_anchors_V_.resize(ggml_nelements(anchors_V_), ggml_fp32_to_fp16(0.0f));
+    host_seq_lens_.resize(ggml_nelements(seq_lens_), 0);
+    host_scales_.resize(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
+    host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
+
     if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
         std::cerr << "[NativeBlockPool] Allocated " 
                   << ggml_backend_buffer_get_size(pool_buffer_) / (1024 * 1024) 
@@ -135,6 +145,16 @@ int NativeBlockPool::get_free_slots_count() {
 }
 
 void NativeBlockPool::zero_all_tensors() {
+    std::fill(host_U_.begin(), host_U_.end(), 0);
+    std::fill(host_U_scale_.begin(), host_U_scale_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_VK_.begin(), host_VK_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_VV_.begin(), host_VV_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_anchors_K_.begin(), host_anchors_K_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_anchors_V_.begin(), host_anchors_V_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_seq_lens_.begin(), host_seq_lens_.end(), 0);
+    std::fill(host_scales_.begin(), host_scales_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_anchor_positions_.begin(), host_anchor_positions_.end(), 0);
+
     if (U_) {
         std::vector<int8_t> zeros(ggml_nelements(U_), 0);
         ggml_backend_tensor_set(U_, zeros.data(), 0, zeros.size() * sizeof(int8_t));
@@ -175,6 +195,34 @@ void NativeBlockPool::zero_all_tensors() {
         std::vector<int32_t> zeros(ggml_nelements(anchor_positions_), 0);
         ggml_backend_tensor_set(anchor_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
     }
+}
+
+void NativeBlockPool::upload_slot(int slot_id) {
+    if (slot_id < 0 || slot_id >= n_slots_) return;
+    
+    ggml_backend_tensor_set(U_, host_U_.data() + slot_id * rank_ * 64, slot_id * U_->nb[2], rank_ * 64 * sizeof(int8_t));
+    ggml_backend_tensor_set(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(VV_, host_VV_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VV_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(anchors_K_, host_anchors_K_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(anchors_V_, host_anchors_V_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
+    ggml_backend_tensor_set(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(anchor_positions_, host_anchor_positions_.data() + slot_id, slot_id * anchor_positions_->nb[0], sizeof(int32_t));
+}
+
+void NativeBlockPool::download_slot(int slot_id) {
+    if (slot_id < 0 || slot_id >= n_slots_) return;
+    
+    ggml_backend_tensor_get(U_, host_U_.data() + slot_id * rank_ * 64, slot_id * U_->nb[2], rank_ * 64 * sizeof(int8_t));
+    ggml_backend_tensor_get(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(VV_, host_VV_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VV_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(anchors_K_, host_anchors_K_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(anchors_V_, host_anchors_V_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
+    ggml_backend_tensor_get(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(anchor_positions_, host_anchor_positions_.data() + slot_id, slot_id * anchor_positions_->nb[0], sizeof(int32_t));
 }
 
 } // namespace diffkv

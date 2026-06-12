@@ -246,14 +246,25 @@ static struct ggml_cgraph * build_decode_graph(
         struct ggml_tensor * q_rope_flat = ggml_reshape_1d(ctx, q_rope, config.n_embd);
 
         // 5. Custom Metal Attention (wrapping forward/sparse Metal kernel)
-        struct ggml_tensor * attn_out = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, config.n_embd);
-        ggml_set_output(attn_out);
-
-        // Bind custom attention operator callback
-        struct ggml_tensor * attn_out_node = ggml_map_custom3(ctx, q_rope_flat, selected_slots, slots_mask, custom_attention_op_callback, GGML_OP_NONE, &userdata[l]);
+        struct ggml_tensor * attn_out = nullptr;
+        if (userdata && selected_slots) {
+            struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
+            struct ggml_tensor * custom_attn = ggml_map_custom3(
+                ctx, q_rope_flat, selected_slots, kv_concat,
+                custom_attention_op_callback, 1, &userdata[l]
+            );
+            attn_out = custom_attn;
+        } else {
+            // Fallback placeholder attention
+            struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, config.n_embd / config.n_head, 1, config.n_head_kv);
+            int group_size = config.n_head / config.n_head_kv;
+            struct ggml_tensor * target_repeat = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, config.n_embd / config.n_head, group_size, config.n_head_kv);
+            struct ggml_tensor * v_repeated = ggml_repeat(ctx, v_reshaped, target_repeat);
+            attn_out = ggml_reshape_1d(ctx, v_repeated, config.n_embd);
+        }
         
         // 6. Output Projection (WO)
-        struct ggml_tensor * attn_proj = ggml_mul_mat(ctx, layer.wo, attn_out_node);
+        struct ggml_tensor * attn_proj = ggml_mul_mat(ctx, layer.wo, attn_out);
         if (layer.bo) attn_proj = ggml_add(ctx, attn_proj, layer.bo);
 
         // 7. Residual connection
@@ -613,8 +624,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     
     // Initialize session-specific lists if empty
     if (session->active_k_dense.empty()) {
-        session->active_k_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
-        session->active_v_dense.assign(n_layers, std::vector<float>(16384 * F_test, 0.0f));
+        session->active_k_dense.assign(n_layers, AlignedFloatVector(16384 * F_test, 0.0f));
+        session->active_v_dense.assign(n_layers, AlignedFloatVector(16384 * F_test, 0.0f));
         session->active_positions_dense.assign(16384, 0);
     }
     if (session->seq_lens_by_layer.empty()) {

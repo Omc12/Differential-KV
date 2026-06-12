@@ -10,6 +10,7 @@
 #include "native_core/kv_runtime_manager.hpp"
 #include "native_core/paging/paged_kv_store.hpp"
 #include "native_core/srl/session_srl_state.hpp"
+#include "runtime/diffkv_attention.hpp"
 
 namespace diffkv {
 
@@ -37,10 +38,10 @@ struct ProductionSession {
     bool has_srl_state = false;
 
     // Running execution state for serving
-    std::vector<std::vector<float>> active_k_dense;
-    std::vector<std::vector<float>> active_v_dense;
+    std::vector<AlignedFloatVector> active_k_dense;
+    std::vector<AlignedFloatVector> active_v_dense;
     std::vector<std::vector<int32_t>> seq_lens_by_layer;
-    std::vector<int32_t> active_positions_dense;
+    AlignedInt32Vector active_positions_dense;
     std::vector<int32_t> last_turn_token_prefix;
     int active_slot = 0;
     int active_block_tokens = 0;

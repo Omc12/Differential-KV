@@ -184,6 +184,20 @@ void PagedKVStore::reload_block(PageEntry& entry, const std::vector<std::unique_
         engine->get_state_table().transition(slot_id, BlockState::CPUResident, BlockState::Reloading);
 
         PagedSlotData & cpu = entry.layers_cpu_data[l];
+        int rank = engine->get_U()->ne[0];
+        int head_dim = engine->get_VK()->ne[0];
+        int kv_heads = engine->get_VK()->ne[1];
+
+        // Update host mirrors (CUDA compatible)
+        std::memcpy(engine->get_host_U() + slot_id * rank * 64, cpu.U.data(), cpu.U.size() * sizeof(int8_t));
+        *(engine->get_host_U_scale() + slot_id) = cpu.U_scale;
+        std::memcpy(engine->get_host_VK() + slot_id * head_dim * kv_heads * rank, cpu.VK.data(), cpu.VK.size() * sizeof(ggml_fp16_t));
+        std::memcpy(engine->get_host_VV() + slot_id * head_dim * kv_heads * rank, cpu.VV.data(), cpu.VV.size() * sizeof(ggml_fp16_t));
+        std::memcpy(engine->get_host_anchors_K() + slot_id * head_dim * kv_heads, cpu.anchors_K.data(), cpu.anchors_K.size() * sizeof(ggml_fp16_t));
+        std::memcpy(engine->get_host_anchors_V() + slot_id * head_dim * kv_heads, cpu.anchors_V.data(), cpu.anchors_V.size() * sizeof(ggml_fp16_t));
+        *(engine->get_host_seq_lens() + slot_id) = cpu.seq_len;
+        *(engine->get_host_scales() + slot_id) = cpu.scale;
+        *(engine->get_host_anchor_positions() + slot_id) = cpu.anchor_position;
 
         ggml_backend_tensor_set(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
         ggml_backend_tensor_set(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
