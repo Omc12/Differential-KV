@@ -310,7 +310,16 @@ void FactualExactStore::build(
             entry.tokens.push_back(token_ids[t]);
         }
 
-        // Prime node designation
+        // 3-token source prefix for quote-grounded connective gating (RC2)
+        {
+            int prefix_start = std::max(0, s - 3);
+            for (int t = prefix_start; t < s; ++t) {
+                entry.prefix_tokens.push_back(token_ids[t]);
+            }
+        }
+
+        // Prime node designation — RC7: require BOTH rarity (IDF) AND lookback
+        // reference (Eagle-R) so that jargon-only spans don't become phantom entities.
         bool is_prime = false;
         for (int slot : entry.slot_ids) {
             if (semantic_prime_slots.count(slot)) {
@@ -325,71 +334,252 @@ void FactualExactStore::build(
                 float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
                 if (idf > max_idf) max_idf = idf;
             }
-            if (max_idf >= 3.0f) {
-                is_prime = true;
+            // Eagle-R: max lookback score for this span
+            bool have_eagle = !eagle_scores.empty();
+            float max_r = 0.0f;
+            if (have_eagle) {
+                for (int t = s; t < e && t < (int)eagle_scores.size(); ++t) {
+                    if (eagle_scores[t] > max_r) max_r = eagle_scores[t];
+                }
+            }
+            if (have_eagle) {
+                // RC7: an entity is a rare term the document refers back to —
+                // require BOTH rarity AND reference so one-off jargon doesn't
+                // spawn a phantom entity.
+                if (max_idf >= 3.0f && max_r >= 0.3f) {
+                    is_prime = true;
+                } else if (max_r >= 1.5f) {
+                    // Highly referenced regardless of rarity → entity prime
+                    is_prime = true;
+                }
+            } else {
+                // RC7 fallback: no reference signal was computed — cannot demand a
+                // reference we never measured, so fall back to rarity-only.
+                if (max_idf >= 3.0f) {
+                    is_prime = true;
+                }
             }
         }
         entry.is_prime = is_prime;
 
+        // For primes, record the single most distinguishing (highest-IDF) token,
+        // used by assign_entities() to bind properties that explicitly name their
+        // entity, overriding misleading low-IDF token overlap (RC4).
+        if (is_prime) {
+            int32_t best_tok = -1;
+            float best_idf = 0.0f;
+            for (int32_t t : entry.tokens) {
+                auto it = inv_index.idf.find(t);
+                float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
+                if (idf >= 3.0f && idf > best_idf) {
+                    best_idf = idf;
+                    best_tok = t;
+                }
+            }
+            entry.distinguishing_token = best_tok;
+        }
+
         entries.push_back(std::move(entry));
     }
 
-    // 8a. Assign entity_ids to all entries via token overlap with primes.
-    // For each non-prime entry, find the prime whose token set has the
-    // highest overlap with this entry's tokens.
+    // 8a. Assign entity_ids: bind each property span to the prime that owns it.
+    //
+    // Plain token-overlap mis-binds related concepts: a property of EP2 such as
+    // "codimension 2 while" shares the filler "while" with the EP3 span and names
+    // neither entity, so it gets pulled to EP3 (RC4).  Absolute positional
+    // proximity is also ambiguous in interleaved comparison text.  Ownership is
+    // decided in priority order (mirrors Python FactualExactStore._assign_entities):
+    //   1. distinguishing-token override — span explicitly names exactly one prime
+    //   2. IDF-weighted overlap — span names several primes
+    //   3. nearest-PRECEDING prime in document order (reading-order ownership)
     struct PrimeInfo {
-        size_t idx;
         std::unordered_set<int32_t> token_set;
         int32_t start_idx;
+        int32_t distinguishing_token;
     };
     std::vector<PrimeInfo> prime_infos;
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (entries[i].is_prime) {
-            entries[i].entity_id = entries[i].start_idx;
+    for (auto& fe : entries) {
+        if (fe.is_prime) {
+            fe.entity_id = fe.start_idx;
             PrimeInfo pi;
-            pi.idx = i;
-            pi.start_idx = entries[i].start_idx;
-            pi.token_set.insert(entries[i].tokens.begin(), entries[i].tokens.end());
+            pi.start_idx = fe.start_idx;
+            pi.distinguishing_token = fe.distinguishing_token;
+            pi.token_set.insert(fe.tokens.begin(), fe.tokens.end());
             prime_infos.push_back(std::move(pi));
         }
     }
 
     if (!prime_infos.empty()) {
+        // Sorted prime positions for reading-order (nearest-preceding) ownership.
+        std::vector<int32_t> prime_starts;
+        prime_starts.reserve(prime_infos.size());
+        for (const auto& pi : prime_infos) prime_starts.push_back(pi.start_idx);
+        std::sort(prime_starts.begin(), prime_starts.end());
+
+        auto tok_idf = [&](int32_t t) -> float {
+            auto it = inv_index.idf.find(t);
+            return (it != inv_index.idf.end() ? it->second : 1.0f);
+        };
+
         for (auto& entry : entries) {
             if (entry.is_prime) continue;
             std::unordered_set<int32_t> entry_tokens(entry.tokens.begin(), entry.tokens.end());
-            int best_overlap = 0;
-            int32_t best_entity = -1;
+
+            // 1./2. Distinguishing-token signal.
+            std::vector<int32_t> named_primes;
             for (const auto& pi : prime_infos) {
-                int shared = 0;
-                for (int32_t t : entry_tokens) {
-                    if (pi.token_set.count(t)) ++shared;
-                }
-                if (shared > best_overlap) {
-                    best_overlap = shared;
-                    best_entity = pi.start_idx;
-                } else if (shared == best_overlap && shared > 0) {
-                    if (best_entity == -1 || std::abs(entry.start_idx - pi.start_idx) < std::abs(entry.start_idx - best_entity)) {
-                        best_entity = pi.start_idx;
-                    }
+                if (pi.distinguishing_token >= 0 && entry_tokens.count(pi.distinguishing_token)) {
+                    named_primes.push_back(pi.start_idx);
                 }
             }
-            if (best_entity == -1) {
-                // No token overlap — fall back to positional proximity
-                int min_dist = INT_MAX;
+            if (named_primes.size() == 1) {
+                entry.entity_id = named_primes[0];
+                continue;
+            }
+            if (named_primes.size() > 1) {
+                std::unordered_set<int32_t> named_set(named_primes.begin(), named_primes.end());
+                int32_t best_entity = -1;
+                float best_score = -1.0f;
                 for (const auto& pi : prime_infos) {
-                    int dist = std::abs(entry.start_idx - pi.start_idx);
-                    if (dist < min_dist) {
-                        min_dist = dist;
+                    if (!named_set.count(pi.start_idx)) continue;
+                    float score = 0.0f;
+                    for (int32_t t : entry_tokens) {
+                        if (pi.token_set.count(t)) score += tok_idf(t);
+                    }
+                    if (score > best_score) {
+                        best_score = score;
                         best_entity = pi.start_idx;
                     }
                 }
+                entry.entity_id = best_entity;
+                continue;
             }
-            entry.entity_id = best_entity;
+
+            // 3. Reading-order ownership: nearest prime introduced before this span.
+            int32_t owner = -1;
+            for (int32_t ps : prime_starts) {
+                if (ps <= entry.start_idx) owner = ps; else break;
+            }
+            if (owner == -1) {
+                // No prime precedes — fall back to nearest prime overall.
+                int min_dist = INT_MAX;
+                for (int32_t ps : prime_starts) {
+                    int dist = std::abs(entry.start_idx - ps);
+                    if (dist < min_dist) { min_dist = dist; owner = ps; }
+                }
+            }
+            entry.entity_id = owner;
         }
     }
 
-    // 8b. Build graph connections with entity-aware dampening.
+    // 8a-rc3. Stamp each entry with its owning entity's signature so an
+    // entity-biased query can rank the queried entity's spans above
+    // shared-vocabulary spans of other entities (RC3).
+    entity_distinguishing.clear();
+    for (const auto& fe : entries) {
+        if (fe.is_prime && fe.distinguishing_token >= 0) {
+            entity_distinguishing[fe.start_idx] = fe.distinguishing_token;
+        }
+    }
+    for (auto& entry : entries) {
+        auto it = entity_distinguishing.find(entry.entity_id);
+        if (it != entity_distinguishing.end()) {
+            entry.entity_sig = entity_signature(it->second);
+        }
+    }
+
+    // 8b-rc1. Extract typed directed triples: (prime → bridge → value).
+    // For each prime entry P, scan forward for property spans owned by the same
+    // entity.  The document tokens between P.end_idx and V.start_idx form the
+    // "bridge" (relational connectives: "is", "has", "exhibits", etc.).
+    // Stored as triple_sequences on the prime for injection at decode time.
+    {
+        // Build set of relational token IDs (low-IDF binders)
+        std::unordered_set<int32_t> rel_tid_set;
+        for (int i_t = 0; i_t < L; ++i_t) {
+            int32_t tid = token_ids[i_t];
+            auto it = inv_index.idf.find(tid);
+            float idf = (it != inv_index.idf.end()) ? it->second : 2.0f;
+            if (idf < 1.5f) rel_tid_set.insert(tid);
+        }
+
+        for (auto& p_entry : entries) {
+            if (!p_entry.is_prime) continue;
+            int32_t p_entity = p_entry.start_idx;
+            int p_end = p_entry.end_idx;
+
+            for (const auto& v_entry : entries) {
+                if (v_entry.is_prime) continue;
+                if (v_entry.entity_id != p_entity) continue;
+                if (v_entry.start_idx < p_end) continue;
+                int gap = v_entry.start_idx - p_end;
+                if (gap > 96) continue;
+
+                // Build bridge tokens
+                std::vector<int32_t> bridge;
+                for (int t = p_end; t < v_entry.start_idx; ++t) {
+                    bridge.push_back(token_ids[t]);
+                }
+                if (bridge.size() > 8) continue;
+
+                // Require at least one relational token in bridge
+                bool has_rel = false;
+                for (int32_t tid : bridge) {
+                    if (rel_tid_set.count(tid)) { has_rel = true; break; }
+                }
+                if (!has_rel) continue;
+
+                // Build triple sequence: bridge + value tokens
+                std::vector<int32_t> triple_seq = bridge;
+                triple_seq.insert(triple_seq.end(),
+                                  v_entry.tokens.begin(), v_entry.tokens.end());
+
+                // Deduplicate
+                bool already_present = false;
+                for (const auto& ts : p_entry.triple_sequences) {
+                    if (ts == triple_seq) { already_present = true; break; }
+                }
+                if (!already_present && !triple_seq.empty()) {
+                    p_entry.triple_sequences.push_back(std::move(triple_seq));
+                }
+            }
+        }
+    }
+
+    // 8c-dx1. DX1: Tag definition spans.
+    // A non-prime span whose owning prime is ≤ 32 tokens away via a short copular
+    // bridge (IDF < 1.0) is marked is_definition = true.  query() boosts these
+    // entries by 1.5× so definitions always survive the coherence cap.
+    {
+        // Build prime_by_entity map
+        std::unordered_map<int32_t, FactEntry*> prime_by_entity;
+        for (auto& fe : entries) {
+            if (fe.is_prime) prime_by_entity[fe.start_idx] = &fe;
+        }
+        for (auto& entry : entries) {
+            if (entry.is_prime || entry.entity_id == -1) continue;
+            auto it = prime_by_entity.find(entry.entity_id);
+            if (it == prime_by_entity.end()) continue;
+            const FactEntry* p_entry = it->second;
+            if (entry.start_idx < p_entry->end_idx) continue;
+            int gap = entry.start_idx - p_entry->end_idx;
+            if (gap > 32) continue;
+            int bridge_len = gap;
+            if (bridge_len > 5) continue;
+            // Definitional bridge contains a copular verb with IDF < 1.0
+            bool has_copula = false;
+            for (int t = p_entry->end_idx; t < entry.start_idx && t < (int)token_ids.size(); ++t) {
+                int32_t tid = token_ids[t];
+                float idf = inv_index.idf.count(tid) ? inv_index.idf.at(tid) : 2.0f;
+                if (idf < 1.0f) { has_copula = true; break; }
+            }
+            if (has_copula || bridge_len <= 3) {
+                entry.is_definition = true;
+            }
+        }
+    }
+
+    // 8e. Build graph connections with entity-aware dampening.
     // Cross-entity edges receive a 0.3× weight penalty to prevent graph
     // walks from propagating one entity's properties into another's
     // retrieval set.
@@ -506,9 +696,32 @@ std::vector<FactEntry> FactualExactStore::query(
     const float* W_proj,
     int desc_dim,
     float threshold,
-    const std::unordered_set<int32_t>* active_slots
+    const std::unordered_set<int32_t>* active_slots,
+    const std::unordered_set<int32_t>* query_entity_bias
 ) const {
     if (entries.empty() || !W_proj) return {};
+
+    // RC3 — build the entity-bias signature from the queried entities'
+    // distinguishing tokens.  Empty when no bias supplied (null-safe: ranking is
+    // then identical to before).
+    const float ENTITY_BIAS_WEIGHT = 0.15f;
+    std::vector<float> q_sig;
+    if (query_entity_bias && !query_entity_bias->empty()) {
+        std::vector<float> acc(ENTITY_SIG_DIM, 0.0f);
+        double nrm = 0.0;
+        for (int32_t eid : *query_entity_bias) {
+            auto it = entity_distinguishing.find(eid);
+            if (it == entity_distinguishing.end()) continue;
+            std::vector<float> s = entity_signature(it->second);
+            for (int i = 0; i < ENTITY_SIG_DIM; ++i) acc[i] += s[i];
+        }
+        for (int i = 0; i < ENTITY_SIG_DIM; ++i) nrm += (double)acc[i] * acc[i];
+        nrm = std::sqrt(nrm);
+        if (nrm > 1e-8) {
+            for (int i = 0; i < ENTITY_SIG_DIM; ++i) acc[i] = (float)(acc[i] / nrm);
+            q_sig = std::move(acc);
+        }
+    }
 
     // 1. Mean query: [head_dim]
     std::vector<float> avg_q(head_dim, 0.0f);
@@ -641,6 +854,20 @@ std::vector<FactEntry> FactualExactStore::query(
             if (walk_it != walk_candidates.end() && walk_it->second > final_score) {
                 final_score = walk_it->second;
             }
+            // RC3: nudge ranking toward the queried entity's spans (ordering only;
+            // the pass/fail gates above are untouched so recall is unchanged).
+            if (!q_sig.empty() && !entry.entity_sig.empty()) {
+                float dp = 0.0f;
+                for (int i = 0; i < ENTITY_SIG_DIM && i < (int)entry.entity_sig.size(); ++i) {
+                    dp += q_sig[i] * entry.entity_sig[i];
+                }
+                final_score += ENTITY_BIAS_WEIGHT * dp;
+            }
+            // DX1: definition spans get boosted retrieval priority so they
+            // always sort above tangential context in the coherence cap.
+            if (entry.is_definition) {
+                final_score = std::min(final_score * 1.5f, 1.0f);
+            }
             entry.current_sim = final_score;
             merged_results.push_back({entry, final_score});
         }
@@ -672,10 +899,12 @@ std::vector<FactEntry> FactualExactStore::query(
     std::sort(merged_results.begin(), merged_results.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
-    // Top 5 only — with 5% selection, each entry is a tight, high-precision span.
-    // Returning more than 5 at this precision level floods the VSL with too many candidates.
+    // RC6 — entity-proportional budget: scale K with matched prime count so each
+    // entity gets coverage in comparison answers (fixed top-5 drops one entity).
+    int n_matched_primes = static_cast<int>(prime_seeds.size());
+    int k_budget = std::max(5, n_matched_primes * 3 + 2);
     std::vector<FactEntry> results;
-    int limit = std::min(5, (int)merged_results.size());
+    int limit = std::min(k_budget, (int)merged_results.size());
     for (int i = 0; i < limit; ++i) {
         FactEntry top_entry = merged_results[i].first;
         top_entry.current_sim = merged_results[i].second;

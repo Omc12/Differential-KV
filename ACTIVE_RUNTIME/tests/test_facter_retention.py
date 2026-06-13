@@ -712,6 +712,209 @@ def test_lm_vsl_masking():
     assert srl_state.vsl_active_candidates == []
 
 
+def _mk_entry(tokens, start, prime=False, dist_tok=None):
+    e = FactEntry(
+        start_idx=start, end_idx=start + len(tokens),
+        K=torch.zeros(1, 1, 1, 1), V=torch.zeros(1, 1, 1, 1),
+        descriptor=torch.zeros(64), tokens=list(tokens),
+    )
+    e.is_prime = prime
+    if prime:
+        e.entity_id = start
+        e.distinguishing_token = dist_tok
+    return e
+
+
+def test_rc4_interleaved_entity_binding():
+    """RC4: interleaved comparison properties must bind to the correct entity.
+
+    Source: "EP2 is codimension 2 while EP3 is codimension 3".
+    The EP2 property span "codimension 2 while" shares the filler token "while"
+    with the EP3 prime span and names neither entity — plain token overlap
+    (the old logic) mis-binds it to EP3.  Reading-order ownership binds it to EP2.
+    """
+    EP2, EP3, codim, two, three, is_, while_ = 1001, 1002, 2002, 301, 302, 50, 60
+
+    class Inv:
+        idf = {EP2: 4.0, EP3: 4.0, codim: 2.0, two: 2.5, three: 2.5, is_: 0.2, while_: 0.3}
+
+    store = FactualExactStore(session_id="rc4")
+    store.entries = [
+        _mk_entry([EP2, is_, codim], 0, prime=True, dist_tok=EP2),   # "EP2 is codimension"
+        _mk_entry([codim, two, while_], 2),                          # "codimension 2 while"  (EP2's property)
+        _mk_entry([while_, EP3, is_, codim], 4, prime=True, dist_tok=EP3),  # "while EP3 is codimension"
+        _mk_entry([codim, three], 7),                                # "codimension 3"  (EP3's property)
+    ]
+
+    store._assign_entities(Inv())
+
+    # Property spans bind to the entity that owns them, not the one they share filler with.
+    assert store.entries[1].entity_id == 0, "codimension-2 span should bind to EP2 (start 0)"
+    assert store.entries[3].entity_id == 4, "codimension-3 span should bind to EP3 (start 4)"
+
+
+def test_rc4_distinguishing_token_override():
+    """A span that explicitly names an entity binds to it regardless of position."""
+    EP2, EP3, codim, two = 1001, 1002, 2002, 301
+
+    class Inv:
+        idf = {EP2: 4.0, EP3: 4.0, codim: 2.0, two: 2.5}
+
+    store = FactualExactStore(session_id="rc4b")
+    store.entries = [
+        _mk_entry([EP2], 0, prime=True, dist_tok=EP2),
+        _mk_entry([EP3], 10, prime=True, dist_tok=EP3),
+        # Property names EP2 but sits closer to the EP3 prime in absolute position.
+        _mk_entry([EP2, codim, two], 8),
+    ]
+    store._assign_entities(Inv())
+    assert store.entries[2].entity_id == 0, "span naming EP2 must bind to EP2 even when nearer EP3"
+
+
+def test_rc2_quote_grounded_connectives():
+    """RC2: under SFA, relational connectives are admitted only where the source
+    grounds them — as a captured-sequence start or source-adjacent (in a span's
+    prefix) — never freely.
+    """
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import get_allowed_tokens_vsl
+
+    # Token ids: content {codim=10, two=11}; connectives is=101 (copula), while=102
+    # (contrastive), because=103 (causal). All three are "relational binders".
+    helper_ids = {100, 101, 102, 103}            # the, is, while, because
+    structural_helper_ids = {100}                # only "the" is purely grammatical
+    # relational_ids = helper_ids - structural = {101, 102, 103}
+
+    srl_state = SessionSRLState(
+        semantic_index=None, chunk_graph=None, inverted_index=None,
+        ordered_slot_ids=[], sink_blocks=[],
+    )
+    # One enterable property span [10, 11] whose source prefix was "... while codim".
+    # -> "while" (102) is source-adjacent and should be admitted; "because" (103)
+    #    never appears in the source and must stay blocked.
+    srl_state.current_step_factual_sequences = [[10, 11]]
+    srl_state.current_step_sequence_entity_ids = [-1]
+    srl_state.current_step_sequence_is_prime = [False]
+    srl_state.current_step_sequence_prefixes = [[102, 10]]   # "while codim" preceded the span
+    srl_state.vsl_active_candidates = []
+
+    allowed = get_allowed_tokens_vsl(
+        srl_state, helper_ids,
+        structural_helper_ids=structural_helper_ids, sfa_active=True,
+    )
+
+    assert 100 in allowed, "purely grammatical helper 'the' must stay free"
+    assert 10 in allowed, "enterable span start must be allowed"
+    assert 102 in allowed, "'while' is source-adjacent (in prefix) -> grounded, admitted"
+    assert 103 not in allowed, "'because' never appears in source -> blocked"
+    assert 101 not in allowed, "'is' is neither a sequence start nor source-adjacent -> blocked"
+
+
+def test_rc2_triple_bridge_connective_allowed():
+    """A connective that begins a captured triple sequence (its bridge) is grounded."""
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import get_allowed_tokens_vsl
+
+    helper_ids = {100, 101, 102}                  # the, is, while
+    structural_helper_ids = {100}
+
+    srl_state = SessionSRLState(
+        semantic_index=None, chunk_graph=None, inverted_index=None,
+        ordered_slot_ids=[], sink_blocks=[],
+    )
+    # Triple sequence starts with its bridge connective "is" (101) -> grounded.
+    srl_state.current_step_factual_sequences = [[101, 10, 11]]   # "is codimension 2"
+    srl_state.current_step_sequence_entity_ids = [5]
+    srl_state.current_step_sequence_is_prime = [False]
+    srl_state.current_step_sequence_prefixes = [[]]              # triples carry no external prefix
+    srl_state.vsl_active_candidates = []
+
+    allowed = get_allowed_tokens_vsl(
+        srl_state, helper_ids,
+        structural_helper_ids=structural_helper_ids, sfa_active=True,
+    )
+    assert 101 in allowed, "'is' begins a captured triple bridge -> grounded, admitted"
+    assert 102 not in allowed, "'while' is ungrounded here -> blocked"
+
+
+def test_rc3_entity_bias_reranking():
+    """RC3: when two property spans have identical descriptors but belong to
+    different entities, an entity-biased query ranks the queried entity's span
+    higher.  Without a bias, ranking is unchanged (null-safe)."""
+    EP2, EP3, codimA, codimB = 1001, 1002, 2001, 2002
+
+    class Inv:
+        idf = {EP2: 4.0, EP3: 4.0, codimA: 2.0, codimB: 2.0}
+
+    d = torch.tensor([1.0, 0.0, 0.0, 0.0])          # shared property descriptor
+    orth = torch.tensor([0.0, 1.0, 0.0, 0.0])       # primes: below threshold, not seeds
+
+    store = FactualExactStore(session_id="rc3")
+    p2 = _mk_entry([EP2], 0, prime=True, dist_tok=EP2); p2.descriptor = orth.clone()
+    p3 = _mk_entry([EP3], 10, prime=True, dist_tok=EP3); p3.descriptor = orth.clone()
+    propA = _mk_entry([EP2, codimA], 1); propA.descriptor = d.clone()   # names EP2 -> binds EP2
+    propB = _mk_entry([EP3, codimB], 11); propB.descriptor = d.clone()  # names EP3 -> binds EP3
+    store.entries = [p2, p3, propA, propB]
+    store._assign_entities(Inv())
+
+    W_proj = torch.eye(4)
+    Q = d.unsqueeze(0)                               # q_desc == d -> sim(propA)=sim(propB)=1
+
+    def sim_of(start, results):
+        for e in results:
+            if e.start_idx == start:
+                return e.current_sim
+        return None
+
+    # Unbiased: both property spans score equally.
+    res = store.query(Q, W_proj, threshold=0.5, active_slots=None)
+    assert abs(sim_of(1, res) - sim_of(11, res)) < 1e-6, "unbiased ranking must be identical"
+
+    # Biased toward EP2: EP2's property outranks EP3's despite identical descriptors.
+    res_b = store.query(Q, W_proj, threshold=0.5, active_slots=None, query_entity_bias={0})
+    assert sim_of(1, res_b) > sim_of(11, res_b), "EP2-biased query must rank EP2's span higher"
+
+
+def test_rc5_advance_comparison_entity():
+    """RC5: a comparison block advances to the next entity only after the active
+    entity's prime AND a property have appeared in recent output."""
+    from native_core.srl.factual_alignment import advance_comparison_entity
+
+    comparison = [0, 10]                              # entity A=0, B=10
+    prime_toks = {0: {1001}, 10: {1002}}
+    prop_toks  = {0: {2001}, 10: {2002}}
+
+    # Only A's prime seen so far -> stay on A (block not yet substantive).
+    idx, cov = advance_comparison_entity(comparison, 0, set(), [1001], prime_toks, prop_toks)
+    assert idx == 0 and cov == set()
+
+    # A's prime + property seen -> A covered, advance to B.
+    idx, cov = advance_comparison_entity(comparison, 0, set(), [1001, 2001], prime_toks, prop_toks)
+    assert idx == 1 and cov == {0}
+
+    # On B's block with everything seen -> B covered, but stay (no further blocks).
+    idx, cov = advance_comparison_entity(comparison, 1, {0}, [1002, 2002], prime_toks, prop_toks)
+    assert idx == 1 and cov == {0, 10}
+
+
+def test_rc8_entity_token_license():
+    """RC8: tokens exclusive to other entities are 'foreign' and get penalised;
+    shared, prime, and entity-agnostic tokens stay licensed."""
+    from native_core.srl.factual_alignment import compute_entity_token_license
+
+    sequences  = [[1001, 50],   [2001, 2002], [3001, 3002], [50, 99]]
+    entity_ids = [0,            0,            10,           -1]
+    is_prime   = [True,         False,        False,        False]
+
+    licensed, foreign = compute_entity_token_license(sequences, entity_ids, is_prime, current_entity=0)
+    # Entity 0's prime + property + the entity-agnostic span are licensed.
+    assert {1001, 50, 2001, 2002, 99} <= licensed
+    # Entity 10's exclusive property tokens are foreign.
+    assert foreign == {3001, 3002}
+    # 50 is shared (also in agnostic span) so it must NOT be penalised.
+    assert 50 not in foreign
+
+
 def test_structured_attention_segmenting():
     import torch
     from native_core.srl.session_srl_state import SessionSRLState

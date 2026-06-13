@@ -88,8 +88,19 @@ class SessionSRLState:
     # but cross-entity contamination is prevented via strict VSL filtering.
     dual_entity_mode: bool = False
     dual_entity_ids: List[int] = field(default_factory=list)  # [entity_id_1, entity_id_2]
+    # RC5 — explicit comparison mode: when ≥2 entities are being compared we do
+    # NOT let them interleave; we lock generation to one entity at a time and
+    # advance only once it has been substantively covered.  comparison_entities
+    # is the ordered block sequence; comparison_active_idx the current block;
+    # comparison_covered the entities already produced.
+    comparison_entities: List[int] = field(default_factory=list)
+    comparison_active_idx: int = 0
+    comparison_covered: set = field(default_factory=set)
     current_step_sequence_entity_ids: List[int] = field(default_factory=list)
     current_step_sequence_is_prime: List[bool] = field(default_factory=list)
+    # current_step_sequence_prefixes: parallel list; the source tokens preceding
+    # each sequence's span (RC2 quote-grounded connectives). [] for triples.
+    current_step_sequence_prefixes: List[List[int]] = field(default_factory=list)
 
     # Per-layer ordered slots (all layers share pool slots → same list for all)
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)

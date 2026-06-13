@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 import os
 import threading
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from native_core.sparse_decode.triton_fused_decode import (
     TritonDiffKV,
     native_triton_sparse_attn_decode,
@@ -516,6 +516,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     srl_state.current_step_max_similarity = 0.0
                                     srl_state.current_step_sequence_entity_ids = []
                                     srl_state.current_step_sequence_is_prime = []
+                                    srl_state.current_step_sequence_prefixes = []
                                     # Invalidate per-step caches
                                     srl_state._prime_tokens_cache = None
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
@@ -735,7 +736,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                             prime_matches[0][0],
                                                             prime_matches[1][0],
                                                         ]
-                                                        srl_state.current_entity_id = -1
+                                                        # RC5: sequence the comparison as per-entity
+                                                        # blocks and lock to the first entity now,
+                                                        # instead of leaving entity context open
+                                                        # (which lets the two interleave).
+                                                        srl_state.comparison_entities = list(srl_state.dual_entity_ids)
+                                                        srl_state.comparison_active_idx = 0
+                                                        srl_state.comparison_covered = set()
+                                                        srl_state.current_entity_id = srl_state.comparison_entities[0]
                                             except Exception:
                                                 pass  # Early binding is best-effort
 
@@ -743,31 +751,51 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     else:
                                         q_for_factual = raw_q
 
+                                    # RC3 — tell the store which entities the query
+                                    # is about so it can rank their spans above
+                                    # shared-vocabulary spans of other entities.
+                                    _qbias = None
+                                    if getattr(srl_state, "dual_entity_mode", False) and getattr(srl_state, "dual_entity_ids", None):
+                                        _qbias = set(srl_state.dual_entity_ids)
+                                    elif getattr(srl_state, "current_entity_id", -1) != -1:
+                                        _qbias = {srl_state.current_entity_id}
+
                                     matching_entries = factual_store.query(
                                         Q=q_for_factual,
                                         W_proj=pool.W_proj,
                                         threshold=0.50,
-                                        active_slots=active_slots
+                                        active_slots=active_slots,
+                                        query_entity_bias=_qbias,
                                     )
                                     if srl_state is not None and matching_entries:
                                         for entry in matching_entries:
                                             srl_state.current_step_factual_tokens.update(entry.tokens)
                                             if entry.tokens not in srl_state.current_step_factual_sequences:
                                                 srl_state.current_step_factual_sequences.append(entry.tokens)
+                                            # RC1 — inject triple sequences from prime entries.
+                                            # Triple sequences = (bridge + value) pairs grounded in
+                                            # the source text.  By adding them here, the VSL can lock
+                                            # onto the complete (relation → value) ordering, preventing
+                                            # the model from freely substituting its own connectives.
+                                            if getattr(entry, "is_prime", False):
+                                                for triple_seq in getattr(entry, "triple_sequences", []):
+                                                    if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                        srl_state.current_step_factual_sequences.append(triple_seq)
+                                                        srl_state.current_step_factual_tokens.update(triple_seq)
                                             # ── 1-hop neighbor injection ────────────────────────────
-                                            # Threshold raised 0.35→0.45: with temporal adjacency
-                                            # edges (within 512 tokens) many unrelated entries had
-                                            # weight > 0.35, flooding sequences with off-topic spans.
                                             for nb_idx, nb_weight in zip(entry.neighbors, entry.weights):
                                                 if nb_weight >= 0.45 and nb_idx < len(factual_store.entries):
                                                     nb_e = factual_store.entries[nb_idx]
                                                     if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
                                                         srl_state.current_step_factual_tokens.update(nb_e.tokens)
                                                         srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                                    if getattr(nb_e, "is_prime", False):
+                                                        for triple_seq in getattr(nb_e, "triple_sequences", []):
+                                                            if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                                srl_state.current_step_factual_sequences.append(triple_seq)
+                                                                srl_state.current_step_factual_tokens.update(triple_seq)
                                                         # ── 2-hop neighbor injection ────────────────
-                                                        # Threshold raised 0.50→0.65: 2-hop is doubly
-                                                        # noisy; only follow strong, high-confidence edges.
-                                                        for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
+                                                    for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
                                                             if nb2_weight >= 0.65 and nb2_idx < len(factual_store.entries):
                                                                 nb2_e = factual_store.entries[nb2_idx]
                                                                 if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
@@ -853,42 +881,116 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                     srl_state.current_step_factual_tokens = set()
                                                     for s in filtered_seqs:
                                                         srl_state.current_step_factual_tokens.update(s)
-                                         # ── Coherence Cap ──
-                                    if srl_state is not None and len(srl_state.current_step_factual_sequences) > 8:
-                                        seq_id_to_score = {}
-                                        for fe_e in factual_store.entries:
-                                            fe_sim = getattr(fe_e, "current_sim", 0.0)
-                                            if fe_sim > 0:
-                                                tup = tuple(fe_e.tokens)
-                                                seq_id_to_score[tup] = max(seq_id_to_score.get(tup, 0.0), fe_sim)
-                                        srl_state.current_step_factual_sequences.sort(
-                                            key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
+
+                                        # ── RC5 Comparison Sequencing ───────────────────────────
+                                        # In comparison mode the anchor's job is segmentation, not
+                                        # winner-selection: lock to one entity's block, advance only
+                                        # once it is substantively covered.  This overrides whatever
+                                        # the dominance heuristic above guessed.
+                                        if (getattr(srl_state, "dual_entity_mode", False)
+                                                and getattr(srl_state, "comparison_entities", None)):
+                                            from native_core.srl.factual_alignment import advance_comparison_entity
+                                            prime_tok_by_ent: Dict = {}
+                                            prop_tok_by_ent: Dict = {}
+                                            for fe in factual_store.entries:
+                                                eid = getattr(fe, "entity_id", -1)
+                                                if eid == -1:
+                                                    continue
+                                                if getattr(fe, "is_prime", False):
+                                                    prime_tok_by_ent.setdefault(eid, set()).update(fe.tokens)
+                                                else:
+                                                    prop_tok_by_ent.setdefault(eid, set()).update(fe.tokens)
+                                            new_idx, new_cov = advance_comparison_entity(
+                                                srl_state.comparison_entities,
+                                                getattr(srl_state, "comparison_active_idx", 0),
+                                                getattr(srl_state, "comparison_covered", set()),
+                                                getattr(srl_state, "recent_generated_tokens", [])[-30:],
+                                                prime_tok_by_ent,
+                                                prop_tok_by_ent,
+                                            )
+                                            srl_state.comparison_active_idx = new_idx
+                                            srl_state.comparison_covered = new_cov
+                                            srl_state.current_entity_id = srl_state.comparison_entities[new_idx]
+                                        # ── Coherence Cap (RC6 entity-proportional) ─────────────
+                                    if srl_state is not None and factual_store is not None:
+                                        n_active_primes = sum(
+                                            1 for fe in factual_store.entries
+                                            if getattr(fe, "is_prime", False) and getattr(fe, "current_sim", 0.0) > 0
                                         )
-                                        srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:8]
-                                        srl_state.current_step_factual_tokens = set()
-                                        for s in srl_state.current_step_factual_sequences:
-                                            srl_state.current_step_factual_tokens.update(s)
+                                        # 4 sequences per active entity + 4 overhead; minimum 8.
+                                        # This prevents one entity from monopolising the budget
+                                        # in comparison questions.
+                                        coherence_cap = max(8, n_active_primes * 4 + 4)
+                                        if len(srl_state.current_step_factual_sequences) > coherence_cap:
+                                            seq_id_to_score = {}
+                                            for fe_e in factual_store.entries:
+                                                fe_sim = getattr(fe_e, "current_sim", 0.0)
+                                                if fe_sim > 0:
+                                                    seq_id_to_score[tuple(fe_e.tokens)] = max(
+                                                        seq_id_to_score.get(tuple(fe_e.tokens), 0.0), fe_sim
+                                                    )
+                                            # DX1: triple sequences inherit their prime's score so
+                                            # they sort above tangential context and aren't evicted.
+                                            for fe_e in factual_store.entries:
+                                                if getattr(fe_e, "is_prime", False):
+                                                    prime_sim = getattr(fe_e, "current_sim", 0.0)
+                                                    if prime_sim > 0:
+                                                        for ts in getattr(fe_e, "triple_sequences", []):
+                                                            tup = tuple(ts)
+                                                            if tup not in seq_id_to_score:
+                                                                seq_id_to_score[tup] = prime_sim
+                                            srl_state.current_step_factual_sequences.sort(
+                                                key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
+                                            )
+                                            srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:coherence_cap]
+                                            srl_state.current_step_factual_tokens = set()
+                                            for s in srl_state.current_step_factual_sequences:
+                                                srl_state.current_step_factual_tokens.update(s)
 
                                     # ── Entity-Subgraph Tagging ───────────────────────────────────
-                                    # Use the entity_id assigned during factual_store.build() via
-                                    # token-overlap matching (not positional proximity).  This is
-                                    # strictly more accurate for interleaved comparison text where
-                                    # positional proximity gives wrong entity assignments.
+                                    # Use the entity_id from factual_store.build() (token-overlap
+                                    # matching — not positional proximity, which is wrong for
+                                    # interleaved comparison text).  Triple sequences (bridge +
+                                    # value) inherit the prime's entity_id since they were extracted
+                                    # from that prime's context.
                                     if srl_state is not None and factual_store is not None:
+                                        # Build lookup: (entry.tokens as tuple) → (entity_id, is_prime, prefix_tokens)
+                                        entry_meta: Dict = {}
+                                        for fe in factual_store.entries:
+                                            tup = tuple(fe.tokens)
+                                            entry_meta[tup] = (
+                                                getattr(fe, "entity_id", -1),
+                                                getattr(fe, "is_prime", False),
+                                                getattr(fe, "prefix_tokens", []),
+                                            )
+                                        # Also build lookup for triple sequences owned by each prime
+                                        triple_to_entity: Dict = {}
+                                        for fe in factual_store.entries:
+                                            if getattr(fe, "is_prime", False):
+                                                p_entity = getattr(fe, "entity_id", -1)
+                                                for ts in getattr(fe, "triple_sequences", []):
+                                                    triple_to_entity[tuple(ts)] = p_entity
+
                                         entity_ids = []
                                         is_prime_flags = []
+                                        seq_prefixes = []
                                         for seq in srl_state.current_step_factual_sequences:
-                                            matched_entity = -1
-                                            seq_is_prime = False
-                                            for fe in factual_store.entries:
-                                                if fe.tokens == seq:
-                                                    matched_entity = getattr(fe, "entity_id", -1)
-                                                    seq_is_prime = getattr(fe, "is_prime", False)
-                                                    break
-                                            entity_ids.append(matched_entity)
-                                            is_prime_flags.append(seq_is_prime)
+                                            tup = tuple(seq)
+                                            if tup in entry_meta:
+                                                eid, isp, pref = entry_meta[tup]
+                                            elif tup in triple_to_entity:
+                                                # Triple sequence — inherits prime's entity.  Its
+                                                # bridge connective is already in the sequence, so
+                                                # it needs no external prefix grounding (RC2).
+                                                eid, isp, pref = triple_to_entity[tup], False, []
+                                            else:
+                                                eid, isp, pref = -1, False, []
+                                            entity_ids.append(eid)
+                                            is_prime_flags.append(isp)
+                                            seq_prefixes.append(list(pref))
                                         srl_state.current_step_sequence_entity_ids = entity_ids
                                         srl_state.current_step_sequence_is_prime = is_prime_flags
+                                        srl_state.current_step_sequence_prefixes = seq_prefixes
 
                                     # Cache entries so layers 1-27 can run K/V attention without
                                     # re-querying or touching logit-bias state.

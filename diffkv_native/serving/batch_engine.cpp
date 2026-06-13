@@ -1164,8 +1164,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.current_entity_id = -1;
     session->srl_state.dual_entity_mode = false;
     session->srl_state.dual_entity_ids.clear();
+    session->srl_state.comparison_entities.clear();
+    session->srl_state.comparison_active_idx = 0;
+    session->srl_state.comparison_covered.clear();
     session->srl_state.current_step_sequence_entity_ids.clear();
     session->srl_state.current_step_sequence_is_prime.clear();
+    session->srl_state.current_step_sequence_prefixes.clear();
     session->srl_state.ordered_slot_ids.clear();
     session->srl_state.sink_blocks.clear();
     session->srl_state.inverted_index.clear();
@@ -1379,6 +1383,22 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
 
+        // RC8 — generation-time binding validator (upgrades DX2).  While locked
+        // to an entity, tokens belonging EXCLUSIVELY to other entities are
+        // penalised so the model cannot emit "EP2 has codimension 3" (failures
+        // 2, 8, 12).  Unlike the old DX2 this ALSO fires in comparison mode (RC5
+        // locks one entity per block) and escalates once retrieval is confident.
+        if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
+            std::unordered_set<int32_t> licensed, foreign;
+            diffkv::compute_entity_token_license(
+                srl_state.current_step_factual_sequences,
+                entity_ids, is_prime_list, current_entity, licensed, foreign);
+            float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
+            for (int32_t t : foreign) {
+                if (t >= 0 && t < n_vocab) output_logits[t] -= pen;
+            }
+        }
+
         // 2. +7.0 VSL active-candidate boost
         for (const auto& suffix : srl_state.vsl_active_candidates) {
             if (!suffix.empty() && suffix[0] >= 0 && suffix[0] < n_vocab) {
@@ -1496,7 +1516,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         //   in get_allowed_tokens_vsl_cpp) and advance in order, fixing entity binding.
         if (req->sfa_active) {
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
-            auto allowed = diffkv::get_allowed_tokens_vsl_cpp(session->srl_state, helper_ids);
+            const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(*model_);
+            auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
+                session->srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
             int n_vocab = model_->get_config().n_vocab;
             float max_sim = session->srl_state.current_step_max_similarity;
             for (int i = 0; i < n_vocab; ++i) {

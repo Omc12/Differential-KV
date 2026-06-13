@@ -13,6 +13,68 @@
 
 namespace diffkv {
 
+// RC5 — advance a comparison's per-entity block sequence.  Returns the new
+// active index; updates `covered` in place.  Mirrors Python
+// advance_comparison_entity.  Advances only once the active entity's prime AND
+// at least one of its property tokens have appeared in recent output.
+inline int advance_comparison_entity(
+    const std::vector<int32_t>& comparison_entities,
+    int active_idx,
+    std::unordered_set<int32_t>& covered,
+    const std::unordered_set<int32_t>& recent_tokens,
+    const std::unordered_map<int32_t, std::unordered_set<int32_t>>& prime_tokens_by_entity,
+    const std::unordered_map<int32_t, std::unordered_set<int32_t>>& prop_tokens_by_entity
+) {
+    if (comparison_entities.empty()) return active_idx;
+    if (active_idx < 0) active_idx = 0;
+    if (active_idx >= (int)comparison_entities.size()) active_idx = (int)comparison_entities.size() - 1;
+    int32_t active_eid = comparison_entities[active_idx];
+
+    auto seen_in = [&](const std::unordered_map<int32_t, std::unordered_set<int32_t>>& m) -> bool {
+        auto it = m.find(active_eid);
+        if (it == m.end()) return false;
+        for (int32_t t : it->second) if (recent_tokens.count(t)) return true;
+        return false;
+    };
+
+    if (seen_in(prime_tokens_by_entity) && seen_in(prop_tokens_by_entity)) {
+        covered.insert(active_eid);
+        for (int nxt = active_idx + 1; nxt < (int)comparison_entities.size(); ++nxt) {
+            if (covered.count(comparison_entities[nxt]) == 0) return nxt;
+        }
+    }
+    return active_idx;
+}
+
+// RC8 — split the per-step factual sequences into tokens the current entity may
+// emit (licensed) and tokens that belong exclusively to other entities
+// (foreign).  Mirrors Python compute_entity_token_license.
+inline void compute_entity_token_license(
+    const std::vector<std::vector<int32_t>>& sequences,
+    const std::vector<int32_t>& entity_ids,
+    const std::vector<bool>& is_prime_flags,
+    int32_t current_entity,
+    std::unordered_set<int32_t>& licensed_out,
+    std::unordered_set<int32_t>& foreign_out
+) {
+    licensed_out.clear();
+    foreign_out.clear();
+    std::unordered_set<int32_t> other;
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        if (sequences[i].empty()) continue;
+        int32_t eid = (i < entity_ids.size()) ? entity_ids[i] : -1;
+        bool isp = (i < is_prime_flags.size()) ? is_prime_flags[i] : false;
+        if (isp || eid == -1 || eid == current_entity) {
+            licensed_out.insert(sequences[i].begin(), sequences[i].end());
+        } else {
+            other.insert(sequences[i].begin(), sequences[i].end());
+        }
+    }
+    for (int32_t t : other) {
+        if (licensed_out.count(t) == 0) foreign_out.insert(t);
+    }
+}
+
 inline std::string clean_token_text(const std::string& text) {
     std::string cleaned = "";
     for (char c : text) {
@@ -64,6 +126,41 @@ inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& mo
 
     is_initialized = true;
     return cached_helper_ids;
+}
+
+// RC2: structural helpers = full helpers minus relational binding words.
+// Used under SFA+lock to prevent "is", "has", "whereas", "because" etc. from
+// bridging two unrelated entity spans within a single locked sequence.
+template <typename ModelType>
+inline const std::unordered_set<int32_t>& get_structural_helper_token_ids_cpp(ModelType& model) {
+    static std::unordered_set<int32_t> cached_structural_ids;
+    static bool is_initialized = false;
+    if (is_initialized) return cached_structural_ids;
+
+    static const std::unordered_set<std::string> RELATIONAL_BINDING_WORDS = {
+        "is", "are", "was", "were", "has", "have", "had",
+        "exhibits", "possesses", "contains", "involves", "requires", "lacks", "features",
+        "whereas", "while", "although", "but", "however", "yet", "though",
+        "notwithstanding", "nevertheless", "nonetheless", "conversely",
+        "unlike", "contrast", "instead", "rather",
+        "because", "since", "therefore", "hence", "thus", "consequently", "accordingly",
+        "than",
+    };
+
+    const auto& all_helpers = get_helper_token_ids_cpp(model);
+    for (int32_t tok_id : all_helpers) {
+        std::string piece = model.token_to_piece(tok_id);
+        std::string cleaned;
+        for (char c : piece)
+            if (std::isalnum(static_cast<unsigned char>(c)))
+                cleaned += std::tolower(static_cast<unsigned char>(c));
+        if (RELATIONAL_BINDING_WORDS.count(cleaned) == 0) {
+            cached_structural_ids.insert(tok_id);
+        }
+    }
+
+    is_initialized = true;
+    return cached_structural_ids;
 }
 
 // Returns the set of allowed token IDs for the current decode step.
@@ -149,51 +246,123 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         }
     }
 
-    // 2. Coherence Cap
-    if (srl_state.current_step_factual_sequences.size() > 8) {
-        size_t n_seqs = srl_state.current_step_factual_sequences.size();
-        std::vector<float> seq_sims(n_seqs, 0.0f);
-        for (size_t si = 0; si < n_seqs; ++si) {
-            const auto& seq = srl_state.current_step_factual_sequences[si];
-            float best_sim = 0.0f;
-            for (const auto& fe : srl_state.factual_store.entries) {
-                if (fe.tokens == seq && fe.current_sim > best_sim) {
-                    best_sim = fe.current_sim;
+    // 1b. RC5 Comparison Sequencing — in comparison mode the anchor's job is
+    // segmentation, not winner-selection: lock to one entity's block and advance
+    // only once it is substantively covered.  Overrides the anchor's guess.
+    if (srl_state.dual_entity_mode && !srl_state.comparison_entities.empty()) {
+        std::unordered_set<int32_t> recent_set;
+        int rgt_size = (int)srl_state.recent_generated_tokens.size();
+        for (int ri = std::max(0, rgt_size - 30); ri < rgt_size; ++ri) {
+            recent_set.insert(srl_state.recent_generated_tokens[ri]);
+        }
+        std::unordered_map<int32_t, std::unordered_set<int32_t>> prime_tok_by_ent;
+        std::unordered_map<int32_t, std::unordered_set<int32_t>> prop_tok_by_ent;
+        for (const auto& fe : srl_state.factual_store.entries) {
+            if (fe.entity_id == -1) continue;
+            if (fe.is_prime) prime_tok_by_ent[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
+            else             prop_tok_by_ent[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
+        }
+        int new_idx = advance_comparison_entity(
+            srl_state.comparison_entities,
+            srl_state.comparison_active_idx,
+            srl_state.comparison_covered,
+            recent_set,
+            prime_tok_by_ent,
+            prop_tok_by_ent
+        );
+        srl_state.comparison_active_idx = new_idx;
+        srl_state.current_entity_id = srl_state.comparison_entities[new_idx];
+    }
+
+    // 2. Coherence Cap — RC6 entity-proportional budget.
+    {
+        int n_active_primes = 0;
+        for (const auto& fe : srl_state.factual_store.entries) {
+            if (fe.is_prime && fe.current_sim > 0.0f) n_active_primes++;
+        }
+        // 4 sequences per active entity + 4 overhead; minimum 8.
+        int coherence_cap = std::max(8, n_active_primes * 4 + 4);
+        if ((int)srl_state.current_step_factual_sequences.size() > coherence_cap) {
+            size_t n_seqs = srl_state.current_step_factual_sequences.size();
+            std::vector<float> seq_sims(n_seqs, 0.0f);
+            for (size_t si = 0; si < n_seqs; ++si) {
+                const auto& seq = srl_state.current_step_factual_sequences[si];
+                float best_sim = 0.0f;
+                for (const auto& fe : srl_state.factual_store.entries) {
+                    if (fe.tokens == seq && fe.current_sim > best_sim)
+                        best_sim = fe.current_sim;
                 }
+                seq_sims[si] = best_sim;
             }
-            seq_sims[si] = best_sim;
-        }
-        std::vector<size_t> order(n_seqs);
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            return seq_sims[a] > seq_sims[b];
-        });
-        order.resize(8);
-        std::vector<std::vector<int32_t>> top_seqs;
-        std::unordered_set<int32_t> top_toks;
-        for (size_t idx : order) {
-            top_seqs.push_back(srl_state.current_step_factual_sequences[idx]);
-            top_toks.insert(srl_state.current_step_factual_sequences[idx].begin(), srl_state.current_step_factual_sequences[idx].end());
-        }
-        if (!top_seqs.empty()) {
-            srl_state.current_step_factual_sequences = std::move(top_seqs);
-            srl_state.current_step_factual_tokens    = std::move(top_toks);
+            std::vector<size_t> order(n_seqs);
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                return seq_sims[a] > seq_sims[b];
+            });
+            order.resize(static_cast<size_t>(coherence_cap));
+            std::vector<std::vector<int32_t>> top_seqs;
+            std::unordered_set<int32_t> top_toks;
+            for (size_t idx : order) {
+                top_seqs.push_back(srl_state.current_step_factual_sequences[idx]);
+                for (int32_t t : srl_state.current_step_factual_sequences[idx]) top_toks.insert(t);
+            }
+            if (!top_seqs.empty()) {
+                srl_state.current_step_factual_sequences = std::move(top_seqs);
+                srl_state.current_step_factual_tokens    = std::move(top_toks);
+            }
         }
     }
 
-    // 3. Entity-Subgraph Tagging
+    // 3. Entity-Subgraph Tagging — RC4: use stored entry.entity_id (token-overlap
+    // matching) not positional proximity.  RC1: triple sequences inherit their
+    // prime's entity_id since they were extracted from that prime's context.
     {
+        // Build lookup: tokens → (entity_id, is_prime)
+        std::unordered_map<const std::vector<int32_t>*, std::pair<int32_t, bool>> entry_meta;
+        for (const auto& fe : srl_state.factual_store.entries) {
+            // Store pointer-based to avoid O(N^2) copies; we match by value below
+            (void)fe; // pointer map not ideal in C++ — use value scan below
+        }
+        // Build triple→entity map for RC1 triple sequences
+        std::unordered_map<size_t, int32_t> triple_hash_to_entity;
+        auto vec_hash = [](const std::vector<int32_t>& v) -> size_t {
+            size_t seed = v.size();
+            for (auto x : v) seed ^= (size_t)x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
+        };
+        for (const auto& fe : srl_state.factual_store.entries) {
+            if (fe.is_prime) {
+                for (const auto& ts : fe.triple_sequences) {
+                    triple_hash_to_entity[vec_hash(ts)] = fe.start_idx;
+                }
+            }
+        }
+
         const auto& seqs = srl_state.current_step_factual_sequences;
         std::vector<int32_t> ent_ids(seqs.size(), -1);
         std::vector<bool>    is_prime_flags(seqs.size(), false);
+        // RC2: the source tokens preceding each span, used to quote-ground the
+        // connectives allowed to bridge into it. empty for triples (their bridge
+        // connective is already part of the captured sequence).
+        std::vector<std::vector<int32_t>> seq_prefixes(seqs.size());
         for (size_t si = 0; si < seqs.size(); ++si) {
+            const auto& seq = seqs[si];
             int32_t matched_entity = -1;
             bool    seq_prime = false;
+            // Try matching against known entries
             for (const auto& fe : srl_state.factual_store.entries) {
-                if (fe.tokens == seqs[si]) {
+                if (fe.tokens == seq) {
                     matched_entity = fe.entity_id;
                     seq_prime = fe.is_prime;
+                    seq_prefixes[si] = fe.prefix_tokens;
                     break;
+                }
+            }
+            // Fallback: check if this is a triple sequence
+            if (matched_entity == -1) {
+                auto it = triple_hash_to_entity.find(vec_hash(seq));
+                if (it != triple_hash_to_entity.end()) {
+                    matched_entity = it->second;
                 }
             }
             ent_ids[si] = matched_entity;
@@ -201,21 +370,37 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         }
         srl_state.current_step_sequence_entity_ids = std::move(ent_ids);
         srl_state.current_step_sequence_is_prime   = std::move(is_prime_flags);
+        srl_state.current_step_sequence_prefixes   = std::move(seq_prefixes);
     }
 }
 
 // Returns the set of allowed token IDs for the current decode step.
+// RC2: When SFA+lock active, relational binding words are stripped from helpers
+// so they cannot leak between entity spans.  Pass structural_helper_ids (full
+// helpers minus RELATIONAL_BINDING_WORDS) and sfa_active=true to activate this.
 inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
     const SessionSRLState& srl_state,
-    const std::unordered_set<int32_t>& helper_ids
+    const std::unordered_set<int32_t>& helper_ids,
+    const std::unordered_set<int32_t>* structural_helper_ids = nullptr,
+    bool sfa_active = false
 ) {
-    std::unordered_set<int32_t> allowed = helper_ids;
-
+    // Determine whether any lock is currently active.
     bool has_active_lock = false;
+    for (const auto& suffix : srl_state.vsl_active_candidates) {
+        if (!suffix.empty()) { has_active_lock = true; break; }
+    }
+
+    // RC2: under SFA+lock, switch to structural helpers (no relational binders).
+    const std::unordered_set<int32_t>& base_helpers =
+        (sfa_active && has_active_lock && structural_helper_ids != nullptr)
+        ? *structural_helper_ids
+        : helper_ids;
+
+    std::unordered_set<int32_t> allowed = base_helpers;
+
     for (const auto& suffix : srl_state.vsl_active_candidates) {
         if (!suffix.empty()) {
             allowed.insert(suffix[0]);
-            has_active_lock = true;
         }
     }
 
@@ -225,6 +410,7 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
         std::unordered_set<int32_t> dual_ids(srl_state.dual_entity_ids.begin(), srl_state.dual_entity_ids.end());
         const auto& entity_ids    = srl_state.current_step_sequence_entity_ids;
         const auto& is_prime_list = srl_state.current_step_sequence_is_prime;
+        const auto& seq_prefixes  = srl_state.current_step_sequence_prefixes;
         const auto& seqs          = srl_state.current_step_factual_sequences;
 
         // Build a mapping of prime tokens by entity
@@ -237,51 +423,66 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
             }
         }
 
+        // Single pass: decide which sequence starts we may enter (entity-filtered)
+        // and collect the source-adjacent connectives that bridge into them.
+        std::unordered_set<int32_t> enterable_starts;
+        std::unordered_set<int32_t> grounded_connectives;
         for (size_t i = 0; i < seqs.size(); ++i) {
             if (seqs[i].empty()) continue;
             int32_t seq_entity  = (i < entity_ids.size())    ? entity_ids[i]    : -1;
             bool    seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
 
-            // Prime sequences are always allowed (they gate entity transitions)
+            bool enter = false;
             if (seq_is_prime) {
-                allowed.insert(seqs[i][0]);
-                continue;
+                // Prime sequences are always allowed (they gate entity transitions)
+                enter = true;
+            } else if (current_entity == -1 && !dual_mode) {
+                enter = true;                       // No entity context yet — allow all
+            } else if (dual_mode) {
+                enter = (dual_ids.count(seq_entity) || seq_entity == -1);
+            } else if (seq_entity == current_entity) {
+                enter = true;                       // Single-entity strict gating
+            } else if (seq_entity == -1) {
+                // Unknown-entity restriction: only allow if tokens overlap with the
+                // current entity's prime token set (else fallback-allow when unknown).
+                auto it = prime_tokens_by_entity.find(current_entity);
+                if (it != prime_tokens_by_entity.end()) {
+                    const auto& prime_toks = it->second;
+                    for (int32_t t : seqs[i]) {
+                        if (prime_toks.count(t)) { enter = true; break; }
+                    }
+                } else {
+                    enter = true;
+                }
             }
 
-            if (current_entity == -1 && !dual_mode) {
-                // No entity context yet — allow all
+            if (enter) {
                 allowed.insert(seqs[i][0]);
-            } else if (dual_mode) {
-                // Dual-entity mode: allow both identified entities, block others
-                if (dual_ids.count(seq_entity) || seq_entity == -1) {
-                    allowed.insert(seqs[i][0]);
-                }
-            } else {
-                // Single-entity mode: strict entity gating
-                if (seq_entity == current_entity) {
-                    allowed.insert(seqs[i][0]);
-                } else if (seq_entity == -1) {
-                    // Unknown-entity restriction: only allow if tokens overlap
-                    // with the current entity's prime token set
-                    auto it = prime_tokens_by_entity.find(current_entity);
-                    if (it != prime_tokens_by_entity.end()) {
-                        const auto& prime_toks = it->second;
-                        bool has_overlap = false;
-                        for (int32_t t : seqs[i]) {
-                            if (prime_toks.count(t)) {
-                                has_overlap = true;
-                                break;
-                            }
-                        }
-                        if (has_overlap) {
-                            allowed.insert(seqs[i][0]);
-                        }
-                    } else {
-                        // No prime tokens known for this entity — allow as fallback
-                        allowed.insert(seqs[i][0]);
-                    }
+                enterable_starts.insert(seqs[i][0]);
+                // The tokens that preceded this span in the source are the only
+                // connectives allowed to bridge into it (RC2 quote-grounding).
+                if (i < seq_prefixes.size()) {
+                    for (int32_t pt : seq_prefixes[i]) grounded_connectives.insert(pt);
                 }
             }
+        }
+
+        // RC2 — Quote-grounded connective gate.  Relational binding words
+        // ("is", "has", "because", "whereas", "while", …) are demoted from the
+        // free-helper set under SFA and re-admitted ONLY where the source grounds
+        // them: they begin a captured sequence (a triple bridge) or were
+        // source-adjacent to a span we may now enter.  This stops the model from
+        // inventing its own connective scaffold around correct content.
+        if (sfa_active && structural_helper_ids != nullptr) {
+            std::vector<int32_t> to_remove;
+            for (int32_t rid : helper_ids) {
+                if (structural_helper_ids->count(rid) == 0
+                    && enterable_starts.count(rid) == 0
+                    && grounded_connectives.count(rid) == 0) {
+                    to_remove.push_back(rid);
+                }
+            }
+            for (int32_t rid : to_remove) allowed.erase(rid);
         }
     }
 

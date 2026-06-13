@@ -1295,6 +1295,10 @@ class ContinuousBatchEngine:
                 srl_state.current_entity_id = -1
                 srl_state.dual_entity_mode = False
                 srl_state.dual_entity_ids = []
+                # RC5: clear comparison sequencing so each response re-segments.
+                srl_state.comparison_entities = []
+                srl_state.comparison_active_idx = 0
+                srl_state.comparison_covered = set()
 
         # ── Repetition-loop recovery (Fix 2) ────────────────────────────────
         # When a loop has been detected we widen the penalty window from 64 to
@@ -1355,6 +1359,30 @@ class ContinuousBatchEngine:
                     for tok_id in srl_state.current_step_factual_tokens:
                         if tok_id < logits.shape[-1]:
                             logits[0, tok_id] += 7.0
+
+            # RC8 — generation-time binding validator (upgrades DX2).
+            # While locked to an entity, tokens that belong EXCLUSIVELY to other
+            # entities (their property/triple spans) are penalised so the model
+            # cannot emit "EP2 has codimension 3" — the relationship-inversion at
+            # the heart of failures 2, 8, 12.  Unlike the old DX2 this ALSO fires
+            # in comparison mode, because RC5 now locks one entity per block, and
+            # it escalates to a near-hard penalty once retrieval is confident.
+            current_entity_dx2 = getattr(srl_state, "current_entity_id", -1)
+            if (current_entity_dx2 != -1
+                    and getattr(srl_state, "current_step_factual_sequences", None)):
+                from native_core.srl.factual_alignment import compute_entity_token_license
+                _licensed, _foreign = compute_entity_token_license(
+                    srl_state.current_step_factual_sequences,
+                    getattr(srl_state, "current_step_sequence_entity_ids", []),
+                    getattr(srl_state, "current_step_sequence_is_prime", []),
+                    current_entity_dx2,
+                )
+                # Confident retrieval → strong suppression (dominates the +7
+                # factual / +10 transition boosts); otherwise soft and escapable.
+                _pen = 12.0 if getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.70 else 4.0
+                for _tok in _foreign:
+                    if 0 <= _tok < logits.shape[-1]:
+                        logits[0, _tok] -= _pen
 
             # +7.0 VSL active-candidate boost
             active_candidates = getattr(srl_state, "vsl_active_candidates", [])
@@ -1434,8 +1462,14 @@ class ContinuousBatchEngine:
         # sequence is allowed when no lock is active), and the lock persists through 12
         # consecutive helpers instead of 4, so normal bridge phrases don't break it.
         if req.sfa_active:
-            from native_core.srl.factual_alignment import get_allowed_tokens_vsl
-            allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+            from native_core.srl.factual_alignment import (
+                get_allowed_tokens_vsl, get_structural_helper_token_ids)
+            structural_helper_ids = get_structural_helper_token_ids(self.tokenizer)
+            allowed_ids = get_allowed_tokens_vsl(
+                srl_state, helper_ids,
+                structural_helper_ids=structural_helper_ids,
+                sfa_active=True,
+            )
             mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
             mask[list(allowed_ids)] = False
             max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)

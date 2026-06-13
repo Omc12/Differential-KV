@@ -1152,8 +1152,12 @@ int main(int argc, char ** argv) {
             srl_state.current_entity_id = -1;
             srl_state.dual_entity_mode = false;
             srl_state.dual_entity_ids.clear();
+            srl_state.comparison_entities.clear();
+            srl_state.comparison_active_idx = 0;
+            srl_state.comparison_covered.clear();
             srl_state.current_step_sequence_entity_ids.clear();
             srl_state.current_step_sequence_is_prime.clear();
+            srl_state.current_step_sequence_prefixes.clear();
         }
 
         // Wrap prompt in Qwen2.5 instruction chat template (skip if gateway already formatted it)
@@ -2254,6 +2258,22 @@ int main(int argc, char ** argv) {
                 }
             }
 
+            // RC8 — generation-time binding validator.  While locked to an entity,
+            // penalise tokens that belong exclusively to OTHER entities so the model
+            // cannot emit "EP2 has codimension 3".  Also fires in comparison mode
+            // (RC5 locks one entity per block) and escalates once retrieval is
+            // confident.
+            if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
+                std::unordered_set<int32_t> licensed, foreign;
+                diffkv::compute_entity_token_license(
+                    srl_state.current_step_factual_sequences,
+                    entity_ids, is_prime_list, current_entity, licensed, foreign);
+                float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
+                for (int32_t tok_id : foreign) {
+                    if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
+                }
+            }
+
             // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
             // exact next token is confirmed. Give it a decisive advantage.
             for (const auto& suffix : srl_state.vsl_active_candidates) {
@@ -2510,7 +2530,13 @@ int main(int argc, char ** argv) {
                             });
                             srl_state.dual_entity_mode = true;
                             srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
-                            srl_state.current_entity_id = -1;
+                            // RC5: sequence the comparison as per-entity blocks and
+                            // lock to the first entity now (instead of leaving entity
+                            // context open, which lets the two interleave).
+                            srl_state.comparison_entities = srl_state.dual_entity_ids;
+                            srl_state.comparison_active_idx = 0;
+                            srl_state.comparison_covered.clear();
+                            srl_state.current_entity_id = srl_state.comparison_entities[0];
                         }
                     }
                 } else {
@@ -2520,6 +2546,16 @@ int main(int argc, char ** argv) {
                     }
                 }
 
+                // RC3 — tell the store which entities the query is about so it
+                // ranks their spans above shared-vocabulary spans of other entities.
+                std::unordered_set<int32_t> qbias;
+                if (srl_state.dual_entity_mode && !srl_state.dual_entity_ids.empty()) {
+                    qbias.insert(srl_state.dual_entity_ids.begin(), srl_state.dual_entity_ids.end());
+                } else if (srl_state.current_entity_id != -1) {
+                    qbias.insert(srl_state.current_entity_id);
+                }
+                const std::unordered_set<int32_t>* qbias_ptr = qbias.empty() ? nullptr : &qbias;
+
                 auto fact_hits = srl_state.factual_store.query(
                     q_for_factual.data(),
                     kv_heads,
@@ -2527,7 +2563,8 @@ int main(int argc, char ** argv) {
                     W_proj_host.data(),
                     desc_dim,
                     0.50f,
-                    slot_filter
+                    slot_filter,
+                    qbias_ptr
                 );
 
                 srl_state.current_step_factual_tokens.clear();
@@ -2535,54 +2572,52 @@ int main(int argc, char ** argv) {
                 srl_state.current_step_max_similarity = 0.0f;
                 srl_state.current_step_sequence_entity_ids.clear();
                 srl_state.current_step_sequence_is_prime.clear();
+                srl_state.current_step_sequence_prefixes.clear();
+
+                // Helper lambda to add a sequence if not already present
+                auto add_seq = [&](const std::vector<int32_t>& seq) {
+                    if (seq.empty()) return;
+                    for (const auto& s : srl_state.current_step_factual_sequences)
+                        if (s == seq) return;
+                    for (int32_t t : seq) srl_state.current_step_factual_tokens.insert(t);
+                    srl_state.current_step_factual_sequences.push_back(seq);
+                };
 
                 for (const auto& hit : fact_hits) {
                     for (int32_t tok_id : hit.tokens) {
                         srl_state.current_step_factual_tokens.insert(tok_id);
                     }
                     if (!hit.tokens.empty()) {
-                        srl_state.current_step_factual_sequences.push_back(hit.tokens);
+                        add_seq(hit.tokens);
                     }
                     if (hit.current_sim > srl_state.current_step_max_similarity) {
                         srl_state.current_step_max_similarity = hit.current_sim;
                     }
+                    // RC1 — inject triple sequences from prime entries so the VSL
+                    // can lock onto the complete (bridge + value) ordering, preventing
+                    // freely hallucinated relational connectives.
+                    if (hit.is_prime) {
+                        for (const auto& triple_seq : hit.triple_sequences) {
+                            add_seq(triple_seq);
+                        }
+                    }
                     // ── 1-hop neighbor injection ────────────────────────────────
-                    // Threshold raised 0.35→0.45: temporal-adjacency edges (within 512
-                    // tokens) had weight > 0.35 for many unrelated entries, flooding the
-                    // sequence list with off-topic spans from the same document region.
                     for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
                         int nb_idx = hit.neighbors[ni];
                         float nb_w  = hit.weights[ni];
                         if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {
                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
-                            if (!nb_e.tokens.empty()) {
-                                bool already = false;
-                                for (const auto& s : srl_state.current_step_factual_sequences) {
-                                    if (s == nb_e.tokens) { already = true; break; }
-                                }
-                                if (!already) {
-                                    for (int32_t t : nb_e.tokens) srl_state.current_step_factual_tokens.insert(t);
-                                    srl_state.current_step_factual_sequences.push_back(nb_e.tokens);
-                                }
-                                // ── 2-hop neighbor injection ────────────────────
-                                // Threshold raised 0.50→0.65: 2-hop is doubly noisy;
-                                // only follow strong, high-confidence edges.
-                                for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
-                                    int nb2_idx = nb_e.neighbors[ni2];
-                                    float nb2_w  = nb_e.weights[ni2];
-                                    if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {
-                                        const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
-                                        if (!nb2_e.tokens.empty()) {
-                                            bool already2 = false;
-                                            for (const auto& s : srl_state.current_step_factual_sequences) {
-                                                if (s == nb2_e.tokens) { already2 = true; break; }
-                                            }
-                                            if (!already2) {
-                                                for (int32_t t : nb2_e.tokens) srl_state.current_step_factual_tokens.insert(t);
-                                                srl_state.current_step_factual_sequences.push_back(nb2_e.tokens);
-                                            }
-                                        }
-                                    }
+                            add_seq(nb_e.tokens);
+                            if (nb_e.is_prime) {
+                                for (const auto& ts : nb_e.triple_sequences) add_seq(ts);
+                            }
+                            // ── 2-hop neighbor injection ────────────────────
+                            for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
+                                int nb2_idx = nb_e.neighbors[ni2];
+                                float nb2_w  = nb_e.weights[ni2];
+                                if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {
+                                    const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
+                                    add_seq(nb2_e.tokens);
                                 }
                             }
                         }

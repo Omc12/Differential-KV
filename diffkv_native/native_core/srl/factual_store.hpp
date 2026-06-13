@@ -13,6 +13,26 @@
 
 namespace diffkv {
 
+// RC3 — entity-signature dimensionality + deterministic generator.  Must match
+// the Python factual_store.entity_signature formula exactly so that any future
+// shared tooling agrees.
+constexpr int ENTITY_SIG_DIM = 16;
+
+inline std::vector<float> entity_signature(int32_t token_id, int dim = ENTITY_SIG_DIM) {
+    std::vector<float> v(dim, 0.0f);
+    if (token_id < 0) return v;
+    double nrm = 0.0;
+    for (int i = 0; i < dim; ++i) {
+        double k = (double)(i + 1);
+        double val = std::sin((double)token_id * 0.61803398875 * k + k);
+        v[i] = (float)val;
+        nrm += val * val;
+    }
+    nrm = std::sqrt(nrm);
+    if (nrm > 1e-8) for (int i = 0; i < dim; ++i) v[i] = (float)(v[i] / nrm);
+    return v;
+}
+
 struct FactEntry {
     int start_idx;
     int end_idx;
@@ -27,11 +47,31 @@ struct FactEntry {
     std::vector<int> neighbors;    // indices of connected factual entries
     std::vector<float> weights;    // connection weights
     bool is_prime = false;
-    // Entity assignment: start_idx of the nearest prime entry whose tokens
-    // overlap with this entry's tokens.  -1 = unassigned.
-    // Set during build() using token-overlap matching (not positional proximity).
+    // Entity assignment: start_idx of the prime that owns this property span.
+    // -1 = unassigned.  Set during build() by assign_entities() using a
+    // distinguishing-token override plus nearest-preceding-prime (reading-order)
+    // ownership — NOT plain token overlap (mis-binds shared-vocabulary
+    // properties, RC4) and NOT absolute positional proximity (mis-binds
+    // interleaved comparisons).
     int32_t entity_id = -1;
+    // For prime entries only: the single highest-IDF (most distinguishing) token
+    // in this prime's span, or -1.  A property span containing exactly one
+    // prime's distinguishing token binds to that prime with high confidence.
+    int32_t distinguishing_token = -1;
+    // RC3: deterministic unit signature of this span's owning entity (from that
+    // entity's distinguishing token); empty/zero when no owning entity.  Used
+    // only when a query supplies an entity bias to rank the queried entity's
+    // spans above shared-vocabulary spans of other entities.
+    std::vector<float> entity_sig;
     mutable float current_sim = 0.0f;
+    // 3-token source context preceding this span (RC2 quote-grounded connectives).
+    std::vector<int32_t> prefix_tokens;
+    // For prime entries: list of (bridge_tokens + value_tokens) sequences grounding
+    // the complete (entity → relation → value) ordering in the source text (RC1).
+    std::vector<std::vector<int32_t>> triple_sequences;
+    // DX1: true when this span sits immediately after its prime via a definitional
+    // bridge (copula IDF < 1.0 — "is", "are", "means", "refers to").
+    bool is_definition = false;
 };
 
 class FactualExactStore {
@@ -41,12 +81,15 @@ public:
     std::vector<float> eagle_scores;
     int num_layers = 0;
     int F_test = 0;
+    // RC3: entity_id (prime start_idx) → that entity's distinguishing token.
+    std::unordered_map<int32_t, int32_t> entity_distinguishing;
 
     FactualExactStore(const std::string& sess_id = "default") : session_id(sess_id), num_layers(0), F_test(0) {}
 
     void clear() {
         entries.clear();
         eagle_scores.clear();
+        entity_distinguishing.clear();
         num_layers = 0;
         F_test = 0;
     }
@@ -74,7 +117,8 @@ public:
         const float* W_proj, // [DESC_DIM * head_dim]
         int desc_dim,
         float threshold = 0.4f,
-        const std::unordered_set<int32_t>* active_slots = nullptr
+        const std::unordered_set<int32_t>* active_slots = nullptr,
+        const std::unordered_set<int32_t>* query_entity_bias = nullptr  // RC3
     ) const;
 };
 

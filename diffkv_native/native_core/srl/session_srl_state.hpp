@@ -134,8 +134,16 @@ struct SessionSRLState {
     // but cross-entity contamination is prevented via strict VSL filtering.
     bool dual_entity_mode = false;
     std::vector<int32_t> dual_entity_ids;  // [entity_id_1, entity_id_2]
+    // RC5 — explicit comparison mode: lock generation to one entity at a time
+    // (per-entity blocks) instead of letting them interleave.
+    std::vector<int32_t> comparison_entities;     // ordered block sequence
+    int comparison_active_idx = 0;                // current block
+    std::unordered_set<int32_t> comparison_covered;  // entities already produced
     std::vector<int32_t> current_step_sequence_entity_ids;
     std::vector<bool>    current_step_sequence_is_prime;
+    // current_step_sequence_prefixes: parallel list; the source tokens preceding
+    // each sequence's span (RC2 quote-grounded connectives). empty for triples.
+    std::vector<std::vector<int32_t>> current_step_sequence_prefixes;
 
     // Segment variables for SAS
     std::unordered_map<int32_t, int> segment_ids; // maps slot_id -> segment_id
