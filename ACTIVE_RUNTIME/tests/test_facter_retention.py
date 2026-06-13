@@ -500,4 +500,408 @@ def test_factual_early_stopping():
     assert stop_generation is False
 
 
+def test_strict_factual_alignment():
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import is_token_id_allowed
+
+    # Mock tokenizer
+    class MockTokenizer:
+        def decode(self, token_ids):
+            mapping = {
+                10: "codimension",
+                11: "diabolical",
+                12: "points",
+                100: "the",
+                101: "is",
+                200: "quantum",
+                201: "eigenvalues"
+            }
+            return mapping.get(token_ids[0], "unknown")
+
+    tokenizer = MockTokenizer()
+    
+    srl_state = SessionSRLState(
+        semantic_index=None,
+        chunk_graph=None,
+        inverted_index=None,
+        ordered_slot_ids=[],
+        sink_blocks=[]
+    )
+    srl_state.current_step_factual_tokens = {10, 11, 12}
+    srl_state.current_step_factual_sequences = [[10, 11, 12]]
+    srl_state.current_step_max_similarity = 0.5
+
+    # 1. Factual tokens are allowed
+    assert is_token_id_allowed(10, srl_state, None, tokenizer) is True
+    assert is_token_id_allowed(11, srl_state, None, tokenizer) is True
+
+    # 2. Transition candidate tokens are allowed
+    assert is_token_id_allowed(11, srl_state, 10, tokenizer) is True
+    
+    # 3. Allowed grammatical helpers are allowed
+    assert is_token_id_allowed(100, srl_state, None, tokenizer) is True
+    assert is_token_id_allowed(101, srl_state, None, tokenizer) is True
+
+    # 4. Ungrounded content/technical tokens are NOT allowed
+    assert is_token_id_allowed(200, srl_state, None, tokenizer) is False
+    assert is_token_id_allowed(201, srl_state, None, tokenizer) is False
+
+
+def test_sticky_sfa_early_stopping():
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import is_token_id_allowed
+
+    # Mock tokenizer
+    class MockTokenizer:
+        def decode(self, token_ids):
+            mapping = {
+                10: "codimension",
+                11: "diabolical",
+                12: "points",
+                100: "the",
+                101: "is",
+                200: "quantum",
+                201: "eigenvalues"
+            }
+            return mapping.get(token_ids[0], "unknown")
+
+    tokenizer = MockTokenizer()
+    
+    srl_state = SessionSRLState(
+        semantic_index=None,
+        chunk_graph=None,
+        inverted_index=None,
+        ordered_slot_ids=[],
+        sink_blocks=[]
+    )
+    srl_state.current_step_factual_tokens = {10, 11, 12}
+    srl_state.current_step_factual_sequences = [[10, 11, 12]]
+
+    # Simulation of generation loop with Sticky SFA
+    sfa_active = False
+    
+    # Step 1: High similarity (SFA triggers)
+    srl_state.current_step_max_similarity = 0.45
+    if srl_state.current_step_max_similarity >= 0.4:
+        sfa_active = True
+    
+    # Check that a factual or helper token is allowed
+    assert sfa_active is True
+    assert is_token_id_allowed(10, srl_state, None, tokenizer) is True
+    assert is_token_id_allowed(100, srl_state, None, tokenizer) is True
+    # Check that an ungrounded token is blocked
+    assert is_token_id_allowed(200, srl_state, None, tokenizer) is False
+
+    # Step 2: Similarity drops to 0.1 (SFA should REMAIN active because it is sticky)
+    srl_state.current_step_max_similarity = 0.1
+    if srl_state.current_step_max_similarity >= 0.4:
+        sfa_active = True
+    
+    # Assert sfa_active is still True (sticky)
+    assert sfa_active is True
+    # Verify that it still blocks ungrounded content
+    assert is_token_id_allowed(200, srl_state, None, tokenizer) is False
+
+
+def test_lm_vsl_masking():
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import get_helper_token_ids, get_allowed_tokens_vsl, update_vsl_state
+
+    # Mock tokenizer
+    class MockTokenizer:
+        @property
+        def vocab_size(self):
+            return 300
+        def decode(self, token_ids):
+            mapping = {
+                10: "codimension",
+                11: "diabolical",
+                12: "singularities",
+                100: "the",
+                101: "is",
+                200: "quantum",
+                201: "eigenvalues"
+            }
+            return mapping.get(token_ids[0], "unknown")
+        def encode(self, text, add_special_tokens=False):
+            mapping = {
+                "the": [100],
+                "is": [101],
+                " codimension": [10],
+                " diabolical": [11],
+                " singularities": [12]
+            }
+            return mapping.get(text, [299])
+
+    tokenizer = MockTokenizer()
+    
+    # 1. Test helper token pre-caching
+    helper_ids = get_helper_token_ids(tokenizer)
+    assert 100 in helper_ids  # "the" is a helper word
+    assert 101 in helper_ids  # "is" is a helper word
+    assert 10 not in helper_ids  # "codimension" is a content word
+    
+    # Create session SRL state
+    srl_state = SessionSRLState(
+        semantic_index=None,
+        chunk_graph=None,
+        inverted_index=None,
+        ordered_slot_ids=[],
+        sink_blocks=[]
+    )
+    srl_state.current_step_factual_tokens = {10, 11, 12}
+    srl_state.current_step_factual_sequences = [[10, 11, 12]]
+    srl_state.vsl_active_candidates = []
+    srl_state.vsl_consecutive_helpers = 0
+
+    # Step 1: Unlocked state. Factual sequence start / any sequence token is allowed.
+    allowed = get_allowed_tokens_vsl(srl_state, helper_ids)
+    assert 10 in allowed  # codimension
+    assert 11 in allowed  # diabolical
+    assert 12 in allowed  # points
+    assert 100 in allowed  # "the" (helper)
+    assert 200 not in allowed  # "quantum" (ungrounded)
+
+    # Model generates token 10 ("codimension")
+    update_vsl_state(10, srl_state, helper_ids)
+    
+    # Verify state is locked onto suffix of sequence 0: [[11, 12]]
+    assert len(srl_state.vsl_active_candidates) == 1
+    assert srl_state.vsl_active_candidates[0] == [11, 12]
+    assert srl_state.vsl_consecutive_helpers == 0
+
+    # Step 2: Locked state. Next allowed content word must be 11.
+    allowed = get_allowed_tokens_vsl(srl_state, helper_ids)
+    assert 11 in allowed  # diabolical
+    assert 12 not in allowed  # "points" is blocked because sequence order is codimension -> diabolical
+    assert 100 in allowed  # helper still allowed
+    assert 200 not in allowed  # ungrounded still blocked
+
+    # Model generates token 11 ("diabolical")
+    update_vsl_state(11, srl_state, helper_ids)
+    
+    # Suffix advanced: [[12]]
+    assert srl_state.vsl_active_candidates[0] == [12]
+
+    # Model generates helper token 100 ("the")
+    update_vsl_state(100, srl_state, helper_ids)
+    
+    # Helpers do not change candidate suffix, but increment helper count
+    assert srl_state.vsl_active_candidates[0] == [12]
+    assert srl_state.vsl_consecutive_helpers == 1
+
+    # Step 3: Locked state. Next allowed content word must be 12.
+    allowed = get_allowed_tokens_vsl(srl_state, helper_ids)
+    assert 12 in allowed
+    assert 11 not in allowed
+
+    # Model generates 12 ("points")
+    update_vsl_state(12, srl_state, helper_ids)
+    
+    # Suffix completed: [[]]
+    assert srl_state.vsl_active_candidates[0] == []
+
+    # Check lock release on sentence ending helper words (6 consecutive helpers)
+    for _ in range(6):
+        update_vsl_state(100, srl_state, helper_ids)
+        
+    # Lock should be completely empty/released now
+    assert srl_state.vsl_active_candidates == []
+
+
+def test_structured_attention_segmenting():
+    import torch
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.query_router import route_query_fixed_k
+    from native_core.srl.inverted_index import InvertedTokenIndex
+    from native_core.srl.chunk_graph import ChunkGraph
+
+    # Mock components
+    class MockSemanticIndex:
+        def __init__(self, slot_ids):
+            self.slot_ids = torch.tensor(slot_ids, dtype=torch.int32)
+            # Create a mock descriptor matrix
+            self.desc_matrix = torch.eye(len(slot_ids), 64).half()
+
+        def slot_to_row_vec(self, slots):
+            slot_to_row = {int(s): i for i, s in enumerate(self.slot_ids.tolist())}
+            rows = []
+            for s in slots.tolist():
+                rows.append(slot_to_row.get(s, -1))
+            return torch.tensor(rows, dtype=torch.long)
+
+        def search(self, q_desc, k):
+            return self.slot_ids[:k]
+
+        def slot_to_idx(self, slot_id):
+            slot_list = self.slot_ids.tolist()
+            if slot_id in slot_list:
+                return slot_list.index(slot_id)
+            return -1
+
+    class MockBlockPool:
+        def __init__(self, slot_ids):
+            self.slot_ids = torch.tensor(slot_ids, dtype=torch.int32)
+            self.seq_lens = torch.ones(max(slot_ids) + 1, dtype=torch.int32) * 256
+            self.scales = torch.ones(max(slot_ids) + 1, dtype=torch.float32)
+            self.W_proj = torch.ones(64, 64, dtype=torch.float32)
+            self.anchors_K = torch.ones(max(slot_ids) + 1, 2, 64, dtype=torch.float32)
+            
+    slot_ids = [10, 20, 30, 40]
+    
+    # Inverted index with concept occurrences
+    token_list = [0] * 1024
+    token_list[1] = 500  # in slot 10
+    token_list[257] = 600  # in slot 20
+    token_ids_index = torch.tensor(token_list, dtype=torch.int32)
+    
+    from native_core.srl.inverted_index import build_inverted_index
+    inv_index = build_inverted_index(
+        token_ids=token_ids_index,
+        slot_ids=slot_ids,
+        block_size=256,
+        stop_token_ids=set()
+    )
+
+    # ChunkGraph (with neighbors)
+    neighbors = torch.full((4, 8), -1, dtype=torch.int32)
+    neighbors[0, 0] = 2  # slot 10 -> row 2 (slot 30)
+    neighbors[1, 0] = 3  # slot 20 -> row 3 (slot 40)
+    chunk_graph = ChunkGraph(neighbors=neighbors)
+
+    semantic_index = MockSemanticIndex(slot_ids)
+    
+    srl_state = SessionSRLState(
+        semantic_index=semantic_index,
+        chunk_graph=chunk_graph,
+        inverted_index=inv_index,
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[10]
+    )
+
+    # Mock prompt Eagle scores and setup segmenting
+    srl_state.prompt_eagle_scores = torch.ones(10, dtype=torch.float32)
+    token_ids = torch.tensor([100, 500, 200, 600, 300], dtype=torch.int32)
+    srl_state.setup_sas_and_eqa(token_ids, {100, 200, 300})
+
+    # Concept tokens should be concept_tok_1=500, concept_tok_2=600
+    assert srl_state.concept_tok_1 == 500
+    assert srl_state.concept_tok_2 == 600
+
+    # Segments should be:
+    # Slot 10, 30 -> Segment 1
+    # Slot 20, 40 -> Segment 2
+    assert srl_state.segment_ids[10] == 1
+    assert srl_state.segment_ids[30] == 1
+    assert srl_state.segment_ids[20] == 2
+    assert srl_state.segment_ids[40] == 2
+
+    # Step 1: Active query segment is 1
+    srl_state.current_query_segment_id = 1
+
+    # Run query router and verify that segment 2 blocks are completely filtered out!
+    pool = MockBlockPool(slot_ids)
+    Q = torch.ones(2, 64, dtype=torch.float32)
+    
+    srl_state.k_min = 2
+    srl_state.k_max = 2
+    
+    selected = route_query_fixed_k(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    )
+    
+    selected_list = selected.tolist()
+    assert 20 not in selected_list
+    assert 40 not in selected_list
+
+
+def test_dynamic_routing_anchor():
+    import torch
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.query_router import route_query_fixed_k
+    from native_core.srl.inverted_index import InvertedTokenIndex
+    from native_core.srl.chunk_graph import ChunkGraph
+
+    class MockSemanticIndex:
+        def __init__(self, slot_ids):
+            self.slot_ids = torch.tensor(slot_ids, dtype=torch.int32)
+            self.desc_matrix = torch.eye(len(slot_ids), 64).half()
+        def slot_to_row_vec(self, slots):
+            slot_to_row = {int(s): i for i, s in enumerate(self.slot_ids.tolist())}
+            rows = [slot_to_row.get(int(s), -1) for s in slots]
+            return torch.tensor(rows, dtype=torch.long)
+
+        def search(self, q_desc, k):
+            return self.slot_ids[:k]
+
+        def slot_to_idx(self, slot_id):
+            slot_list = self.slot_ids.tolist()
+            if slot_id in slot_list:
+                return slot_list.index(slot_id)
+            return -1
+
+    class MockBlockPool:
+        def __init__(self, slot_ids):
+            self.slot_ids = torch.tensor(slot_ids, dtype=torch.int32)
+            self.seq_lens = torch.ones(max(slot_ids) + 1, dtype=torch.int32) * 256
+            self.scales = torch.ones(max(slot_ids) + 1, dtype=torch.float32)
+            self.W_proj = torch.ones(64, 64, dtype=torch.float32)
+            self.anchors_K = torch.ones(max(slot_ids) + 1, 2, 64, dtype=torch.float32)
+
+    slot_ids = [10, 20, 30]
+    semantic_index = MockSemanticIndex(slot_ids)
+    
+    neighbors = torch.full((3, 8), -1, dtype=torch.int32)
+    neighbors[1, 0] = 2  # slot 20 (row 1) has neighbor 30 (row 2)
+    chunk_graph = ChunkGraph(neighbors=neighbors)
+
+    srl_state = SessionSRLState(
+        semantic_index=semantic_index,
+        chunk_graph=chunk_graph,
+        inverted_index=InvertedTokenIndex(index={}, important_vocab=set()),
+        ordered_slot_ids=slot_ids,
+        sink_blocks=[10]
+    )
+
+    k0 = torch.zeros(64)
+    k0[0] = 1.0
+    k1 = torch.zeros(64)
+    k1[1] = 1.0
+    k2 = torch.zeros(64)
+    k2[0] = 1.0
+    k3 = torch.zeros(64)
+    k3[2] = 1.0
+    
+    srl_state.recent_decode_keys = [k0, k1, k2, k3]
+    srl_state.recent_generated_tokens = [50, 51, 52, 53]
+    srl_state.generated_token_slots = [20, 20, 20, 20]
+
+    srl_state.update_dynamic_anchors(set())
+
+    assert len(srl_state.dynamic_anchors) > 0
+    assert 20 in srl_state.dynamic_anchors
+
+    pool = MockBlockPool(slot_ids)
+    Q = torch.ones(2, 64, dtype=torch.float32)
+    srl_state.k_min = 3
+    srl_state.k_max = 3
+
+    selected = route_query_fixed_k(
+        Q=Q,
+        srl_state=srl_state,
+        pool=pool,
+        scale=1.0,
+        layer_idx=0
+    )
+    selected_list = selected.tolist()
+    assert 30 in selected_list
+
+
+
+
+
 

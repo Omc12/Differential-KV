@@ -540,7 +540,7 @@ void custom_attention_op_callback(
             float max_s = -1e30f;
             std::vector<float> scores(total_fact_len);
             
-            float fact_scale = scale / 0.2f;
+            float fact_scale = scale / 0.12f;
             for (int t = 0; t < total_fact_len; ++t) {
                 float dot = 0.0f;
                 const float* k_t = fact_k_rot.data() + t * F_test + kv_head * D;

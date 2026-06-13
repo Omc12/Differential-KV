@@ -29,6 +29,7 @@ struct BatchRequest {
     bool cancelled = false;
     bool repetition_loop_detected = false;
     int loop_detection_idx = -1;
+    bool sfa_active = false;
 
     // Output queue / callback state
     std::vector<std::string> output_chunks;

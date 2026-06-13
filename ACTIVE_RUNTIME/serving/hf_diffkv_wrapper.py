@@ -822,6 +822,11 @@ class PyTorchDiffKVHFWrapper:
         if hasattr(self.manager, "finalize_srl_index"):
             self.manager.finalize_srl_index(session_id, cached_len=cached_len)
 
+        srl_state = getattr(self.manager, "_session_srl", {}).get(session_id)
+        if srl_state is not None:
+            srl_state.vsl_active_candidates = []
+            srl_state.vsl_consecutive_helpers = 0
+
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
 
@@ -831,6 +836,8 @@ class PyTorchDiffKVHFWrapper:
         # Pre-allocate position cache to avoid slow GPU allocations in the loop
         max_total_len = cur_pos + max_new_tokens + 10
         pos_cache = torch.arange(max_total_len, dtype=torch.long, device=self.device)
+
+        sfa_active = False
 
         for _ in range(max_new_tokens):
             # ── Repetition-loop detection (mirrors batch_engine.py / mlx_diffkv_wrapper.py Fix 2) ──────
@@ -891,12 +898,46 @@ class PyTorchDiffKVHFWrapper:
             # Apply Factual Logit Bias
             srl_state = getattr(self.manager, "_session_srl", {}).get(session_id)
             if srl_state is not None:
+                # ── Helper token set (needed for both VSL masking and penalty below) ──
+                from native_core.srl.factual_alignment import get_helper_token_ids
+                helper_ids = get_helper_token_ids(self.tokenizer)
+
+                # +7.0 factual token bias — raised from +3 to overcome LM paraphrase prior.
+                # At +3 the model could still prefer "converge" over "coalesce" if its
+                # prior favoured the former by more than 3 logit units. At +7 the gap
+                # is wide enough that source-exact tokens reliably win.
                 if getattr(srl_state, "current_step_factual_tokens", None):
                     for tok_id in srl_state.current_step_factual_tokens:
                         if tok_id < logits.shape[-1]:
-                            logits[0, tok_id] += 1.5
+                            logits[0, tok_id] += 7.0
 
-                # Transition biasing (Option 1)
+                # +7.0 VSL active-candidate boost
+                active_candidates = getattr(srl_state, "vsl_active_candidates", [])
+                if active_candidates:
+                    for suffix in active_candidates:
+                        if suffix and suffix[0] < logits.shape[-1]:
+                            logits[0, suffix[0]] += 7.0
+
+                # -3.5 anti-hallucination penalty ─────────────────────────────────
+                # Threshold lowered 0.55→0.4 (matches SFA activation) and magnitude
+                # raised -2.5→-3.5. Previously the condition also required active VSL
+                # candidates, which was too restrictive: the penalty now fires as soon
+                # as any factual match is present and similarity is sufficient.
+                # This blocks "more complex", "distinct structures", spurious equations.
+                if (getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4
+                        and getattr(srl_state, "current_step_factual_tokens", None)):
+                    factual_set = srl_state.current_step_factual_tokens
+                    _vocab = logits.shape[-1]
+                    _excl = [t for t in list(factual_set) + list(helper_ids) if 0 <= t < _vocab]
+                    if _excl:
+                        _excl_t = torch.tensor(_excl, dtype=torch.long, device=logits.device)
+                        _penalty_mask = torch.ones(_vocab, dtype=torch.bool, device=logits.device)
+                        _penalty_mask.scatter_(0, _excl_t, False)
+                        logits[0, _penalty_mask] -= 3.5
+
+                # +10.0 transition bias — raised from +4 to strongly enforce known
+                # token sequences. Fixes inverted/collapsed relationships by making
+                # the correct next token in a source sequence decisively more likely.
                 last_token = generated[-1] if generated else None
                 if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
                     transition_candidates = set()
@@ -906,20 +947,53 @@ class PyTorchDiffKVHFWrapper:
                                 transition_candidates.add(seq[idx + 1])
                     for tok_id in transition_candidates:
                         if tok_id < logits.shape[-1]:
-                            logits[0, tok_id] += 2.0
+                            logits[0, tok_id] += 10.0
 
             # Apply Dynamic Temperature Scaling (Option 1)
             effective_temperature = temperature
-            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4:
+            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3:
                 max_sim = srl_state.current_step_max_similarity
-                effective_temperature = temperature * (1.0 - max_sim * 0.8)
+                effective_temperature = temperature * (1.0 - max_sim * 0.95)
+
+            # SFA threshold lowered 0.4→0.3 to match factual-query threshold: SFA
+            # now activates for ANY confirmed factual match, not just high-sim ones.
+            sfa_active = (
+                srl_state is not None
+                and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3
+                and bool(getattr(srl_state, "current_step_factual_sequences", None))
+            )
+
+            # LM-VSL (Logit Masking) — guard against empty sequences; without this
+            # get_allowed_tokens_vsl returns only helper words, locking generation.
+            if sfa_active:
+                from native_core.srl.factual_alignment import get_allowed_tokens_vsl
+                allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+                mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
+                mask[list(allowed_ids)] = False
+                logits[0, mask] = -1e10
 
             # Sample
             next_id = _compiled_sample_fn(logits, effective_temperature, top_p)
+            next_id_val = next_id.item()
 
-            generated.append(next_id.item())
+            # Strict Factual Alignment (SFA) State Update and Loop Check
+            if sfa_active and srl_state is not None:
+                from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
+                helper_ids = get_helper_token_ids(self.tokenizer)
+                update_vsl_state(next_id_val, srl_state, helper_ids)
+                
+                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+                    uncertainty_suffix = " [uncertain: details missing in source]"
+                    uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
+                    for t_id in uncertainty_tokens:
+                        generated.append(t_id)
+                        if hasattr(self.manager, "register_prefill_tokens"):
+                            self.manager.register_prefill_tokens(session_id, torch.tensor([t_id], dtype=torch.long))
+                    break
+
+            generated.append(next_id_val)
             if hasattr(self.manager, "register_prefill_tokens"):
-                self.manager.register_prefill_tokens(session_id, torch.tensor([next_id.item()], dtype=torch.long))
+                self.manager.register_prefill_tokens(session_id, torch.tensor([next_id_val], dtype=torch.long))
 
             # Factual Early Stopping (Option 2 Extension)
             stop_generation = False

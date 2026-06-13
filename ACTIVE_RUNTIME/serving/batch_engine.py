@@ -1280,6 +1280,19 @@ class ContinuousBatchEngine:
                             _empty()
 
     def _sample(self, logits: torch.Tensor, req: BatchRequest) -> int:
+        srl_state = self.wrapper.manager.get_srl_state(req.session_id)
+        if len(req.generated_ids) == 0:
+            req.sfa_active = False
+            if srl_state is not None:
+                srl_state.vsl_active_candidates = []
+                srl_state.vsl_consecutive_helpers = 0
+                # Reset the query anchor so each new response anchors to its own
+                # first decode step, not the previous response's Q-vector.
+                # Without this reset, all turns in a multi-turn chat are 35%
+                # anchored toward turn-1's query, causing recurring retrieval of
+                # the same entries regardless of the actual question.
+                srl_state.factual_anchor_q = None
+
         # ── Repetition-loop recovery (Fix 2) ────────────────────────────────
         # When a loop has been detected we widen the penalty window from 64 to
         # 256 tokens and boost the penalty strength to break the loop faster.
@@ -1314,16 +1327,49 @@ class ContinuousBatchEngine:
             prompt_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
         # Apply Factual Logit Bias
-        srl_state = self.wrapper.manager.get_srl_state(req.session_id)
         if srl_state is not None:
+            # Helper token set (needed for penalty and VSL masking below)
+            from native_core.srl.factual_alignment import get_helper_token_ids
+            helper_ids = get_helper_token_ids(self.tokenizer)
+
+            # +7.0 factual token bias (raised from +3)
             if getattr(srl_state, "current_step_factual_tokens", None):
                 for tok_id in srl_state.current_step_factual_tokens:
                     if tok_id < logits.shape[-1]:
-                        logits[0, tok_id] += 1.5
+                        logits[0, tok_id] += 7.0
 
-            # Transition biasing (Option 1)
+            # +7.0 VSL active-candidate boost
+            active_candidates = getattr(srl_state, "vsl_active_candidates", [])
+            if active_candidates:
+                for suffix in active_candidates:
+                    if suffix and suffix[0] < logits.shape[-1]:
+                        logits[0, suffix[0]] += 7.0
+
+            # -3.5 anti-hallucination penalty — only fires at sim ≥ 0.55 to avoid
+            # penalising all domain vocabulary when a weak/wrong match passes the
+            # lower factual-query threshold. At 0.3 almost every entry in a focused
+            # document matches, so the "excluded" token set was nearly the full vocab
+            # which makes the penalty useless and the factual set the only option.
+            # Raising to 0.55 means we only penalise when we're genuinely confident.
+            if (getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.55
+                    and getattr(srl_state, "current_step_factual_tokens", None)):
+                factual_set = srl_state.current_step_factual_tokens
+                _vocab = logits.shape[-1]
+                _excl = [t for t in list(factual_set) + list(helper_ids) if 0 <= t < _vocab]
+                if _excl:
+                    _excl_t = torch.tensor(_excl, dtype=torch.long, device=logits.device)
+                    _penalty_mask = torch.ones(_vocab, dtype=torch.bool, device=logits.device)
+                    _penalty_mask.scatter_(0, _excl_t, False)
+                    logits[0, _penalty_mask] -= 3.5
+
+            # +10.0 transition bias — only fire when the last token is a CONTENT word
+            # (not in helper_ids). Helper words (the, is, of, a, ...) appear at random
+            # positions across many sequences; boosting their successors adds noise not
+            # signal and drives the model into wrong sequence continuations.
             last_token = req.generated_ids[-1] if req.generated_ids else None
-            if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
+            if (last_token is not None
+                    and last_token not in helper_ids
+                    and getattr(srl_state, "current_step_factual_sequences", None)):
                 transition_candidates = set()
                 for seq in srl_state.current_step_factual_sequences:
                     for idx, tok in enumerate(seq[:-1]):
@@ -1331,13 +1377,36 @@ class ContinuousBatchEngine:
                             transition_candidates.add(seq[idx + 1])
                 for tok_id in transition_candidates:
                     if tok_id < logits.shape[-1]:
-                        logits[0, tok_id] += 2.0
+                        logits[0, tok_id] += 10.0
 
-        # Apply Dynamic Temperature Scaling (Option 1)
+        # Apply Dynamic Temperature Scaling — threshold raised 0.3→0.55 to match
+        # the tighter retrieval confidence bar.
         effective_temperature = req.temperature
-        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4:
+        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.55:
             max_sim = srl_state.current_step_max_similarity
-            effective_temperature = req.temperature * (1.0 - max_sim * 0.8)
+            effective_temperature = req.temperature * (1.0 - max_sim * 0.95)
+
+        # SFA threshold raised 0.3→0.55: at 0.3 almost every topical entry matches,
+        # activating the VSL and forcing generation from a mixed-category token set.
+        # At 0.55 only high-confidence, specific retrieval triggers the constraint.
+        req.sfa_active = (
+            srl_state is not None
+            and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.55
+            and bool(getattr(srl_state, "current_step_factual_sequences", None))
+        )
+
+        # LM-VSL (Logit Masking) — soft penalty (-7) instead of hard mask (-1e10).
+        # Hard masking means ANY retrieval error (wrong entry retrieved) completely
+        # locks the model into incorrect sequences with zero escape. Soft penalty
+        # still strongly guides generation toward factual sequences but allows the
+        # model's own distribution to win when it has very high confidence in a
+        # token that doesn't appear in the retrieved sequences.
+        if req.sfa_active:
+            from native_core.srl.factual_alignment import get_allowed_tokens_vsl
+            allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+            mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
+            mask[list(allowed_ids)] = False
+            logits[0, mask] -= 7.0
 
         sampled_tensor = _sample_gpu_jit(
             logits,
@@ -1355,9 +1424,23 @@ class ContinuousBatchEngine:
 
         is_eos = (token_id in self.stop_token_ids)
 
-        # Factual Early Stopping (Option 2 Extension)
+        # Strict Factual Alignment (SFA) State Update and Loop Check
         srl_state = self.wrapper.manager.get_srl_state(req.session_id)
-        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
+        if getattr(req, "sfa_active", False) and srl_state is not None:
+            from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
+            helper_ids = get_helper_token_ids(self.tokenizer)
+            update_vsl_state(token_id, srl_state, helper_ids)
+            
+            if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+                if req.generated_ids:
+                    req.generated_ids.pop()
+                uncertainty_suffix = " [uncertain: details missing in source]"
+                uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
+                req.generated_ids.extend(uncertainty_tokens)
+                is_eos = True
+
+        # Factual Early Stopping (Option 2 Extension)
+        if not is_eos and srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
             if getattr(srl_state, "current_step_factual_sequences", None):
                 for seq in srl_state.current_step_factual_sequences:
                     if len(seq) >= 5 and token_id == seq[-1]:
@@ -1403,6 +1486,10 @@ class ContinuousBatchEngine:
         srl_state = self.wrapper.manager.get_srl_state(req.session_id)
         if srl_state is not None:
             srl_state.update_generated_tokens(token_id)
+            srl_state.update_query_segment(token_id)
+            curr_slot_id = srl_state.ordered_slot_ids[-1] if srl_state.ordered_slot_ids else 0
+            srl_state.generated_token_slots.append(curr_slot_id)
+            srl_state.update_dynamic_anchors(self.wrapper.manager._stop_token_ids)
 
         # Standard robust incremental decode: decodes the full generated sequence and computes the delta text.
         # This is 100% correct, handles token boundaries perfectly, and completely eliminates spacing corruption.

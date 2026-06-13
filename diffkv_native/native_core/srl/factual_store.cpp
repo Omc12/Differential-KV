@@ -97,6 +97,7 @@ void FactualExactStore::build(
                 }
                 R[j] = col_sum;
             }
+            this->eagle_scores = R;
         }
 
         // 2. Compute Key Norms at Layer 0
@@ -134,8 +135,11 @@ void FactualExactStore::build(
             total_salience[t] = key_norms[t] * idf_vals[t] * (1.0f + 1.0f * R[t]);
         }
 
-        // Select the top 10% most salient tokens
-        int k_num = std::max(8, (int)(L * 0.10f));
+        // Select the top 5% most salient tokens (precision mode: max 300 tokens)
+        // 50% was selecting half the document — far too broad for exact grounding.
+        // 5% keeps only the rarest, most distinctive content words per document.
+        int k_num = std::max(8, (int)(L * 0.05f));
+        k_num = std::min(k_num, 300);  // absolute cap regardless of document length
         k_num = std::min(k_num, L);
 
         if (L > 0) {
@@ -188,11 +192,14 @@ void FactualExactStore::build(
         spans.push_back({start, L});
     }
 
-    // Split long spans into chunks of max length 12
+    // Split long spans into chunks of max length 20 (raised from 12).
+    // Longer chunks preserve more relational context per sequence — critical for
+    // VSL to lock onto full property phrases like "coalesce to a single direction
+    // at rate sqrt(ε)" rather than truncated 12-token fragments.
     std::vector<std::pair<int, int>> chunked_spans;
     for (const auto& span : spans) {
-        for (int sub_s = span.first; sub_s < span.second; sub_s += 12) {
-            int sub_e = std::min(sub_s + 12, span.second);
+        for (int sub_s = span.first; sub_s < span.second; sub_s += 20) {
+            int sub_e = std::min(sub_s + 20, span.second);
             chunked_spans.push_back({sub_s, sub_e});
         }
     }
@@ -219,27 +226,31 @@ void FactualExactStore::build(
                         span_len * F_test * sizeof(float));
         }
 
-        // Compute descriptor for the span using layer 0 average key
-        std::vector<float> avg_k(head_dim, 0.0f);
+        // Compute descriptor for the span using layer 0 max-pooled key.
+        // Max-pool over positions retains the most activated (distinctive) features
+        // for each head, rather than averaging them away. This is critical for
+        // formula/math spans where a single rare token dominates the span semantics.
+        // Then mean over heads to produce the final descriptor vector.
+        std::vector<float> max_k(head_dim, -1e9f);
         for (int t = 0; t < span_len; ++t) {
             for (int kh = 0; kh < kv_heads; ++kh) {
                 for (int d = 0; d < head_dim; ++d) {
-                    avg_k[d] += entry.K[kh * head_dim + t * F_test + d];
+                    float val = entry.K[kh * head_dim + t * F_test + d];
+                    if (val > max_k[d]) max_k[d] = val;
                 }
             }
         }
-        for (int d = 0; d < head_dim; ++d) {
-            avg_k[d] /= (span_len * kv_heads);
-        }
+        // Mean over heads by averaging max_k with itself (max is already position-pooled);
+        // no further reduction needed — max_k[d] is already the per-position max.
 
-        // Project descriptor using W_proj [desc_dim, head_dim]
+        // Project descriptor using W_proj [desc_dim, head_dim] — using max_k
         entry.descriptor.resize(desc_dim, 0.0f);
         if (W_proj) {
             float norm_sq = 0.0f;
             for (int r = 0; r < desc_dim; ++r) {
                 float val = 0.0f;
                 for (int d = 0; d < head_dim; ++d) {
-                    val += avg_k[d] * W_proj[r * head_dim + d];
+                    val += max_k[d] * W_proj[r * head_dim + d];
                 }
                 entry.descriptor[r] = val;
                 norm_sq += val * val;
@@ -512,7 +523,19 @@ std::vector<FactEntry> FactualExactStore::query(
             }
         }
         auto walk_it = walk_candidates.find(idx);
-        bool passes_walk = (walk_it != walk_candidates.end() && walk_it->second >= threshold);
+        // Two-condition walk gate (mirrors Python logic):
+        //   1. walk_score >= 0.20 (propagated relevance from seed)
+        //   2. sim >= 0.10 (some direct distributional relevance)
+        //      OR walk_score >= 0.30 (strong edge — trust graph topology)
+        // Prevents zero-sim entries via weak temporal edges from being returned.
+        const float WALK_THRESHOLD = 0.20f;
+        const float WALK_STRONG    = 0.30f;
+        const float WALK_MIN_SIM   = 0.10f;
+        bool passes_walk = false;
+        if (walk_it != walk_candidates.end()) {
+            float ws = walk_it->second;
+            passes_walk = (ws >= WALK_THRESHOLD && (sim >= WALK_MIN_SIM || ws >= WALK_STRONG));
+        }
 
         if (passes_main || passes_relaxed || passes_walk) {
             float final_score = sim;
@@ -550,8 +573,10 @@ std::vector<FactEntry> FactualExactStore::query(
     std::sort(merged_results.begin(), merged_results.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
+    // Top 5 only — with 5% selection, each entry is a tight, high-precision span.
+    // Returning more than 5 at this precision level floods the VSL with too many candidates.
     std::vector<FactEntry> results;
-    int limit = std::min(8, (int)merged_results.size());
+    int limit = std::min(5, (int)merged_results.size());
     for (int i = 0; i < limit; ++i) {
         FactEntry top_entry = merged_results[i].first;
         top_entry.current_sim = merged_results[i].second;

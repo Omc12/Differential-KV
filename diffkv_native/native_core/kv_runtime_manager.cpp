@@ -390,6 +390,66 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         }
     }
 
+    // 4. Dynamic routing anchors expansion
+    if (!srl_state.dynamic_anchors.empty()) {
+        std::unordered_set<int32_t> da_set(srl_state.dynamic_anchors.begin(), srl_state.dynamic_anchors.end());
+        std::vector<int32_t> expanded_da = srl_state.expand_neighborhood(da_set);
+        for (int32_t slot : expanded_da) {
+            if (slot >= 0 && slot < active_slot) {
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                }
+            }
+        }
+    }
+
+    // 4.5 Prompt routing anchors expansion
+    if (!srl_state.prompt_anchors.empty()) {
+        int b_size = srl_state.inverted_index.block_size;
+        std::unordered_set<int32_t> pa_slots;
+        for (int idx : srl_state.prompt_anchors) {
+            int block_idx = idx / b_size;
+            if (block_idx >= 0 && block_idx < static_cast<int>(srl_state.ordered_slot_ids.size())) {
+                pa_slots.insert(srl_state.ordered_slot_ids[block_idx]);
+            }
+        }
+        if (!pa_slots.empty()) {
+            std::vector<int32_t> expanded_pa = srl_state.expand_neighborhood(pa_slots);
+            for (int32_t slot : expanded_pa) {
+                if (slot >= 0 && slot < active_slot) {
+                    if (!seen.count(slot)) {
+                        host_candidates.push_back(slot);
+                        seen.insert(slot);
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Structured Attention Segmenting filtering
+    int curr_seg = srl_state.current_query_segment_id;
+    if (curr_seg != 0 && !srl_state.segment_ids.empty()) {
+        std::unordered_set<int32_t> sink_set(srl_state.sink_blocks.begin(), srl_state.sink_blocks.end());
+        std::vector<int32_t> filtered;
+        for (int32_t slot : host_candidates) {
+            if (sink_set.count(slot)) {
+                filtered.push_back(slot);
+                continue;
+            }
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end()) {
+                int seg_id = it->second;
+                if (seg_id == 0 || seg_id == curr_seg) {
+                    filtered.push_back(slot);
+                }
+            } else {
+                filtered.push_back(slot);
+            }
+        }
+        host_candidates = filtered;
+    }
+
     // Pad with 0 up to srl_k_host
     while (host_candidates.size() < (size_t)srl_k_host) {
         host_candidates.push_back(0);

@@ -34,6 +34,7 @@ class FactualExactStore {
 public:
     std::string session_id;
     std::vector<FactEntry> entries;
+    std::vector<float> eagle_scores;
     int num_layers = 0;
     int F_test = 0;
 
@@ -41,6 +42,7 @@ public:
 
     void clear() {
         entries.clear();
+        eagle_scores.clear();
         num_layers = 0;
         F_test = 0;
     }

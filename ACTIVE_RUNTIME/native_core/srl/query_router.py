@@ -598,11 +598,43 @@ def route_query(
     # stale). On topic switch, rare_lex is zeroed out above; on same-topic
     # queries it still contributes but doesn't displace semantic hits.
     # Order: sink → semantic → rare_lex → graph → lexical → recent
+    # ── Step 6.5: Dynamic Anchors expansion ──
+    dynamic_routed_slots = []
+    if getattr(srl_state, "dynamic_anchors", None):
+        dynamic_routed_slots = list(srl_state.expand_neighborhood(set(srl_state.dynamic_anchors)))
+
+    # ── Step 6.6: Prompt Anchors expansion ──
+    prompt_routed_slots = []
+    if getattr(srl_state, "prompt_anchors", None):
+        block_size = srl_state.inverted_index.block_size if (srl_state.inverted_index is not None and hasattr(srl_state.inverted_index, "block_size")) else 256
+        prompt_anchor_slots = []
+        for idx in srl_state.prompt_anchors:
+            block_idx = idx // block_size
+            if block_idx < len(srl_state.ordered_slot_ids):
+                prompt_anchor_slots.append(srl_state.ordered_slot_ids[block_idx])
+        if prompt_anchor_slots:
+            prompt_routed_slots = list(srl_state.expand_neighborhood(set(prompt_anchor_slots)))
+
     combined = list(dict.fromkeys(
-        sink + semantic_slots + rare_lex_slots + graph_slots + lexical_slots + recent_slots
+        sink + semantic_slots + rare_lex_slots + graph_slots + lexical_slots + recent_slots + dynamic_routed_slots + prompt_routed_slots
     ))
 
-    if N - len(combined) <= 2:
+    # Apply Structured Attention Segmenting filtering
+    curr_seg = getattr(srl_state, "current_query_segment_id", 0)
+    if curr_seg != 0 and getattr(srl_state, "segment_ids", None):
+        segment_ids = srl_state.segment_ids
+        sink_set = set(sink)
+        filtered_combined = []
+        for slot in combined:
+            if slot in sink_set:
+                filtered_combined.append(slot)
+                continue
+            seg_id = segment_ids.get(slot, 0)
+            if seg_id == 0 or seg_id == curr_seg:
+                filtered_combined.append(slot)
+        combined = filtered_combined
+
+    if curr_seg == 0 and N - len(combined) <= 2:
         combined = srl_state.ordered_slot_ids
 
     if not combined:

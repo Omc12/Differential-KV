@@ -157,7 +157,7 @@ inline InvertedTokenIndex build_inverted_index(
     const std::vector<int32_t>&     slot_ids,      // [N] in chronological order
     int                             block_size,
     const std::unordered_set<int>&  stop_token_ids,
-    int                             top_n_per_block = 20
+    int                             top_n_per_block = 50  // raised from 20; ensures dense technical vocab is indexed
 ) {
     InvertedTokenIndex inv;
     inv.block_size = block_size;
@@ -213,6 +213,31 @@ inline InvertedTokenIndex build_inverted_index(
         float n_containing = static_cast<float>(slots_with_tok.size());
         float n_blocks     = static_cast<float>(N);
         inv.idf[tok] = std::log(n_blocks / n_containing) + 1.0f;
+    }
+
+    // Rare-term always-index pass: ensure high-IDF terms are indexed even if they
+    // fell outside the top_n_per_block frequency cap. Critical for rare technical
+    // vocabulary (e.g. "EP2", "codimension", "coalesce") that appears infrequently
+    // within a block but is highly distinctive across the corpus.
+    const float IDF_RARE_THRESHOLD = 3.0f;
+    for (const auto& kv : inv.idf) {
+        int tok = kv.first;
+        float tok_idf = kv.second;
+        if (tok_idf >= IDF_RARE_THRESHOLD) {
+            auto& slot_list = inv.index[tok];
+            std::unordered_set<int32_t> already(slot_list.begin(), slot_list.end());
+            // Find all slots containing this rare token via occurrences
+            auto occ_it = inv.occurrences.find(tok);
+            if (occ_it != inv.occurrences.end()) {
+                for (const auto& occ : occ_it->second) {
+                    int32_t slot = std::get<0>(occ);
+                    if (!already.count(slot)) {
+                        slot_list.push_back(slot);
+                        already.insert(slot);
+                    }
+                }
+            }
+        }
     }
 
     return inv;

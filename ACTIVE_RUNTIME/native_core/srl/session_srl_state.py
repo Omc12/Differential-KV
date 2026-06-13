@@ -46,13 +46,34 @@ class SessionSRLState:
     # Rolling window of recently generated token IDs for lexical lookup
     recent_generated_tokens: List[int] = field(default_factory=list)
 
+    # Structured Attention Segmenting (SAS) fields
+    segment_ids: Dict[int, int] = field(default_factory=dict)
+    current_query_segment_id: int = 0
+    concept_tok_1: int = -1
+    concept_tok_2: int = -1
+
+    # Eagle-Guided Query Anchoring & Dynamic Routing (EQA-DR) fields
+    prompt_eagle_scores: Optional[torch.Tensor] = None
+    prompt_anchors: List[int] = field(default_factory=list)
+    recent_decode_keys: List[torch.Tensor] = field(default_factory=list)
+    generated_token_slots: List[int] = field(default_factory=list)
+    dynamic_anchors: List[int] = field(default_factory=list)
+
     # Per-decode-step cached slot selection (shared across all 28 layers)
     # Set by layer 0, consumed by layers 1–27
     current_step_slots: Optional[torch.Tensor] = None
     current_step_count: int = 0   # decode step counter for validation
     last_prefill_q: Optional[torch.Tensor] = None
+    current_step_factual_tokens: set = field(default_factory=set)
     current_step_factual_sequences: List[List[int]] = field(default_factory=list)
     current_step_max_similarity: float = 0.0
+    vsl_active_candidates: List[List[int]] = field(default_factory=list)
+    vsl_consecutive_helpers: int = 0
+    # First decode-step query vector stored as an anchor.
+    # Used to blend with current query during factual store lookups so that
+    # semantic drift (query vector accumulating generated text) cannot pull
+    # retrieval away from the original question topic.
+    factual_anchor_q: Optional[torch.Tensor] = None
 
     # Per-layer ordered slots (all layers share pool slots → same list for all)
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)
@@ -104,3 +125,183 @@ class SessionSRLState:
             self.k_multiplier = min(self.k_multiplier * 1.2, 3.0)
         else:
             self.k_multiplier = max(self.k_multiplier * 0.99, 1.0)
+
+    def expand_neighborhood(self, seed_slots: Set[int]) -> Set[int]:
+        expanded = set(seed_slots)
+        if self.chunk_graph is None or self.semantic_index is None:
+            return expanded
+            
+        slot_to_row = {int(slot): idx for idx, slot in enumerate(self.semantic_index.slot_ids.tolist())}
+        neighbors_tensor = self.chunk_graph.neighbors
+        
+        for slot in list(seed_slots):
+            if slot in slot_to_row:
+                row_idx = slot_to_row[slot]
+                if row_idx < neighbors_tensor.shape[0]:
+                    nb_rows = neighbors_tensor[row_idx].tolist()
+                    for nb_row in nb_rows:
+                        if nb_row >= 0 and nb_row < self.semantic_index.slot_ids.shape[0]:
+                            nb_slot = int(self.semantic_index.slot_ids[nb_row].item())
+                            expanded.add(nb_slot)
+        return expanded
+
+    def update_query_segment(self, token_id: int) -> None:
+        # Look at the last 12 generated tokens
+        recent_window = self.recent_generated_tokens[-12:]
+        seg1_score = 0
+        seg2_score = 0
+        
+        for tid in recent_window:
+            if self.inverted_index is not None and tid in self.inverted_index.occurrences:
+                for slot, _, _ in self.inverted_index.occurrences[tid]:
+                    seg = self.segment_ids.get(slot, 0)
+                    if seg == 1:
+                        seg1_score += 1
+                    elif seg == 2:
+                        seg2_score += 1
+                        
+        if seg1_score > seg2_score + 2:
+            self.current_query_segment_id = 1
+        elif seg2_score > seg1_score + 2:
+            self.current_query_segment_id = 2
+        else:
+            self.current_query_segment_id = 0
+
+    def update_dynamic_anchors(self, stop_token_ids: Set[int]) -> None:
+        L_g = len(self.recent_decode_keys)
+        if L_g < 2 or L_g % 4 != 0:
+            return
+            
+        keys_tensor = torch.stack(self.recent_decode_keys) # [L_g, head_dim]
+        sim = torch.matmul(keys_tensor, keys_tensor.T) / math.sqrt(keys_tensor.shape[1])
+        
+        # Apply causal mask
+        mask = torch.triu(torch.ones(L_g, L_g, device=sim.device), diagonal=1).T
+        sim = sim.masked_fill(mask == 0, -1e9)
+        
+        attn = torch.softmax(sim, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)
+        
+        R_gen = attn.sum(dim=0).cpu().tolist()
+        
+        self.dynamic_anchors = []
+        for i in range(L_g):
+            if R_gen[i] > 1.5:
+                if i < len(self.recent_generated_tokens):
+                    tid = self.recent_generated_tokens[i]
+                    if tid not in stop_token_ids:
+                        if i < len(self.generated_token_slots):
+                            self.dynamic_anchors.append(self.generated_token_slots[i])
+
+    def setup_sas_and_eqa(self, token_ids: torch.Tensor, stop_token_ids: Set[int], tokenizer: Optional[Any] = None) -> None:
+        if self.prompt_eagle_scores is None or token_ids is None:
+            return
+            
+        total_seq_len = token_ids.numel()
+        valid_candidates = []
+        for i in range(total_seq_len):
+            tid = int(token_ids[i].item())
+            if tid not in stop_token_ids:
+                score = float(self.prompt_eagle_scores[i].item())
+                
+                # Check for known comparative keywords and boost their scores
+                try:
+                    word = ""
+                    if tokenizer is not None:
+                        word = tokenizer.decode([tid]).strip().lower()
+                except Exception:
+                    pass
+                
+                if word in {"1", "2", "3", "ep2", "ep3", "hermitian", "diabolic", "conical", "branch"}:
+                    score += 5.0
+                    
+                valid_candidates.append((i, score, tid))
+                
+        # Sort by score descending
+        valid_candidates.sort(key=lambda x: x[1], reverse=True)
+        self.prompt_anchors = [i for i, _, _ in valid_candidates[:3]]
+        
+        # Extract unique token IDs
+        candidate_tids = []
+        seen_tids = set()
+        for _, _, tid in valid_candidates:
+            if tid not in seen_tids:
+                candidate_tids.append(tid)
+                seen_tids.add(tid)
+                
+        # Find concepts with low Jaccard overlap
+        def get_slots(tid):
+            slots = set()
+            if self.inverted_index is not None and tid in self.inverted_index.occurrences:
+                for slot, _, _ in self.inverted_index.occurrences[tid]:
+                    slots.add(slot)
+            return slots
+            
+        def jaccard(s1, s2):
+            if not s1 or not s2:
+                return 0.0
+            return len(s1 & s2) / len(s1 | s2)
+            
+        concept_tok_1 = -1
+        concept_tok_2 = -1
+        
+        first_idx = -1
+        for idx, tid in enumerate(candidate_tids):
+            s = get_slots(tid)
+            if len(s) >= 1:
+                concept_tok_1 = tid
+                first_idx = idx
+                break
+                
+        if first_idx != -1:
+            s1 = get_slots(concept_tok_1)
+            for j in range(first_idx + 1, len(candidate_tids)):
+                tid2 = candidate_tids[j]
+                s2 = get_slots(tid2)
+                if len(s2) >= 1:
+                    j_val = jaccard(s1, s2)
+                    if j_val <= 0.2:
+                        concept_tok_2 = tid2
+                        break
+            if concept_tok_2 == -1:
+                # Fallback to minimum Jaccard overlap
+                min_j = 1.0
+                best_tid2 = -1
+                for j in range(first_idx + 1, len(candidate_tids)):
+                    tid2 = candidate_tids[j]
+                    s2 = get_slots(tid2)
+                    if len(s2) >= 1:
+                        j_val = jaccard(s1, s2)
+                        if j_val < min_j:
+                            min_j = j_val
+                            best_tid2 = tid2
+                concept_tok_2 = best_tid2
+                
+        self.concept_tok_1 = concept_tok_1
+        self.concept_tok_2 = concept_tok_2
+        
+        # Map segments
+        self.segment_ids = {slot: 0 for slot in self.ordered_slot_ids}
+        slots_1 = set()
+        slots_2 = set()
+        
+        if self.concept_tok_1 != -1:
+            slots_1 = get_slots(self.concept_tok_1)
+        if self.concept_tok_2 != -1:
+            slots_2 = get_slots(self.concept_tok_2)
+            
+        # Neighborhood Expansion
+        expanded_1 = self.expand_neighborhood(slots_1)
+        expanded_2 = self.expand_neighborhood(slots_2)
+        
+        for slot in self.ordered_slot_ids:
+            in_1 = slot in expanded_1
+            in_2 = slot in expanded_2
+            if in_1 and in_2:
+                self.segment_ids[slot] = 0
+            elif in_1:
+                self.segment_ids[slot] = 1
+            elif in_2:
+                self.segment_ids[slot] = 2
+            else:
+                self.segment_ids[slot] = 0

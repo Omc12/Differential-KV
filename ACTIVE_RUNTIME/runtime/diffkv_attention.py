@@ -468,6 +468,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         curr_k = unrot_key_states[b_idx:b_idx+1]
                         curr_v = value_states[b_idx:b_idx+1]
                         kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
+                        if captured_layer_idx == 0:
+                            srl_state = kv_manager.get_srl_state(sid)
+                            if srl_state is not None:
+                                k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
+                                srl_state.recent_decode_keys.append(k_avg)
+                                if len(srl_state.recent_decode_keys) > 512:
+                                    srl_state.recent_decode_keys = srl_state.recent_decode_keys[-512:]
 
                     # 2. Attention decode dispatch
                     # Always route through the unified native_triton_sparse_attn_decode path.
@@ -675,25 +682,164 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
 
                         # ── Query Factual Store (Solution 4) ──
+                        # Descriptors are built from layer-0 K vectors (factual_store.py:200,
+                        # span_K[0]). Running the query at layers 1-27 compares against a
+                        # different projection space and accumulates spurious cross-category
+                        # matches into the logit-bias state. All state updates therefore run
+                        # only at layer 0; layers 1-27 reuse the cached FactEntry list so
+                        # the three-way attention combination still fires at every layer.
                         factual_store = getattr(kv_manager, "_factual_stores", {}).get(sid)
                         matching_entries = []
                         if factual_store is not None and pool is not None and pool.W_proj is not None:
                             try:
-                                active_slots = set(block_indices.tolist()) if block_indices is not None else None
-                                matching_entries = factual_store.query(
-                                    Q=unrot_query_states[b_idx, :, 0, :],
-                                    W_proj=pool.W_proj,
-                                    threshold=0.4,
-                                    active_slots=active_slots
-                                )
-                                if srl_state is not None and matching_entries:
-                                    for entry in matching_entries:
-                                        srl_state.current_step_factual_tokens.update(entry.tokens)
-                                        if entry.tokens not in srl_state.current_step_factual_sequences:
-                                            srl_state.current_step_factual_sequences.append(entry.tokens)
-                                    sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
-                                    if sims:
-                                        srl_state.current_step_max_similarity = max(srl_state.current_step_max_similarity, max(sims))
+                                if captured_layer_idx == 0:
+                                    # ── Layer 0: run query and update all logit-bias state ──────
+                                    active_slots = set(block_indices.tolist()) if block_indices is not None else None
+
+                                    # Query Anchor Blending (layer-0 Q space only — blending a
+                                    # layer-0 anchor with layer-N raw_q is semantically incorrect).
+                                    raw_q = unrot_query_states[b_idx, :, 0, :]  # [H, D]
+                                    if srl_state is not None:
+                                        if srl_state.factual_anchor_q is None:
+                                            srl_state.factual_anchor_q = raw_q.detach().clone()
+                                        q_for_factual = 0.65 * raw_q + 0.35 * srl_state.factual_anchor_q.to(raw_q.device)
+                                    else:
+                                        q_for_factual = raw_q
+
+                                    matching_entries = factual_store.query(
+                                        Q=q_for_factual,
+                                        W_proj=pool.W_proj,
+                                        threshold=0.50,
+                                        active_slots=active_slots
+                                    )
+                                    if srl_state is not None and matching_entries:
+                                        for entry in matching_entries:
+                                            srl_state.current_step_factual_tokens.update(entry.tokens)
+                                            if entry.tokens not in srl_state.current_step_factual_sequences:
+                                                srl_state.current_step_factual_sequences.append(entry.tokens)
+                                            # ── 1-hop neighbor injection ────────────────────────────
+                                            # Threshold raised 0.35→0.45: with temporal adjacency
+                                            # edges (within 512 tokens) many unrelated entries had
+                                            # weight > 0.35, flooding sequences with off-topic spans.
+                                            for nb_idx, nb_weight in zip(entry.neighbors, entry.weights):
+                                                if nb_weight >= 0.45 and nb_idx < len(factual_store.entries):
+                                                    nb_e = factual_store.entries[nb_idx]
+                                                    if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
+                                                        srl_state.current_step_factual_tokens.update(nb_e.tokens)
+                                                        srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                                        # ── 2-hop neighbor injection ────────────────
+                                                        # Threshold raised 0.50→0.65: 2-hop is doubly
+                                                        # noisy; only follow strong, high-confidence edges.
+                                                        for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
+                                                            if nb2_weight >= 0.65 and nb2_idx < len(factual_store.entries):
+                                                                nb2_e = factual_store.entries[nb2_idx]
+                                                                if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
+                                                                    srl_state.current_step_factual_tokens.update(nb2_e.tokens)
+                                                                    srl_state.current_step_factual_sequences.append(nb2_e.tokens)
+                                        sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
+                                        if sims:
+                                            srl_state.current_step_max_similarity = max(srl_state.current_step_max_similarity, max(sims))
+
+                                    # ── Lexical Tripwire ────────────────────────────────────────────
+                                    if srl_state is not None and factual_store is not None:
+                                        recent_toks = getattr(srl_state, "recent_generated_tokens", [])
+                                        inv_index = getattr(srl_state, "inverted_index", None)
+                                        if recent_toks and inv_index is not None:
+                                            last_tok = recent_toks[-1]
+                                            tok_idf = inv_index.idf.get(last_tok, 0.0)
+                                            if tok_idf >= 2.5 and last_tok in inv_index.occurrences:
+                                                occ_slots = set(occ[0] for occ in inv_index.occurrences[last_tok])
+                                                for fe in factual_store.entries:
+                                                    if last_tok in fe.tokens and any(s in occ_slots for s in fe.slot_ids):
+                                                        if fe.tokens not in srl_state.current_step_factual_sequences:
+                                                            srl_state.current_step_factual_tokens.update(fe.tokens)
+                                                            srl_state.current_step_factual_sequences.append(fe.tokens)
+                                                        for nb_idx, nb_weight in zip(fe.neighbors, fe.weights):
+                                                            if nb_weight >= 0.45 and nb_idx < len(factual_store.entries):
+                                                                nb_e = factual_store.entries[nb_idx]
+                                                                if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
+                                                                    srl_state.current_step_factual_tokens.update(nb_e.tokens)
+                                                                    srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                                        break
+
+                                    # ── Contrastive Category Anchor ──────────────────────────────────
+                                    # For single-category questions: fires when exactly ONE prime
+                                    # matches recent tokens — filters sequences to ±512 positions.
+                                    # For comparison questions (two primes active): fires when one
+                                    # prime has ≥2× the recent-token overlap of the other — the model
+                                    # is actively generating about one category, so lock to it.
+                                    # Without this extension, comparison questions NEVER trigger the
+                                    # anchor and both categories' tokens stay merged in the VSL set.
+                                    if srl_state is not None and factual_store is not None:
+                                        recent_set = set(getattr(srl_state, "recent_generated_tokens", [])[-30:])
+                                        best_prime_pos = None
+                                        best_overlap = 0
+                                        second_best_overlap = 0
+                                        active_prime_count = 0
+
+                                        for fe in factual_store.entries:
+                                            if getattr(fe, "is_prime", False):
+                                                overlap = sum(1 for t in fe.tokens if t in recent_set)
+                                                if overlap >= 1:
+                                                    active_prime_count += 1
+                                                    if overlap > best_overlap:
+                                                        second_best_overlap = best_overlap
+                                                        best_overlap = overlap
+                                                        best_prime_pos = fe.start_idx
+                                                    elif overlap > second_best_overlap:
+                                                        second_best_overlap = overlap
+
+                                        # Determine effective prime: single active OR dominant in
+                                        # two-prime comparison (one has ≥2× the other's overlap).
+                                        effective_prime_pos = None
+                                        if active_prime_count == 1 and best_prime_pos is not None:
+                                            effective_prime_pos = best_prime_pos
+                                        elif (active_prime_count == 2 and best_prime_pos is not None
+                                              and best_overlap >= 2
+                                              and best_overlap >= 2 * (second_best_overlap + 1)):
+                                            effective_prime_pos = best_prime_pos
+
+                                        if effective_prime_pos is not None:
+                                            pos_map = {tuple(fe.tokens): fe.start_idx for fe in factual_store.entries}
+                                            filtered_seqs = []
+                                            for s in srl_state.current_step_factual_sequences:
+                                                fe_pos = pos_map.get(tuple(s))
+                                                if fe_pos is None or abs(fe_pos - effective_prime_pos) < 512:
+                                                    filtered_seqs.append(s)
+                                            if filtered_seqs:
+                                                srl_state.current_step_factual_sequences = filtered_seqs
+                                                srl_state.current_step_factual_tokens = set()
+                                                for s in filtered_seqs:
+                                                    srl_state.current_step_factual_tokens.update(s)
+
+                                    # ── Coherence Cap ─────────────────────────────────────────────
+                                    if srl_state is not None and len(srl_state.current_step_factual_sequences) > 8:
+                                        seq_id_to_score = {}
+                                        for fe_e in factual_store.entries:
+                                            fe_sim = getattr(fe_e, "current_sim", 0.0)
+                                            if fe_sim > 0:
+                                                tup = tuple(fe_e.tokens)
+                                                seq_id_to_score[tup] = max(seq_id_to_score.get(tup, 0.0), fe_sim)
+                                        srl_state.current_step_factual_sequences.sort(
+                                            key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
+                                        )
+                                        srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:8]
+                                        srl_state.current_step_factual_tokens = set()
+                                        for s in srl_state.current_step_factual_sequences:
+                                            srl_state.current_step_factual_tokens.update(s)
+
+                                    # Cache entries so layers 1-27 can run K/V attention without
+                                    # re-querying or touching logit-bias state.
+                                    if srl_state is not None:
+                                        srl_state._cached_factual_entries = matching_entries
+
+                                else:
+                                    # Layers 1-27: reuse the layer-0 FactEntry list for the
+                                    # three-way K/V attention combination only. entry.K[layer_idx]
+                                    # gives the correct per-layer keys; no state is mutated here.
+                                    if srl_state is not None:
+                                        matching_entries = getattr(srl_state, "_cached_factual_entries", [])
+
                             except Exception as fe:
                                 print(f"[SRL] WARNING: Factual store query failed: {fe}")
 
@@ -791,7 +937,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             k_rep_fact = repeat_kv(fact_k_rot, num_key_value_groups)
                             v_rep_fact = repeat_kv(fact_v, num_key_value_groups)
                             
-                            _scale = (D ** -0.5) / 0.2
+                            _scale = (D ** -0.5) / 0.12
                             out_facts = F.scaled_dot_product_attention(
                                 query_states[b_idx:b_idx+1], k_rep_fact, v_rep_fact,
                                 is_causal=False,
@@ -808,7 +954,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             # Apply Factual LSE Attention Boosting
                             max_sim = max([getattr(entry, "current_sim", 0.0) for entry in matching_entries]) if matching_entries else 0.0
                             if max_sim >= 0.4:
-                                boost = 4.0 * (max_sim - 0.4) / 0.6
+                                boost = 8.0 * (max_sim - 0.4) / 0.6
                                 lse_facts = lse_facts + boost
 
                             # 4. Three-way LSE combination

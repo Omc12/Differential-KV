@@ -905,6 +905,8 @@ class KVRuntimeManager:
                         semantic_prime_slots=prime_slots
                     )
                     self._factual_stores[session_id] = factual_store
+                    srl_state.prompt_eagle_scores = getattr(factual_store, "eagle_scores", None)
+                    srl_state.setup_sas_and_eqa(token_ids_cpu, self._stop_token_ids, self.tokenizer)
             except Exception as fe:
                 print(f"[SRL] WARNING: Failed to build FactualExactStore: {fe}")
 

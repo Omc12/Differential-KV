@@ -650,6 +650,17 @@ async def run_direct_mode(args):
                         print(f"K-Min/K-Max:  {srl_state.k_min} / {srl_state.k_max}")
                         print(f"Threshold:    {srl_state.routing_threshold}")
                         print(f"Cache Size:   {getattr(srl_state, 'cache_size_tokens', 0)} tokens")
+                        
+                        # SAS and EQA-DR parameters
+                        if hasattr(srl_state, "concept_tok_1"):
+                            print(f"Concept Tok 1: {srl_state.concept_tok_1}")
+                            print(f"Concept Tok 2: {srl_state.concept_tok_2}")
+                        if hasattr(srl_state, "current_query_segment_id"):
+                            print(f"Current Segment: {srl_state.current_query_segment_id}")
+                        if hasattr(srl_state, "dynamic_anchors"):
+                            print(f"Dynamic Anchors: {srl_state.dynamic_anchors}")
+                        if hasattr(srl_state, "prompt_anchors"):
+                            print(f"Prompt Anchors: {srl_state.prompt_anchors}")
                     print("=========================\n")
                     continue
                 else:

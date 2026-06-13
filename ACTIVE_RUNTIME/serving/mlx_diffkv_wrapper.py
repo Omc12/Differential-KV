@@ -770,6 +770,61 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                     values[ b_idx:b_idx+1]
                 )
 
+                # ── Factual store query (MLX decode path, layer 0 only) ──────
+                # MLX attention bypasses diffkv_attention.py so the factual store
+                # is never queried there. Use unrotated K at layer 0 as proxy Q
+                # (same approach as C++ main.cpp). Results populate the factual
+                # state fields read by the serving loop on the NEXT decode step.
+                if layer_idx == 0:
+                    try:
+                        pool = getattr(manager, 'native_pool', None)
+                        factual_store = getattr(manager, "_factual_stores", {}).get(sid)
+                        srl_state = manager.get_srl_state(sid)
+                        if (factual_store is not None and pool is not None
+                                and pool.W_proj is not None and srl_state is not None
+                                and factual_store.entries):
+                            import numpy as _np
+                            import torch as _torch
+                            # keys: [B, H_kv, L=1, D] — extract [H_kv, D] for this batch element
+                            k_np = _np.array(keys[b_idx, :, 0, :])
+                            k_torch = _torch.from_numpy(k_np).float()
+
+                            matching_entries = factual_store.query(
+                                Q=k_torch,
+                                W_proj=pool.W_proj,
+                                threshold=0.3,
+                                active_slots=None,
+                            )
+
+                            srl_state.current_step_factual_tokens = set()
+                            srl_state.current_step_factual_sequences = []
+                            srl_state.current_step_max_similarity = 0.0
+
+                            if matching_entries:
+                                for entry in matching_entries:
+                                    srl_state.current_step_factual_tokens.update(entry.tokens)
+                                    if entry.tokens not in srl_state.current_step_factual_sequences:
+                                        srl_state.current_step_factual_sequences.append(entry.tokens)
+                                    # 1-hop + 2-hop neighbor injection
+                                    for nb_idx, nb_weight in zip(entry.neighbors, entry.weights):
+                                        if nb_weight >= 0.35 and nb_idx < len(factual_store.entries):
+                                            nb_e = factual_store.entries[nb_idx]
+                                            if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
+                                                srl_state.current_step_factual_tokens.update(nb_e.tokens)
+                                                srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                            for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
+                                                if nb2_weight >= 0.50 and nb2_idx < len(factual_store.entries):
+                                                    nb2_e = factual_store.entries[nb2_idx]
+                                                    if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
+                                                        srl_state.current_step_factual_tokens.update(nb2_e.tokens)
+                                                        srl_state.current_step_factual_sequences.append(nb2_e.tokens)
+                                sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
+                                if sims:
+                                    srl_state.current_step_max_similarity = max(sims)
+                    except Exception:
+                        pass
+                # ────────────────────────────────────────────────────────────
+
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output)
 
@@ -1033,7 +1088,11 @@ class MLXDiffKVWrapper:
             
         # Complete sequence prefill done
         generated = prompt_ids.copy()
-        
+        srl_state = self.manager.get_srl_state(session_id)
+        if srl_state is not None:
+            srl_state.vsl_active_candidates = []
+            srl_state.vsl_consecutive_helpers = 0
+            
         # ── Decoding loop ──
         cur_pos = cached_len + len(new_prompt_ids)
         logits = output.logits[0, -1].cpu().numpy()
@@ -1056,6 +1115,7 @@ class MLXDiffKVWrapper:
                     probs = probs / np.sum(probs)
             return int(np.random.choice(len(probs), p=probs))
 
+        sfa_active = False
         for _ in range(max_new_tokens):
             # ── Repetition-loop detection (mirrors batch_engine.py Fix 2) ──────
             # Detect tight token-level loops every 10 new tokens.
@@ -1104,12 +1164,36 @@ class MLXDiffKVWrapper:
             # Apply Factual Logit Bias
             srl_state = getattr(self.manager, "_session_srl", {}).get(session_id)
             if srl_state is not None:
+                # Helper token set (needed for penalty and VSL masking below)
+                from native_core.srl.factual_alignment import get_helper_token_ids
+                helper_ids = get_helper_token_ids(self.tokenizer)
+
+                # +7.0 factual token bias (raised from +3)
                 if getattr(srl_state, "current_step_factual_tokens", None):
                     for tok_id in srl_state.current_step_factual_tokens:
                         if tok_id < len(logits):
-                            logits[tok_id] += 1.5
+                            logits[tok_id] += 7.0
 
-                # Transition biasing (Option 1)
+                # +7.0 VSL active-candidate boost
+                active_candidates = getattr(srl_state, "vsl_active_candidates", [])
+                if active_candidates:
+                    for suffix in active_candidates:
+                        if suffix and suffix[0] < len(logits):
+                            logits[suffix[0]] += 7.0
+
+                # -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4,
+                # magnitude raised -2.5→-3.5, active_candidates requirement removed.
+                if (getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4
+                        and getattr(srl_state, "current_step_factual_tokens", None)):
+                    factual_set = srl_state.current_step_factual_tokens
+                    _vocab = len(logits)
+                    _excl = np.array([t for t in list(factual_set) + list(helper_ids) if 0 <= t < _vocab], dtype=np.int64)
+                    _penalty_mask = np.ones(_vocab, dtype=bool)
+                    if len(_excl) > 0:
+                        _penalty_mask[_excl] = False
+                    logits[_penalty_mask] -= 3.5
+
+                # +10.0 transition bias (raised from +4)
                 last_token = generated[-1] if generated else None
                 if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
                     transition_candidates = set()
@@ -1119,15 +1203,46 @@ class MLXDiffKVWrapper:
                                 transition_candidates.add(seq[idx + 1])
                     for tok_id in transition_candidates:
                         if tok_id < len(logits):
-                            logits[tok_id] += 2.0
+                            logits[tok_id] += 10.0
 
             # Apply Dynamic Temperature Scaling (Option 1)
             effective_temperature = temperature
-            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4:
+            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3:
                 max_sim = srl_state.current_step_max_similarity
-                effective_temperature = temperature * (1.0 - max_sim * 0.8)
+                effective_temperature = temperature * (1.0 - max_sim * 0.95)
+
+            # SFA threshold lowered 0.4→0.3 to match factual-query threshold.
+            sfa_active = (
+                srl_state is not None
+                and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3
+                and bool(getattr(srl_state, "current_step_factual_sequences", None))
+            )
+
+            # LM-VSL (Logit Masking) — guard against empty sequences; without this
+            # get_allowed_tokens_vsl returns only helper words, locking generation.
+            if sfa_active:
+                from native_core.srl.factual_alignment import get_allowed_tokens_vsl
+                allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+                mask = np.ones_like(logits, dtype=bool)
+                mask[list(allowed_ids)] = False
+                logits[mask] = -1e10
 
             next_id = sample_logits(logits, effective_temperature, top_p)
+
+            # Strict Factual Alignment (SFA) State Update and Loop Check
+            if sfa_active and srl_state is not None:
+                from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
+                helper_ids = get_helper_token_ids(self.tokenizer)
+                update_vsl_state(next_id, srl_state, helper_ids)
+                
+                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+                    uncertainty_suffix = " [uncertain: details missing in source]"
+                    uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
+                    for t_id in uncertainty_tokens:
+                        generated.append(t_id)
+                        self.manager.register_prefill_tokens(session_id, torch.tensor([t_id], dtype=torch.long))
+                    break
+
             generated.append(next_id)
             self.manager.register_prefill_tokens(session_id, torch.tensor([next_id], dtype=torch.long))
 

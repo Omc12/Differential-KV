@@ -50,7 +50,7 @@ def build_inverted_index(
     slot_ids:         List[int],        # pool slot IDs in chronological order
     block_size:       int,              # tokens per block (including anchor)
     stop_token_ids:   Set[int],         # precomputed stop word token IDs
-    top_n_per_block:  int = 20,         # most important tokens to index per block
+    top_n_per_block:  int = 50,         # most important tokens to index per block; raised from 20
 ) -> InvertedTokenIndex:
     """
     Build a lexical inverted index from prompt token IDs with exact position tracking.
@@ -78,8 +78,10 @@ def build_inverted_index(
         freq = Counter(t for t in block_toks if t not in stop_token_ids)
 
         # Take top_n most frequent for backward-compatibility index
+        indexed_in_block: set = set()
         for tok, _ in freq.most_common(top_n_per_block):
             index[tok].append(slot)
+            indexed_in_block.add(tok)
 
         # Track absolute and relative positions for all non-stop tokens
         for rel_pos, tok in enumerate(block_toks):
@@ -105,6 +107,18 @@ def build_inverted_index(
     for tok, occs in occurrences.items():
         n_containing = len(set(occ[0] for occ in occs))
         idf[tok] = math.log(N_blocks / n_containing) + 1.0
+
+    # Rare-term always-index pass: ensure high-IDF terms are indexed even if they
+    # fell outside the top_n_per_block frequency cap. This is critical for rare
+    # technical vocabulary (e.g. "EP2", "codimension", "coalesce") that appears
+    # infrequently within a block but is highly distinctive across the corpus.
+    IDF_RARE_THRESHOLD = 3.0
+    for tok, occs in occurrences.items():
+        if idf.get(tok, 0.0) >= IDF_RARE_THRESHOLD:
+            for slot, _, _ in occs:
+                if tok not in deduped or slot not in deduped[tok]:
+                    deduped.setdefault(tok, []).append(slot)
+                    # Also ensure it's in important_vocab for lookup()
 
     return InvertedTokenIndex(
         index              = deduped,

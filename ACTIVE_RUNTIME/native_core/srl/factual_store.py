@@ -99,6 +99,7 @@ class FactualExactStore:
                     R = R_device.cpu()
                 except Exception:
                     R = torch.zeros(total_seq_len, dtype=torch.float32)
+            self.eagle_scores = R
                     
             # 2. Calculate Key Norms at Layer 0
             key_norms = torch.ones(total_seq_len, dtype=torch.float32)
@@ -124,13 +125,17 @@ class FactualExactStore:
             # 4. Compute joint factual salience score
             total_salience = key_norms * idf_vals * (1.0 + 1.0 * R)
             
-            # Select the top 10% most salient tokens
-            k_num = max(8, int(total_seq_len * 0.10))
+            # Select the top 5% most salient tokens (precision mode: max 300 tokens)
+            # 50% was selecting half the document — far too broad for exact grounding.
+            # 5% keeps only the rarest, most distinctive content words per document.
+            k_num = max(8, int(total_seq_len * 0.05))
+            k_num = min(k_num, 300)  # absolute cap regardless of document length
             k_num = min(k_num, total_seq_len)
             
             if total_seq_len > 0:
                 threshold_val = float(torch.topk(total_salience, k=k_num).values[-1].item())
                 factual_mask = total_salience >= threshold_val
+
                 
             # 5. Gap-bridging (dilation): bridge single-token gaps
             if total_seq_len > 2:
@@ -165,8 +170,8 @@ class FactualExactStore:
         # Split long spans into chunks of max length 12
         chunked_spans = []
         for s, e in spans:
-            for sub_s in range(s, e, 12):
-                sub_e = min(sub_s + 12, e)
+            for sub_s in range(s, e, 20):
+                sub_e = min(sub_s + 20, e)
                 chunked_spans.append((sub_s, sub_e))
                 
         # 7. Extract verbatim KV sequences across all layers for each span
@@ -187,10 +192,14 @@ class FactualExactStore:
             span_K = torch.stack(span_K_list, dim=0) # [num_layers, kv_heads, span_len, head_dim]
             span_V = torch.stack(span_V_list, dim=0) # [num_layers, kv_heads, span_len, head_dim]
             
-            # Compute descriptor for the span using layer 0 average key
-            avg_k = span_K[0].mean(dim=(0, 1)).float() # [head_dim]
+            # Compute descriptor for the span using layer 0 max-pooled key.
+            # Max-pool over positions retains the most activated (distinctive) features
+            # for each head, rather than averaging them away. This is critical for
+            # formula/math spans where a single rare token dominates the span semantics.
+            # Then mean over heads to produce the final descriptor vector.
+            max_k = span_K[0].max(dim=1).values.mean(dim=0).float()  # [head_dim]
             if W_proj is not None:
-                desc = avg_k.to(W_proj.device) @ W_proj.T # [DESC_DIM]
+                desc = max_k.to(W_proj.device) @ W_proj.T  # [DESC_DIM]
                 desc = desc / (desc.norm() + 1e-8)
             else:
                 desc = torch.zeros(64)
@@ -316,7 +325,25 @@ class FactualExactStore:
             passes_relaxed = (active_slots is not None and 
                               any(slot in active_slots for slot in entry.slot_ids) and 
                               sim >= 0.15)
-            passes_walk = idx in walk_candidates and walk_candidates[idx] >= threshold
+            # Walk threshold uses a lower bar than the main threshold so that genuine
+            # property spans (connected to a matched category node via a strong edge)
+            # are included. Two conditions must BOTH hold:
+            #   1. walk_score >= 0.20 (the propagated relevance from the seed)
+            #   2. Either sim >= 0.10 (some direct distributional relevance) OR
+            #      walk_score >= 0.30 (strong edge — trust the graph topology)
+            # This prevents zero-similarity entries reached only via weak temporal
+            # adjacency edges from being returned (fixes test_3d_factual_graph_walk),
+            # while still pulling in genuine property spans with moderate similarity.
+            _WALK_THRESHOLD = 0.20
+            _WALK_STRONG    = 0.30   # strong-edge override (no sim requirement)
+            _WALK_MIN_SIM   = 0.10   # minimum direct sim when edge is moderate
+            if idx in walk_candidates:
+                ws = walk_candidates[idx]
+                passes_walk = (ws >= _WALK_THRESHOLD and
+                               (sim >= _WALK_MIN_SIM or ws >= _WALK_STRONG))
+            else:
+                passes_walk = False
+
             
             if passes_main or passes_relaxed or passes_walk:
                 final_score = max(sim, walk_candidates.get(idx, -1.0))
@@ -338,5 +365,7 @@ class FactualExactStore:
                 
         # Sort by final score descending
         merged_results.sort(key=lambda x: x[1], reverse=True)
-        top_entries = [x[0] for x in merged_results[:8]]
+        # Top 5 only — with 5% selection, each entry is a tight, high-precision span.
+        # Returning more than 5 at this precision level floods the VSL with too many candidates.
+        top_entries = [x[0] for x in merged_results[:5]]
         return merge_adjacent_entries(top_entries)

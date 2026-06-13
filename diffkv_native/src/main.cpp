@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
+#include <numeric>
 #include <unordered_set>
 #include <random>
 #include <map>
@@ -19,6 +20,7 @@
 #include "../third_party/llama.cpp/ggml/src/ggml-impl.h"
 #include "runtime/native_block_pool.hpp"
 #include "native_core/srl/diffkv_srl.hpp"
+#include "native_core/srl/factual_alignment.hpp"
 #include "native_core/srl/query_router.hpp"
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/compression/async_compressor.hpp"
@@ -1142,6 +1144,10 @@ int main(int argc, char ** argv) {
             srl_state.current_step_slots.clear();
             srl_state.current_step_factual_tokens.clear();
             srl_state.current_step_count = 0;
+            // Reset query anchor so each response anchors to its own first decode
+            // step rather than persisting the previous turn's Q-vector (which caused
+            // the same recurring retrieval across unrelated follow-up questions).
+            srl_state.factual_anchor_q.clear();
         }
 
         // Wrap prompt in Qwen2.5 instruction chat template (skip if gateway already formatted it)
@@ -1807,6 +1813,7 @@ int main(int argc, char ** argv) {
         }
 
         int32_t last_token = first_decode_token;
+        bool sfa_active = false;
         std::string first_piece = model.token_to_piece(last_token);
         if (!is_warmup_run) {
             std::cout << first_piece << std::flush;
@@ -1826,6 +1833,8 @@ int main(int argc, char ** argv) {
         all_tokens.push_back(last_token);
 
         // Build initial SessionSRLState for all completed blocks in prefill using runtime_manager
+        srl_state.vsl_active_candidates.clear();
+        srl_state.vsl_consecutive_helpers = 0;
         srl_state.ordered_slot_ids.clear();
         srl_state.sink_blocks.clear();
         srl_state.inverted_index.clear();
@@ -1888,6 +1897,9 @@ int main(int argc, char ** argv) {
                 prime_slots,
                 true // use_salience_parser
             );
+            srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids, [&](int32_t tid) {
+                return model.token_to_piece(tid);
+            });
         }
 
         int active_slot = runtime_manager.get_ingest_manager().get_blocks(0).size() - 1;
@@ -2205,27 +2217,59 @@ int main(int argc, char ** argv) {
 
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
-            // Apply Factual Logit Bias
+
+            // +7.0 factual token bias (raised from +3): at +3 the LM paraphrase prior
+            // could still outweigh source-exact tokens by >3 logit units. +7 ensures
+            // source tokens reliably win over generic synonyms.
             for (int32_t tok_id : srl_state.current_step_factual_tokens) {
                 if (tok_id >= 0 && tok_id < n_vocab) {
-                    output_logits[tok_id] += 1.5f;
+                    output_logits[tok_id] += 7.0f;
                 }
             }
-            // Transition Biasing (Option 1)
+
+            // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
+            // exact next token is confirmed. Give it a decisive advantage.
+            for (const auto& suffix : srl_state.vsl_active_candidates) {
+                if (!suffix.empty() && suffix[0] >= 0 && suffix[0] < n_vocab) {
+                    output_logits[suffix[0]] += 7.0f;
+                }
+            }
+
+            // -3.5 anti-hallucination penalty: only at sim ≥ 0.55 — at 0.3/0.4 the
+            // excluded set is almost the full domain vocabulary (every entry in a focused
+            // document passes the lower bar) making the penalty meaningless and the model
+            // unable to generate anything outside the retrieved-but-wrong sequences.
+            if (srl_state.current_step_max_similarity >= 0.55f &&
+                !srl_state.current_step_factual_tokens.empty()) {
+                const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(model);
+                for (int i = 0; i < n_vocab; ++i) {
+                    if (srl_state.current_step_factual_tokens.count(i) == 0 &&
+                        helper_ids_penalty.count(i) == 0) {
+                        output_logits[i] -= 3.5f;
+                    }
+                }
+            }
+
+            // +10.0 transition bias — only when last_token is a CONTENT word (not a
+            // helper word). Helper words appear at many positions across all sequences;
+            // boosting their successors adds random noise and drives wrong continuations.
             if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
-                std::unordered_set<int32_t> transition_candidates;
-                for (const auto& seq : srl_state.current_step_factual_sequences) {
-                    if (seq.size() > 1) {
-                        for (size_t i = 0; i < seq.size() - 1; ++i) {
-                            if (seq[i] == last_token) {
-                                transition_candidates.insert(seq[i + 1]);
+                const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
+                if (helper_ids_trans.count(last_token) == 0) {
+                    std::unordered_set<int32_t> transition_candidates;
+                    for (const auto& seq : srl_state.current_step_factual_sequences) {
+                        if (seq.size() > 1) {
+                            for (size_t i = 0; i < seq.size() - 1; ++i) {
+                                if (seq[i] == last_token) {
+                                    transition_candidates.insert(seq[i + 1]);
+                                }
                             }
                         }
                     }
-                }
-                for (int32_t tok_id : transition_candidates) {
-                    if (tok_id >= 0 && tok_id < n_vocab) {
-                        output_logits[tok_id] += 2.0f;
+                    for (int32_t tok_id : transition_candidates) {
+                        if (tok_id >= 0 && tok_id < n_vocab) {
+                            output_logits[tok_id] += 10.0f;
+                        }
                     }
                 }
             }
@@ -2256,11 +2300,34 @@ int main(int argc, char ** argv) {
                 }
             }
 
+            // SFA threshold raised 0.3→0.55: at 0.3 almost every entry in a topically
+            // focused document matches, activating the VSL and merging all categories'
+            // tokens into one set. At 0.55 only high-confidence specific retrieval
+            // triggers the sequence constraint.
+            sfa_active = (srl_state.current_step_max_similarity >= 0.55f &&
+                          !srl_state.current_step_factual_sequences.empty());
+
+            // LM-VSL (Logit Masking) — soft penalty (-7) instead of hard mask (-1e10).
+            // Hard masking means any retrieval error locks the model into incorrect
+            // sequences with no escape. Soft penalty still guides generation toward
+            // factual sequences but lets the model's own distribution win when it has
+            // high confidence in a token outside the retrieved set.
+            if (sfa_active && !srl_state.current_step_factual_sequences.empty()) {
+                const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
+                auto allowed = diffkv::get_allowed_tokens_vsl_cpp(srl_state, helper_ids);
+                for (int i = 0; i < n_vocab; ++i) {
+                    if (allowed.count(i) == 0) {
+                        output_logits[i] -= 7.0f;
+                    }
+                }
+            }
+
             int32_t next_token = 0;
             if (interactive) {
                 float effective_temperature = temperature;
-                if (srl_state.current_step_max_similarity >= 0.4f) {
-                    effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.8f);
+                // Dynamic temperature threshold raised 0.3→0.55 to match tighter SFA bar.
+                if (srl_state.current_step_max_similarity >= 0.55f) {
+                    effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.95f);
                 }
                 next_token = sample_logits(output_logits, effective_temperature, top_p, sample_rng);
             } else {
@@ -2288,9 +2355,31 @@ int main(int argc, char ** argv) {
                 break;
             }
 
+            // Strict Factual Alignment (SFA) State Update and Loop Check
+            if (sfa_active) {
+                const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
+                diffkv::update_vsl_state_cpp(next_token, srl_state, helper_ids);
+                
+                if (srl_state.vsl_consecutive_helpers >= 6) {
+                    std::string uncertainty_str = " [uncertain: details missing in source]";
+                    std::vector<int32_t> uncertainty_toks = model.tokenize(uncertainty_str, false);
+                    for (int32_t t : uncertainty_toks) {
+                        if (!is_warmup_run) {
+                            std::cout << model.token_to_piece(t);
+                        }
+                        generated_tokens.push_back(t);
+                        all_tokens.push_back(t);
+                    }
+                    if (!is_warmup_run) {
+                        std::cout << std::flush;
+                    }
+                    break;
+                }
+            }
+
             // Factual Early Stopping (Option 2 Extension)
             bool stop_generation = false;
-            if (srl_state.current_step_max_similarity >= 0.5f) {
+            if (srl_state.current_step_max_similarity >= 0.4f) {
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
                     if (seq.size() >= 5 && next_token == seq.back()) {
                         stop_generation = true;
@@ -2328,8 +2417,299 @@ int main(int argc, char ** argv) {
                 std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
                 std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
             }
-            
+
+            // ── Factual store query ──────────────────────────────────────────
+            // Use layer-0 decode K as a proxy Q vector to find matching factual
+            // spans. Results populate current_step_factual_tokens/sequences and
+            // current_step_max_similarity, which drive logit biasing (+3/+4),
+            // VSL masking, temperature reduction, and SFA on the NEXT decode step.
+            // (One-step lag is unavoidable: Q is inside the GGML graph; K is the
+            //  best available proxy extracted from the same token embedding.)
+            if (!srl_state.factual_store.entries.empty()) {
+                std::unordered_set<int32_t> active_slots_set(
+                    cached_physical_candidates.begin(),
+                    cached_physical_candidates.end()
+                );
+                const std::unordered_set<int32_t>* slot_filter =
+                    active_slots_set.empty() ? nullptr : &active_slots_set;
+
+                // ── Query Anchor Blending ─────────────────────────────────────
+                // Store layer-0 decode-K from the first decode step as a stable
+                // anchor. On subsequent steps blend 65% current + 35% anchor so
+                // accumulated generated-token context cannot pull retrieval away
+                // from the original question topic (mirrors Python 0.65/0.35 blend).
+                std::vector<float> q_for_factual(F_test);
+                if (srl_state.factual_anchor_q.empty()) {
+                    srl_state.factual_anchor_q = decode_k[0];
+                    q_for_factual = decode_k[0];
+                } else {
+                    for (int qi = 0; qi < F_test; ++qi) {
+                        q_for_factual[qi] = 0.65f * decode_k[0][qi]
+                                          + 0.35f * srl_state.factual_anchor_q[qi];
+                    }
+                }
+
+                auto fact_hits = srl_state.factual_store.query(
+                    q_for_factual.data(),
+                    kv_heads,
+                    head_dim,
+                    W_proj_host.data(),
+                    desc_dim,
+                    0.50f,
+                    slot_filter
+                );
+
+                srl_state.current_step_factual_tokens.clear();
+                srl_state.current_step_factual_sequences.clear();
+                srl_state.current_step_max_similarity = 0.0f;
+
+                for (const auto& hit : fact_hits) {
+                    for (int32_t tok_id : hit.tokens) {
+                        srl_state.current_step_factual_tokens.insert(tok_id);
+                    }
+                    if (!hit.tokens.empty()) {
+                        srl_state.current_step_factual_sequences.push_back(hit.tokens);
+                    }
+                    if (hit.current_sim > srl_state.current_step_max_similarity) {
+                        srl_state.current_step_max_similarity = hit.current_sim;
+                    }
+                    // ── 1-hop neighbor injection ────────────────────────────────
+                    // Threshold raised 0.35→0.45: temporal-adjacency edges (within 512
+                    // tokens) had weight > 0.35 for many unrelated entries, flooding the
+                    // sequence list with off-topic spans from the same document region.
+                    for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
+                        int nb_idx = hit.neighbors[ni];
+                        float nb_w  = hit.weights[ni];
+                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {
+                            const auto& nb_e = srl_state.factual_store.entries[nb_idx];
+                            if (!nb_e.tokens.empty()) {
+                                bool already = false;
+                                for (const auto& s : srl_state.current_step_factual_sequences) {
+                                    if (s == nb_e.tokens) { already = true; break; }
+                                }
+                                if (!already) {
+                                    for (int32_t t : nb_e.tokens) srl_state.current_step_factual_tokens.insert(t);
+                                    srl_state.current_step_factual_sequences.push_back(nb_e.tokens);
+                                }
+                                // ── 2-hop neighbor injection ────────────────────
+                                // Threshold raised 0.50→0.65: 2-hop is doubly noisy;
+                                // only follow strong, high-confidence edges.
+                                for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
+                                    int nb2_idx = nb_e.neighbors[ni2];
+                                    float nb2_w  = nb_e.weights[ni2];
+                                    if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {
+                                        const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
+                                        if (!nb2_e.tokens.empty()) {
+                                            bool already2 = false;
+                                            for (const auto& s : srl_state.current_step_factual_sequences) {
+                                                if (s == nb2_e.tokens) { already2 = true; break; }
+                                            }
+                                            if (!already2) {
+                                                for (int32_t t : nb2_e.tokens) srl_state.current_step_factual_tokens.insert(t);
+                                                srl_state.current_step_factual_sequences.push_back(nb2_e.tokens);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Lexical Tripwire ──────────────────────────────────────────────
+                // If the last generated token is high-IDF (≥2.5), inject any
+                // factual entries that contain it and whose slot_ids overlap the
+                // inverted-index occurrences for that token. This re-anchors the
+                // VSL token set to the relevant fact spans when a content-bearing
+                // token was just generated (mirrors Python Lexical Tripwire).
+                if (!srl_state.recent_generated_tokens.empty()) {
+                    int32_t last_tok = srl_state.recent_generated_tokens.back();
+                    auto idf_it = srl_state.inverted_index.idf.find(last_tok);
+                    if (idf_it != srl_state.inverted_index.idf.end() && idf_it->second >= 2.5f) {
+                        auto occ_it = srl_state.inverted_index.occurrences.find(last_tok);
+                        if (occ_it != srl_state.inverted_index.occurrences.end()) {
+                            std::unordered_set<int32_t> occ_slots;
+                            for (const auto& occ : occ_it->second) {
+                                occ_slots.insert(std::get<0>(occ));
+                            }
+                            for (const auto& fe : srl_state.factual_store.entries) {
+                                bool has_tok = false;
+                                for (int32_t t : fe.tokens) {
+                                    if (t == last_tok) { has_tok = true; break; }
+                                }
+                                bool has_slot = false;
+                                for (int32_t s : fe.slot_ids) {
+                                    if (occ_slots.count(s)) { has_slot = true; break; }
+                                }
+                                if (has_tok && has_slot) {
+                                    bool already = false;
+                                    for (const auto& s : srl_state.current_step_factual_sequences) {
+                                        if (s == fe.tokens) { already = true; break; }
+                                    }
+                                    if (!already) {
+                                        for (int32_t t : fe.tokens) srl_state.current_step_factual_tokens.insert(t);
+                                        srl_state.current_step_factual_sequences.push_back(fe.tokens);
+                                    }
+                                    // 1-hop from tripwire entry
+                                    for (size_t ni = 0; ni < fe.neighbors.size(); ++ni) {
+                                        int nb_idx = fe.neighbors[ni];
+                                        float nb_w  = (ni < fe.weights.size()) ? fe.weights[ni] : 0.0f;
+                                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {
+                                            const auto& nb_e = srl_state.factual_store.entries[nb_idx];
+                                            if (!nb_e.tokens.empty()) {
+                                                bool alr = false;
+                                                for (const auto& s : srl_state.current_step_factual_sequences) {
+                                                    if (s == nb_e.tokens) { alr = true; break; }
+                                                }
+                                                if (!alr) {
+                                                    for (int32_t t : nb_e.tokens) srl_state.current_step_factual_tokens.insert(t);
+                                                    srl_state.current_step_factual_sequences.push_back(nb_e.tokens);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    break; // only inject from first matching entry
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Contrastive Category Anchor ─────────────────────────────────
+                // For single-category questions: fires when exactly ONE prime matches
+                // recent tokens — filters sequences to ±512 document positions.
+                // Extended for comparison questions: when TWO primes are active but
+                // one has ≥2× the recent-token overlap of the other, the model is
+                // actively generating about that category — lock to it. Without this
+                // extension, comparison questions NEVER trigger the anchor and both
+                // categories' token sets remain merged in the VSL.
+                {
+                    std::unordered_set<int32_t> recent_set;
+                    int rgt_size = (int)srl_state.recent_generated_tokens.size();
+                    int rgt_start = std::max(0, rgt_size - 30);
+                    for (int ri = rgt_start; ri < rgt_size; ++ri) {
+                        recent_set.insert(srl_state.recent_generated_tokens[ri]);
+                    }
+
+                    int best_prime_pos    = -1;
+                    int best_overlap      = 0;
+                    int second_best_overlap = 0;
+                    int active_prime_count  = 0;
+
+                    for (const auto& fe : srl_state.factual_store.entries) {
+                        if (fe.is_prime) {
+                            int overlap = 0;
+                            for (int32_t t : fe.tokens) {
+                                if (recent_set.count(t)) overlap++;
+                            }
+                            if (overlap >= 1) {
+                                active_prime_count++;
+                                if (overlap > best_overlap) {
+                                    second_best_overlap = best_overlap;
+                                    best_overlap   = overlap;
+                                    best_prime_pos = fe.start_idx;
+                                } else if (overlap > second_best_overlap) {
+                                    second_best_overlap = overlap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Effective prime: single active OR dominant in a two-prime comparison.
+                    int effective_prime_pos = -1;
+                    if (active_prime_count == 1 && best_prime_pos >= 0) {
+                        effective_prime_pos = best_prime_pos;
+                    } else if (active_prime_count == 2 && best_prime_pos >= 0
+                               && best_overlap >= 2
+                               && best_overlap >= 2 * (second_best_overlap + 1)) {
+                        effective_prime_pos = best_prime_pos;
+                    }
+
+                    if (effective_prime_pos >= 0) {
+                        std::vector<std::vector<int32_t>> filtered_seqs;
+                        std::unordered_set<int32_t> filtered_toks;
+                        for (const auto& seq : srl_state.current_step_factual_sequences) {
+                            int seq_pos = -1;
+                            for (const auto& fe : srl_state.factual_store.entries) {
+                                if (fe.tokens == seq) { seq_pos = fe.start_idx; break; }
+                            }
+                            bool keep = (seq_pos < 0) || (std::abs(seq_pos - effective_prime_pos) < 512);
+                            if (keep) {
+                                filtered_seqs.push_back(seq);
+                                for (int32_t t : seq) filtered_toks.insert(t);
+                            }
+                        }
+                        if (!filtered_seqs.empty()) {
+                            srl_state.current_step_factual_sequences = filtered_seqs;
+                            srl_state.current_step_factual_tokens    = filtered_toks;
+                        }
+                    }
+                }
+
+                // ── Coherence Cap ─────────────────────────────────────────────
+                // Limit the active factual sequences to 8, ranked by current_sim,
+                // so the VSL token set cannot grow into a mixed-category soup when
+                // many hop-injected entries accumulate (mirrors Python Coherence Cap).
+                if (srl_state.current_step_factual_sequences.size() > 8) {
+                    size_t n_seqs = srl_state.current_step_factual_sequences.size();
+                    std::vector<float> seq_sims(n_seqs, 0.0f);
+                    for (size_t si = 0; si < n_seqs; ++si) {
+                        const auto& seq = srl_state.current_step_factual_sequences[si];
+                        float best_sim = 0.0f;
+                        for (const auto& fe : srl_state.factual_store.entries) {
+                            if (fe.tokens == seq && fe.current_sim > best_sim) {
+                                best_sim = fe.current_sim;
+                            }
+                        }
+                        seq_sims[si] = best_sim;
+                    }
+                    std::vector<size_t> order(n_seqs);
+                    std::iota(order.begin(), order.end(), 0);
+                    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                        return seq_sims[a] > seq_sims[b];
+                    });
+                    order.resize(8);
+                    std::vector<std::vector<int32_t>> top_seqs;
+                    std::unordered_set<int32_t> top_toks;
+                    for (size_t idx : order) {
+                        top_seqs.push_back(srl_state.current_step_factual_sequences[idx]);
+                        for (int32_t t : srl_state.current_step_factual_sequences[idx]) {
+                            top_toks.insert(t);
+                        }
+                    }
+                    if (!top_seqs.empty()) {
+                        srl_state.current_step_factual_sequences = std::move(top_seqs);
+                        srl_state.current_step_factual_tokens    = std::move(top_toks);
+                    }
+                }
+            }
+            // ────────────────────────────────────────────────────────────────
+
             runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+
+            srl_state.update_query_segment(next_token);
+            {
+                std::vector<float> k_avg(head_dim, 0.0f);
+                for (int h = 0; h < kv_heads; ++h) {
+                    for (int d = 0; d < head_dim; ++d) {
+                        k_avg[d] += decode_k[0][h * head_dim + d];
+                    }
+                }
+                for (int d = 0; d < head_dim; ++d) {
+                    k_avg[d] /= kv_heads;
+                }
+                srl_state.recent_decode_keys.push_back(k_avg);
+                if (srl_state.recent_decode_keys.size() > 512) {
+                    srl_state.recent_decode_keys.erase(srl_state.recent_decode_keys.begin());
+                }
+
+                int32_t current_slot_id = 0;
+                if (!srl_state.ordered_slot_ids.empty()) {
+                    current_slot_id = srl_state.ordered_slot_ids.back();
+                }
+                srl_state.generated_token_slots.push_back(current_slot_id);
+                srl_state.update_dynamic_anchors(stop_token_ids);
+            }
 
             // Compute cos/sin for the current token position: current_pos
             int half_dim = head_dim / 2;

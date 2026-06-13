@@ -7,6 +7,7 @@
 #include "../third_party/llama.cpp/ggml/src/ggml-impl.h"
 #include "runtime/native_block_pool.hpp"
 #include "native_core/srl/diffkv_srl.hpp"
+#include "native_core/srl/factual_alignment.hpp"
 #include "native_core/srl/query_router.hpp"
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/compression/async_compressor.hpp"
@@ -1148,6 +1149,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
     
     int32_t last_token = first_decode_token;
+    req->sfa_active = false;
     std::string first_piece = model_->token_to_piece(last_token);
     req->push_chunk(first_piece);
     req->generated_tokens.push_back(last_token);
@@ -1156,6 +1158,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     all_tokens.push_back(last_token);
     
     // Rebuild initial SRL state for the session
+    session->srl_state.vsl_active_candidates.clear();
+    session->srl_state.vsl_consecutive_helpers = 0;
     session->srl_state.ordered_slot_ids.clear();
     session->srl_state.sink_blocks.clear();
     session->srl_state.inverted_index.clear();
@@ -1227,6 +1231,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             prime_slots,
             true // use_salience_parser
         );
+        session->srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids_, [&](int32_t tid) {
+            return model_->token_to_piece(tid);
+        });
     }
     
     session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
@@ -1337,7 +1344,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         // Apply Factual Logit Bias
         for (int32_t tok_id : session->srl_state.current_step_factual_tokens) {
             if (tok_id >= 0 && tok_id < n_vocab) {
-                output_logits[tok_id] += 1.5f;
+                output_logits[tok_id] += 3.0f;
             }
         }
         // Transition Biasing (Option 1)
@@ -1354,7 +1361,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
             for (int32_t tok_id : transition_candidates) {
                 if (tok_id >= 0 && tok_id < n_vocab) {
-                    output_logits[tok_id] += 2.0f;
+                    output_logits[tok_id] += 4.0f;
                 }
             }
         }
@@ -1413,10 +1420,26 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
 
+        if (session->srl_state.current_step_max_similarity >= 0.4f) {
+            req->sfa_active = true;
+        }
+
+        // LM-VSL (Logit Masking)
+        if (req->sfa_active) {
+            const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
+            auto allowed = diffkv::get_allowed_tokens_vsl_cpp(session->srl_state, helper_ids);
+            int n_vocab = model_->get_config().n_vocab;
+            for (int i = 0; i < n_vocab; ++i) {
+                if (allowed.count(i) == 0) {
+                    output_logits[i] = -1e10f;
+                }
+            }
+        }
+
         // Sampling
         float effective_temperature = req->temperature;
         if (session->srl_state.current_step_max_similarity >= 0.4f) {
-            effective_temperature = req->temperature * (1.0f - session->srl_state.current_step_max_similarity * 0.8f);
+            effective_temperature = req->temperature * (1.0f - session->srl_state.current_step_max_similarity * 0.95f);
         }
         int32_t next_token = sample_token(
             output_logits,
@@ -1428,6 +1451,23 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         
         if (model_->is_eog_token(next_token) || next_token == model_->token_eos()) {
             break;
+        }
+
+        // Strict Factual Alignment (SFA) State Update and Loop Check
+        if (req->sfa_active) {
+            const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
+            diffkv::update_vsl_state_cpp(next_token, session->srl_state, helper_ids);
+            
+            if (session->srl_state.vsl_consecutive_helpers >= 6) {
+                std::string uncertainty_str = " [uncertain: details missing in source]";
+                std::vector<int32_t> uncertainty_toks = model_->tokenize(uncertainty_str, false);
+                for (int32_t t : uncertainty_toks) {
+                    req->push_chunk(model_->token_to_piece(t));
+                    req->generated_tokens.push_back(t);
+                    all_tokens.push_back(t);
+                }
+                break;
+            }
         }
 
         // Factual Early Stopping (Option 2 Extension)
@@ -1460,6 +1500,34 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
         
         runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+
+        // Update SRL state and dynamic anchors
+        session->srl_state.update_generated_tokens(next_token);
+        session->srl_state.update_query_segment(next_token);
+
+        {
+            int kv_heads = model_->get_config().n_head_kv;
+            std::vector<float> k_avg(head_dim, 0.0f);
+            for (int h = 0; h < kv_heads; ++h) {
+                for (int d = 0; d < head_dim; ++d) {
+                    k_avg[d] += decode_k[0][h * head_dim + d];
+                }
+            }
+            for (int d = 0; d < head_dim; ++d) {
+                k_avg[d] /= kv_heads;
+            }
+            session->srl_state.recent_decode_keys.push_back(k_avg);
+            if (session->srl_state.recent_decode_keys.size() > 512) {
+                session->srl_state.recent_decode_keys.erase(session->srl_state.recent_decode_keys.begin());
+            }
+
+            int32_t current_slot_id = 0;
+            if (!session->srl_state.ordered_slot_ids.empty()) {
+                current_slot_id = session->srl_state.ordered_slot_ids.back();
+            }
+            session->srl_state.generated_token_slots.push_back(current_slot_id);
+            session->srl_state.update_dynamic_anchors(stop_token_ids_);
+        }
 
         // Manual append newly ingested token to host-side dense resident buffers
         for (int l = 0; l < n_layers; ++l) {
