@@ -1420,25 +1420,35 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
 
-        if (session->srl_state.current_step_max_similarity >= 0.4f) {
+        // SFA threshold raised to 0.55 to match main.cpp interactive path.
+        if (session->srl_state.current_step_max_similarity >= 0.55f) {
             req->sfa_active = true;
         }
 
-        // LM-VSL (Logit Masking)
+        // LM-VSL (Logit Masking) — graduated by retrieval confidence.
+        // sim 0.55–0.69 → soft (-7): model can escape if LM distribution is strong.
+        // sim ≥ 0.70    → hard (-1e10): verbatim extraction — the model must enter
+        //   factual sequences from their first token (sequence-start-only fallback
+        //   in get_allowed_tokens_vsl_cpp) and advance in order, fixing entity binding.
         if (req->sfa_active) {
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
             auto allowed = diffkv::get_allowed_tokens_vsl_cpp(session->srl_state, helper_ids);
             int n_vocab = model_->get_config().n_vocab;
+            float max_sim = session->srl_state.current_step_max_similarity;
             for (int i = 0; i < n_vocab; ++i) {
                 if (allowed.count(i) == 0) {
-                    output_logits[i] = -1e10f;
+                    if (max_sim >= 0.70f) {
+                        output_logits[i] = -1e10f;   // hard: verbatim
+                    } else {
+                        output_logits[i] -= 7.0f;    // soft: guided
+                    }
                 }
             }
         }
 
-        // Sampling
+        // Sampling — temperature threshold raised to match SFA/VSL bar.
         float effective_temperature = req->temperature;
-        if (session->srl_state.current_step_max_similarity >= 0.4f) {
+        if (session->srl_state.current_step_max_similarity >= 0.55f) {
             effective_temperature = req->temperature * (1.0f - session->srl_state.current_step_max_similarity * 0.95f);
         }
         int32_t next_token = sample_token(
@@ -1458,7 +1468,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
             diffkv::update_vsl_state_cpp(next_token, session->srl_state, helper_ids);
             
-            if (session->srl_state.vsl_consecutive_helpers >= 6) {
+            if (session->srl_state.vsl_consecutive_helpers >= 16) {
                 std::string uncertainty_str = " [uncertain: details missing in source]";
                 std::vector<int32_t> uncertainty_toks = model_->tokenize(uncertainty_str, false);
                 for (int32_t t : uncertainty_toks) {

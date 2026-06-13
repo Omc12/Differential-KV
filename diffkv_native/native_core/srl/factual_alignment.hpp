@@ -27,7 +27,7 @@ inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& mo
     if (is_initialized) {
         return cached_helper_ids;
     }
-    
+
     static const std::unordered_set<std::string> ALLOWED_HELPER_WORDS = {
         "i", "me", "my", "myself", "we", "us", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
         "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
@@ -65,17 +65,30 @@ inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& mo
             cached_helper_ids.insert(tok_id);
         }
     }
-    
+
     is_initialized = true;
     return cached_helper_ids;
 }
 
+// Returns the set of allowed token IDs for the current decode step.
+//
+// LOCK ACTIVE (vsl_active_candidates is non-empty with non-empty suffixes):
+//   allowed = helper_ids ∪ {suffix[0] for each active suffix}
+//   The model must advance along one of the locked sequences or use a helper.
+//
+// NO ACTIVE LOCK:
+//   allowed = helper_ids ∪ {seq[0] for each factual sequence}
+//   The model can ONLY START a new factual sequence from its first token.
+//   This prevents picking mid-sequence factual tokens and assembling them
+//   into invented sentence structures — the dominant cause of entity binding
+//   failure and relationship inversion.
+//   (Previous behaviour: all tokens from all sequences when unlocked.)
 inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
     const SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& helper_ids
 ) {
     std::unordered_set<int32_t> allowed = helper_ids;
-    
+
     bool has_active_lock = false;
     for (const auto& suffix : srl_state.vsl_active_candidates) {
         if (!suffix.empty()) {
@@ -83,18 +96,25 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
             has_active_lock = true;
         }
     }
-    
+
     if (!has_active_lock) {
+        // No active lock: only permit sequence-START tokens so the model must
+        // enter a factual sequence from its first token rather than picking
+        // tokens from the middle of a sequence out of order.
         for (const auto& seq : srl_state.current_step_factual_sequences) {
-            for (int32_t t_id : seq) {
-                allowed.insert(t_id);
+            if (!seq.empty()) {
+                allowed.insert(seq[0]);
             }
         }
     }
-    
+
     return allowed;
 }
 
+// Advance the VSL lock state after a token is generated.
+// Helpers pass through without advancing the lock; the consecutive-helper
+// counter resets the lock only at >= 12 (raised from 4) so normal bridge
+// phrases like "which is also known as" don't discard a valid lock.
 inline void update_vsl_state_cpp(
     int32_t token_id,
     SessionSRLState& srl_state,
@@ -102,23 +122,24 @@ inline void update_vsl_state_cpp(
 ) {
     if (helper_ids.count(token_id) > 0) {
         srl_state.vsl_consecutive_helpers++;
-        // Threshold lowered 6 → 4: with tight 5%-selection factual sequences, the model
-        // should stay locked to a source phrase. 4 consecutive helpers signals real drift.
-        if (srl_state.vsl_consecutive_helpers >= 4) {
+        // Raised 4→12: a 4-token helper chain is common in normal prose
+        // ("which is also known as"). Previously this dropped the lock after
+        // the very first bridge phrase, reverting to unlocked mode.
+        if (srl_state.vsl_consecutive_helpers >= 12) {
             srl_state.vsl_active_candidates.clear();
         }
         return;
     }
-    
+
     std::vector<std::vector<int32_t>> new_candidates;
-    
+
     for (const auto& suffix : srl_state.vsl_active_candidates) {
         if (!suffix.empty() && suffix[0] == token_id) {
             std::vector<int32_t> next_suffix(suffix.begin() + 1, suffix.end());
             new_candidates.push_back(next_suffix);
         }
     }
-    
+
     bool has_active_lock = false;
     for (const auto& suffix : srl_state.vsl_active_candidates) {
         if (!suffix.empty()) {
@@ -126,7 +147,7 @@ inline void update_vsl_state_cpp(
             break;
         }
     }
-    
+
     if (new_candidates.empty() && !has_active_lock) {
         for (const auto& seq : srl_state.current_step_factual_sequences) {
             for (size_t j = 0; j < seq.size(); ++j) {
@@ -137,7 +158,7 @@ inline void update_vsl_state_cpp(
             }
         }
     }
-    
+
     srl_state.vsl_active_candidates = new_candidates;
     srl_state.vsl_consecutive_helpers = 0;
 }

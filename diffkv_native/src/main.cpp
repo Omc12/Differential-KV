@@ -2307,17 +2307,22 @@ int main(int argc, char ** argv) {
             sfa_active = (srl_state.current_step_max_similarity >= 0.55f &&
                           !srl_state.current_step_factual_sequences.empty());
 
-            // LM-VSL (Logit Masking) — soft penalty (-7) instead of hard mask (-1e10).
-            // Hard masking means any retrieval error locks the model into incorrect
-            // sequences with no escape. Soft penalty still guides generation toward
-            // factual sequences but lets the model's own distribution win when it has
-            // high confidence in a token outside the retrieved set.
+            // LM-VSL (Logit Masking) — graduated by retrieval confidence.
+            // sim 0.55–0.69 → soft (-7): model can escape if LM distribution is strong.
+            // sim ≥ 0.70    → hard (-1e10): verbatim extraction — with sequence-start-only
+            //   fallback in get_allowed_tokens_vsl_cpp, the model must enter factual sequences
+            //   from their first token and advance in order, fixing entity binding failure.
             if (sfa_active && !srl_state.current_step_factual_sequences.empty()) {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
                 auto allowed = diffkv::get_allowed_tokens_vsl_cpp(srl_state, helper_ids);
+                float max_sim = srl_state.current_step_max_similarity;
                 for (int i = 0; i < n_vocab; ++i) {
                     if (allowed.count(i) == 0) {
-                        output_logits[i] -= 7.0f;
+                        if (max_sim >= 0.70f) {
+                            output_logits[i] = -1e10f;   // hard: verbatim
+                        } else {
+                            output_logits[i] -= 7.0f;    // soft: guided
+                        }
                     }
                 }
             }
@@ -2360,7 +2365,7 @@ int main(int argc, char ** argv) {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
                 diffkv::update_vsl_state_cpp(next_token, srl_state, helper_ids);
                 
-                if (srl_state.vsl_consecutive_helpers >= 6) {
+                if (srl_state.vsl_consecutive_helpers >= 16) {
                     std::string uncertainty_str = " [uncertain: details missing in source]";
                     std::vector<int32_t> uncertainty_toks = model.tokenize(uncertainty_str, false);
                     for (int32_t t : uncertainty_toks) {

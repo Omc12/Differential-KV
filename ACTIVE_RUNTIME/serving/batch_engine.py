@@ -1395,18 +1395,29 @@ class ContinuousBatchEngine:
             and bool(getattr(srl_state, "current_step_factual_sequences", None))
         )
 
-        # LM-VSL (Logit Masking) — soft penalty (-7) instead of hard mask (-1e10).
-        # Hard masking means ANY retrieval error (wrong entry retrieved) completely
-        # locks the model into incorrect sequences with zero escape. Soft penalty
-        # still strongly guides generation toward factual sequences but allows the
-        # model's own distribution to win when it has very high confidence in a
-        # token that doesn't appear in the retrieved sequences.
+        # LM-VSL (Logit Masking) — graduated by retrieval confidence:
+        #
+        #  sim 0.55–0.69 → soft penalty (-7): model can escape if its LM distribution
+        #    is very strong; prevents total lock-in on weak retrievals.
+        #  sim ≥ 0.70    → hard mask (-1e10): high-confidence retrieval forces verbatim
+        #    extraction. With the new sequence-start-only fallback in get_allowed_tokens_vsl,
+        #    the model must enter a factual sequence from its first token and advance
+        #    through it in order — this is the fix for entity binding and relationship
+        #    inversion (the model was picking correct keywords in wrong sentence structures).
+        #
+        # The VSL now uses sequence-start-only fallback when unlocked (only seq[0] of each
+        # sequence is allowed when no lock is active), and the lock persists through 12
+        # consecutive helpers instead of 4, so normal bridge phrases don't break it.
         if req.sfa_active:
             from native_core.srl.factual_alignment import get_allowed_tokens_vsl
             allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
             mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
             mask[list(allowed_ids)] = False
-            logits[0, mask] -= 7.0
+            max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
+            if max_sim >= 0.70:
+                logits[0, mask] = -1e10   # hard: verbatim extraction mode
+            else:
+                logits[0, mask] -= 7.0    # soft: guided but escapable
 
         sampled_tensor = _sample_gpu_jit(
             logits,
@@ -1431,7 +1442,7 @@ class ContinuousBatchEngine:
             helper_ids = get_helper_token_ids(self.tokenizer)
             update_vsl_state(token_id, srl_state, helper_ids)
             
-            if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+            if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                 if req.generated_ids:
                     req.generated_ids.pop()
                 uncertainty_suffix = " [uncertain: details missing in source]"
