@@ -676,10 +676,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         matching_entries = []
                         if factual_store is not None and pool is not None and pool.W_proj is not None:
                             try:
+                                active_slots = set(block_indices.tolist()) if block_indices is not None else None
                                 matching_entries = factual_store.query(
                                     Q=query_states[b_idx, :, 0, :],
                                     W_proj=pool.W_proj,
-                                    threshold=0.4
+                                    threshold=0.4,
+                                    active_slots=active_slots
                                 )
                             except Exception as fe:
                                 print(f"[SRL] WARNING: Factual store query failed: {fe}")

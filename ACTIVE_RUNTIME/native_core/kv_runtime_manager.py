@@ -889,11 +889,20 @@ class KVRuntimeManager:
                 if hasattr(self, "_prefill_kv_capture") and session_id in self._prefill_kv_capture:
                     factual_store = FactualExactStore(session_id)
                     prefill_kv = self._prefill_kv_capture[session_id]
+                    
+                    prime_slots = set()
+                    if chunk_graph is not None and getattr(chunk_graph, "cluster_centers_tensor", None) is not None:
+                        prime_slots = set(chunk_graph.cluster_centers_tensor.tolist())
+                        
                     factual_store.build(
                         prefill_kv=prefill_kv,
                         token_ids=token_ids_cpu,
                         W_proj=pool.W_proj,
-                        stop_token_ids=self._stop_token_ids
+                        stop_token_ids=self._stop_token_ids,
+                        slot_ids=slot_ids,
+                        block_size=index_block_size,
+                        inv_index=inv_index,
+                        semantic_prime_slots=prime_slots
                     )
                     self._factual_stores[session_id] = factual_store
             except Exception as fe:

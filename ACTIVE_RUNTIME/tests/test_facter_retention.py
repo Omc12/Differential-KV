@@ -153,3 +153,214 @@ def test_fact_anchors_and_factual_store():
                  out_facts * w_facts.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
                  
     assert out_final.shape == (H_q, head_dim)
+
+
+def test_localized_vertical_factual_retrieval():
+    # Setup inputs to test mapping token spans to slot IDs
+    num_kv_heads = 4
+    head_dim = 64
+    block_size = 8
+    slot_ids = [100, 101, 102]
+    
+    seq_len = 24
+    token_ids = torch.arange(1, seq_len + 1, dtype=torch.long) # tokens 1 to 24
+    
+    # Rare token IDs: 5, 6, 7 (span [4,7)) and 15, 16, 17 (span [14,17))
+    stop_token_ids = set(token_ids.tolist()) - {5, 6, 7, 15, 16, 17}
+    
+    k = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    v = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    prefill_kv = {0: [k, v]}
+    W_proj = torch.randn(64, head_dim)
+    
+    store = FactualExactStore(session_id="test_3d_session")
+    store.build(
+        prefill_kv=prefill_kv,
+        token_ids=token_ids,
+        W_proj=W_proj,
+        stop_token_ids=stop_token_ids,
+        slot_ids=slot_ids,
+        block_size=block_size,
+        use_salience_parser=False
+    )
+    
+    # Verify mapping
+    assert len(store.entries) == 2
+    
+    entry_1 = store.entries[0]
+    entry_2 = store.entries[1]
+    
+    assert entry_1.slot_ids == [100]
+    assert entry_2.slot_ids == [101, 102]
+    
+    # Query with active_slots={100}
+    Q = torch.randn(num_kv_heads, head_dim)
+    matches_1 = store.query(Q, W_proj, threshold=-1.0, active_slots={100})
+    assert len(matches_1) == 1
+    assert matches_1[0].start_idx == 4
+    
+    # Query with active_slots={102}
+    matches_2 = store.query(Q, W_proj, threshold=-1.0, active_slots={102})
+    assert len(matches_2) == 1
+    assert matches_2[0].start_idx == 14
+    
+    # Query with active_slots={100, 101}
+    matches_3 = store.query(Q, W_proj, threshold=-1.0, active_slots={100, 101})
+    assert len(matches_3) == 2
+    
+    # Query with active_slots={999}
+    matches_none = store.query(Q, W_proj, threshold=-1.0, active_slots={999})
+    assert len(matches_none) == 0
+
+    # Test relaxed fallback threshold
+    avg_q = Q.mean(dim=0).float()
+    q_desc = avg_q @ W_proj.T
+    q_desc = q_desc / (q_desc.norm() + 1e-8)
+    
+    entry_1.descriptor = q_desc.cpu() * 0.2
+    
+    matches_fallback = store.query(Q, W_proj, threshold=0.5, active_slots={100})
+    assert len(matches_fallback) == 1
+    assert matches_fallback[0].start_idx == 4
+
+
+def test_3d_factual_graph_walk():
+    num_kv_heads = 4
+    head_dim = 64
+    block_size = 8
+    slot_ids = [100, 101, 102]
+    
+    seq_len = 24
+    token_ids = torch.arange(1, seq_len + 1, dtype=torch.long)
+    
+    # Rare tokens:
+    # 5, 6, 7 (span [4,7)) - slot 100
+    # 15 (span [14, 15)) - slot 101
+    # 21 (span [20, 21)) - slot 102
+    token_ids[14] = 5
+    
+    stop_token_ids = set(token_ids.tolist()) - {5, 6, 7, 15, 21}
+    
+    # Mock InvertedTokenIndex with idf for token 21 = 4.0
+    from native_core.srl.inverted_index import InvertedTokenIndex
+    inv_index = InvertedTokenIndex(
+        index={},
+        important_vocab=set(),
+        idf={21: 4.0, 5: 1.0}
+    )
+    
+    k = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    v = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    prefill_kv = {0: [k, v]}
+    W_proj = torch.randn(64, head_dim)
+    
+    # Slot 100 is prime
+    semantic_prime_slots = {100}
+    
+    store = FactualExactStore(session_id="test_walk_session")
+    store.build(
+        prefill_kv=prefill_kv,
+        token_ids=token_ids,
+        W_proj=W_proj,
+        stop_token_ids=stop_token_ids,
+        slot_ids=slot_ids,
+        block_size=block_size,
+        inv_index=inv_index,
+        semantic_prime_slots=semantic_prime_slots,
+        use_salience_parser=False
+    )
+    
+    # We expect 3 entries:
+    # Entry 0: span [4, 7), slot_ids [100]. Prime because of semantic_prime_slots {100}
+    # Entry 1: span [14, 15), slot_ids [101]. Not prime.
+    # Entry 2: span [20, 21), slot_ids [102]. Prime because token 21 IDF is 4.0
+    assert len(store.entries) == 3
+    
+    entry_0 = store.entries[0]
+    entry_1 = store.entries[1]
+    entry_2 = store.entries[2]
+    
+    assert entry_0.is_prime is True
+    assert entry_1.is_prime is False
+    assert entry_2.is_prime is True
+    
+    # Check graph adjacency edges
+    # Entry 0 and Entry 1 share token 5 (lexical overlap) -> they must be connected!
+    assert 1 in entry_0.neighbors
+    assert 0 in entry_1.neighbors
+    
+    # Verify query walk traversal:
+    Q = torch.randn(num_kv_heads, head_dim)
+    avg_q = Q.mean(dim=0).float()
+    q_desc = avg_q @ W_proj.T
+    q_desc = q_desc / (q_desc.norm() + 1e-8)
+    
+    # Force entry 0 descriptor to match q_desc perfectly (sim = 1.0)
+    entry_0.descriptor = q_desc.cpu()
+    # Force entry 1 and 2 to be zero (sim = 0.0)
+    entry_1.descriptor = torch.zeros(64)
+    entry_2.descriptor = torch.zeros(64)
+    
+    # Query with active_slots = None (or empty), so we don't trigger base-layer vertical filter.
+    # Entry 0 matches directly (sim=1.0 >= 0.4) -> it activates as a seed.
+    # Entry 0 has neighbor Entry 1, and the walk activates Entry 1 too.
+    # Entry 2 is not retrieved.
+    matches = store.query(Q, W_proj, threshold=0.4, active_slots=set())
+    
+    assert len(matches) >= 2
+    match_starts = [entry.start_idx for entry in matches]
+    assert 4 in match_starts   # Entry 0
+    assert 14 in match_starts  # Entry 1
+    assert 20 not in match_starts # Entry 2
+
+
+def test_self_supervised_factual_parser():
+    num_kv_heads = 4
+    head_dim = 64
+    seq_len = 16
+    
+    # Keys for specific tokens will have very large norms (index 5 and 10)
+    k = torch.randn(1, num_kv_heads, seq_len, head_dim) * 0.1
+    k[0, :, 5, :] = torch.randn(num_kv_heads, head_dim) * 5.0
+    k[0, :, 10, :] = torch.randn(num_kv_heads, head_dim) * 5.0
+    
+    # Make future keys (11-14) look back to key 10
+    for i in range(11, 15):
+        k[0, :, i, :] = k[0, :, 10, :] + torch.randn(num_kv_heads, head_dim) * 0.01
+        
+    v = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    prefill_kv = {0: [k, v]}
+    W_proj = torch.randn(64, head_dim)
+    token_ids = torch.arange(1, seq_len + 1, dtype=torch.long)
+    stop_token_ids = {1, 2, 3, 4}
+    
+    # Mock InvertedTokenIndex with IDF (token at index 5 has token ID = 6)
+    from native_core.srl.inverted_index import InvertedTokenIndex
+    inv_index = InvertedTokenIndex(
+        index={},
+        important_vocab=set(),
+        idf={6: 3.0}
+    )
+    
+    store = FactualExactStore(session_id="test_self_supervised_session")
+    store.build(
+        prefill_kv=prefill_kv,
+        token_ids=token_ids,
+        W_proj=W_proj,
+        stop_token_ids=stop_token_ids,
+        inv_index=inv_index,
+        use_salience_parser=True
+    )
+    
+    assert len(store.entries) > 0
+    
+    found_5 = False
+    found_10 = False
+    for entry in store.entries:
+        if entry.start_idx <= 5 < entry.end_idx:
+            found_5 = True
+        if entry.start_idx <= 10 < entry.end_idx:
+            found_10 = True
+            
+    assert found_5, "Token 5 (high norm + high IDF) not selected"
+    assert found_10, "Token 10 (high norm + high Eagle lookback) not selected"
