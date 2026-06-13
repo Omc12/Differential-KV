@@ -248,8 +248,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     # Gather block data from the pool
                     U_stack    = reconstruct_batch_U(pool, pool_indices_t).to(q.dtype)
-                    V_K_stack  = pool.V_K[pool_indices_t]        # [N, R, num_kv_heads, D]
-                    V_V_stack  = pool.V_V[pool_indices_t]        # [N, R, num_kv_heads, D]
+                    V_K_stack  = pool.V_K[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
+                    V_V_stack  = pool.V_V[pool_indices_t].to(q.dtype)        # [N, R, num_kv_heads, D]
                     anc_K      = torch.stack([b.anchor_kv[0, 0] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     anc_V      = torch.stack([b.anchor_kv[0, 1] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     scales_1d  = pool.scales[pool_indices_t]     # [N]
@@ -257,9 +257,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     # Gather residuals
                     res_K_pos = pool.residual_K_positions[pool_indices_t]
-                    res_K_val = pool.residual_K_values[pool_indices_t].to(q.dtype)
+                    res_K_val_raw = pool.residual_K_values[pool_indices_t].to(q.dtype)
+                    res_K_val = repeat_kv(res_K_val_raw.permute(0, 2, 1, 3), num_key_value_groups).permute(0, 2, 1, 3)
                     res_V_pos = pool.residual_V_positions[pool_indices_t]
-                    res_V_val = pool.residual_V_values[pool_indices_t].to(q.dtype)
+                    res_V_val_raw = pool.residual_V_values[pool_indices_t].to(q.dtype)
+                    res_V_val = repeat_kv(res_V_val_raw.permute(0, 2, 1, 3), num_key_value_groups).permute(0, 2, 1, 3)
 
                     # GQA repeat-expansion (zero-copy expand → contiguous only if needed)
                     v_k_rep   = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)   # [N, H, R, D]
@@ -514,6 +516,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     srl_state.current_step_max_similarity = 0.0
                                     srl_state.current_step_sequence_entity_ids = []
                                     srl_state.current_step_sequence_is_prime = []
+                                    # Invalidate per-step caches
+                                    srl_state._prime_tokens_cache = None
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
                                 srl_enabled = session_config.get("srl_enabled", True)
 
@@ -704,6 +708,37 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     if srl_state is not None:
                                         if srl_state.factual_anchor_q is None:
                                             srl_state.factual_anchor_q = raw_q.detach().clone()
+
+                                            # ── Early Entity Binding (Component 4) ───────────────
+                                            # Analyze the query tokens against prime entries at the
+                                            # very start of generation.  This sets entity context
+                                            # immediately instead of waiting 30+ generated tokens
+                                            # for the Contrastive Category Anchor to activate.
+                                            try:
+                                                query_toks = set(getattr(srl_state, "current_query_tokens", []))
+                                                if query_toks and factual_store is not None:
+                                                    prime_matches = []
+                                                    for fe in factual_store.entries:
+                                                        if getattr(fe, "is_prime", False):
+                                                            overlap = len(query_toks & set(fe.tokens))
+                                                            if overlap >= 1:
+                                                                prime_matches.append((fe.start_idx, overlap))
+                                                    if len(prime_matches) == 1:
+                                                        # Single-entity query: lock immediately
+                                                        srl_state.current_entity_id = prime_matches[0][0]
+                                                        srl_state.dual_entity_mode = False
+                                                    elif len(prime_matches) >= 2:
+                                                        # Comparison query: activate dual-entity mode
+                                                        prime_matches.sort(key=lambda x: x[1], reverse=True)
+                                                        srl_state.dual_entity_mode = True
+                                                        srl_state.dual_entity_ids = [
+                                                            prime_matches[0][0],
+                                                            prime_matches[1][0],
+                                                        ]
+                                                        srl_state.current_entity_id = -1
+                                            except Exception:
+                                                pass  # Early binding is best-effort
+
                                         q_for_factual = 0.65 * raw_q + 0.35 * srl_state.factual_anchor_q.to(raw_q.device)
                                     else:
                                         q_for_factual = raw_q
@@ -835,32 +870,22 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             srl_state.current_step_factual_tokens.update(s)
 
                                     # ── Entity-Subgraph Tagging ───────────────────────────────────
-                                    # After all filtering is done, tag each remaining sequence with
-                                    # (a) the document position of its nearest prime entry (entity_id),
-                                    # and (b) whether it IS the prime entry itself.  These tags are
-                                    # consumed by get_allowed_tokens_vsl to restrict the unlocked
-                                    # fallback to same-entity sequence starts, preventing cross-entity
-                                    # token mixing that causes relationship binding failures.
+                                    # Use the entity_id assigned during factual_store.build() via
+                                    # token-overlap matching (not positional proximity).  This is
+                                    # strictly more accurate for interleaved comparison text where
+                                    # positional proximity gives wrong entity assignments.
                                     if srl_state is not None and factual_store is not None:
-                                        prime_positions = [
-                                            fe.start_idx for fe in factual_store.entries
-                                            if getattr(fe, "is_prime", False)
-                                        ]
                                         entity_ids = []
                                         is_prime_flags = []
                                         for seq in srl_state.current_step_factual_sequences:
-                                            seq_start = None
+                                            matched_entity = -1
                                             seq_is_prime = False
                                             for fe in factual_store.entries:
                                                 if fe.tokens == seq:
-                                                    seq_start = fe.start_idx
+                                                    matched_entity = getattr(fe, "entity_id", -1)
                                                     seq_is_prime = getattr(fe, "is_prime", False)
                                                     break
-                                            if seq_start is not None and prime_positions:
-                                                nearest = min(prime_positions, key=lambda p: abs(p - seq_start))
-                                                entity_ids.append(nearest)
-                                            else:
-                                                entity_ids.append(-1)
+                                            entity_ids.append(matched_entity)
                                             is_prime_flags.append(seq_is_prime)
                                         srl_state.current_step_sequence_entity_ids = entity_ids
                                         srl_state.current_step_sequence_is_prime = is_prime_flags

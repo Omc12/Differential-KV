@@ -482,7 +482,7 @@ def _prefill_fused_history_attend(
 
     V_K_flat = V_K.reshape(N, R, H * D)
     deltas_k_flat = torch.bmm(U, V_K_flat)
-    deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1)
+    deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).to(q.dtype)
 
     K_unrot_full = torch.cat(
         [anchors_K.unsqueeze(1), anchors_K.unsqueeze(1) + deltas_k], dim=1
@@ -531,7 +531,7 @@ def _prefill_fused_history_attend(
     w_delta_perm = w_delta.permute(2, 0, 1, 3)
     w_delta_flat = w_delta_perm.reshape(N, H * Q, S)
     W_proj_flat = torch.bmm(w_delta_flat, U)
-    W_proj_flat = W_proj_flat * scales.view(N, 1, 1)
+    W_proj_flat = W_proj_flat * scales.view(N, 1, 1).to(q.dtype)
     W_proj = W_proj_flat.reshape(N, H, Q, R).permute(1, 2, 0, 3)
 
     V_V_t  = V_V.permute(2, 0, 1, 3)
@@ -728,8 +728,8 @@ def fused_decode_mps(
                         abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
                         abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
                         
-                        cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
-                        sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                        cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
+                        sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
                         K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
                     
                     score_exact = torch.sum(q * K_exact, dim=-1) * scale
@@ -1069,8 +1069,8 @@ def _pytorch_vectorized_sparse_attn_decode(
                             abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
                             abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
                             
-                            cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
-                            sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                            cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
+                            sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
                             K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
                         
                         score_exact = torch.sum(q_sq_fp32 * K_exact, dim=-1) * inv_scale

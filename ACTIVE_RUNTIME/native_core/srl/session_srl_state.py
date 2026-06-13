@@ -83,6 +83,11 @@ class SessionSRLState:
     #   entity_id (prime start_idx) for each sequence. -1 = unknown.
     # current_step_sequence_is_prime: parallel list; True if the sequence is a prime entry.
     current_entity_id: int = -1
+    # Dual-entity mode for comparison questions (e.g., "Compare EP2 and EP3").
+    # When active, both entities' factual sequences are available for generation
+    # but cross-entity contamination is prevented via strict VSL filtering.
+    dual_entity_mode: bool = False
+    dual_entity_ids: List[int] = field(default_factory=list)  # [entity_id_1, entity_id_2]
     current_step_sequence_entity_ids: List[int] = field(default_factory=list)
     current_step_sequence_is_prime: List[bool] = field(default_factory=list)
 

@@ -1150,6 +1150,8 @@ int main(int argc, char ** argv) {
             // Reset entity context so each new response starts with no entity
             // commitment — the model freely picks which entity to lead with.
             srl_state.current_entity_id = -1;
+            srl_state.dual_entity_mode = false;
+            srl_state.dual_entity_ids.clear();
             srl_state.current_step_sequence_entity_ids.clear();
             srl_state.current_step_sequence_is_prime.clear();
         }
@@ -2451,6 +2453,39 @@ int main(int argc, char ** argv) {
                 if (srl_state.factual_anchor_q.empty()) {
                     srl_state.factual_anchor_q = decode_k[0];
                     q_for_factual = decode_k[0];
+
+                    // ── Early Entity Binding (Component 4) ────────────────────
+                    // Analyze query tokens against prime entries at the very start.
+                    if (!srl_state.current_query_tokens.empty()) {
+                        std::unordered_set<int32_t> query_toks(srl_state.current_query_tokens.begin(), srl_state.current_query_tokens.end());
+                        struct PrimeMatch {
+                            int32_t start_idx;
+                            int overlap;
+                        };
+                        std::vector<PrimeMatch> prime_matches;
+                        for (const auto& fe : srl_state.factual_store.entries) {
+                            if (fe.is_prime) {
+                                int overlap = 0;
+                                for (int32_t t : fe.tokens) {
+                                    if (query_toks.count(t)) overlap++;
+                                }
+                                if (overlap >= 1) {
+                                    prime_matches.push_back({fe.start_idx, overlap});
+                                }
+                            }
+                        }
+                        if (prime_matches.size() == 1) {
+                            srl_state.current_entity_id = prime_matches[0].start_idx;
+                            srl_state.dual_entity_mode = false;
+                        } else if (prime_matches.size() >= 2) {
+                            std::sort(prime_matches.begin(), prime_matches.end(), [](const PrimeMatch& a, const PrimeMatch& b) {
+                                return a.overlap > b.overlap;
+                            });
+                            srl_state.dual_entity_mode = true;
+                            srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
+                            srl_state.current_entity_id = -1;
+                        }
+                    }
                 } else {
                     for (int qi = 0; qi < F_test; ++qi) {
                         q_for_factual[qi] = 0.65f * decode_k[0][qi]
@@ -2586,158 +2621,8 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                // ── Contrastive Category Anchor ─────────────────────────────────
-                // For single-category questions: fires when exactly ONE prime matches
-                // recent tokens — filters sequences to ±512 document positions.
-                // Extended for comparison questions: when TWO primes are active but
-                // one has ≥2× the recent-token overlap of the other, the model is
-                // actively generating about that category — lock to it. Without this
-                // extension, comparison questions NEVER trigger the anchor and both
-                // categories' token sets remain merged in the VSL.
-                {
-                    std::unordered_set<int32_t> recent_set;
-                    int rgt_size = (int)srl_state.recent_generated_tokens.size();
-                    int rgt_start = std::max(0, rgt_size - 30);
-                    for (int ri = rgt_start; ri < rgt_size; ++ri) {
-                        recent_set.insert(srl_state.recent_generated_tokens[ri]);
-                    }
-
-                    int best_prime_pos    = -1;
-                    int best_overlap      = 0;
-                    int second_best_overlap = 0;
-                    int active_prime_count  = 0;
-
-                    for (const auto& fe : srl_state.factual_store.entries) {
-                        if (fe.is_prime) {
-                            int overlap = 0;
-                            for (int32_t t : fe.tokens) {
-                                if (recent_set.count(t)) overlap++;
-                            }
-                            if (overlap >= 1) {
-                                active_prime_count++;
-                                if (overlap > best_overlap) {
-                                    second_best_overlap = best_overlap;
-                                    best_overlap   = overlap;
-                                    best_prime_pos = fe.start_idx;
-                                } else if (overlap > second_best_overlap) {
-                                    second_best_overlap = overlap;
-                                }
-                            }
-                        }
-                    }
-
-                    // Effective prime: single active OR dominant in a two-prime comparison.
-                    int effective_prime_pos = -1;
-                    if (active_prime_count == 1 && best_prime_pos >= 0) {
-                        effective_prime_pos = best_prime_pos;
-                    } else if (active_prime_count == 2 && best_prime_pos >= 0
-                               && best_overlap >= 2
-                               && best_overlap >= 2 * (second_best_overlap + 1)) {
-                        effective_prime_pos = best_prime_pos;
-                    }
-
-                    if (effective_prime_pos >= 0) {
-                        // Update entity context from CA: this fires once the model has
-                        // generated enough tokens to identify the dominant prime, and
-                        // locks the entity so entity-filtered VSL stays consistent.
-                        srl_state.current_entity_id = effective_prime_pos;
-
-                        std::vector<std::vector<int32_t>> filtered_seqs;
-                        std::unordered_set<int32_t> filtered_toks;
-                        for (const auto& seq : srl_state.current_step_factual_sequences) {
-                            int seq_pos = -1;
-                            for (const auto& fe : srl_state.factual_store.entries) {
-                                if (fe.tokens == seq) { seq_pos = fe.start_idx; break; }
-                            }
-                            bool keep = (seq_pos < 0) || (std::abs(seq_pos - effective_prime_pos) < 512);
-                            if (keep) {
-                                filtered_seqs.push_back(seq);
-                                for (int32_t t : seq) filtered_toks.insert(t);
-                            }
-                        }
-                        if (!filtered_seqs.empty()) {
-                            srl_state.current_step_factual_sequences = filtered_seqs;
-                            srl_state.current_step_factual_tokens    = filtered_toks;
-                        }
-                    }
-                }
-
-                // ── Coherence Cap ─────────────────────────────────────────────
-                // Limit the active factual sequences to 8, ranked by current_sim,
-                // so the VSL token set cannot grow into a mixed-category soup when
-                // many hop-injected entries accumulate (mirrors Python Coherence Cap).
-                if (srl_state.current_step_factual_sequences.size() > 8) {
-                    size_t n_seqs = srl_state.current_step_factual_sequences.size();
-                    std::vector<float> seq_sims(n_seqs, 0.0f);
-                    for (size_t si = 0; si < n_seqs; ++si) {
-                        const auto& seq = srl_state.current_step_factual_sequences[si];
-                        float best_sim = 0.0f;
-                        for (const auto& fe : srl_state.factual_store.entries) {
-                            if (fe.tokens == seq && fe.current_sim > best_sim) {
-                                best_sim = fe.current_sim;
-                            }
-                        }
-                        seq_sims[si] = best_sim;
-                    }
-                    std::vector<size_t> order(n_seqs);
-                    std::iota(order.begin(), order.end(), 0);
-                    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                        return seq_sims[a] > seq_sims[b];
-                    });
-                    order.resize(8);
-                    std::vector<std::vector<int32_t>> top_seqs;
-                    std::unordered_set<int32_t> top_toks;
-                    for (size_t idx : order) {
-                        top_seqs.push_back(srl_state.current_step_factual_sequences[idx]);
-                        for (int32_t t : srl_state.current_step_factual_sequences[idx]) {
-                            top_toks.insert(t);
-                        }
-                    }
-                    if (!top_seqs.empty()) {
-                        srl_state.current_step_factual_sequences = std::move(top_seqs);
-                        srl_state.current_step_factual_tokens    = std::move(top_toks);
-                    }
-                }
-
-                // ── Entity-Subgraph Tagging ──────────────────────────────────
-                // After all filtering (CA + Coherence Cap), tag each remaining
-                // sequence with (a) the document position of its nearest prime
-                // entry (entity_id) and (b) whether it IS the prime itself.
-                // get_allowed_tokens_vsl_cpp uses these to restrict the unlocked
-                // fallback to same-entity sequence starts, preventing cross-entity
-                // token mixing that produces correct keywords in wrong relationships.
-                {
-                    std::vector<int32_t> prime_positions;
-                    for (const auto& fe : srl_state.factual_store.entries) {
-                        if (fe.is_prime) prime_positions.push_back(fe.start_idx);
-                    }
-                    const auto& seqs = srl_state.current_step_factual_sequences;
-                    std::vector<int32_t> ent_ids(seqs.size(), -1);
-                    std::vector<bool>    is_prime_flags(seqs.size(), false);
-                    for (size_t si = 0; si < seqs.size(); ++si) {
-                        int32_t seq_start = -1;
-                        bool    seq_prime = false;
-                        for (const auto& fe : srl_state.factual_store.entries) {
-                            if (fe.tokens == seqs[si]) {
-                                seq_start = fe.start_idx;
-                                seq_prime = fe.is_prime;
-                                break;
-                            }
-                        }
-                        if (seq_start >= 0 && !prime_positions.empty()) {
-                            int32_t nearest = prime_positions[0];
-                            int32_t best_dist = std::abs(prime_positions[0] - seq_start);
-                            for (int32_t pp : prime_positions) {
-                                int32_t d = std::abs(pp - seq_start);
-                                if (d < best_dist) { best_dist = d; nearest = pp; }
-                            }
-                            ent_ids[si] = nearest;
-                        }
-                        is_prime_flags[si] = seq_prime;
-                    }
-                    srl_state.current_step_sequence_entity_ids = std::move(ent_ids);
-                    srl_state.current_step_sequence_is_prime   = std::move(is_prime_flags);
-                }
+                // ── Contrastive Category Anchor, Coherence Cap, & Entity-Subgraph Tagging ──────
+                diffkv::process_and_tag_vsl_step(srl_state);
             }
             // ────────────────────────────────────────────────────────────────
 

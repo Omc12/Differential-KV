@@ -129,7 +129,22 @@ void FactualExactStore::build(
             }
         }
 
-        // 4. Compute joint factual salience score
+        // 4. Relational keyword IDF boost — give binding words (verbs,
+        // prepositions, comparatives) a fixed IDF-equivalent score so they
+        // survive the top-% salience selection.  Without this, they all score
+        // ~0.1 and are systematically excluded, destroying relational structure.
+        for (int t = 0; t < L; ++t) {
+            int tid = token_ids[t];
+            auto it = inv_index.idf.find(tid);
+            if (it != inv_index.idf.end() && it->second < 1.5f) {
+                // Low-IDF token — likely a relational/function word.
+                // Boost to median content-word IDF so it has a chance to
+                // survive salience selection when adjacent to concept tokens.
+                idf_vals[t] = std::max(idf_vals[t], 2.0f);
+            }
+        }
+
+        // 5. Compute joint factual salience score
         std::vector<float> total_salience(L, 0.0f);
         for (int t = 0; t < L; ++t) {
             total_salience[t] = key_norms[t] * idf_vals[t] * (1.0f + 1.0f * R[t]);
@@ -151,7 +166,25 @@ void FactualExactStore::build(
             }
         }
 
-        // 5. Gap-bridging (dilation)
+        // 5b. Relational Context Window Expansion — each salient seed token
+        // is expanded into a ±3-token window so the factual span captures
+        // the surrounding relational structure.
+        {
+            const int CONTEXT_WINDOW = 3;
+            std::vector<bool> expanded_mask = factual_mask;
+            for (int t = 0; t < L; ++t) {
+                if (factual_mask[t]) {
+                    int lo = std::max(0, t - CONTEXT_WINDOW);
+                    int hi = std::min(L, t + CONTEXT_WINDOW + 1);
+                    for (int p = lo; p < hi; ++p) {
+                        expanded_mask[p] = true;
+                    }
+                }
+            }
+            factual_mask = expanded_mask;
+        }
+
+        // 5c. Gap-bridging (dilation)
         if (L > 2) {
             std::vector<bool> dilated_mask = factual_mask;
             for (int t = 1; t < L - 1; ++t) {
@@ -301,7 +334,66 @@ void FactualExactStore::build(
         entries.push_back(std::move(entry));
     }
 
-    // 8. Build graph connections
+    // 8a. Assign entity_ids to all entries via token overlap with primes.
+    // For each non-prime entry, find the prime whose token set has the
+    // highest overlap with this entry's tokens.
+    struct PrimeInfo {
+        size_t idx;
+        std::unordered_set<int32_t> token_set;
+        int32_t start_idx;
+    };
+    std::vector<PrimeInfo> prime_infos;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].is_prime) {
+            entries[i].entity_id = entries[i].start_idx;
+            PrimeInfo pi;
+            pi.idx = i;
+            pi.start_idx = entries[i].start_idx;
+            pi.token_set.insert(entries[i].tokens.begin(), entries[i].tokens.end());
+            prime_infos.push_back(std::move(pi));
+        }
+    }
+
+    if (!prime_infos.empty()) {
+        for (auto& entry : entries) {
+            if (entry.is_prime) continue;
+            std::unordered_set<int32_t> entry_tokens(entry.tokens.begin(), entry.tokens.end());
+            int best_overlap = 0;
+            int32_t best_entity = -1;
+            for (const auto& pi : prime_infos) {
+                int shared = 0;
+                for (int32_t t : entry_tokens) {
+                    if (pi.token_set.count(t)) ++shared;
+                }
+                if (shared > best_overlap) {
+                    best_overlap = shared;
+                    best_entity = pi.start_idx;
+                } else if (shared == best_overlap && shared > 0) {
+                    if (best_entity == -1 || std::abs(entry.start_idx - pi.start_idx) < std::abs(entry.start_idx - best_entity)) {
+                        best_entity = pi.start_idx;
+                    }
+                }
+            }
+            if (best_entity == -1) {
+                // No token overlap — fall back to positional proximity
+                int min_dist = INT_MAX;
+                for (const auto& pi : prime_infos) {
+                    int dist = std::abs(entry.start_idx - pi.start_idx);
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        best_entity = pi.start_idx;
+                    }
+                }
+            }
+            entry.entity_id = best_entity;
+        }
+    }
+
+    // 8b. Build graph connections with entity-aware dampening.
+    // Cross-entity edges receive a 0.3× weight penalty to prevent graph
+    // walks from propagating one entity's properties into another's
+    // retrieval set.
+    const float CROSS_ENTITY_DAMPEN = 0.3f;
     int num_entries = entries.size();
     for (int i = 0; i < num_entries; ++i) {
         auto& entry_i = entries[i];
@@ -337,6 +429,13 @@ void FactualExactStore::build(
                 float w_sim = std::max(0.0f, sim_val);
 
                 float weight = 0.4f * w_sim + 0.4f * w_lex + 0.2f * w_temp;
+
+                // Entity-aware dampening: penalise cross-entity edges
+                int32_t eid_i = entry_i.entity_id;
+                int32_t eid_j = entry_j.entity_id;
+                if (eid_i != -1 && eid_j != -1 && eid_i != eid_j) {
+                    weight *= CROSS_ENTITY_DAMPEN;
+                }
 
                 entry_i.neighbors.push_back(j);
                 entry_i.weights.push_back(weight);

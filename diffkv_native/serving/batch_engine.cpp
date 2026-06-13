@@ -1162,6 +1162,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.vsl_consecutive_helpers = 0;
     // Reset entity context so each new response starts uncommitted.
     session->srl_state.current_entity_id = -1;
+    session->srl_state.dual_entity_mode = false;
+    session->srl_state.dual_entity_ids.clear();
     session->srl_state.current_step_sequence_entity_ids.clear();
     session->srl_state.current_step_sequence_is_prime.clear();
     session->srl_state.ordered_slot_ids.clear();
@@ -1422,6 +1424,10 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     }
                 }
             }
+        }
+
+        if (!session->srl_state.factual_store.entries.empty()) {
+            diffkv::process_and_tag_vsl_step(session->srl_state);
         }
 
         // SFA threshold raised to 0.55 to match main.cpp interactive path.

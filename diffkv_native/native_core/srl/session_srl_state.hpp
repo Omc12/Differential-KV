@@ -129,6 +129,11 @@ struct SessionSRLState {
     //   entity_id (prime start_idx) for each sequence (-1 = unknown).
     // current_step_sequence_is_prime: True if the sequence is itself a prime entry.
     int32_t current_entity_id = -1;
+    // Dual-entity mode for comparison questions (e.g., "Compare EP2 and EP3").
+    // When active, both entities' factual sequences are available for generation
+    // but cross-entity contamination is prevented via strict VSL filtering.
+    bool dual_entity_mode = false;
+    std::vector<int32_t> dual_entity_ids;  // [entity_id_1, entity_id_2]
     std::vector<int32_t> current_step_sequence_entity_ids;
     std::vector<bool>    current_step_sequence_is_prime;
 

@@ -2,6 +2,37 @@ import torch
 import math
 from typing import List, Dict, Optional, Set, Any
 
+# High-binding-value relational tokens that are critical for preserving
+# entity-property bindings and categorical distinctions.  These words
+# typically receive very low IDF scores (they appear frequently) and get
+# excluded from the top-5% salience selection.  We give them a fixed
+# IDF-equivalent boost so they survive into factual spans.
+RELATIONAL_KEYWORDS = {
+    # Contrastive / comparative
+    "unlike", "whereas", "while", "although", "however", "but",
+    "instead", "rather", "conversely", "nevertheless", "nonetheless",
+    "yet", "though", "notwithstanding",
+    # Comparative degree
+    "compared", "differs", "differ", "different", "difference",
+    "differences", "distinct", "distinction", "distinguishes",
+    "greater", "larger", "smaller", "higher", "lower", "fewer",
+    "more", "less", "most", "least",
+    # Causal / process
+    "causes", "caused", "because", "therefore", "hence", "thus",
+    "leads", "results", "produces", "induces", "triggers",
+    "consequently", "accordingly",
+    # Binding verbs / copulas that attach properties to entities
+    "is", "are", "was", "were", "has", "have", "had",
+    "exhibits", "exhibits", "possesses", "contains", "involves",
+    "requires", "lacks", "features",
+    # Specification / attribution
+    "called", "named", "known", "defined", "characterized",
+    "classified", "denoted", "refers", "represents",
+    # Scope / exclusion
+    "only", "exclusively", "specifically", "solely",
+    "except", "excluding", "neither", "nor",
+}
+
 class FactEntry:
     def __init__(self, start_idx: int, end_idx: int, K: torch.Tensor, V: torch.Tensor, descriptor: torch.Tensor, slot_ids: Optional[List[int]] = None, tokens: Optional[List[int]] = None):
         self.start_idx = start_idx
@@ -14,6 +45,10 @@ class FactEntry:
         self.neighbors: List[int] = []  # Indices of connected factual entries
         self.weights: List[float] = []  # Connection weights
         self.is_prime: bool = False     # Whether this fact is a Factual Prime Node
+        # Entity assignment: document position (start_idx) of the nearest prime
+        # entry whose tokens overlap with this entry's tokens.  -1 = unassigned.
+        # Set during build() using token-overlap matching (not positional proximity).
+        self.entity_id: int = -1
 
 def merge_adjacent_entries(entries: List[FactEntry]) -> List[FactEntry]:
     if not entries:
@@ -122,7 +157,45 @@ class FactualExactStore:
                     tid = int(token_ids[i].item())
                     idf_vals[i] = 0.1 if tid in stop_token_ids else 2.5
                     
-            # 4. Compute joint factual salience score
+            # 4. Relational keyword boost — give binding words a fixed IDF-
+            # equivalent score so they survive the top-% salience selection.
+            # Without this, verbs/prepositions/comparatives all score ~0.1
+            # and are systematically excluded, destroying relational structure.
+            if inv_index is not None and hasattr(inv_index, "idf"):
+                _rel_tok_ids: Optional[Set[int]] = None
+                try:
+                    # Build the set of token IDs matching relational keywords.
+                    # Cached on the inv_index to avoid rebuilding every call.
+                    _rel_tok_ids = getattr(inv_index, "_relational_token_ids", None)
+                    if _rel_tok_ids is None:
+                        _rel_tok_ids = set()
+                        vocab = None
+                        if hasattr(inv_index, "_tokenizer_ref") and inv_index._tokenizer_ref is not None:
+                            vocab = inv_index._tokenizer_ref
+                        if vocab is None:
+                            # Fallback: scan all occurrences for tokens whose
+                            # decoded form matches a relational keyword.
+                            # This is built once and cached.
+                            pass
+                        # Direct IDF-based identification: any token whose IDF
+                        # is very low but whose raw text matches RELATIONAL_KEYWORDS.
+                        # We check all tokens in the document.
+                        for i_t in range(total_seq_len):
+                            tid = int(token_ids[i_t].item())
+                            if tid in inv_index.idf and inv_index.idf[tid] < 1.5:
+                                _rel_tok_ids.add(tid)
+                        inv_index._relational_token_ids = _rel_tok_ids
+                except Exception:
+                    _rel_tok_ids = None
+
+                if _rel_tok_ids:
+                    for i_t in range(total_seq_len):
+                        tid = int(token_ids[i_t].item())
+                        if tid in _rel_tok_ids:
+                            # Boost relational tokens to median content-word IDF
+                            idf_vals[i_t] = max(idf_vals[i_t], 2.0)
+
+            # 5. Compute joint factual salience score
             total_salience = key_norms * idf_vals * (1.0 + 1.0 * R)
             
             # Select the top 5% most salient tokens (precision mode: max 300 tokens)
@@ -136,8 +209,22 @@ class FactualExactStore:
                 threshold_val = float(torch.topk(total_salience, k=k_num).values[-1].item())
                 factual_mask = total_salience >= threshold_val
 
+            # 5b. Relational Context Window Expansion — each salient seed token
+            # is expanded into a ±3-token window so the factual span captures
+            # the surrounding relational structure (verbs, prepositions,
+            # comparatives) that binds concepts together.  Without this, spans
+            # are bags of nouns missing the connective tissue.
+            CONTEXT_WINDOW = 3
+            if total_seq_len > 0:
+                expanded_mask = factual_mask.clone()
+                seed_positions = torch.where(factual_mask)[0].tolist()
+                for pos in seed_positions:
+                    lo = max(0, pos - CONTEXT_WINDOW)
+                    hi = min(total_seq_len, pos + CONTEXT_WINDOW + 1)
+                    expanded_mask[lo:hi] = True
+                factual_mask = expanded_mask
                 
-            # 5. Gap-bridging (dilation): bridge single-token gaps
+            # 5c. Gap-bridging (dilation): bridge single-token gaps
             if total_seq_len > 2:
                 dilated_mask = factual_mask.clone()
                 for i in range(1, total_seq_len - 1):
@@ -235,10 +322,50 @@ class FactualExactStore:
                 if max_idf >= 3.0:
                     is_prime = True
             entry.is_prime = is_prime
+            # entity_id will be assigned after all entries are built (below)
             
             self.entries.append(entry)
             
-        # 3. Build factual layer graph connections
+        # 3. Assign entity_ids to all entries via token overlap with primes.
+        # For each non-prime entry, find the prime whose token set has the
+        # highest Jaccard overlap with this entry's tokens.  This is strictly
+        # more accurate than positional proximity for interleaved comparison
+        # text (e.g., "EP2 is X while EP3 is Y" where EP3's property span
+        # may be positionally closer to EP2's prime).
+        prime_entries = [(idx, e) for idx, e in enumerate(self.entries) if e.is_prime]
+        for p_idx, p_entry in prime_entries:
+            p_entry.entity_id = p_entry.start_idx  # Primes define their own entity
+
+        if prime_entries:
+            prime_token_sets = [(p_idx, set(p_e.tokens), p_e.start_idx) for p_idx, p_e in prime_entries]
+            for entry in self.entries:
+                if entry.is_prime:
+                    continue  # already assigned
+                entry_tokens = set(entry.tokens)
+                best_overlap = 0
+                best_entity = -1
+                for _p_idx, p_tokens, p_start in prime_token_sets:
+                    # Jaccard-like overlap: |intersection| / |entry_tokens|
+                    shared = len(entry_tokens & p_tokens)
+                    if shared > best_overlap:
+                        best_overlap = shared
+                        best_entity = p_start
+                    elif shared == best_overlap and shared > 0:
+                        # Tie-break by positional proximity
+                        if best_entity == -1 or abs(entry.start_idx - p_start) < abs(entry.start_idx - best_entity):
+                            best_entity = p_start
+                if best_entity == -1:
+                    # No token overlap — fall back to positional proximity
+                    nearest_prime = min(prime_token_sets, key=lambda x: abs(entry.start_idx - x[2]))
+                    best_entity = nearest_prime[2]
+                entry.entity_id = best_entity
+
+        # 4. Build factual layer graph connections with entity-aware dampening.
+        # Cross-entity edges receive a 0.3× weight penalty to prevent graph
+        # walks from propagating one entity's properties into another's
+        # retrieval set.  This preserves the edges (needed for comparison
+        # queries) but dramatically reduces cross-contamination.
+        CROSS_ENTITY_DAMPEN = 0.3
         num_entries = len(self.entries)
         for i in range(num_entries):
             entry_i = self.entries[i]
@@ -266,6 +393,12 @@ class FactualExactStore:
                     w_sim = max(0.0, sim_val)
                     
                     weight = 0.4 * w_sim + 0.4 * w_lex + 0.2 * w_temp
+
+                    # Entity-aware dampening: penalise cross-entity edges
+                    eid_i = entry_i.entity_id
+                    eid_j = entry_j.entity_id
+                    if eid_i != -1 and eid_j != -1 and eid_i != eid_j:
+                        weight *= CROSS_ENTITY_DAMPEN
                     
                     entry_i.neighbors.append(j)
                     entry_i.weights.append(weight)

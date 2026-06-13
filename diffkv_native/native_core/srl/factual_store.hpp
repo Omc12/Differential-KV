@@ -27,6 +27,10 @@ struct FactEntry {
     std::vector<int> neighbors;    // indices of connected factual entries
     std::vector<float> weights;    // connection weights
     bool is_prime = false;
+    // Entity assignment: start_idx of the nearest prime entry whose tokens
+    // overlap with this entry's tokens.  -1 = unassigned.
+    // Set during build() using token-overlap matching (not positional proximity).
+    int32_t entity_id = -1;
     mutable float current_sim = 0.0f;
 };
 
