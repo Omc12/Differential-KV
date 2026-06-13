@@ -1130,6 +1130,17 @@ class MLXDiffKVWrapper:
             next_id = sample_logits(logits, effective_temperature, top_p)
             generated.append(next_id)
             self.manager.register_prefill_tokens(session_id, torch.tensor([next_id], dtype=torch.long))
+
+            # Factual Early Stopping (Option 2 Extension)
+            stop_generation = False
+            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
+                if getattr(srl_state, "current_step_factual_sequences", None):
+                    for seq in srl_state.current_step_factual_sequences:
+                        if len(seq) >= 5 and next_id == seq[-1]:
+                            stop_generation = True
+                            break
+            if stop_generation:
+                break
             
             if next_id in self.stop_token_ids:
                 break

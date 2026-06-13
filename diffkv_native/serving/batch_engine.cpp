@@ -1429,6 +1429,20 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         if (model_->is_eog_token(next_token) || next_token == model_->token_eos()) {
             break;
         }
+
+        // Factual Early Stopping (Option 2 Extension)
+        bool stop_generation = false;
+        if (session->srl_state.current_step_max_similarity >= 0.5f) {
+            for (const auto& seq : session->srl_state.current_step_factual_sequences) {
+                if (seq.size() >= 5 && next_token == seq.back()) {
+                    stop_generation = true;
+                    break;
+                }
+            }
+        }
+        if (stop_generation) {
+            break;
+        }
         
         std::string piece = model_->token_to_piece(next_token);
         req->push_chunk(piece);

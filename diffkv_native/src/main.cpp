@@ -2288,6 +2288,23 @@ int main(int argc, char ** argv) {
                 break;
             }
 
+            // Factual Early Stopping (Option 2 Extension)
+            bool stop_generation = false;
+            if (srl_state.current_step_max_similarity >= 0.5f) {
+                for (const auto& seq : srl_state.current_step_factual_sequences) {
+                    if (seq.size() >= 5 && next_token == seq.back()) {
+                        stop_generation = true;
+                        break;
+                    }
+                }
+            }
+            if (stop_generation) {
+                if (!interactive) {
+                    std::cerr << " [Factual Early Stop]" << std::endl;
+                }
+                break;
+            }
+
             std::string piece = model.token_to_piece(next_token);
             if (!is_warmup_run) {
                 std::cout << piece << std::flush;

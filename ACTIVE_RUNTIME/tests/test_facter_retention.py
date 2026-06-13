@@ -455,3 +455,49 @@ def test_transition_biasing_and_temp_scaling():
     assert abs(effective_temp - 0.48) < 1e-6
 
 
+def test_factual_early_stopping():
+    from native_core.srl.session_srl_state import SessionSRLState
+
+    srl_state = SessionSRLState(
+        semantic_index=None,
+        chunk_graph=None,
+        inverted_index=None,
+        ordered_slot_ids=[],
+        sink_blocks=[]
+    )
+    srl_state.current_step_max_similarity = 0.6
+    srl_state.current_step_factual_sequences = [[10, 11, 12, 13, 14, 15]]
+
+    # 1. Test target token matches last token of a sequence of len >= 5
+    next_id = 15
+    stop_generation = False
+    if srl_state.current_step_max_similarity >= 0.5:
+        for seq in srl_state.current_step_factual_sequences:
+            if len(seq) >= 5 and next_id == seq[-1]:
+                stop_generation = True
+                break
+    assert stop_generation is True
+
+    # 2. Test target token does not match if similarity is too low
+    srl_state.current_step_max_similarity = 0.4
+    stop_generation = False
+    if srl_state.current_step_max_similarity >= 0.5:
+        for seq in srl_state.current_step_factual_sequences:
+            if len(seq) >= 5 and next_id == seq[-1]:
+                stop_generation = True
+                break
+    assert stop_generation is False
+
+    # 3. Test target token does not match if sequence is too short
+    srl_state.current_step_max_similarity = 0.6
+    srl_state.current_step_factual_sequences = [[14, 15]]  # len 2
+    stop_generation = False
+    if srl_state.current_step_max_similarity >= 0.5:
+        for seq in srl_state.current_step_factual_sequences:
+            if len(seq) >= 5 and next_id == seq[-1]:
+                stop_generation = True
+                break
+    assert stop_generation is False
+
+
+

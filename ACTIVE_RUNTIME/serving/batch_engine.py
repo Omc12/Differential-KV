@@ -1354,6 +1354,16 @@ class ContinuousBatchEngine:
             req.first_token_time = time.time()
 
         is_eos = (token_id in self.stop_token_ids)
+
+        # Factual Early Stopping (Option 2 Extension)
+        srl_state = self.wrapper.manager.get_srl_state(req.session_id)
+        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
+            if getattr(srl_state, "current_step_factual_sequences", None):
+                for seq in srl_state.current_step_factual_sequences:
+                    if len(seq) >= 5 and token_id == seq[-1]:
+                        is_eos = True
+                        break
+
         is_max = (len(req.generated_ids) >= req.max_tokens)
 
         # ── Repetition-loop detection (Fix 2) ────────────────────────────────

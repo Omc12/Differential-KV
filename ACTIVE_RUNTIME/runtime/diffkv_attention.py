@@ -791,15 +791,16 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             k_rep_fact = repeat_kv(fact_k_rot, num_key_value_groups)
                             v_rep_fact = repeat_kv(fact_v, num_key_value_groups)
                             
+                            _scale = (D ** -0.5) / 0.2
                             out_facts = F.scaled_dot_product_attention(
                                 query_states[b_idx:b_idx+1], k_rep_fact, v_rep_fact,
                                 is_causal=False,
+                                scale=_scale
                             )
                             out_facts_hd = out_facts[0, :, 0, :].float()
                             
                             _q = query_states[b_idx, :, 0, :]
                             _kf = k_rep_fact[0]
-                            _scale = (D ** -0.5)
                             scores_fact = torch.matmul(_kf, _q.unsqueeze(-1)).squeeze(-1) * _scale
                             lse_facts = torch.logsumexp(scores_fact.float(), dim=-1)
                             lse_facts = lse_facts.to(torch.float32)
