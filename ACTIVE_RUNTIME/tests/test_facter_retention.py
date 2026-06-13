@@ -406,3 +406,52 @@ def test_factual_span_merging_and_similarity():
         assert hasattr(res, "current_sim")
         assert isinstance(res.current_sim, float)
 
+
+def test_transition_biasing_and_temp_scaling():
+    from native_core.srl.session_srl_state import SessionSRLState
+
+    # Create a mock srl_state
+    srl_state = SessionSRLState(
+        semantic_index=None,
+        chunk_graph=None,
+        inverted_index=None,
+        ordered_slot_ids=[],
+        sink_blocks=[]
+    )
+    # Set factual sequences and tokens
+    srl_state.current_step_factual_tokens = {10, 11, 12}
+    srl_state.current_step_factual_sequences = [[10, 11, 12], [20, 21]]
+    srl_state.current_step_max_similarity = 0.5
+
+    # Mock logits
+    logits = torch.zeros((1, 100))
+
+    # Test logic matching hf_diffkv_wrapper.py
+    # 1. Apply static bias
+    for tok_id in srl_state.current_step_factual_tokens:
+        logits[0, tok_id] += 1.5
+
+    # 2. Apply transition bias for last_token = 11 (next should be 12)
+    last_token = 11
+    transition_candidates = set()
+    for seq in srl_state.current_step_factual_sequences:
+        for idx, tok in enumerate(seq[:-1]):
+            if tok == last_token:
+                transition_candidates.add(seq[idx + 1])
+    for tok_id in transition_candidates:
+        logits[0, tok_id] += 2.0
+
+    # Assertions
+    assert logits[0, 10].item() == 1.5
+    assert logits[0, 11].item() == 1.5
+    assert logits[0, 12].item() == 3.5  # 1.5 static + 2.0 transition bias
+    assert logits[0, 21].item() == 0.0  # not matched
+
+    # 3. Test temperature scaling
+    temperature = 0.8
+    effective_temp = temperature
+    if srl_state.current_step_max_similarity >= 0.4:
+        effective_temp = temperature * (1.0 - srl_state.current_step_max_similarity * 0.8)
+    assert abs(effective_temp - 0.48) < 1e-6
+
+

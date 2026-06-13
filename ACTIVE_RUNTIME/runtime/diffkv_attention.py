@@ -501,7 +501,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         if pool is not None and pool.W_proj is not None:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
-                                srl_state.current_step_factual_tokens = set()
+                                if captured_layer_idx == 0:
+                                    srl_state.current_step_factual_tokens = set()
+                                    srl_state.current_step_factual_sequences = []
+                                    srl_state.current_step_max_similarity = 0.0
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
                                 srl_enabled = session_config.get("srl_enabled", True)
 
@@ -686,6 +689,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 if srl_state is not None and matching_entries:
                                     for entry in matching_entries:
                                         srl_state.current_step_factual_tokens.update(entry.tokens)
+                                        if entry.tokens not in srl_state.current_step_factual_sequences:
+                                            srl_state.current_step_factual_sequences.append(entry.tokens)
+                                    sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
+                                    if sims:
+                                        srl_state.current_step_max_similarity = max(srl_state.current_step_max_similarity, max(sims))
                             except Exception as fe:
                                 print(f"[SRL] WARNING: Factual store query failed: {fe}")
 

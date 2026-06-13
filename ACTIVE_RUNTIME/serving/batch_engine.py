@@ -1315,14 +1315,33 @@ class ContinuousBatchEngine:
 
         # Apply Factual Logit Bias
         srl_state = self.wrapper.manager.get_srl_state(req.session_id)
-        if srl_state is not None and getattr(srl_state, "current_step_factual_tokens", None):
-            for tok_id in srl_state.current_step_factual_tokens:
-                if tok_id < logits.shape[-1]:
-                    logits[0, tok_id] += 1.5
+        if srl_state is not None:
+            if getattr(srl_state, "current_step_factual_tokens", None):
+                for tok_id in srl_state.current_step_factual_tokens:
+                    if tok_id < logits.shape[-1]:
+                        logits[0, tok_id] += 1.5
+
+            # Transition biasing (Option 1)
+            last_token = req.generated_ids[-1] if req.generated_ids else None
+            if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
+                transition_candidates = set()
+                for seq in srl_state.current_step_factual_sequences:
+                    for idx, tok in enumerate(seq[:-1]):
+                        if tok == last_token:
+                            transition_candidates.add(seq[idx + 1])
+                for tok_id in transition_candidates:
+                    if tok_id < logits.shape[-1]:
+                        logits[0, tok_id] += 2.0
+
+        # Apply Dynamic Temperature Scaling (Option 1)
+        effective_temperature = req.temperature
+        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4:
+            max_sim = srl_state.current_step_max_similarity
+            effective_temperature = req.temperature * (1.0 - max_sim * 0.8)
 
         sampled_tensor = _sample_gpu_jit(
             logits,
-            req.temperature,
+            effective_temperature,
             req.top_p,
             penalty_val,
             gen_tensor,

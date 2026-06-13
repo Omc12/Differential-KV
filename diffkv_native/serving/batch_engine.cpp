@@ -1340,6 +1340,24 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 output_logits[tok_id] += 1.5f;
             }
         }
+        // Transition Biasing (Option 1)
+        if (last_token >= 0 && !session->srl_state.current_step_factual_sequences.empty()) {
+            std::unordered_set<int32_t> transition_candidates;
+            for (const auto& seq : session->srl_state.current_step_factual_sequences) {
+                if (seq.size() > 1) {
+                    for (size_t i = 0; i < seq.size() - 1; ++i) {
+                        if (seq[i] == last_token) {
+                            transition_candidates.insert(seq[i + 1]);
+                        }
+                    }
+                }
+            }
+            for (int32_t tok_id : transition_candidates) {
+                if (tok_id >= 0 && tok_id < n_vocab) {
+                    output_logits[tok_id] += 2.0f;
+                }
+            }
+        }
         
         // Construct filtered penalty tokens matching Python runtime logic
         bool loop_detected = req->repetition_loop_detected;
@@ -1396,9 +1414,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
 
         // Sampling
+        float effective_temperature = req->temperature;
+        if (session->srl_state.current_step_max_similarity >= 0.4f) {
+            effective_temperature = req->temperature * (1.0f - session->srl_state.current_step_max_similarity * 0.8f);
+        }
         int32_t next_token = sample_token(
             output_logits,
-            req->temperature,
+            effective_temperature,
             req->top_p,
             penalty_val,
             penalty_tokens

@@ -55,7 +55,7 @@ struct SessionSRLState {
     float k_lexical_frac     = 0.15f;
     float k_graph_frac       = 0.15f;
     float k_recency_frac     = 0.20f;
-    int   routing_threshold  = 50;    // min blocks before SRL activates
+    int   routing_threshold  = 2;    // min blocks before SRL activates
     float overlap_threshold  = 0.15f;
     float graph_hop_decay    = 0.5f;
     float srl_age_penalty    = 0.01f;
@@ -112,6 +112,8 @@ struct SessionSRLState {
     }
 
     std::unordered_set<int32_t> current_step_factual_tokens;
+    std::vector<std::vector<int32_t>> current_step_factual_sequences;
+    float current_step_max_similarity = 0.0f;
 
     // -----------------------------------------------------------------
     // reset_step_cache
@@ -122,6 +124,8 @@ struct SessionSRLState {
         current_step_slots.clear();
         current_step_count = 0;
         current_step_factual_tokens.clear();
+        current_step_factual_sequences.clear();
+        current_step_max_similarity = 0.0f;
     }
 
     // -----------------------------------------------------------------

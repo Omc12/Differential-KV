@@ -2211,6 +2211,24 @@ int main(int argc, char ** argv) {
                     output_logits[tok_id] += 1.5f;
                 }
             }
+            // Transition Biasing (Option 1)
+            if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
+                std::unordered_set<int32_t> transition_candidates;
+                for (const auto& seq : srl_state.current_step_factual_sequences) {
+                    if (seq.size() > 1) {
+                        for (size_t i = 0; i < seq.size() - 1; ++i) {
+                            if (seq[i] == last_token) {
+                                transition_candidates.insert(seq[i + 1]);
+                            }
+                        }
+                    }
+                }
+                for (int32_t tok_id : transition_candidates) {
+                    if (tok_id >= 0 && tok_id < n_vocab) {
+                        output_logits[tok_id] += 2.0f;
+                    }
+                }
+            }
             auto t_after_logits = std::chrono::high_resolution_clock::now();
 
             float rep_penalty = repetition_penalty;
@@ -2240,7 +2258,11 @@ int main(int argc, char ** argv) {
 
             int32_t next_token = 0;
             if (interactive) {
-                next_token = sample_logits(output_logits, temperature, top_p, sample_rng);
+                float effective_temperature = temperature;
+                if (srl_state.current_step_max_similarity >= 0.4f) {
+                    effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.8f);
+                }
+                next_token = sample_logits(output_logits, effective_temperature, top_p, sample_rng);
             } else {
                 std::vector<std::pair<float, int>> logits_sorted;
                 logits_sorted.reserve(n_vocab);

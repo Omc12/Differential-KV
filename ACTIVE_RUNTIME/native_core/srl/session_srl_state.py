@@ -51,6 +51,8 @@ class SessionSRLState:
     current_step_slots: Optional[torch.Tensor] = None
     current_step_count: int = 0   # decode step counter for validation
     last_prefill_q: Optional[torch.Tensor] = None
+    current_step_factual_sequences: List[List[int]] = field(default_factory=list)
+    current_step_max_similarity: float = 0.0
 
     # Per-layer ordered slots (all layers share pool slots → same list for all)
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)
@@ -63,7 +65,7 @@ class SessionSRLState:
     k_lexical_frac:    float = 0.15
     k_graph_frac:      float = 0.15
     k_recency_frac:    float = 0.20
-    routing_threshold: int   = 50
+    routing_threshold: int   = 2
     overlap_threshold: float = 0.15
     graph_hop_decay:   float = 0.5
     srl_age_penalty:   float = 0.01

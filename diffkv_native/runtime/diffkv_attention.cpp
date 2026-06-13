@@ -455,6 +455,8 @@ void custom_attention_op_callback(
 
         if (data->layer_idx == 0) {
             srl->current_step_factual_tokens.clear();
+            srl->current_step_factual_sequences.clear();
+            srl->current_step_max_similarity = 0.0f;
         }
         matching_entries = srl->factual_store.query(
             Q_unrot.data(),
@@ -467,6 +469,19 @@ void custom_attention_op_callback(
         );
         for (const auto& entry : matching_entries) {
             srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
+            bool exists = false;
+            for (const auto& seq : srl->current_step_factual_sequences) {
+                if (seq == entry.tokens) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                srl->current_step_factual_sequences.push_back(entry.tokens);
+            }
+            if (entry.current_sim > srl->current_step_max_similarity) {
+                srl->current_step_max_similarity = entry.current_sim;
+            }
         }
     }
 
