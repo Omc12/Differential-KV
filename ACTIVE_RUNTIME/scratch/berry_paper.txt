@@ -1,0 +1,338 @@
+Physics of nonhermitian degeneracies *)
+M.V. Berry **)
+H.H. Wills Physics Laboratory, Tyndall Avenue, Bristol BS8 1TL, UK
+Received 1 July 2004
+A summary, with references and additional comments, of a talk delivered at the Second
+International Workshop on Pseudohermitian Hamiltonians in Quantum Physics (Prague,
+14–16 June 2004). After explaining some general features of nonhermitian degeneracies
+(‘exceptional points’), several applications are outlined: to multiple reflections in a pile of
+plates, linewidths of unstable lasers, atom diffraction by light, and crystal optics.
+PACS: 03.65.Yz
+Key words: matrices, degeneracies, quantum
+1 Introduction
+Nonhermitian hamiltonians usually enter physics as a description of part of a
+system, as a result of a decision not to incorporate all freedoms — for example
+those describing dissipation. Examples are complex refractive indices in optics, and
+complex potentials describing the scattering of electrons or X-rays, or by nuclei
+(‘cloudy crystal ball’). Traditionally, the nonhermiticity has been regarded as a
+perturbation, with the physics essentially unchanged from the hermitian case, except for an exponential decay (for example during propagation through a crystal).
+But nonhermitian physics differs radically from hermitian physics in the presence
+of degeneracies, that is coalescences of eigenvalues. My aim here is to illustrate this
+essentially nonhermitian behaviour with a series of examples, drawn from several
+areas of physics, that I have encountered over the past decade (Sections 3–7), after
+some general remarks (Section 2).
+Professor Dieter Heiss and his colleagues have arrived at similar insights, and
+this paper can be regarded as complementary to his [1]. A minor difference, of no
+physical consequence, is that Heiss uses the term ‘exceptional points’, introduced
+in an authoritative work by Kato [2] to denote what I call nonhermitian degeneracies. My opinion is that the term degeneracy is appropriate because it is well
+established in mathematics as a label for any type of coalescence. Its applicability
+to the nonhermitian case is further strengthened by the observation that here it is
+not only the eigenvalues but also the eigenvectors that coalesce.
+The examples I will give reflect my interests, so there is no attempt to be
+comprehensive. And since all the work has been published already, I restrict myself
+to a brief description of each case.
+*) Presented at the Second International Workshop on Pseudohermitian Hamiltonians in Quantum Physics, Prague, Czech Republic, 14–16 June, 2004.
+**) http://www.physics.bristol.ac.uk/staff/berry mv.html
+Czechoslovak Journal of Physics, Vol. 54 (2004), No. 10 1039
+M.V. Berry
+2 Hermitian and nonhermitian generalities
+The emphasis here is on degeneracies involving two states, and on generic situations, that is situations that are stable under perturbation. Therefore we are
+considering not individual degenerate matrices but families of such matrices, parameterised by several variables. With this understanding, the differences between
+hermitian and nonhermitian degeneracies can be summarised as follows.
+For hermitian matrices that are real symmetric (commonly describing nondissipative physics with time-reversal symmetry), degeneracies are of codimension two,
+that is, degeneracies are isolated points in a two-parameter space, robust in the
+sense that when additional parameters are varied, preserving the real symmetric
+character of the matrix, they are not destroyed but simply move. In the threedimensional space of eigenvalue and two parameters, the eigenvalue surfaces form a
+double cone (diabolo)with apex at the degeneracy; such degeneracies are referred
+to as ‘conical intersections’ or ‘diabolical points’ [3].
+For complex hermitian matrices (commonly describing nondissipative physics
+without time-reversal or other antiunitary symmetry), degeneracies are of codimension three, that is isolated points in a three-parameter space, robust against
+any hermitian perturbation.
+After a circuit in the parameter space (either surrounding a degeneracy in the
+real symmetric case or near a point of degeneracy on the complex hermitian case),
+each of the two eigenfunctions returns to its original form, apart from a phase shift
+that depends on the (physically or mathematically enforced)continuation rule (e.g.
+a geometric phase [4, 5] if the rule is parallel transport). Approaching the degeneracy, the two eigenvectors remain orthogonal. The left eigenvector (eigenvector of
+the adjoint — i.e. hermitian conjugate — matrix)is identical to the corresponding
+right eigenvector.
+For nonhermitian matrices, whether symmetric or not, degeneracies are of codimension two, that is points in a two-parameter space and curves in a three-parameter
+space. These nonhermitian degeneracies are not diabolical points but rather branchpoints, with associated Riemann sheets: around a circuit encircling the degeneracy,
+the eigenvalues, and the corresponding eigenvectors, interchange. If the nonhermitian matrix is a perturbation of a real symmetric matrix, and the parameter space
+is a plane, the perturbation splits the diabolical point into two branch-point degeneracies. If the nonhermitian matrix is a perturbation of a complex hermitian matrix,
+and the parameter space is three-dimensional, the perturbation makes the isolated
+hermitian degeneracy point explode into a ring of branch-point degeneracies. A
+general model for these eigenvalue phenomena is
+M =
+ zx − iy
+x +iy −z
+
++i  z0 x0 − iy0
+x0 +iy0 −z0
+
+, (1)
+where r = {x, y, z} is the three-dimensional parameter space of the hermitian
+part of M, and r0 = {x0,y0,z0} characterises the nonhermitian perturbation. The
+1040 Czech. J. Phys. 54 (2004)
+Physics of nonhermitian degeneracies
+eigenvalues are
+λ = (r +ir0) · (r +ir0)= 
+r2 − r2
+0 + 2i r · r0 , (2)
+showing that the perturbation splits the degeneracy, defined by λ+ = λ− (= 0 in
+this traceless case)from the isolated hermitian point degeneracy at r = 0 to a ring
+of branch-points with radius r0 in the plane perpendicular to r0. Nonhermitian
+degeneracies are stable against any perturbations, hermitian or nonhermitian.
+The branch-point nature of a nonhermitian degeneracy has implications: since
+the eigenvectors interchange around a circuit of the nonhermitian degeneracy, two
+circuits are required to make the states return, apart from an overall phase that
+again depends on the continuation rule (in a recent experiment [6] the continuation
+was a sign, so four circuits were necessary to make both states return, including
+phases). Also, on approaching a nonhermitian degeneracy, the two states involved
+in the degeneracy become parallel rather than remaining orthogonal as in the hermitian case (though of course the two left and the two right eigenvectors form a
+biorthogonal set). Finally, the left and right eigenvectors become orthogonal at the
+degeneracy, rather than remaining parallel as in the hermitian case.
+3 Nonhermitian nonphysics of a pile of plates [7]
+Every physicist has probably noticed that a pile of N overhead-projector transparency sheets looks more and more like a mirror as N increases. The first serious
+attempt at a theory of such ‘transparent mirrors’ was by Stokes [8], who calculated all the multiple reflections of light from the plates. (Stokes had observed the
+phenomenon in piles of cover slips for microscope slides). In modern terminology,
+he argued that because the sheets, and spaces between them, are large compared
+with the wavelength, wave effects can be neglected, so it is sufficient to work with
+incoherent reflections and transmissions of intensity rather than amplitude.
+If the intensity transmission and reflection coefficients from a single sheet are
+τ and ρ, with τ + ρ = 1 since there is no loss, the matrix giving the forward- and
+backward-propagating intensities after the n-th sheet, in terms of the intensities
+immediately before, is
+m =
+ 10
+01
++ ρ
+τ
+ −11
+−11
+. (3)
+This is a real nonsymmetric matrix and therefore nonhermitian, with degenerate
+eigenvalues 1. The matrix governing the whole pile is mN . Usually the elements
+of such a matrix power grow exponentially with N, which would imply that the
+transmission would decrease exponentially with N, so the reflection — the mirroring
+— would saturate exponentially to unity. But for this nonhermitian degenerate m,
+the result
+(( -1 1 ), ( -1 1 ))^2 = (( 0 0 ), ( 0 0 ))
+implies
+mN =
+ 10
+01
++ N ρ
+τ
+ −11
+−11
+, (5)
+which in turn implies that the transmitted intensity TN decays linearly with N,
+rather than exponentially:
+TN = 1
+1+ N ρ
+τ
+. (6)
+This seems to imply a physical effect of a nonhermitian degeneracy representing
+a system without absorption. But it is wrong! Coherence of the multiple reflections
+cannot be neglected, because there can be topologically distinct scattering paths
+that pass through the same spaces and sheets (though in a different order). In fact,
+the coherent interference is destructive, and appropriate averaging over the random
+air gaps between the sheets leads to the exact result
+TN = τN = exp ( -N log 1/tau ) . (7)
+This exponential mirroring is an unexpected example of Anderson localization (destructive random interference). Experiments with stacks of 30 and 50 sheets confirmed this law, rather than Stokes’s linear mirroring. In this example, nonhermitian
+physics is nonphysics.
+4 Linewidths of unstable lasers [9]
+In laser pointers, and small demonstration lasers, the cavities consist of two
+mirrors that are concave towards each other. These are stable lasers, whose modes,
+that are eigenfunctions of the unitary round-trip wave operator (two propagations
+and two reflections), have the familiar gaussian transverse profile, localised near
+the optical symmetry axis.
+Powerful lasers, on the other hand, are unstable: one of the mirrors is reversed,
+so light leaks away from the edges. The advantage of the instability is that now
+the cavity is filled with light, so all the lasing material is used. A fundamental
+consequence of the leaking is that the round-trip operator T for the light that
+forms the mode is nonunitary: it is the exponential of a nonhermitian operator. An
+explicit expression for the operator in the simplest case (a ‘strip resonator’)is [10]
+Tu(x)= \int_{-1}^{1} dy exp( 1/2 i A (y - x/M)^2) u(y)= \gamma u(x). (8)
+Here u(x)is the mode, with δ the complex propagation constant with |\gamma| < 1; x
+is a transverse coordinate whose limits ±1 correspond to the edges of the mirror
+beyond which the light leaks away (if the limits are replaced by ±\infty, T is unitary).
+M (> 1)is the magnification (ratio of focal lengths of the mirrors); the parameter A
+is the important Fresnel number, inversely proportional to the wavelength; usually
+A >> 1.
+The eigenfunctions u of (8)are very different from the familiar gaussian beams
+of stable lasers. In particular, the graph of the intensity |u(x)|^2 are fractal [11–13], as
+suggested by experiment [14]. In the present context, the important nonhermitian
+(=nonunitary here)physics arises from the fact that the right eigenvectors u(x)are
+different from the corresponding left eigenvectors \nu(x)(which are the eigenvectors
+of T adjoint rather than T); in particular, the overlap
+\langle \nu | u \rangle = \int_{-1}^{1} dx \nu*(x) u(x) (9)
+of the normalised u and \nu is less than unity. The importance of this is that the
+overlap determines the laser linewidth through the Petermann factor
+K = 1 / | \langle \nu | u \rangle |^2 , (10)
+by which the minimum linewidth (governed by quantum optics)is magnified by the
+nonunitarity.
+Nonunitarity implies K> 1. Computations of K as a function of A had shown
+strong peaks. These were explained by the observation that at a nonhermitian
+degeneracy u and v are orthogonal, so K = \infty. Since nonhermitian degeneracies
+have codimension 2, this situation (bad for the operation of the laser)does not
+usually happen for real A. But it is expected for complex A, and K is large for
+degeneracies near the real axis in the complex A plane. As a function of Re A, K
+displays an unusual ‘square root of Lorentzian’ lineshape, reflecting its origin in
+a degeneracy of resonances rather than an individual resonance. (By changing M
+as well, degeneracies can be steered onto the real A axis, making K = \infty for this
+special case.)
+A large-A asymptotic theory for the operator (8)gives a detailed description of
+the arrangement of the degeneracies, in particular their proximity to the real A axis.
+All details of the theory agree with numerical simulations based on discretization
+of the intergal operator (8), but await investigation in laboratory experiments.
+5 Atoms diffracted by imaginary crystals of light [15]
+Interfering laser beams can create a ‘crystal of light’ that splits a beam of incident atoms into a set of Bragg-diffracted beams. The atoms are represented by an
+amplitude satisfying Schrodinger’s equation, with a periodic potential proportional
+to the light intensity. The interaction involves the laser frequency and relevant
+transition frequencies in the atoms. For appropriate detuning, the potential can be
+complex, indicating incoherent loss of atoms to levels not involved in the diffraction,
+and a nonhermitian evolution operator. Experiments by Zeilinger and colleagues
+[16] correspond to the extreme situation where the potential is purely imaginary,
+described in the simplest case by a Schrodinger equation
+-\nabla^2 \psi(x, z)+i Q cos^2(K x) \psi(x, z)= k^2 \psi(x, z), (11)
+involving a volume grating extending from z = 0 to z = Z.
+For an incident plane wave with wavevector k =(K0, \sqrt{k^2 - K_0^2}), the amplitudes An(Z)of the nth emerging diffracted beam satisfy, in the paraxial approximation, the differential-difference equation
+i k \partial_Z An(Z) = [2 n (n K + K_0) - 1/4 i Q] An(Z) - 1/8 i Q [ An+1(Z) + An-1(Z) ] , (12)
+with An(0)= \delta_n,0. Nonhermiticity is embodied in the factors i on the righthand
+side and has interesting physical effects.
+Nonhermitian degeneracies powerfully influence the ‘rocking curves’, that is the
+dependence of the An(Z)on the initial direction K0, especially near the Bragg
+angle K0 = K where the form of the interference fringes is radically different from
+the hermitian case. And instead of the total power decaying exponentially, there is
+the alternating sum rule
+\sum (-1)^n |An(Z)|^2 = exp( -Q Z / 2k ) . (13)
+A similar analysis [17] explores analogous phenomena in the (exactly-solvable
+potential exp(iKx).
+6 Crystal optics with absorption and chirality [18]
+In a general electrically anisotropic material (‘crystal’), two plane waves can
+travel in any direction s, with different speeds (refractive indices n\pm)and polarizations, specified by the (always-transverse)vectors D\pm. These are the eigenvalues
+and eigenvectors of the matrix m(s)consisting of the 2 × 2 part of the reciprocal
+dielectric tensor perpendicular to s [19, 20]. In the general case where the crystal
+is not only biaxially anisotropic but also absorbing (dichroic)and chiral (optically
+active, or gyrotropic), systematic consideration of nonhermitian effects, as well as
+ideas from singularity theory, provide a comprehensive description of this beautiful
+area of classical physics.
+If the biaxial crystal is transparent and non-chiral, m(s)is real symmetric
+(case a). If the crystal is biaxial, transparent and chiral, m(s)is complex hermitian
+(case b). If the crystal is biaxial absorbing and nonchiral, m(s)is complex symmetric and therefore nonhermitian (case c). And in the most general case, where the
+crystal is biaxial, absorbing and chiral, m(s)is a general nonsymmetric complex
+nonhermitian matrix (case d).
+For each case, in considering the refractive indices and polarizations as functions
+in the 2-parameter direction space (s), it is helpful to concentrate on the singularities, of which there are three types. First are the degeneracies, where n+ = n-.
+In case a, these are four diabolical points (i.e. directions)in antipodal pairs, corresponding to the optic axes of a doubly refracting material, discovered by Hamilton
+and responsible for conical refraction [19]. Adding absorption (case c), causes the
+optic axes to split into two ‘singular axes’ [21], which are nonhermitian degeneracies: branch-point connections between the two eigensheets. In this case, the two
+polarizations (identical because the eigenvectors are parallel)are circular, illustrating a known theorem [22, 23]. When chirality is incorporated (case d), the singular
+axes approach each other, and the associated common polarization is elliptic rather
+than circular; eventually, the singular axes annihilate in pairs, leaving two disconnected eigensheets. Without absorption, the passage from the nonchiral case a to
+the transparent chiral case b causes the immediate destruction of the diabolical
+points, consistent with the codimensions described in Section 2 (two for diabolical
+points and three for general hermitian degeneracies).
+The second type of singularity consists of points where the polarizations are
+purely circular: C points, invented [24] for waves in position space but here occurring
+in the momentum space of directions s. These do not occur in case a, for which all
+polarizations are linear, but are present in cases (b–d). With absorption and not
+chirality (case c), the C points coincide with the degeneracies, as already mentioned.
+Adding chirality (cases d and b), the C points remain fixed as the singular axes
+(now elliptically polarized)move away and annihilate: the C points are ghosts,
+haunting the directions of the departed degeneracies. In general the C points are
+different for the two polarizations.
+The third type of singularity consists of lines in s space where the polarization
+is purely linear: L lines. These occur for cases b–d, and separate s regions of right
+and left handed elliptic polarization, containing the C points.
+Propagating through a plate of crystal, the two polarizations get out of phase.
+These phase shifts, which are functions of s, are revealed as interference fringes
+when the plate is sandwiched between crossed polarizers (e.g. linear or circular),
+and this provides a means (still to be systematically investigated experimentally)
+for detecting the three types of singularity. A curious feature of these ‘polarization
+sandwiches’ will now be described.
+7 A nontrivial square root of zero toy [25]
+A polarizing sheet is represented by a projection operator, in this case a 2 × 2
+matrix of the form
+Pu = |u\rangle\langle u| , (14)
+where the 2-vector |u\rangle represents the state passed by the polarizer. In the sandwiches under consideration now, the ‘bread’ consists of crossed polarizer P- and
+analyzer P+ (i.e., \langle + | - \rangle = 0). The ‘filling’ consists of the crystal slab, whose action
+on an incident polarization is represented by an evolution matrix A(s)constructed
+from the dielectric matrix m(s)described in Section 6. The complete sandwich is
+represented by the matrix
+M(s)= P+ A(s) P- , (15)
+and transforms incident to outgoing polarization states by
+|\psi_out\rangle = M(s) |\psi_in\rangle. (16)
+The sandwich matrices M(s)have several properties that are obvious physically
+and amusing mathematically. The matrices are nonhermitian (because of the loss
+represented by the polarizers), and degenerate, with two eigenvalues zero and the
+common eigenstate |+\rangle. Unlike a polarizer, which passes its own eigenstate and
+annihilates the orthogonal state, M(s)annihilates its own eigenstate. And it is easy
+to see from (15)and (14)that
+M(s)^2 = 0 , (17)
+so the sandwich matrices are nontrivial square roots of zero (the trivial square root
+being the empty sandwich, for which M = 0) .
+One such sandwich, that is is very easy to construct [26], uses ordinary linear
+polarizing sheets for the polarizer and analyzer, and a sheet of plastic overheadprojector transparency foil (a biaxially anisotropic material)for the filling. The
+result (17), for the sandwich matrix M(s) , holds for all s near the forward direction, but the pattern that is seen on viewing any diffuse light (e.g. the sky)through
+the sandwich (which need be no more than 2 cm square), held obliquely immediately in front of one eye, depends sensitively on s and reveals the eigenstructure of
+the material matrix m(s)(Section 6). In particular, the degeneracy (diabolical in
+this hermitian case)appears as a ‘bull’s-eye’: the centre of a system of brilliantly
+coloured circular interference fringes, together with a black stripe through the centre that reflects the sign change (geometric phase)of the eigenvectors around the
+conical intersection. A great deal of mathematics and physics is brought to life by
+this toy: not only (17)and diabolical degeneracies and geometric phases, but also
+wave interference and its many manifestations in crystal optics. Every physicist
+should make one.
+I thank Professor Miroslav Znojil for his kind hospitality at the meeting in Prague
+when he encouraged me to write this review. My research is supported by the Royal
+Society of London.
+References
+[1] W.D. Heiss: Czech. J. Phys. 54 (2004) 1091 (this issue).
+[2] T. Kato: Perturbation theory of linear operators, Springer, New York, 1966.
+[3] M.V. Berry and M. Wilkinson: Diabolical points in the spectra of triangles, Proc. Roy.
+Soc. Lond. A 392 (1984) 15–43.
+[4] M.V. Berry: Quantal phase factors accompanying adiabatic changes, Proc. Roy. Soc.
+Lond. A 392 (1984) 45–57.
+[5] A. Shapere and F. Wilczek: Geometric Phases in Physics, World Scientific, Singapore,
+1989.
+[6] H.-D. Dembowski, H.-D. Graf, H.L. Harney, A. Heine, W.D. Heiss, H. Rehfeld, and
+A. Richter: Experimental demonstration of the topological structure of exceptional
+points, Phys. Rev. Lett. 86 (2001) 787–790.
+[7] M.V. Berry and S. Klein: Transparent mirrors:rays, waves and localization, Eur. J.
+Phys. 18 (1997) 222–228.
+[8] G.G. Stokes: On the intensity of the light reflected from or transmitted through a pile
+of plates, Proc. Roy. Soc. Lond. 11 (1862) 545–556.
+[9] M.V. Berry: Mode degeneracies and the Petermann excessnoise factor for unstable
+lasers, J. Mod. Opt. 50 (2003) 63–81.
+[10] A.E. Siegman: Lasers, University Science Books, Mill Valley, 1986.
+[11] M.V. Berry, C. Storm, and W. van Saarloos: Theory of unstable laser modes:edge
+waves and fractality, Opt. Commun. 197 (2001) 393–402.
+[12] M.V. Berry: Fractal modes of unstable lasers with polygonal and circular mirrors,
+Opt. Commun. 200 (2001) 321–330.
+[13] M.A. Yates and G.H.C. New: Fractal dimension of unstable resonator modes, Opt.
+Commun. 208 (2002) 377–380.
+[14] G.H.C. New, M.A. Yates, J.P. Woerdman, and G.S. McDonald: Diffractive origin of
+fractal resonator modes, Opt. Commun. 193 (2001) 261–266.
+[15] M.V. Berry and D.H.J. O’Dell: Diffraction by volume gratings with imaginary potentials, J. Phys. A 31 (1998) 2093–2101.
+[16] M.K. Oberthaler, R. Abfalterer, S. Bernet, J. Schmiedmayer, and A. Zeilinger: Atom
+waves in crystals of light, Phys. Rev. Lett. A 77 (1996) 4980–4983.
+[17] M.V. Berry: Lop-sided diffraction by absorbing crystals, J. Phys. A 31 (1998) 3493–
+3502.
+[18] M.V. Berry and M.R. Dennis: The optical singularities of birefringent dichroic chiral
+crystals, Proc. Roy. Soc. A 459 (2003) 1261–1292.
+[19] M. Born and E. Wolf: Principles of Optics, Pergamon, London, 1959.
+[20] L.D. Landau, E.M. Lifshitz, and L.P. Pitaevskii: Electrodynamics of Continuous Media, Pergamon, Oxford, 1984.
+[21] G.N. Ramachandran and S. Ramaseshan: Crystal Optics, Handbuch der Physik, Vol.
+XXV/I (Ed. H. Flugge), Springer-Verlag, Berlin, 1961.
+[22] J.L. Synge: The Petrov classification of gravitational fields, Comm. Dubl. Inst. Adv.
+Stud., ser. A 15 (1964) 1–51.
+[23] W.D. Heiss and Harney: The chirality of exceptional points, Eur. Phys. J. D 17 (1964)
+149–151.
+[24] J.F. Nye and J.V. Hajnal: The wave structure of monochromatic electromagnetic
+radiation, Proc. Roy. Soc. Lond. A 409 (1987) 21–36.
+[25] M.V. Berry and M.R. Dennis: Black polarization sandwiches are nontrivial square
+roots of zero, J. Optics A 6 (2004) S24–S25.
+[26] M.V. Berry, R. Bhandari, and S. Klein: Black plastic sandwiches demonstrating biaxial
+optical anisotropy, Eur. J. Phys. 20 (1999) 1–14.
+Czech. J. Phys. 54 (2004) 1047

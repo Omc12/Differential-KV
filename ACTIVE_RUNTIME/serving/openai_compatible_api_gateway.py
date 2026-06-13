@@ -227,6 +227,7 @@ class OpenAICompatibleAPIGateway:
     def _setup_routes(self):
 
         @self.app.post("/v1/chat/completions")
+        @self.app.post("/chat/completions")
         async def chat_completions(request: ChatCompletionRequest):
             # Create or reuse a session
             session_id = request.session_id
@@ -441,6 +442,7 @@ class OpenAICompatibleAPIGateway:
                     empty_cache()
 
         @self.app.post("/v1/sessions")
+        @self.app.post("/sessions")
         async def create_session():
             if self.session_manager:
                 sid = self.session_manager.create_session()
@@ -449,6 +451,7 @@ class OpenAICompatibleAPIGateway:
             return {"session_id": sid}
 
         @self.app.delete("/v1/sessions/{session_id}")
+        @self.app.delete("/sessions/{session_id}")
         async def delete_session(session_id: str):
             if self.session_manager:
                 if hasattr(self.session_manager, "delete_session"):
@@ -489,6 +492,7 @@ class OpenAICompatibleAPIGateway:
             }
 
         @self.app.get("/v1/runtime_info")
+        @self.app.get("/runtime_info")
         async def runtime_info():
             import torch as _t
             import psutil
@@ -578,6 +582,7 @@ class OpenAICompatibleAPIGateway:
             }
 
         @self.app.get("/v1/sessions/{session_id}/srl")
+        @self.app.get("/sessions/{session_id}/srl")
         async def session_srl_info(session_id: str):
             """Get SRL (Semantic Routing Layer) stats for a given session."""
             kv_manager = getattr(getattr(self.resolver, "wrapper", None), "manager", None)

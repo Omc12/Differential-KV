@@ -702,7 +702,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 if captured_layer_idx == 0:
                                     # ── Layer 0: run query and update all logit-bias state ──────
                                     active_slots = set(block_indices.tolist()) if block_indices is not None else None
-
                                     # Query Anchor Blending (layer-0 Q space only — blending a
                                     # layer-0 anchor with layer-N raw_q is semantically incorrect).
                                     raw_q = unrot_query_states[b_idx, :, 0, :]  # [H, D]
@@ -717,11 +716,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             # for the Contrastive Category Anchor to activate.
                                             try:
                                                 query_toks = set(getattr(srl_state, "current_query_tokens", []))
-                                                if query_toks and factual_store is not None:
+                                                inv_index = getattr(srl_state, "inverted_index", None)
+                                                if query_toks and factual_store is not None and inv_index is not None:
+                                                    important_query_toks = query_toks & inv_index.important_vocab
                                                     prime_matches = []
                                                     for fe in factual_store.entries:
                                                         if getattr(fe, "is_prime", False):
-                                                            overlap = len(query_toks & set(fe.tokens))
+                                                            fe_important = set(fe.tokens) & inv_index.important_vocab
+                                                            overlap = len(important_query_toks & fe_important)
                                                             if overlap >= 1:
                                                                 prime_matches.append((fe.start_idx, overlap))
                                                     if len(prime_matches) == 1:
@@ -836,6 +838,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # Without this extension, comparison questions NEVER trigger the
                                     # anchor and both categories' tokens stay merged in the VSL set.
                                     if srl_state is not None and factual_store is not None:
+                                        inv_index = getattr(srl_state, "inverted_index", None)
                                         recent_set = set(getattr(srl_state, "recent_generated_tokens", [])[-30:])
                                         best_prime_pos = None
                                         best_overlap = 0
@@ -844,7 +847,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                         for fe in factual_store.entries:
                                             if getattr(fe, "is_prime", False):
-                                                overlap = sum(1 for t in fe.tokens if t in recent_set)
+                                                if inv_index is not None:
+                                                    important_recent = recent_set & inv_index.important_vocab
+                                                    fe_important = set(fe.tokens) & inv_index.important_vocab
+                                                    overlap = len(important_recent & fe_important)
+                                                else:
+                                                    overlap = sum(1 for t in fe.tokens if t in recent_set)
                                                 if overlap >= 1:
                                                     active_prime_count += 1
                                                     if overlap > best_overlap:

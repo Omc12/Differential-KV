@@ -1007,7 +1007,7 @@ class PyTorchDiffKVHFWrapper:
                 helper_ids = get_helper_token_ids(self.tokenizer)
                 update_vsl_state(next_id_val, srl_state, helper_ids)
                 
-                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                     uncertainty_suffix = " [uncertain: details missing in source]"
                     uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
                     for t_id in uncertainty_tokens:

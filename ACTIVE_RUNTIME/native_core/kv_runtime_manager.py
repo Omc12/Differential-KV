@@ -805,9 +805,11 @@ class KVRuntimeManager:
                     stop_token_ids = self._stop_token_ids,
                     top_n_per_block = 20,
                 )
+                inv_index._tokenizer_ref = self.tokenizer
             else:
                 from native_core.srl.inverted_index import InvertedTokenIndex
                 inv_index = InvertedTokenIndex(index={}, important_vocab=set())
+                inv_index._tokenizer_ref = self.tokenizer
 
             # ── 2. Chunk graph ──────────────────────────────────────────
             chunk_graph = build_chunk_graph(

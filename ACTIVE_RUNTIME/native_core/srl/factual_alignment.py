@@ -303,42 +303,52 @@ def update_vsl_state(token_id: int, srl_state, helper_ids: set):
     """
     Advance the VSL lock state after a token is generated.
 
-    Helpers pass through without advancing the lock. Threshold raised 4→12 so
-    normal bridge phrases don't discard a valid lock prematurely.
-
-    When starting a new lock (no prior lock, token matches a sequence start),
-    record that sequence's entity_id as the new current_entity_id so subsequent
-    fallback steps restrict to the same entity's sequences.
+    If the generated token matches the next expected token of an active candidate,
+    we advance the lock (even if it is a helper token).
+    If there is no active lock and the token matches the start of a sequence,
+    we start a new lock (even if it is a helper token).
+    Otherwise, if the token is in helper_ids, it passes through as a generic helper
+    without breaking the lock (unless consecutive helpers threshold is reached).
     """
+    factual_sequences = getattr(srl_state, "current_step_factual_sequences", None) or []
+    active_candidates = getattr(srl_state, "vsl_active_candidates", None) or []
+    entity_ids    = getattr(srl_state, "current_step_sequence_entity_ids", [])
+
+    new_candidates = []
+    # 1. Try to advance existing active locks
+    for suffix in active_candidates:
+        if suffix and suffix[0] == token_id:
+            new_candidates.append(suffix[1:])
+
+    # 2. Try to start a new lock if no existing lock advanced and we are unlocked
+    has_active_lock = any(len(suffix) > 0 for suffix in active_candidates)
+    did_match_existing = len(new_candidates) > 0 or (len(active_candidates) > 0 and any(suffix and suffix[0] == token_id for suffix in active_candidates))
+
+    did_start_new = False
+    if not did_match_existing and not has_active_lock:
+        for i, seq in enumerate(factual_sequences):
+            if seq and seq[0] == token_id:
+                new_candidates.append(seq[1:])
+                did_start_new = True
+                seq_entity = entity_ids[i] if i < len(entity_ids) else -1
+                if seq_entity != -1:
+                    srl_state.current_entity_id = seq_entity
+
+    # 3. If the token matched an existing candidate or started a new lock, update state
+    if did_match_existing or did_start_new:
+        srl_state.vsl_active_candidates = new_candidates
+        srl_state.vsl_consecutive_helpers = 0
+        return
+
+    # 4. Otherwise, if it's a helper token, it passes through as a generic helper
     if token_id in helper_ids:
         srl_state.vsl_consecutive_helpers = getattr(srl_state, "vsl_consecutive_helpers", 0) + 1
         if srl_state.vsl_consecutive_helpers >= 12:
             srl_state.vsl_active_candidates = []
         return
 
-    factual_sequences = getattr(srl_state, "current_step_factual_sequences", None) or []
-    active_candidates = getattr(srl_state, "vsl_active_candidates", None) or []
-    entity_ids    = getattr(srl_state, "current_step_sequence_entity_ids", [])
-
-    new_candidates = []
-
-    for suffix in active_candidates:
-        if suffix and suffix[0] == token_id:
-            new_candidates.append(suffix[1:])
-
-    has_active_lock = any(len(suffix) > 0 for suffix in active_candidates)
-    if not new_candidates and not has_active_lock:
-        # In entity-filtered fallback mode only sequence-start tokens are reachable,
-        # so we only look at seq[0] here.  Update entity context from the sequence
-        # we are entering so the next fallback step is entity-consistent.
-        for i, seq in enumerate(factual_sequences):
-            if seq and seq[0] == token_id:
-                new_candidates.append(seq[1:])
-                seq_entity = entity_ids[i] if i < len(entity_ids) else -1
-                if seq_entity != -1:
-                    srl_state.current_entity_id = seq_entity
-
-    srl_state.vsl_active_candidates = new_candidates
+    # 5. If it's a non-helper token that didn't match anything, the lock is broken
+    srl_state.vsl_active_candidates = []
     srl_state.vsl_consecutive_helpers = 0
 
 

@@ -239,7 +239,7 @@ class SessionSRLState:
                 except Exception:
                     pass
                 
-                if word in {"1", "2", "3", "ep2", "ep3", "hermitian", "diabolic", "conical", "branch"}:
+                if word in {"1", "2", "3", "ep2", "ep3", "hermitian", "diabolic", "diabolical", "conical", "branch", "exceptional", "symmetric", "eigenvalue", "eigenvalues", "eigenvector", "eigenvectors", "codimension", "topology", "monodromy", "loop", "left", "right"}:
                     score += 5.0
                     
                 valid_candidates.append((i, score, tid))

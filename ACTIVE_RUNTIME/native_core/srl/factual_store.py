@@ -224,18 +224,20 @@ class FactualExactStore:
                         vocab = None
                         if hasattr(inv_index, "_tokenizer_ref") and inv_index._tokenizer_ref is not None:
                             vocab = inv_index._tokenizer_ref
-                        if vocab is None:
-                            # Fallback: scan all occurrences for tokens whose
-                            # decoded form matches a relational keyword.
-                            # This is built once and cached.
-                            pass
-                        # Direct IDF-based identification: any token whose IDF
-                        # is very low but whose raw text matches RELATIONAL_KEYWORDS.
-                        # We check all tokens in the document.
-                        for i_t in range(total_seq_len):
-                            tid = int(token_ids[i_t].item())
-                            if tid in inv_index.idf and inv_index.idf[tid] < 1.5:
-                                _rel_tok_ids.add(tid)
+                        if vocab is not None:
+                            # Direct token-based identification: any token whose IDF
+                            # is very low and whose decoded text matches RELATIONAL_KEYWORDS.
+                            for i_t in range(total_seq_len):
+                                tid = int(token_ids[i_t].item())
+                                if tid in inv_index.idf and inv_index.idf[tid] < 1.5:
+                                    try:
+                                        text = vocab.decode([tid])
+                                        cleaned = text.replace("Ġ", "").replace(" ", "").replace("</w>", "")
+                                        cleaned = "".join(c for c in cleaned if c.isalnum()).strip().lower()
+                                        if cleaned in RELATIONAL_KEYWORDS:
+                                            _rel_tok_ids.add(tid)
+                                    except Exception:
+                                        pass
                         inv_index._relational_token_ids = _rel_tok_ids
                 except Exception:
                     _rel_tok_ids = None
@@ -414,12 +416,20 @@ class FactualExactStore:
             # Used by _assign_entities() to bind properties that explicitly name
             # their entity, overriding misleading low-IDF token overlap (RC4).
             if is_prime and inv_index is not None and hasattr(inv_index, "idf") and span_tokens:
-                best_tok, best_idf = None, 0.0
+                best_tok, best_idf = None, -1.0
                 for t in span_tokens:
+                    if stop_token_ids and t in stop_token_ids:
+                        continue
                     t_idf = inv_index.idf.get(t, 1.0)
-                    if t_idf >= 3.0 and t_idf > best_idf:
+                    if t_idf > best_idf:
                         best_idf = t_idf
                         best_tok = t
+                if best_tok is None:
+                    for t in span_tokens:
+                        t_idf = inv_index.idf.get(t, 1.0)
+                        if t_idf > best_idf:
+                            best_idf = t_idf
+                            best_tok = t
                 entry.distinguishing_token = best_tok
             # entity_id is assigned after all entries are built (see _assign_entities)
 
@@ -469,7 +479,7 @@ class FactualExactStore:
                         continue  # overly long bridge → noise
                     # Bridge must contain at least one relational token so we know
                     # it is a genuine binding phrase and not just whitespace.
-                    if not any(tid in rel_tid_set for tid in bridge):
+                    if len(bridge) > 0 and not any(tid in rel_tid_set for tid in bridge):
                         continue
 
                     triple_seq = bridge + v_entry.tokens

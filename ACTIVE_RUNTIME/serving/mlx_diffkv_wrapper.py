@@ -367,6 +367,12 @@ class MLXKVBlockManager:
 
     def clear_session(self, session_id: str):
         self.sessions.pop(session_id, None)
+        if hasattr(self, "patched_model") and self.patched_model is not None:
+            cache_key = (session_id,)
+            if cache_key in self.patched_model._prefill_caches:
+                del self.patched_model._prefill_caches[cache_key]
+            if cache_key in self.patched_model._prev_was_prefill:
+                del self.patched_model._prev_was_prefill[cache_key]
 
     def snapshot_session(self, session_id: str, checkpoint_id: str):
         if session_id not in self.sessions:
@@ -386,6 +392,26 @@ class MLXKVBlockManager:
             "comp_seq_len": [mx.array(sl) for src_sl, sl in zip(src["comp_seq_len"], src["comp_seq_len"])], # copy mx arrays properly
             "token_ids": src["token_ids"].copy() if "token_ids" in src else []
         }
+        if hasattr(self, "patched_model") and self.patched_model is not None:
+            if not hasattr(self, "_session_checkpoints_prompt_cache"):
+                self._session_checkpoints_prompt_cache = {}
+            src_key = (session_id,)
+            if src_key in self.patched_model._prefill_caches:
+                from mlx_lm.models.cache import KVCache
+                src_cache = self.patched_model._prefill_caches[src_key]
+                dst_cache = []
+                for layer_cache in src_cache:
+                    new_layer = KVCache()
+                    if layer_cache.keys is not None:
+                        new_layer.keys = mx.array(layer_cache.keys)
+                    if layer_cache.values is not None:
+                        new_layer.values = mx.array(layer_cache.values)
+                    if hasattr(layer_cache, "offset"):
+                        new_layer.offset = layer_cache.offset
+                    if hasattr(layer_cache, "step"):
+                        new_layer.step = layer_cache.step
+                    dst_cache.append(new_layer)
+                self._session_checkpoints_prompt_cache[checkpoint_id] = dst_cache
 
     def restore_session(self, session_id: str, checkpoint_id: str):
         if checkpoint_id not in self._session_checkpoints:
@@ -405,9 +431,28 @@ class MLXKVBlockManager:
             "comp_seq_len": [mx.array(sl) for sl in ckpt["comp_seq_len"]],
             "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else []
         }
+        if hasattr(self, "patched_model") and self.patched_model is not None:
+            if hasattr(self, "_session_checkpoints_prompt_cache") and checkpoint_id in self._session_checkpoints_prompt_cache:
+                from mlx_lm.models.cache import KVCache
+                ckpt_cache = self._session_checkpoints_prompt_cache[checkpoint_id]
+                dst_cache = []
+                for layer_cache in ckpt_cache:
+                    new_layer = KVCache()
+                    if layer_cache.keys is not None:
+                        new_layer.keys = mx.array(layer_cache.keys)
+                    if layer_cache.values is not None:
+                        new_layer.values = mx.array(layer_cache.values)
+                    if hasattr(layer_cache, "offset"):
+                        new_layer.offset = layer_cache.offset
+                    if hasattr(layer_cache, "step"):
+                        new_layer.step = layer_cache.step
+                    dst_cache.append(new_layer)
+                self.patched_model._prefill_caches[(session_id,)] = dst_cache
 
     def delete_checkpoint(self, checkpoint_id: str):
         self._session_checkpoints.pop(checkpoint_id, None)
+        if hasattr(self, "_session_checkpoints_prompt_cache"):
+            self._session_checkpoints_prompt_cache.pop(checkpoint_id, None)
 
     def get_streaming_summary(self, session_id: str = None) -> dict:
         return {"streaming_ingest": False}
@@ -479,6 +524,13 @@ class MLXKVBlockManager:
         if "token_ids" in session and session["token_ids"]:
             session["token_ids"] = session["token_ids"][:target_len]
 
+        if hasattr(self, "patched_model") and self.patched_model is not None:
+            cache_key = (session_id,)
+            if cache_key in self.patched_model._prefill_caches:
+                for layer_cache in self.patched_model._prefill_caches[cache_key]:
+                    if hasattr(layer_cache, "trim"):
+                        layer_cache.trim(target_len)
+
     def clone_session(self, src_sid: str, dst_sid: str):
         if src_sid not in self.sessions:
             return
@@ -497,6 +549,27 @@ class MLXKVBlockManager:
             "comp_seq_len": [mx.array(sl) for sl in src["comp_seq_len"]],
             "token_ids": src["token_ids"].copy() if "token_ids" in src else []
         }
+        if hasattr(self, "patched_model") and self.patched_model is not None:
+            src_key = (src_sid,)
+            dst_key = (dst_sid,)
+            if src_key in self.patched_model._prefill_caches:
+                from mlx_lm.models.cache import KVCache
+                src_cache = self.patched_model._prefill_caches[src_key]
+                dst_cache = []
+                for layer_cache in src_cache:
+                    new_layer = KVCache()
+                    if layer_cache.keys is not None:
+                        new_layer.keys = mx.array(layer_cache.keys)
+                    if layer_cache.values is not None:
+                        new_layer.values = mx.array(layer_cache.values)
+                    if hasattr(layer_cache, "offset"):
+                        new_layer.offset = layer_cache.offset
+                    if hasattr(layer_cache, "step"):
+                        new_layer.step = layer_cache.step
+                    dst_cache.append(new_layer)
+                self.patched_model._prefill_caches[dst_key] = dst_cache
+                if src_key in self.patched_model._prev_was_prefill:
+                    self.patched_model._prev_was_prefill[dst_key] = self.patched_model._prev_was_prefill[src_key]
 
     def get_session_sequence_length(self, session_id: str) -> int:
         session = self.sessions.get(session_id)
@@ -1013,6 +1086,7 @@ class MLXDiffKVWrapper:
         
         self._patch_attention_layers(model)
         self.model = MLXQwenModel(model, self.manager)
+        self.manager.patched_model = self.model
 
     def _patch_attention_layers(self, model):
         from mlx_lm.models import qwen2
@@ -1260,7 +1334,7 @@ class MLXDiffKVWrapper:
                 helper_ids = get_helper_token_ids(self.tokenizer)
                 update_vsl_state(next_id, srl_state, helper_ids)
                 
-                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 6:
+                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                     uncertainty_suffix = " [uncertain: details missing in source]"
                     uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
                     for t_id in uncertainty_tokens:

@@ -1107,6 +1107,84 @@ def test_dynamic_routing_anchor():
     assert 30 in selected_list
 
 
+def test_update_vsl_state_with_helpers():
+    """Verify that helper tokens in sequences can start or advance locks correctly,
+    and unmatched helpers pass through, while unmatched non-helpers break the lock.
+    """
+    from native_core.srl.session_srl_state import SessionSRLState
+    from native_core.srl.factual_alignment import update_vsl_state
+
+    # 10 is content, 101 is a helper ("is")
+    helper_ids = {101}
+    srl_state = SessionSRLState(
+        semantic_index=None, chunk_graph=None, inverted_index=None,
+        ordered_slot_ids=[], sink_blocks=[],
+    )
+    srl_state.current_step_factual_sequences = [[10, 101, 12]]
+    srl_state.current_step_sequence_entity_ids = [-1]
+    srl_state.vsl_active_candidates = []
+    srl_state.vsl_consecutive_helpers = 0
+
+    # Start lock with content token 10
+    update_vsl_state(10, srl_state, helper_ids)
+    assert srl_state.vsl_active_candidates == [[101, 12]]
+
+    # Advance lock with helper token 101 (which is the expected next token)
+    update_vsl_state(101, srl_state, helper_ids)
+    assert srl_state.vsl_active_candidates == [[12]]
+
+    # Unmatched helper (e.g. 101 again, when 12 is expected) passes through
+    update_vsl_state(101, srl_state, helper_ids)
+    assert srl_state.vsl_active_candidates == [[12]]
+    assert srl_state.vsl_consecutive_helpers == 1
+
+    # Unmatched non-helper breaks the lock
+    update_vsl_state(99, srl_state, helper_ids)
+    assert srl_state.vsl_active_candidates == []
+
+
+def test_factual_store_build_relational_boost():
+    """Verify that low-IDF tokens are only boosted if their decoded text matches RELATIONAL_KEYWORDS."""
+    from native_core.srl.inverted_index import InvertedTokenIndex
+    from native_core.srl.factual_store import FactualExactStore
+
+    class MockTokenizer:
+        def decode(self, token_ids):
+            mapping = {
+                100: "the",
+                101: "is",
+                200: "quantum"
+            }
+            return mapping.get(token_ids[0], "unknown")
+
+    tokenizer = MockTokenizer()
+    inv_index = InvertedTokenIndex(
+        index={},
+        important_vocab=set(),
+        idf={100: 0.5, 101: 0.4, 200: 4.5}
+    )
+    inv_index._tokenizer_ref = tokenizer
+
+    store = FactualExactStore(session_id="test_boost")
+    token_ids = torch.tensor([100, 101, 200], dtype=torch.long)
+    prefill_kv = {0: [torch.zeros(1, 1, 3, 64), torch.zeros(1, 1, 3, 64)]}
+    W_proj = torch.zeros(64, 64)
+
+    store.build(
+        prefill_kv=prefill_kv,
+        token_ids=token_ids,
+        W_proj=W_proj,
+        stop_token_ids={100},
+        inv_index=inv_index,
+        use_salience_parser=True
+    )
+
+    # Check that inv_index._relational_token_ids contains 101 ("is") but NOT 100 ("the")
+    assert 101 in inv_index._relational_token_ids
+    assert 100 not in inv_index._relational_token_ids
+
+
+
 
 
 
