@@ -94,25 +94,22 @@ def get_allowed_tokens_vsl(srl_state, helper_ids: set) -> set:
     """
     Return the set of allowed token IDs for the current decode step.
 
-    Two modes:
-
-    LOCK ACTIVE (vsl_active_candidates is non-empty with non-empty suffixes):
-      allowed = helper_ids ∪ {suffix[0] for each active suffix}
-      The model must advance along one of the locked sequences or use a helper.
-
-    NO ACTIVE LOCK:
-      allowed = helper_ids ∪ {seq[0] for each factual sequence}
-      The model can ONLY START a new factual sequence from its first token.
-      This prevents the model from picking factual tokens out of mid-sequence order
-      and assembling them into invented sentence structures — the dominant cause of
-      entity binding failure and relationship inversion.
-      (Previous behaviour: allowed ALL tokens from ALL sequences when unlocked,
-       which let the model generate correct keywords in wrong relationships.)
+    LOCK ACTIVE: allowed = helper_ids ∪ {suffix[0] for each active suffix}
+    NO ACTIVE LOCK (entity-filtered):
+      allowed = helper_ids ∪ {seq[0] for sequences matching the current entity context}
+      - If no entity context yet (current_entity_id == -1): all sequence starts allowed.
+      - If entity context established: only same-entity starts + prime-entry starts.
+        Prime sequences are always offered to allow entity transitions in comparison
+        questions (e.g. after describing EP2, the model can generate "EP3" to switch).
+      - Sequences with unknown entity (-1) are always allowed as a safe fallback.
     """
     allowed = set(helper_ids)
 
     factual_sequences = getattr(srl_state, "current_step_factual_sequences", None) or []
     active_candidates = getattr(srl_state, "vsl_active_candidates", None) or []
+    entity_ids    = getattr(srl_state, "current_step_sequence_entity_ids", [])
+    is_prime_list = getattr(srl_state, "current_step_sequence_is_prime", [])
+    current_entity = getattr(srl_state, "current_entity_id", -1)
 
     has_active_lock = False
     for suffix in active_candidates:
@@ -121,13 +118,15 @@ def get_allowed_tokens_vsl(srl_state, helper_ids: set) -> set:
             has_active_lock = True
 
     if not has_active_lock:
-        # No active lock: only permit sequence-START tokens.
-        # The model must hit a first token to initiate a new lock.
-        # This is the key fix for entity binding — it cannot pick a mid-sequence
-        # factual token (e.g. "orthogonal") without first passing through the
-        # start of the sequence that anchors its entity context.
-        for seq in factual_sequences:
-            if seq:
+        for i, seq in enumerate(factual_sequences):
+            if not seq:
+                continue
+            seq_entity  = entity_ids[i]  if i < len(entity_ids)    else -1
+            seq_is_prime = is_prime_list[i] if i < len(is_prime_list) else False
+            # Allow when: no entity context, same entity, unknown entity, or prime
+            # sequence (prime sequences gate entity transitions).
+            if (current_entity == -1 or seq_entity == current_entity
+                    or seq_entity == -1 or seq_is_prime):
                 allowed.add(seq[0])
 
     return allowed
@@ -137,25 +136,22 @@ def update_vsl_state(token_id: int, srl_state, helper_ids: set):
     """
     Advance the VSL lock state after a token is generated.
 
-    Helpers pass through without advancing the lock counter (they never break
-    or advance a sequence position — they just extend the gap between content
-    tokens). The consecutive-helper counter still exists to detect genuine drift
-    (model stuck generating only helpers), but the threshold is raised from 4→12
-    so normal connective phrases ("which is also known as the") don't discard a
-    valid lock prematurely.
+    Helpers pass through without advancing the lock. Threshold raised 4→12 so
+    normal bridge phrases don't discard a valid lock prematurely.
+
+    When starting a new lock (no prior lock, token matches a sequence start),
+    record that sequence's entity_id as the new current_entity_id so subsequent
+    fallback steps restrict to the same entity's sequences.
     """
     if token_id in helper_ids:
         srl_state.vsl_consecutive_helpers = getattr(srl_state, "vsl_consecutive_helpers", 0) + 1
-        # Raised from 4→12: a 4-token helper chain is common in normal prose
-        # ("which is also known as"). Previously this would drop the lock after
-        # the very first bridge phrase, reverting to unlocked mode and letting
-        # the model generate out-of-sequence factual tokens.
         if srl_state.vsl_consecutive_helpers >= 12:
             srl_state.vsl_active_candidates = []
         return
 
     factual_sequences = getattr(srl_state, "current_step_factual_sequences", None) or []
     active_candidates = getattr(srl_state, "vsl_active_candidates", None) or []
+    entity_ids    = getattr(srl_state, "current_step_sequence_entity_ids", [])
 
     new_candidates = []
 
@@ -165,14 +161,15 @@ def update_vsl_state(token_id: int, srl_state, helper_ids: set):
 
     has_active_lock = any(len(suffix) > 0 for suffix in active_candidates)
     if not new_candidates and not has_active_lock:
-        # No lock or no advancing candidate: try to start a new lock from this
-        # token's position in any sequence. This handles the case where the model
-        # just generated a sequence-start token (which was permitted by the
-        # sequence-start-only fallback in get_allowed_tokens_vsl).
-        for seq in factual_sequences:
-            for j, t_id in enumerate(seq):
-                if t_id == token_id:
-                    new_candidates.append(seq[j+1:])
+        # In entity-filtered fallback mode only sequence-start tokens are reachable,
+        # so we only look at seq[0] here.  Update entity context from the sequence
+        # we are entering so the next fallback step is entity-consistent.
+        for i, seq in enumerate(factual_sequences):
+            if seq and seq[0] == token_id:
+                new_candidates.append(seq[1:])
+                seq_entity = entity_ids[i] if i < len(entity_ids) else -1
+                if seq_entity != -1:
+                    srl_state.current_entity_id = seq_entity
 
     srl_state.vsl_active_candidates = new_candidates
     srl_state.vsl_consecutive_helpers = 0

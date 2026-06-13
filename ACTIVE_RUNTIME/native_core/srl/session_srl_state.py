@@ -75,6 +75,17 @@ class SessionSRLState:
     # retrieval away from the original question topic.
     factual_anchor_q: Optional[torch.Tensor] = None
 
+    # Entity-subgraph tracking for relationship binding.
+    # current_entity_id: document position (start_idx) of the prime entry for
+    #   the entity currently being generated about. -1 = no context established.
+    #   Persists across decode steps within one response; reset at generation start.
+    # current_step_sequence_entity_ids: parallel to current_step_factual_sequences;
+    #   entity_id (prime start_idx) for each sequence. -1 = unknown.
+    # current_step_sequence_is_prime: parallel list; True if the sequence is a prime entry.
+    current_entity_id: int = -1
+    current_step_sequence_entity_ids: List[int] = field(default_factory=list)
+    current_step_sequence_is_prime: List[bool] = field(default_factory=list)
+
     # Per-layer ordered slots (all layers share pool slots → same list for all)
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)
     layer_slot_ids: Dict[int, List[int]] = field(default_factory=dict)

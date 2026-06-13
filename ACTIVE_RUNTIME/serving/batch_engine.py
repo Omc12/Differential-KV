@@ -1288,10 +1288,11 @@ class ContinuousBatchEngine:
                 srl_state.vsl_consecutive_helpers = 0
                 # Reset the query anchor so each new response anchors to its own
                 # first decode step, not the previous response's Q-vector.
-                # Without this reset, all turns in a multi-turn chat are 35%
-                # anchored toward turn-1's query, causing recurring retrieval of
-                # the same entries regardless of the actual question.
                 srl_state.factual_anchor_q = None
+                # Reset entity context: each new response starts with no entity
+                # commitment so the model can freely choose which entity to
+                # address first based on factual boost alone.
+                srl_state.current_entity_id = -1
 
         # ── Repetition-loop recovery (Fix 2) ────────────────────────────────
         # When a loop has been detected we widen the penalty window from 64 to

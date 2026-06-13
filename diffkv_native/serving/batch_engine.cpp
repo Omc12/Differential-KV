@@ -1160,6 +1160,10 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     // Rebuild initial SRL state for the session
     session->srl_state.vsl_active_candidates.clear();
     session->srl_state.vsl_consecutive_helpers = 0;
+    // Reset entity context so each new response starts uncommitted.
+    session->srl_state.current_entity_id = -1;
+    session->srl_state.current_step_sequence_entity_ids.clear();
+    session->srl_state.current_step_sequence_is_prime.clear();
     session->srl_state.ordered_slot_ids.clear();
     session->srl_state.sink_blocks.clear();
     session->srl_state.inverted_index.clear();

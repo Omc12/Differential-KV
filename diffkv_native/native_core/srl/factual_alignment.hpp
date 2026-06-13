@@ -72,17 +72,14 @@ inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& mo
 
 // Returns the set of allowed token IDs for the current decode step.
 //
-// LOCK ACTIVE (vsl_active_candidates is non-empty with non-empty suffixes):
-//   allowed = helper_ids ∪ {suffix[0] for each active suffix}
-//   The model must advance along one of the locked sequences or use a helper.
+// LOCK ACTIVE: allowed = helper_ids ∪ {suffix[0] for each active suffix}
 //
-// NO ACTIVE LOCK:
-//   allowed = helper_ids ∪ {seq[0] for each factual sequence}
-//   The model can ONLY START a new factual sequence from its first token.
-//   This prevents picking mid-sequence factual tokens and assembling them
-//   into invented sentence structures — the dominant cause of entity binding
-//   failure and relationship inversion.
-//   (Previous behaviour: all tokens from all sequences when unlocked.)
+// NO ACTIVE LOCK (entity-filtered):
+//   allowed = helper_ids ∪ {seq[0] for same-entity and prime sequences}
+//   - current_entity_id == -1: all sequence starts allowed (no context yet).
+//   - Otherwise: only sequences whose entity_id matches current_entity_id, or
+//     sequences with unknown entity (-1), or prime sequences (to allow entity
+//     transitions, e.g. generating "EP3" after finishing the EP2 section).
 inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
     const SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& helper_ids
@@ -98,12 +95,18 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
     }
 
     if (!has_active_lock) {
-        // No active lock: only permit sequence-START tokens so the model must
-        // enter a factual sequence from its first token rather than picking
-        // tokens from the middle of a sequence out of order.
-        for (const auto& seq : srl_state.current_step_factual_sequences) {
-            if (!seq.empty()) {
-                allowed.insert(seq[0]);
+        int32_t current_entity = srl_state.current_entity_id;
+        const auto& entity_ids    = srl_state.current_step_sequence_entity_ids;
+        const auto& is_prime_list = srl_state.current_step_sequence_is_prime;
+        const auto& seqs          = srl_state.current_step_factual_sequences;
+
+        for (size_t i = 0; i < seqs.size(); ++i) {
+            if (seqs[i].empty()) continue;
+            int32_t seq_entity  = (i < entity_ids.size())    ? entity_ids[i]    : -1;
+            bool    seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
+            if (current_entity == -1 || seq_entity == current_entity
+                    || seq_entity == -1 || seq_is_prime) {
+                allowed.insert(seqs[i][0]);
             }
         }
     }
@@ -112,9 +115,9 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
 }
 
 // Advance the VSL lock state after a token is generated.
-// Helpers pass through without advancing the lock; the consecutive-helper
-// counter resets the lock only at >= 12 (raised from 4) so normal bridge
-// phrases like "which is also known as" don't discard a valid lock.
+// Helpers pass through; threshold 4→12 so normal bridge phrases don't drop the lock.
+// When starting a new lock from a sequence-start token, update current_entity_id
+// from that sequence's entity tag so subsequent fallback steps are entity-consistent.
 inline void update_vsl_state_cpp(
     int32_t token_id,
     SessionSRLState& srl_state,
@@ -122,9 +125,6 @@ inline void update_vsl_state_cpp(
 ) {
     if (helper_ids.count(token_id) > 0) {
         srl_state.vsl_consecutive_helpers++;
-        // Raised 4→12: a 4-token helper chain is common in normal prose
-        // ("which is also known as"). Previously this dropped the lock after
-        // the very first bridge phrase, reverting to unlocked mode.
         if (srl_state.vsl_consecutive_helpers >= 12) {
             srl_state.vsl_active_candidates.clear();
         }
@@ -149,11 +149,17 @@ inline void update_vsl_state_cpp(
     }
 
     if (new_candidates.empty() && !has_active_lock) {
-        for (const auto& seq : srl_state.current_step_factual_sequences) {
-            for (size_t j = 0; j < seq.size(); ++j) {
-                if (seq[j] == token_id) {
-                    std::vector<int32_t> next_suffix(seq.begin() + j + 1, seq.end());
-                    new_candidates.push_back(next_suffix);
+        // In entity-filtered fallback mode only sequence-START tokens are reachable,
+        // so we only match seq[0] here.  Record the entity of the entered sequence.
+        const auto& seqs      = srl_state.current_step_factual_sequences;
+        const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
+        for (size_t i = 0; i < seqs.size(); ++i) {
+            if (!seqs[i].empty() && seqs[i][0] == token_id) {
+                std::vector<int32_t> next_suffix(seqs[i].begin() + 1, seqs[i].end());
+                new_candidates.push_back(next_suffix);
+                int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                if (seq_entity != -1) {
+                    srl_state.current_entity_id = seq_entity;
                 }
             }
         }

@@ -512,6 +512,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     srl_state.current_step_factual_tokens = set()
                                     srl_state.current_step_factual_sequences = []
                                     srl_state.current_step_max_similarity = 0.0
+                                    srl_state.current_step_sequence_entity_ids = []
+                                    srl_state.current_step_sequence_is_prime = []
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
                                 srl_enabled = session_config.get("srl_enabled", True)
 
@@ -800,6 +802,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             effective_prime_pos = best_prime_pos
 
                                         if effective_prime_pos is not None:
+                                            # Update entity context: the CA has identified the dominant entity.
+                                            # This kicks in ASAP (doesn't wait for 30+ generated tokens) so
+                                            # early-generation entity binding is also enforced.
+                                            srl_state.current_entity_id = effective_prime_pos
                                             pos_map = {tuple(fe.tokens): fe.start_idx for fe in factual_store.entries}
                                             filtered_seqs = []
                                             for s in srl_state.current_step_factual_sequences:
@@ -827,6 +833,37 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         srl_state.current_step_factual_tokens = set()
                                         for s in srl_state.current_step_factual_sequences:
                                             srl_state.current_step_factual_tokens.update(s)
+
+                                    # ── Entity-Subgraph Tagging ───────────────────────────────────
+                                    # After all filtering is done, tag each remaining sequence with
+                                    # (a) the document position of its nearest prime entry (entity_id),
+                                    # and (b) whether it IS the prime entry itself.  These tags are
+                                    # consumed by get_allowed_tokens_vsl to restrict the unlocked
+                                    # fallback to same-entity sequence starts, preventing cross-entity
+                                    # token mixing that causes relationship binding failures.
+                                    if srl_state is not None and factual_store is not None:
+                                        prime_positions = [
+                                            fe.start_idx for fe in factual_store.entries
+                                            if getattr(fe, "is_prime", False)
+                                        ]
+                                        entity_ids = []
+                                        is_prime_flags = []
+                                        for seq in srl_state.current_step_factual_sequences:
+                                            seq_start = None
+                                            seq_is_prime = False
+                                            for fe in factual_store.entries:
+                                                if fe.tokens == seq:
+                                                    seq_start = fe.start_idx
+                                                    seq_is_prime = getattr(fe, "is_prime", False)
+                                                    break
+                                            if seq_start is not None and prime_positions:
+                                                nearest = min(prime_positions, key=lambda p: abs(p - seq_start))
+                                                entity_ids.append(nearest)
+                                            else:
+                                                entity_ids.append(-1)
+                                            is_prime_flags.append(seq_is_prime)
+                                        srl_state.current_step_sequence_entity_ids = entity_ids
+                                        srl_state.current_step_sequence_is_prime = is_prime_flags
 
                                     # Cache entries so layers 1-27 can run K/V attention without
                                     # re-querying or touching logit-bias state.

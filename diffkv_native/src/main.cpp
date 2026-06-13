@@ -1145,9 +1145,13 @@ int main(int argc, char ** argv) {
             srl_state.current_step_factual_tokens.clear();
             srl_state.current_step_count = 0;
             // Reset query anchor so each response anchors to its own first decode
-            // step rather than persisting the previous turn's Q-vector (which caused
-            // the same recurring retrieval across unrelated follow-up questions).
+            // step rather than persisting the previous turn's Q-vector.
             srl_state.factual_anchor_q.clear();
+            // Reset entity context so each new response starts with no entity
+            // commitment — the model freely picks which entity to lead with.
+            srl_state.current_entity_id = -1;
+            srl_state.current_step_sequence_entity_ids.clear();
+            srl_state.current_step_sequence_is_prime.clear();
         }
 
         // Wrap prompt in Qwen2.5 instruction chat template (skip if gateway already formatted it)
@@ -2467,6 +2471,8 @@ int main(int argc, char ** argv) {
                 srl_state.current_step_factual_tokens.clear();
                 srl_state.current_step_factual_sequences.clear();
                 srl_state.current_step_max_similarity = 0.0f;
+                srl_state.current_step_sequence_entity_ids.clear();
+                srl_state.current_step_sequence_is_prime.clear();
 
                 for (const auto& hit : fact_hits) {
                     for (int32_t tok_id : hit.tokens) {
@@ -2631,6 +2637,11 @@ int main(int argc, char ** argv) {
                     }
 
                     if (effective_prime_pos >= 0) {
+                        // Update entity context from CA: this fires once the model has
+                        // generated enough tokens to identify the dominant prime, and
+                        // locks the entity so entity-filtered VSL stays consistent.
+                        srl_state.current_entity_id = effective_prime_pos;
+
                         std::vector<std::vector<int32_t>> filtered_seqs;
                         std::unordered_set<int32_t> filtered_toks;
                         for (const auto& seq : srl_state.current_step_factual_sequences) {
@@ -2686,6 +2697,46 @@ int main(int argc, char ** argv) {
                         srl_state.current_step_factual_sequences = std::move(top_seqs);
                         srl_state.current_step_factual_tokens    = std::move(top_toks);
                     }
+                }
+
+                // ── Entity-Subgraph Tagging ──────────────────────────────────
+                // After all filtering (CA + Coherence Cap), tag each remaining
+                // sequence with (a) the document position of its nearest prime
+                // entry (entity_id) and (b) whether it IS the prime itself.
+                // get_allowed_tokens_vsl_cpp uses these to restrict the unlocked
+                // fallback to same-entity sequence starts, preventing cross-entity
+                // token mixing that produces correct keywords in wrong relationships.
+                {
+                    std::vector<int32_t> prime_positions;
+                    for (const auto& fe : srl_state.factual_store.entries) {
+                        if (fe.is_prime) prime_positions.push_back(fe.start_idx);
+                    }
+                    const auto& seqs = srl_state.current_step_factual_sequences;
+                    std::vector<int32_t> ent_ids(seqs.size(), -1);
+                    std::vector<bool>    is_prime_flags(seqs.size(), false);
+                    for (size_t si = 0; si < seqs.size(); ++si) {
+                        int32_t seq_start = -1;
+                        bool    seq_prime = false;
+                        for (const auto& fe : srl_state.factual_store.entries) {
+                            if (fe.tokens == seqs[si]) {
+                                seq_start = fe.start_idx;
+                                seq_prime = fe.is_prime;
+                                break;
+                            }
+                        }
+                        if (seq_start >= 0 && !prime_positions.empty()) {
+                            int32_t nearest = prime_positions[0];
+                            int32_t best_dist = std::abs(prime_positions[0] - seq_start);
+                            for (int32_t pp : prime_positions) {
+                                int32_t d = std::abs(pp - seq_start);
+                                if (d < best_dist) { best_dist = d; nearest = pp; }
+                            }
+                            ent_ids[si] = nearest;
+                        }
+                        is_prime_flags[si] = seq_prime;
+                    }
+                    srl_state.current_step_sequence_entity_ids = std::move(ent_ids);
+                    srl_state.current_step_sequence_is_prime   = std::move(is_prime_flags);
                 }
             }
             // ────────────────────────────────────────────────────────────────

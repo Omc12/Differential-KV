@@ -122,6 +122,16 @@ struct SessionSRLState {
     // semantic drift from pulling factual retrieval off the original topic.
     std::vector<float> factual_anchor_q;
 
+    // Entity-subgraph tracking for relationship binding.
+    // current_entity_id: document position (start_idx) of the active prime.
+    //   -1 = no entity context yet. Persists across steps; reset at turn start.
+    // current_step_sequence_entity_ids: parallel to current_step_factual_sequences;
+    //   entity_id (prime start_idx) for each sequence (-1 = unknown).
+    // current_step_sequence_is_prime: True if the sequence is itself a prime entry.
+    int32_t current_entity_id = -1;
+    std::vector<int32_t> current_step_sequence_entity_ids;
+    std::vector<bool>    current_step_sequence_is_prime;
+
     // Segment variables for SAS
     std::unordered_map<int32_t, int> segment_ids; // maps slot_id -> segment_id
     int current_query_segment_id = 0;
