@@ -309,4 +309,4 @@ class FactualExactStore:
                 
         # Sort by final score descending
         merged_results.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in merged_results[:3]]
+        return [x[0] for x in merged_results[:8]]

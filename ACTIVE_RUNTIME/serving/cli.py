@@ -230,6 +230,17 @@ async def run_client_mode(args):
                 session_id = f"cli-session-{uuid.uuid4().hex[:8]}"
                 print_system(f"Conversation reset. New Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
                 continue
+            elif cmd == "/system":
+                parts = user_prompt_stripped.split(maxsplit=1)
+                if len(parts) > 1:
+                    sys_prompt = parts[1]
+                else:
+                    print_system("Please provide the system prompt text after /system.")
+                    continue
+                messages = [m for m in messages if m["role"] != "system"]
+                messages.insert(0, {"role": "system", "content": sys_prompt})
+                print_system(f"System prompt set to: {COLOR_BOLD}{sys_prompt}{COLOR_RESET}")
+                continue
             elif cmd in ["/paste", "/multiline"]:
                 print_system("Raw paste mode active. Paste your text now (it will automatically submit when pasting completes).")
                 pasted_text = await run_raw_paste()
@@ -241,6 +252,7 @@ async def run_client_mode(args):
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Clear chat history and start a new session.")
+                print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                 print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
                 print("  /stats             : Fetch live runtime & memory stats from the server.")
                 print("  /srl               : Fetch Semantic Routing Layer (SRL) details for current session.")
@@ -538,6 +550,17 @@ async def run_direct_mode(args):
                     messages = []
                     print_system(f"Session reset. New Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
                     continue
+                elif cmd == "/system":
+                    parts = user_prompt_stripped.split(maxsplit=1)
+                    if len(parts) > 1:
+                        sys_prompt = parts[1]
+                    else:
+                        print_system("Please provide the system prompt text after /system.")
+                        continue
+                    messages = [m for m in messages if m["role"] != "system"]
+                    messages.insert(0, {"role": "system", "content": sys_prompt})
+                    print_system(f"System prompt set to: {COLOR_BOLD}{sys_prompt}{COLOR_RESET}")
+                    continue
                 elif cmd in ["/paste", "/multiline"]:
                     print_system("Raw paste mode active. Paste your text now (it will automatically submit when pasting completes).")
                     pasted_text = await run_raw_paste()
@@ -549,6 +572,7 @@ async def run_direct_mode(args):
                 elif cmd == "/help":
                     print_system("Available commands:")
                     print("  /reset, /new       : Reset current conversation and release KV cache.")
+                    print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                     print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
                     print("  /stats             : Print model details, VRAM, and KV compression diagnostics.")
                     print("  /srl               : Print Semantic Routing Layer metadata for this session.")
