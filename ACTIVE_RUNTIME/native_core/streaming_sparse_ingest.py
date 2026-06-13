@@ -344,6 +344,9 @@ class StreamingSparseIngestManager:
         # session_id -> cached query words set
         self.session_query_words: Dict[str, set] = {}
 
+        # session_id -> document word counts
+        self.session_doc_words: Dict[str, dict] = {}
+
         # Telemetry
         self.stats = {
             "total_blocks_created": 0,
@@ -433,6 +436,7 @@ class StreamingSparseIngestManager:
         self.session_staging_buffers.pop(session_id, None)
         self.session_prefill_lens.pop(session_id, None)
         self.session_query_words.pop(session_id, None)
+        self.session_doc_words.pop(session_id, None)
 
     def rollback_session(self, session_id: str, target_len: int) -> None:
         """
@@ -597,7 +601,13 @@ class StreamingSparseIngestManager:
             if _RE_ASCII_EQUATION.search(block_text):
                 return True
 
+            # Rule 3d: Verbatim definitions — always exempt
+            if _RE_DEFINITIONS.search(block_text):
+                return True
 
+            # Rule 3e: Formal claims / theorems — always exempt
+            if _RE_CLAIMS.search(block_text):
+                return True
 
             # Rule 3f: Acronym density — always exempt
             acronyms = set(_RE_ACRONYMS.findall(block_text))
@@ -631,6 +641,26 @@ class StreamingSparseIngestManager:
                     }
                     if block_words & query_words:
                         return True
+
+            # Rule 5: Rare document words (exact keywords)
+            doc_words = self.session_doc_words.get(session_id)
+            if doc_words is None:
+                doc_words = {}
+                if token_ids_cpu is not None:
+                    # Decode the entire document text
+                    full_text = self.manager.tokenizer.decode(token_ids_cpu.tolist()).lower()
+                    # Count all words
+                    from collections import Counter
+                    doc_words = Counter(_RE_WORD_TOKENS.findall(full_text))
+                self.session_doc_words[session_id] = doc_words
+
+            block_words = {
+                w for w in _RE_WORD_TOKENS.findall(block_text_lc)
+                if w not in _STOP_WORDS_COMPRESS
+            }
+            for w in block_words:
+                if doc_words.get(w, 0) <= 2:
+                    return True
 
         except Exception:
             pass
@@ -1219,7 +1249,7 @@ class StreamingSparseIngestManager:
         for layer_idx, blocks in layers.items():
             blocks_to_compress = []
             for idx, b in enumerate(blocks):
-                if b.state == "ACCUMULATING" and b.active_k is not None:
+                if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
                     if getattr(b, "skip_compression", False):
                         continue
                     if _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1)):

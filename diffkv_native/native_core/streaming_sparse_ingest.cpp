@@ -227,6 +227,8 @@ void StreamingSparseIngestManager::clear() {
     stats_ = Stats();
     session_token_ids_.clear();
     last_compression_scan_idx_.assign(n_layers_, 0);  // reset scan pointer on session clear
+    doc_word_counts_.clear();
+    doc_word_counts_built_ = false;
 }
 
 void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines) {
@@ -279,6 +281,28 @@ void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::uni
 bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const std::vector<int32_t>& block_tokens) const {
     if (!model_) return false;
     
+    if (!doc_word_counts_built_) {
+        doc_word_counts_.clear();
+        if (!session_token_ids_.empty()) {
+            std::string full_text = model_->detokenize(session_token_ids_);
+            std::string current = "";
+            for (char c : full_text) {
+                if (std::isalnum(static_cast<unsigned char>(c))) {
+                    current += std::tolower(static_cast<unsigned char>(c));
+                } else {
+                    if (!current.empty()) {
+                        doc_word_counts_[current]++;
+                        current.clear();
+                    }
+                }
+            }
+            if (!current.empty()) {
+                doc_word_counts_[current]++;
+            }
+        }
+        doc_word_counts_built_ = true;
+    }
+    
     try {
         std::string block_text = model_->detokenize(block_tokens);
         std::vector<uint32_t> codepoints = decode_utf8(block_text);
@@ -308,7 +332,15 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
             return true;
         }
 
+        // Rule 3d: Verbatim definitions
+        if (std::regex_search(block_text, RE_DEFINITIONS)) {
+            return true;
+        }
 
+        // Rule 3e: Formal claims / theorems
+        if (std::regex_search(block_text, RE_CLAIMS)) {
+            return true;
+        }
 
         // Rule 3f: Acronym density — always exempt
         {
@@ -331,6 +363,17 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
                     if (query_words_.find(w) != query_words_.end()) {
                         return true;
                     }
+                }
+            }
+        }
+
+        // Rule 5: Rare document words (exact keywords)
+        {
+            std::unordered_set<std::string> block_words = extract_words(block_text, stopwords_);
+            for (const auto & w : block_words) {
+                auto it = doc_word_counts_.find(w);
+                if (it != doc_word_counts_.end() && it->second <= 2) {
+                    return true;
                 }
             }
         }
@@ -549,13 +592,10 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.feat_dim = F_test;
     job.rank = rank;
     job.head_dim = head_dim;
-    job.rank_min = std::max(4, rank / 2);
-    job.rank_max = std::min(64, static_cast<int>(rank * 1.5));
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
-    job.out_skip_compression = &block->skip_compression;
     
     // Outputs in block pool host mirrors (CUDA compatible)
     job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * rank;

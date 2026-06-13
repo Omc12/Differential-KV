@@ -427,9 +427,8 @@ inline std::vector<int32_t> route_query(
             }
             
             // 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer)
-            // 2. Gather slots associated with these centers/neighbors, grouped by center and concentric role (Center, Around, Outer)
-            std::unordered_map<int32_t, std::vector<int32_t>> center_to_around;
-            std::unordered_map<int32_t, std::vector<int32_t>> center_to_outer;
+            std::vector<int32_t> around_slots;
+            std::vector<int32_t> outer_slots;
             
             const auto& role_map = cg.role_mapping_tensor;
             const auto& slot_to_center = cg.slot_to_center_tensor;
@@ -442,15 +441,15 @@ inline std::vector<int32_t> route_query(
                     if (all_selected_prime_nodes.count(assoc_c)) {
                         int role = role_map[s];
                         if (role == 1) {
-                            center_to_around[assoc_c].push_back(s);
+                            around_slots.push_back(s);
                         } else if (role == 0) {
-                            center_to_outer[assoc_c].push_back(s);
+                            outer_slots.push_back(s);
                         }
                     }
                 }
             }
             
-            // 3. Build prioritized list: cluster-by-cluster interleaved concentric routing
+            // 3. Build prioritized list: Center -> Around -> Outer
             std::vector<int32_t> prioritized_slots;
             std::unordered_set<int32_t> seen_prioritized;
             
@@ -461,57 +460,19 @@ inline std::vector<int32_t> route_query(
                 }
             };
             
-            // Prepend top k_lex_reserve exact lexical match slots
-            int k_lex_reserve = std::max(1, std::min(3, k_semantic / 8));
-            int take_reserve = std::min(k_lex_reserve, static_cast<int>(lex_slots.size()));
-            for (int i = 0; i < take_reserve; ++i) {
-                add_to_pri(lex_slots[i]);
-            }
-
-            // Step A: Scored/Selected centers + their around slots
+            // First add the scored/selected centers (highest relevance)
             for (int32_t c : selected_centers_vec) {
                 add_to_pri(c);
-                if (center_to_around.count(c)) {
-                    for (int32_t s : center_to_around[c]) {
-                        add_to_pri(s);
-                    }
-                }
             }
-            
-            // Step B: Direct Lexical matches boost
-            for (int32_t s : lex_slots) {
-                add_to_pri(s);
-            }
-            for (int32_t s : rare_lex_slots) {
-                add_to_pri(s);
-            }
-            
-            // Step C: Neighbor prime nodes + their around slots
+            // Then add all expanded prime nodes
             for (int32_t c : all_selected_prime_nodes) {
                 add_to_pri(c);
-                if (center_to_around.count(c)) {
-                    for (int32_t s : center_to_around[c]) {
-                        add_to_pri(s);
-                    }
-                }
             }
-            
-            // Step D: Scored centers' outer slots
-            for (int32_t c : selected_centers_vec) {
-                if (center_to_outer.count(c)) {
-                    for (int32_t s : center_to_outer[c]) {
-                        add_to_pri(s);
-                    }
-                }
+            for (int32_t s : around_slots) {
+                add_to_pri(s);
             }
-            
-            // Step E: Neighbor prime nodes' outer slots
-            for (int32_t c : all_selected_prime_nodes) {
-                if (center_to_outer.count(c)) {
-                    for (int32_t s : center_to_outer[c]) {
-                        add_to_pri(s);
-                    }
-                }
+            for (int32_t s : outer_slots) {
+                add_to_pri(s);
             }
             
             sem_slots = prioritized_slots;

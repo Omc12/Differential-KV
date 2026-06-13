@@ -829,56 +829,48 @@ class KVRuntimeManager:
         for session_id, layers in list(self._streaming_mgr.session_blocks.items()):
             for layer_idx, blocks in list(layers.items()):
                 for block in blocks:
-                    state = getattr(block, "state", None)
-                    if state in ("CPU_COMPRESSED", "CPU_SKIPPED"):
+                    if getattr(block, "state", None) == "CPU_COMPRESSED":
                         try:
                             # Perform the GPU/Metal upload on the main thread
                             gpu_device = block.anchor_kv.device if block.anchor_kv is not None else self.device
-                            
+                            u_cpu = getattr(block, "U_cpu", None)
+                            v_cpu = getattr(block, "V_cpu", None)
+
+                            if u_cpu is None or v_cpu is None:
+                                # Still waiting for compressor to populate — skip for now
+                                continue
+
                             if getattr(block, "anchor_kv_cpu", None) is not None:
                                 block.anchor_kv = block.anchor_kv_cpu.to(gpu_device)
                                 block.anchor_kv_cpu = None
 
-                            if state == "CPU_SKIPPED":
-                                block.state = "DENSE"
-                                block.skip_compression = True
+                            block.U = u_cpu.to(gpu_device)
+                            block.V = v_cpu.to(gpu_device)
+
+                            # Clean up temporary CPU tensors
+                            block.U_cpu = None
+                            block.V_cpu = None
+
+                            # Write to native pool
+                            if hasattr(self, 'native_pool') and self.native_pool is not None:
+                                if getattr(block, 'pool_idx', None) is None:
+                                    block.pool_idx = self.native_pool.allocate_block()
+                                block.pool = self.native_pool
+                                self.native_pool.write_block(
+                                    pool_idx=block.pool_idx,
+                                    U=block.U,
+                                    V=block.V,
+                                    anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
+                                    anchor_V=block.anchor_kv[0, 1],
+                                    scale=block.scale,
+                                    seq_len=block.U.shape[0]
+                                )
+                                # Clear local GPU tensors on block to prevent VRAM leak
                                 block.U = None
                                 block.V = None
-                            else:
-                                u_cpu = getattr(block, "U_cpu", None)
-                                v_cpu = getattr(block, "V_cpu", None)
 
-                                if u_cpu is None or v_cpu is None:
-                                    # Still waiting for compressor to populate — skip for now
-                                    continue
-
-                                block.U = u_cpu.to(gpu_device)
-                                block.V = v_cpu.to(gpu_device)
-
-                                # Clean up temporary CPU tensors
-                                block.U_cpu = None
-                                block.V_cpu = None
-
-                                # Write to native pool
-                                if hasattr(self, 'native_pool') and self.native_pool is not None:
-                                    if getattr(block, 'pool_idx', None) is None:
-                                        block.pool_idx = self.native_pool.allocate_block()
-                                    block.pool = self.native_pool
-                                    self.native_pool.write_block(
-                                        pool_idx=block.pool_idx,
-                                        U=block.U,
-                                        V=block.V,
-                                        anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
-                                        anchor_V=block.anchor_kv[0, 1],
-                                        scale=block.scale,
-                                        seq_len=block.U.shape[0]
-                                    )
-                                    # Clear local GPU tensors on block to prevent VRAM leak
-                                    block.U = None
-                                    block.V = None
-
-                                # Mark finalized and decrement pending counter
-                                block.state = "COMPRESSED"
+                            # Mark finalized and decrement pending counter
+                            block.state = "COMPRESSED"
                             with self._pending_lock:
                                 self._pending_cpu_blocks = max(0, self._pending_cpu_blocks - 1)
                             self._streaming_mgr.update_metadata_state(session_id, layer_idx, block)
@@ -2122,28 +2114,6 @@ class KVRuntimeManager:
         normalized_deltas = deltas / token_norms.unsqueeze(1)
 
 
-        # Check key norm saliency distribution
-        max_norm = k_norms.max().item()
-        mean_norm = k_norms.mean().item()
-        std_norm = k_norms.std().item()
-
-        saliency_ratio = float(os.environ.get("DIFFKV_SALIENCY_RATIO", "2.2"))
-        saliency_cv = float(os.environ.get("DIFFKV_SALIENCY_CV", "0.8"))
-
-        is_salient = (max_norm / (mean_norm + 1e-8) > saliency_ratio) or (std_norm / (mean_norm + 1e-8) > saliency_cv)
-        is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
-
-        if is_salient:
-            block.skip_compression = True
-            block.dirty = True
-            if is_background:
-                block.state = "CPU_SKIPPED"
-            else:
-                block.state = "DENSE"
-                block.U = None
-                block.V = None
-            return
-
         # Per-layer rank with optional early-layer boost.
         # self.config is the DiffKVConfig instance set in __init__.
         _cfg = getattr(self, "config", None)
@@ -2154,22 +2124,7 @@ class KVRuntimeManager:
             _layer_idx_safe, self.num_layers, self.rank,
             early_boost=_early_boost, max_rank_early=_max_rank_early,
         )
-        r_min = max(4, rank // 2)
-        r_max = min(64, int(rank * 1.5))
-        lr_delta = compress_lowrank(normalized_deltas, rank, r_min=r_min, r_max=r_max)
-
-        # Check SVD reconstruction quality
-        min_cosine_sim = float(os.environ.get("DIFFKV_MIN_COSINE_SIM", "0.93"))
-        if lr_delta.cosine_sim < min_cosine_sim:
-            block.skip_compression = True
-            block.dirty = True
-            if is_background:
-                block.state = "CPU_SKIPPED"
-            else:
-                block.state = "DENSE"
-                block.U = None
-                block.V = None
-            return
+        lr_delta = compress_lowrank(normalized_deltas, rank)
 
         # Scale U by token norms to perform token-wise denormalization when reconstructed
         U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)

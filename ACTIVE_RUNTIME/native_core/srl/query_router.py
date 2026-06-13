@@ -341,66 +341,52 @@ def route_query(
                             if nb != -1:
                                 all_selected_prime_nodes.add(nb)
 
-            # 2. Gather slots associated with these centers/neighbors, grouped by center and concentric role (Center, Around, Outer)
+            # 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer)
             role_map = chunk_graph.role_mapping_tensor
             slot_to_center = chunk_graph.slot_to_center_tensor
             
-            center_to_around = defaultdict(list)
-            center_to_outer = defaultdict(list)
+            around_slots = []
+            outer_slots = []
             
             slot_ids_cpu = srl_state.semantic_index.slot_ids.cpu().tolist()
             for s in slot_ids_cpu:
                 if s in all_selected_prime_nodes:
                     continue
+                # check if this slot is associated with one of the selected centers or neighbors
                 if s < len(slot_to_center):
                     assoc_c = int(slot_to_center[s].item())
                     if assoc_c in all_selected_prime_nodes:
                         role = int(role_map[s].item())
                         if role == 1:
-                            center_to_around[assoc_c].append(s)
+                            around_slots.append(s)
                         elif role == 0:
-                            center_to_outer[assoc_c].append(s)
+                            outer_slots.append(s)
                             
-            # 3. Build prioritized list: cluster-by-cluster interleaved concentric routing
+            # 3. Build prioritized list: Center -> Around -> Outer
             prioritized_slots = []
             seen = set()
             
-            # Helper to safely add slots
-            def add_slot(s):
+            # High relevance: Center (both the scored ones and their neighbors)
+            for c in selected_centers:
+                if c not in seen:
+                    prioritized_slots.append(c)
+                    seen.add(c)
+            for c in all_selected_prime_nodes:
+                if c not in seen:
+                    prioritized_slots.append(c)
+                    seen.add(c)
+                    
+            # Mid relevance: Around
+            for s in around_slots:
                 if s not in seen:
                     prioritized_slots.append(s)
                     seen.add(s)
-
-            # Prepend top k_lex_reserve exact lexical match slots
-            k_lex_reserve = max(1, min(3, k_semantic // 8))
-            for s in lexical_slots[:k_lex_reserve]:
-                add_slot(s)
-
-            # Step A: Highly relevant primary centers and their immediate sentence contexts (Around slots)
-            for c in selected_centers:
-                add_slot(c)
-                for s in center_to_around[c]:
-                    add_slot(s)
-
-            # Step B: Direct Lexical Matches — always prioritize exact keyword matched slots
-            for s in (lexical_slots + rare_lex_slots):
-                add_slot(s)
-
-            # Step C: Neighboring/expanded centers and their immediate sentence contexts (Around slots)
-            for c in all_selected_prime_nodes:
-                add_slot(c)
-                for s in center_to_around[c]:
-                    add_slot(s)
-
-            # Step D: Scored centers' outer (peripheral) slots
-            for c in selected_centers:
-                for s in center_to_outer[c]:
-                    add_slot(s)
-
-            # Step E: Neighbor prime nodes' outer (peripheral) slots
-            for c in all_selected_prime_nodes:
-                for s in center_to_outer[c]:
-                    add_slot(s)
+                    
+            # Low relevance: Outer
+            for s in outer_slots:
+                if s not in seen:
+                    prioritized_slots.append(s)
+                    seen.add(s)
                     
             semantic_slots = prioritized_slots[:k_semantic]
             semantic_slots_t = torch.tensor(semantic_slots, dtype=torch.int32, device=Q.device)

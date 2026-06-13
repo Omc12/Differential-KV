@@ -259,42 +259,6 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         scores[s] = k_norms / kv_heads;
     }
 
-    // Calculate key norm statistics for saliency detection
-    float max_k_norm = 0.0f;
-    float sum_k_norm = 0.0f;
-    for (int s = 0; s < S_total; ++s) {
-        float val = scores[s];
-        if (val > max_k_norm) max_k_norm = val;
-        sum_k_norm += val;
-    }
-    float mean_k_norm = sum_k_norm / S_total;
-
-    float sum_sq_diff = 0.0f;
-    for (int s = 0; s < S_total; ++s) {
-        float diff = scores[s] - mean_k_norm;
-        sum_sq_diff += diff * diff;
-    }
-    float std_k_norm = std::sqrt(sum_sq_diff / S_total);
-
-    float saliency_ratio = 2.2f;
-    if (const char* env_sr = std::getenv("DIFFKV_SALIENCY_RATIO")) {
-        saliency_ratio = std::stof(env_sr);
-    }
-    float saliency_cv = 0.8f;
-    if (const char* env_scv = std::getenv("DIFFKV_SALIENCY_CV")) {
-        saliency_cv = std::stof(env_scv);
-    }
-
-    bool is_salient = (max_k_norm / (mean_k_norm + 1e-8f) > saliency_ratio) ||
-                      (std_k_norm / (mean_k_norm + 1e-8f) > saliency_cv);
-
-    if (is_salient) {
-        if (params.out_skip_compression) {
-            *params.out_skip_compression = true;
-        }
-        return true;
-    }
-
     std::vector<float> K_f_normed(S_total * F);
     for (int s = 0; s < S_total; ++s) {
         float norm = 0.0f;
@@ -417,39 +381,17 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         total_energy += S_joint[r] * S_joint[r];
     }
 
-    float target_energy = 0.0f;
-    for (int r = 0; r < std::min(svd_dim, R); ++r) {
-        target_energy += S_joint[r] * S_joint[r];
-    }
-    float energy_retained = (total_energy > 0.0f) ? (target_energy / total_energy) : 1.0f;
-    float cos_sim = std::sqrt(energy_retained);
-
-    float min_cosine_sim = 0.93f;
-    if (const char* env_mcs = std::getenv("DIFFKV_MIN_COSINE_SIM")) {
-        min_cosine_sim = std::stof(env_mcs);
-    }
-
-    if (cos_sim < min_cosine_sim) {
-        if (params.out_skip_compression) {
-            *params.out_skip_compression = true;
-        }
-        return true;
-    }
-
-    int k_dynamic = R;
+    int k_dynamic = svd_dim;
     if (total_energy > 1e-9f) {
-        float entropy = 0.0f;
+        float cum_energy = 0.0f;
+        float threshold = 0.999f * total_energy;
         for (int r = 0; r < svd_dim; ++r) {
-            float p_i = (S_joint[r] * S_joint[r]) / total_energy;
-            entropy -= p_i * std::log(p_i + 1e-12f);
+            cum_energy += S_joint[r] * S_joint[r];
+            if (cum_energy >= threshold) {
+                k_dynamic = std::max(4, std::min(r + 1, R));
+                break;
+            }
         }
-        float max_entropy = std::log(static_cast<float>(svd_dim) + 1e-9f);
-        float entropy_ratio = std::min(1.0f, std::max(0.0f, entropy / (max_entropy + 1e-9f)));
-
-        int r_min = params.rank_min;
-        int r_max = params.rank_max;
-        int k_scaled = static_cast<int>(std::round(r_min + entropy_ratio * (r_max - r_min)));
-        k_dynamic = std::max(4, std::min(k_scaled, r_max));
     }
 
     std::vector<float> U_scaled(S_deltas * R, 0.0f);
