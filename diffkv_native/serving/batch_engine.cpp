@@ -1348,26 +1348,80 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
         
         // Apply Factual Logit Bias
-        for (int32_t tok_id : session->srl_state.current_step_factual_tokens) {
-            if (tok_id >= 0 && tok_id < n_vocab) {
-                output_logits[tok_id] += 3.0f;
-            }
-        }
-        // Transition Biasing (Option 1)
-        if (last_token >= 0 && !session->srl_state.current_step_factual_sequences.empty()) {
-            std::unordered_set<int32_t> transition_candidates;
-            for (const auto& seq : session->srl_state.current_step_factual_sequences) {
-                if (seq.size() > 1) {
-                    for (size_t i = 0; i < seq.size() - 1; ++i) {
-                        if (seq[i] == last_token) {
-                            transition_candidates.insert(seq[i + 1]);
-                        }
+        const auto& srl_state = session->srl_state;
+        int32_t current_entity = srl_state.current_entity_id;
+        const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
+        const auto& is_prime_list = srl_state.current_step_sequence_is_prime;
+
+        // 1. +7.0 factual token bias
+        if (!srl_state.current_step_factual_tokens.empty()) {
+            if (current_entity != -1) {
+                std::unordered_set<int32_t> entity_factual_tokens;
+                for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                    int32_t seq_eid = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                    bool seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
+                    if (seq_eid == -1 || seq_eid == current_entity || seq_is_prime) {
+                        entity_factual_tokens.insert(srl_state.current_step_factual_sequences[i].begin(),
+                                                     srl_state.current_step_factual_sequences[i].end());
+                    }
+                }
+                for (int32_t tok_id : entity_factual_tokens) {
+                    if (tok_id >= 0 && tok_id < n_vocab) {
+                        output_logits[tok_id] += 7.0f;
+                    }
+                }
+            } else {
+                for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                    if (tok_id >= 0 && tok_id < n_vocab) {
+                        output_logits[tok_id] += 7.0f;
                     }
                 }
             }
-            for (int32_t tok_id : transition_candidates) {
-                if (tok_id >= 0 && tok_id < n_vocab) {
-                    output_logits[tok_id] += 4.0f;
+        }
+
+        // 2. +7.0 VSL active-candidate boost
+        for (const auto& suffix : srl_state.vsl_active_candidates) {
+            if (!suffix.empty() && suffix[0] >= 0 && suffix[0] < n_vocab) {
+                output_logits[suffix[0]] += 7.0f;
+            }
+        }
+
+        // 3. -3.5 anti-hallucination penalty
+        if (srl_state.current_step_max_similarity >= 0.55f &&
+            !srl_state.dual_entity_mode &&
+            !srl_state.current_step_factual_tokens.empty()) {
+            const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(*model_);
+            for (int i = 0; i < n_vocab; ++i) {
+                if (srl_state.current_step_factual_tokens.count(i) == 0 &&
+                    helper_ids_penalty.count(i) == 0) {
+                    output_logits[i] -= 3.5f;
+                }
+            }
+        }
+
+        // 4. +10.0 transition bias
+        if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
+            const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(*model_);
+            if (helper_ids_trans.count(last_token) == 0) {
+                std::unordered_set<int32_t> transition_candidates;
+                for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                    int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                    if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
+                        continue; // skip cross-entity transitions
+                    }
+                    const auto& seq = srl_state.current_step_factual_sequences[i];
+                    if (seq.size() > 1) {
+                        for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
+                            if (seq[idx] == last_token) {
+                                transition_candidates.insert(seq[idx + 1]);
+                            }
+                        }
+                    }
+                }
+                for (int32_t tok_id : transition_candidates) {
+                    if (tok_id >= 0 && tok_id < n_vocab) {
+                        output_logits[tok_id] += 10.0f;
+                    }
                 }
             }
         }

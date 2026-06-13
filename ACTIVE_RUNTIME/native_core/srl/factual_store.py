@@ -57,7 +57,9 @@ def merge_adjacent_entries(entries: List[FactEntry]) -> List[FactEntry]:
     merged = []
     curr = sorted_entries[0]
     for next_entry in sorted_entries[1:]:
-        if next_entry.start_idx == curr.end_idx:
+        curr_eid = getattr(curr, "entity_id", -1)
+        next_eid = getattr(next_entry, "entity_id", -1)
+        if next_entry.start_idx == curr.end_idx and curr_eid == next_eid:
             new_K = torch.cat([curr.K, next_entry.K], dim=2)
             new_V = torch.cat([curr.V, next_entry.V], dim=2)
             curr_sim = max(getattr(curr, "current_sim", 0.0), getattr(next_entry, "current_sim", 0.0))
@@ -70,6 +72,7 @@ def merge_adjacent_entries(entries: List[FactEntry]) -> List[FactEntry]:
                 slot_ids=list(set(curr.slot_ids + next_entry.slot_ids)),
                 tokens=curr.tokens + next_entry.tokens
             )
+            curr.entity_id = curr_eid
             curr.current_sim = curr_sim
         else:
             merged.append(curr)

@@ -1092,6 +1092,10 @@ class MLXDiffKVWrapper:
         if srl_state is not None:
             srl_state.vsl_active_candidates = []
             srl_state.vsl_consecutive_helpers = 0
+            srl_state.factual_anchor_q = None
+            srl_state.current_entity_id = -1
+            srl_state.dual_entity_mode = False
+            srl_state.dual_entity_ids = []
             
         # ── Decoding loop ──
         cur_pos = cached_len + len(new_prompt_ids)
@@ -1170,9 +1174,24 @@ class MLXDiffKVWrapper:
 
                 # +7.0 factual token bias (raised from +3)
                 if getattr(srl_state, "current_step_factual_tokens", None):
-                    for tok_id in srl_state.current_step_factual_tokens:
-                        if tok_id < len(logits):
-                            logits[tok_id] += 7.0
+                    current_entity = getattr(srl_state, "current_entity_id", -1)
+                    entity_ids = getattr(srl_state, "current_step_sequence_entity_ids", [])
+                    is_prime_list = getattr(srl_state, "current_step_sequence_is_prime", [])
+                    
+                    if current_entity != -1:
+                        entity_factual_tokens = set()
+                        for i, seq in enumerate(srl_state.current_step_factual_sequences):
+                            seq_eid = entity_ids[i] if i < len(entity_ids) else -1
+                            seq_is_prime = is_prime_list[i] if i < len(is_prime_list) else False
+                            if seq_eid == -1 or seq_eid == current_entity or seq_is_prime:
+                                entity_factual_tokens.update(seq)
+                        for tok_id in entity_factual_tokens:
+                            if tok_id < len(logits):
+                                logits[tok_id] += 7.0
+                    else:
+                        for tok_id in srl_state.current_step_factual_tokens:
+                            if tok_id < len(logits):
+                                logits[tok_id] += 7.0
 
                 # +7.0 VSL active-candidate boost
                 active_candidates = getattr(srl_state, "vsl_active_candidates", [])
@@ -1184,6 +1203,7 @@ class MLXDiffKVWrapper:
                 # -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4,
                 # magnitude raised -2.5→-3.5, active_candidates requirement removed.
                 if (getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4
+                        and not getattr(srl_state, "dual_entity_mode", False)
                         and getattr(srl_state, "current_step_factual_tokens", None)):
                     factual_set = srl_state.current_step_factual_tokens
                     _vocab = len(logits)
@@ -1197,7 +1217,12 @@ class MLXDiffKVWrapper:
                 last_token = generated[-1] if generated else None
                 if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
                     transition_candidates = set()
-                    for seq in srl_state.current_step_factual_sequences:
+                    current_entity = getattr(srl_state, "current_entity_id", -1)
+                    entity_ids = getattr(srl_state, "current_step_sequence_entity_ids", [])
+                    for i, seq in enumerate(srl_state.current_step_factual_sequences):
+                        seq_entity = entity_ids[i] if i < len(entity_ids) else -1
+                        if current_entity != -1 and seq_entity != -1 and seq_entity != current_entity:
+                            continue  # skip cross-entity transitions
                         for idx, tok in enumerate(seq[:-1]):
                             if tok == last_token:
                                 transition_candidates.add(seq[idx + 1])

@@ -841,19 +841,19 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             # This kicks in ASAP (doesn't wait for 30+ generated tokens) so
                                             # early-generation entity binding is also enforced.
                                             srl_state.current_entity_id = effective_prime_pos
-                                            pos_map = {tuple(fe.tokens): fe.start_idx for fe in factual_store.entries}
-                                            filtered_seqs = []
-                                            for s in srl_state.current_step_factual_sequences:
-                                                fe_pos = pos_map.get(tuple(s))
-                                                if fe_pos is None or abs(fe_pos - effective_prime_pos) < 512:
-                                                    filtered_seqs.append(s)
-                                            if filtered_seqs:
-                                                srl_state.current_step_factual_sequences = filtered_seqs
-                                                srl_state.current_step_factual_tokens = set()
-                                                for s in filtered_seqs:
-                                                    srl_state.current_step_factual_tokens.update(s)
-
-                                    # ── Coherence Cap ─────────────────────────────────────────────
+                                            if not getattr(srl_state, "dual_entity_mode", False):
+                                                pos_map = {tuple(fe.tokens): fe.start_idx for fe in factual_store.entries}
+                                                filtered_seqs = []
+                                                for s in srl_state.current_step_factual_sequences:
+                                                    fe_pos = pos_map.get(tuple(s))
+                                                    if fe_pos is None or abs(fe_pos - effective_prime_pos) < 512:
+                                                        filtered_seqs.append(s)
+                                                if filtered_seqs:
+                                                    srl_state.current_step_factual_sequences = filtered_seqs
+                                                    srl_state.current_step_factual_tokens = set()
+                                                    for s in filtered_seqs:
+                                                        srl_state.current_step_factual_tokens.update(s)
+                                         # ── Coherence Cap ──
                                     if srl_state is not None and len(srl_state.current_step_factual_sequences) > 8:
                                         seq_id_to_score = {}
                                         for fe_e in factual_store.entries:

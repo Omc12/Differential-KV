@@ -110,6 +110,8 @@ def get_allowed_tokens_vsl(srl_state, helper_ids: set) -> set:
     entity_ids    = getattr(srl_state, "current_step_sequence_entity_ids", [])
     is_prime_list = getattr(srl_state, "current_step_sequence_is_prime", [])
     current_entity = getattr(srl_state, "current_entity_id", -1)
+    dual_mode = getattr(srl_state, "dual_entity_mode", False)
+    dual_ids = getattr(srl_state, "dual_entity_ids", [])
 
     has_active_lock = False
     for suffix in active_candidates:
@@ -123,11 +125,18 @@ def get_allowed_tokens_vsl(srl_state, helper_ids: set) -> set:
                 continue
             seq_entity  = entity_ids[i]  if i < len(entity_ids)    else -1
             seq_is_prime = is_prime_list[i] if i < len(is_prime_list) else False
-            # Allow when: no entity context, same entity, unknown entity, or prime
-            # sequence (prime sequences gate entity transitions).
-            if (current_entity == -1 or seq_entity == current_entity
-                    or seq_entity == -1 or seq_is_prime):
+            
+            if seq_is_prime or seq_entity == -1:
                 allowed.add(seq[0])
+            elif current_entity != -1:
+                if seq_entity == current_entity:
+                    allowed.add(seq[0])
+            else:
+                if dual_mode and dual_ids:
+                    if seq_entity in dual_ids:
+                        allowed.add(seq[0])
+                else:
+                    allowed.add(seq[0])
 
     return allowed
 

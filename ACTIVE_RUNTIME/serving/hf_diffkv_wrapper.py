@@ -826,6 +826,10 @@ class PyTorchDiffKVHFWrapper:
         if srl_state is not None:
             srl_state.vsl_active_candidates = []
             srl_state.vsl_consecutive_helpers = 0
+            srl_state.factual_anchor_q = None
+            srl_state.current_entity_id = -1
+            srl_state.dual_entity_mode = False
+            srl_state.dual_entity_ids = []
 
         past_kv = outputs.past_key_values
         logits = outputs.logits[:, -1, :]  # [1, vocab]
@@ -907,9 +911,24 @@ class PyTorchDiffKVHFWrapper:
                 # prior favoured the former by more than 3 logit units. At +7 the gap
                 # is wide enough that source-exact tokens reliably win.
                 if getattr(srl_state, "current_step_factual_tokens", None):
-                    for tok_id in srl_state.current_step_factual_tokens:
-                        if tok_id < logits.shape[-1]:
-                            logits[0, tok_id] += 7.0
+                    current_entity = getattr(srl_state, "current_entity_id", -1)
+                    entity_ids = getattr(srl_state, "current_step_sequence_entity_ids", [])
+                    is_prime_list = getattr(srl_state, "current_step_sequence_is_prime", [])
+                    
+                    if current_entity != -1:
+                        entity_factual_tokens = set()
+                        for i, seq in enumerate(srl_state.current_step_factual_sequences):
+                            seq_eid = entity_ids[i] if i < len(entity_ids) else -1
+                            seq_is_prime = is_prime_list[i] if i < len(is_prime_list) else False
+                            if seq_eid == -1 or seq_eid == current_entity or seq_is_prime:
+                                entity_factual_tokens.update(seq)
+                        for tok_id in entity_factual_tokens:
+                            if tok_id < logits.shape[-1]:
+                                logits[0, tok_id] += 7.0
+                    else:
+                        for tok_id in srl_state.current_step_factual_tokens:
+                            if tok_id < logits.shape[-1]:
+                                logits[0, tok_id] += 7.0
 
                 # +7.0 VSL active-candidate boost
                 active_candidates = getattr(srl_state, "vsl_active_candidates", [])
@@ -925,6 +944,7 @@ class PyTorchDiffKVHFWrapper:
                 # as any factual match is present and similarity is sufficient.
                 # This blocks "more complex", "distinct structures", spurious equations.
                 if (getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.4
+                        and not getattr(srl_state, "dual_entity_mode", False)
                         and getattr(srl_state, "current_step_factual_tokens", None)):
                     factual_set = srl_state.current_step_factual_tokens
                     _vocab = logits.shape[-1]
@@ -941,7 +961,12 @@ class PyTorchDiffKVHFWrapper:
                 last_token = generated[-1] if generated else None
                 if last_token is not None and getattr(srl_state, "current_step_factual_sequences", None):
                     transition_candidates = set()
-                    for seq in srl_state.current_step_factual_sequences:
+                    current_entity = getattr(srl_state, "current_entity_id", -1)
+                    entity_ids = getattr(srl_state, "current_step_sequence_entity_ids", [])
+                    for i, seq in enumerate(srl_state.current_step_factual_sequences):
+                        seq_entity = entity_ids[i] if i < len(entity_ids) else -1
+                        if current_entity != -1 and seq_entity != -1 and seq_entity != current_entity:
+                            continue  # skip cross-entity transitions
                         for idx, tok in enumerate(seq[:-1]):
                             if tok == last_token:
                                 transition_candidates.add(seq[idx + 1])

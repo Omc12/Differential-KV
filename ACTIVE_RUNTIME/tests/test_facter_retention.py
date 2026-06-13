@@ -531,12 +531,15 @@ def test_strict_factual_alignment():
     srl_state.current_step_factual_sequences = [[10, 11, 12]]
     srl_state.current_step_max_similarity = 0.5
 
-    # 1. Factual tokens are allowed
+    # 1. Factual tokens: only the start of the sequence is allowed initially
     assert is_token_id_allowed(10, srl_state, None, tokenizer) is True
-    assert is_token_id_allowed(11, srl_state, None, tokenizer) is True
+    assert is_token_id_allowed(11, srl_state, None, tokenizer) is False
 
-    # 2. Transition candidate tokens are allowed
+    # 2. If we simulate locking by manually setting active candidates
+    srl_state.vsl_active_candidates = [[11, 12]]
     assert is_token_id_allowed(11, srl_state, 10, tokenizer) is True
+    assert is_token_id_allowed(10, srl_state, 10, tokenizer) is False
+    srl_state.vsl_active_candidates = []  # reset
     
     # 3. Allowed grammatical helpers are allowed
     assert is_token_id_allowed(100, srl_state, None, tokenizer) is True
@@ -654,11 +657,11 @@ def test_lm_vsl_masking():
     srl_state.vsl_active_candidates = []
     srl_state.vsl_consecutive_helpers = 0
 
-    # Step 1: Unlocked state. Factual sequence start / any sequence token is allowed.
+    # Step 1: Unlocked state. Only factual sequence starts / helpers are allowed.
     allowed = get_allowed_tokens_vsl(srl_state, helper_ids)
-    assert 10 in allowed  # codimension
-    assert 11 in allowed  # diabolical
-    assert 12 in allowed  # points
+    assert 10 in allowed  # codimension (sequence start)
+    assert 11 not in allowed  # diabolical (non-start content)
+    assert 12 not in allowed  # points (non-start content)
     assert 100 in allowed  # "the" (helper)
     assert 200 not in allowed  # "quantum" (ungrounded)
 
@@ -701,8 +704,8 @@ def test_lm_vsl_masking():
     # Suffix completed: [[]]
     assert srl_state.vsl_active_candidates[0] == []
 
-    # Check lock release on sentence ending helper words (6 consecutive helpers)
-    for _ in range(6):
+    # Check lock release on sentence ending helper words (12 consecutive helpers)
+    for _ in range(12):
         update_vsl_state(100, srl_state, helper_ids)
         
     # Lock should be completely empty/released now

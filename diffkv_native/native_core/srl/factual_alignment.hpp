@@ -127,22 +127,24 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         if (effective_prime_pos >= 0) {
             srl_state.current_entity_id = effective_prime_pos;
 
-            std::vector<std::vector<int32_t>> filtered_seqs;
-            std::unordered_set<int32_t> filtered_toks;
-            for (const auto& seq : srl_state.current_step_factual_sequences) {
-                int seq_pos = -1;
-                for (const auto& fe : srl_state.factual_store.entries) {
-                    if (fe.tokens == seq) { seq_pos = fe.start_idx; break; }
+            if (!srl_state.dual_entity_mode) {
+                std::vector<std::vector<int32_t>> filtered_seqs;
+                std::unordered_set<int32_t> filtered_toks;
+                for (const auto& seq : srl_state.current_step_factual_sequences) {
+                    int seq_pos = -1;
+                    for (const auto& fe : srl_state.factual_store.entries) {
+                        if (fe.tokens == seq) { seq_pos = fe.start_idx; break; }
+                    }
+                    bool keep = (seq_pos < 0) || (std::abs(seq_pos - effective_prime_pos) < 512);
+                    if (keep) {
+                        filtered_seqs.push_back(seq);
+                        filtered_toks.insert(seq.begin(), seq.end());
+                    }
                 }
-                bool keep = (seq_pos < 0) || (std::abs(seq_pos - effective_prime_pos) < 512);
-                if (keep) {
-                    filtered_seqs.push_back(seq);
-                    filtered_toks.insert(seq.begin(), seq.end());
+                if (!filtered_seqs.empty()) {
+                    srl_state.current_step_factual_sequences = std::move(filtered_seqs);
+                    srl_state.current_step_factual_tokens    = std::move(filtered_toks);
                 }
-            }
-            if (!filtered_seqs.empty()) {
-                srl_state.current_step_factual_sequences = std::move(filtered_seqs);
-                srl_state.current_step_factual_tokens    = std::move(filtered_toks);
             }
         }
     }

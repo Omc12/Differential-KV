@@ -2224,12 +2224,33 @@ int main(int argc, char ** argv) {
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
 
-            // +7.0 factual token bias (raised from +3): at +3 the LM paraphrase prior
-            // could still outweigh source-exact tokens by >3 logit units. +7 ensures
-            // source tokens reliably win over generic synonyms.
-            for (int32_t tok_id : srl_state.current_step_factual_tokens) {
-                if (tok_id >= 0 && tok_id < n_vocab) {
-                    output_logits[tok_id] += 7.0f;
+            int32_t current_entity = srl_state.current_entity_id;
+            const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
+            const auto& is_prime_list = srl_state.current_step_sequence_is_prime;
+
+            // +7.0 factual token bias (raised from +3)
+            if (!srl_state.current_step_factual_tokens.empty()) {
+                if (current_entity != -1) {
+                    std::unordered_set<int32_t> entity_factual_tokens;
+                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                        int32_t seq_eid = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                        bool seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
+                        if (seq_eid == -1 || seq_eid == current_entity || seq_is_prime) {
+                            entity_factual_tokens.insert(srl_state.current_step_factual_sequences[i].begin(),
+                                                         srl_state.current_step_factual_sequences[i].end());
+                        }
+                    }
+                    for (int32_t tok_id : entity_factual_tokens) {
+                        if (tok_id >= 0 && tok_id < n_vocab) {
+                            output_logits[tok_id] += 7.0f;
+                        }
+                    }
+                } else {
+                    for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                        if (tok_id >= 0 && tok_id < n_vocab) {
+                            output_logits[tok_id] += 7.0f;
+                        }
+                    }
                 }
             }
 
@@ -2246,6 +2267,7 @@ int main(int argc, char ** argv) {
             // document passes the lower bar) making the penalty meaningless and the model
             // unable to generate anything outside the retrieved-but-wrong sequences.
             if (srl_state.current_step_max_similarity >= 0.55f &&
+                !srl_state.dual_entity_mode &&
                 !srl_state.current_step_factual_tokens.empty()) {
                 const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(model);
                 for (int i = 0; i < n_vocab; ++i) {
@@ -2263,11 +2285,16 @@ int main(int argc, char ** argv) {
                 const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
                 if (helper_ids_trans.count(last_token) == 0) {
                     std::unordered_set<int32_t> transition_candidates;
-                    for (const auto& seq : srl_state.current_step_factual_sequences) {
+                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                        int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                        if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
+                            continue; // skip cross-entity transitions
+                        }
+                        const auto& seq = srl_state.current_step_factual_sequences[i];
                         if (seq.size() > 1) {
-                            for (size_t i = 0; i < seq.size() - 1; ++i) {
-                                if (seq[i] == last_token) {
-                                    transition_candidates.insert(seq[i + 1]);
+                            for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
+                                if (seq[idx] == last_token) {
+                                    transition_candidates.insert(seq[idx + 1]);
                                 }
                             }
                         }

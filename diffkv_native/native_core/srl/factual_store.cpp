@@ -456,7 +456,7 @@ static std::vector<FactEntry> merge_adjacent_entries(const std::vector<FactEntry
     FactEntry curr = sorted_entries[0];
     for (size_t i = 1; i < sorted_entries.size(); ++i) {
         const auto& next_entry = sorted_entries[i];
-        if (next_entry.start_idx == curr.end_idx) {
+        if (next_entry.start_idx == curr.end_idx && curr.entity_id == next_entry.entity_id) {
             int curr_len = curr.end_idx - curr.start_idx;
             int next_len = next_entry.end_idx - next_entry.start_idx;
             int new_len = curr_len + next_len;
