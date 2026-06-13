@@ -41,6 +41,7 @@ set(SOURCES
     native_core/compression/async_compressor.cpp
     native_core/compression/lowrank.cpp
     native_core/srl/diffkv_srl.cpp
+    native_core/srl/factual_store.cpp
     native_core/paging/paged_kv_store.cpp
     native_core/streaming_sparse_ingest.cpp
     native_core/kv_runtime_manager.cpp

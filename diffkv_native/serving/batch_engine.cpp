@@ -11,6 +11,7 @@
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/compression/async_compressor.hpp"
 #include "native_core/kv_runtime_manager.hpp"
+#include "native_core/srl/factual_store.hpp"
 
 #include <iostream>
 #include <cmath>
@@ -1113,6 +1114,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].rope_freq_base = model_->get_config().rope_freq_base;
         userdata[l].approximate_attn = approx;
         userdata[l].ignore_c = false;
+        userdata[l].srl_state = &session->srl_state;
+        userdata[l].W_proj = W_proj_host.data();
+        userdata[l].desc_dim = desc_dim;
     }
     
     struct ggml_tensor * decode_logits = nullptr;
@@ -1202,6 +1206,26 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             true  // add_last_as_sink
         );
         session->has_srl_state = true;
+
+        std::unordered_set<int32_t> prime_slots(
+            session->srl_state.chunk_graph.cluster_centers_tensor.begin(),
+            session->srl_state.chunk_graph.cluster_centers_tensor.end()
+        );
+        session->srl_state.factual_store.build(
+            k_activations,
+            v_activations,
+            prompt_tokens,
+            W_proj_host.data(),
+            desc_dim,
+            head_dim,
+            kv_heads,
+            stop_token_ids_,
+            session->srl_state.ordered_slot_ids,
+            session->micro_block_size + 1,
+            session->srl_state.inverted_index,
+            prime_slots,
+            true // use_salience_parser
+        );
     }
     
     session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
@@ -1298,6 +1322,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             userdata[l].active_positions_dense = session->active_positions_dense.data();
             userdata[l].active_block_tokens = total_dense_tokens[l];
             userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
+            userdata[l].current_pos = current_pos;
         }
         
         if (ggml_backend_sched_graph_compute(sched_, decode_graph) != GGML_STATUS_SUCCESS) {

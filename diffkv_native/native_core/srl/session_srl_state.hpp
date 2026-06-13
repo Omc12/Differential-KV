@@ -7,6 +7,7 @@
 #include "native_core/srl/semantic_index.hpp"
 #include "native_core/srl/chunk_graph.hpp"
 #include "native_core/srl/inverted_index.hpp"
+#include "native_core/srl/factual_store.hpp"
 
 #include <vector>
 #include <unordered_map>
@@ -28,6 +29,7 @@ struct SessionSRLState {
     SemanticIndex      semantic_index;
     ChunkGraph         chunk_graph;
     InvertedTokenIndex inverted_index;
+    FactualExactStore  factual_store;
 
     // --- Block ordering ---
     std::vector<int32_t> ordered_slot_ids;   // pool slot IDs in chronological order

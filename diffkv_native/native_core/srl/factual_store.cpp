@@ -1,0 +1,503 @@
+#include "native_core/srl/factual_store.hpp"
+#include <iostream>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#endif
+
+namespace diffkv {
+
+void FactualExactStore::build(
+    const std::vector<std::vector<float>>& k_activations,
+    const std::vector<std::vector<float>>& v_activations,
+    const std::vector<int32_t>& token_ids,
+    const float* W_proj,
+    int desc_dim,
+    int head_dim,
+    int kv_heads,
+    const std::unordered_set<int>& stop_token_ids,
+    const std::vector<int32_t>& slot_ids,
+    int block_size,
+    const InvertedTokenIndex& inv_index,
+    const std::unordered_set<int32_t>& semantic_prime_slots,
+    bool use_salience_parser
+) {
+    int L = token_ids.size();
+    if (L == 0 || k_activations.empty()) return;
+    int num_layers = k_activations.size();
+    int F_test = kv_heads * head_dim;
+
+    std::vector<bool> factual_mask(L, false);
+
+    if (use_salience_parser) {
+        // 1. Compute Eagle lookback score R(t) using causal key self-similarity
+        std::vector<float> R(L, 0.0f);
+        if (L > 1) {
+            std::vector<float> K_avg(L * head_dim, 0.0f);
+            for (int t = 0; t < L; ++t) {
+                for (int kh = 0; kh < kv_heads; ++kh) {
+                    for (int d = 0; d < head_dim; ++d) {
+                        K_avg[t * head_dim + d] += k_activations[0][t * F_test + kh * head_dim + d];
+                    }
+                }
+                for (int d = 0; d < head_dim; ++d) {
+                    K_avg[t * head_dim + d] /= kv_heads;
+                }
+            }
+
+            std::vector<float> sim(L * L, 0.0f);
+#ifdef __APPLE__
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, L, L, head_dim,
+                        1.0f / std::sqrt(head_dim), K_avg.data(), head_dim,
+                        K_avg.data(), head_dim, 0.0f, sim.data(), L);
+#else
+            for (int i = 0; i < L; ++i) {
+                for (int j = 0; j < L; ++j) {
+                    float dot = 0.0f;
+                    for (int d = 0; d < head_dim; ++d) {
+                        dot += K_avg[i * head_dim + d] * K_avg[j * head_dim + d];
+                    }
+                    sim[i * L + j] = dot / std::sqrt(head_dim);
+                }
+            }
+#endif
+
+            // Apply causal mask and softmax along key dimensions
+            for (int i = 0; i < L; ++i) {
+                float max_val = -1e9f;
+                for (int j = 0; j < L; ++j) {
+                    if (j >= i) {
+                        sim[i * L + j] = -1e9f;
+                    }
+                    if (sim[i * L + j] > max_val) {
+                        max_val = sim[i * L + j];
+                    }
+                }
+                float sum_exp = 0.0f;
+                for (int j = 0; j < L; ++j) {
+                    sim[i * L + j] = std::exp(sim[i * L + j] - max_val);
+                    sum_exp += sim[i * L + j];
+                }
+                float inv_sum = 1.0f / (sum_exp + 1e-10f);
+                for (int j = 0; j < L; ++j) {
+                    sim[i * L + j] *= inv_sum;
+                }
+            }
+
+            // Sum columns to get total lookbacks pointing to each token
+            for (int j = 0; j < L; ++j) {
+                float col_sum = 0.0f;
+                for (int i = 0; i < L; ++i) {
+                    col_sum += sim[i * L + j];
+                }
+                R[j] = col_sum;
+            }
+        }
+
+        // 2. Compute Key Norms at Layer 0
+        std::vector<float> key_norms(L, 1.0f);
+        for (int t = 0; t < L; ++t) {
+            std::vector<float> K_avg_t(head_dim, 0.0f);
+            for (int kh = 0; kh < kv_heads; ++kh) {
+                for (int d = 0; d < head_dim; ++d) {
+                    K_avg_t[d] += k_activations[0][t * F_test + kh * head_dim + d];
+                }
+            }
+            float sum_sq = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                K_avg_t[d] /= kv_heads;
+                sum_sq += K_avg_t[d] * K_avg_t[d];
+            }
+            key_norms[t] = std::sqrt(sum_sq);
+        }
+
+        // 3. Compute IDF values
+        std::vector<float> idf_vals(L, 0.0f);
+        for (int t = 0; t < L; ++t) {
+            int tid = token_ids[t];
+            auto it = inv_index.idf.find(tid);
+            if (it != inv_index.idf.end()) {
+                idf_vals[t] = it->second;
+            } else {
+                idf_vals[t] = (stop_token_ids.count(tid) ? 0.1f : 2.5f);
+            }
+        }
+
+        // 4. Compute joint factual salience score
+        std::vector<float> total_salience(L, 0.0f);
+        for (int t = 0; t < L; ++t) {
+            total_salience[t] = key_norms[t] * idf_vals[t] * (1.0f + 1.0f * R[t]);
+        }
+
+        // Select the top 10% most salient tokens
+        int k_num = std::max(8, (int)(L * 0.10f));
+        k_num = std::min(k_num, L);
+
+        if (L > 0) {
+            std::vector<float> sorted_salience = total_salience;
+            std::nth_element(sorted_salience.begin(), sorted_salience.end() - k_num, sorted_salience.end());
+            float threshold_val = sorted_salience[L - k_num];
+            for (int t = 0; t < L; ++t) {
+                factual_mask[t] = (total_salience[t] >= threshold_val);
+            }
+        }
+
+        // 5. Gap-bridging (dilation)
+        if (L > 2) {
+            std::vector<bool> dilated_mask = factual_mask;
+            for (int t = 1; t < L - 1; ++t) {
+                if (factual_mask[t - 1] && factual_mask[t + 1]) {
+                    dilated_mask[t] = true;
+                }
+            }
+            factual_mask = dilated_mask;
+        }
+    } else {
+        // Fallback to simple stop-token exclusion
+        for (int t = 0; t < L; ++t) {
+            int tid = token_ids[t];
+            if (!stop_token_ids.count(tid) && tid > 0) {
+                factual_mask[t] = true;
+            }
+        }
+    }
+
+    // 6. Group contiguous factual tokens into spans
+    std::vector<std::pair<int, int>> spans;
+    bool in_span = false;
+    int start = -1;
+    for (int t = 0; t < L; ++t) {
+        if (factual_mask[t]) {
+            if (!in_span) {
+                start = t;
+                in_span = true;
+            }
+        } else {
+            if (in_span) {
+                spans.push_back({start, t});
+                in_span = false;
+            }
+        }
+    }
+    if (in_span) {
+        spans.push_back({start, L});
+    }
+
+    // Split long spans into chunks of max length 12
+    std::vector<std::pair<int, int>> chunked_spans;
+    for (const auto& span : spans) {
+        for (int sub_s = span.first; sub_s < span.second; sub_s += 12) {
+            int sub_e = std::min(sub_s + 12, span.second);
+            chunked_spans.push_back({sub_s, sub_e});
+        }
+    }
+
+    // 7. Extract verbatim KV sequences across all layers for each span
+    for (const auto& span : chunked_spans) {
+        int s = span.first;
+        int e = span.second;
+        int span_len = e - s;
+        if (span_len <= 0) continue;
+
+        FactEntry entry;
+        entry.start_idx = s;
+        entry.end_idx = e;
+        entry.K.resize(num_layers * F_test * span_len);
+        entry.V.resize(num_layers * F_test * span_len);
+
+        for (int l = 0; l < num_layers; ++l) {
+            std::memcpy(entry.K.data() + l * F_test * span_len,
+                        k_activations[l].data() + s * F_test,
+                        span_len * F_test * sizeof(float));
+            std::memcpy(entry.V.data() + l * F_test * span_len,
+                        v_activations[l].data() + s * F_test,
+                        span_len * F_test * sizeof(float));
+        }
+
+        // Compute descriptor for the span using layer 0 average key
+        std::vector<float> avg_k(head_dim, 0.0f);
+        for (int t = 0; t < span_len; ++t) {
+            for (int kh = 0; kh < kv_heads; ++kh) {
+                for (int d = 0; d < head_dim; ++d) {
+                    avg_k[d] += entry.K[kh * head_dim + t * F_test + d];
+                }
+            }
+        }
+        for (int d = 0; d < head_dim; ++d) {
+            avg_k[d] /= (span_len * kv_heads);
+        }
+
+        // Project descriptor using W_proj [desc_dim, head_dim]
+        entry.descriptor.resize(desc_dim, 0.0f);
+        if (W_proj) {
+            float norm_sq = 0.0f;
+            for (int r = 0; r < desc_dim; ++r) {
+                float val = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    val += avg_k[d] * W_proj[r * head_dim + d];
+                }
+                entry.descriptor[r] = val;
+                norm_sq += val * val;
+            }
+            float norm = std::sqrt(norm_sq) + 1e-8f;
+            for (int r = 0; r < desc_dim; ++r) {
+                entry.descriptor[r] /= norm;
+            }
+        }
+
+        // Determine which slot IDs this span overlaps with
+        if (block_size > 0) {
+            int start_block_idx = s / block_size;
+            int end_block_idx = (e - 1) / block_size;
+            for (int idx = start_block_idx; idx <= end_block_idx; ++idx) {
+                if (idx >= 0 && idx < (int)slot_ids.size()) {
+                    entry.slot_ids.push_back(slot_ids[idx]);
+                }
+            }
+        }
+
+        // Tokens
+        for (int t = s; t < e; ++t) {
+            entry.tokens.push_back(token_ids[t]);
+        }
+
+        // Prime node designation
+        bool is_prime = false;
+        for (int slot : entry.slot_ids) {
+            if (semantic_prime_slots.count(slot)) {
+                is_prime = true;
+                break;
+            }
+        }
+        if (!is_prime) {
+            float max_idf = 0.0f;
+            for (int t : entry.tokens) {
+                auto it = inv_index.idf.find(t);
+                float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
+                if (idf > max_idf) max_idf = idf;
+            }
+            if (max_idf >= 3.0f) {
+                is_prime = true;
+            }
+        }
+        entry.is_prime = is_prime;
+
+        entries.push_back(std::move(entry));
+    }
+
+    // 8. Build graph connections
+    int num_entries = entries.size();
+    for (int i = 0; i < num_entries; ++i) {
+        auto& entry_i = entries[i];
+        std::unordered_set<int> tokens_i(entry_i.tokens.begin(), entry_i.tokens.end());
+
+        for (int j = i + 1; j < num_entries; ++j) {
+            auto& entry_j = entries[j];
+            std::unordered_set<int> tokens_j(entry_j.tokens.begin(), entry_j.tokens.end());
+
+            // Lexical overlap
+            bool lexical_overlap = false;
+            for (int t : tokens_i) {
+                if (tokens_j.count(t) && !stop_token_ids.count(t)) {
+                    lexical_overlap = true;
+                    break;
+                }
+            }
+
+            // Temporal distance
+            int temporal_dist = std::abs(entry_i.start_idx - entry_j.start_idx);
+            bool is_temporal_adjacent = (temporal_dist < 512);
+
+            // Descriptor similarity
+            float sim_val = 0.0f;
+            for (int r = 0; r < desc_dim; ++r) {
+                sim_val += entry_i.descriptor[r] * entry_j.descriptor[r];
+            }
+            bool is_similar = (sim_val >= 0.3f);
+
+            if (lexical_overlap || is_temporal_adjacent || is_similar) {
+                float w_lex = lexical_overlap ? 1.0f : 0.0f;
+                float w_temp = std::max(0.0f, 1.0f - (temporal_dist / 512.0f));
+                float w_sim = std::max(0.0f, sim_val);
+
+                float weight = 0.4f * w_sim + 0.4f * w_lex + 0.2f * w_temp;
+
+                entry_i.neighbors.push_back(j);
+                entry_i.weights.push_back(weight);
+
+                entry_j.neighbors.push_back(i);
+                entry_j.weights.push_back(weight);
+            }
+        }
+    }
+}
+
+std::vector<FactEntry> FactualExactStore::query(
+    const float* Q,
+    int H_q,
+    int head_dim,
+    const float* W_proj,
+    int desc_dim,
+    float threshold,
+    const std::unordered_set<int32_t>* active_slots
+) const {
+    if (entries.empty() || !W_proj) return {};
+
+    // 1. Mean query: [head_dim]
+    std::vector<float> avg_q(head_dim, 0.0f);
+    for (int h = 0; h < H_q; ++h) {
+        const float* qh = Q + h * head_dim;
+        for (int d = 0; d < head_dim; ++d) {
+            avg_q[d] += qh[d];
+        }
+    }
+    for (int d = 0; d < head_dim; ++d) {
+        avg_q[d] /= H_q;
+    }
+
+    // 2. Project query descriptor: [desc_dim]
+    std::vector<float> q_desc(desc_dim, 0.0f);
+    float norm_sq = 0.0f;
+    for (int r = 0; r < desc_dim; ++r) {
+        float val = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            val += avg_q[d] * W_proj[r * head_dim + d];
+        }
+        q_desc[r] = val;
+        norm_sq += val * val;
+    }
+    float norm = std::sqrt(norm_sq) + 1e-8f;
+    for (int r = 0; r < desc_dim; ++r) {
+        q_desc[r] /= norm;
+    }
+
+    // 3. Base Layer: Candidate indexes matching active_slots
+    std::unordered_set<int> candidate_indices;
+    if (active_slots) {
+        for (size_t idx = 0; idx < entries.size(); ++idx) {
+            const auto& entry = entries[idx];
+            bool has_slot = false;
+            for (int slot : entry.slot_ids) {
+                if (active_slots->count(slot)) {
+                    has_slot = true;
+                    break;
+                }
+            }
+            if (has_slot) {
+                candidate_indices.insert(idx);
+            }
+        }
+    } else {
+        for (size_t idx = 0; idx < entries.size(); ++idx) {
+            candidate_indices.insert(idx);
+        }
+    }
+
+    // 4. Factual Prime Node Activation (seeds)
+    std::vector<std::pair<int, float>> prime_seeds;
+    for (size_t idx = 0; idx < entries.size(); ++idx) {
+        const auto& entry = entries[idx];
+        if (entry.is_prime) {
+            float sim = 0.0f;
+            for (int r = 0; r < desc_dim; ++r) {
+                sim += q_desc[r] * entry.descriptor[r];
+            }
+            if (sim >= threshold) {
+                prime_seeds.push_back({(int)idx, sim});
+            }
+        }
+    }
+
+    // 5. Factual Graph Walk
+    std::unordered_map<int, float> walk_candidates;
+    for (const auto& seed : prime_seeds) {
+        int seed_idx = seed.first;
+        float seed_sim = seed.second;
+        walk_candidates[seed_idx] = seed_sim;
+        const auto& entry = entries[seed_idx];
+        for (size_t nb_i = 0; nb_i < entry.neighbors.size(); ++nb_i) {
+            int nb_idx = entry.neighbors[nb_i];
+            float weight = entry.weights[nb_i];
+            float prop_sim = seed_sim * weight;
+            auto it = walk_candidates.find(nb_idx);
+            if (it == walk_candidates.end() || prop_sim > it->second) {
+                walk_candidates[nb_idx] = prop_sim;
+            }
+        }
+    }
+
+    // 6. Merge candidates
+    std::vector<std::pair<FactEntry, float>> merged_results;
+    std::unordered_set<int> all_candidate_idxs = candidate_indices;
+    for (const auto& pair : walk_candidates) {
+        all_candidate_idxs.insert(pair.first);
+    }
+
+    for (int idx : all_candidate_idxs) {
+        const auto& entry = entries[idx];
+        float sim = 0.0f;
+        for (int r = 0; r < desc_dim; ++r) {
+            sim += q_desc[r] * entry.descriptor[r];
+        }
+
+        bool passes_main = (sim >= threshold);
+        bool passes_relaxed = false;
+        if (active_slots) {
+            bool has_slot = false;
+            for (int slot : entry.slot_ids) {
+                if (active_slots->count(slot)) {
+                    has_slot = true;
+                    break;
+                }
+            }
+            if (has_slot && sim >= 0.15f) {
+                passes_relaxed = true;
+            }
+        }
+        auto walk_it = walk_candidates.find(idx);
+        bool passes_walk = (walk_it != walk_candidates.end() && walk_it->second >= threshold);
+
+        if (passes_main || passes_relaxed || passes_walk) {
+            float final_score = sim;
+            if (walk_it != walk_candidates.end() && walk_it->second > final_score) {
+                final_score = walk_it->second;
+            }
+            merged_results.push_back({entry, final_score});
+        }
+    }
+
+    // Fallback
+    if (active_slots && merged_results.empty()) {
+        std::vector<std::pair<FactEntry, float>> fallback_matches;
+        for (int idx : candidate_indices) {
+            const auto& entry = entries[idx];
+            float sim = 0.0f;
+            for (int r = 0; r < desc_dim; ++r) {
+                sim += q_desc[r] * entry.descriptor[r];
+            }
+            if (sim >= 0.15f) {
+                fallback_matches.push_back({entry, sim});
+            }
+        }
+        std::sort(fallback_matches.begin(), fallback_matches.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (!fallback_matches.empty()) {
+            merged_results.push_back(fallback_matches[0]);
+        }
+    }
+
+    std::sort(merged_results.begin(), merged_results.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::vector<FactEntry> results;
+    int limit = std::min(8, (int)merged_results.size());
+    for (int i = 0; i < limit; ++i) {
+        results.push_back(merged_results[i].first);
+    }
+    return results;
+}
+
+} // namespace diffkv

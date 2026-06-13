@@ -34,6 +34,9 @@ struct CustomAttnUserData {
     int active_slot;
     bool ignore_c = false;
     int current_pos = 0;  // sequence position of the current decode token (set in main.cpp)
+    void * srl_state = nullptr;
+    const float * W_proj = nullptr;
+    int desc_dim = 0;
 
     // Cached Metal buffers to avoid per-token allocations
     void * mtl_dense_k = nullptr;

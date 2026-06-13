@@ -1,5 +1,7 @@
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/srl/attention_cache.hpp"
+#include "native_core/srl/session_srl_state.hpp"
+#include "native_core/srl/factual_store.hpp"
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -368,6 +370,13 @@ void custom_attention_op_callback(
     const char* env_cpu = std::getenv("DIFFKV_FORCE_CPU_ATTN");
     bool force_cpu = (env_cpu && std::string(env_cpu) == "1");
 
+    if (data->srl_state != nullptr) {
+        SessionSRLState* srl = static_cast<SessionSRLState*>(data->srl_state);
+        if (!srl->factual_store.entries.empty()) {
+            force_cpu = true;
+        }
+    }
+
     if (!force_cpu) {
         // Unified Metal path: one kernel dispatch handles sparse + dense.
         // Output is written directly into dst->data.
@@ -412,47 +421,165 @@ void custom_attention_op_callback(
         );
     }
 
-    if (T_dense == 0) {
-        // No dense tokens: copy sparse output (or zero)
-        if (K > 0) {
-            std::memcpy(dst->data, out_sparse.data(), n_q_heads * D * sizeof(float));
+    // ── Factual Exact Store Attention ──
+    std::vector<FactEntry> matching_entries;
+    if (data->srl_state != nullptr && data->W_proj != nullptr) {
+        SessionSRLState* srl = static_cast<SessionSRLState*>(data->srl_state);
+        std::unordered_set<int32_t> active_slots;
+        if (K > 0 && slot_indices && slot_indices->data) {
+            const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
+            for (int k = 0; k < K; ++k) {
+                if (slots_ptr[k] >= 0) active_slots.insert(slots_ptr[k]);
+            }
+        }
+        // Align Query-Key RoPE rotation states: unrotate Q prior to descriptor matching
+        std::vector<float> Q_unrot(n_q_heads * D);
+        const float* Q_ptr = (const float*)Q->data;
+        if (has_rope) {
+            int half_d = D / 2;
+            for (int h = 0; h < n_q_heads; ++h) {
+                for (int d = 0; d < half_d; ++d) {
+                    float theta_val = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
+                    float angle = data->current_pos * theta_val;
+                    float cos_a = std::cos(angle);
+                    float sin_a = std::sin(angle);
+                    float q_rot_d = Q_ptr[h * D + d];
+                    float q_rot_partner = Q_ptr[h * D + d + half_d];
+                    Q_unrot[h * D + d] = q_rot_d * cos_a + q_rot_partner * sin_a;
+                    Q_unrot[h * D + d + half_d] = -q_rot_d * sin_a + q_rot_partner * cos_a;
+                }
+            }
         } else {
-            std::memset(dst->data, 0, n_q_heads * D * sizeof(float));
+            std::memcpy(Q_unrot.data(), Q_ptr, n_q_heads * D * sizeof(float));
         }
-        if (cache_active) {
-            get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+
+        matching_entries = srl->factual_store.query(
+            Q_unrot.data(),
+            n_q_heads,
+            D,
+            data->W_proj,
+            data->desc_dim,
+            0.4f,
+            &active_slots
+        );
+    }
+
+    std::vector<float> out_facts(n_q_heads * D, 0.0f);
+    std::vector<float> lse_facts(n_q_heads, -1e30f);
+
+    std::vector<float> fact_k;
+    std::vector<float> fact_v;
+    std::vector<int> fact_positions;
+    int F_test = n_kv_heads * D;
+
+    for (const auto& entry : matching_entries) {
+        int span_len = entry.end_idx - entry.start_idx;
+        int offset = data->layer_idx * F_test * span_len;
+        fact_k.insert(fact_k.end(), entry.K.begin() + offset, entry.K.begin() + offset + F_test * span_len);
+        fact_v.insert(fact_v.end(), entry.V.begin() + offset, entry.V.begin() + offset + F_test * span_len);
+        for (int p = entry.start_idx; p < entry.end_idx; ++p) {
+            fact_positions.push_back(p);
         }
-        return;
+    }
+
+    int total_fact_len = fact_positions.size();
+    if (total_fact_len > 0) {
+        int half_d = D / 2;
+        std::vector<float> theta(half_d);
+        for (int d = 0; d < half_d; ++d) {
+            theta[d] = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
+        }
+
+        std::vector<float> fact_k_rot(total_fact_len * F_test);
+        for (int t = 0; t < total_fact_len; ++t) {
+            int pos = fact_positions[t];
+            for (int kh = 0; kh < n_kv_heads; ++kh) {
+                int head_off = t * F_test + kh * D;
+                for (int d = 0; d < D; ++d) {
+                    float raw_k = fact_k[head_off + d];
+                    if (has_rope) {
+                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        float raw_p = fact_k[head_off + partner];
+                        float rot_c = (d < half_d) ? -raw_p : raw_p;
+                        int idx = (d < half_d) ? d : (d - half_d);
+                        float angle = pos * theta[idx];
+                        fact_k_rot[head_off + d] = raw_k * std::cos(angle) + rot_c * std::sin(angle);
+                    } else {
+                        fact_k_rot[head_off + d] = raw_k;
+                    }
+                }
+            }
+        }
+
+        const float* Q_ptr = (const float*)Q->data;
+        const int g = n_q_heads / n_kv_heads;
+        
+        for (int h = 0; h < n_q_heads; ++h) {
+            int kv_head = h / g;
+            float max_s = -1e30f;
+            std::vector<float> scores(total_fact_len);
+            
+            for (int t = 0; t < total_fact_len; ++t) {
+                float dot = 0.0f;
+                const float* k_t = fact_k_rot.data() + t * F_test + kv_head * D;
+                for (int d = 0; d < D; ++d) {
+                    dot += Q_ptr[h * D + d] * k_t[d];
+                }
+                scores[t] = dot * scale;
+                if (scores[t] > max_s) max_s = scores[t];
+            }
+            
+            float sum_e = 0.0f;
+            for (int t = 0; t < total_fact_len; ++t) {
+                sum_e += std::exp(scores[t] - max_s);
+            }
+            lse_facts[h] = max_s + std::log(std::max(sum_e, 1e-9f));
+            
+            for (int d = 0; d < D; ++d) out_facts[h * D + d] = 0.0f;
+            for (int t = 0; t < total_fact_len; ++t) {
+                float w = std::exp(scores[t] - lse_facts[h]);
+                const float* v_t = fact_v.data() + t * F_test + kv_head * D;
+                for (int d = 0; d < D; ++d) {
+                    out_facts[h * D + d] += w * v_t[d];
+                }
+            }
+        }
     }
 
     // Dense window attention
     std::vector<float> out_dense(n_q_heads * D, 0.0f);
     std::vector<float> lse_dense(n_q_heads, -1e30f);
-    cpu_dense_attention(
-        (const float*)Q->data,
-        data->active_k_dense, data->active_v_dense,
-        data->active_positions_dense,
-        T_dense, n_q_heads, n_kv_heads, D,
-        scale, has_rope, rope_freq_base,
-        data->active_slot,
-        out_dense.data(), lse_dense.data()
-    );
+    if (T_dense > 0) {
+        cpu_dense_attention(
+            (const float*)Q->data,
+            data->active_k_dense, data->active_v_dense,
+            data->active_positions_dense,
+            T_dense, n_q_heads, n_kv_heads, D,
+            scale, has_rope, rope_freq_base,
+            data->active_slot,
+            out_dense.data(), lse_dense.data()
+        );
+    }
 
-    // LSE combine
+    // Three-way LSE combine
     std::vector<float> final_out(n_q_heads * D);
     for (int h = 0; h < n_q_heads; ++h) {
         float ld = lse_dense[h];
         float ls = lse_sparse[h];
-        if (K == 0) {
-            // Only dense
-            for (int d = 0; d < D; ++d) final_out[h * D + d] = out_dense[h * D + d];
+        float lf = lse_facts[h];
+        
+        float lse_max = std::max({ld, ls, lf});
+        if (lse_max <= -1e20f) {
+            for (int d = 0; d < D; ++d) final_out[h * D + d] = 0.0f;
         } else {
-            float lse_max = std::max(ld, ls);
-            float wd = std::exp(ld - lse_max);
-            float ws = std::exp(ls - lse_max);
-            float denom = std::max(wd + ws, 1e-9f);
+            float wd = (std::isinf(ld) || ld <= -1e20f) ? 0.0f : std::exp(ld - lse_max);
+            float ws = (std::isinf(ls) || ls <= -1e20f) ? 0.0f : std::exp(ls - lse_max);
+            float wf = (std::isinf(lf) || lf <= -1e20f) ? 0.0f : std::exp(lf - lse_max);
+            float denom = std::max(wd + ws + wf, 1e-9f);
             for (int d = 0; d < D; ++d) {
-                final_out[h * D + d] = (out_dense[h * D + d] * wd + out_sparse[h * D + d] * ws) / denom;
+                final_out[h * D + d] = (out_dense[h * D + d] * wd +
+                                        out_sparse[h * D + d] * ws +
+                                        out_facts[h * D + d] * wf) / denom;
             }
         }
     }

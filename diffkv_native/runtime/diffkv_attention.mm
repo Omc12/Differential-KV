@@ -148,6 +148,7 @@ CustomAttnUserData::CustomAttnUserData()
       rank(0), S_max(0), K(0), D(0), scale(0.0f), has_rope(false), rope_freq_base(0.0f), approximate_attn(false),
       active_k_dense(nullptr), active_v_dense(nullptr), active_positions_dense(nullptr),
       active_block_tokens(0), active_slot(0), ignore_c(false), current_pos(0),
+      srl_state(nullptr), W_proj(nullptr), desc_dim(0),
       mtl_dense_k(nullptr), mtl_dense_v(nullptr), mtl_dense_pos(nullptr),
       mtl_slot_indices(nullptr), mtl_output_buf(nullptr), mtl_lse_buf(nullptr),
       mtl_q_buf(nullptr), mtl_u_pool(nullptr), mtl_u_scale(nullptr), mtl_vk_pool(nullptr), mtl_vv_pool(nullptr),
@@ -243,6 +244,9 @@ CustomAttnUserData::CustomAttnUserData(CustomAttnUserData&& other) noexcept {
     active_slot = other.active_slot;
     ignore_c = other.ignore_c;
     current_pos = other.current_pos;
+    srl_state = other.srl_state;
+    W_proj = other.W_proj;
+    desc_dim = other.desc_dim;
 
     mtl_dense_k = other.mtl_dense_k;
     mtl_dense_v = other.mtl_dense_v;
@@ -369,6 +373,9 @@ CustomAttnUserData& CustomAttnUserData::operator=(CustomAttnUserData&& other) no
         active_slot = other.active_slot;
         ignore_c = other.ignore_c;
         current_pos = other.current_pos;
+        srl_state = other.srl_state;
+        W_proj = other.W_proj;
+        desc_dim = other.desc_dim;
 
         mtl_dense_k = other.mtl_dense_k;
         mtl_dense_v = other.mtl_dense_v;

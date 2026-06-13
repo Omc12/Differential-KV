@@ -1728,6 +1728,9 @@ int main(int argc, char ** argv) {
             userdata[l].rope_freq_base = model.get_config().rope_freq_base;
             userdata[l].approximate_attn = approx;
             userdata[l].ignore_c = true;
+            userdata[l].srl_state = &srl_state;
+            userdata[l].W_proj = W_proj_host.data();
+            userdata[l].desc_dim = desc_dim;
         }
 
         struct ggml_tensor * decode_logits = nullptr;
@@ -1861,6 +1864,26 @@ int main(int argc, char ** argv) {
                 0.15f, // overlap_threshold
                 true, // add_first_as_sink
                 true  // add_last_as_sink
+            );
+
+            std::unordered_set<int32_t> prime_slots(
+                srl_state.chunk_graph.cluster_centers_tensor.begin(),
+                srl_state.chunk_graph.cluster_centers_tensor.end()
+            );
+            srl_state.factual_store.build(
+                k_activations,
+                v_activations,
+                prompt_tokens,
+                W_proj_host.data(),
+                desc_dim,
+                head_dim,
+                kv_heads,
+                stop_token_ids,
+                srl_state.ordered_slot_ids,
+                runtime_manager.get_micro_block_size() + 1,
+                srl_state.inverted_index,
+                prime_slots,
+                true // use_salience_parser
             );
         }
 
