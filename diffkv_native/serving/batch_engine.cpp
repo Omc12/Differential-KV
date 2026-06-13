@@ -1164,6 +1164,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.recent_generated_tokens.clear();
     session->srl_state.current_query_tokens.clear();
     session->srl_state.current_step_slots.clear();
+    session->srl_state.current_step_factual_tokens.clear();
     session->srl_state.current_step_count = 0;
     session->srl_state.recent_miss_rate = 0.0f;
     session->srl_state.k_multiplier = 1.0f;
@@ -1332,6 +1333,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         
         std::vector<float> output_logits(n_vocab);
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+        
+        // Apply Factual Logit Bias
+        for (int32_t tok_id : session->srl_state.current_step_factual_tokens) {
+            if (tok_id >= 0 && tok_id < n_vocab) {
+                output_logits[tok_id] += 1.5f;
+            }
+        }
         
         // Construct filtered penalty tokens matching Python runtime logic
         bool loop_detected = req->repetition_loop_detected;

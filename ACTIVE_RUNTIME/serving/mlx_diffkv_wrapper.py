@@ -1101,6 +1101,13 @@ class MLXDiffKVWrapper:
                     else:
                         logits[tok_id] *= _pen_val
                         
+            # Apply Factual Logit Bias
+            srl_state = getattr(self.manager, "_session_srl", {}).get(session_id)
+            if srl_state is not None and getattr(srl_state, "current_step_factual_tokens", None):
+                for tok_id in srl_state.current_step_factual_tokens:
+                    if tok_id < len(logits):
+                        logits[tok_id] += 1.5
+
             next_id = sample_logits(logits, temperature, top_p)
             generated.append(next_id)
             self.manager.register_prefill_tokens(session_id, torch.tensor([next_id], dtype=torch.long))

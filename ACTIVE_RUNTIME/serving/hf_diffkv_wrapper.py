@@ -888,6 +888,13 @@ class PyTorchDiffKVHFWrapper:
                         else:
                             logits[0, tok_id] *= _pen_val
 
+            # Apply Factual Logit Bias
+            srl_state = getattr(self.manager, "_session_srl", {}).get(session_id)
+            if srl_state is not None and getattr(srl_state, "current_step_factual_tokens", None):
+                for tok_id in srl_state.current_step_factual_tokens:
+                    if tok_id < logits.shape[-1]:
+                        logits[0, tok_id] += 1.5
+
             # Sample
             next_id = _compiled_sample_fn(logits, temperature, top_p)
 

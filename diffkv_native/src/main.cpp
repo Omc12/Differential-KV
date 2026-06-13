@@ -1125,6 +1125,7 @@ int main(int argc, char ** argv) {
             srl_state.recent_generated_tokens.clear();
             srl_state.current_query_tokens.clear();
             srl_state.current_step_slots.clear();
+            srl_state.current_step_factual_tokens.clear();
             srl_state.current_step_count = 0;
             srl_state.recent_miss_rate = 0.0f;
             srl_state.k_multiplier = 1.0f;
@@ -1139,6 +1140,7 @@ int main(int argc, char ** argv) {
             srl_state.recent_generated_tokens.clear();
             srl_state.current_query_tokens.clear();
             srl_state.current_step_slots.clear();
+            srl_state.current_step_factual_tokens.clear();
             srl_state.current_step_count = 0;
         }
 
@@ -1223,6 +1225,7 @@ int main(int argc, char ** argv) {
             srl_state.recent_generated_tokens.clear();
             srl_state.current_query_tokens.clear();
             srl_state.current_step_slots.clear();
+            srl_state.current_step_factual_tokens.clear();
             srl_state.current_step_count = 0;
             srl_state.recent_miss_rate = 0.0f;
             srl_state.k_multiplier = 1.0f;
@@ -2202,6 +2205,12 @@ int main(int argc, char ** argv) {
 
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+            // Apply Factual Logit Bias
+            for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                if (tok_id >= 0 && tok_id < n_vocab) {
+                    output_logits[tok_id] += 1.5f;
+                }
+            }
             auto t_after_logits = std::chrono::high_resolution_clock::now();
 
             float rep_penalty = repetition_penalty;

@@ -111,6 +111,8 @@ struct SessionSRLState {
             k_multiplier = std::max(k_multiplier * 0.99f, 1.0f);
     }
 
+    std::unordered_set<int32_t> current_step_factual_tokens;
+
     // -----------------------------------------------------------------
     // reset_step_cache
     // Called at the start of each new decode step to clear the cached
@@ -119,6 +121,7 @@ struct SessionSRLState {
     void reset_step_cache() {
         current_step_slots.clear();
         current_step_count = 0;
+        current_step_factual_tokens.clear();
     }
 
     // -----------------------------------------------------------------

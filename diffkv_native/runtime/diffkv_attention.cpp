@@ -453,6 +453,9 @@ void custom_attention_op_callback(
             std::memcpy(Q_unrot.data(), Q_ptr, n_q_heads * D * sizeof(float));
         }
 
+        if (data->layer_idx == 0) {
+            srl->current_step_factual_tokens.clear();
+        }
         matching_entries = srl->factual_store.query(
             Q_unrot.data(),
             n_q_heads,
@@ -462,6 +465,9 @@ void custom_attention_op_callback(
             0.4f,
             &active_slots
         );
+        for (const auto& entry : matching_entries) {
+            srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
+        }
     }
 
     std::vector<float> out_facts(n_q_heads * D, 0.0f);
@@ -542,6 +548,17 @@ void custom_attention_op_callback(
                 for (int d = 0; d < D; ++d) {
                     out_facts[h * D + d] += w * v_t[d];
                 }
+            }
+            // Apply Factual LSE Attention Boosting
+            float max_sim = 0.0f;
+            for (const auto& entry : matching_entries) {
+                if (entry.current_sim > max_sim) {
+                    max_sim = entry.current_sim;
+                }
+            }
+            if (max_sim >= 0.4f) {
+                float boost = 4.0f * (max_sim - 0.4f) / 0.6f;
+                lse_facts[h] += boost;
             }
         }
     }

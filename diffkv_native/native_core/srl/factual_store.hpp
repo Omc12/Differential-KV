@@ -27,17 +27,22 @@ struct FactEntry {
     std::vector<int> neighbors;    // indices of connected factual entries
     std::vector<float> weights;    // connection weights
     bool is_prime = false;
+    mutable float current_sim = 0.0f;
 };
 
 class FactualExactStore {
 public:
     std::string session_id;
     std::vector<FactEntry> entries;
+    int num_layers = 0;
+    int F_test = 0;
 
-    FactualExactStore(const std::string& sess_id = "default") : session_id(sess_id) {}
+    FactualExactStore(const std::string& sess_id = "default") : session_id(sess_id), num_layers(0), F_test(0) {}
 
     void clear() {
         entries.clear();
+        num_layers = 0;
+        F_test = 0;
     }
 
     void build(

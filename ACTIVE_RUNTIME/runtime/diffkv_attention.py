@@ -488,7 +488,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         block_indices, dense_blocks, anchor_indices, max_anchor_idx, max_valid_len = kv_manager.get_cached_decode_blocks(
                             sid, captured_layer_idx, query_states.device
                         )
-
                         pool = getattr(kv_manager, 'native_pool', None)
                         session_mbs = kv_manager.get_session_micro_block_size(sid)
 
@@ -502,6 +501,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         if pool is not None and pool.W_proj is not None:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
+                                srl_state.current_step_factual_tokens = set()
                                 session_config = getattr(kv_manager, "session_configs", {}).get(sid, {})
                                 srl_enabled = session_config.get("srl_enabled", True)
 
@@ -683,6 +683,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     threshold=0.4,
                                     active_slots=active_slots
                                 )
+                                if srl_state is not None and matching_entries:
+                                    for entry in matching_entries:
+                                        srl_state.current_step_factual_tokens.update(entry.tokens)
                             except Exception as fe:
                                 print(f"[SRL] WARNING: Factual store query failed: {fe}")
 
@@ -792,6 +795,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             scores_fact = torch.matmul(_kf, _q.unsqueeze(-1)).squeeze(-1) * _scale
                             lse_facts = torch.logsumexp(scores_fact.float(), dim=-1)
                             lse_facts = lse_facts.to(torch.float32)
+
+                            # Apply Factual LSE Attention Boosting
+                            max_sim = max([getattr(entry, "current_sim", 0.0) for entry in matching_entries]) if matching_entries else 0.0
+                            if max_sim >= 0.4:
+                                boost = 4.0 * (max_sim - 0.4) / 0.6
+                                lse_facts = lse_facts + boost
 
                             # 4. Three-way LSE combination
                             lse_max = torch.maximum(torch.maximum(lse_dense, lse_sparse), lse_facts)

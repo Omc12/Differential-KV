@@ -1313,6 +1313,13 @@ class ContinuousBatchEngine:
         else:
             prompt_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
 
+        # Apply Factual Logit Bias
+        srl_state = self.wrapper.manager.get_srl_state(req.session_id)
+        if srl_state is not None and getattr(srl_state, "current_step_factual_tokens", None):
+            for tok_id in srl_state.current_step_factual_tokens:
+                if tok_id < logits.shape[-1]:
+                    logits[0, tok_id] += 1.5
+
         sampled_tensor = _sample_gpu_jit(
             logits,
             req.temperature,

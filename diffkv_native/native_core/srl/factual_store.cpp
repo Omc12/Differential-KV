@@ -29,6 +29,8 @@ void FactualExactStore::build(
     if (L == 0 || k_activations.empty()) return;
     int num_layers = k_activations.size();
     int F_test = kv_heads * head_dim;
+    this->num_layers = num_layers;
+    this->F_test = F_test;
 
     std::vector<bool> factual_mask(L, false);
 
@@ -335,6 +337,58 @@ void FactualExactStore::build(
     }
 }
 
+static std::vector<FactEntry> merge_adjacent_entries(const std::vector<FactEntry>& entries, int num_layers, int F_test) {
+    if (entries.empty()) return {};
+    std::vector<FactEntry> sorted_entries = entries;
+    std::sort(sorted_entries.begin(), sorted_entries.end(),
+              [](const FactEntry& a, const FactEntry& b) { return a.start_idx < b.start_idx; });
+    std::vector<FactEntry> merged;
+    FactEntry curr = sorted_entries[0];
+    for (size_t i = 1; i < sorted_entries.size(); ++i) {
+        const auto& next_entry = sorted_entries[i];
+        if (next_entry.start_idx == curr.end_idx) {
+            int curr_len = curr.end_idx - curr.start_idx;
+            int next_len = next_entry.end_idx - next_entry.start_idx;
+            int new_len = curr_len + next_len;
+            
+            std::vector<float> new_K(num_layers * F_test * new_len);
+            std::vector<float> new_V(num_layers * F_test * new_len);
+            
+            for (int l = 0; l < num_layers; ++l) {
+                std::memcpy(new_K.data() + l * F_test * new_len,
+                            curr.K.data() + l * F_test * curr_len,
+                            curr_len * F_test * sizeof(float));
+                std::memcpy(new_V.data() + l * F_test * new_len,
+                            curr.V.data() + l * F_test * curr_len,
+                            curr_len * F_test * sizeof(float));
+                            
+                std::memcpy(new_K.data() + l * F_test * new_len + curr_len * F_test,
+                            next_entry.K.data() + l * F_test * next_len,
+                            next_len * F_test * sizeof(float));
+                std::memcpy(new_V.data() + l * F_test * new_len + curr_len * F_test,
+                            next_entry.V.data() + l * F_test * next_len,
+                            next_len * F_test * sizeof(float));
+            }
+            
+            curr.end_idx = next_entry.end_idx;
+            curr.K = std::move(new_K);
+            curr.V = std::move(new_V);
+            
+            std::unordered_set<int32_t> slots(curr.slot_ids.begin(), curr.slot_ids.end());
+            slots.insert(next_entry.slot_ids.begin(), next_entry.slot_ids.end());
+            curr.slot_ids.assign(slots.begin(), slots.end());
+            
+            curr.tokens.insert(curr.tokens.end(), next_entry.tokens.begin(), next_entry.tokens.end());
+            curr.current_sim = std::max(curr.current_sim, next_entry.current_sim);
+        } else {
+            merged.push_back(curr);
+            curr = next_entry;
+        }
+    }
+    merged.push_back(curr);
+    return merged;
+}
+
 std::vector<FactEntry> FactualExactStore::query(
     const float* Q,
     int H_q,
@@ -465,6 +519,7 @@ std::vector<FactEntry> FactualExactStore::query(
             if (walk_it != walk_candidates.end() && walk_it->second > final_score) {
                 final_score = walk_it->second;
             }
+            entry.current_sim = final_score;
             merged_results.push_back({entry, final_score});
         }
     }
@@ -479,13 +534,16 @@ std::vector<FactEntry> FactualExactStore::query(
                 sim += q_desc[r] * entry.descriptor[r];
             }
             if (sim >= 0.15f) {
+                entry.current_sim = sim;
                 fallback_matches.push_back({entry, sim});
             }
         }
         std::sort(fallback_matches.begin(), fallback_matches.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
         if (!fallback_matches.empty()) {
-            merged_results.push_back(fallback_matches[0]);
+            FactEntry fb_entry = fallback_matches[0].first;
+            fb_entry.current_sim = fallback_matches[0].second;
+            merged_results.push_back({fb_entry, fallback_matches[0].second});
         }
     }
 
@@ -495,9 +553,11 @@ std::vector<FactEntry> FactualExactStore::query(
     std::vector<FactEntry> results;
     int limit = std::min(8, (int)merged_results.size());
     for (int i = 0; i < limit; ++i) {
-        results.push_back(merged_results[i].first);
+        FactEntry top_entry = merged_results[i].first;
+        top_entry.current_sim = merged_results[i].second;
+        results.push_back(top_entry);
     }
-    return results;
+    return merge_adjacent_entries(results, num_layers, F_test);
 }
 
 } // namespace diffkv

@@ -364,3 +364,45 @@ def test_self_supervised_factual_parser():
             
     assert found_5, "Token 5 (high norm + high IDF) not selected"
     assert found_10, "Token 10 (high norm + high Eagle lookback) not selected"
+
+
+def test_factual_span_merging_and_similarity():
+    # Construct adjacent mock FactEntries
+    K1 = torch.randn(1, 2, 5, 32)
+    V1 = torch.randn(1, 2, 5, 32)
+    desc1 = torch.randn(64)
+    desc1 = desc1 / desc1.norm()
+    
+    K2 = torch.randn(1, 2, 5, 32)
+    V2 = torch.randn(1, 2, 5, 32)
+    desc2 = torch.randn(64)
+    desc2 = desc2 / desc2.norm()
+    
+    entry1 = FactEntry(start_idx=0, end_idx=5, K=K1, V=V1, descriptor=desc1, tokens=[0, 1, 2, 3, 4])
+    entry2 = FactEntry(start_idx=5, end_idx=10, K=K2, V=V2, descriptor=desc2, tokens=[5, 6, 7, 8, 9])
+    
+    # Test merge_adjacent_entries directly
+    from native_core.srl.factual_store import merge_adjacent_entries
+    merged = merge_adjacent_entries([entry1, entry2])
+    
+    assert len(merged) == 1
+    m = merged[0]
+    assert m.start_idx == 0
+    assert m.end_idx == 10
+    assert m.tokens == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert m.K.shape == (1, 2, 10, 32)
+    assert m.V.shape == (1, 2, 10, 32)
+    
+    # Verify query sets current_sim
+    store = FactualExactStore(session_id="test_sim_session")
+    store.entries = [entry1, entry2]
+    
+    Q = torch.randn(4, 32)
+    W_proj = torch.randn(64, 32)
+    
+    results = store.query(Q, W_proj, threshold=-1.0)
+    assert len(results) > 0
+    for res in results:
+        assert hasattr(res, "current_sim")
+        assert isinstance(res.current_sim, float)
+

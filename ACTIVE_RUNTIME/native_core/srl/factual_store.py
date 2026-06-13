@@ -15,6 +15,33 @@ class FactEntry:
         self.weights: List[float] = []  # Connection weights
         self.is_prime: bool = False     # Whether this fact is a Factual Prime Node
 
+def merge_adjacent_entries(entries: List[FactEntry]) -> List[FactEntry]:
+    if not entries:
+        return []
+    sorted_entries = sorted(entries, key=lambda x: x.start_idx)
+    merged = []
+    curr = sorted_entries[0]
+    for next_entry in sorted_entries[1:]:
+        if next_entry.start_idx == curr.end_idx:
+            new_K = torch.cat([curr.K, next_entry.K], dim=2)
+            new_V = torch.cat([curr.V, next_entry.V], dim=2)
+            curr_sim = max(getattr(curr, "current_sim", 0.0), getattr(next_entry, "current_sim", 0.0))
+            curr = FactEntry(
+                start_idx=curr.start_idx,
+                end_idx=next_entry.end_idx,
+                K=new_K,
+                V=new_V,
+                descriptor=curr.descriptor,
+                slot_ids=list(set(curr.slot_ids + next_entry.slot_ids)),
+                tokens=curr.tokens + next_entry.tokens
+            )
+            curr.current_sim = curr_sim
+        else:
+            merged.append(curr)
+            curr = next_entry
+    merged.append(curr)
+    return merged
+
 class FactualExactStore:
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -293,6 +320,7 @@ class FactualExactStore:
             
             if passes_main or passes_relaxed or passes_walk:
                 final_score = max(sim, walk_candidates.get(idx, -1.0))
+                entry.current_sim = final_score
                 merged_results.append((entry, final_score))
                 
         # Fallback: if active_slots is provided but no matches passed, pull the top localized match
@@ -302,6 +330,7 @@ class FactualExactStore:
                 entry = self.entries[idx]
                 sim = torch.dot(q_desc_cpu, entry.descriptor).item()
                 if sim >= 0.15:
+                    entry.current_sim = sim
                     fallback_matches.append((entry, sim))
             fallback_matches.sort(key=lambda x: x[1], reverse=True)
             if fallback_matches:
@@ -309,4 +338,5 @@ class FactualExactStore:
                 
         # Sort by final score descending
         merged_results.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in merged_results[:8]]
+        top_entries = [x[0] for x in merged_results[:8]]
+        return merge_adjacent_entries(top_entries)
