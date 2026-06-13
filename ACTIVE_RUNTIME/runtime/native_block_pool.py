@@ -58,6 +58,7 @@ class NativeBlockPool:
         self.dtype           = dtype
         self.initial_blocks  = initial_blocks
         self.num_layers      = num_layers
+        self.max_residual_tokens = 8
 
         _is_mps = (str(device) == "mps" or
                    (isinstance(device, torch.device) and device.type == "mps"))
@@ -69,7 +70,11 @@ class NativeBlockPool:
             max_seq_len * rank * 1 +              # U  (int8)
             rank * num_kv_heads * head_dim * 2 * 2 +  # V_K + V_V (fp16)
             num_kv_heads * head_dim * 2 * 2 +     # anchors K + V (fp16)
-            6 + 2                                 # scales (2B) + seq_lens (4B) + U_scale (2B)
+            6 + 2 +                               # scales (2B) + seq_lens (4B) + U_scale (2B)
+            self.max_residual_tokens * 2 +        # residual_K_positions (2B, int16)
+            self.max_residual_tokens * 2 +        # residual_V_positions (2B, int16)
+            self.max_residual_tokens * num_kv_heads * head_dim * 2 +  # residual_K_values (fp16)
+            self.max_residual_tokens * num_kv_heads * head_dim * 2    # residual_V_values (fp16)
         )
 
         # Default token hint used as fallback when ensure_allocated is called
@@ -135,11 +140,25 @@ class NativeBlockPool:
         self.current_blocks = n_blocks
         self.U          = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=torch.int8)
         self.U_scale    = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
+        self.U_sem      = torch.zeros((n_blocks, self.max_seq_len // 2, self.rank), device=self.device, dtype=torch.int8)
+        self.U_sem_scale = torch.zeros((n_blocks, self.rank), device=self.device, dtype=self.dtype)
+        self.U_fact     = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=self.dtype)
+        self.n_semantic = torch.zeros((n_blocks,), device=self.device, dtype=torch.int16)
         self.V_KV       = torch.zeros((n_blocks, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.anchors_KV = torch.zeros((n_blocks, 2, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
         self.seq_lens   = torch.zeros((n_blocks,), device=self.device, dtype=torch.int32)
         self.desc       = torch.zeros((n_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
+
+        self.residual_K_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        self.residual_K_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.residual_V_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        self.residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+
+        # Fact Anchors (Solution 3)
+        self.fact_anchors_K = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.fact_anchors_V = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+        self.fact_anchor_positions = torch.full((n_blocks, 3), -1, device=self.device, dtype=torch.int16)
 
         self._free_indices     = list(range(n_blocks - 1, -1, -1))
         self._free_indices_set = set(self._free_indices)
@@ -154,7 +173,11 @@ class NativeBlockPool:
     def _pool_mb(self) -> float:
         """Current pool VRAM usage in megabytes."""
         total = 0
-        for attr in ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc"):
+        attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
+                 "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
+                 "U_sem", "U_sem_scale", "U_fact", "n_semantic",
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
+        for attr in attrs:
             t = getattr(self, attr, None)
             if t is not None:
                 total += t.numel() * t.element_size()
@@ -196,30 +219,72 @@ class NativeBlockPool:
         
         new_U = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=torch.int8)
         new_U_scale = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
+        new_U_sem = torch.zeros((new_blocks, max_seq_len // 2, rank), device=self.device, dtype=torch.int8)
+        new_U_sem_scale = torch.zeros((new_blocks, rank), device=self.device, dtype=self.dtype)
+        new_U_fact = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
+        new_n_semantic = torch.zeros((new_blocks,), device=self.device, dtype=torch.int16)
         new_V_KV = torch.zeros((new_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
         new_desc = torch.zeros((new_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
 
+        new_res_K_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        new_res_K_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_res_V_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+
+        new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
+        new_fact_anc_pos = torch.full((new_blocks, 3), -1, device=self.device, dtype=torch.int16)
+
         new_U[:old_blocks] = self.U
         new_U_scale[:old_blocks] = self.U_scale
+        new_U_sem[:old_blocks] = self.U_sem
+        new_U_sem_scale[:old_blocks] = self.U_sem_scale
+        new_U_fact[:old_blocks] = self.U_fact
+        new_n_semantic[:old_blocks] = self.n_semantic
         new_V_KV[:old_blocks] = self.V_KV
         new_anchors_KV[:old_blocks] = self.anchors_KV
         new_scales[:old_blocks] = self.scales
         new_seq_lens[:old_blocks] = self.seq_lens
         new_desc[:old_blocks] = self.desc
 
+        new_res_K_pos[:old_blocks] = self.residual_K_positions
+        new_res_K_val[:old_blocks] = self.residual_K_values
+        new_res_V_pos[:old_blocks] = self.residual_V_positions
+        new_res_V_val[:old_blocks] = self.residual_V_values
+
+        new_fact_anc_K[:old_blocks] = self.fact_anchors_K
+        new_fact_anc_V[:old_blocks] = self.fact_anchors_V
+        new_fact_anc_pos[:old_blocks] = self.fact_anchor_positions
+
         # Explicitly delete old tensors so the allocator can reclaim them
-        del self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc
+        del (self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc,
+             self.residual_K_positions, self.residual_K_values, self.residual_V_positions, self.residual_V_values,
+             self.U_sem, self.U_sem_scale, self.U_fact, self.n_semantic,
+             self.fact_anchors_K, self.fact_anchors_V, self.fact_anchor_positions)
 
         self.U = new_U
         self.U_scale = new_U_scale
+        self.U_sem = new_U_sem
+        self.U_sem_scale = new_U_sem_scale
+        self.U_fact = new_U_fact
+        self.n_semantic = new_n_semantic
         self.V_KV = new_V_KV
         self.anchors_KV = new_anchors_KV
         self.scales = new_scales
         self.seq_lens = new_seq_lens
         self.desc = new_desc
+
+        self.residual_K_positions = new_res_K_pos
+        self.residual_K_values = new_res_K_val
+        self.residual_V_positions = new_res_V_pos
+        self.residual_V_values = new_res_V_val
+
+        self.fact_anchors_K = new_fact_anc_K
+        self.fact_anchors_V = new_fact_anc_V
+        self.fact_anchor_positions = new_fact_anc_pos
         
         self._ref_counts.extend([0] * added)
         self._last_used.extend([0.0] * added)
@@ -287,7 +352,18 @@ class NativeBlockPool:
         anchor_K: torch.Tensor, 
         anchor_V: torch.Tensor, 
         scale: float, 
-        seq_len: int
+        seq_len: int,
+        residual_K_positions: Optional[torch.Tensor] = None,
+        residual_K_values: Optional[torch.Tensor] = None,
+        residual_V_positions: Optional[torch.Tensor] = None,
+        residual_V_values: Optional[torch.Tensor] = None,
+        U_sem_int4: Optional[torch.Tensor] = None,
+        U_sem_scale: Optional[torch.Tensor] = None,
+        U_fact_fp16: Optional[torch.Tensor] = None,
+        n_semantic: int = 0,
+        fact_anchors_K: Optional[torch.Tensor] = None,
+        fact_anchors_V: Optional[torch.Tensor] = None,
+        fact_anchor_positions: Optional[torch.Tensor] = None,
     ):
         """
         Copies compressed data directly into the contiguous pool.
@@ -350,6 +426,51 @@ class NativeBlockPool:
         self.seq_lens[pool_idx] = seq_len
         self.version[pool_idx] += 1
 
+        # Copy residuals
+        self.residual_K_positions[pool_idx] = -1
+        self.residual_K_values[pool_idx] = 0.0
+        self.residual_V_positions[pool_idx] = -1
+        self.residual_V_values[pool_idx] = 0.0
+
+        if residual_K_positions is not None and residual_K_positions.numel() > 0:
+            n_res_k = min(residual_K_positions.numel(), self.max_residual_tokens)
+            self.residual_K_positions[pool_idx, :n_res_k] = residual_K_positions[:n_res_k].to(torch.int16)
+            self.residual_K_values[pool_idx, :n_res_k] = residual_K_values[:n_res_k].view(n_res_k, num_kv, h_dim).to(self.dtype)
+
+        if residual_V_positions is not None and residual_V_positions.numel() > 0:
+            n_res_v = min(residual_V_positions.numel(), self.max_residual_tokens)
+            self.residual_V_positions[pool_idx, :n_res_v] = residual_V_positions[:n_res_v].to(torch.int16)
+            self.residual_V_values[pool_idx, :n_res_v] = residual_V_values[:n_res_v].view(n_res_v, num_kv, h_dim).to(self.dtype)
+
+        # Copy stratified SVD components (Solution 2)
+        self.U_sem[pool_idx] = 0
+        self.U_sem_scale[pool_idx] = 0.0
+        self.U_fact[pool_idx] = 0.0
+        self.n_semantic[pool_idx] = n_semantic
+
+        if U_sem_int4 is not None and U_sem_int4.numel() > 0:
+            write_sem_seq = min(U_sem_int4.shape[0], self.U_sem.shape[1])
+            write_sem_rank = min(U_sem_int4.shape[1], self.U_sem.shape[2])
+            self.U_sem[pool_idx, :write_sem_seq, :write_sem_rank] = U_sem_int4[:write_sem_seq, :write_sem_rank]
+            self.U_sem_scale[pool_idx, :write_sem_rank] = U_sem_scale[:write_sem_rank].to(self.dtype)
+
+        if U_fact_fp16 is not None and U_fact_fp16.numel() > 0:
+            write_fact_seq = min(U_fact_fp16.shape[0], self.U_fact.shape[1])
+            write_fact_rank = min(U_fact_fp16.shape[1], self.U_fact.shape[2])
+            self.U_fact[pool_idx, :write_fact_seq, :write_fact_rank] = U_fact_fp16[:write_fact_seq, :write_fact_rank].to(self.dtype)
+
+        # Copy fact anchors (Solution 3)
+        self.fact_anchors_K[pool_idx] = 0.0
+        self.fact_anchors_V[pool_idx] = 0.0
+        self.fact_anchor_positions[pool_idx] = -1
+
+        if fact_anchors_K is not None and fact_anchors_K.numel() > 0:
+            self.fact_anchors_K[pool_idx] = fact_anchors_K.to(self.dtype)
+        if fact_anchors_V is not None and fact_anchors_V.numel() > 0:
+            self.fact_anchors_V[pool_idx] = fact_anchors_V.to(self.dtype)
+        if fact_anchor_positions is not None and fact_anchor_positions.numel() > 0:
+            self.fact_anchor_positions[pool_idx] = fact_anchor_positions.to(torch.int16)
+
         # ── SRL: compute and store semantic descriptor ─────────────────────
         # Runs only when W_proj is initialized (set by KVRuntimeManager).
         # Cost: ~3R+2D multiplications — negligible vs. SVD compression cost.
@@ -369,7 +490,11 @@ class NativeBlockPool:
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
         # Free old tensors before re-allocating
-        for attr in ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc"):
+        attrs = ("U", "U_scale", "V_KV", "anchors_KV", "scales", "seq_lens", "desc",
+                 "residual_K_positions", "residual_K_values", "residual_V_positions", "residual_V_values",
+                 "U_sem", "U_sem_scale", "U_fact", "n_semantic",
+                 "fact_anchors_K", "fact_anchors_V", "fact_anchor_positions")
+        for attr in attrs:
             if hasattr(self, attr):
                 delattr(self, attr)
         gc.collect()

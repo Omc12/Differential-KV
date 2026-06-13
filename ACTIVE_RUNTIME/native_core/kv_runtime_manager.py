@@ -123,6 +123,20 @@ class KVBlock:
     _lock:    threading.Lock = field(default_factory=threading.Lock, repr=False)
     pool:     Any = None
 
+    _residual_K_positions: Optional[torch.Tensor] = None
+    _residual_K_values:    Optional[torch.Tensor] = None
+    _residual_V_positions: Optional[torch.Tensor] = None
+    _residual_V_values:    Optional[torch.Tensor] = None
+
+    _U_sem_int4:           Optional[torch.Tensor] = None
+    _U_sem_scale:          Optional[torch.Tensor] = None
+    _U_fact_fp16:          Optional[torch.Tensor] = None
+    _n_semantic:           int = 0
+
+    _fact_anchors_K:       Optional[torch.Tensor] = None
+    _fact_anchors_V:       Optional[torch.Tensor] = None
+    _fact_anchor_positions: Optional[torch.Tensor] = None
+
     @property
     def U(self):
         if self._U is not None:
@@ -159,6 +173,170 @@ class KVBlock:
     @V.setter
     def V(self, val):
         self._V = val
+
+    @property
+    def residual_K_positions(self):
+        if self._residual_K_positions is not None:
+            return self._residual_K_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_K_positions[pool_idx]
+        return None
+
+    @residual_K_positions.setter
+    def residual_K_positions(self, val):
+        self._residual_K_positions = val
+
+    @property
+    def residual_K_values(self):
+        if self._residual_K_values is not None:
+            return self._residual_K_values
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_K_values[pool_idx]
+        return None
+
+    @residual_K_values.setter
+    def residual_K_values(self, val):
+        self._residual_K_values = val
+
+    @property
+    def residual_V_positions(self):
+        if self._residual_V_positions is not None:
+            return self._residual_V_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_V_positions[pool_idx]
+        return None
+
+    @residual_V_positions.setter
+    def residual_V_positions(self, val):
+        self._residual_V_positions = val
+
+    @property
+    def residual_V_values(self):
+        if self._residual_V_values is not None:
+            return self._residual_V_values
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_V_values[pool_idx]
+        return None
+
+    @residual_V_values.setter
+    def residual_V_values(self, val):
+        self._residual_V_values = val
+
+    @property
+    def U_sem_int4(self):
+        if self._U_sem_int4 is not None:
+            return self._U_sem_int4
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            write_seq = (seq_len + 1) // 2
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            return pool.U_sem[pool_idx, :write_seq, :n_sem]
+        return None
+
+    @U_sem_int4.setter
+    def U_sem_int4(self, val):
+        self._U_sem_int4 = val
+
+    @property
+    def U_sem_scale(self):
+        if self._U_sem_scale is not None:
+            return self._U_sem_scale
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            return pool.U_sem_scale[pool_idx, :n_sem]
+        return None
+
+    @U_sem_scale.setter
+    def U_sem_scale(self, val):
+        self._U_sem_scale = val
+
+    @property
+    def U_fact_fp16(self):
+        if self._U_fact_fp16 is not None:
+            return self._U_fact_fp16
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.U_fact.shape[2]
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            n_fact = rank - n_sem
+            if n_fact <= 0:
+                return torch.empty((seq_len, 0), device=pool.device, dtype=pool.dtype)
+            return pool.U_fact[pool_idx, :seq_len, :n_fact]
+        return None
+
+    @U_fact_fp16.setter
+    def U_fact_fp16(self, val):
+        self._U_fact_fp16 = val
+
+    @property
+    def n_semantic(self):
+        if self._n_semantic > 0:
+            return self._n_semantic
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return int(pool.n_semantic[pool_idx].item())
+        return 0
+
+    @n_semantic.setter
+    def n_semantic(self, val):
+        self._n_semantic = val
+
+    @property
+    def fact_anchors_K(self):
+        if self._fact_anchors_K is not None:
+            return self._fact_anchors_K
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchors_K[pool_idx]
+        return None
+
+    @fact_anchors_K.setter
+    def fact_anchors_K(self, val):
+        self._fact_anchors_K = val
+
+    @property
+    def fact_anchors_V(self):
+        if self._fact_anchors_V is not None:
+            return self._fact_anchors_V
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchors_V[pool_idx]
+        return None
+
+    @fact_anchors_V.setter
+    def fact_anchors_V(self, val):
+        self._fact_anchors_V = val
+
+    @property
+    def fact_anchor_positions(self):
+        if self._fact_anchor_positions is not None:
+            return self._fact_anchor_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchor_positions[pool_idx]
+        return None
+
+    @fact_anchor_positions.setter
+    def fact_anchor_positions(self, val):
+        self._fact_anchor_positions = val
 
     def __eq__(self, other):
         return self is other
@@ -276,6 +454,7 @@ class KVRuntimeManager:
 
         # Per-session SRL state (populated by finalize_srl_index)
         self._session_srl: dict = {}
+        self._factual_stores: dict = {}
 
         # Per-session SRL custom configuration settings
         self.session_configs: dict = {}
@@ -704,6 +883,23 @@ class KVRuntimeManager:
                 srl_state.last_prefill_q = self._last_prefill_q[session_id]
             self._session_srl[session_id] = srl_state
 
+            # ── 6. Assemble and Build Factual Store (Solution 4) ──
+            try:
+                from native_core.srl.factual_store import FactualExactStore
+                if hasattr(self, "_prefill_kv_capture") and session_id in self._prefill_kv_capture:
+                    factual_store = FactualExactStore(session_id)
+                    prefill_kv = self._prefill_kv_capture[session_id]
+                    factual_store.build(
+                        prefill_kv=prefill_kv,
+                        token_ids=token_ids_cpu,
+                        W_proj=pool.W_proj,
+                        stop_token_ids=self._stop_token_ids
+                    )
+                    self._factual_stores[session_id] = factual_store
+            except Exception as fe:
+                print(f"[SRL] WARNING: Failed to build FactualExactStore: {fe}")
+
+
             n = len(slot_ids)
             desc_kb = n * 64 * 2 / 1024
             graph_kb = n * 8 * 4 / 1024
@@ -846,10 +1042,45 @@ class KVRuntimeManager:
 
                             block.U = u_cpu.to(gpu_device)
                             block.V = v_cpu.to(gpu_device)
+                            block.residual_K_positions = getattr(block, "residual_K_positions", None)
+                            if block.residual_K_positions is not None:
+                                block.residual_K_positions = block.residual_K_positions.to(gpu_device)
+                            block.residual_K_values = getattr(block, "residual_K_values", None)
+                            if block.residual_K_values is not None:
+                                block.residual_K_values = block.residual_K_values.to(gpu_device)
+                            block.residual_V_positions = getattr(block, "residual_V_positions", None)
+                            if block.residual_V_positions is not None:
+                                block.residual_V_positions = block.residual_V_positions.to(gpu_device)
+                            block.residual_V_values = getattr(block, "residual_V_values", None)
+                            if block.residual_V_values is not None:
+                                block.residual_V_values = block.residual_V_values.to(gpu_device)
+
+                            block.U_sem_int4 = getattr(block, "U_sem_int4_cpu", None)
+                            if block.U_sem_int4 is not None:
+                                block.U_sem_int4 = block.U_sem_int4.to(gpu_device)
+                            block.U_sem_scale = getattr(block, "U_sem_scale_cpu", None)
+                            if block.U_sem_scale is not None:
+                                block.U_sem_scale = block.U_sem_scale.to(gpu_device)
+                            block.U_fact_fp16 = getattr(block, "U_fact_fp16_cpu", None)
+                            if block.U_fact_fp16 is not None:
+                                block.U_fact_fp16 = block.U_fact_fp16.to(gpu_device)
+
+                            fact_anc_K = getattr(block, "fact_anchors_K_cpu", None)
+                            block.fact_anchors_K = fact_anc_K.to(gpu_device) if fact_anc_K is not None else None
+                            fact_anc_V = getattr(block, "fact_anchors_V_cpu", None)
+                            block.fact_anchors_V = fact_anc_V.to(gpu_device) if fact_anc_V is not None else None
+                            fact_anc_pos = getattr(block, "fact_anchor_positions_cpu", None)
+                            block.fact_anchor_positions = fact_anc_pos.to(gpu_device) if fact_anc_pos is not None else None
 
                             # Clean up temporary CPU tensors
                             block.U_cpu = None
                             block.V_cpu = None
+                            block.U_sem_int4_cpu = None
+                            block.U_sem_scale_cpu = None
+                            block.U_fact_fp16_cpu = None
+                            block.fact_anchors_K_cpu = None
+                            block.fact_anchors_V_cpu = None
+                            block.fact_anchor_positions_cpu = None
 
                             # Write to native pool
                             if hasattr(self, 'native_pool') and self.native_pool is not None:
@@ -863,11 +1094,26 @@ class KVRuntimeManager:
                                     anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
                                     anchor_V=block.anchor_kv[0, 1],
                                     scale=block.scale,
-                                    seq_len=block.U.shape[0]
+                                    seq_len=block.U.shape[0],
+                                    residual_K_positions=block.residual_K_positions,
+                                    residual_K_values=block.residual_K_values,
+                                    residual_V_positions=block.residual_V_positions,
+                                    residual_V_values=block.residual_V_values,
+                                    U_sem_int4=block.U_sem_int4,
+                                    U_sem_scale=block.U_sem_scale,
+                                    U_fact_fp16=block.U_fact_fp16,
+                                    n_semantic=getattr(block, "n_semantic", 0),
                                 )
                                 # Clear local GPU tensors on block to prevent VRAM leak
                                 block.U = None
                                 block.V = None
+                                block.U_sem_int4 = None
+                                block.U_sem_scale = None
+                                block.U_fact_fp16 = None
+                                block.residual_K_positions = None
+                                block.residual_K_values = None
+                                block.residual_V_positions = None
+                                block.residual_V_values = None
 
                             # Mark finalized and decrement pending counter
                             block.state = "COMPRESSED"
@@ -931,6 +1177,7 @@ class KVRuntimeManager:
         self._mbs_cache.pop(session_id, None)
         # Clean up SRL state and stored token IDs
         self._session_srl.pop(session_id, None)
+        self._factual_stores.pop(session_id, None)
         self._session_token_ids.pop(session_id, None)
         if hasattr(self, "attention_score_cache"):
             self.attention_score_cache.clear_session(session_id)
@@ -1198,7 +1445,18 @@ class KVRuntimeManager:
                         anchor_K=self._get_rotated_anchor_k(session_id, b_restore.anchor_kv[0, 0], b_restore.anchor_idx),
                         anchor_V=b_restore.anchor_kv[0, 1],
                         scale=b_restore.scale,
-                        seq_len=u_gpu.shape[0]
+                        seq_len=u_gpu.shape[0],
+                        residual_K_positions=getattr(b, "residual_K_positions", None),
+                        residual_K_values=getattr(b, "residual_K_values", None),
+                        residual_V_positions=getattr(b, "residual_V_positions", None),
+                        residual_V_values=getattr(b, "residual_V_values", None),
+                        U_sem_int4=getattr(b, "U_sem_int4", None),
+                        U_sem_scale=getattr(b, "U_sem_scale", None),
+                        U_fact_fp16=getattr(b, "U_fact_fp16", None),
+                        n_semantic=getattr(b, "n_semantic", 0),
+                        fact_anchors_K=getattr(b, "fact_anchors_K", None),
+                        fact_anchors_V=getattr(b, "fact_anchors_V", None),
+                        fact_anchor_positions=getattr(b, "fact_anchor_positions", None),
                     )
                     # Clear local GPU tensors on block again to prevent VRAM leak
                     b_restore._U = None
@@ -2132,6 +2390,22 @@ class KVRuntimeManager:
         if not torch.isfinite(U_scaled).all():
             U_scaled = torch.nan_to_num(U_scaled, nan=0.0, posinf=65504.0, neginf=-65504.0)
 
+        # ── Solution 3: The Fact Anchor System ──
+        recon_deltas = (lr_delta.U.float() @ lr_delta.V.float()) * lr_delta.scale
+        recon_errors = (deltas - recon_deltas.to(deltas.device)).norm(dim=1) # [seq_len]
+        
+        top_k_val = min(3, seq_len)
+        fact_anchors_K_val = torch.zeros((3, heads, head_dim), device=input_device, dtype=k.dtype)
+        fact_anchors_V_val = torch.zeros((3, heads, head_dim), device=input_device, dtype=v.dtype)
+        fact_anchor_positions_val = torch.full((3,), -1, device=input_device, dtype=torch.int16)
+        
+        if top_k_val > 0:
+            top_3 = torch.topk(recon_errors, k=top_k_val)
+            for j, pos_val in enumerate(top_3.indices):
+                fact_anchors_K_val[j] = k[0, :, pos_val, :]
+                fact_anchors_V_val[j] = v[0, :, pos_val, :]
+                fact_anchor_positions_val[j] = pos_val.to(torch.int16)
+
         if self.rank:
             import os as _local_os
             if _local_os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1":
@@ -2149,6 +2423,17 @@ class KVRuntimeManager:
             block.cosine_sim     = lr_delta.cosine_sim
             block.norm_drift     = lr_delta.norm_drift
             block.dynamic_rank   = getattr(lr_delta, "dynamic_rank", self.rank)
+
+            # Solution 2 CPU components
+            block.U_sem_int4_cpu = lr_delta.U_sem_int4.cpu() if lr_delta.U_sem_int4 is not None else None
+            block.U_sem_scale_cpu = lr_delta.U_sem_scale.cpu() if lr_delta.U_sem_scale is not None else None
+            block.U_fact_fp16_cpu = lr_delta.U_fact_fp16.cpu() if lr_delta.U_fact_fp16 is not None else None
+            block.n_semantic     = lr_delta.n_semantic
+
+            # Solution 3 CPU components
+            block.fact_anchors_K_cpu = fact_anchors_K_val.cpu()
+            block.fact_anchors_V_cpu = fact_anchors_V_val.cpu()
+            block.fact_anchor_positions_cpu = fact_anchor_positions_val.cpu()
 
             block.dirty    = True
 
@@ -2177,6 +2462,17 @@ class KVRuntimeManager:
                     block.norm_drift = lr_delta.norm_drift
                     block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
 
+                    # Solution 2 components
+                    block.U_sem_int4 = lr_delta.U_sem_int4.to(gpu_device) if lr_delta.U_sem_int4 is not None else None
+                    block.U_sem_scale = lr_delta.U_sem_scale.to(gpu_device) if lr_delta.U_sem_scale is not None else None
+                    block.U_fact_fp16 = lr_delta.U_fact_fp16.to(gpu_device) if lr_delta.U_fact_fp16 is not None else None
+                    block.n_semantic     = lr_delta.n_semantic
+
+                    # Solution 3 components
+                    block.fact_anchors_K = fact_anchors_K_val.to(gpu_device)
+                    block.fact_anchors_V = fact_anchors_V_val.to(gpu_device)
+                    block.fact_anchor_positions = fact_anchor_positions_val.to(gpu_device)
+
                     block.active_k = None
                     block.active_v = None
                     block.active_k_cpu = None
@@ -2194,6 +2490,17 @@ class KVRuntimeManager:
                 block.cosine_sim = lr_delta.cosine_sim
                 block.norm_drift = lr_delta.norm_drift
                 block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
+
+                # Solution 2 components
+                block.U_sem_int4 = lr_delta.U_sem_int4.to(gpu_device) if lr_delta.U_sem_int4 is not None else None
+                block.U_sem_scale = lr_delta.U_sem_scale.to(gpu_device) if lr_delta.U_sem_scale is not None else None
+                block.U_fact_fp16 = lr_delta.U_fact_fp16.to(gpu_device) if lr_delta.U_fact_fp16 is not None else None
+                block.n_semantic     = lr_delta.n_semantic
+
+                # Solution 3 components
+                block.fact_anchors_K = fact_anchors_K_val.to(gpu_device)
+                block.fact_anchors_V = fact_anchors_V_val.to(gpu_device)
+                block.fact_anchor_positions = fact_anchor_positions_val.to(gpu_device)
 
                 block.active_k = None
                 block.active_v = None
@@ -2229,11 +2536,32 @@ class KVRuntimeManager:
                             anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
                             anchor_V=block.anchor_kv[0, 1],
                             scale=block.scale,
-                            seq_len=block.U.shape[0]
+                            seq_len=block.U.shape[0],
+                            residual_K_positions=block.residual_K_positions,
+                            residual_K_values=block.residual_K_values,
+                            residual_V_positions=block.residual_V_positions,
+                            residual_V_values=block.residual_V_values,
+                            U_sem_int4=block.U_sem_int4,
+                            U_sem_scale=block.U_sem_scale,
+                            U_fact_fp16=block.U_fact_fp16,
+                            n_semantic=getattr(block, 'n_semantic', 0),
+                            fact_anchors_K=block.fact_anchors_K,
+                            fact_anchors_V=block.fact_anchors_V,
+                            fact_anchor_positions=block.fact_anchor_positions,
                         )
                         # Clear local GPU tensors on block to prevent VRAM leak
                         block.U = None
                         block.V = None
+                        block.U_sem_int4 = None
+                        block.U_sem_scale = None
+                        block.U_fact_fp16 = None
+                        block.residual_K_positions = None
+                        block.residual_K_values = None
+                        block.residual_V_positions = None
+                        block.residual_V_values = None
+                        block.fact_anchors_K = None
+                        block.fact_anchors_V = None
+                        block.fact_anchor_positions = None
                     except Exception as e:
                         # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
                         print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")

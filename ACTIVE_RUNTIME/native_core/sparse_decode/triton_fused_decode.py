@@ -14,6 +14,7 @@ import os
 import threading
 from collections import OrderedDict
 from typing import Optional, Tuple, List, Any
+from native_core.compression.lowrank import reconstruct_batch_U
 
 try:
     from native_core.mac_utils import nvtx_push as _nvtx_push, nvtx_pop as _nvtx_pop, has_cuda as _has_cuda
@@ -467,6 +468,10 @@ def _prefill_fused_history_attend(
     q: torch.Tensor,
     seq_lens: torch.Tensor,
     inv_scale: float,
+    residual_K_positions: torch.Tensor,
+    residual_K_values: torch.Tensor,
+    residual_V_positions: torch.Tensor,
+    residual_V_values: torch.Tensor,
 ) -> torch.Tensor:
     N = U.shape[0]
     S = U.shape[1]
@@ -482,6 +487,14 @@ def _prefill_fused_history_attend(
     K_unrot_full = torch.cat(
         [anchors_K.unsqueeze(1), anchors_K.unsqueeze(1) + deltas_k], dim=1
     )
+
+    # ── Post-SVD Sparse Residual Correction for Key (Prefill History) ──
+    if residual_K_positions.numel() > 0:
+        res_pos_K_clamped = residual_K_positions.clamp(min=0).long()
+        mask_K = (residual_K_positions >= 0).unsqueeze(-1).unsqueeze(-1)
+        res_vals_K_masked = residual_K_values.to(K_unrot_full.dtype) * mask_K
+        index_K = (res_pos_K_clamped + 1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, D)
+        K_unrot_full.scatter_add_(dim=1, index=index_K, src=res_vals_K_masked)
 
     half_d = D // 2
     K_half1 = K_unrot_full[..., :half_d]
@@ -527,6 +540,21 @@ def _prefill_fused_history_attend(
     out_delta = torch.bmm(W_proj_flat2, V_V_t_flat2)
 
     out_hist = (out_anchor + out_delta).unsqueeze(0)
+
+    # ── Post-SVD Sparse Residual Correction for Value (Prefill History) ──
+    if residual_V_positions.numel() > 0:
+        w_d_perm = w_delta.permute(2, 0, 1, 3)
+        res_pos_V_clamped = residual_V_positions.clamp(min=0).long()
+        res_pos_V_expanded = res_pos_V_clamped.unsqueeze(1).unsqueeze(2).expand(-1, H, Q, -1)
+        w_res_V = torch.gather(w_d_perm, dim=3, index=res_pos_V_expanded)
+        
+        mask_V = (residual_V_positions >= 0).unsqueeze(1).unsqueeze(2).expand(-1, H, Q, -1)
+        w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
+
+        res_val_V_perm = residual_V_values.to(w_res_V.dtype).permute(0, 2, 1, 3)
+        O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_perm.unsqueeze(2), dim=(0, 3))
+        out_hist = out_hist + O_res.unsqueeze(0).to(out_hist.dtype)
+
     lse_out  = lse_hist.to(q.dtype).unsqueeze(0)
 
     lse_padded = lse_out.unsqueeze(-1).expand(1, H, Q, D)
@@ -609,11 +637,16 @@ def fused_decode_mps(
     N   = block_indices.shape[0]
     idx = block_indices.long()
 
-    U_a    = pool.U[idx].float() * pool.U_scale[idx].view(N, 1, 1).float()
+    U_a    = reconstruct_batch_U(pool, idx).float()
     AncK_a = pool.anchors_K[idx].float()
     AncV_a = pool.anchors_V[idx].float()
     VK_a   = pool.V_K[idx].float()
     VV_a   = pool.V_V[idx].float()
+
+    def rotate_half(x):
+        x1 = x[..., :x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2:]
+        return torch.cat((-x2, x1), dim=-1)
 
     if anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
@@ -627,11 +660,6 @@ def fused_decode_mps(
         cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
         sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
         
-        def rotate_half(x):
-            x1 = x[..., :x.shape[-1] // 2]
-            x2 = x[..., x.shape[-1] // 2:]
-            return torch.cat((-x2, x1), dim=-1)
-            
         VK_a = VK_a * cos_anc + rotate_half(VK_a) * sin_anc
         AncK_a = AncK_a * cos_anc_2d + rotate_half(AncK_a) * sin_anc_2d
 
@@ -648,6 +676,65 @@ def fused_decode_mps(
     delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)
     delta_s = delta_s * pool.scales[idx].float().view(1, N, 1)
     delta_s = delta_s + s_anc.unsqueeze(-1)
+
+    # ── Post-SVD Sparse Residual Correction for Key ──
+    res_pos_K = getattr(pool, "residual_K_positions", None)
+    res_val_K = getattr(pool, "residual_K_values", None)
+    if res_pos_K is not None and res_val_K is not None:
+        res_pos_K_idx = res_pos_K[idx]
+        res_val_K_idx = res_val_K[idx].float()
+        if res_pos_K_idx.numel() > 0:
+            res_val_K_e = res_val_K_idx.repeat_interleave(gpk, dim=2)  # [N, MAX_RESIDUAL_TOKENS, H_q, D]
+            has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+            if has_rope:
+                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                res_pos_K_clamped = res_pos_K_idx.clamp(min=0)
+                abs_pos = anchor_indices.unsqueeze(1) + 1 + res_pos_K_clamped.long()
+                abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
+                
+                cos_res = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)
+                sin_res = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)
+                
+                q_res_rot = q.unsqueeze(0).unsqueeze(1) * cos_res - rotate_half(q.unsqueeze(0).unsqueeze(1)) * sin_res
+                corr_K = torch.sum(q_res_rot * res_val_K_e, dim=-1) * scale
+            else:
+                corr_K = torch.sum(q.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * scale
+
+            corr_K_perm = corr_K.permute(2, 0, 1)
+            mask_K = (res_pos_K_idx >= 0).unsqueeze(0).expand(H_q, -1, -1)
+            corr_K_perm = corr_K_perm.masked_fill(~mask_K, 0.0)
+
+            res_pos_K_clamped_expanded = res_pos_K_idx.clamp(min=0).long().unsqueeze(0).expand(H_q, -1, -1)
+            delta_s.scatter_add_(dim=2, index=res_pos_K_clamped_expanded, src=corr_K_perm)
+
+    # ── Solution 3: Fact Anchor overrides for Key ──
+    fact_pos = getattr(pool, "fact_anchor_positions", None)
+    fact_anc_K_pool = getattr(pool, "fact_anchors_K", None)
+    if fact_pos is not None and fact_anc_K_pool is not None:
+        fact_pos_idx = fact_pos[idx]  # [N, 3]
+        fact_anc_K_idx = fact_anc_K_pool[idx].float()  # [N, 3, num_kv_heads, D]
+        for i in range(N):
+            for j in range(3):
+                pos_val = int(fact_pos_idx[i, j].item())
+                if pos_val >= 0:
+                    K_raw = fact_anc_K_idx[i, j]
+                    K_exact = K_raw.repeat_interleave(gpk, dim=0)
+                    
+                    has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+                    if has_rope:
+                        cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                        sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                        abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
+                        abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
+                        
+                        cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                        sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                        K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+                    
+                    score_exact = torch.sum(q * K_exact, dim=-1) * scale
+                    delta_s[:, i, pos_val] = score_exact
+
 
     if blk_sizes is not None:
         s_range   = torch.arange(S_comp, device=Q.device).view(1, 1, -1)
@@ -675,10 +762,52 @@ def fused_decode_mps(
     w_proj = w_proj * pool.scales[idx].float().view(N, 1, 1)
     O = O + torch.einsum('nhr,nhrd->hd', w_proj, VV_e)
 
+    # ── Post-SVD Sparse Residual Correction for Value ──
+    res_pos_V = getattr(pool, "residual_V_positions", None)
+    res_val_V = getattr(pool, "residual_V_values", None)
+    if res_pos_V is not None and res_val_V is not None:
+        res_pos_V_idx = res_pos_V[idx]
+        res_val_V_idx = res_val_V[idx].float()
+        if res_pos_V_idx.numel() > 0:
+            res_val_V_e = res_val_V_idx.repeat_interleave(gpk, dim=2)  # [N, MAX_RESIDUAL_TOKENS, H_q, D]
+            w_d_perm = w_d.permute(1, 0, 2)
+            res_pos_V_clamped = res_pos_V_idx.clamp(min=0).long()
+            res_pos_V_expanded = res_pos_V_clamped.unsqueeze(1).expand(-1, H_q, -1)
+            w_res_V = torch.gather(w_d_perm, dim=2, index=res_pos_V_expanded)
+            
+            mask_V = (res_pos_V_idx >= 0).unsqueeze(1).expand(-1, H_q, -1)
+            w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
+
+            res_val_V_e_perm = res_val_V_e.permute(0, 2, 1, 3)
+            O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_e_perm, dim=(0, 2))
+            O = O + O_res
+
+    # ── Solution 3: Fact Anchor overrides for Value ──
+    fact_pos = getattr(pool, "fact_anchor_positions", None)
+    fact_anc_V_pool = getattr(pool, "fact_anchors_V", None)
+    if fact_pos is not None and fact_anc_V_pool is not None:
+        fact_pos_idx = fact_pos[idx]  # [N, 3]
+        fact_anc_V_idx = fact_anc_V_pool[idx].float()  # [N, 3, num_kv_heads, D]
+        for i in range(N):
+            for j in range(3):
+                pos_val = int(fact_pos_idx[i, j].item())
+                if pos_val >= 0:
+                    V_exact_raw = fact_anc_V_idx[i, j]
+                    V_exact = V_exact_raw.repeat_interleave(gpk, dim=0)
+                    
+                    u_val = U_a[i, pos_val]  # [R]
+                    vv_i = VV_e[i]  # [H_q, R, D]
+                    v_svd = torch.sum(u_val.view(1, -1, 1) * vv_i, dim=1) * pool.scales[idx[i]].item() + AncV_e[i] # [H_q, D]
+                    
+                    v_diff = V_exact - v_svd
+                    w_pos = w_d[:, i, pos_val].unsqueeze(-1) # [H_q, 1]
+                    O = O + (w_pos * v_diff)
+
+
     if torch.isnan(O).any() or torch.isinf(O).any() or torch.isnan(lse).any():
         print("[fused_decode_mps DEBUG] NaN/Inf detected!")
         print(f"q finite: {torch.isfinite(q).all().item()} min: {q.min().item()} max: {q.max().item()}")
-        print(f"AncK_e finite: {torch.isfinite(AncK_e).all().item()} min: {AncK_e.min().item()} max: {AncK_e.max().item()}")
+        print(f"AncK_e finite: {torch.isfinite(AncK_e).all().item()} min: {AncK_e.min().item()} max: {AncK_e.min().item()} max: {AncK_e.max().item()}")
         print(f"VK_e finite: {torch.isfinite(VK_e).all().item()} min: {VK_e.min().item()} max: {VK_e.max().item()}")
         print(f"U_a finite: {torch.isfinite(U_a).all().item()} min: {U_a.min().item()} max: {U_a.max().item()}")
         print(f"scales finite: {torch.isfinite(pool.scales[idx]).all().item()} min: {pool.scales[idx].min().item()} max: {pool.scales[idx].max().item()}")
@@ -781,6 +910,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 decode_workspace.pop(session_id, None)
 
     if N > 0:
+        indices = block_indices.long()
         current_version = session_dict.get("routing_version", 0) if session_dict is not None else 0
 
         cached_gathered = None
@@ -796,8 +926,7 @@ def _pytorch_vectorized_sparse_attn_decode(
         if cached_gathered is not None:
             U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t = cached_gathered
         else:
-            indices = block_indices.long()
-            U = pool.U[indices].to(q.dtype) * pool.U_scale[indices].view(-1, 1, 1)
+            U = reconstruct_batch_U(pool, indices).to(q.dtype)
             
             V_K_raw = pool.V_K[indices]
             anchors_K_raw = pool.anchors_K[indices]
@@ -890,6 +1019,63 @@ def _pytorch_vectorized_sparse_attn_decode(
             # Inner product with U: [H_q, N, block_capacity]
             scores_block = torch.einsum('nhr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
             scores_block = scores_block + scores_anchor.unsqueeze(-1)
+
+        res_pos_K = getattr(pool, "residual_K_positions", None)
+        res_val_K = getattr(pool, "residual_K_values", None)
+        if res_pos_K is not None and res_val_K is not None and N > 0:
+            res_pos_K_idx = res_pos_K[indices]
+            res_val_K_idx = res_val_K[indices].float()
+            if res_pos_K_idx.numel() > 0:
+                res_val_K_e = res_val_K_idx.repeat_interleave(num_key_value_groups, dim=2)
+                if not approximate_attn and has_rope:
+                    res_pos_K_clamped = res_pos_K_idx.clamp(min=0)
+                    abs_pos = anchor_indices.unsqueeze(1) + 1 + res_pos_K_clamped.long()
+                    cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                    sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                    abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
+                    
+                    cos_res = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
+                    sin_res = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
+                    
+                    q_res_rot = q_sq_fp32.unsqueeze(0).unsqueeze(1) * cos_res - rotate_half(q_sq_fp32.unsqueeze(0).unsqueeze(1)) * sin_res
+                    corr_K = torch.sum(q_res_rot * res_val_K_e, dim=-1) * inv_scale
+                else:
+                    corr_K = torch.sum(q_sq_fp32.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * inv_scale
+
+                corr_K_perm = corr_K.permute(2, 0, 1)
+                mask_K = (res_pos_K_idx >= 0).unsqueeze(0).expand(H_q, -1, -1)
+                corr_K_perm = corr_K_perm.masked_fill(~mask_K, 0.0)
+
+                res_pos_K_clamped_expanded = res_pos_K_idx.clamp(min=0).long().unsqueeze(0).expand(H_q, -1, -1)
+                scores_block.scatter_add_(dim=2, index=res_pos_K_clamped_expanded, src=corr_K_perm)
+
+        # ── Solution 3: Fact Anchor overrides for Key ──
+        fact_pos = getattr(pool, "fact_anchor_positions", None)
+        fact_anc_K_pool = getattr(pool, "fact_anchors_K", None)
+        if fact_pos is not None and fact_anc_K_pool is not None and N > 0:
+            fact_pos_idx = fact_pos[indices]  # [N, 3]
+            fact_anc_K_idx = fact_anc_K_pool[indices].float()  # [N, 3, num_kv_heads, D]
+            for i in range(N):
+                for j in range(3):
+                    pos_val = int(fact_pos_idx[i, j].item())
+                    if pos_val >= 0:
+                        K_raw = fact_anc_K_idx[i, j]
+                        K_exact = K_raw.repeat_interleave(num_key_value_groups, dim=0)
+                        
+                        has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+                        if has_rope:
+                            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                            abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
+                            abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
+                            
+                            cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                            sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                            K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+                        
+                        score_exact = torch.sum(q_sq_fp32 * K_exact, dim=-1) * inv_scale
+                        scores_block[:, i, pos_val] = score_exact
+
         
         # Mask out-of-bounds tokens
         s_range = torch.arange(block_capacity, device=q.device).view(1, 1, -1)
@@ -974,6 +1160,50 @@ def _pytorch_vectorized_sparse_attn_decode(
         S_dense=S_dense,
         V_V_perm=None,
     )
+
+    # ── Post-SVD Sparse Residual Correction for Value ──
+    res_pos_V = getattr(pool, "residual_V_positions", None)
+    res_val_V = getattr(pool, "residual_V_values", None)
+    if res_pos_V is not None and res_val_V is not None and N > 0:
+        res_pos_V_idx = res_pos_V[indices]
+        res_val_V_idx = res_val_V[indices].float()
+        if res_pos_V_idx.numel() > 0:
+            res_val_V_e = res_val_V_idx.repeat_interleave(num_key_value_groups, dim=2)  # [N, MAX_RESIDUAL_TOKENS, H_q, D]
+            P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)  # [N, H_q, block_capacity]
+            res_pos_V_clamped = res_pos_V_idx.clamp(min=0).long()
+            res_pos_V_expanded = res_pos_V_clamped.unsqueeze(1).expand(-1, H_q, -1)
+            w_res_V = torch.gather(P_comp_reshaped, dim=2, index=res_pos_V_expanded)
+            
+            mask_V = (res_pos_V_idx >= 0).unsqueeze(1).expand(-1, H_q, -1)
+            w_res_V = w_res_V.masked_fill(~mask_V, 0.0)
+
+            res_val_V_e_perm = res_val_V_e.permute(0, 2, 1, 3)
+            O_res = torch.sum(w_res_V.unsqueeze(-1) * res_val_V_e_perm, dim=(0, 2))
+            O_final = O_final + O_res.to(O_final.dtype)
+
+    # ── Solution 3: Fact Anchor overrides for Value ──
+    fact_pos = getattr(pool, "fact_anchor_positions", None)
+    fact_anc_V_pool = getattr(pool, "fact_anchors_V", None)
+    if fact_pos is not None and fact_anc_V_pool is not None and N > 0:
+        fact_pos_idx = fact_pos[indices]
+        fact_anc_V_idx = fact_anc_V_pool[indices].float()
+        P_comp_reshaped = P_comp.view(H_q, N, block_capacity) # [H_q, N, block_capacity]
+        for i in range(N):
+            for j in range(3):
+                pos_val = int(fact_pos_idx[i, j].item())
+                if pos_val >= 0:
+                    V_exact_raw = fact_anc_V_idx[i, j]
+                    V_exact = V_exact_raw.repeat_interleave(num_key_value_groups, dim=0)
+                    
+                    u_val = U[i, pos_val].float()
+                    v_svd = torch.zeros((H_q, D), device=q.device, dtype=torch.float32)
+                    for h in range(H_q):
+                        v_svd[h] = torch.sum(u_val.unsqueeze(1) * V_V[i, :, h, :].float(), dim=0) * scales[i].item() + anchors_V[i, h].float()
+                    
+                    v_diff = V_exact - v_svd
+                    w_pos = P_comp_reshaped[:, i, pos_val].unsqueeze(-1) # [H_q, 1]
+                    O_final = O_final + (w_pos * v_diff).to(O_final.dtype)
+
 
     return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)
 

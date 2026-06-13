@@ -1645,18 +1645,7 @@ int main(int argc, char ** argv) {
         if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
             engage_threshold = std::stoi(env_et);
         }
-        
-        // Define max_generate early to compute dense_past_capacity dynamically
-        int max_generate = 2048;
-        if (is_warmup_run) {
-            max_generate = 2;
-        } else if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
-            max_generate = std::max(1, std::stoi(env_mt));
-        }
-        int dense_past_capacity = std::max(engage_threshold, L + max_generate);
-        
-        // Force dense decode always to prevent CPU-GPU roundtrip synchronization stalls
-        bool decode_use_sparse = false;
+        bool decode_use_sparse = (L >= engage_threshold);
 
         if (!decode_use_sparse) {
             int half_dim = head_dim / 2;
@@ -1710,7 +1699,7 @@ int main(int argc, char ** argv) {
         ggml_set_input(slots_mask_decode);
         struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
         ggml_set_input(host_slots_decode);
-        struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, dense_past_capacity + 1, 1);
+        struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
         ggml_set_input(dense_attn_mask_decode);
 
 #ifdef __APPLE__
@@ -1755,9 +1744,9 @@ int main(int argc, char ** argv) {
         std::vector<struct ggml_tensor *> dense_k_past_inputs(n_layers, nullptr);
         std::vector<struct ggml_tensor *> dense_v_past_inputs(n_layers, nullptr);
         for (int l = 0; l < n_layers; ++l) {
-            dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, dense_past_capacity);
+            dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
             ggml_set_input(dense_k_past_inputs[l]);
-            dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, dense_past_capacity);
+            dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
             ggml_set_input(dense_v_past_inputs[l]);
         }
         ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
@@ -1769,7 +1758,7 @@ int main(int argc, char ** argv) {
             srl_k_semantic, srl_k_keep,
             userdata.data(), &decode_logits, &decode_selected_slots,
             &decode_concat_k, &decode_concat_v,
-            decode_use_sparse, L, dense_past_capacity,
+            decode_use_sparse, L, engage_threshold,
             dense_k_past_inputs.data(), dense_v_past_inputs.data(),
             dense_attn_mask_decode
         );
@@ -1819,6 +1808,13 @@ int main(int argc, char ** argv) {
 
         std::vector<int32_t> generated_tokens;
         generated_tokens.push_back(last_token);
+        // max_generate: default 2048, overridable via DIFFKV_MAX_TOKENS env var or request
+        int max_generate = 2048;
+        if (is_warmup_run) {
+            max_generate = 2;
+        } else if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
+            max_generate = std::max(1, std::stoi(env_mt));
+        }
 
         std::vector<int32_t> all_tokens = prompt_tokens;
         all_tokens.push_back(last_token);
@@ -1979,8 +1975,7 @@ int main(int argc, char ** argv) {
             }
             int current_pos = L + step;
 
-            // Always decode in dense mode on the GPU to avoid CPU-GPU roundtrip stalls
-            bool step_use_sparse = false;
+            bool step_use_sparse = (current_pos >= engage_threshold);
             bool rebuild_needed = (step_use_sparse != decode_use_sparse);
             if (rebuild_needed) {
                 decode_use_sparse = step_use_sparse;
@@ -2001,7 +1996,7 @@ int main(int argc, char ** argv) {
                 ggml_set_input(slots_mask_decode);
                 host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
                 ggml_set_input(host_slots_decode);
-                dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, dense_past_capacity + 1, 1);
+                dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
                 ggml_set_input(dense_attn_mask_decode);
                 
                 // Reuse persistent dense K/V input tensors allocated in dense_past_ctx
@@ -2018,7 +2013,7 @@ int main(int argc, char ** argv) {
                     srl_k_semantic, srl_k_keep,
                     userdata.data(), &decode_logits, &decode_selected_slots,
                     &decode_concat_k, &decode_concat_v,
-                    decode_use_sparse, current_pos, dense_past_capacity,
+                    decode_use_sparse, current_pos, engage_threshold,
                     dense_k_past_inputs.data(), dense_v_past_inputs.data(),
                     dense_attn_mask_decode
                 );
@@ -2080,12 +2075,12 @@ int main(int argc, char ** argv) {
                         }
                     }
                 }
-                std::vector<ggml_fp16_t> dense_mask_host(dense_past_capacity + 1);
-                for (int i = 0; i < dense_past_capacity + 1; ++i) {
-                    float val = (i < current_pos || i == dense_past_capacity) ? 0.0f : -1e10f;
+                std::vector<ggml_fp16_t> dense_mask_host(engage_threshold + 1);
+                for (int i = 0; i < engage_threshold + 1; ++i) {
+                    float val = (i < current_pos || i == engage_threshold) ? 0.0f : -1e10f;
                     dense_mask_host[i] = ggml_fp32_to_fp16(val);
                 }
-                ggml_backend_tensor_set(dense_attn_mask_decode, dense_mask_host.data(), 0, (dense_past_capacity + 1) * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(dense_attn_mask_decode, dense_mask_host.data(), 0, (engage_threshold + 1) * sizeof(ggml_fp16_t));
             }
 
             auto t_before_retrieval = std::chrono::high_resolution_clock::now();

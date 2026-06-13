@@ -5,7 +5,6 @@
 #include "native_core/compression/async_compressor.hpp"
 #include <vector>
 #include <unordered_set>
-#include <unordered_map>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -137,8 +136,6 @@ private:
     std::vector<size_t> last_compression_scan_idx_;
     const std::unordered_set<int32_t>* stop_token_ids_ = nullptr;
     std::string active_session_id_;
-    mutable std::unordered_map<std::string, int> doc_word_counts_;
-    mutable bool doc_word_counts_built_ = false;
 };
 
 } // namespace diffkv

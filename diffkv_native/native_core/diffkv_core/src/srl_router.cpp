@@ -142,33 +142,35 @@ void anchor_screen(
         return;
     }
 
-    // 1. GQA head-specific matching with max dot product
-    std::vector<float> scores(M_unique, 0.0f);
-    int group_size = H_q / kv_heads;
-    if (group_size <= 0) group_size = 1;
+    // 1. Mean-pool query over all heads -> q_mean
+    std::vector<float> q_mean(D, 0.0f);
+    for (int h = 0; h < H_q; ++h) {
+        for (int d = 0; d < D; ++d) {
+            q_mean[d] += Q[h * D + d];
+        }
+    }
+    for (int d = 0; d < D; ++d) {
+        q_mean[d] /= H_q;
+    }
 
+    // 2. Gather anchor keys for unique candidate slots and average over kv_heads
+    std::vector<float> anc_flat(M_unique * D, 0.0f);
     for (int m = 0; m < M_unique; ++m) {
         int slot_id = unique_candidates[m];
-        const float* anchor = anchors_K + (size_t)slot_id * kv_heads * D;
-
-        float max_dot = -1e9f;
-        for (int h = 0; h < H_q; ++h) {
-            int kh = h / group_size;
-            if (kh >= kv_heads) kh = kv_heads - 1;
-
-            const float* q_h = Q + (size_t)h * D;
-            const float* k_h = anchor + (size_t)kh * D;
-
-            float dot_h = 0.0f;
+        for (int h = 0; h < kv_heads; ++h) {
+            int base = slot_id * kv_heads * D + h * D;
             for (int d = 0; d < D; ++d) {
-                dot_h += q_h[d] * k_h[d];
-            }
-            if (dot_h > max_dot) {
-                max_dot = dot_h;
+                anc_flat[m * D + d] += anchors_K[base + d];
             }
         }
-        scores[m] = max_dot * scale;
+        for (int d = 0; d < D; ++d) {
+            anc_flat[m * D + d] /= kv_heads;
+        }
     }
+
+    // 3. Dot product with mean query
+    std::vector<float> scores(M_unique, 0.0f);
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, M_unique, D, scale, anc_flat.data(), D, q_mean.data(), 1, 0.0f, scores.data(), 1);
 
     // 4. Top-k sorting
     int k_clamped = std::min(k_keep, M_unique);

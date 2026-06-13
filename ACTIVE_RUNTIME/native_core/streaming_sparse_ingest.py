@@ -158,6 +158,20 @@ class StreamingKVBlock:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     pool: Any = None
 
+    _residual_K_positions: Optional[torch.Tensor] = None
+    _residual_K_values: Optional[torch.Tensor] = None
+    _residual_V_positions: Optional[torch.Tensor] = None
+    _residual_V_values: Optional[torch.Tensor] = None
+
+    _U_sem_int4: Optional[torch.Tensor] = None
+    _U_sem_scale: Optional[torch.Tensor] = None
+    _U_fact_fp16: Optional[torch.Tensor] = None
+    _n_semantic: int = 0
+
+    _fact_anchors_K: Optional[torch.Tensor] = None
+    _fact_anchors_V: Optional[torch.Tensor] = None
+    _fact_anchor_positions: Optional[torch.Tensor] = None
+
     @property
     def U(self):
         if self._U is not None:
@@ -194,6 +208,171 @@ class StreamingKVBlock:
     @V.setter
     def V(self, val):
         self._V = val
+
+    @property
+    def residual_K_positions(self):
+        if self._residual_K_positions is not None:
+            return self._residual_K_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_K_positions[pool_idx]
+        return None
+
+    @residual_K_positions.setter
+    def residual_K_positions(self, val):
+        self._residual_K_positions = val
+
+    @property
+    def residual_K_values(self):
+        if self._residual_K_values is not None:
+            return self._residual_K_values
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_K_values[pool_idx]
+        return None
+
+    @residual_K_values.setter
+    def residual_K_values(self, val):
+        self._residual_K_values = val
+
+    @property
+    def residual_V_positions(self):
+        if self._residual_V_positions is not None:
+            return self._residual_V_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_V_positions[pool_idx]
+        return None
+
+    @residual_V_positions.setter
+    def residual_V_positions(self, val):
+        self._residual_V_positions = val
+
+    @property
+    def residual_V_values(self):
+        if self._residual_V_values is not None:
+            return self._residual_V_values
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.residual_V_values[pool_idx]
+        return None
+
+    @residual_V_values.setter
+    def residual_V_values(self, val):
+        self._residual_V_values = val
+
+    @property
+    def U_sem_int4(self):
+        if self._U_sem_int4 is not None:
+            return self._U_sem_int4
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            write_seq = (seq_len + 1) // 2
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            return pool.U_sem[pool_idx, :write_seq, :n_sem]
+        return None
+
+    @U_sem_int4.setter
+    def U_sem_int4(self, val):
+        self._U_sem_int4 = val
+
+    @property
+    def U_sem_scale(self):
+        if self._U_sem_scale is not None:
+            return self._U_sem_scale
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            return pool.U_sem_scale[pool_idx, :n_sem]
+        return None
+
+    @U_sem_scale.setter
+    def U_sem_scale(self, val):
+        self._U_sem_scale = val
+
+    @property
+    def U_fact_fp16(self):
+        if self._U_fact_fp16 is not None:
+            return self._U_fact_fp16
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            seq_len = int(pool.seq_lens[pool_idx].item())
+            rank = self.dynamic_rank if self.dynamic_rank > 0 else pool.U_fact.shape[2]
+            n_sem = int(pool.n_semantic[pool_idx].item())
+            n_fact = rank - n_sem
+            if n_fact <= 0:
+                return torch.empty((seq_len, 0), device=pool.device, dtype=pool.dtype)
+            return pool.U_fact[pool_idx, :seq_len, :n_fact]
+        return None
+
+    @U_fact_fp16.setter
+    def U_fact_fp16(self, val):
+        self._U_fact_fp16 = val
+
+    @property
+    def n_semantic(self):
+        if self._n_semantic > 0:
+            return self._n_semantic
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return int(pool.n_semantic[pool_idx].item())
+        return 0
+
+    @n_semantic.setter
+    def n_semantic(self, val):
+        self._n_semantic = val
+
+    @property
+    def fact_anchors_K(self):
+        if self._fact_anchors_K is not None:
+            return self._fact_anchors_K
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchors_K[pool_idx]
+        return None
+
+    @fact_anchors_K.setter
+    def fact_anchors_K(self, val):
+        self._fact_anchors_K = val
+
+    @property
+    def fact_anchors_V(self):
+        if self._fact_anchors_V is not None:
+            return self._fact_anchors_V
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchors_V[pool_idx]
+        return None
+
+    @fact_anchors_V.setter
+    def fact_anchors_V(self, val):
+        self._fact_anchors_V = val
+
+    @property
+    def fact_anchor_positions(self):
+        if self._fact_anchor_positions is not None:
+            return self._fact_anchor_positions
+        if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
+            pool = self.pool
+            pool_idx = self.pool_idx
+            return pool.fact_anchor_positions[pool_idx]
+        return None
+
+    @fact_anchor_positions.setter
+    def fact_anchor_positions(self, val):
+        self._fact_anchor_positions = val
+
 
     # ── Phase 29: Ring buffer fields (Fix #1 — eliminate torch.cat per token) ──
     # Pre-allocated GPU tensor of shape [1, heads, micro_block_size, head_dim].

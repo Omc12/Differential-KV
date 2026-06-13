@@ -22,6 +22,71 @@ except ImportError:
     def _has_cuda(): return torch.cuda.is_available()
 
 
+def pack_int4(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pack float32 U_semantic of shape [S, R] into int8 U_sem_packed of shape [S // 2, R].
+    S does not need to be even; if odd, we pad with a row of zeros before packing.
+    Quantizes values to the range [-8, 7].
+    """
+    S, R = x.shape
+    device = x.device
+    
+    # Pad to even S if odd
+    if S % 2 != 0:
+        x_padded = torch.cat([x, torch.zeros((1, R), device=device, dtype=x.dtype)], dim=0)
+    else:
+        x_padded = x
+        
+    S_pad = x_padded.shape[0]
+    
+    # Scale per column: [R]
+    max_abs = x_padded.abs().max(dim=0).values
+    scale = torch.clamp(max_abs / 7.0, min=1e-5)
+    
+    # Quantize to [-8, 7]
+    q = torch.clamp(torch.round(x_padded / scale.unsqueeze(0)), -8, 7).to(torch.int8)
+    
+    # Shift to unsigned [0, 15] for safe bitwise operation
+    q_shifted = (q + 8).to(torch.uint8 if hasattr(torch, "uint8") else torch.int8)
+    
+    # Pack consecutive rows
+    even = q_shifted[0::2, :]
+    odd = q_shifted[1::2, :]
+    
+    # even is in low 4 bits, odd in high 4 bits
+    packed = (even & 0x0F) | ((odd & 0x0F) << 4)
+    return packed.to(torch.int8), scale
+
+
+def unpack_int4(packed: torch.Tensor, scale: torch.Tensor, original_S: int) -> torch.Tensor:
+    """
+    Unpack int8 U_sem_packed of shape [S // 2, R] to float16 U_semantic of shape [S, R].
+    Slices the result back to original_S.
+    """
+    S_half, R = packed.shape
+    device = packed.device
+    
+    # Cast to uint8 to avoid signed bitwise operation bugs (e.g. sign extension on shift)
+    packed_u8 = packed.to(torch.uint8)
+    
+    # Extract low and high 4 bits
+    even = packed_u8 & 0x0F
+    odd = (packed_u8 >> 4) & 0x0F
+    
+    # Subtract the offset of 8 that was added during packing to recover signed range [-8, 7]
+    even_signed = even.to(torch.float32) - 8.0
+    odd_signed = odd.to(torch.float32) - 8.0
+    
+    # Interleave
+    unpacked = torch.zeros((S_half * 2, R), device=device, dtype=torch.float32)
+    unpacked[0::2, :] = even_signed
+    unpacked[1::2, :] = odd_signed
+    
+    # Slice to original_S and scale
+    unpacked = unpacked[:original_S, :] * scale.unsqueeze(0)
+    return unpacked.to(torch.float16)
+
+
 @dataclass
 class LowRankDelta:
     U: torch.Tensor       # [n_deltas, rank] float16
@@ -33,6 +98,14 @@ class LowRankDelta:
     cosine_sim: float = 1.0
     norm_drift: float = 0.0
     dynamic_rank: int = -1
+    residual_K_positions: Optional[torch.Tensor] = None
+    residual_K_values:    Optional[torch.Tensor] = None
+    residual_V_positions: Optional[torch.Tensor] = None
+    residual_V_values:    Optional[torch.Tensor] = None
+    U_sem_int4:           Optional[torch.Tensor] = None
+    U_sem_scale:          Optional[torch.Tensor] = None
+    U_fact_fp16:          Optional[torch.Tensor] = None
+    n_semantic:           int = 0
 
     def nbytes(self) -> int:
         return self.U.numel() * 2 + self.V.numel() * 2
@@ -59,7 +132,13 @@ class LowRankDelta:
         return self.nbytes()
 
 
-def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
+def compress_lowrank(
+    deltas: torch.Tensor,
+    rank: int,
+    error_threshold: float = 0.08,
+    max_residual_frac: float = 0.15,
+    token_norms: Optional[torch.Tensor] = None,
+) -> LowRankDelta:
     """
     Compress [n, feat_dim] float32 delta matrix to rank-r approximation.
     Uses Phase 36 Randomized SVD (rSVD) and Energy-Preserving Dynamic Rank.
@@ -172,6 +251,19 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     if not torch.isfinite(Vh_k_fp16).all():
         Vh_k_fp16 = torch.nan_to_num(Vh_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # ── Singular Value Stratified Quantization (Solution 2) ──
+    s_vals = S[:k]
+    max_s = s_vals.max().item() if s_vals.numel() > 0 else 0.0
+    s_threshold = max_s * 0.05
+    n_semantic = int((s_vals > s_threshold).sum().item())
+    n_semantic = max(1, min(n_semantic, k))
+    
+    U_semantic = U_k_fp16[:, :n_semantic]
+    U_factual = U_k_fp16[:, n_semantic:]
+    
+    U_sem_int4, U_sem_scale = pack_int4(U_semantic)
+    U_fact_fp16 = U_factual.clone()
+
     retained = (S[:k]**2).sum().item() / (total_energy + 1e-12)
     
     # Calculate reconstruction metrics on CPU using actual (unpadded) k-rank matrices
@@ -190,9 +282,70 @@ def compress_lowrank(deltas: torch.Tensor, rank: int) -> LowRankDelta:
     U_out = U_k_fp16.to(device)   # [n, k]
     V_out = Vh_k_fp16.to(device)  # [k, d]
 
+    # ── Post-SVD Sparse Residual Storage (Solution 1) ──
+    half_d = d // 2
+    delta_K = deltas_cpu[:, :half_d]
+    delta_V = deltas_cpu[:, half_d:]
+    recon_K = recon[:, :half_d]
+    recon_V = recon[:, half_d:]
+
+    error_K = (delta_K - recon_K).norm(dim=1)
+    error_V = (delta_V - recon_V).norm(dim=1)
+
+    norm_K = delta_K.norm(dim=1).clamp(min=1e-8)
+    norm_V = delta_V.norm(dim=1).clamp(min=1e-8)
+
+    rel_error_K = error_K / norm_K
+    rel_error_V = error_V / norm_V
+
+    n_max_residual = int(n * max_residual_frac)
+    
+    fact_positions_K = None
+    residual_K_vals = None
+    fact_positions_V = None
+    residual_V_vals = None
+
+    if n > 0 and n_max_residual > 0:
+        top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
+        top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+        
+        mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
+        fact_positions_K = top_k_K.indices[mask_K]
+        
+        mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
+        fact_positions_V = top_k_V.indices[mask_V]
+        
+        if fact_positions_K.numel() > 0:
+            res_K_vals = (delta_K - recon_K)[fact_positions_K]
+            if token_norms is not None:
+                res_K_vals = res_K_vals * token_norms.cpu()[fact_positions_K.cpu()].unsqueeze(1)
+            residual_K_vals = res_K_vals.to(torch.float16).to(device)
+            fact_positions_K = fact_positions_K.to(torch.int16).to(device)
+        else:
+            fact_positions_K = None
+            residual_K_vals = None
+            
+        if fact_positions_V.numel() > 0:
+            res_V_vals = (delta_V - recon_V)[fact_positions_V]
+            if token_norms is not None:
+                res_V_vals = res_V_vals * token_norms.cpu()[fact_positions_V.cpu()].unsqueeze(1)
+            residual_V_vals = res_V_vals.to(torch.float16).to(device)
+            fact_positions_V = fact_positions_V.to(torch.int16).to(device)
+        else:
+            fact_positions_V = None
+            residual_V_vals = None
+
     return LowRankDelta(U=U_out, V=V_out, shape=(n, d),
                         rank=rank, scale=scale, energy_retained=float(retained),
-                        cosine_sim=cos_sim, norm_drift=norm_drift, dynamic_rank=k)
+                        cosine_sim=cos_sim, norm_drift=norm_drift, dynamic_rank=k,
+                        residual_K_positions=fact_positions_K,
+                        residual_K_values=residual_K_vals,
+                        residual_V_positions=fact_positions_V,
+                        residual_V_values=residual_V_vals,
+                        U_sem_int4=U_sem_int4.to(device) if U_sem_int4 is not None else None,
+                        U_sem_scale=U_sem_scale.to(device) if U_sem_scale is not None else None,
+                        U_fact_fp16=U_fact_fp16.to(device) if U_fact_fp16 is not None else None,
+                        n_semantic=n_semantic)
 
 
 def decompress_lowrank(lr: LowRankDelta,
@@ -378,8 +531,25 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         u_k = u_k * token_norms[i].unsqueeze(1)               # Scale U by token norms
         v_k = Vh_fp16[i, :k, :]                                # [k, feat_dim]
 
+        # ── Singular Value Stratified Quantization (Solution 2) ──
+        s_vals = S_fp16[i, :k]
+        max_s = s_vals.max().item() if s_vals.numel() > 0 else 0.0
+        s_threshold = max_s * 0.05
+        n_sem = int((s_vals > s_threshold).sum().item())
+        n_sem = max(1, min(n_sem, k))
+        
+        u_semantic = u_k[:, :n_sem]
+        u_factual = u_k[:, n_sem:]
+        
+        u_sem_int4, u_sem_scale = pack_int4(u_semantic)
+        u_fact_fp16 = u_factual.clone()
+
         block.U = u_k.contiguous()
         block.V = v_k.contiguous()
+        block.U_sem_int4 = u_sem_int4.to(gpu_device)
+        block.U_sem_scale = u_sem_scale.to(gpu_device)
+        block.U_fact_fp16 = u_fact_fp16.to(gpu_device)
+        block.n_semantic = n_sem
         block.scale = 1.0
         block.dynamic_rank = k
         block.active_k = None
@@ -389,16 +559,131 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.state = "COMPRESSED"
         block.dirty = True
 
+        # ── Post-SVD Sparse Residual Storage on GPU ──
+        recon = u_k.float() @ v_k.float()  # [T_active, feat_dim]
+        half_d = feat_dim // 2
+        delta_K = deltas[i, :, :half_d]
+        delta_V = deltas[i, :, half_d:]
+        recon_K = recon[:, :half_d]
+        recon_V = recon[:, half_d:]
+
+        error_K = (delta_K - recon_K).norm(dim=1)
+        error_V = (delta_V - recon_V).norm(dim=1)
+
+        norm_K = delta_K.norm(dim=1).clamp(min=1e-8)
+        norm_V = delta_V.norm(dim=1).clamp(min=1e-8)
+
+        rel_error_K = error_K / norm_K
+        rel_error_V = error_V / norm_V
+
+        n_max_residual = int(T_active * 0.15)
+        
+        fact_positions_K = None
+        residual_K_vals = None
+        fact_positions_V = None
+        residual_V_vals = None
+
+        if T_active > 0 and n_max_residual > 0:
+            top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, T_active))
+            top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, T_active))
+            
+            mask_K = (top_k_K.values > 0.08) & (error_K[top_k_K.indices] > 1e-4)
+            fact_positions_K = top_k_K.indices[mask_K]
+            
+            mask_V = (top_k_V.values > 0.08) & (error_V[top_k_V.indices] > 1e-4)
+            fact_positions_V = top_k_V.indices[mask_V]
+            
+            if fact_positions_K.numel() > 0:
+                residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)
+                fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
+            else:
+                fact_positions_K = None
+                residual_K_vals = None
+                
+            if fact_positions_V.numel() > 0:
+                residual_V_vals = (delta_V - recon_V)[fact_positions_V].to(torch.float16).to(gpu_device)
+                fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
+            else:
+                fact_positions_V = None
+                residual_V_vals = None
+
+        block.residual_K_positions = fact_positions_K
+        block.residual_K_values = residual_K_vals
+        block.residual_V_positions = fact_positions_V
+        block.residual_V_values = residual_V_vals
+
         if pool is not None:
             if getattr(block, 'pool_idx', None) is None:
                 block.pool_idx = pool.allocate_block()
             block.pool = pool
-            pool.write_block(block.pool_idx, block.U, block.V, block.anchor_kv[0,0], block.anchor_kv[0,1], block.scale, T_active)
+            pool.write_block(
+                pool_idx=block.pool_idx,
+                U=block.U,
+                V=block.V,
+                anchor_K=block.anchor_kv[0,0],
+                anchor_V=block.anchor_kv[0,1],
+                scale=block.scale,
+                seq_len=T_active,
+                residual_K_positions=block.residual_K_positions,
+                residual_K_values=block.residual_K_values,
+                residual_V_positions=block.residual_V_positions,
+                residual_V_values=block.residual_V_values
+            )
             # Clear local GPU tensors on block to prevent VRAM leak
             block.U = None
             block.V = None
+            block.residual_K_positions = None
+            block.residual_K_values = None
+            block.residual_V_positions = None
+            block.residual_V_values = None
 
         if manager is not None and getattr(manager, "_streaming_mgr", None) is not None:
             manager._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
 
     return True
+
+
+def reconstruct_batch_U(pool, idx: torch.Tensor) -> torch.Tensor:
+    """
+    Reconstruct U of shape [N, max_seq_len, rank] from stratified components:
+    pool.U_sem [n_blocks, max_seq_len // 2, rank]
+    pool.U_sem_scale [n_blocks, rank]
+    pool.U_fact [n_blocks, max_seq_len, rank]
+    pool.n_semantic [n_blocks]
+    Falls back to pool.U and pool.U_scale if stratified components are not present/used.
+    """
+    N = idx.shape[0]
+    device = pool.device
+    dtype = pool.dtype
+    
+    max_seq_len = pool.U.shape[1]
+    rank = pool.U.shape[2]
+    
+    U_recon = torch.zeros((N, max_seq_len, rank), device=device, dtype=dtype)
+    
+    idx_list = idx.tolist() if hasattr(idx, 'tolist') else list(idx)
+    for i, pool_idx in enumerate(idx_list):
+        n_sem = int(pool.n_semantic[pool_idx].item()) if hasattr(pool, "n_semantic") else 0
+        seq_len = int(pool.seq_lens[pool_idx].item())
+        
+        # If stratified quantization is not used (n_sem == 0), fallback to standard pool.U
+        if n_sem == 0:
+            scale_val = pool.U_scale[pool_idx].to(dtype)
+            U_recon[i] = pool.U[pool_idx].to(dtype) * scale_val.view(1, 1)
+            continue
+            
+        # 1. Unpack semantic part
+        half_seq = (seq_len + 1) // 2
+        packed_sem = pool.U_sem[pool_idx, :half_seq, :n_sem]
+        scale_sem = pool.U_sem_scale[pool_idx, :n_sem]
+        U_sem = unpack_int4(packed_sem, scale_sem, seq_len).to(dtype)
+        U_recon[i, :seq_len, :n_sem] = U_sem
+        
+        # 2. Copy factual part
+        n_fact = rank - n_sem
+        if n_fact > 0:
+            U_fact = pool.U_fact[pool_idx, :seq_len, :n_fact]
+            U_recon[i, :seq_len, n_sem:n_sem+n_fact] = U_fact.to(dtype)
+            
+    return U_recon
+

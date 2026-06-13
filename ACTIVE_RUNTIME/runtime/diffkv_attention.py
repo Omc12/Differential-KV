@@ -12,6 +12,7 @@ from native_core.sparse_decode.triton_fused_decode import (
     fused_decode_mps,
     HAS_TRITON,
 )
+from native_core.compression.lowrank import reconstruct_batch_U
 
 # ── Phase 1: C++ extension fast path ─────────────────────────────────────────
 # Import diffkv_core C++ extension if built. When available, the hot path uses:
@@ -246,13 +247,19 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     max_seq_len = pool.U.shape[1]
 
                     # Gather block data from the pool
-                    U_stack    = pool.U[pool_indices_t].to(q.dtype) * pool.U_scale[pool_indices_t].view(-1, 1, 1)
+                    U_stack    = reconstruct_batch_U(pool, pool_indices_t).to(q.dtype)
                     V_K_stack  = pool.V_K[pool_indices_t]        # [N, R, num_kv_heads, D]
                     V_V_stack  = pool.V_V[pool_indices_t]        # [N, R, num_kv_heads, D]
                     anc_K      = torch.stack([b.anchor_kv[0, 0] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     anc_V      = torch.stack([b.anchor_kv[0, 1] for b in comp_blocks], dim=0).to(q.dtype)  # [N, num_kv_heads, D]
                     scales_1d  = pool.scales[pool_indices_t]     # [N]
                     seq_lens_t = pool.seq_lens[pool_indices_t]   # [N] int32
+
+                    # Gather residuals
+                    res_K_pos = pool.residual_K_positions[pool_indices_t]
+                    res_K_val = pool.residual_K_values[pool_indices_t].to(q.dtype)
+                    res_V_pos = pool.residual_V_positions[pool_indices_t]
+                    res_V_val = pool.residual_V_values[pool_indices_t].to(q.dtype)
 
                     # GQA repeat-expansion (zero-copy expand → contiguous only if needed)
                     v_k_rep   = repeat_kv(V_K_stack.permute(0, 2, 1, 3), num_key_value_groups)   # [N, H, R, D]
@@ -305,6 +312,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         q          = q,
                         seq_lens   = seq_lens_t,
                         inv_scale  = inv_scale_val,
+                        residual_K_positions = res_K_pos,
+                        residual_K_values    = res_K_val,
+                        residual_V_positions = res_V_pos,
+                        residual_V_values    = res_V_val,
                     )
                     out_hist  = result[0]                     # [1, H, q_len, D]
                     lse_hist  = result[1, 0, :, :, 0]        # [H, q_len]
@@ -660,6 +671,150 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             _cos_anc_2d = cos_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
                             _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
 
+                        # ── Query Factual Store (Solution 4) ──
+                        factual_store = getattr(kv_manager, "_factual_stores", {}).get(sid)
+                        matching_entries = []
+                        if factual_store is not None and pool is not None and pool.W_proj is not None:
+                            try:
+                                matching_entries = factual_store.query(
+                                    Q=query_states[b_idx, :, 0, :],
+                                    W_proj=pool.W_proj,
+                                    threshold=0.4
+                                )
+                            except Exception as fe:
+                                print(f"[SRL] WARNING: Factual store query failed: {fe}")
+
+                        if matching_entries:
+                            # 1. Dense recency attention output & LSE
+                            has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                            H_q = query_states.shape[1]
+                            D = query_states.shape[3]
+                            if has_dense:
+                                dense_positions_list = []
+                                for blk in dense_blocks:
+                                    dense_positions_list.extend(blk.token_indices)
+                                dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                cos_dense = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
+                                sin_dense = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
+                                
+                                dense_k_half = torch.zeros_like(dense_k_assembled)
+                                half_d = head_dim // 2
+                                dense_k_half[..., :half_d] = -dense_k_assembled[..., half_d:]
+                                dense_k_half[..., half_d:] = dense_k_assembled[..., :half_d]
+                                
+                                dense_k_rot = dense_k_assembled * cos_dense + dense_k_half * sin_dense
+                                
+                                k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
+                                v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                out_dense = F.scaled_dot_product_attention(
+                                    query_states[b_idx:b_idx+1], k_rep, v_rep,
+                                    is_causal=False,
+                                )  # [1, H_q, 1, D]
+                                out_dense_hd = out_dense[0, :, 0, :].float()
+                                
+                                _q = query_states[b_idx, :, 0, :]
+                                _kd = k_rep[0]
+                                _scale = (D ** -0.5)
+                                scores_dense = torch.matmul(_kd, _q.unsqueeze(-1)).squeeze(-1) * _scale  # [H_q, T]
+                                lse_dense = torch.logsumexp(scores_dense.float(), dim=-1)  # [H_q]
+                            else:
+                                out_dense_hd = torch.zeros((H_q, D), dtype=torch.float32, device=query_states.device)
+                                lse_dense = torch.full((H_q,), float('-inf'), dtype=torch.float32, device=query_states.device)
+
+                            # 2. Sparse semantic attention output & LSE
+                            has_comp = (block_indices is not None and block_indices.numel() > 0)
+                            if has_comp:
+                                _Q_sq = query_states[b_idx, :, 0, :]
+                                _bsizes = pool.seq_lens[block_indices]
+                                out_sparse, lse_sparse = fused_decode_mps(
+                                    Q                    = _Q_sq,
+                                    pool                 = pool,
+                                    block_indices        = block_indices,
+                                    blk_sizes            = _bsizes,
+                                    num_key_value_groups = num_key_value_groups,
+                                    anchor_indices       = anchor_indices,
+                                    cos                  = cos_all,
+                                    sin                  = sin_all,
+                                )
+                                out_sparse_fp32 = out_sparse.float()
+                                lse_sparse = lse_sparse.to(torch.float32)
+                            else:
+                                out_sparse_fp32 = torch.zeros((H_q, D), dtype=torch.float32, device=query_states.device)
+                                lse_sparse = torch.full((H_q,), float('-inf'), dtype=torch.float32, device=query_states.device)
+
+                            # 3. Factual store matches attention output & LSE
+                            fact_k_list = []
+                            fact_v_list = []
+                            fact_positions = []
+                            for entry in matching_entries:
+                                k_layer = entry.K[captured_layer_idx].to(device=query_states.device, dtype=query_states.dtype)
+                                v_layer = entry.V[captured_layer_idx].to(device=query_states.device, dtype=query_states.dtype)
+                                fact_k_list.append(k_layer)
+                                fact_v_list.append(v_layer)
+                                fact_positions.extend(range(entry.start_idx, entry.end_idx))
+                                
+                            fact_k = torch.cat(fact_k_list, dim=1).unsqueeze(0) # [1, kv_heads, total_fact_len, D]
+                            fact_v = torch.cat(fact_v_list, dim=1).unsqueeze(0) # [1, kv_heads, total_fact_len, D]
+                            
+                            pos_tensor = torch.tensor(fact_positions, dtype=torch.long, device=query_states.device)
+                            cos_flat = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+                            sin_flat = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+                            if cos_flat.dim() == 3:
+                                cos_flat = cos_flat.squeeze(0)
+                            if sin_flat.dim() == 3:
+                                sin_flat = sin_flat.squeeze(0)
+                                
+                            pos_clamped = pos_tensor.clamp(min=0, max=cos_flat.shape[0] - 1)
+                            cos_fact = cos_flat[pos_clamped].unsqueeze(0)
+                            sin_fact = sin_flat[pos_clamped].unsqueeze(0)
+                            
+                            _, fact_k_rot = apply_rotary_pos_emb(
+                                q=query_states[b_idx:b_idx+1],
+                                k=fact_k,
+                                cos=cos_fact,
+                                sin=sin_fact
+                            )
+                            
+                            k_rep_fact = repeat_kv(fact_k_rot, num_key_value_groups)
+                            v_rep_fact = repeat_kv(fact_v, num_key_value_groups)
+                            
+                            out_facts = F.scaled_dot_product_attention(
+                                query_states[b_idx:b_idx+1], k_rep_fact, v_rep_fact,
+                                is_causal=False,
+                            )
+                            out_facts_hd = out_facts[0, :, 0, :].float()
+                            
+                            _q = query_states[b_idx, :, 0, :]
+                            _kf = k_rep_fact[0]
+                            _scale = (D ** -0.5)
+                            scores_fact = torch.matmul(_kf, _q.unsqueeze(-1)).squeeze(-1) * _scale
+                            lse_facts = torch.logsumexp(scores_fact.float(), dim=-1)
+                            lse_facts = lse_facts.to(torch.float32)
+
+                            # 4. Three-way LSE combination
+                            lse_max = torch.maximum(torch.maximum(lse_dense, lse_sparse), lse_facts)
+                            lse_max_masked = lse_max.clone()
+                            lse_max_masked[torch.isinf(lse_max)] = 0.0
+
+                            w_dense = torch.exp(lse_dense - lse_max_masked)
+                            w_sparse = torch.exp(lse_sparse - lse_max_masked)
+                            w_facts = torch.exp(lse_facts - lse_max_masked)
+
+                            w_dense[torch.isinf(lse_dense)] = 0.0
+                            w_sparse[torch.isinf(lse_sparse)] = 0.0
+                            w_facts[torch.isinf(lse_facts)] = 0.0
+
+                            denom = w_dense + w_sparse + w_facts
+                            denom_safe = torch.clamp(denom, min=1e-9)
+
+                            out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
+                                         out_sparse_fp32 * w_sparse.unsqueeze(-1) +
+                                         out_facts_hd * w_facts.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
+                                         
+                            attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)
+                            attn_outputs.append(attn_out_b)
+                            continue
+
                         # ── MPS Fast Path (Phase 34): fused_decode_mps ─────────────────────────
                         # On MPS (Apple Silicon), avoid _pytorch_vectorized_sparse_attn_decode
                         # which reconstructs all compressed K tokens from SVD + applies RoPE,
@@ -786,7 +941,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
-                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None:
+                                    
+                                    has_residual = False
+                                    if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
+                                        has_residual = (pool.residual_K_positions[block_indices] >= 0).any().item()
+
+                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, _ = _decode_attention_metal(
                                             _Q_sq.contiguous(),
@@ -806,7 +966,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             num_key_value_heads,
                                             kv_manager.rank,
                                         )
-                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse = _decode_attention_aten(
                                             _Q_sq.contiguous(),
@@ -863,7 +1023,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     _Q_sq = query_states[b_idx, :, 0, :]
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
-                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None:
+                                    
+                                    has_residual = False
+                                    if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
+                                        has_residual = (pool.residual_K_positions[block_indices] >= 0).any().item()
+
+                                    if _DIFFKV_HAS_METAL_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, lse_sparse = _decode_attention_metal(
                                             _Q_sq.contiguous(),
@@ -883,7 +1048,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             num_key_value_heads,
                                             kv_manager.rank,
                                         )
-                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None:
+                                    elif _DIFFKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         out_sparse, lse_sparse = _decode_attention_aten_lse(
                                             _Q_sq.contiguous(),
