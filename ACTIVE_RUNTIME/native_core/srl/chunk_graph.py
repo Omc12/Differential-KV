@@ -232,6 +232,43 @@ def build_chunk_graph(
             else:
                 vocabs.append(set())
 
+    # ── Entity Isolation & Exclusion Pruning ──
+    sig_tokens = []
+    sig_idfs = []
+    if vocabs and inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf:
+        for i in range(N):
+            best_tok = -1
+            best_idf = -1.0
+            for tok in vocabs[i]:
+                idf_val = inv_index.idf.get(tok, 1.0)
+                if idf_val > best_idf:
+                    best_idf = idf_val
+                    best_tok = tok
+            sig_tokens.append(best_tok)
+            sig_idfs.append(best_idf)
+            
+        # Prune similarity matrix for mutually exclusive concept domains
+        for i in range(N):
+            sig_i = sig_tokens[i]
+            idf_i = sig_idfs[i]
+            if sig_i == -1 or idf_i < 2.0:
+                continue
+            for j in range(N):
+                if i == j:
+                    continue
+                sig_j = sig_tokens[j]
+                idf_j = sig_idfs[j]
+                if sig_j == -1 or idf_j < 2.0:
+                    continue
+                if sig_i != sig_j:
+                    has_cross_ref = (sig_j in vocabs[i]) or (sig_i in vocabs[j])
+                    if not has_cross_ref:
+                        sim[i, j] = -1.0
+                        sim[j, i] = -1.0
+    else:
+        sig_tokens = [-1] * N
+        sig_idfs = [-1.0] * N
+
     slot_to_anchor = {}
     if blocks:
         for b in blocks:
@@ -262,10 +299,17 @@ def build_chunk_graph(
             
             sim_score = max(0.0, float(sim[j, i]))
             
-            # Asymmetric lexical scores
-            lex_score_i_to_j = 0.0
-            lex_score_j_to_i = 0.0
-            if vocabs:
+            # Check exclusion constraint
+            is_excluded = False
+            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
+                if sig_tokens[i] != sig_tokens[j]:
+                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
+                    if not has_cross_ref:
+                        is_excluded = True
+
+            # Symmetric lexical score
+            lex_score = 0.0
+            if not is_excluded and vocabs:
                 w_i = vocabs[i]
                 w_j = vocabs[j]
                 intersection = w_i & w_j
@@ -274,16 +318,15 @@ def build_chunk_graph(
                         sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
                         sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
                         sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
-                        
-                        if sum_idf_i > 0:
-                            lex_score_i_to_j = sum_idf_intersect / sum_idf_i
-                        if sum_idf_j > 0:
-                            lex_score_j_to_i = sum_idf_intersect / sum_idf_j
+                        denom = sum_idf_i + sum_idf_j - sum_idf_intersect
+                        if denom > 0:
+                            lex_score = sum_idf_intersect / denom
                     else:
-                        if len(w_i) > 0:
-                            lex_score_i_to_j = len(intersection) / len(w_i)
-                        if len(w_j) > 0:
-                            lex_score_j_to_i = len(intersection) / len(w_j)
+                        denom = len(w_i) + len(w_j) - len(intersection)
+                        if denom > 0:
+                            lex_score = len(intersection) / denom
+            lex_score_i_to_j = lex_score
+            lex_score_j_to_i = lex_score
             
             temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
             
@@ -338,21 +381,33 @@ def build_chunk_graph(
             allow_i_to_j = (cached_len == 0) or (is_i_new == is_j_new) or (is_i_new and not is_j_new)
             allow_j_to_i = (cached_len == 0) or (is_i_new == is_j_new) or (is_j_new and not is_i_new)
 
+            # Check exclusion constraint
+            is_excluded = False
+            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
+                if sig_tokens[i] != sig_tokens[j]:
+                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
+                    if not has_cross_ref:
+                        is_excluded = True
+
             if allow_i_to_j and j not in handshake_neighbors[i]:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_i_to_j = 0.0
-                if vocabs:
+                if not is_excluded and vocabs:
                     w_i = vocabs[i]
                     w_j = vocabs[j]
                     intersection = w_i & w_j
-                    if len(w_i) > 0:
+                    if len(w_i) > 0 or len(w_j) > 0:
                         if has_idf:
                             sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
                             sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
-                            if sum_idf_i > 0:
-                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i
+                            sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
+                            denom = sum_idf_i + sum_idf_j - sum_idf_intersect
+                            if denom > 0:
+                                lex_score_i_to_j = sum_idf_intersect / denom
                         else:
-                            lex_score_i_to_j = len(intersection) / len(w_i)
+                            denom = len(w_i) + len(w_j) - len(intersection)
+                            if denom > 0:
+                                lex_score_i_to_j = len(intersection) / denom
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_i_to_j = 0.5 * sim_score + 0.5 * lex_score_i_to_j + temporal_boost
                 
@@ -362,18 +417,22 @@ def build_chunk_graph(
             if allow_j_to_i and i not in handshake_neighbors[j]:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_j_to_i = 0.0
-                if vocabs:
+                if not is_excluded and vocabs:
                     w_i = vocabs[i]
                     w_j = vocabs[j]
                     intersection = w_i & w_j
-                    if len(w_j) > 0:
+                    if len(w_i) > 0 or len(w_j) > 0:
                         if has_idf:
                             sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
+                            sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
                             sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
-                            if sum_idf_j > 0:
-                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j
+                            denom = sum_idf_i + sum_idf_j - sum_idf_intersect
+                            if denom > 0:
+                                lex_score_j_to_i = sum_idf_intersect / denom
                         else:
-                            lex_score_j_to_i = len(intersection) / len(w_j)
+                            denom = len(w_i) + len(w_j) - len(intersection)
+                            if denom > 0:
+                                lex_score_j_to_i = len(intersection) / denom
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
                 

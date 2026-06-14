@@ -341,12 +341,20 @@ def route_query(
                             if nb != -1:
                                 all_selected_prime_nodes.add(nb)
 
-            # 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer)
+            # 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer) and center association
             role_map = chunk_graph.role_mapping_tensor
             slot_to_center = chunk_graph.slot_to_center_tensor
             
-            around_slots = []
-            outer_slots = []
+            centers_order = []
+            for c in selected_centers:
+                if c not in centers_order:
+                    centers_order.append(c)
+            for c in all_selected_prime_nodes:
+                if c not in centers_order:
+                    centers_order.append(c)
+
+            around_by_center = {c: [] for c in centers_order}
+            outer_by_center = {c: [] for c in centers_order}
             
             slot_ids_cpu = srl_state.semantic_index.slot_ids.cpu().tolist()
             for s in slot_ids_cpu:
@@ -358,32 +366,45 @@ def route_query(
                     if assoc_c in all_selected_prime_nodes:
                         role = int(role_map[s].item())
                         if role == 1:
-                            around_slots.append(s)
+                            around_by_center.setdefault(assoc_c, []).append(s)
                         elif role == 0:
-                            outer_slots.append(s)
+                            outer_by_center.setdefault(assoc_c, []).append(s)
                             
-            # 3. Build prioritized list: Center -> Around -> Outer
+            # Interleave around/outer slots per centroid
+            around_lists = [around_by_center.get(c, []) for c in centers_order]
+            around_slots_interleaved = []
+            max_len_around = max((len(l) for l in around_lists), default=0)
+            for step in range(max_len_around):
+                for l in around_lists:
+                    if step < len(l):
+                        around_slots_interleaved.append(l[step])
+
+            outer_lists = [outer_by_center.get(c, []) for c in centers_order]
+            outer_slots_interleaved = []
+            max_len_outer = max((len(l) for l in outer_lists), default=0)
+            for step in range(max_len_outer):
+                for l in outer_lists:
+                    if step < len(l):
+                        outer_slots_interleaved.append(l[step])
+
+            # 3. Build prioritized list: Center -> Around -> Outer (interleaved)
             prioritized_slots = []
             seen = set()
             
             # High relevance: Center (both the scored ones and their neighbors)
-            for c in selected_centers:
-                if c not in seen:
-                    prioritized_slots.append(c)
-                    seen.add(c)
-            for c in all_selected_prime_nodes:
+            for c in centers_order:
                 if c not in seen:
                     prioritized_slots.append(c)
                     seen.add(c)
                     
             # Mid relevance: Around
-            for s in around_slots:
+            for s in around_slots_interleaved:
                 if s not in seen:
                     prioritized_slots.append(s)
                     seen.add(s)
                     
             # Low relevance: Outer
-            for s in outer_slots:
+            for s in outer_slots_interleaved:
                 if s not in seen:
                     prioritized_slots.append(s)
                     seen.add(s)
@@ -427,16 +448,21 @@ def route_query(
                     if p not in selected_parents:
                         selected_parents.append(p)
                 
-                # 2. Gather children blocks for the selected parent landmarks
-                selected_parents_t = torch.tensor(selected_parents, dtype=torch.int32, device=chunk_graph.parent_to_children_tensor.device)
-                valid_parents_t = selected_parents_t[selected_parents_t < chunk_graph.parent_to_children_tensor.shape[0]]
+                # 2. Gather children blocks for the selected parent landmarks (interleaved)
+                children_lists = []
+                if getattr(chunk_graph, "parent_to_children_tensor", None) is not None:
+                    for p in selected_parents:
+                        if p < chunk_graph.parent_to_children_tensor.shape[0]:
+                            row = chunk_graph.parent_to_children_tensor[p]
+                            children = row[row != -1].tolist()
+                            children_lists.append(children)
                 
-                if valid_parents_t.numel() > 0:
-                    children_tensor = chunk_graph.parent_to_children_tensor[valid_parents_t.long()]
-                    children_flat = children_tensor.flatten()
-                    valid_children = children_flat[children_flat != -1].tolist()
-                else:
-                    valid_children = []
+                children_interleaved = []
+                max_children_len = max((len(l) for l in children_lists), default=0)
+                for step in range(max_children_len):
+                    for l in children_lists:
+                        if step < len(l):
+                            children_interleaved.append(l[step])
                     
                 hierarchical_slots = []
                 seen = set()
@@ -444,7 +470,7 @@ def route_query(
                     if parent not in seen:
                         hierarchical_slots.append(parent)
                         seen.add(parent)
-                for child in valid_children:
+                for child in children_interleaved:
                     if child not in seen:
                         hierarchical_slots.append(child)
                         seen.add(child)

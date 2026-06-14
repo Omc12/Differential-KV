@@ -275,6 +275,49 @@ inline ChunkGraph build_chunk_graph(
         }
     }
 
+    // ── Entity Isolation & Exclusion Pruning ──
+    std::vector<int> sig_tokens(N, -1);
+    std::vector<float> sig_idfs(N, -1.0f);
+    if (inv_index && !inv_index->chunk_vocabularies.empty() && !inv_index->idf.empty()) {
+        for (int i = 0; i < N; ++i) {
+            int best_tok = -1;
+            float best_idf = -1.0f;
+            for (int tok : vocabs[i]) {
+                float idf_val = 1.0f;
+                auto idf_it = inv_index->idf.find(tok);
+                if (idf_it != inv_index->idf.end()) {
+                    idf_val = idf_it->second;
+                }
+                if (idf_val > best_idf) {
+                    best_idf = idf_val;
+                    best_tok = tok;
+                }
+            }
+            sig_tokens[i] = best_tok;
+            sig_idfs[i] = best_idf;
+        }
+
+        // Prune similarity matrix for mutually exclusive concept domains
+        for (int i = 0; i < N; ++i) {
+            int sig_i = sig_tokens[i];
+            float idf_i = sig_idfs[i];
+            if (sig_i == -1 || idf_i < 2.0f) continue;
+            for (int j = 0; j < N; ++j) {
+                if (i == j) continue;
+                int sig_j = sig_tokens[j];
+                float idf_j = sig_idfs[j];
+                if (sig_j == -1 || idf_j < 2.0f) continue;
+                if (sig_i != sig_j) {
+                    bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                    if (!has_cross_ref) {
+                        sim[i * N + j] = -1.0f;
+                        sim[j * N + i] = -1.0f;
+                    }
+                }
+            }
+        }
+    }
+
     // ── Handshake Hunting Protocol ──
     std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
     for (int i = 0; i < N; ++i) {
@@ -291,7 +334,23 @@ inline ChunkGraph build_chunk_graph(
             float lex_score_i_to_j = 0.0f;
             float lex_score_j_to_i = 0.0f;
             
+            bool is_excluded = false;
             if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                int sig_i = sig_tokens[i];
+                float idf_i = sig_idfs[i];
+                int sig_j = sig_tokens[j];
+                float idf_j = sig_idfs[j];
+                if (sig_i != -1 && idf_i >= 2.0f && sig_j != -1 && idf_j >= 2.0f) {
+                    if (sig_i != sig_j) {
+                        bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                        if (!has_cross_ref) {
+                            is_excluded = true;
+                        }
+                    }
+                }
+            }
+
+            if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
                 const auto& v_i = vocabs[i];
                 const auto& v_j = vocabs[j];
                 if (!v_i.empty() || !v_j.empty()) {
@@ -319,11 +378,11 @@ inline ChunkGraph build_chunk_graph(
                         sum_idf_j += idf_val;
                     }
                     
-                    if (sum_idf_i > 0.0f) {
-                        lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
-                    }
-                    if (sum_idf_j > 0.0f) {
-                        lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
+                    float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
+                    if (denom > 0.0f) {
+                        float lex_score = sum_idf_intersect / denom;
+                        lex_score_i_to_j = lex_score;
+                        lex_score_j_to_i = lex_score;
                     }
                 }
             }
@@ -390,15 +449,32 @@ inline ChunkGraph build_chunk_graph(
                         break;
                     }
                 }
+                bool is_excluded = false;
+                if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                    int sig_i = sig_tokens[i];
+                    float idf_i = sig_idfs[i];
+                    int sig_j = sig_tokens[j];
+                    float idf_j = sig_idfs[j];
+                    if (sig_i != -1 && idf_i >= 2.0f && sig_j != -1 && idf_j >= 2.0f) {
+                        if (sig_i != sig_j) {
+                            bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                            if (!has_cross_ref) {
+                                is_excluded = true;
+                            }
+                        }
+                    }
+                }
+
                 if (allow_i_to_j && !connected) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_i_to_j = 0.0f;
-                    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                    if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
                         const auto& v_i = vocabs[i];
                         const auto& v_j = vocabs[j];
-                        if (!v_i.empty()) {
+                        if (!v_i.empty() || !v_j.empty()) {
                             float sum_idf_intersect = 0.0f;
                             float sum_idf_i = 0.0f;
+                            float sum_idf_j = 0.0f;
                             for (int tok : v_i) {
                                 float idf_val = 1.0f;
                                 auto idf_it = inv_index->idf.find(tok);
@@ -410,8 +486,17 @@ inline ChunkGraph build_chunk_graph(
                                     sum_idf_intersect += idf_val;
                                 }
                             }
-                            if (sum_idf_i > 0.0f) {
-                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
+                            for (int tok : v_j) {
+                                float idf_val = 1.0f;
+                                auto idf_it = inv_index->idf.find(tok);
+                                if (idf_it != inv_index->idf.end()) {
+                                    idf_val = idf_it->second;
+                                }
+                                sum_idf_j += idf_val;
+                            }
+                            float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
+                            if (denom > 0.0f) {
+                                lex_score_i_to_j = sum_idf_intersect / denom;
                             }
                         }
                     }
@@ -431,12 +516,24 @@ inline ChunkGraph build_chunk_graph(
                 if (allow_j_to_i && !reverse_connected) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_j_to_i = 0.0f;
-                    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                    if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
                         const auto& v_i = vocabs[i];
                         const auto& v_j = vocabs[j];
-                        if (!v_j.empty()) {
+                        if (!v_i.empty() || !v_j.empty()) {
                             float sum_idf_intersect = 0.0f;
+                            float sum_idf_i = 0.0f;
                             float sum_idf_j = 0.0f;
+                            for (int tok : v_i) {
+                                float idf_val = 1.0f;
+                                auto idf_it = inv_index->idf.find(tok);
+                                if (idf_it != inv_index->idf.end()) {
+                                    idf_val = idf_it->second;
+                                }
+                                sum_idf_i += idf_val;
+                                if (v_j.count(tok)) {
+                                    sum_idf_intersect += idf_val;
+                                }
+                            }
                             for (int tok : v_j) {
                                 float idf_val = 1.0f;
                                 auto idf_it = inv_index->idf.find(tok);
@@ -444,12 +541,10 @@ inline ChunkGraph build_chunk_graph(
                                     idf_val = idf_it->second;
                                 }
                                 sum_idf_j += idf_val;
-                                if (v_i.count(tok)) {
-                                    sum_idf_intersect += idf_val;
-                                }
                             }
-                            if (sum_idf_j > 0.0f) {
-                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
+                            float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
+                            if (denom > 0.0f) {
+                                lex_score_j_to_i = sum_idf_intersect / denom;
                             }
                         }
                     }

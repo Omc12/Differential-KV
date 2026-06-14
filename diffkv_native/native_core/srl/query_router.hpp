@@ -308,8 +308,12 @@ inline std::vector<int32_t> route_query(
             }
             
             // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
-            std::vector<int32_t> around_slots;
-            std::vector<int32_t> outer_slots;
+            // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer) and center association
+            // We use centers order from selected_centers_vec.
+            std::vector<int32_t> centers_order = selected_centers_vec;
+            // Map: center_id -> list of around/outer slots
+            std::unordered_map<int32_t, std::vector<int32_t>> around_by_center;
+            std::unordered_map<int32_t, std::vector<int32_t>> outer_by_center;
             
             const auto& role_map = cg.role_mapping_tensor;
             const auto& slot_to_center = cg.slot_to_center_tensor;
@@ -322,15 +326,43 @@ inline std::vector<int32_t> route_query(
                     if (selected_centers.count(assoc_c)) {
                         int role = role_map[s];
                         if (role == 1) {
-                            around_slots.push_back(s);
+                            around_by_center[assoc_c].push_back(s);
                         } else if (role == 0) {
-                            outer_slots.push_back(s);
+                            outer_by_center[assoc_c].push_back(s);
                         }
                     }
                 }
             }
             
-            // 3. Build prioritized list: Center -> Around -> Outer
+            // Interleave around slots
+            std::vector<int32_t> around_slots_interleaved;
+            size_t max_len_around = 0;
+            for (int32_t c : centers_order) {
+                max_len_around = std::max(max_len_around, around_by_center[c].size());
+            }
+            for (size_t step = 0; step < max_len_around; ++step) {
+                for (int32_t c : centers_order) {
+                    if (step < around_by_center[c].size()) {
+                        around_slots_interleaved.push_back(around_by_center[c][step]);
+                    }
+                }
+            }
+            
+            // Interleave outer slots
+            std::vector<int32_t> outer_slots_interleaved;
+            size_t max_len_outer = 0;
+            for (int32_t c : centers_order) {
+                max_len_outer = std::max(max_len_outer, outer_by_center[c].size());
+            }
+            for (size_t step = 0; step < max_len_outer; ++step) {
+                for (int32_t c : centers_order) {
+                    if (step < outer_by_center[c].size()) {
+                        outer_slots_interleaved.push_back(outer_by_center[c][step]);
+                    }
+                }
+            }
+            
+            // 3. Build prioritized list: Center -> Around -> Outer (interleaved)
             std::vector<int32_t> prioritized_slots;
             std::unordered_set<int32_t> seen_prioritized;
             
@@ -341,13 +373,13 @@ inline std::vector<int32_t> route_query(
                 }
             };
             
-            for (int32_t c : selected_centers_vec) {
+            for (int32_t c : centers_order) {
                 add_to_pri(c);
             }
-            for (int32_t s : around_slots) {
+            for (int32_t s : around_slots_interleaved) {
                 add_to_pri(s);
             }
-            for (int32_t s : outer_slots) {
+            for (int32_t s : outer_slots_interleaved) {
                 add_to_pri(s);
             }
             
@@ -410,24 +442,42 @@ inline std::vector<int32_t> route_query(
                     selected_parents.push_back(parent_scores[idx].second);
                 }
                 
-                // 2. Gather children blocks using flat parent_to_children_tensor vector
-                std::vector<int32_t> hierarchical_slots;
+                // 2. Gather children blocks per parent landmark and interleave
                 int max_children = srl_state.chunk_graph.max_children;
                 const auto& ptc = srl_state.chunk_graph.parent_to_children_tensor;
-                int max_ptc_slots = ptc.size() / max_children;
+                int max_ptc_slots = ptc.empty() ? 0 : (ptc.size() / max_children);
                 
-                for (int32_t parent : selected_parents) {
-                    hierarchical_slots.push_back(parent);
+                std::vector<std::vector<int32_t>> children_lists(selected_parents.size());
+                size_t max_children_len = 0;
+                
+                for (size_t i = 0; i < selected_parents.size(); ++i) {
+                    int32_t parent = selected_parents[i];
                     if (parent >= 0 && parent < max_ptc_slots) {
                         int base_idx = parent * max_children;
                         for (int c = 0; c < max_children; ++c) {
                             int32_t child = ptc[base_idx + c];
                             if (child != -1) {
-                                hierarchical_slots.push_back(child);
+                                children_lists[i].push_back(child);
                             }
                         }
                     }
+                    max_children_len = std::max(max_children_len, children_lists[i].size());
                 }
+                
+                std::vector<int32_t> children_interleaved;
+                for (size_t step = 0; step < max_children_len; ++step) {
+                    for (size_t i = 0; i < selected_parents.size(); ++i) {
+                        if (step < children_lists[i].size()) {
+                            children_interleaved.push_back(children_lists[i][step]);
+                        }
+                    }
+                }
+                
+                std::vector<int32_t> hierarchical_slots;
+                for (int32_t parent : selected_parents) {
+                    hierarchical_slots.push_back(parent);
+                }
+                hierarchical_slots.insert(hierarchical_slots.end(), children_interleaved.begin(), children_interleaved.end());
                 
                 // Deduplicate preserving order
                 std::unordered_set<int32_t> seen_hier;
@@ -597,42 +647,107 @@ inline std::vector<int32_t> route_query(
     }
 
     // -------------------------------------------------------------------
+    // Step 7.5: Dynamic Anchors expansion
+    // -------------------------------------------------------------------
+    std::vector<int32_t> dynamic_routed_slots;
+    if (!srl_state.dynamic_anchors.empty()) {
+        std::unordered_set<int32_t> da_set(srl_state.dynamic_anchors.begin(), srl_state.dynamic_anchors.end());
+        dynamic_routed_slots = srl_state.expand_neighborhood(da_set);
+    }
+
+    // -------------------------------------------------------------------
+    // Step 7.6: Prompt Anchors expansion
+    // -------------------------------------------------------------------
+    std::vector<int32_t> prompt_routed_slots;
+    if (!srl_state.prompt_anchors.empty()) {
+        int b_size = srl_state.inverted_index.block_size;
+        std::unordered_set<int32_t> pa_slots;
+        for (int idx : srl_state.prompt_anchors) {
+            int block_idx = idx / b_size;
+            if (block_idx >= 0 && block_idx < static_cast<int>(srl_state.ordered_slot_ids.size())) {
+                pa_slots.insert(srl_state.ordered_slot_ids[block_idx]);
+            }
+        }
+        if (!pa_slots.empty()) {
+            prompt_routed_slots = srl_state.expand_neighborhood(pa_slots);
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Step 8: Merge and deduplicate
-    // Order: sink > semantic > rare_lex > graph > lexical > recency
+    // Order: sink > semantic > rare_lex > graph > lexical > recency > dynamic_routed > prompt_routed
     // -------------------------------------------------------------------
     std::unordered_set<int32_t> seen;
-    std::vector<int32_t> sink_candidates;
-    std::vector<int32_t> non_sink_candidates;
+    std::vector<int32_t> combined;
 
-    // Helper: add unique slots to a destination vector
-    auto add_unique = [&](const std::vector<int32_t>& src,
-                          std::vector<int32_t>&       dst) {
+    auto add_unique = [&](const std::vector<int32_t>& src) {
         for (int32_t s : src) {
             if (!seen.count(s)) {
                 seen.insert(s);
-                dst.push_back(s);
+                combined.push_back(s);
             }
         }
     };
 
-    // Sink blocks always included
-    for (int32_t s : srl_state.sink_blocks) {
-        if (!seen.count(s)) {
-            seen.insert(s);
-            sink_candidates.push_back(s);
+    add_unique(srl_state.sink_blocks);
+    add_unique(sem_slots);
+    add_unique(rare_lex_slots);
+    add_unique(graph_slots);
+    add_unique(lex_slots);
+    add_unique(recency_slots);
+    add_unique(dynamic_routed_slots);
+    add_unique(prompt_routed_slots);
+
+    // -------------------------------------------------------------------
+    // Step 8.5: Structured Attention Segmenting filtering
+    // -------------------------------------------------------------------
+    int curr_seg = srl_state.current_query_segment_id;
+    if (curr_seg != 0 && !srl_state.segment_ids.empty()) {
+        std::unordered_set<int32_t> sink_set(srl_state.sink_blocks.begin(), srl_state.sink_blocks.end());
+        std::vector<int32_t> filtered;
+        for (int32_t slot : combined) {
+            if (sink_set.count(slot)) {
+                filtered.push_back(slot);
+                continue;
+            }
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end()) {
+                int seg_id = it->second;
+                if (seg_id == 0 || seg_id == curr_seg) {
+                    filtered.push_back(slot);
+                }
+            } else {
+                filtered.push_back(slot);
+            }
         }
+        combined = filtered;
     }
 
-    add_unique(sem_slots,      non_sink_candidates);
-    add_unique(rare_lex_slots, non_sink_candidates);
-    add_unique(graph_slots,    non_sink_candidates);
-    add_unique(lex_slots,      non_sink_candidates);
-    add_unique(recency_slots,  non_sink_candidates);
+    if (curr_seg == 0 && N - static_cast<int>(combined.size()) <= 2) {
+        combined = srl_state.ordered_slot_ids;
+    }
+
+    if (combined.empty()) {
+        combined = srl_state.ordered_slot_ids;
+        if (static_cast<int>(combined.size()) > K) {
+            combined.resize(K);
+        }
+    }
 
     // -------------------------------------------------------------------
     // Step 9: Two-level gate: rerank non-sink candidates
     // -------------------------------------------------------------------
-    // We want to keep up to K - sink_count from non_sink
+    std::unordered_set<int32_t> sink_set(srl_state.sink_blocks.begin(), srl_state.sink_blocks.end());
+    std::vector<int32_t> sink_candidates;
+    std::vector<int32_t> non_sink_candidates;
+    for (int32_t s : combined) {
+        if (sink_set.count(s)) {
+            sink_candidates.push_back(s);
+        } else {
+            non_sink_candidates.push_back(s);
+        }
+    }
+
     int sink_count = static_cast<int>(sink_candidates.size());
     int non_sink_budget = std::max(1, K - sink_count);
 

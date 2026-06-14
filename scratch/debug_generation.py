@@ -128,7 +128,7 @@ def main():
     
     print(f"Prefill done. Starting generation loop from pos {cur_pos}...")
     
-    for step in range(30):
+    for step in range(200):
         # Apply factual biases
         sfa_active = (
             srl_state is not None
