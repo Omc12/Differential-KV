@@ -1320,11 +1320,22 @@ class MLXDiffKVWrapper:
             # LM-VSL (Logit Masking) — guard against empty sequences; without this
             # get_allowed_tokens_vsl returns only helper words, locking generation.
             if sfa_active:
-                from native_core.srl.factual_alignment import get_allowed_tokens_vsl
-                allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+                from native_core.srl.factual_alignment import (
+                    get_allowed_tokens_vsl, get_structural_helper_token_ids)
+                structural_helper_ids = get_structural_helper_token_ids(self.tokenizer)
+                allowed_ids = get_allowed_tokens_vsl(
+                    srl_state, helper_ids,
+                    structural_helper_ids=structural_helper_ids,
+                    sfa_active=True,
+                )
                 mask = np.ones_like(logits, dtype=bool)
                 mask[list(allowed_ids)] = False
-                logits[mask] = -1e10
+                
+                max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
+                if max_sim >= 0.70:
+                    logits[mask] = -1e10   # hard: verbatim extraction mode
+                else:
+                    logits[mask] -= 7.0    # soft: guided but escapable
 
             next_id = sample_logits(logits, effective_temperature, top_p)
 

@@ -376,8 +376,20 @@ class PyTorchDiffKVHFWrapper:
         self.rank = self.config.get("rank", 16)
         self.micro_block_size = self.config.get("micro_block_size", 256)
         
+        self.local_files_only = (
+            os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+            or os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+            or self.config.get("local_files_only", False)
+        )
+        if self.local_files_only:
+            print("[DiffKV] Offline mode active: loading model/tokenizer from local cache only.")
+
         print(f"[DiffKV] Lazy-initializing tokenizer for model {model_id}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id, 
+            trust_remote_code=True,
+            local_files_only=self.local_files_only
+        )
         self._alphanumeric_tokens = {}
         
         # Initialize stop token IDs from tokenizer
@@ -458,6 +470,7 @@ class PyTorchDiffKVHFWrapper:
                 quantization_config=quantization_config,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
+                local_files_only=self.local_files_only,
             )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -467,6 +480,7 @@ class PyTorchDiffKVHFWrapper:
                 trust_remote_code=True,
                 quantization_config=quantization_config,
                 use_safetensors=True,
+                local_files_only=self.local_files_only,
             )
 
         self.model.eval()
@@ -991,11 +1005,22 @@ class PyTorchDiffKVHFWrapper:
             # LM-VSL (Logit Masking) — guard against empty sequences; without this
             # get_allowed_tokens_vsl returns only helper words, locking generation.
             if sfa_active:
-                from native_core.srl.factual_alignment import get_allowed_tokens_vsl
-                allowed_ids = get_allowed_tokens_vsl(srl_state, helper_ids)
+                from native_core.srl.factual_alignment import (
+                    get_allowed_tokens_vsl, get_structural_helper_token_ids)
+                structural_helper_ids = get_structural_helper_token_ids(self.tokenizer)
+                allowed_ids = get_allowed_tokens_vsl(
+                    srl_state, helper_ids,
+                    structural_helper_ids=structural_helper_ids,
+                    sfa_active=True,
+                )
                 mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
                 mask[list(allowed_ids)] = False
-                logits[0, mask] = -1e10
+                
+                max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
+                if max_sim >= 0.70:
+                    logits[0, mask] = -65000.0   # hard: verbatim extraction mode
+                else:
+                    logits[0, mask] -= 7.0        # soft: guided but escapable
 
             # Sample
             next_id = _compiled_sample_fn(logits, effective_temperature, top_p)

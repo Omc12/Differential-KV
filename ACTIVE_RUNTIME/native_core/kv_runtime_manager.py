@@ -793,6 +793,16 @@ class KVRuntimeManager:
 
             # ── 3. Inverted token index ─────────────────────────────────
             token_ids_cpu = self._session_token_ids.get(session_id)
+            if token_ids_cpu is not None:
+                if hasattr(self, "_prefill_kv_capture") and session_id in self._prefill_kv_capture:
+                    cap = self._prefill_kv_capture[session_id]
+                    if cap:
+                        first_layer = list(cap.keys())[0]
+                        seq_len_kv = cap[first_layer][0].shape[2]
+                        if token_ids_cpu.numel() > seq_len_kv:
+                            token_ids_cpu = token_ids_cpu[:seq_len_kv]
+                        elif token_ids_cpu.numel() < seq_len_kv:
+                            seq_len_kv = token_ids_cpu.numel()
             mbs = self.get_session_micro_block_size(session_id)
             # block_size for indexing = anchor (1) + active tokens (mbs)
             index_block_size = mbs + 1
@@ -1192,6 +1202,8 @@ class KVRuntimeManager:
         self._session_srl.pop(session_id, None)
         self._factual_stores.pop(session_id, None)
         self._session_token_ids.pop(session_id, None)
+        if hasattr(self, "_prefill_kv_capture"):
+            self._prefill_kv_capture.pop(session_id, None)
         if hasattr(self, "attention_score_cache"):
             self.attention_score_cache.clear_session(session_id)
         if hasattr(self, "_last_prefill_q"):

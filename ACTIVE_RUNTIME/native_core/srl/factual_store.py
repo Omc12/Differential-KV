@@ -151,9 +151,18 @@ class FactualExactStore:
         if not prefill_kv or token_ids is None or token_ids.numel() == 0:
             return
             
-        total_seq_len = token_ids.numel()
         layers = sorted(list(prefill_kv.keys()))
+        first_layer = layers[0]
+        K_layer, _ = prefill_kv[first_layer]
+        seq_len_kv = K_layer.shape[2]
         
+        # Ensure token_ids and captured KV cache sequence length match
+        if token_ids.numel() > seq_len_kv:
+            token_ids = token_ids[:seq_len_kv]
+        elif token_ids.numel() < seq_len_kv:
+            seq_len_kv = token_ids.numel()
+            
+        total_seq_len = seq_len_kv
         factual_mask = torch.zeros(total_seq_len, dtype=torch.bool)
         
         if use_salience_parser:
