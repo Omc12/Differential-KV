@@ -1,0 +1,213 @@
+=== Nodes containing keywords ===
+Slot 2 (block 1, parent 0, center 0):
+  Matched: ['eigenvector']
+  Role: outer
+  Text: '. In Hermitian systems, a degeneracy does not destroy the independence of eigenvectors: although the eigenvalues coincid'
+Slot 3 (block 2, parent 0, center 0):
+  Matched: ['diabolical']
+  Role: outer
+  Text: ' and can still be chosen orthogonal. Such degeneracies are often represented geometrically by conical intersections, als'
+Slot 6 (block 5, parent 0, center 0):
+  Matched: ['exceptional']
+  Role: outer
+  Text: ' a qualitatively different phenomenon known as an exceptional point. Here the degeneracy is stronger: not only do the ei'
+Slot 7 (block 6, parent 0, center 0):
+  Matched: ['exceptional']
+  Role: outer
+  Text: 'ectors themselves coalesce into a single state, causing the matrix to become defective and lose a complete eigenbasis. E'
+Slot 8 (block 7, parent 8, center 8):
+  Matched: ['riemann', 'exceptional', 'cone']
+  Role: center
+  Text: ' square-root branch-point topology. The eigenvalue surfaces therefore form two connected Riemann sheets rather than a si'
+Slot 9 (block 8, parent 8, center 8):
+  Matched: ['loop']
+  Role: around
+  Text: ' the eigenvalues and associated states, so two loops are required to return to the original branch. Because non-Hermitia'
+Slot 10 (block 9, parent 8, center 8):
+  Matched: ['exceptional', 'eigenvector']
+  Role: around
+  Text: 'oints, left and right eigenvectors must be treated separately; near an exceptional point they exhibit biorthogonal behav'
+Slot 265 (block 11, parent 264, center 264):
+  Matched: ['exceptional']
+  Role: around
+  Text: ' and state the codimensions of:\n\n   * real symmetric degeneracies,\n   * complex Hermitian degeneracies,\n   * exceptional'
+Slot 266 (block 12, parent 264, center 264):
+  Matched: ['diabolical', 'exceptional']
+  Role: around
+  Text: ' Compare the topology of eigenvalue surfaces near:\n\n   * a diabolical point,\n   * an exceptional point.\n\n3. Explain the '
+Slot 267 (block 13, parent 264, center 264):
+  Matched: ['riemann', 'diabolical', 'exceptional', 'eigenvector']
+  Role: around
+  Text: 'value degeneracy,\n   * eigenvector coalescence.\n\n4. Why are exceptional points associated with Riemann sheets whereas di'
+Slot 268 (block 14, parent 264, center 264):
+  Matched: ['exceptional', 'loop']
+  Role: around
+  Text: ' with conical intersections?\n\n5. What happens after one closed loop around:\n\n   * a Hermitian degeneracy,\n   * an except'
+Slot 269 (block 15, parent 264, center 264):
+  Matched: ['eigenvector']
+  Role: around
+  Text: ' Why are left and right eigenvectors important in non-Hermitian systems but not in Hermitian ones?<|im_end|>\n<|im_start|'
+Slot 270 (block 16, parent 264, center 264):
+  Matched: ['riemann', 'exceptional', 'eigenvector']
+  Role: around
+  Text: ' exceptional points associated with Riemann sheets?\n\n7. Why are conical intersections one eigenvector coalescence.\n\n4. W'
+Slot 271 (block 17, parent 264, center 264):
+  Matched: ['riemann', 'exceptional', 'loop']
+  Role: around
+  Text: 'iemann sheets after closed loop?\n\n.\n\n4. Why are exceptional points associated with Riemann sheets. Why are exceptional p'
+Slot 272 (block 18, parent 264, center 264):
+  Matched: ['riemann', 'exceptional', 'loop']
+  Role: around
+  Text: ' exceptional points associated with Riemann sheets?\n\n7. Why are exceptional points associated with Riemann sheets?\n\n Wha'
+Slot 273 (block 19, parent 264, center 264):
+  Matched: ['riemann', 'diabolical', 'exceptional', 'eigenvector']
+  Role: around
+  Text: ' points associated with Riemann eigenvector coalescence.\n\n4. Why are exceptional points associated with Riemann sheets w'
+
+=== Parent-Child Mapping ===
+Parent Slot 0 (MISSING NODE) -> Children: [1, 2, 3, 4, 5, 6, 7]
+Parent Slot 8 (' square-root branch-point topology. The eigenvalue surfaces therefore form two c') -> Children: [8, 9, 10]
+Parent Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch without two eigenvalue sheets<') -> Children: [264, 265, 266, 267, 268, 269, 270, 271, 272, 273]
+
+=== Links connecting these slots ===
+[neighborhood] Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.200
+[neighborhood] Slot 2 ('. In Hermitian systems, a degeneracy does not dest') -> Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') weight=0.200
+[neighborhood] Slot 2 ('. In Hermitian systems, a degeneracy does not dest') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.200
+[neighborhood] Slot 3 (' and can still be chosen orthogonal. Such degenera') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.200
+[neighborhood] Slot 3 (' and can still be chosen orthogonal. Such degenera') -> Slot 4 (' touch without merging. The number of independent ') weight=0.200
+[neighborhood] Slot 4 (' touch without merging. The number of independent ') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.200
+[neighborhood] Slot 5 (' two, while for complex Hermitian matrices it is t') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.200
+[neighborhood] Slot 6 (' a qualitatively different phenomenon known as an ') -> Slot 5 (' two, while for complex Hermitian matrices it is t') weight=0.200
+[neighborhood] Slot 6 (' a qualitatively different phenomenon known as an ') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.200
+[neighborhood] Slot 7 ('ectors themselves coalesce into a single state, ca') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.200
+[neighborhood] Slot 7 ('ectors themselves coalesce into a single state, ca') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.200
+[neighborhood] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.200
+[neighborhood] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.200
+[neighborhood] Slot 9 (' the eigenvalues and associated states, so two loo') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.200
+[neighborhood] Slot 9 (' the eigenvalues and associated states, so two loo') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.200
+[neighborhood] Slot 10 ('oints, left and right eigenvectors must be treated') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.200
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.200
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.200
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=0.200
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.200
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 265 (' and state the codimensions of:\n\n   * real symmetr') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.200
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.200
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 266 (' Compare the topology of eigenvalue surfaces near:') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.200
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.200
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.200
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=0.200
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 268 (' with conical intersections?\n\n5. What happens afte') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 269 (' Why are left and right eigenvectors important in ') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.200
+[neighborhood] Slot 269 (' Why are left and right eigenvectors important in ') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.700
+[neighborhood] Slot 269 (' Why are left and right eigenvectors important in ') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 269 (' Why are left and right eigenvectors important in ') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 269 (' Why are left and right eigenvectors important in ') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 4 (' touch without merging. The number of independent ') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 5 (' two, while for complex Hermitian matrices it is t') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=0.700
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.700
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 270 (' exceptional points associated with Riemann sheets') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 4 (' touch without merging. The number of independent ') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 5 (' two, while for complex Hermitian matrices it is t') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=0.500
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.700
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.700
+[neighborhood] Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 4 (' touch without merging. The number of independent ') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 5 (' two, while for complex Hermitian matrices it is t') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.700
+[neighborhood] Slot 272 (' exceptional points associated with Riemann sheets') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=0.700
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 1 ('<|im_start|>system\nYou are a helpful assistant.<|i') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 2 ('. In Hermitian systems, a degeneracy does not dest') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 3 (' and can still be chosen orthogonal. Such degenera') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 4 (' touch without merging. The number of independent ') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 5 (' two, while for complex Hermitian matrices it is t') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 6 (' a qualitatively different phenomenon known as an ') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 7 ('ectors themselves coalesce into a single state, ca') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=0.500
+[neighborhood] Slot 273 (' points associated with Riemann eigenvector coales') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=0.700
+[prime] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') weight=1.000
+[prime] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=1.000
+[parent-child] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 8 (' square-root branch-point topology. The eigenvalue') weight=1.000
+[parent-child] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 9 (' the eigenvalues and associated states, so two loo') weight=1.000
+[parent-child] Slot 8 (' square-root branch-point topology. The eigenvalue') -> Slot 10 ('oints, left and right eigenvectors must be treated') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 265 (' and state the codimensions of:\n\n   * real symmetr') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 266 (' Compare the topology of eigenvalue surfaces near:') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 267 ('value degeneracy,\n   * eigenvector coalescence.\n\n4') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 268 (' with conical intersections?\n\n5. What happens afte') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 269 (' Why are left and right eigenvectors important in ') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 270 (' exceptional points associated with Riemann sheets') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 271 ('iemann sheets after closed loop?\n\n.\n\n4. Why are ex') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 272 (' exceptional points associated with Riemann sheets') weight=1.000
+[parent-child] Slot 264 ('<|im_start|>assistant\nThe eigenvalue sheets touch ') -> Slot 273 (' points associated with Riemann eigenvector coales') weight=1.000

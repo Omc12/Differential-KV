@@ -255,6 +255,44 @@ inline std::vector<int32_t> route_query(
     int k_recency  = std::max(1, budget.k_recency);
 
     // -------------------------------------------------------------------
+    // Step 2.5: Lexical retrieval + rare lexical
+    // -------------------------------------------------------------------
+    std::vector<int32_t> lex_slots;
+    std::vector<int32_t> rare_lex_slots;
+
+    // Use current_query_tokens if query_tokens not provided
+    const std::vector<int>* tok_ptr = query_tokens;
+    if (!tok_ptr && !srl_state.current_query_tokens.empty())
+        tok_ptr = &srl_state.current_query_tokens;
+
+    if (tok_ptr && !tok_ptr->empty()) {
+        float decay = 0.999f;
+        auto lex_scored = score_lexical_slots(srl_state.inverted_index, *tok_ptr, decay);
+
+        int n_lex = static_cast<int>(lex_scored.size());
+        int take_lex = std::min(k_lexical, n_lex);
+        for (int i = 0; i < take_lex; ++i)
+            lex_slots.push_back(lex_scored[i].first);
+
+        // Rare lexical: slots whose best token has IDF >= 2.0
+        std::unordered_set<int32_t> rare_seen;
+        for (int tok : *tok_ptr) {
+            auto idf_it = srl_state.inverted_index.idf.find(tok);
+            if (idf_it == srl_state.inverted_index.idf.end()) continue;
+            if (idf_it->second < 2.0f) continue;
+
+            auto idx_it = srl_state.inverted_index.index.find(tok);
+            if (idx_it == srl_state.inverted_index.index.end()) continue;
+            for (int32_t s : idx_it->second) {
+                if (!rare_seen.count(s)) {
+                    rare_seen.insert(s);
+                    rare_lex_slots.push_back(s);
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Step 3: Semantic retrieval (Hierarchical Graph-based Routing)
     // -------------------------------------------------------------------
     std::vector<int32_t> sem_slots;
@@ -298,32 +336,84 @@ inline std::vector<int32_t> route_query(
             
             best_sem_score = center_scores[0].first;
             
-            // Select top cluster centers
-            int k_centers = std::max(1, std::min(k_semantic / 8, static_cast<int>(center_scores.size())));
-            std::unordered_set<int32_t> selected_centers;
-            std::vector<int32_t> selected_centers_vec;
-            for (int idx = 0; idx < k_centers; ++idx) {
-                selected_centers.insert(center_scores[idx].second);
-                selected_centers_vec.push_back(center_scores[idx].second);
+            // Select cluster centers with similarity score >= max(0.30, 0.85 * S_max)
+            float s_max_centroid = center_scores[0].first;
+            float threshold = std::max(0.30f, 0.85f * s_max_centroid);
+            
+            std::vector<int32_t> selected_centers;
+            for (const auto& cs : center_scores) {
+                if (cs.first >= threshold) {
+                    selected_centers.push_back(cs.second);
+                }
+            }
+            if (selected_centers.empty()) {
+                selected_centers.push_back(center_scores[0].second);
             }
             
-            // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer)
-            // 2. Gather slots associated with these centers, grouped by concentric role (Center, Around, Outer) and center association
-            // We use centers order from selected_centers_vec.
-            std::vector<int32_t> centers_order = selected_centers_vec;
-            // Map: center_id -> list of around/outer slots
+            // Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+            std::vector<int32_t> lexical_parents;
+            if (!cg.slot_to_parent_tensor.empty()) {
+                std::vector<int32_t> combined_lex = lex_slots;
+                combined_lex.insert(combined_lex.end(), rare_lex_slots.begin(), rare_lex_slots.end());
+                for (int32_t s : combined_lex) {
+                    if (s >= 0 && s < static_cast<int32_t>(cg.slot_to_parent_tensor.size())) {
+                        int32_t p = cg.slot_to_parent_tensor[s];
+                        if (p != -1) {
+                            lexical_parents.push_back(p);
+                        }
+                    }
+                }
+            }
+            for (int32_t p : lexical_parents) {
+                if (std::find(selected_centers.begin(), selected_centers.end(), p) == selected_centers.end()) {
+                    selected_centers.push_back(p);
+                }
+            }
+            
+            // Retrieve 1-hop prime neighbors from chunk_graph.prime_neighbors
+            std::unordered_set<int32_t> all_selected_prime_nodes(selected_centers.begin(), selected_centers.end());
+            if (!cg.prime_neighbors.empty()) {
+                for (int32_t c : selected_centers) {
+                    if (c >= 0 && c * 3 < static_cast<int32_t>(cg.prime_neighbors.size())) {
+                        for (int k = 0; k < 3; ++k) {
+                            int32_t nb = cg.prime_neighbors[c * 3 + k];
+                            if (nb != -1) {
+                                all_selected_prime_nodes.insert(nb);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 2. Gather slots associated with these centers/neighbors, grouped by concentric role (Center, Around, Outer) and center association
+            std::vector<int32_t> centers_order;
+            for (int32_t c : selected_centers) {
+                if (std::find(centers_order.begin(), centers_order.end(), c) == centers_order.end()) {
+                    centers_order.push_back(c);
+                }
+            }
+            for (int32_t c : all_selected_prime_nodes) {
+                if (std::find(centers_order.begin(), centers_order.end(), c) == centers_order.end()) {
+                    centers_order.push_back(c);
+                }
+            }
+            
             std::unordered_map<int32_t, std::vector<int32_t>> around_by_center;
             std::unordered_map<int32_t, std::vector<int32_t>> outer_by_center;
+            for (int32_t c : centers_order) {
+                around_by_center[c] = {};
+                outer_by_center[c] = {};
+            }
             
             const auto& role_map = cg.role_mapping_tensor;
             const auto& slot_to_center = cg.slot_to_center_tensor;
             
             for (int32_t s : srl_state.semantic_index.slot_ids) {
-                if (selected_centers.count(s)) continue;
+                if (all_selected_prime_nodes.count(s)) continue;
                 
                 if (s >= 0 && s < static_cast<int32_t>(slot_to_center.size())) {
                     int32_t assoc_c = slot_to_center[s];
-                    if (selected_centers.count(assoc_c)) {
+                    if (all_selected_prime_nodes.count(assoc_c)) {
                         int role = role_map[s];
                         if (role == 1) {
                             around_by_center[assoc_c].push_back(s);
@@ -442,6 +532,26 @@ inline std::vector<int32_t> route_query(
                     selected_parents.push_back(parent_scores[idx].second);
                 }
                 
+                // Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
+                std::vector<int32_t> lexical_parents;
+                if (!cg.slot_to_parent_tensor.empty()) {
+                    std::vector<int32_t> combined_lex = lex_slots;
+                    combined_lex.insert(combined_lex.end(), rare_lex_slots.begin(), rare_lex_slots.end());
+                    for (int32_t s : combined_lex) {
+                        if (s >= 0 && s < static_cast<int32_t>(cg.slot_to_parent_tensor.size())) {
+                            int32_t p = cg.slot_to_parent_tensor[s];
+                            if (p != -1) {
+                                lexical_parents.push_back(p);
+                            }
+                        }
+                    }
+                }
+                for (int32_t p : lexical_parents) {
+                    if (std::find(selected_parents.begin(), selected_parents.end(), p) == selected_parents.end()) {
+                        selected_parents.push_back(p);
+                    }
+                }
+                
                 // 2. Gather children blocks per parent landmark and interleave
                 int max_children = srl_state.chunk_graph.max_children;
                 const auto& ptc = srl_state.chunk_graph.parent_to_children_tensor;
@@ -510,44 +620,6 @@ inline std::vector<int32_t> route_query(
     // Step 4: Topic-switch detection
     // -------------------------------------------------------------------
     [[maybe_unused]] bool is_topic_switch = (best_sem_score < 0.25f);
-
-    // -------------------------------------------------------------------
-    // Step 5: Lexical retrieval + rare lexical
-    // -------------------------------------------------------------------
-    std::vector<int32_t> lex_slots;
-    std::vector<int32_t> rare_lex_slots;
-
-    // Use current_query_tokens if query_tokens not provided
-    const std::vector<int>* tok_ptr = query_tokens;
-    if (!tok_ptr && !srl_state.current_query_tokens.empty())
-        tok_ptr = &srl_state.current_query_tokens;
-
-    if (tok_ptr && !tok_ptr->empty()) {
-        float decay = 0.999f;
-        auto lex_scored = score_lexical_slots(srl_state.inverted_index, *tok_ptr, decay);
-
-        int n_lex = static_cast<int>(lex_scored.size());
-        int take_lex = std::min(k_lexical, n_lex);
-        for (int i = 0; i < take_lex; ++i)
-            lex_slots.push_back(lex_scored[i].first);
-
-        // Rare lexical: slots whose best token has IDF >= 2.0
-        std::unordered_set<int32_t> rare_seen;
-        for (int tok : *tok_ptr) {
-            auto idf_it = srl_state.inverted_index.idf.find(tok);
-            if (idf_it == srl_state.inverted_index.idf.end()) continue;
-            if (idf_it->second < 2.0f) continue;
-
-            auto idx_it = srl_state.inverted_index.index.find(tok);
-            if (idx_it == srl_state.inverted_index.index.end()) continue;
-            for (int32_t s : idx_it->second) {
-                if (!rare_seen.count(s)) {
-                    rare_seen.insert(s);
-                    rare_lex_slots.push_back(s);
-                }
-            }
-        }
-    }
 
     // -------------------------------------------------------------------
     // Step 6: Graph expansion (2-hop) from semantic seed set

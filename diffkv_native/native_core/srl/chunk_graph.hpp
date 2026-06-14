@@ -1,8 +1,3 @@
-// chunk_graph.hpp
-// Translation of chunk_graph.py to C++17.
-// Builds a mixed semantic/temporal/lexical similarity graph over KV blocks.
-// Uses Accelerate cblas_sgemm for pairwise cosine similarity.
-
 #pragma once
 
 #include "native_core/srl/chunk_descriptor.hpp"   // DESC_DIM
@@ -17,6 +12,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <functional>
+#include <string>
 
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
@@ -76,6 +73,8 @@ struct ChunkGraph {
     std::vector<int32_t> role_mapping_tensor;         // [max_slot + 1] int32 role (0=outer, 1=around, 2=center)
     std::vector<int32_t> cluster_centers_tensor;      // [C] int32 slot IDs of cluster centers
     std::vector<int32_t> slot_to_center_tensor;       // [max_slot + 1] int32 slot IDs of center
+    std::vector<int32_t> prime_neighbors;             // [(max_slot + 1) * 3] padded with -1
+    std::vector<float>   prime_weights;               // [(max_slot + 1) * 3] padded with 0.0f
 
     ChunkGraph() : N(0), max_degree(1), max_children(1) {}
 
@@ -149,7 +148,9 @@ inline ChunkGraph build_chunk_graph(
     float                      overlap_threshold  = 0.15f,
     const std::vector<int32_t>* block_pool_idxs   = nullptr,  // for hierarchical grouping
     const std::vector<int>*    block_anchor_idxs  = nullptr,  // anchor positions (hierarchical)
-    int                        cached_len         = 0
+    int                        cached_len         = 0,
+    const std::unordered_set<int32_t>& helper_token_ids = {},
+    const std::function<std::string(int32_t)>& token_to_piece = nullptr
 ) {
     ChunkGraph g;
     g.N = N;
@@ -164,6 +165,8 @@ inline ChunkGraph build_chunk_graph(
 
     g.role_mapping_tensor.assign(max_slot + 1, -1);
     g.slot_to_center_tensor.assign(max_slot + 1, -1);
+    g.prime_neighbors.assign((max_slot + 1) * 3, -1);
+    g.prime_weights.assign((max_slot + 1) * 3, 0.0f);
 
     if (N == 0) {
         g.max_degree = 1;
@@ -302,6 +305,29 @@ inline ChunkGraph build_chunk_graph(
             int best_tok = -1;
             float best_idf = -1.0f;
             for (int tok : vocabs[i]) {
+                if (helper_token_ids.count(tok)) {
+                    continue;
+                }
+                if (token_to_piece) {
+                    try {
+                        std::string raw = token_to_piece(tok);
+                        std::string clean = "";
+                        bool has_alpha = false;
+                        for (char c : raw) {
+                            if (std::isalnum(static_cast<unsigned char>(c))) {
+                                clean += std::tolower(static_cast<unsigned char>(c));
+                                if (std::isalpha(static_cast<unsigned char>(c))) {
+                                    has_alpha = true;
+                                }
+                            }
+                        }
+                        if (clean.length() <= 2 || !has_alpha) {
+                            continue;
+                        }
+                    } catch (...) {
+                        continue;
+                    }
+                }
                 float idf_val = 1.0f;
                 auto idf_it = inv_index->idf.find(tok);
                 if (idf_it != inv_index->idf.end()) {
@@ -684,6 +710,91 @@ inline ChunkGraph build_chunk_graph(
             }
 
             g.role_mapping_tensor[s] = is_around ? 1 : 0;
+        }
+    }
+
+    // Build Prime Node similarity graph (inter-cluster graph)
+    if (!g.parent_landmarks.empty()) {
+        std::unordered_map<int32_t, int> slot_to_idx;
+        for (int idx = 0; idx < N; ++idx) {
+            slot_to_idx[slot_ids[idx]] = idx;
+        }
+        std::vector<int32_t> valid_parent_slots;
+        std::vector<int> valid_parent_idxs;
+        for (int32_t p : g.parent_landmarks) {
+            auto it = slot_to_idx.find(p);
+            if (it != slot_to_idx.end()) {
+                valid_parent_slots.push_back(p);
+                valid_parent_idxs.push_back(it->second);
+            }
+        }
+        
+        int L_parents = valid_parent_slots.size();
+        if (L_parents > 1) {
+            std::vector<float> parent_sim(L_parents * L_parents, 0.0f);
+            for (int i = 0; i < L_parents; ++i) {
+                int row_i = valid_parent_idxs[i];
+                const float* desc_i = desc_matrix + row_i * DESC_DIM;
+                for (int j = 0; j < L_parents; ++j) {
+                    if (i == j) {
+                        parent_sim[i * L_parents + j] = -1.0f;
+                        continue;
+                    }
+                    int row_j = valid_parent_idxs[j];
+                    const float* desc_j = desc_matrix + row_j * DESC_DIM;
+                    float dot = 0.0f;
+                    for (int d = 0; d < DESC_DIM; ++d) {
+                        dot += desc_i[d] * desc_j[d];
+                    }
+                    parent_sim[i * L_parents + j] = dot;
+                }
+            }
+            
+            // Prune parent_sim for mutually exclusive concept domains
+            for (int i = 0; i < L_parents; ++i) {
+                int32_t p_slot_i = valid_parent_slots[i];
+                int idx_i = slot_to_idx[p_slot_i];
+                int sig_i = sig_tokens[idx_i];
+                float idf_i = sig_idfs[idx_i];
+                if (sig_i == -1 || idf_i < 2.0f) continue;
+                for (int j = 0; j < L_parents; ++j) {
+                    if (i == j) continue;
+                    int32_t p_slot_j = valid_parent_slots[j];
+                    int idx_j = slot_to_idx[p_slot_j];
+                    int sig_j = sig_tokens[idx_j];
+                    float idf_j = sig_idfs[idx_j];
+                    if (sig_j == -1 || idf_j < 2.0f) continue;
+                    if (sig_i != sig_j) {
+                        bool has_cross_ref = vocabs[idx_i].count(sig_j) || vocabs[idx_j].count(sig_i);
+                        if (!has_cross_ref) {
+                            parent_sim[i * L_parents + j] = -1.0f;
+                            parent_sim[j * L_parents + i] = -1.0f;
+                        }
+                    }
+                }
+            }
+            
+            for (int i = 0; i < L_parents; ++i) {
+                int32_t p_slot = valid_parent_slots[i];
+                std::vector<std::pair<float, int32_t>> sims;
+                for (int j = 0; j < L_parents; ++j) {
+                    if (i == j) continue;
+                    float val = parent_sim[i * L_parents + j];
+                    if (val >= 0.30f) {
+                        sims.push_back({val, valid_parent_slots[j]});
+                    }
+                }
+                
+                std::sort(sims.begin(), sims.end(), [](const auto& a, const auto& b) {
+                    return a.first > b.first;
+                });
+                
+                int num_links = std::min(3, static_cast<int>(sims.size()));
+                for (int k = 0; k < num_links; ++k) {
+                    g.prime_neighbors[p_slot * 3 + k] = sims[k].second;
+                    g.prime_weights[p_slot * 3 + k] = sims[k].first;
+                }
+            }
         }
     }
 

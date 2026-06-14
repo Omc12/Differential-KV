@@ -242,10 +242,25 @@ def build_chunk_graph(
     sig_tokens = []
     sig_idfs = []
     if vocabs and inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf:
+        from native_core.srl.factual_alignment import get_helper_token_ids
+        _tokenizer = getattr(inv_index, "_tokenizer_ref", None)
+        helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
+        
         for i in range(N):
             best_tok = -1
             best_idf = -1.0
             for tok in vocabs[i]:
+                if tok in helper_ids:
+                    continue
+                if _tokenizer is not None:
+                    try:
+                        raw = _tokenizer.decode([tok])
+                        clean = raw.replace("Ġ", "").replace("▁", "").strip()
+                        alnum = "".join(c for c in clean if c.isalnum())
+                        if len(alnum) <= 2 or not any(c.isalpha() for c in clean):
+                            continue
+                    except Exception:
+                        continue
                 idf_val = inv_index.idf.get(tok, 1.0)
                 if idf_val > best_idf:
                     best_idf = idf_val
@@ -546,6 +561,29 @@ def build_chunk_graph(
             parent_desc = desc_matrix[valid_parent_idxs].float()  # [L, DESC_DIM]
             parent_sim = parent_desc @ parent_desc.T  # [L, L]
             parent_sim.fill_diagonal_(-1.0)
+            
+            # Prune parent_sim for mutually exclusive concept domains
+            for i in range(L):
+                p_slot_i = valid_parent_slots[i]
+                idx_i = slot_to_idx[p_slot_i]
+                sig_i = sig_tokens[idx_i]
+                idf_i = sig_idfs[idx_i]
+                if sig_i == -1 or idf_i < 2.0:
+                    continue
+                for j in range(L):
+                    if i == j:
+                        continue
+                    p_slot_j = valid_parent_slots[j]
+                    idx_j = slot_to_idx[p_slot_j]
+                    sig_j = sig_tokens[idx_j]
+                    idf_j = sig_idfs[idx_j]
+                    if sig_j == -1 or idf_j < 2.0:
+                        continue
+                    if sig_i != sig_j:
+                        has_cross_ref = (sig_j in vocabs[idx_i]) or (sig_i in vocabs[idx_j])
+                        if not has_cross_ref:
+                            parent_sim[i, j] = -1.0
+                            parent_sim[j, i] = -1.0
             
             for i in range(L):
                 p_slot = valid_parent_slots[i]
