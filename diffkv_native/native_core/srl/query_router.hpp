@@ -260,14 +260,23 @@ inline std::vector<int32_t> route_query(
     std::vector<int32_t> lex_slots;
     std::vector<int32_t> rare_lex_slots;
 
-    // Use current_query_tokens if query_tokens not provided
-    const std::vector<int>* tok_ptr = query_tokens;
-    if (!tok_ptr && !srl_state.current_query_tokens.empty())
-        tok_ptr = &srl_state.current_query_tokens;
+    // Use recent_generated_tokens if query_tokens not provided, fall back to current_query_tokens
+    std::vector<int> recent_toks;
+    if (query_tokens != nullptr) {
+        recent_toks = *query_tokens;
+    } else if (!srl_state.recent_generated_tokens.empty()) {
+        int n_recent = static_cast<int>(srl_state.recent_generated_tokens.size());
+        int start_idx = std::max(0, n_recent - 16);
+        recent_toks.assign(srl_state.recent_generated_tokens.begin() + start_idx, srl_state.recent_generated_tokens.end());
+    } else if (!srl_state.current_query_tokens.empty()) {
+        int n_query = static_cast<int>(srl_state.current_query_tokens.size());
+        int start_idx = std::max(0, n_query - 128);
+        recent_toks.assign(srl_state.current_query_tokens.begin() + start_idx, srl_state.current_query_tokens.end());
+    }
 
-    if (tok_ptr && !tok_ptr->empty()) {
+    if (!recent_toks.empty()) {
         float decay = 0.999f;
-        auto lex_scored = score_lexical_slots(srl_state.inverted_index, *tok_ptr, decay);
+        auto lex_scored = score_lexical_slots(srl_state.inverted_index, recent_toks, decay);
 
         int n_lex = static_cast<int>(lex_scored.size());
         int take_lex = std::min(k_lexical, n_lex);
@@ -276,7 +285,7 @@ inline std::vector<int32_t> route_query(
 
         // Rare lexical: slots whose best token has IDF >= 2.0
         std::unordered_set<int32_t> rare_seen;
-        for (int tok : *tok_ptr) {
+        for (int tok : recent_toks) {
             auto idf_it = srl_state.inverted_index.idf.find(tok);
             if (idf_it == srl_state.inverted_index.idf.end()) continue;
             if (idf_it->second < 2.0f) continue;

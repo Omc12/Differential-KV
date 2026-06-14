@@ -103,6 +103,25 @@ class ChunkGraph:
         return d
 
 
+def can_reach(adj_list, start, target) -> bool:
+    """Check if node target is reachable from start in the given adjacency structure."""
+    if start == target:
+        return True
+    visited = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node == target:
+            return True
+        if node not in visited:
+            visited.add(node)
+            neighbors = adj_list.get(node, []) if isinstance(adj_list, dict) else (adj_list[node] if node < len(adj_list) else [])
+            for nb in neighbors:
+                if nb != -1 and nb not in visited:
+                    stack.append(nb)
+    return False
+
+
 def build_chunk_graph(
     desc_matrix:  torch.Tensor,   # [N, DESC_DIM] float16, L2 normalized (from SemanticIndex)
     slot_ids:     torch.Tensor,   # [N] int32 pool slot IDs (from SemanticIndex)
@@ -299,11 +318,7 @@ def build_chunk_graph(
 
     # ── Handshake Hunting Protocol ──────────────────────────────────────────
     # Simulate sequential/chronological creation of chunks.
-    # The newly created ones are targeted by earlier ones (hunting), which
-    # send a request with their position/relevance, and the targeted chunk
-    # sends back its ID to form a bidirectional connection.
-    handshake_neighbors = [[] for _ in range(N)]
-    handshake_weights = [[] for _ in range(N)]
+    candidate_edges = []
 
     has_idf = (inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf)
 
@@ -362,8 +377,6 @@ def build_chunk_graph(
             is_temporal_match = (abs(i - j) == 1)
             
             if is_semantic_match or is_lexical_match or is_temporal_match:
-                # Handshake complete:
-                # j targets i (sends request), i returns ID (connects)
                 add_i_to_j = True
                 add_j_to_i = True
                 
@@ -373,16 +386,14 @@ def build_chunk_graph(
                     else:
                         add_i_to_j = False # older i cannot target newer j
                 
-                if add_j_to_i:
-                    handshake_neighbors[j].append(i)
-                    handshake_weights[j].append(max(1e-5, weight_j_to_i))
+                if add_j_to_i and not is_excluded:
+                    candidate_edges.append((weight_j_to_i, j, i))
                 
-                if add_i_to_j:
-                    handshake_neighbors[i].append(j)
-                    handshake_weights[i].append(max(1e-5, weight_i_to_j))
+                if add_i_to_j and not is_excluded:
+                    candidate_edges.append((weight_i_to_j, i, j))
 
     # For structural robustness and backwards compatibility, ensure top-k semantic
-    # neighbors are also included in the handshake connections.
+    # neighbors are also included in the candidate edges.
     k_sem = min(K_semantic, N - 1)
     if k_sem > 0:
         _, sem_idx = torch.topk(sim, k=k_sem, dim=1, largest=True, sorted=True)
@@ -411,7 +422,7 @@ def build_chunk_graph(
                     if not has_cross_ref:
                         is_excluded = True
 
-            if allow_i_to_j and j not in handshake_neighbors[i] and not is_excluded:
+            if allow_i_to_j and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_i_to_j = 0.0
                 if not is_excluded and vocabs:
@@ -429,11 +440,9 @@ def build_chunk_graph(
                                 lex_score_i_to_j = len(intersection) / len(w_i)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_i_to_j = 0.5 * sim_score + 0.5 * lex_score_i_to_j + temporal_boost
+                candidate_edges.append((weight_i_to_j, i, j))
                 
-                handshake_neighbors[i].append(j)
-                handshake_weights[i].append(max(1e-5, weight_i_to_j))
-                
-            if allow_j_to_i and i not in handshake_neighbors[j] and not is_excluded:
+            if allow_j_to_i and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_j_to_i = 0.0
                 if not is_excluded and vocabs:
@@ -451,26 +460,28 @@ def build_chunk_graph(
                                 lex_score_j_to_i = len(intersection) / len(w_j)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
-                
-                handshake_neighbors[j].append(i)
-                handshake_weights[j].append(max(1e-5, weight_j_to_i))
+                candidate_edges.append((weight_j_to_i, j, i))
 
-    # Deduplicate connections per block
-    merged_neighbors = []
-    merged_weights = []
-    max_degree = 0
-    for i in range(N):
-        unique_nb = []
-        unique_wt = []
-        seen_nb = set()
-        for idx, nb in enumerate(handshake_neighbors[i]):
-            if nb != i and nb not in seen_nb:
-                unique_nb.append(nb)
-                unique_wt.append(handshake_weights[i][idx])
-                seen_nb.add(nb)
-        merged_neighbors.append(unique_nb)
-        merged_weights.append(unique_wt)
-        max_degree = max(max_degree, len(unique_nb))
+    # Sort candidate edges by weight in descending order
+    candidate_edges.sort(key=lambda x: x[0], reverse=True)
+
+    # Build local DAG by checking reachability
+    handshake_neighbors = [[] for _ in range(N)]
+    handshake_weights = [[] for _ in range(N)]
+
+    for weight, u, v in candidate_edges:
+        if u == v:
+            continue
+        if len(handshake_neighbors[u]) >= 8:
+            continue
+        if can_reach(handshake_neighbors, v, u):
+            continue
+        handshake_neighbors[u].append(v)
+        handshake_weights[u].append(max(1e-5, weight))
+
+    merged_neighbors = handshake_neighbors
+    merged_weights = handshake_weights
+    max_degree = max((len(nb) for nb in merged_neighbors), default=0)
 
     # Pad all neighbor lists to max_degree with -1 (out-of-bounds sentinel)
     max_degree = max(1, max_degree)
@@ -585,25 +596,37 @@ def build_chunk_graph(
                             parent_sim[i, j] = -1.0
                             parent_sim[j, i] = -1.0
             
+            prime_candidates = []
             for i in range(L):
-                p_slot = valid_parent_slots[i]
-                sims = []
+                p_slot_i = valid_parent_slots[i]
                 for j in range(L):
                     if i == j:
                         continue
                     val = float(parent_sim[i, j].item())
                     if val >= 0.30:
-                        sims.append((val, valid_parent_slots[j]))
+                        prime_candidates.append((val, p_slot_i, valid_parent_slots[j]))
+            
+            # Sort prime candidate edges by weight descending
+            prime_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # Build prime DAG
+            prime_adj = {p: [] for p in valid_parent_slots}
+            prime_w_adj = {p: [] for p in valid_parent_slots}
+            
+            for val, u_slot, v_slot in prime_candidates:
+                if len(prime_adj[u_slot]) >= 3:
+                    continue
+                if can_reach(prime_adj, v_slot, u_slot):
+                    continue
+                prime_adj[u_slot].append(v_slot)
+                prime_w_adj[u_slot].append(val)
                 
-                # Sort descending by similarity
-                sims.sort(key=lambda x: x[0], reverse=True)
-                
-                # Link at most 3
-                num_links = min(3, len(sims))
-                for k in range(num_links):
-                    val, neighbor_slot = sims[k]
-                    prime_neighbors[p_slot, k] = neighbor_slot
-                    prime_weights[p_slot, k] = val
+            # Write to prime_neighbors and prime_weights
+            for p_slot, neighbors_list in prime_adj.items():
+                w_list = prime_w_adj[p_slot]
+                for k in range(len(neighbors_list)):
+                    prime_neighbors[p_slot, k] = neighbors_list[k]
+                    prime_weights[p_slot, k] = w_list[k]
 
     return ChunkGraph(
         neighbors=neighbors_tensor.cpu(),

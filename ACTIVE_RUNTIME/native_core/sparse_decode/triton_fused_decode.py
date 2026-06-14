@@ -966,6 +966,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 gathered_cache[layer_idx] = (current_version, (U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t))
         
         block_capacity = U.shape[1]
+        R = U.shape[2]
 
         if max_valid_len is None:
             max_valid_len = int(seq_lens_t.max().item())

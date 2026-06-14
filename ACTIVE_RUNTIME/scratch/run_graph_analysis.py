@@ -19,6 +19,8 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 # FORCE DIFFKV TO ENGAGE FOR SHORT SEQUENCES (Defaults to 4096!)
 os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
 os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
+os.environ["DIFFKV_SRL_THRESHOLD"] = "5"
+os.environ["DIFFKV_SRL_K_MIN"] = "5"
 
 # Import PyTorchDiffKVHFWrapper directly to bypass the dynamic MLX redirect
 from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
@@ -340,7 +342,7 @@ def serialize_srl_graph(wrapper, session_id):
     }
 
 def main():
-    device = get_best_device()
+    device = "cpu"
     print(f"Device: {device}")
     
     # Initialize the tiny model

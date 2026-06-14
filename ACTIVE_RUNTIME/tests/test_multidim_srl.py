@@ -117,14 +117,14 @@ def test_multidim_chunk_graph_connections():
     # Verify neighbors shape and structure
     neighbors = graph.neighbors
     assert neighbors.shape[0] == 3
-    # Check that block 0 (row 0) and block 1 (row 1) are connected via lexical overlap
-    # Neighbors of row 0 should contain row 1
+    # Check that block 0 (row 0) and block 1 (row 1) are connected via lexical overlap.
+    # Since we construct a strict DAG and sort candidates by weight descending,
+    # the candidate edge 1 -> 0 has higher weight than 0 -> 1 (due to larger relative overlap).
+    # Therefore, 1 -> 0 is added, and 0 -> 1 is skipped to prevent a cycle.
     row_0_neighbors = neighbors[0].tolist()
-    # Filter out padding value -1
     row_0_neighbors = [n for n in row_0_neighbors if n != -1]
-    assert 1 in row_0_neighbors
+    assert 1 not in row_0_neighbors
     
-    # Neighbors of row 1 should contain row 0
     row_1_neighbors = neighbors[1].tolist()
     row_1_neighbors = [n for n in row_1_neighbors if n != -1]
     assert 0 in row_1_neighbors
@@ -319,19 +319,18 @@ def test_dynamic_decay_and_weights():
     
     # Verify weights exist and are asymmetric
     assert graph.weights is not None
-    # Slot 101 (row 0) has neighbor 102 (row 1)
-    neighbors_0 = graph.neighbors[0].tolist()
-    idx_1_in_0 = neighbors_0.index(1)
-    weight_0_to_1 = float(graph.weights[0, idx_1_in_0])
     
-    # Slot 102 (row 1) has neighbor 101 (row 0)
+    # Slot 102 (row 1) has neighbor 101 (row 0) because candidate 1 -> 0 has higher weight
+    # than candidate 0 -> 1 (since lex_score(1 -> 0) = 1.0 > lex_score(0 -> 1) = 0.667).
+    # Consequently, 1 -> 0 is added first, and 0 -> 1 is skipped to maintain a DAG.
     neighbors_1 = graph.neighbors[1].tolist()
     idx_0_in_1 = neighbors_1.index(0)
     weight_1_to_0 = float(graph.weights[1, idx_0_in_1])
+    assert weight_1_to_0 > 0.0
     
-    # Since lex_score(1 -> 0) = 1.0 > lex_score(0 -> 1) = 0.667,
-    # weight_1_to_0 should be strictly greater than weight_0_to_1
-    assert weight_1_to_0 > weight_0_to_1
+    # Slot 101 (row 0) should not have neighbor 102 (row 1) to prevent a cycle
+    neighbors_0 = graph.neighbors[0].tolist()
+    assert 1 not in neighbors_0
 
     # 2. Verify query-dependent decay and degree damping during route_query
     # We have 8 blocks:

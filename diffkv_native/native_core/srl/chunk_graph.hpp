@@ -126,6 +126,70 @@ static inline void insert_neighbor(
     }
 }
 
+inline bool can_reach(
+    const std::vector<std::vector<std::pair<int32_t, float>>>& adj,
+    int32_t start,
+    int32_t target
+) {
+    int N = static_cast<int>(adj.size());
+    if (start < 0 || start >= N || target < 0 || target >= N) return false;
+    if (start == target) return true;
+    
+    std::vector<bool> visited(N, false);
+    std::vector<int32_t> stack;
+    stack.push_back(start);
+    
+    while (!stack.empty()) {
+        int32_t node = stack.back();
+        stack.pop_back();
+        
+        if (node == target) return true;
+        
+        if (!visited[node]) {
+            visited[node] = true;
+            for (const auto& neighbor : adj[node]) {
+                int32_t nb_node = neighbor.first;
+                if (nb_node >= 0 && nb_node < N && !visited[nb_node]) {
+                    stack.push_back(nb_node);
+                }
+            }
+        }
+    }
+    return false;
+}
+
+inline bool can_reach_map(
+    const std::unordered_map<int32_t, std::vector<int32_t>>& adj,
+    int32_t start,
+    int32_t target
+) {
+    if (start == target) return true;
+    
+    std::unordered_set<int32_t> visited;
+    std::vector<int32_t> stack;
+    stack.push_back(start);
+    
+    while (!stack.empty()) {
+        int32_t node = stack.back();
+        stack.pop_back();
+        
+        if (node == target) return true;
+        
+        if (visited.find(node) == visited.end()) {
+            visited.insert(node);
+            auto it = adj.find(node);
+            if (it != adj.end()) {
+                for (int32_t nb : it->second) {
+                    if (nb != -1 && visited.find(nb) == visited.end()) {
+                        stack.push_back(nb);
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // build_chunk_graph
 //
@@ -364,7 +428,13 @@ inline ChunkGraph build_chunk_graph(
     }
 
     // ── Handshake Hunting Protocol ──
-    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
+    struct CandidateEdge {
+        float weight;
+        int32_t src;
+        int32_t dst;
+    };
+    std::vector<CandidateEdge> candidate_edges;
+
     for (int i = 0; i < N; ++i) {
         int anchor_i = (block_anchor_idxs && i < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[i] : 0;
         bool is_i_new = (cached_len > 0) && (anchor_i >= cached_len);
@@ -455,11 +525,11 @@ inline ChunkGraph build_chunk_graph(
                     }
                 }
                 
-                if (add_j_to_i) {
-                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
+                if (add_j_to_i && !is_excluded) {
+                    candidate_edges.push_back({std::max(1e-5f, weight_j_to_i), j, i});
                 }
-                if (add_i_to_j) {
-                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
+                if (add_i_to_j && !is_excluded) {
+                    candidate_edges.push_back({std::max(1e-5f, weight_i_to_j), i, j});
                 }
             }
         }
@@ -489,13 +559,6 @@ inline ChunkGraph build_chunk_graph(
                 bool allow_i_to_j = (cached_len == 0) || (is_i_new == is_j_new) || (is_i_new && !is_j_new);
                 bool allow_j_to_i = (cached_len == 0) || (is_i_new == is_j_new) || (is_j_new && !is_i_new);
 
-                bool connected = false;
-                for (const auto& p : adj[i]) {
-                    if (p.first == j) {
-                        connected = true;
-                        break;
-                    }
-                }
                 bool is_excluded = false;
                 if (inv_index && !inv_index->chunk_vocabularies.empty()) {
                     int sig_i = sig_tokens[i];
@@ -512,7 +575,7 @@ inline ChunkGraph build_chunk_graph(
                     }
                 }
 
-                if (allow_i_to_j && !connected && !is_excluded) {
+                if (allow_i_to_j && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_i_to_j = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
@@ -539,18 +602,10 @@ inline ChunkGraph build_chunk_graph(
                     }
                     float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
                     float weight_i_to_j = 0.5f * sim_score + 0.5f * lex_score_i_to_j + temporal_boost;
-                    
-                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
+                    candidate_edges.push_back({std::max(1e-5f, weight_i_to_j), i, j});
                 }
                 
-                bool reverse_connected = false;
-                for (const auto& p : adj[j]) {
-                    if (p.first == i) {
-                        reverse_connected = true;
-                        break;
-                    }
-                }
-                if (allow_j_to_i && !reverse_connected && !is_excluded) {
+                if (allow_j_to_i && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_j_to_i = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
@@ -584,29 +639,34 @@ inline ChunkGraph build_chunk_graph(
                     }
                     float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
                     float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
-                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
+                    candidate_edges.push_back({std::max(1e-5f, weight_j_to_i), j, i});
                 }
             }
         }
     }
 
-    // Deduplicate and determine actual max_degree, pad rows with -1
+    // Sort candidate edges by weight descending
+    std::sort(candidate_edges.begin(), candidate_edges.end(), [](const auto& a, const auto& b) {
+        return a.weight > b.weight;
+    });
+
+    // Build local DAG by checking reachability and capping degree
+    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
+    std::unordered_set<int64_t> seen_edges;
     int actual_max = 0;
-    for (int i = 0; i < N; ++i) {
-        auto& row_adj = adj[i];
-        std::vector<std::pair<int32_t, float>> uniq;
-        std::unordered_set<int32_t> seen;
-        for (const auto& p : row_adj) {
-            if (p.first != i && seen.find(p.first) == seen.end()) {
-                uniq.push_back(p);
-                seen.insert(p.first);
-            }
-        }
-        row_adj = std::move(uniq);
-        std::sort(row_adj.begin(), row_adj.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
-        actual_max = std::max(actual_max, static_cast<int>(row_adj.size()));
+
+    for (const auto& edge : candidate_edges) {
+        if (edge.src == edge.dst) continue;
+        int64_t key = (static_cast<int64_t>(edge.src) << 32) | edge.dst;
+        if (seen_edges.count(key)) continue;
+        if (static_cast<int>(adj[edge.src].size()) >= 8) continue;
+        if (can_reach(adj, edge.dst, edge.src)) continue;
+        
+        adj[edge.src].push_back({edge.dst, edge.weight});
+        seen_edges.insert(key);
+        actual_max = std::max(actual_max, static_cast<int>(adj[edge.src].size()));
     }
+
     g.max_degree = std::max(1, actual_max);
 
     g.neighbors.assign((size_t)N * g.max_degree, -1);
@@ -774,25 +834,55 @@ inline ChunkGraph build_chunk_graph(
                 }
             }
             
+            struct PrimeCandidate {
+                float val;
+                int32_t u;
+                int32_t v;
+            };
+            std::vector<PrimeCandidate> prime_candidates;
             for (int i = 0; i < L_parents; ++i) {
-                int32_t p_slot = valid_parent_slots[i];
-                std::vector<std::pair<float, int32_t>> sims;
+                int32_t p_slot_i = valid_parent_slots[i];
                 for (int j = 0; j < L_parents; ++j) {
                     if (i == j) continue;
                     float val = parent_sim[i * L_parents + j];
                     if (val >= 0.30f) {
-                        sims.push_back({val, valid_parent_slots[j]});
+                        prime_candidates.push_back({val, p_slot_i, valid_parent_slots[j]});
                     }
                 }
+            }
+            
+            // Sort prime candidates descending
+            std::sort(prime_candidates.begin(), prime_candidates.end(), [](const auto& a, const auto& b) {
+                return a.val > b.val;
+            });
+            
+            // Build prime DAG
+            std::unordered_map<int32_t, std::vector<int32_t>> prime_adj;
+            std::unordered_map<int32_t, std::vector<float>> prime_w_adj;
+            for (int32_t p : valid_parent_slots) {
+                prime_adj[p] = {};
+                prime_w_adj[p] = {};
+            }
+            
+            std::unordered_set<int64_t> seen_prime;
+            for (const auto& pc : prime_candidates) {
+                int64_t key = (static_cast<int64_t>(pc.u) << 32) | pc.v;
+                if (seen_prime.count(key)) continue;
+                if (static_cast<int>(prime_adj[pc.u].size()) >= 3) continue;
+                if (can_reach_map(prime_adj, pc.v, pc.u)) continue;
                 
-                std::sort(sims.begin(), sims.end(), [](const auto& a, const auto& b) {
-                    return a.first > b.first;
-                });
-                
-                int num_links = std::min(3, static_cast<int>(sims.size()));
-                for (int k = 0; k < num_links; ++k) {
-                    g.prime_neighbors[p_slot * 3 + k] = sims[k].second;
-                    g.prime_weights[p_slot * 3 + k] = sims[k].first;
+                prime_adj[pc.u].push_back(pc.v);
+                prime_w_adj[pc.u].push_back(pc.val);
+                seen_prime.insert(key);
+            }
+            
+            // Write to prime_neighbors and prime_weights
+            for (int32_t p_slot : valid_parent_slots) {
+                const auto& neighbors_list = prime_adj[p_slot];
+                const auto& w_list = prime_w_adj[p_slot];
+                for (size_t k = 0; k < neighbors_list.size(); ++k) {
+                    g.prime_neighbors[p_slot * 3 + k] = neighbors_list[k];
+                    g.prime_weights[p_slot * 3 + k] = w_list[k];
                 }
             }
         }

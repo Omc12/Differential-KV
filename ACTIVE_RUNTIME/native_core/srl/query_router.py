@@ -218,22 +218,18 @@ def route_query(
         q_desc = compute_query_descriptor(Q, pool.W_proj)
     K      = adaptive_k(q_desc, srl_state, N)
 
-    # ── Step 1.5: Lexical inverted index lookup (IDF & Term Coverage Boost) ──
-    # FIX (Bug 1): Prioritize current_query_tokens for lexical lookup.
-    # Only use recent_generated_tokens (previous-turn output) as a weak fallback
-    # to avoid contaminating the inverted-index search with stale vocabulary.
+    # Decode phase: prioritize the assistant's recently generated tokens
+    # to focus retrieval on the specific sub-topic being written.
+    # Fall back to the user query only if generation has just started.
     k_lexical   = max(1, int(K * _LEX_FRAC))
     if query_tokens is not None:
         recent_toks = query_tokens
     else:
-        current_q_toks = getattr(srl_state, "current_query_tokens", [])
-        if current_q_toks:
-            # Use only the incoming query tokens — exclude previous-turn outputs.
-            recent_toks = current_q_toks[-128:]
+        recent_gen = getattr(srl_state, "recent_generated_tokens", [])
+        if recent_gen:
+            recent_toks = recent_gen[-16:]
         else:
-            # Fallback: no explicit query tokens available — use a small tail of
-            # recent generated tokens so we don't completely lose lexical signal.
-            recent_toks = srl_state.recent_generated_tokens[-16:]
+            recent_toks = getattr(srl_state, "current_query_tokens", [])[-128:]
 
     from collections import defaultdict
     inv_index = srl_state.inverted_index
