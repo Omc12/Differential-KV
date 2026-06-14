@@ -25,6 +25,7 @@ void FactualExactStore::build(
     const std::unordered_set<int32_t>& semantic_prime_slots,
     bool use_salience_parser
 ) {
+    clear();
     int L = token_ids.size();
     if (L == 0 || k_activations.empty()) return;
     int num_layers = k_activations.size();

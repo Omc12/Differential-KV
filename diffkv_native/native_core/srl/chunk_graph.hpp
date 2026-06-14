@@ -182,16 +182,35 @@ inline ChunkGraph build_chunk_graph(
     {
         // Map: group_id -> first block row (becomes landmark representative)
         std::unordered_map<int, int32_t> group_to_landmark_row;
+        int chunk_size = 512;
+        int dynamic_chunk_size = static_cast<int>(std::sqrt(N * 128.0));
+        if (dynamic_chunk_size < 256) dynamic_chunk_size = 256;
+        if (dynamic_chunk_size > 1024) dynamic_chunk_size = 1024;
+        chunk_size = dynamic_chunk_size;
 
         for (int i = 0; i < N; ++i) {
-            int group_id = (*block_anchor_idxs)[i] / 512;
+            int anchor = (*block_anchor_idxs)[i];
+            int group_id = 0;
+            if (cached_len > 0 && anchor >= cached_len) {
+                int prefill_max_groups = (cached_len - 1) / chunk_size + 1;
+                group_id = prefill_max_groups + ((anchor - cached_len) / chunk_size);
+            } else {
+                group_id = anchor / chunk_size;
+            }
             if (group_to_landmark_row.find(group_id) == group_to_landmark_row.end()) {
                 group_to_landmark_row[group_id] = i;
             }
         }
 
         for (int i = 0; i < N; ++i) {
-            int group_id = (*block_anchor_idxs)[i] / 512;
+            int anchor = (*block_anchor_idxs)[i];
+            int group_id = 0;
+            if (cached_len > 0 && anchor >= cached_len) {
+                int prefill_max_groups = (cached_len - 1) / chunk_size + 1;
+                group_id = prefill_max_groups + ((anchor - cached_len) / chunk_size);
+            } else {
+                group_id = anchor / chunk_size;
+            }
             int landmark_row = group_to_landmark_row[group_id];
             int32_t parent_slot = slot_ids[landmark_row];
             int32_t child_slot  = slot_ids[i];

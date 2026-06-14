@@ -1624,7 +1624,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
         // Factual Early Stopping (Option 2 Extension)
         bool stop_generation = false;
-        if (session->srl_state.current_step_max_similarity >= 0.5f) {
+        if (req->max_tokens < 64 && session->srl_state.current_step_max_similarity >= 0.5f) {
             for (const auto& seq : session->srl_state.current_step_factual_sequences) {
                 if (seq.size() >= 5 && next_token == seq.back() && req->generated_tokens.size() >= seq.size() - 1) {
                     bool match = true;

@@ -730,6 +730,18 @@ class KVRuntimeManager:
 
         if clear_srl:
             self._session_srl.pop(session_id, None)
+            self._factual_stores.pop(session_id, None)
+        else:
+            srl_state = self._session_srl.get(session_id)
+            if srl_state is not None:
+                kept_slots = set()
+                if self._streaming_mgr is not None and session_id in self._streaming_mgr.session_blocks:
+                    blocks_layer0 = self._streaming_mgr.session_blocks[session_id].get(0, [])
+                    for block in blocks_layer0:
+                        if block.pool_idx is not None:
+                            kept_slots.add(block.pool_idx)
+                if hasattr(srl_state, "rollback_to"):
+                    srl_state.rollback_to(target_len, kept_slots)
 
     def set_session_config(self, session_id: str, config: dict):
         if not hasattr(self, "session_configs"):

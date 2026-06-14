@@ -1366,9 +1366,12 @@ class MLXDiffKVWrapper:
             generated.append(next_id)
             self.manager.register_prefill_tokens(session_id, torch.tensor([next_id], dtype=torch.long))
 
+            if srl_state is not None and hasattr(srl_state, "save_step_state"):
+                srl_state.save_step_state(len(generated))
+
             # Factual Early Stopping (Option 2 Extension)
             stop_generation = False
-            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
+            if max_new_tokens < 64 and srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
                 if getattr(srl_state, "current_step_factual_sequences", None):
                     for seq in srl_state.current_step_factual_sequences:
                         if len(seq) >= 5 and len(generated) >= len(seq):

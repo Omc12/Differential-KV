@@ -1512,7 +1512,7 @@ class ContinuousBatchEngine:
                 is_eos = True
 
         # Factual Early Stopping (Option 2 Extension)
-        if not is_eos and srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
+        if not is_eos and req.max_tokens < 64 and srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
             if getattr(srl_state, "current_step_factual_sequences", None):
                 for seq in srl_state.current_step_factual_sequences:
                     if len(seq) >= 5 and len(req.generated_ids) >= len(seq):
@@ -1565,6 +1565,8 @@ class ContinuousBatchEngine:
             curr_slot_id = srl_state.ordered_slot_ids[-1] if srl_state.ordered_slot_ids else 0
             srl_state.generated_token_slots.append(curr_slot_id)
             srl_state.update_dynamic_anchors(self.wrapper.manager._stop_token_ids)
+            if hasattr(srl_state, "save_step_state"):
+                srl_state.save_step_state(len(req.prompt_ids) + len(req.generated_ids))
 
         # Standard robust incremental decode: decodes the full generated sequence and computes the delta text.
         # This is 100% correct, handles token boundaries perfectly, and completely eliminates spacing corruption.

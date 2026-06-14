@@ -344,3 +344,76 @@ class SessionSRLState:
                 self.segment_ids[slot] = 2
             else:
                 self.segment_ids[slot] = 0
+
+    def save_step_state(self, seq_len: int) -> None:
+        if not hasattr(self, "_step_history"):
+            self._step_history = {}
+        self._step_history[seq_len] = {
+            "vsl_active_candidates": [list(x) for x in self.vsl_active_candidates] if self.vsl_active_candidates else [],
+            "vsl_consecutive_helpers": self.vsl_consecutive_helpers,
+            "current_entity_id": self.current_entity_id,
+            "current_step_factual_tokens": set(self.current_step_factual_tokens) if self.current_step_factual_tokens else set(),
+            "current_step_factual_sequences": [list(x) for x in self.current_step_factual_sequences] if self.current_step_factual_sequences else [],
+            "current_step_sequence_entity_ids": list(self.current_step_sequence_entity_ids) if self.current_step_sequence_entity_ids else [],
+            "current_step_sequence_is_prime": list(self.current_step_sequence_is_prime) if self.current_step_sequence_is_prime else [],
+            "current_step_sequence_prefixes": [list(x) for x in self.current_step_sequence_prefixes] if self.current_step_sequence_prefixes else [],
+            "current_step_slots": self.current_step_slots.clone() if self.current_step_slots is not None else None,
+            "current_step_max_similarity": self.current_step_max_similarity,
+            "dynamic_anchors": list(self.dynamic_anchors) if self.dynamic_anchors else [],
+            "generated_token_slots": list(self.generated_token_slots) if self.generated_token_slots else [],
+            "recent_generated_tokens": list(self.recent_generated_tokens) if self.recent_generated_tokens else [],
+            "recent_decode_keys": list(self.recent_decode_keys) if self.recent_decode_keys else [],
+            "current_step_count": self.current_step_count,
+        }
+
+    def rollback_to(self, target_len: int, kept_slots: set = None) -> None:
+        # 1. Filter slot-related lists if kept_slots is provided
+        if kept_slots is not None:
+            self.ordered_slot_ids = [slot for slot in self.ordered_slot_ids if slot in kept_slots]
+            self.sink_blocks = [slot for slot in self.sink_blocks if slot in kept_slots]
+            self.dynamic_anchors = [slot for slot in self.dynamic_anchors if slot in kept_slots]
+            self.generated_token_slots = [slot for slot in self.generated_token_slots if slot in kept_slots]
+
+        # 2. Restore decode state from step history
+        history = getattr(self, "_step_history", {})
+        if target_len in history:
+            state = history[target_len]
+            self.vsl_active_candidates = [list(x) for x in state["vsl_active_candidates"]]
+            self.vsl_consecutive_helpers = state["vsl_consecutive_helpers"]
+            self.current_entity_id = state["current_entity_id"]
+            self.current_step_factual_tokens = set(state["current_step_factual_tokens"])
+            self.current_step_factual_sequences = [list(x) for x in state["current_step_factual_sequences"]]
+            self.current_step_sequence_entity_ids = list(state["current_step_sequence_entity_ids"])
+            self.current_step_sequence_is_prime = list(state["current_step_sequence_is_prime"])
+            self.current_step_sequence_prefixes = [list(x) for x in state["current_step_sequence_prefixes"]]
+            self.current_step_slots = state["current_step_slots"].clone() if state["current_step_slots"] is not None else None
+            self.current_step_max_similarity = state["current_step_max_similarity"]
+            self.dynamic_anchors = [slot for slot in state["dynamic_anchors"] if kept_slots is None or slot in kept_slots]
+            self.generated_token_slots = [slot for slot in state["generated_token_slots"] if kept_slots is None or slot in kept_slots]
+            self.recent_generated_tokens = list(state["recent_generated_tokens"])
+            self.recent_decode_keys = list(state["recent_decode_keys"])
+            self.current_step_count = state["current_step_count"]
+        else:
+            # Fallback: reset all decode-time state variables if target_len is not in history (e.g. before decode started)
+            self.vsl_active_candidates = []
+            self.vsl_consecutive_helpers = 0
+            self.current_entity_id = -1
+            self.current_step_factual_tokens = set()
+            self.current_step_factual_sequences = []
+            self.current_step_sequence_entity_ids = []
+            self.current_step_sequence_is_prime = []
+            self.current_step_sequence_prefixes = []
+            self.current_step_slots = None
+            self.current_step_max_similarity = 0.0
+            self.dynamic_anchors = []
+            self.generated_token_slots = []
+            self.recent_generated_tokens = []
+            self.recent_decode_keys = []
+            self.current_step_count = 0
+
+        # Clean up history entries greater than target_len
+        if history:
+            stale_keys = [k for k in list(history.keys()) if k > target_len]
+            for k in stale_keys:
+                history.pop(k, None)
+

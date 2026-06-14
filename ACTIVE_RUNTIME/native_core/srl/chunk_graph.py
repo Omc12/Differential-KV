@@ -153,7 +153,13 @@ def build_chunk_graph(
         chunk_groups = {}
         for b in blocks:
             if getattr(b, "pool_idx", None) is not None:
-                c_idx = b.anchor_idx // chunk_size
+                anchor = b.anchor_idx
+                if cached_len > 0 and anchor >= cached_len:
+                    # Isolate decode blocks: offset group index so it is strictly greater than any prefill group index
+                    prefill_max_groups = (cached_len - 1) // chunk_size + 1
+                    c_idx = prefill_max_groups + ((anchor - cached_len) // chunk_size)
+                else:
+                    c_idx = anchor // chunk_size
                 chunk_groups.setdefault(c_idx, []).append(b.pool_idx)
                 
         # Find maximum children count for sizing

@@ -1229,17 +1229,19 @@ int main(int argc, char ** argv) {
                     session_cached_token_ids.resize(mismatch_idx);
                 }
                 
-                // Clear SRL state to allow reconstruction for the new branch
-                srl_state.ordered_slot_ids.clear();
-                srl_state.sink_blocks.clear();
+                // Clear/rollback SRL state to allow reconstruction for the new branch
+                std::unordered_set<int32_t> kept_slots;
+                const auto& blocks_layer0 = runtime_manager.get_ingest_manager().get_blocks(0);
+                for (const auto& block : blocks_layer0) {
+                    if (block->pool_idx != -1) {
+                        kept_slots.insert(block->pool_idx);
+                    }
+                }
+                srl_state.rollback_to(mismatch_idx, &kept_slots);
+                srl_state.factual_store.clear();
                 srl_state.inverted_index.clear();
                 srl_state.chunk_graph = diffkv::ChunkGraph();
                 srl_state.semantic_index = diffkv::SemanticIndex();
-                srl_state.recent_generated_tokens.clear();
-                srl_state.current_query_tokens.clear();
-                srl_state.current_step_slots.clear();
-                srl_state.current_step_factual_tokens.clear();
-                srl_state.current_step_count = 0;
                 srl_state.recent_miss_rate = 0.0f;
                 srl_state.k_multiplier = 1.0f;
                 srl_state.call_count = 0;
@@ -2580,7 +2582,7 @@ int main(int argc, char ** argv) {
 
             // Factual Early Stopping (Option 2 Extension)
             bool stop_generation = false;
-            if (srl_state.current_step_max_similarity >= 0.4f) {
+            if (max_generate < 64 && srl_state.current_step_max_similarity >= 0.4f) {
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
                     if (seq.size() >= 5 && next_token == seq.back() && generated_tokens.size() >= seq.size() - 1) {
                         bool match = true;
@@ -2828,6 +2830,7 @@ int main(int argc, char ** argv) {
             // ────────────────────────────────────────────────────────────────
 
             srl_state.update_query_segment(next_token);
+            srl_state.save_step_state(L + generated_tokens.size());
             t_step_end = std::chrono::high_resolution_clock::now();
 
             if (time_decode) {

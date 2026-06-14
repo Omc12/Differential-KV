@@ -20,6 +20,24 @@
 
 namespace diffkv {
 
+struct SessionSRLStateHistoryEntry {
+    std::vector<std::vector<int32_t>> vsl_active_candidates;
+    int32_t vsl_consecutive_helpers = 0;
+    int32_t current_entity_id = -1;
+    std::unordered_set<int32_t> current_step_factual_tokens;
+    std::vector<std::vector<int32_t>> current_step_factual_sequences;
+    std::vector<int32_t> current_step_sequence_entity_ids;
+    std::vector<bool> current_step_sequence_is_prime;
+    std::vector<std::vector<int32_t>> current_step_sequence_prefixes;
+    std::vector<int32_t> current_step_slots;
+    float current_step_max_similarity = 0.0f;
+    std::vector<int32_t> dynamic_anchors;
+    std::vector<int32_t> generated_token_slots;
+    std::vector<int> recent_generated_tokens;
+    std::vector<std::vector<float>> recent_decode_keys;
+    int current_step_count = 0;
+};
+
 // ---------------------------------------------------------------------------
 // SessionSRLState
 //
@@ -525,6 +543,110 @@ struct SessionSRLState {
     void add_block(const float* desc, int32_t slot_id) {
         ordered_slot_ids.push_back(slot_id);
         add_block_to_index(semantic_index, desc, slot_id);
+    }
+
+    // --- Decode History & Rollback support ---
+    std::unordered_map<int, SessionSRLStateHistoryEntry> step_history;
+
+    void save_step_state(int seq_len) {
+        SessionSRLStateHistoryEntry entry;
+        entry.vsl_active_candidates = vsl_active_candidates;
+        entry.vsl_consecutive_helpers = vsl_consecutive_helpers;
+        entry.current_entity_id = current_entity_id;
+        entry.current_step_factual_tokens = current_step_factual_tokens;
+        entry.current_step_factual_sequences = current_step_factual_sequences;
+        entry.current_step_sequence_entity_ids = current_step_sequence_entity_ids;
+        entry.current_step_sequence_is_prime = current_step_sequence_is_prime;
+        entry.current_step_sequence_prefixes = current_step_sequence_prefixes;
+        entry.current_step_slots = current_step_slots;
+        entry.current_step_max_similarity = current_step_max_similarity;
+        entry.dynamic_anchors = dynamic_anchors;
+        entry.generated_token_slots = generated_token_slots;
+        entry.recent_generated_tokens = recent_generated_tokens;
+        entry.recent_decode_keys = recent_decode_keys;
+        entry.current_step_count = current_step_count;
+        
+        step_history[seq_len] = std::move(entry);
+    }
+
+    void rollback_to(int target_len, const std::unordered_set<int32_t>* kept_slots = nullptr) {
+        // 1. Filter slot-related lists if kept_slots is provided
+        if (kept_slots != nullptr) {
+            auto filter_func = [kept_slots](std::vector<int32_t>& vec) {
+                std::vector<int32_t> filtered;
+                for (int32_t slot : vec) {
+                    if (kept_slots->count(slot)) {
+                        filtered.push_back(slot);
+                    }
+                }
+                vec = std::move(filtered);
+            };
+            filter_func(ordered_slot_ids);
+            filter_func(sink_blocks);
+            filter_func(dynamic_anchors);
+            filter_func(generated_token_slots);
+        }
+
+        // 2. Restore decode state from step history
+        auto it = step_history.find(target_len);
+        if (it != step_history.end()) {
+            const auto& entry = it->second;
+            vsl_active_candidates = entry.vsl_active_candidates;
+            vsl_consecutive_helpers = entry.vsl_consecutive_helpers;
+            current_entity_id = entry.current_entity_id;
+            current_step_factual_tokens = entry.current_step_factual_tokens;
+            current_step_factual_sequences = entry.current_step_factual_sequences;
+            current_step_sequence_entity_ids = entry.current_step_sequence_entity_ids;
+            current_step_sequence_is_prime = entry.current_step_sequence_is_prime;
+            current_step_sequence_prefixes = entry.current_step_sequence_prefixes;
+            current_step_slots = entry.current_step_slots;
+            current_step_max_similarity = entry.current_step_max_similarity;
+            
+            dynamic_anchors.clear();
+            for (int32_t slot : entry.dynamic_anchors) {
+                if (kept_slots == nullptr || kept_slots->count(slot)) {
+                    dynamic_anchors.push_back(slot);
+                }
+            }
+            
+            generated_token_slots.clear();
+            for (int32_t slot : entry.generated_token_slots) {
+                if (kept_slots == nullptr || kept_slots->count(slot)) {
+                    generated_token_slots.push_back(slot);
+                }
+            }
+            
+            recent_generated_tokens = entry.recent_generated_tokens;
+            recent_decode_keys = entry.recent_decode_keys;
+            current_step_count = entry.current_step_count;
+        } else {
+            vsl_active_candidates.clear();
+            vsl_consecutive_helpers = 0;
+            current_entity_id = -1;
+            current_step_factual_tokens.clear();
+            current_step_factual_sequences.clear();
+            current_step_sequence_entity_ids.clear();
+            current_step_sequence_is_prime.clear();
+            current_step_sequence_prefixes.clear();
+            current_step_slots.clear();
+            current_step_max_similarity = 0.0f;
+            dynamic_anchors.clear();
+            generated_token_slots.clear();
+            recent_generated_tokens.clear();
+            recent_decode_keys.clear();
+            current_step_count = 0;
+        }
+
+        // Clean up history entries greater than target_len
+        std::vector<int> to_remove;
+        for (const auto& pair : step_history) {
+            if (pair.first > target_len) {
+                to_remove.push_back(pair.first);
+            }
+        }
+        for (int k : to_remove) {
+            step_history.erase(k);
+        }
     }
 };
 
