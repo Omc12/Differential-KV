@@ -29,6 +29,10 @@ void FactualExactStore::build(
     if (L == 0 || k_activations.empty()) return;
     int num_layers = k_activations.size();
     int F_test = kv_heads * head_dim;
+    int max_l = k_activations[0].size() / F_test;
+    if (L > max_l) {
+        L = max_l;
+    }
     this->num_layers = num_layers;
     this->F_test = F_test;
 

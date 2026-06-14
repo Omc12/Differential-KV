@@ -762,35 +762,51 @@ class StreamingSparseIngestManager:
 
             # Rule 1: Long digit codes (IDs, years+, zip codes, DOIs) — always exempt
             if _RE_LONG_DIGITS.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 1 skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 2: Scientific notation — always exempt (1.23e+4, 2.998e8)
             if _RE_SCI_NOTATION.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 2 skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3: Unicode math symbols — always exempt (π, ∑, ∞, ≤, ±, etc.)
             if _RE_UNICODE_MATH.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3 skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3b: LaTeX math formula block — always exempt
             if _RE_LATEX_MATH.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3b skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3c: ASCII equation statement — always exempt
             if _RE_ASCII_EQUATION.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3c skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3d: Verbatim definitions — always exempt
             if _RE_DEFINITIONS.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3d skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3e: Formal claims / theorems — always exempt
             if _RE_CLAIMS.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3e skip block anchor={anchor_idx}: '{block_text}'")
                 return True
 
             # Rule 3f: Acronym density — always exempt
             acronyms = set(_RE_ACRONYMS.findall(block_text))
             if len(acronyms) >= 3:
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 3f skip block anchor={anchor_idx}: '{block_text}', acronyms={acronyms}")
                 return True
 
             # Rule 4: Short digits (≥2 digits) with query-word overlap
@@ -819,6 +835,8 @@ class StreamingSparseIngestManager:
                         if w not in _STOP_WORDS_COMPRESS
                     }
                     if block_words & query_words:
+                        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                            print(f"[DiffKV DEBUG] Rule 4 skip block anchor={anchor_idx}: overlap={block_words & query_words}")
                         return True
 
             # Rule 5: Rare document words (exact keywords)
@@ -839,9 +857,13 @@ class StreamingSparseIngestManager:
             }
             for w in block_words:
                 if doc_words.get(w, 0) <= 2:
+                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                        print(f"[DiffKV DEBUG] Rule 5 skip block anchor={anchor_idx}: word '{w}' occurs {doc_words.get(w, 0)} times")
                     return True
 
-        except Exception:
+        except Exception as e:
+            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                print(f"[DiffKV DEBUG] skip check error: {e}")
             pass
         return False
 

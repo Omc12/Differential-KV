@@ -1064,7 +1064,13 @@ class ContinuousBatchEngine:
                             _draft_mgr.finalize_srl_index(_sid + "_draft", cached_len=_cached_len)
                     try:
                         _t_finalize_start = time.perf_counter()
-                        await _loop.run_in_executor(None, _do_finalize)
+                        is_mps = False
+                        if hasattr(_mgr, "device"):
+                            is_mps = (_mgr.device == "mps" or (isinstance(_mgr.device, torch.device) and _mgr.device.type == "mps") or "mps" in str(_mgr.device))
+                        if is_mps:
+                            _do_finalize()
+                        else:
+                            await _loop.run_in_executor(None, _do_finalize)
                         _t_finalize_end = time.perf_counter()
                         print(f"[DiffKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
                               f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms", file=sys.stderr)

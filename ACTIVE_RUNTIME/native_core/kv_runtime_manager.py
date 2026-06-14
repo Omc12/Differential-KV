@@ -630,7 +630,7 @@ class KVRuntimeManager:
                 # exact attention, compressing everything older. This is sufficient for
                 # typical response lengths and yields clear VRAM savings at 4K+ contexts.
                 # Increase to 1024 via recency_window=1024 if generation quality drifts.
-                recency_window=512,
+                recency_window=int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")),
             )
             self._streaming_mgr.manager = self
         else:
