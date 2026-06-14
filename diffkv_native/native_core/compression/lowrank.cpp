@@ -437,6 +437,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     if (params.out_seq_len) {
         *params.out_seq_len = S_deltas;
     }
+    if (params.out_anchor_position) {
+        *params.out_anchor_position = params.anchor_idx + landmark_idx;
+    }
 
     return true;
 }

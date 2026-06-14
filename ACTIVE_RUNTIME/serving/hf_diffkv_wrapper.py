@@ -1031,6 +1031,12 @@ class PyTorchDiffKVHFWrapper:
             next_id_val = next_id.item()
 
             # Strict Factual Alignment (SFA) State Update and Loop Check
+            if srl_state is not None:
+                srl_state.recent_generated_tokens.append(next_id_val)
+                srl_state.generated_token_slots.append(srl_state.ordered_slot_ids[-1] if srl_state.ordered_slot_ids else 0)
+                srl_state.update_query_segment(next_id_val)
+                srl_state.update_dynamic_anchors(self.stop_token_ids)
+
             if sfa_active and srl_state is not None:
                 from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
                 helper_ids = get_helper_token_ids(self.tokenizer)
@@ -1154,6 +1160,18 @@ class PyTorchDiffKVHFWrapper:
 
     def switch_session(self, session_id: str):
         self.active_session = session_id
+
+    def rollback_session(self, session_id: str, target_len: int, clear_srl: bool = False):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.rollback_session(session_id, target_len, clear_srl=clear_srl)
+
+    def clone_session(self, src_sid: str, dst_sid: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clone_session(src_sid, dst_sid)
+
+    def clear_session(self, session_id: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clear_session(session_id)
 
     def _custom_sample(self, logits):
         probs = torch.softmax(logits, dim=-1)

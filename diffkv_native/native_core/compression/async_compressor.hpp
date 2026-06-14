@@ -20,6 +20,7 @@ struct CompressJob {
     int feat_dim;    // F
     int rank;        // R
     int head_dim;    // D
+    int anchor_idx;  // Sequence position of block start
     
     // Host-accessible unified pointers (float32 inputs)
     const float* raw_k_ptr;
@@ -38,6 +39,7 @@ struct CompressJob {
     ggml_fp16_t* out_anchor_k;  // [kv_heads * head_dim] destination in pool anchors_K
     ggml_fp16_t* out_anchor_v;  // [kv_heads * head_dim] destination in pool anchors_V
     int32_t* out_seq_len;
+    int32_t* out_anchor_position; // destination in pool anchor_positions
     DiffKVBlockStateTable* state_table = nullptr;
 };
 

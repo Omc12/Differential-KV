@@ -498,6 +498,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.feat_dim = F_test;
     job.rank = rank;
     job.head_dim = head_dim;
+    job.anchor_idx = block->anchor_idx;
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
@@ -512,6 +513,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.out_anchor_k = engines[layer_idx]->get_host_anchors_K() + slot_id * F_test;
     job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;
     job.out_seq_len = engines[layer_idx]->get_host_seq_lens() + slot_id;
+    job.out_anchor_position = engines[layer_idx]->get_host_anchor_positions() + slot_id;
     job.state_table = &engines[layer_idx]->get_state_table();
     
     bool async_svd = true;

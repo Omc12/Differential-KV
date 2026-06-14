@@ -178,21 +178,23 @@ class SessionSRLState:
     def update_query_segment(self, token_id: int) -> None:
         # Look at the last 12 generated tokens
         recent_window = self.recent_generated_tokens[-12:]
-        seg1_score = 0
-        seg2_score = 0
+        seg1_score = 0.0
+        seg2_score = 0.0
         
         for tid in recent_window:
             if self.inverted_index is not None and tid in self.inverted_index.occurrences:
-                for slot, _, _ in self.inverted_index.occurrences[tid]:
-                    seg = self.segment_ids.get(slot, 0)
-                    if seg == 1:
-                        seg1_score += 1
-                    elif seg == 2:
-                        seg2_score += 1
+                occs = self.inverted_index.occurrences[tid]
+                total_cnt = len(occs)
+                if total_cnt > 0:
+                    seg1_cnt = sum(1 for slot, _, _ in occs if self.segment_ids.get(slot, 0) == 1)
+                    seg2_cnt = sum(1 for slot, _, _ in occs if self.segment_ids.get(slot, 0) == 2)
+                    idf_val = self.inverted_index.idf.get(tid, 1.0)
+                    seg1_score += (seg1_cnt / total_cnt) * idf_val
+                    seg2_score += (seg2_cnt / total_cnt) * idf_val
                         
-        if seg1_score > seg2_score + 2:
+        if seg1_score > seg2_score + 1.0:
             self.current_query_segment_id = 1
-        elif seg2_score > seg1_score + 2:
+        elif seg2_score > seg1_score + 1.0:
             self.current_query_segment_id = 2
         else:
             self.current_query_segment_id = 0
@@ -272,46 +274,48 @@ class SessionSRLState:
                 return 0.0
             return len(s1 & s2) / len(s1 | s2)
             
-        concept_tok_1 = -1
-        concept_tok_2 = -1
+        concept_tok_1 = getattr(self, "concept_tok_1", -1)
+        concept_tok_2 = getattr(self, "concept_tok_2", -1)
         
-        first_idx = -1
-        for idx, tid in enumerate(candidate_tids):
-            s = get_slots(tid)
-            if len(s) >= 1:
-                concept_tok_1 = tid
-                first_idx = idx
-                break
-                
-        if first_idx != -1:
-            s1 = get_slots(concept_tok_1)
-            for j in range(first_idx + 1, len(candidate_tids)):
-                tid2 = candidate_tids[j]
-                s2 = get_slots(tid2)
-                if len(s2) >= 1:
-                    j_val = jaccard(s1, s2)
-                    if j_val <= 0.2:
-                        concept_tok_2 = tid2
-                        break
-            if concept_tok_2 == -1:
-                # Fallback to minimum Jaccard overlap
-                min_j = 1.0
-                best_tid2 = -1
+        if concept_tok_1 == -1:
+            first_idx = -1
+            for idx, tid in enumerate(candidate_tids):
+                s = get_slots(tid)
+                if len(s) >= 1:
+                    concept_tok_1 = tid
+                    first_idx = idx
+                    break
+                    
+            if first_idx != -1:
+                s1 = get_slots(concept_tok_1)
                 for j in range(first_idx + 1, len(candidate_tids)):
                     tid2 = candidate_tids[j]
                     s2 = get_slots(tid2)
                     if len(s2) >= 1:
                         j_val = jaccard(s1, s2)
-                        if j_val < min_j:
-                            min_j = j_val
-                            best_tid2 = tid2
-                concept_tok_2 = best_tid2
+                        if j_val <= 0.2:
+                            concept_tok_2 = tid2
+                            break
+                if concept_tok_2 == -1:
+                    # Fallback to minimum Jaccard overlap
+                    min_j = 1.0
+                    best_tid2 = -1
+                    for j in range(first_idx + 1, len(candidate_tids)):
+                        tid2 = candidate_tids[j]
+                        s2 = get_slots(tid2)
+                        if len(s2) >= 1:
+                            j_val = jaccard(s1, s2)
+                            if j_val < min_j:
+                                min_j = j_val
+                                best_tid2 = tid2
+                    concept_tok_2 = best_tid2
                 
         self.concept_tok_1 = concept_tok_1
         self.concept_tok_2 = concept_tok_2
         
         # Map segments
-        self.segment_ids = {slot: 0 for slot in self.ordered_slot_ids}
+        existing_segs = getattr(self, "segment_ids", {})
+        self.segment_ids = {slot: existing_segs.get(slot, 0) for slot in self.ordered_slot_ids}
         slots_1 = set()
         slots_2 = set()
         
@@ -325,6 +329,11 @@ class SessionSRLState:
         expanded_2 = self.expand_neighborhood(slots_2)
         
         for slot in self.ordered_slot_ids:
+            if slot in existing_segs and existing_segs[slot] != 0:
+                continue
+            if getattr(self, "cached_len", 0) > 0:
+                self.segment_ids[slot] = 0
+                continue
             in_1 = slot in expanded_1
             in_2 = slot in expanded_2
             if in_1 and in_2:

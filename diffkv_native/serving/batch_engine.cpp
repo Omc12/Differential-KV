@@ -854,17 +854,18 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
                     float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
                     
+                    int landmark_idx = engine->get_host_anchor_positions()[slot_id] - block->anchor_idx;
                     for (int t = 0; t < block_len; ++t) {
                         int global_pos = block->anchor_idx + t;
                         if (global_pos >= cached_len) break;
                         
-                        if (t == 0) {
+                        if (t == landmark_idx) {
                             for (int f = 0; f < F_test; ++f) {
                                 k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
                                 v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
                             }
                         } else {
-                            int s = t - 1;
+                            int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
                             for (int f = 0; f < F_test; ++f) {
                                 float sum_k = 0.0f;
                                 float sum_v = 0.0f;
@@ -1354,6 +1355,57 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         
         std::vector<float> output_logits(n_vocab);
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+
+        std::vector<float> concat_k_host(n_layers * F_test);
+        std::vector<float> concat_v_host(n_layers * F_test);
+        ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
+        ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
+
+        std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
+        std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
+        for (int l = 0; l < n_layers; ++l) {
+            std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
+            std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
+        }
+        
+        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+
+        {
+            int kv_heads = model_->get_config().n_head_kv;
+            std::vector<float> k_avg(head_dim, 0.0f);
+            for (int h = 0; h < kv_heads; ++h) {
+                for (int d = 0; d < head_dim; ++d) {
+                    k_avg[d] += decode_k[0][h * head_dim + d];
+                }
+            }
+            for (int d = 0; d < head_dim; ++d) {
+                k_avg[d] /= kv_heads;
+            }
+            session->srl_state.recent_decode_keys.push_back(k_avg);
+            if (session->srl_state.recent_decode_keys.size() > 512) {
+                session->srl_state.recent_decode_keys.erase(session->srl_state.recent_decode_keys.begin());
+            }
+
+            int32_t current_slot_id = 0;
+            if (!session->srl_state.ordered_slot_ids.empty()) {
+                current_slot_id = session->srl_state.ordered_slot_ids.back();
+            }
+            session->srl_state.generated_token_slots.push_back(current_slot_id);
+            session->srl_state.update_dynamic_anchors(stop_token_ids_);
+        }
+
+        // Manual append newly ingested token to host-side dense resident buffers
+        for (int l = 0; l < n_layers; ++l) {
+            int offset = total_dense_tokens[l] * F_test;
+            if (offset + F_test <= (int)session->active_k_dense[l].size()) {
+                std::memcpy(session->active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
+                std::memcpy(session->active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+                total_dense_tokens[l]++;
+            }
+        }
+        if (total_positions < (int)session->active_positions_dense.size()) {
+            session->active_positions_dense[total_positions++] = current_pos;
+        }
         
         // Apply Factual Logit Bias
         const auto& srl_state = session->srl_state;
@@ -1597,61 +1649,14 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         std::string piece = model_->token_to_piece(next_token);
         req->push_chunk(piece);
         
-        std::vector<float> concat_k_host(n_layers * F_test);
-        std::vector<float> concat_v_host(n_layers * F_test);
-        ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
-        ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
-
-        std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
-        std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
-        for (int l = 0; l < n_layers; ++l) {
-            std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
-            std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
-        }
-        
-        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens);
-
         // Update SRL state and dynamic anchors
         session->srl_state.update_generated_tokens(next_token);
         session->srl_state.update_query_segment(next_token);
 
-        {
-            int kv_heads = model_->get_config().n_head_kv;
-            std::vector<float> k_avg(head_dim, 0.0f);
-            for (int h = 0; h < kv_heads; ++h) {
-                for (int d = 0; d < head_dim; ++d) {
-                    k_avg[d] += decode_k[0][h * head_dim + d];
-                }
-            }
-            for (int d = 0; d < head_dim; ++d) {
-                k_avg[d] /= kv_heads;
-            }
-            session->srl_state.recent_decode_keys.push_back(k_avg);
-            if (session->srl_state.recent_decode_keys.size() > 512) {
-                session->srl_state.recent_decode_keys.erase(session->srl_state.recent_decode_keys.begin());
-            }
+        last_token = next_token;
+        req->generated_tokens.push_back(next_token);
+        all_tokens.push_back(next_token);
 
-            int32_t current_slot_id = 0;
-            if (!session->srl_state.ordered_slot_ids.empty()) {
-                current_slot_id = session->srl_state.ordered_slot_ids.back();
-            }
-            session->srl_state.generated_token_slots.push_back(current_slot_id);
-            session->srl_state.update_dynamic_anchors(stop_token_ids_);
-        }
-
-        // Manual append newly ingested token to host-side dense resident buffers
-        for (int l = 0; l < n_layers; ++l) {
-            int offset = total_dense_tokens[l] * F_test;
-            if (offset + F_test <= (int)session->active_k_dense[l].size()) {
-                std::memcpy(session->active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
-                std::memcpy(session->active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
-                total_dense_tokens[l]++;
-            }
-        }
-        if (total_positions < (int)session->active_positions_dense.size()) {
-            session->active_positions_dense[total_positions++] = current_pos;
-        }
-        
         int old_active_slot = session->active_slot;
         session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
         if (session->active_slot < 0) {
@@ -1682,7 +1687,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     session->srl_state,
                     desc.data(),
                     block->pool_idx, // Physical slot ID
-                    session->token_ids.data() + block->anchor_idx, // Correct token IDs
+                    all_tokens.data() + block->anchor_idx, // Correct token IDs
                     block->token_count(),
                     block->anchor_idx,
                     stop_token_ids_
@@ -1727,10 +1732,6 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             // Sync dense buffers only when block finishes
             sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
         }
-        
-        last_token = next_token;
-        req->generated_tokens.push_back(next_token);
-        all_tokens.push_back(next_token);
 
         // ── Repetition-loop detection (Fix 2) ────────────────────────────────
         // Check for n-gram loops every 10 tokens after the minimum warm-up period.

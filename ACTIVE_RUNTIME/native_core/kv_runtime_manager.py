@@ -705,6 +705,19 @@ class KVRuntimeManager:
         if session_id in self._session_token_ids:
             self._session_token_ids[session_id] = self._session_token_ids[session_id][:target_len]
 
+        # Truncate captured prefill/decode K/V states to target_len
+        if hasattr(self, "_prefill_kv_capture") and session_id in self._prefill_kv_capture:
+            if target_len <= 0:
+                self._prefill_kv_capture.pop(session_id, None)
+            else:
+                session_cap = self._prefill_kv_capture[session_id]
+                for layer_idx in list(session_cap.keys()):
+                    K_cap, V_cap = session_cap[layer_idx]
+                    if K_cap.shape[2] > target_len:
+                        session_cap[layer_idx][0] = K_cap[:, :, :target_len, :]
+                    if V_cap.shape[2] > target_len:
+                        session_cap[layer_idx][1] = V_cap[:, :, :target_len, :]
+
         # Invalidate GPU block indices cache and sliced RoPE caches for this session.
         # Note: concatenated_K_rot and V_V_perm were removed in a prior refactor —
         # those keys no longer exist in decode_workspace.
@@ -904,6 +917,10 @@ class KVRuntimeManager:
             )
             srl_state.ordered_anchor_idxs = [b.anchor_idx for b in blocks_layer0 if getattr(b, "pool_idx", None) is not None and getattr(b, "state", "") == "COMPRESSED"]
             srl_state.cached_len = cached_len
+            if existing_srl is not None:
+                srl_state.concept_tok_1 = getattr(existing_srl, "concept_tok_1", -1)
+                srl_state.concept_tok_2 = getattr(existing_srl, "concept_tok_2", -1)
+                srl_state.segment_ids = dict(getattr(existing_srl, "segment_ids", {}))
             srl_state.nothing_found = nothing_found
             srl_state.current_query_tokens = current_query_tokens
             if hasattr(self, "_last_prefill_q") and session_id in self._last_prefill_q:
@@ -1634,6 +1651,15 @@ class KVRuntimeManager:
 
         if k.shape[2] == 1:
             self._streaming_mgr.append_decode_token(session_id, layer_idx, k, v)
+            # CRITICAL SRL ALIGNMENT FIX: Capture decode token K/V states
+            if not hasattr(self, "_prefill_kv_capture"):
+                self._prefill_kv_capture = {}
+            session_cap = self._prefill_kv_capture.setdefault(session_id, {})
+            if layer_idx not in session_cap:
+                session_cap[layer_idx] = [k.clone().cpu(), v.clone().cpu()]
+            else:
+                session_cap[layer_idx][0] = torch.cat([session_cap[layer_idx][0], k.cpu()], dim=2)
+                session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], v.cpu()], dim=2)
         else:
             self._streaming_mgr.ingest_chunk(session_id, layer_idx, k, v)
 

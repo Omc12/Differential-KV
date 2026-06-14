@@ -755,7 +755,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             except Exception:
                                                 pass  # Early binding is best-effort
 
-                                        q_for_factual = 0.65 * raw_q + 0.35 * srl_state.factual_anchor_q.to(raw_q.device)
+                                        q_for_factual = 0.20 * raw_q + 0.80 * srl_state.factual_anchor_q.to(raw_q.device)
                                     else:
                                         q_for_factual = raw_q
 

@@ -366,6 +366,8 @@ class MLXKVBlockManager:
             self.sessions[session_id] = self._create_empty_session()
 
     def clear_session(self, session_id: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clear_session(session_id)
         self.sessions.pop(session_id, None)
         if hasattr(self, "patched_model") and self.patched_model is not None:
             cache_key = (session_id,)
@@ -478,6 +480,8 @@ class MLXKVBlockManager:
         return [object() for _ in range(num_logical_blocks)]
 
     def rollback_session(self, session_id: str, target_len: int, clear_srl: bool = False):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.rollback_session(session_id, target_len, clear_srl=clear_srl)
         session = self.sessions.get(session_id)
         if session is None:
             return
@@ -532,6 +536,8 @@ class MLXKVBlockManager:
                         layer_cache.trim(target_len)
 
     def clone_session(self, src_sid: str, dst_sid: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clone_session(src_sid, dst_sid)
         if src_sid not in self.sessions:
             return
         src = self.sessions[src_sid]
@@ -1389,3 +1395,20 @@ class MLXDiffKVWrapper:
         self._session_token_ids[session_id] = generated
         decoded = self.tokenizer.decode(generated, skip_special_tokens=True)
         return _normalize_references(decoded)
+
+    def rollback_session(self, session_id: str, target_len: int, clear_srl: bool = False):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.rollback_session(session_id, target_len, clear_srl=clear_srl)
+        if session_id in self._session_token_ids:
+            self._session_token_ids[session_id] = self._session_token_ids[session_id][:target_len]
+
+    def clone_session(self, src_sid: str, dst_sid: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clone_session(src_sid, dst_sid)
+        if src_sid in self._session_token_ids:
+            self._session_token_ids[dst_sid] = list(self._session_token_ids[src_sid])
+
+    def clear_session(self, session_id: str):
+        if hasattr(self, "manager") and self.manager is not None:
+            self.manager.clear_session(session_id)
+        self._session_token_ids.pop(session_id, None)

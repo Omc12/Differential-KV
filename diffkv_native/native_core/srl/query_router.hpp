@@ -596,10 +596,31 @@ inline std::vector<int32_t> route_query(
             }
         }
 
-        std::vector<float> A0(N, 0.0f);
+        std::vector<float> A0_1(N, 0.0f);
+        std::vector<float> A0_2(N, 0.0f);
+        std::vector<float> A0_0(N, 0.0f);
+
+        int q_seg = srl_state.current_query_segment_id;
+
         for (int i = 0; i < N; ++i) {
-            if (seed_set.count(sem_idx.slot_ids[i])) {
-                A0[i] = sem_scores_cpu[i];
+            int32_t slot = sem_idx.slot_ids[i];
+            if (seed_set.count(slot)) {
+                int seg = 0;
+                auto it = srl_state.segment_ids.find(slot);
+                if (it != srl_state.segment_ids.end()) {
+                    seg = it->second;
+                }
+                if (seg == 1) {
+                    if (q_seg != 2) { // ignore Segment 1 seeds if q_seg is 2
+                        A0_1[i] = sem_scores_cpu[i];
+                    }
+                } else if (seg == 2) {
+                    if (q_seg != 1) { // ignore Segment 2 seeds if q_seg is 1
+                        A0_2[i] = sem_scores_cpu[i];
+                    }
+                } else {
+                    A0_0[i] = sem_scores_cpu[i];
+                }
             }
         }
 
@@ -608,10 +629,88 @@ inline std::vector<int32_t> route_query(
         for (int i = 0; i < N; ++i)
             retention[i] = srl_state.graph_hop_decay * sem_scores_cpu[i];
 
-        // Hop 1: A1 = propagate(A0)
-        std::vector<float> A1 = graph_propagate(g, A0, retention, srl_state.graph_hop_decay);
-        // Hop 2: A2 = propagate(A1)
-        std::vector<float> A2 = graph_propagate(g, A1, retention, srl_state.graph_hop_decay);
+        // 1. Walk for Segment 1: forbid Segment 2
+        std::vector<float> A1_1 = graph_propagate(g, A0_1, retention, srl_state.graph_hop_decay);
+        for (int i = 0; i < N; ++i) {
+            int32_t slot = sem_idx.slot_ids[i];
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end() && it->second == 2) {
+                A1_1[i] = 0.0f;
+            }
+        }
+        std::vector<float> A2_1 = graph_propagate(g, A1_1, retention, srl_state.graph_hop_decay);
+        for (int i = 0; i < N; ++i) {
+            int32_t slot = sem_idx.slot_ids[i];
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end() && it->second == 2) {
+                A2_1[i] = 0.0f;
+            }
+        }
+
+        // 2. Walk for Segment 2: forbid Segment 1
+        std::vector<float> A1_2 = graph_propagate(g, A0_2, retention, srl_state.graph_hop_decay);
+        for (int i = 0; i < N; ++i) {
+            int32_t slot = sem_idx.slot_ids[i];
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end() && it->second == 1) {
+                A1_2[i] = 0.0f;
+            }
+        }
+        std::vector<float> A2_2 = graph_propagate(g, A1_2, retention, srl_state.graph_hop_decay);
+        for (int i = 0; i < N; ++i) {
+            int32_t slot = sem_idx.slot_ids[i];
+            auto it = srl_state.segment_ids.find(slot);
+            if (it != srl_state.segment_ids.end() && it->second == 1) {
+                A2_2[i] = 0.0f;
+            }
+        }
+
+        // 3. Walk for Segment 0: generic, forbid opponent segment dynamically
+        std::vector<float> A1_0 = graph_propagate(g, A0_0, retention, srl_state.graph_hop_decay);
+        if (q_seg == 1) {
+            for (int i = 0; i < N; ++i) {
+                int32_t slot = sem_idx.slot_ids[i];
+                auto it = srl_state.segment_ids.find(slot);
+                if (it != srl_state.segment_ids.end() && it->second == 2) {
+                    A1_0[i] = 0.0f;
+                }
+            }
+        } else if (q_seg == 2) {
+            for (int i = 0; i < N; ++i) {
+                int32_t slot = sem_idx.slot_ids[i];
+                auto it = srl_state.segment_ids.find(slot);
+                if (it != srl_state.segment_ids.end() && it->second == 1) {
+                    A1_0[i] = 0.0f;
+                }
+            }
+        }
+
+        std::vector<float> A2_0 = graph_propagate(g, A1_0, retention, srl_state.graph_hop_decay);
+        if (q_seg == 1) {
+            for (int i = 0; i < N; ++i) {
+                int32_t slot = sem_idx.slot_ids[i];
+                auto it = srl_state.segment_ids.find(slot);
+                if (it != srl_state.segment_ids.end() && it->second == 2) {
+                    A2_0[i] = 0.0f;
+                }
+            }
+        } else if (q_seg == 2) {
+            for (int i = 0; i < N; ++i) {
+                int32_t slot = sem_idx.slot_ids[i];
+                auto it = srl_state.segment_ids.find(slot);
+                if (it != srl_state.segment_ids.end() && it->second == 1) {
+                    A2_0[i] = 0.0f;
+                }
+            }
+        }
+
+        // Sum results
+        std::vector<float> A1(N);
+        std::vector<float> A2(N);
+        for (int i = 0; i < N; ++i) {
+            A1[i] = A1_1[i] + A1_2[i] + A1_0[i];
+            A2[i] = A2_1[i] + A2_2[i] + A2_0[i];
+        }
 
         // graph_scores = A1 + A2, exclude seed rows
         std::vector<std::pair<float, int32_t>> gscore_slots;

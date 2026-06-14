@@ -99,6 +99,7 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     params.feat_dim = job.feat_dim;
     params.rank = job.rank;
     params.head_dim = job.head_dim;
+    params.anchor_idx = job.anchor_idx;
     params.raw_k_ptr = job.raw_k_ptr;
     params.raw_v_ptr = job.raw_v_ptr;
     params.token_ids = job.token_ids;
@@ -111,6 +112,7 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     params.out_anchor_k = job.out_anchor_k;
     params.out_anchor_v = job.out_anchor_v;
     params.out_seq_len = job.out_seq_len;
+    params.out_anchor_position = job.out_anchor_position;
 
     bool ok = compress_lowrank_block(params);
 

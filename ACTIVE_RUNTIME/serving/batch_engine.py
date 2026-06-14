@@ -535,9 +535,9 @@ class ContinuousBatchEngine:
                     
                     if mismatch_idx > 32:
                         print(f"[DiffKV BatchEngine] Partially rolling back session {session_id} to token index {mismatch_idx} instead of fully clearing.")
-                        self.wrapper.manager.rollback_session(session_id, mismatch_idx, clear_srl=True)
+                        self.wrapper.rollback_session(session_id, mismatch_idx, clear_srl=True)
                         if self.draft_wrapper is not None:
-                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", mismatch_idx, clear_srl=True)
+                            self.draft_wrapper.rollback_session(session_id + "_draft", mismatch_idx, clear_srl=True)
                         req.cached_len = mismatch_idx
                         self.session_token_ids[session_id] = stored_ids[:mismatch_idx]
                     else:
@@ -580,9 +580,9 @@ class ContinuousBatchEngine:
                         self._free_session_kv(session_id + "_draft", is_draft=True)
                     
                     # Clone the matching session's KV cache (zero-copy metadata cloning)
-                    self.wrapper.manager.clone_session(best_sid, session_id)
+                    self.wrapper.clone_session(best_sid, session_id)
                     if self.draft_wrapper is not None:
-                        self.draft_wrapper.manager.clone_session(best_sid + "_draft", session_id + "_draft")
+                        self.draft_wrapper.clone_session(best_sid + "_draft", session_id + "_draft")
                     
                     # If the cloned session's KV cache is longer than the matched prefix length,
                     # roll it back to match length (e.g. if the matching session was stopped mid-generation).
@@ -590,9 +590,9 @@ class ContinuousBatchEngine:
                     if cloned_len > longest_match_len:
                         print(f"[DiffKV BatchEngine] Cloned session {session_id} has length {cloned_len} tokens, "
                               f"but matched prefix is {longest_match_len} tokens. Rolling back cloned cache to match length.")
-                        self.wrapper.manager.rollback_session(session_id, longest_match_len, clear_srl=True)
+                        self.wrapper.rollback_session(session_id, longest_match_len, clear_srl=True)
                         if self.draft_wrapper is not None:
-                            self.draft_wrapper.manager.rollback_session(session_id + "_draft", longest_match_len, clear_srl=True)
+                            self.draft_wrapper.rollback_session(session_id + "_draft", longest_match_len, clear_srl=True)
                     
                     # Update local token registry
                     self.session_token_ids[session_id] = self.session_token_ids[best_sid][:longest_match_len]
@@ -715,9 +715,10 @@ class ContinuousBatchEngine:
             if session_id in self.session_token_ids:
                 del self.session_token_ids[session_id]
             wrapper = self.draft_wrapper if is_draft else self.wrapper
-            kv_mgr = wrapper.manager
-            if hasattr(kv_mgr, 'clear_session'):
-                kv_mgr.clear_session(session_id)
+            if hasattr(wrapper, 'clear_session'):
+                wrapper.clear_session(session_id)
+            elif hasattr(wrapper, 'manager') and hasattr(wrapper.manager, 'clear_session'):
+                wrapper.manager.clear_session(session_id)
         except Exception as e:
             print(f"[DiffKV] WARNING: could not free KV for session {session_id}: {e}")
 

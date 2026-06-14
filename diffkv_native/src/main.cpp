@@ -1201,19 +1201,51 @@ int main(int argc, char ** argv) {
             prompt_tokens.resize(L);
         }
 
-        // Prefix verification guard: if cached_len >= L or if prefix tokens don't match, cache is invalid.
+        // Prefix verification guard: check mismatch index for token-level prefix verification.
         bool cache_valid = true;
         if (cached_len > 0) {
-            if (cached_len >= L) {
-                cache_valid = false;
-            } else if (!session_cached_token_ids.empty()) {
-                int compare_len = std::min(cached_len, (int)session_cached_token_ids.size());
-                for (int i = 0; i < compare_len; ++i) {
-                    if (prompt_tokens[i] != session_cached_token_ids[i]) {
-                        cache_valid = false;
-                        break;
-                    }
+            int mismatch_idx = 0;
+            if (!session_cached_token_ids.empty()) {
+                int max_compare = std::min((int)prompt_tokens.size(), (int)session_cached_token_ids.size());
+                while (mismatch_idx < max_compare && prompt_tokens[mismatch_idx] == session_cached_token_ids[mismatch_idx]) {
+                    mismatch_idx++;
                 }
+            } else {
+                mismatch_idx = 0;
+            }
+
+            if (mismatch_idx >= cached_len && cached_len < L) {
+                // Fully valid cache prefix, no rollback needed.
+            } else if (mismatch_idx > 32 && mismatch_idx < L) {
+                // Partial rollback is possible and beneficial!
+                if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+                    std::cerr << "[DiffKV Native] Prefix mismatch. Matching prefix length: " << mismatch_idx 
+                              << " (cached_len=" << cached_len << "). Performing partial rollback." << std::endl;
+                }
+                runtime_manager.get_ingest_manager().rollback(mismatch_idx, runtime_manager.get_engines());
+                cached_len = mismatch_idx;
+                session_cached_len = mismatch_idx;
+                if (mismatch_idx < (int)session_cached_token_ids.size()) {
+                    session_cached_token_ids.resize(mismatch_idx);
+                }
+                
+                // Clear SRL state to allow reconstruction for the new branch
+                srl_state.ordered_slot_ids.clear();
+                srl_state.sink_blocks.clear();
+                srl_state.inverted_index.clear();
+                srl_state.chunk_graph = diffkv::ChunkGraph();
+                srl_state.semantic_index = diffkv::SemanticIndex();
+                srl_state.recent_generated_tokens.clear();
+                srl_state.current_query_tokens.clear();
+                srl_state.current_step_slots.clear();
+                srl_state.current_step_factual_tokens.clear();
+                srl_state.current_step_count = 0;
+                srl_state.recent_miss_rate = 0.0f;
+                srl_state.k_multiplier = 1.0f;
+                srl_state.call_count = 0;
+            } else {
+                // Mismatch index too small, reset everything
+                cache_valid = false;
             }
         }
         if (!cache_valid) {
@@ -1324,14 +1356,8 @@ int main(int argc, char ** argv) {
                         float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
                         float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
 
-                        // 1. Copy anchor K/V
-                        int global_anchor_pos = block->anchor_idx;
-                        if (global_anchor_pos < cached_len) {
-                            for (int f = 0; f < F_test; ++f) {
-                                k_activations[l][global_anchor_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                v_activations[l][global_anchor_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
-                            }
-                        }
+                        // 1. Compute landmark index (landmark_idx)
+                        int landmark_idx = engine->get_host_anchor_positions()[slot_id] - block->anchor_idx;
 
                         // 2. Compute non-anchor tokens
                         int non_anchor_len = block_len - 1;
@@ -1397,24 +1423,49 @@ int main(int argc, char ** argv) {
                             }
 #endif
 
-                            // Add anchor K/V and multiply by block_scale, then store in activations
-                            for (int s = 0; s < non_anchor_len; ++s) {
-                                int global_pos = block->anchor_idx + 1 + s;
+                            // Add anchor K/V and multiply by block_scale, then store in activations.
+                            // Copy anchor to landmark position, and delta tokens to their original positions.
+                            for (int t = 0; t < block_len; ++t) {
+                                int global_pos = block->anchor_idx + t;
                                 if (global_pos >= cached_len) break;
 
-                                float* k_act_row = &k_activations[l][global_pos * F_test];
-                                float* v_act_row = &v_activations[l][global_pos * F_test];
-                                const float* k_del_row = &K_delta[s * F_test];
-                                const float* v_del_row = &V_delta[s * F_test];
-
+                                if (t == landmark_idx) {
+                                    // This is the landmark token, stored as the anchor in the pool
+                                    for (int f = 0; f < F_test; ++f) {
+                                        k_activations[l][global_pos * F_test + f] = anchor_k_float[f];
+                                        v_activations[l][global_pos * F_test + f] = anchor_v_float[f];
+                                    }
+                                } else {
+                                    // Reconstructed from SVD delta
+                                    int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
+                                    float* k_act_row = &k_activations[l][global_pos * F_test];
+                                    float* v_act_row = &v_activations[l][global_pos * F_test];
+                                    const float* k_del_row = &K_delta[s * F_test];
+                                    const float* v_del_row = &V_delta[s * F_test];
+                                    for (int f = 0; f < F_test; ++f) {
+                                        k_act_row[f] = anchor_k_float[f] + k_del_row[f] * block_scale;
+                                        v_act_row[f] = anchor_v_float[f] + v_del_row[f] * block_scale;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Single token block (just anchor)
+                            int global_pos = block->anchor_idx;
+                            if (global_pos < cached_len) {
                                 for (int f = 0; f < F_test; ++f) {
-                                    k_act_row[f] = anchor_k_float[f] + k_del_row[f] * block_scale;
-                                    v_act_row[f] = anchor_v_float[f] + v_del_row[f] * block_scale;
+                                    k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
+                                    v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
                                 }
                             }
                         }
                     } else {
                         // DenseResident or Compressing
+                        if (l == 0) {
+                            std::cerr << "[Decompress Debug] Block starting at " << block->anchor_idx 
+                                      << " block_len=" << block_len 
+                                      << " active_k_size=" << block->active_k.size() 
+                                      << " state=" << (int)block->state << "\n";
+                        }
                         for (int t = 0; t < block_len; ++t) {
                             int global_pos = block->anchor_idx + t;
                             if (global_pos >= cached_len) break;
@@ -1633,6 +1684,23 @@ int main(int argc, char ** argv) {
         }
         runtime_manager.wait_for_compressor();
         runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
+
+        if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
+            std::cerr << "[DEBUG ACTIVATIONS] cached_len=" << cached_len << " L=" << L << "\n";
+            std::cerr << "  k_activations[0] at 0 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][0 * F_test + i];
+            std::cerr << "\n  k_activations[0] at 21 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][21 * F_test + i];
+            std::cerr << "\n  k_activations[0] at 77 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][77 * F_test + i];
+            std::cerr << "\n  v_activations[0] at 0 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][0 * F_test + i];
+            std::cerr << "\n  v_activations[0] at 21 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][21 * F_test + i];
+            std::cerr << "\n  v_activations[0] at 77 (first 5):";
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][77 * F_test + i];
+            std::cerr << std::endl;
+        }
 
         // Logits already retrieved inside the chunk loop
 
@@ -2227,6 +2295,79 @@ int main(int argc, char ** argv) {
 
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+            auto t_after_logits = std::chrono::high_resolution_clock::now();
+
+            auto t_before_kv_get = std::chrono::high_resolution_clock::now();
+            std::vector<float> concat_k_host(n_layers * F_test);
+            std::vector<float> concat_v_host(n_layers * F_test);
+            ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
+            ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
+            auto t_after_kv_get = std::chrono::high_resolution_clock::now();
+
+            std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
+            std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
+            for (int l = 0; l < n_layers; ++l) {
+                std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
+                std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
+            }
+
+            runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+
+            {
+                std::vector<float> k_avg(head_dim, 0.0f);
+                for (int h = 0; h < kv_heads; ++h) {
+                    for (int d = 0; d < head_dim; ++d) {
+                        k_avg[d] += decode_k[0][h * head_dim + d];
+                    }
+                }
+                for (int d = 0; d < head_dim; ++d) {
+                    k_avg[d] /= kv_heads;
+                }
+                srl_state.recent_decode_keys.push_back(k_avg);
+                if (srl_state.recent_decode_keys.size() > 512) {
+                    srl_state.recent_decode_keys.erase(srl_state.recent_decode_keys.begin());
+                }
+
+                int32_t current_slot_id = 0;
+                if (!srl_state.ordered_slot_ids.empty()) {
+                    current_slot_id = srl_state.ordered_slot_ids.back();
+                }
+                srl_state.generated_token_slots.push_back(current_slot_id);
+                srl_state.update_dynamic_anchors(stop_token_ids);
+            }
+
+            // Compute cos/sin for the current token position: current_pos
+            int half_dim = head_dim / 2;
+            std::vector<float> cos_tok(half_dim);
+            std::vector<float> sin_tok(half_dim);
+            for (int i = 0; i < half_dim; ++i) {
+                float theta = (float)current_pos / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
+                cos_tok[i] = std::cos(theta);
+                sin_tok[i] = std::sin(theta);
+            }
+
+            // Manual append newly ingested token to host-side dense resident buffers
+            for (int l = 0; l < n_layers; ++l) {
+                int offset = total_dense_tokens[l] * F_test;
+                if (offset + F_test <= (int)active_k_dense[l].size()) {
+                    std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
+                    std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+
+                    apply_rope_neox_cpu_fast(
+                        decode_k[l].data(),
+                        active_k_dense_rotated[l].data() + offset,
+                        cos_tok.data(),
+                        sin_tok.data(),
+                        1, kv_heads, head_dim
+                    );
+
+                    total_dense_tokens[l]++;
+                }
+            }
+            if (total_positions < (int)active_positions_dense.size()) {
+                active_positions_dense[total_positions++] = current_pos;
+            }
+            auto t_step_end = std::chrono::high_resolution_clock::now();
 
             int32_t current_entity = srl_state.current_entity_id;
             const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
@@ -2326,7 +2467,7 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
-            auto t_after_logits = std::chrono::high_resolution_clock::now();
+            t_after_logits = std::chrono::high_resolution_clock::now();
 
             float rep_penalty = repetition_penalty;
             auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
@@ -2474,20 +2615,6 @@ int main(int argc, char ** argv) {
             all_tokens.push_back(next_token);
             last_token = next_token;
 
-            auto t_before_kv_get = std::chrono::high_resolution_clock::now();
-            std::vector<float> concat_k_host(n_layers * F_test);
-            std::vector<float> concat_v_host(n_layers * F_test);
-            ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
-            ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
-            auto t_after_kv_get = std::chrono::high_resolution_clock::now();
-
-            std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
-            std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
-            for (int l = 0; l < n_layers; ++l) {
-                std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
-                std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
-            }
-
             // ── Factual store query ──────────────────────────────────────────
             // Use layer-0 decode K as a proxy Q vector to find matching factual
             // spans. Results populate current_step_factual_tokens/sequences and
@@ -2553,8 +2680,8 @@ int main(int argc, char ** argv) {
                     }
                 } else {
                     for (int qi = 0; qi < F_test; ++qi) {
-                        q_for_factual[qi] = 0.65f * decode_k[0][qi]
-                                          + 0.35f * srl_state.factual_anchor_q[qi];
+                        q_for_factual[qi] = 0.20f * decode_k[0][qi]
+                                          + 0.80f * srl_state.factual_anchor_q[qi];
                     }
                 }
 
@@ -2700,64 +2827,8 @@ int main(int argc, char ** argv) {
             }
             // ────────────────────────────────────────────────────────────────
 
-            runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens);
-
             srl_state.update_query_segment(next_token);
-            {
-                std::vector<float> k_avg(head_dim, 0.0f);
-                for (int h = 0; h < kv_heads; ++h) {
-                    for (int d = 0; d < head_dim; ++d) {
-                        k_avg[d] += decode_k[0][h * head_dim + d];
-                    }
-                }
-                for (int d = 0; d < head_dim; ++d) {
-                    k_avg[d] /= kv_heads;
-                }
-                srl_state.recent_decode_keys.push_back(k_avg);
-                if (srl_state.recent_decode_keys.size() > 512) {
-                    srl_state.recent_decode_keys.erase(srl_state.recent_decode_keys.begin());
-                }
-
-                int32_t current_slot_id = 0;
-                if (!srl_state.ordered_slot_ids.empty()) {
-                    current_slot_id = srl_state.ordered_slot_ids.back();
-                }
-                srl_state.generated_token_slots.push_back(current_slot_id);
-                srl_state.update_dynamic_anchors(stop_token_ids);
-            }
-
-            // Compute cos/sin for the current token position: current_pos
-            int half_dim = head_dim / 2;
-            std::vector<float> cos_tok(half_dim);
-            std::vector<float> sin_tok(half_dim);
-            for (int i = 0; i < half_dim; ++i) {
-                float theta = (float)current_pos / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
-                cos_tok[i] = std::cos(theta);
-                sin_tok[i] = std::sin(theta);
-            }
-
-            // Manual append newly ingested token to host-side dense resident buffers
-            for (int l = 0; l < n_layers; ++l) {
-                int offset = total_dense_tokens[l] * F_test;
-                if (offset + F_test <= (int)active_k_dense[l].size()) {
-                    std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
-                    std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
-
-                    apply_rope_neox_cpu_fast(
-                        decode_k[l].data(),
-                        active_k_dense_rotated[l].data() + offset,
-                        cos_tok.data(),
-                        sin_tok.data(),
-                        1, kv_heads, head_dim
-                    );
-
-                    total_dense_tokens[l]++;
-                }
-            }
-            if (total_positions < (int)active_positions_dense.size()) {
-                active_positions_dense[total_positions++] = current_pos;
-            }
-            auto t_step_end = std::chrono::high_resolution_clock::now();
+            t_step_end = std::chrono::high_resolution_clock::now();
 
             if (time_decode) {
                 double total_ms = std::chrono::duration<double, std::milli>(t_step_end - t_step_start).count();

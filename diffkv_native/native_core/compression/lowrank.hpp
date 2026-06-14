@@ -14,6 +14,7 @@ struct LowRankCompressParams {
     int feat_dim;    // F
     int rank;        // R
     int head_dim;    // D
+    int anchor_idx;  // Sequence position of block start
     
     // Host-accessible inputs
     const float* raw_k_ptr;
@@ -30,6 +31,7 @@ struct LowRankCompressParams {
     ggml_fp16_t* out_anchor_k;
     ggml_fp16_t* out_anchor_v;
     int32_t* out_seq_len;
+    int32_t* out_anchor_position;
 };
 
 // Perform low-rank SVD compression on a block

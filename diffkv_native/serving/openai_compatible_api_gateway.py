@@ -500,17 +500,11 @@ async def chat_completions(request: ChatCompletionRequest):
     # We compare the full prev_prompt (not a truncated prefix) for maximum accuracy.
     cached_len = 0
     if not is_ephemeral and session_id in wrapper.session_cached_len:
-        prev_prompt = wrapper.session_prompt_text.get(session_id, "")
         prev_cached  = wrapper.session_cached_len[session_id]
-        if prev_prompt and len(user_prompt) > len(prev_prompt) and user_prompt.startswith(prev_prompt):
-            # Prompt is a continuation — skip re-prefilling the cached prefix tokens
+        if prev_cached > 0:
+            # Pass previous cached length to C++ binary for token-level mismatch verification
             cached_len = prev_cached
-            print(f"[Gateway] Session {session_id}: reusing {cached_len} cached KV tokens "
-                  f"(Turn {len([m for m in messages if m.role=='assistant'])+1})")
-        else:
-            # Prompt diverged — start fresh
-            wrapper._clear_session(session_id)
-            print(f"[Gateway] Session {session_id}: prefix mismatch, starting fresh.")
+            print(f"[Gateway] Session {session_id}: passing {cached_len} cached KV tokens to C++ binary for token-level verification.")
 
 
     # ── Streaming path ────────────────────────────────────────────────

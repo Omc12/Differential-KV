@@ -307,26 +307,27 @@ def build_chunk_graph(
                     if not has_cross_ref:
                         is_excluded = True
 
-            # Symmetric lexical score
-            lex_score = 0.0
+            # Directed relative lexical overlap score
+            lex_score_i_to_j = 0.0
+            lex_score_j_to_i = 0.0
             if not is_excluded and vocabs:
                 w_i = vocabs[i]
                 w_j = vocabs[j]
                 intersection = w_i & w_j
-                if len(w_i) > 0 or len(w_j) > 0:
+                if len(intersection) > 0:
                     if has_idf:
                         sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
                         sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
                         sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
-                        denom = sum_idf_i + sum_idf_j - sum_idf_intersect
-                        if denom > 0:
-                            lex_score = sum_idf_intersect / denom
+                        if sum_idf_i > 0:
+                            lex_score_i_to_j = sum_idf_intersect / sum_idf_i
+                        if sum_idf_j > 0:
+                            lex_score_j_to_i = sum_idf_intersect / sum_idf_j
                     else:
-                        denom = len(w_i) + len(w_j) - len(intersection)
-                        if denom > 0:
-                            lex_score = len(intersection) / denom
-            lex_score_i_to_j = lex_score
-            lex_score_j_to_i = lex_score
+                        if len(w_i) > 0:
+                            lex_score_i_to_j = len(intersection) / len(w_i)
+                        if len(w_j) > 0:
+                            lex_score_j_to_i = len(intersection) / len(w_j)
             
             temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
             
@@ -396,18 +397,15 @@ def build_chunk_graph(
                     w_i = vocabs[i]
                     w_j = vocabs[j]
                     intersection = w_i & w_j
-                    if len(w_i) > 0 or len(w_j) > 0:
+                    if len(intersection) > 0:
                         if has_idf:
                             sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
                             sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
-                            sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
-                            denom = sum_idf_i + sum_idf_j - sum_idf_intersect
-                            if denom > 0:
-                                lex_score_i_to_j = sum_idf_intersect / denom
+                            if sum_idf_i > 0:
+                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i
                         else:
-                            denom = len(w_i) + len(w_j) - len(intersection)
-                            if denom > 0:
-                                lex_score_i_to_j = len(intersection) / denom
+                            if len(w_i) > 0:
+                                lex_score_i_to_j = len(intersection) / len(w_i)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_i_to_j = 0.5 * sim_score + 0.5 * lex_score_i_to_j + temporal_boost
                 
@@ -421,18 +419,15 @@ def build_chunk_graph(
                     w_i = vocabs[i]
                     w_j = vocabs[j]
                     intersection = w_i & w_j
-                    if len(w_i) > 0 or len(w_j) > 0:
+                    if len(intersection) > 0:
                         if has_idf:
                             sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
-                            sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
                             sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
-                            denom = sum_idf_i + sum_idf_j - sum_idf_intersect
-                            if denom > 0:
-                                lex_score_j_to_i = sum_idf_intersect / denom
+                            if sum_idf_j > 0:
+                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j
                         else:
-                            denom = len(w_i) + len(w_j) - len(intersection)
-                            if denom > 0:
-                                lex_score_j_to_i = len(intersection) / denom
+                            if len(w_j) > 0:
+                                lex_score_j_to_i = len(intersection) / len(w_j)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
                 

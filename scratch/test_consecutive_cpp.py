@@ -8,8 +8,11 @@ model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-
 
 # Setup environment variables
 env = dict(os.environ)
-env["DIFFKV_USE_GPU"] = "1"
-env["DIFFKV_MICRO_BLOCK_SIZE"] = "64"
+env["DIFFKV_USE_GPU"] = "0"
+env["DIFFKV_MICRO_BLOCK_SIZE"] = "32"
+env["DIFFKV_ENGAGE_THRESHOLD"] = "2048"
+env["DIFFKV_TEMPERATURE"] = "0.0"
+env["DIFFKV_VERBOSE"] = "1"
 
 print("Starting subprocess...")
 p = subprocess.Popen(

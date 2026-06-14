@@ -378,11 +378,13 @@ inline ChunkGraph build_chunk_graph(
                         sum_idf_j += idf_val;
                     }
                     
-                    float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
-                    if (denom > 0.0f) {
-                        float lex_score = sum_idf_intersect / denom;
-                        lex_score_i_to_j = lex_score;
-                        lex_score_j_to_i = lex_score;
+                    if (sum_idf_intersect > 0.0f) {
+                        if (sum_idf_i > 0.0f) {
+                            lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
+                        }
+                        if (sum_idf_j > 0.0f) {
+                            lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
+                        }
                     }
                 }
             }
@@ -474,7 +476,6 @@ inline ChunkGraph build_chunk_graph(
                         if (!v_i.empty() || !v_j.empty()) {
                             float sum_idf_intersect = 0.0f;
                             float sum_idf_i = 0.0f;
-                            float sum_idf_j = 0.0f;
                             for (int tok : v_i) {
                                 float idf_val = 1.0f;
                                 auto idf_it = inv_index->idf.find(tok);
@@ -486,17 +487,8 @@ inline ChunkGraph build_chunk_graph(
                                     sum_idf_intersect += idf_val;
                                 }
                             }
-                            for (int tok : v_j) {
-                                float idf_val = 1.0f;
-                                auto idf_it = inv_index->idf.find(tok);
-                                if (idf_it != inv_index->idf.end()) {
-                                    idf_val = idf_it->second;
-                                }
-                                sum_idf_j += idf_val;
-                            }
-                            float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
-                            if (denom > 0.0f) {
-                                lex_score_i_to_j = sum_idf_intersect / denom;
+                            if (sum_idf_intersect > 0.0f && sum_idf_i > 0.0f) {
+                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
                             }
                         }
                     }
@@ -521,16 +513,14 @@ inline ChunkGraph build_chunk_graph(
                         const auto& v_j = vocabs[j];
                         if (!v_i.empty() || !v_j.empty()) {
                             float sum_idf_intersect = 0.0f;
-                            float sum_idf_i = 0.0f;
                             float sum_idf_j = 0.0f;
                             for (int tok : v_i) {
-                                float idf_val = 1.0f;
-                                auto idf_it = inv_index->idf.find(tok);
-                                if (idf_it != inv_index->idf.end()) {
-                                    idf_val = idf_it->second;
-                                }
-                                sum_idf_i += idf_val;
                                 if (v_j.count(tok)) {
+                                    float idf_val = 1.0f;
+                                    auto idf_it = inv_index->idf.find(tok);
+                                    if (idf_it != inv_index->idf.end()) {
+                                        idf_val = idf_it->second;
+                                    }
                                     sum_idf_intersect += idf_val;
                                 }
                             }
@@ -542,9 +532,8 @@ inline ChunkGraph build_chunk_graph(
                                 }
                                 sum_idf_j += idf_val;
                             }
-                            float denom = sum_idf_i + sum_idf_j - sum_idf_intersect;
-                            if (denom > 0.0f) {
-                                lex_score_j_to_i = sum_idf_intersect / denom;
+                            if (sum_idf_intersect > 0.0f && sum_idf_j > 0.0f) {
+                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
                             }
                         }
                     }

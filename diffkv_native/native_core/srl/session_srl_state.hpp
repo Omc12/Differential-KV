@@ -197,31 +197,44 @@ struct SessionSRLState {
         int size = static_cast<int>(recent_generated_tokens.size());
         int start = std::max(0, size - 12);
         
-        int seg1_score = 0;
-        int seg2_score = 0;
+        float seg1_score = 0.0f;
+        float seg2_score = 0.0f;
         
         for (int i = start; i < size; ++i) {
             int tid = recent_generated_tokens[i];
             auto it = inverted_index.occurrences.find(tid);
             if (it != inverted_index.occurrences.end()) {
-                for (const auto& occ : it->second) {
-                    int32_t slot = std::get<0>(occ);
-                    auto seg_it = segment_ids.find(slot);
-                    if (seg_it != segment_ids.end()) {
-                        int seg = seg_it->second;
-                        if (seg == 1) {
-                            seg1_score++;
-                        } else if (seg == 2) {
-                            seg2_score++;
+                const auto& occs = it->second;
+                float total_cnt = static_cast<float>(occs.size());
+                if (total_cnt > 0.0f) {
+                    float seg1_cnt = 0.0f;
+                    float seg2_cnt = 0.0f;
+                    for (const auto& occ : occs) {
+                        int32_t slot = std::get<0>(occ);
+                        auto seg_it = segment_ids.find(slot);
+                        if (seg_it != segment_ids.end()) {
+                            int seg = seg_it->second;
+                            if (seg == 1) {
+                                seg1_cnt += 1.0f;
+                            } else if (seg == 2) {
+                                seg2_cnt += 1.0f;
+                            }
                         }
                     }
+                    float idf_val = 1.0f;
+                    auto idf_it = inverted_index.idf.find(tid);
+                    if (idf_it != inverted_index.idf.end()) {
+                        idf_val = idf_it->second;
+                    }
+                    seg1_score += (seg1_cnt / total_cnt) * idf_val;
+                    seg2_score += (seg2_cnt / total_cnt) * idf_val;
                 }
             }
         }
         
-        if (seg1_score > seg2_score + 2) {
+        if (seg1_score > seg2_score + 1.0f) {
             current_query_segment_id = 1;
-        } else if (seg2_score > seg1_score + 2) {
+        } else if (seg2_score > seg1_score + 1.0f) {
             current_query_segment_id = 2;
         } else {
             current_query_segment_id = 0;
@@ -368,55 +381,61 @@ struct SessionSRLState {
             return static_cast<float>(intersect_cnt) / union_cnt;
         };
 
-        concept_tok_1 = -1;
-        concept_tok_2 = -1;
+        int c_tok_1 = concept_tok_1;
+        int c_tok_2 = concept_tok_2;
 
-        int first_idx = -1;
-        for (size_t i = 0; i < candidate_tids.size(); ++i) {
-            auto s = get_slots(candidate_tids[i]);
-            if (!s.empty()) {
-                concept_tok_1 = candidate_tids[i];
-                first_idx = static_cast<int>(i);
-                break;
-            }
-        }
-
-        if (first_idx != -1) {
-            auto s1 = get_slots(concept_tok_1);
-            for (size_t j = first_idx + 1; j < candidate_tids.size(); ++j) {
-                int32_t tid2 = candidate_tids[j];
-                auto s2 = get_slots(tid2);
-                if (!s2.empty()) {
-                    float j_val = jaccard(s1, s2);
-                    if (j_val <= 0.2f) {
-                        concept_tok_2 = tid2;
-                        break;
-                    }
+        if (c_tok_1 == -1) {
+            int first_idx = -1;
+            for (size_t i = 0; i < candidate_tids.size(); ++i) {
+                auto s = get_slots(candidate_tids[i]);
+                if (!s.empty()) {
+                    c_tok_1 = candidate_tids[i];
+                    first_idx = static_cast<int>(i);
+                    break;
                 }
             }
-            if (concept_tok_2 == -1) {
-                // Fallback to minimum Jaccard overlap
-                float min_j = 1.0f;
-                int32_t best_tid2 = -1;
+
+            if (first_idx != -1) {
+                auto s1 = get_slots(c_tok_1);
                 for (size_t j = first_idx + 1; j < candidate_tids.size(); ++j) {
                     int32_t tid2 = candidate_tids[j];
                     auto s2 = get_slots(tid2);
                     if (!s2.empty()) {
                         float j_val = jaccard(s1, s2);
-                        if (j_val < min_j) {
-                            min_j = j_val;
-                            best_tid2 = tid2;
+                        if (j_val <= 0.2f) {
+                            c_tok_2 = tid2;
+                            break;
                         }
                     }
                 }
-                concept_tok_2 = best_tid2;
+                if (c_tok_2 == -1) {
+                    // Fallback to minimum Jaccard overlap
+                    float min_j = 1.0f;
+                    int32_t best_tid2 = -1;
+                    for (size_t j = first_idx + 1; j < candidate_tids.size(); ++j) {
+                        int32_t tid2 = candidate_tids[j];
+                        auto s2 = get_slots(tid2);
+                        if (!s2.empty()) {
+                            float j_val = jaccard(s1, s2);
+                            if (j_val < min_j) {
+                                min_j = j_val;
+                                best_tid2 = tid2;
+                            }
+                        }
+                    }
+                    c_tok_2 = best_tid2;
+                }
             }
+            concept_tok_1 = c_tok_1;
+            concept_tok_2 = c_tok_2;
         }
 
-        // Initialize all slots to segment 0
+        // Map segments preserving existing ones
+        std::unordered_map<int32_t, int> existing_segs = segment_ids;
         segment_ids.clear();
         for (int32_t slot : ordered_slot_ids) {
-            segment_ids[slot] = 0;
+            auto it = existing_segs.find(slot);
+            segment_ids[slot] = (it != existing_segs.end()) ? it->second : 0;
         }
 
         std::unordered_set<int32_t> slots_1;
@@ -437,6 +456,14 @@ struct SessionSRLState {
         std::unordered_set<int32_t> expanded_2(expanded_2_vec.begin(), expanded_2_vec.end());
 
         for (int32_t slot : ordered_slot_ids) {
+            auto it = existing_segs.find(slot);
+            if (it != existing_segs.end() && it->second != 0) {
+                continue;
+            }
+            if (cached_len > 0) {
+                segment_ids[slot] = 0;
+                continue;
+            }
             bool in_1 = expanded_1.find(slot) != expanded_1.end();
             bool in_2 = expanded_2.find(slot) != expanded_2.end();
             if (in_1 && in_2) {

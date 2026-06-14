@@ -539,6 +539,40 @@ def route_query(
             A0 = torch.zeros(N_idx, dtype=torch.float32)
             A0[valid_rows] = sem_scores_cpu[valid_rows]
             
+            # Split seeds by segment ID
+            row_segs = []
+            for r in range(N_idx):
+                slot_id = int(idx_map.slot_ids[r].item())
+                row_segs.append(srl_state.segment_ids.get(slot_id, 0))
+            row_segs_tensor = torch.tensor(row_segs, dtype=torch.int32)
+
+            valid_rows_list = valid_rows.tolist()
+            rows_seg1 = []
+            rows_seg2 = []
+            rows_seg0 = []
+            for r in valid_rows_list:
+                slot_id = int(idx_map.slot_ids[r].item())
+                seg = srl_state.segment_ids.get(slot_id, 0)
+                if seg == 1:
+                    rows_seg1.append(r)
+                elif seg == 2:
+                    rows_seg2.append(r)
+                else:
+                    rows_seg0.append(r)
+
+            current_query_segment_id = getattr(srl_state, "current_query_segment_id", 0)
+            forbidden_for_0 = None
+            if current_query_segment_id == 1:
+                rows_seg2 = []
+                forbidden_for_0 = 2
+            elif current_query_segment_id == 2:
+                rows_seg1 = []
+                forbidden_for_0 = 1
+
+            valid_rows_1 = torch.tensor(rows_seg1, dtype=torch.long)
+            valid_rows_2 = torch.tensor(rows_seg2, dtype=torch.long)
+            valid_rows_0 = torch.tensor(rows_seg0, dtype=torch.long)
+
             # Retention scaling (query similarity target-damping)
             # Retention(q, j) = graph_hop_decay * sem_scores_cpu[j]
             graph_hop_decay = getattr(srl_state, "graph_hop_decay", 0.5)
@@ -549,45 +583,66 @@ def route_query(
             degrees = (neighbors >= 0).sum(dim=1, keepdim=True).float()
             damping = 1.0 + torch.log(1.0 + degrees)  # [N_idx, 1]
             
-            # 1-hop propagation: A0 -> A1
-            A1 = torch.zeros(N_idx, dtype=torch.float32)
-            seed_neighbors = neighbors[valid_rows]  # [M_seeds, MAX_DEGREE]
-            seed_weights = weights[valid_rows]      # [M_seeds, MAX_DEGREE]
-            
-            # Dilute transition weights out of seed nodes
-            damped_seed_weights = seed_weights / damping[valid_rows]
-            
-            seed_A0 = A0[valid_rows].unsqueeze(1)    # [M_seeds, 1]
-            propagated_signals_1 = seed_A0 * damped_seed_weights  # [M_seeds, MAX_DEGREE]
-            
-            flat_neighbors_1 = seed_neighbors.view(-1).to(torch.int64)
-            flat_signals_1 = propagated_signals_1.view(-1)
-            
-            valid_mask_1 = (flat_neighbors_1 >= 0) & (flat_neighbors_1 < N_idx)
-            A1.scatter_add_(0, flat_neighbors_1[valid_mask_1], flat_signals_1[valid_mask_1])
-            A1 = A1 * retention
-            
-            # 2-hop propagation: A1 -> A2
-            A2 = torch.zeros(N_idx, dtype=torch.float32)
-            active_rows = torch.where(A1 > 0.0)[0]
-            if active_rows.numel() > 0:
-                active_neighbors = neighbors[active_rows]
-                active_weights = weights[active_rows]
+            def propagate_for_group(group_rows, forbidden_segment):
+                A1_g = torch.zeros(N_idx, dtype=torch.float32)
+                A2_g = torch.zeros(N_idx, dtype=torch.float32)
+                if group_rows.numel() == 0:
+                    return A1_g, A2_g
+
+                A0_g = torch.zeros(N_idx, dtype=torch.float32)
+                A0_g[group_rows] = sem_scores_cpu[group_rows]
+
+                # 1-hop propagation
+                seed_neighbors = neighbors[group_rows]  # [M_group, MAX_DEGREE]
+                seed_weights = weights[group_rows]      # [M_group, MAX_DEGREE]
                 
-                # Dilute transition weights out of active nodes
-                damped_active_weights = active_weights / damping[active_rows]
+                # Dilute transition weights out of seed nodes
+                damped_seed_weights = seed_weights / damping[group_rows]
                 
-                active_A1 = A1[active_rows].unsqueeze(1)
-                propagated_signals_2 = active_A1 * damped_active_weights
+                seed_A0 = A0_g[group_rows].unsqueeze(1)    # [M_group, 1]
+                propagated_signals_1 = seed_A0 * damped_seed_weights  # [M_group, MAX_DEGREE]
                 
-                flat_neighbors_2 = active_neighbors.view(-1).to(torch.int64)
-                flat_signals_2 = propagated_signals_2.view(-1)
+                flat_neighbors_1 = seed_neighbors.view(-1).to(torch.int64)
+                flat_signals_1 = propagated_signals_1.view(-1)
                 
-                valid_mask_2 = (flat_neighbors_2 >= 0) & (flat_neighbors_2 < N_idx)
-                A2.scatter_add_(0, flat_neighbors_2[valid_mask_2], flat_signals_2[valid_mask_2])
-                A2 = A2 * retention
+                valid_mask_1 = (flat_neighbors_1 >= 0) & (flat_neighbors_1 < N_idx)
+                A1_g.scatter_add_(0, flat_neighbors_1[valid_mask_1], flat_signals_1[valid_mask_1])
+                A1_g = A1_g * retention
+
+                if forbidden_segment is not None:
+                    forbidden_mask = (row_segs_tensor == forbidden_segment)
+                    A1_g[forbidden_mask] = 0.0
                 
-            # Total graph score
+                # 2-hop propagation
+                active_rows = torch.where(A1_g > 0.0)[0]
+                if active_rows.numel() > 0:
+                    active_neighbors = neighbors[active_rows]
+                    active_weights = weights[active_rows]
+                    
+                    # Dilute transition weights out of active nodes
+                    damped_active_weights = active_weights / damping[active_rows]
+                    
+                    active_A1 = A1_g[active_rows].unsqueeze(1)
+                    propagated_signals_2 = active_A1 * damped_active_weights
+                    
+                    flat_neighbors_2 = active_neighbors.view(-1).to(torch.int64)
+                    flat_signals_2 = propagated_signals_2.view(-1)
+                    
+                    valid_mask_2 = (flat_neighbors_2 >= 0) & (flat_neighbors_2 < N_idx)
+                    A2_g.scatter_add_(0, flat_neighbors_2[valid_mask_2], flat_signals_2[valid_mask_2])
+                    A2_g = A2_g * retention
+
+                    if forbidden_segment is not None:
+                        A2_g[forbidden_mask] = 0.0
+                
+                return A1_g, A2_g
+
+            A1_1, A2_1 = propagate_for_group(valid_rows_1, forbidden_segment=2)
+            A1_2, A2_2 = propagate_for_group(valid_rows_2, forbidden_segment=1)
+            A1_0, A2_0 = propagate_for_group(valid_rows_0, forbidden_segment=forbidden_for_0)
+
+            A1 = A1_1 + A1_2 + A1_0
+            A2 = A2_1 + A2_2 + A2_0
             graph_scores = A1 + A2
             
             # Exclude seed nodes from the new neighbors selection

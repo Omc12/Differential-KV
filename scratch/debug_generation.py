@@ -14,6 +14,7 @@ os.environ["DIFFKV_USE_TORCH_COMPILE"] = "0"
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
+os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 
 from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
 from native_core.mac_utils import get_best_device
@@ -35,10 +36,10 @@ def main():
     
     # Configure overrides to match run_graph_analysis.py
     if wrapper.manager._streaming_mgr is not None:
-        wrapper.manager._streaming_mgr.recency_window = 64
+        wrapper.manager._streaming_mgr.recency_window = 128
         wrapper.manager._streaming_mgr.short_context_threshold = 0
         wrapper.manager._streaming_mgr.protect_block_zero = True
-        wrapper.manager._streaming_mgr._should_skip_compression = lambda *args, **kwargs: True
+        wrapper.manager._streaming_mgr._should_skip_compression = lambda *args, **kwargs: False
         
         from native_core.streaming_sparse_ingest import StreamingKVBlock
         StreamingKVBlock.short_context_threshold = 0
@@ -72,75 +73,30 @@ def main():
     ]
     prompt2 = wrapper.tokenizer.apply_chat_template(messages2, tokenize=False, add_generation_prompt=True)
     
-    print("\n--- Decoding Step-by-Step for Prompt 2 ---")
-    # Instead of generate(), we do manual stepping
-    inputs = wrapper.tokenizer(prompt2, return_tensors='pt').to(wrapper.device)
-    prompt_ids = inputs.input_ids[0].tolist()
+    print("\n--- Running Prompt 2 with custom step-by-step logging ---")
+    input_ids = wrapper.tokenizer(prompt2, return_tensors="pt")["input_ids"].to(device)
     
-    cached_len = 0
-    seq_len = wrapper.manager.get_session_sequence_length(session_id)
-    if seq_len > 0 and seq_len < len(prompt_ids):
-        stored_ids = getattr(wrapper, "_session_token_ids", {}).setdefault(session_id, [])
-        if len(stored_ids) >= seq_len and prompt_ids[:seq_len] == stored_ids[:seq_len]:
-            cached_len = seq_len
-            print(f"Reusing KV cache! Length {cached_len}")
-            
-    if cached_len == 0:
-        wrapper.manager.clear_session(session_id)
-        wrapper._session_token_ids = {session_id: []}
-        new_prompt_ids = prompt_ids
-    else:
-        new_prompt_ids = prompt_ids[cached_len:]
+    wrapper.manager.init_session(session_id, input_ids.shape[1])
+    with torch.no_grad():
+        out = wrapper.model(input_ids)
         
-    input_ids = torch.tensor([new_prompt_ids], device=wrapper.device)
-    prefill_len = input_ids.shape[1]
-    generated = prompt_ids.copy()
+    generated = []
+    logits = out.logits[:, -1, :]
+    cur_pos = input_ids.shape[1]
     
-    wrapper.manager.init_session(session_id, prefill_len=cached_len + prefill_len)
-    if hasattr(wrapper.manager, "register_prefill_tokens"):
-        wrapper.manager.register_prefill_tokens(session_id, torch.tensor(new_prompt_ids, dtype=torch.long))
-    wrapper.model._diffkv_session_ids = [session_id]
+    from native_core.srl.factual_alignment import get_helper_token_ids, get_allowed_tokens_vsl, get_structural_helper_token_ids
     
-    # Process prefill chunks
-    PREFILL_CHUNK = 512
-    for i in range(0, len(new_prompt_ids), PREFILL_CHUNK):
-        chunk = new_prompt_ids[i:i + PREFILL_CHUNK]
-        pos_ids = torch.arange(cached_len + i, cached_len + i + len(chunk), dtype=torch.long, device=wrapper.device).unsqueeze(0)
-        chunk_tensor = torch.tensor([chunk], dtype=torch.long, device=wrapper.device)
-        with torch.no_grad():
-            outputs = wrapper.model(input_ids=chunk_tensor, position_ids=pos_ids, use_cache=True)
-            
-    if hasattr(wrapper.manager, "finalize_compressed_blocks"):
-        wrapper.manager.finalize_compressed_blocks()
-    if hasattr(wrapper.manager, "finalize_srl_index"):
-        wrapper.manager.finalize_srl_index(session_id, cached_len=cached_len)
+    for step in range(150):
+        srl_state = wrapper.manager.get_srl_state(session_id)
+        max_sim = getattr(srl_state, "current_step_max_similarity", 0.0) if srl_state else 0.0
         
-    srl_state = getattr(wrapper.manager, "_session_srl", {}).get(session_id)
-    if srl_state is not None:
-        srl_state.vsl_active_candidates = []
-        srl_state.vsl_consecutive_helpers = 0
-        srl_state.factual_anchor_q = None
-        srl_state.current_entity_id = -1
-        
-    logits = outputs.logits[:, -1, :]
-    past_kv = outputs.past_key_values
-    cur_pos = cached_len + prefill_len
-    
-    print(f"Prefill done. Starting generation loop from pos {cur_pos}...")
-    
-    for step in range(200):
-        # Apply factual biases
         sfa_active = (
             srl_state is not None
-            and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3
+            and max_sim >= 0.55
             and bool(getattr(srl_state, "current_step_factual_sequences", None))
         )
         
-        sim = getattr(srl_state, "current_step_max_similarity", 0.0) if srl_state else 0.0
-        print(f"\nStep {step}: pos={cur_pos} | sfa_active={sfa_active} | max_similarity={sim:.4f}")
-        
         if sfa_active:
-            from native_core.srl.factual_alignment import get_allowed_tokens_vsl, get_structural_helper_token_ids, get_helper_token_ids
             helper_ids = get_helper_token_ids(wrapper.tokenizer)
             structural_helper_ids = get_structural_helper_token_ids(wrapper.tokenizer)
             allowed_ids = get_allowed_tokens_vsl(
@@ -151,58 +107,51 @@ def main():
             mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
             mask[list(allowed_ids)] = False
             
-            if sim >= 0.70:
+            if max_sim >= 0.70:
+                print(f"[Step {step}] Hard masking active! max_sim = {max_sim:.3f}")
                 logits[0, mask] = -65000.0
-                print(f"  Hard masking applied: allowed_count={len(allowed_ids)}")
             else:
+                print(f"[Step {step}] Soft masking active! max_sim = {max_sim:.3f}")
                 logits[0, mask] -= 7.0
-                print(f"  Soft penalty applied: allowed_count={len(allowed_ids)}")
-                
-        # Sample
-        effective_temperature = 0.0
-        probs = torch.softmax(logits, dim=-1)
-        next_id = torch.argmax(probs, dim=-1).unsqueeze(0)
-        next_id_val = next_id.item()
-        next_text = wrapper.tokenizer.decode([next_id_val])
-        print(f"  Sampled token ID: {next_id_val} -> {repr(next_text)}")
+        else:
+            print(f"[Step {step}] SFA Inactive. max_sim = {max_sim:.3f}")
+            
+        next_id = logits.argmax(dim=-1).item()
+        next_tok_text = wrapper.tokenizer.decode([next_id])
+        print(f"[Step {step}] Generated: {repr(next_tok_text)}")
         
-        # Stop check
         stop_generation = False
-        if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
-            if getattr(srl_state, "current_step_factual_sequences", None):
-                for seq in srl_state.current_step_factual_sequences:
-                    if len(seq) >= 5 and next_id_val == seq[-1]:
+        if srl_state is not None and max_sim >= 0.5:
+            factual_seqs = getattr(srl_state, "current_step_factual_sequences", [])
+            for seq in factual_seqs:
+                if len(seq) >= 5 and len(generated) + 1 >= len(seq):
+                    test_gen = generated + [next_id]
+                    if test_gen[-len(seq):] == list(seq):
                         stop_generation = True
-                        print(f"  Triggered factual stop on sequence: {wrapper.tokenizer.decode(seq)}")
+                        print(f"[Step {step}] Early stopping triggered on sequence: {wrapper.tokenizer.decode(seq)}")
                         break
-        
+                        
+        generated.append(next_id)
         if stop_generation:
-            print("  Halting due to factual stop condition.")
             break
-            
-        if next_id_val in wrapper.stop_token_ids:
-            print("  Halting due to stop token.")
+        if next_id in wrapper.stop_token_ids:
             break
-            
-        generated.append(next_id_val)
-        if hasattr(wrapper.manager, "register_prefill_tokens"):
-            wrapper.manager.register_prefill_tokens(session_id, torch.tensor([next_id_val], dtype=torch.long))
             
         if sfa_active and srl_state is not None:
-            from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
+            from native_core.srl.factual_alignment import update_vsl_state
             helper_ids = get_helper_token_ids(wrapper.tokenizer)
-            update_vsl_state(next_id_val, srl_state, helper_ids)
-            print(f"  Updated VSL state: consecutive_helpers={srl_state.vsl_consecutive_helpers} | active_locks={len(srl_state.vsl_active_candidates)}")
-            if srl_state.vsl_consecutive_helpers >= 16:
-                print("  Halting due to 16 consecutive helpers.")
-                break
-                
-        pos_tensor = torch.tensor([[cur_pos]], device=wrapper.device)
-        input_ids = next_id
-        with torch.no_grad():
-            outputs = wrapper.model(input_ids=input_ids, position_ids=pos_tensor, use_cache=True)
-        logits = outputs.logits[:, -1, :]
+            update_vsl_state(next_id, srl_state, helper_ids)
+            
+        next_id_tensor = torch.tensor([[next_id]], device=device)
+        pos_tensor = torch.tensor([[cur_pos]], device=device)
         cur_pos += 1
+        
+        with torch.no_grad():
+            out = wrapper.model(next_id_tensor, position_ids=pos_tensor)
+        logits = out.logits[:, -1, :]
+        
+    print(f"\nFinal Generated Text:\n{wrapper.tokenizer.decode(generated)}")
+    wrapper.close()
 
 if __name__ == "__main__":
     main()
