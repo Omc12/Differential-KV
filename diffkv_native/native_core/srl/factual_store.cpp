@@ -199,6 +199,44 @@ void FactualExactStore::build(
             }
             factual_mask = dilated_mask;
         }
+
+        // 5d. Mandatory prime slot coverage — each cluster center (semantic
+        // prime slot) must have at least one token in the factual mask even
+        // if all its tokens fall below the global 5% salience threshold.
+        // Without this, blocks at the structural center of a cluster are
+        // silently excluded and their concepts (e.g. "Riemann sheets" in the
+        // EP cluster) cannot be associated with the correct entity, causing
+        // topology leakage into neighbouring clusters.
+        if (block_size > 0 && !slot_ids.empty() && !semantic_prime_slots.empty()) {
+            for (int32_t slot : semantic_prime_slots) {
+                auto it = std::find(slot_ids.begin(), slot_ids.end(), slot);
+                if (it == slot_ids.end()) continue;
+                int block_idx = (int)(it - slot_ids.begin());
+                int tok_start = block_idx * block_size;
+                int tok_end = std::min(tok_start + block_size, L);
+                if (tok_start >= L) continue;
+                bool any_covered = false;
+                for (int t = tok_start; t < tok_end; ++t) {
+                    if (factual_mask[t]) { any_covered = true; break; }
+                }
+                if (!any_covered) {
+                    // Force the highest-salience token in this slot and
+                    // expand by the context window.
+                    int peak = tok_start;
+                    float peak_sal = total_salience[tok_start];
+                    for (int t = tok_start + 1; t < tok_end; ++t) {
+                        if (total_salience[t] > peak_sal) {
+                            peak_sal = total_salience[t];
+                            peak = t;
+                        }
+                    }
+                    constexpr int FORCED_WIN = 3;  // mirrors CONTEXT_WINDOW in 5b
+                    int lo = std::max(0, peak - FORCED_WIN);
+                    int hi = std::min(L, peak + FORCED_WIN + 1);
+                    for (int t = lo; t < hi; ++t) factual_mask[t] = true;
+                }
+            }
+        }
     } else {
         // Fallback to simple stop-token exclusion
         for (int t = 0; t < L; ++t) {
@@ -525,7 +563,9 @@ void FactualExactStore::build(
                 for (int t = p_end; t < v_entry.start_idx; ++t) {
                     bridge.push_back(token_ids[t]);
                 }
-                if (bridge.size() > 8) continue;
+                if (bridge.size() > 48) continue; // raised from 8: with 5%-sparse
+                // span coverage bridges between adjacent spans are consistently
+                // 20-30 tokens long, silently excluding every valid triple
 
                 // Require at least one relational token in bridge
                 bool has_rel = false;

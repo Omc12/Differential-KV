@@ -296,6 +296,35 @@ class FactualExactStore:
                     if factual_mask[i - 1] and factual_mask[i + 1]:
                         dilated_mask[i] = True
                 factual_mask = dilated_mask
+
+            # 5d. Mandatory prime slot coverage — each cluster center (semantic
+            # prime slot) must have at least one token in the factual mask even
+            # if all its tokens fall below the global 5% salience threshold.
+            # Without this, blocks at the structural center of a cluster are
+            # silently excluded and their concepts (e.g. "Riemann sheets" in the
+            # EP cluster) cannot be associated with the correct entity, causing
+            # topology leakage into neighbouring clusters.
+            if (semantic_prime_slots and slot_ids is not None
+                    and block_size is not None and block_size > 0):
+                for slot in semantic_prime_slots:
+                    if slot not in slot_ids:
+                        continue
+                    block_idx = slot_ids.index(slot)
+                    tok_start = block_idx * block_size
+                    tok_end = min(tok_start + block_size, total_seq_len)
+                    if tok_start >= total_seq_len:
+                        continue
+                    if not factual_mask[tok_start:tok_end].any():
+                        # No token from this prime slot survived salience —
+                        # force the highest-salience position in the slot and
+                        # expand by the context window so the forced span
+                        # captures the surrounding relational structure.
+                        region = total_salience[tok_start:tok_end]
+                        peak_rel = int(region.argmax().item())
+                        peak = tok_start + peak_rel
+                        lo = max(0, peak - CONTEXT_WINDOW)
+                        hi = min(total_seq_len, peak + CONTEXT_WINDOW + 1)
+                        factual_mask[lo:hi] = True
         else:
             # Fallback to simple stop-token exclusion for deterministic testing
             for i in range(total_seq_len):
@@ -427,14 +456,50 @@ class FactualExactStore:
             # Used by _assign_entities() to bind properties that explicitly name
             # their entity, overriding misleading low-IDF token overlap (RC4).
             if is_prime and inv_index is not None and hasattr(inv_index, "idf") and span_tokens:
+                # Build a per-token content-word filter using the tokenizer when
+                # available.  Tokens whose decoded text is purely punctuation,
+                # whitespace, or a very short particle (' Here', ' In', '.\n\n')
+                # appear in only ONE block and therefore get an artificially high
+                # document-level IDF (log(N/1)+1) despite carrying no semantic
+                # identity.  Using them as distinguishing tokens makes entity
+                # binding unreliable (entity 173 gets ' Here', entity 154 gets
+                # '.\n\n', etc.).
+                _dist_exclude: Set[int] = set()
+                _tokenizer = getattr(inv_index, "_tokenizer_ref", None)
+                if _tokenizer is not None:
+                    for t in span_tokens:
+                        try:
+                            raw = _tokenizer.decode([t])
+                            clean = raw.replace("Ġ", "").replace("▁", "").strip()
+                            # Exclude: pure non-alphanumeric, very short words
+                            # (≤2 chars), and known sentence-initial discourse
+                            # particles that are syntactically unique per block
+                            # but semantically generic.
+                            alnum = "".join(c for c in clean if c.isalnum())
+                            if len(alnum) <= 2 or not any(c.isalpha() for c in clean):
+                                _dist_exclude.add(t)
+                        except Exception:
+                            pass
+
                 best_tok, best_idf = None, -1.0
                 for t in span_tokens:
                     if stop_token_ids and t in stop_token_ids:
+                        continue
+                    if t in _dist_exclude:
                         continue
                     t_idf = inv_index.idf.get(t, 1.0)
                     if t_idf > best_idf:
                         best_idf = t_idf
                         best_tok = t
+                if best_tok is None:
+                    # Fallback: relax exclusion filter (keep stop-token exclusion)
+                    for t in span_tokens:
+                        if stop_token_ids and t in stop_token_ids:
+                            continue
+                        t_idf = inv_index.idf.get(t, 1.0)
+                        if t_idf > best_idf:
+                            best_idf = t_idf
+                            best_tok = t
                 if best_tok is None:
                     for t in span_tokens:
                         t_idf = inv_index.idf.get(t, 1.0)
@@ -486,8 +551,11 @@ class FactualExactStore:
                         continue  # too distant; bridge would be meaningless
 
                     bridge = token_ids[p_end:v_entry.start_idx].tolist()
-                    if len(bridge) > 8:
-                        continue  # overly long bridge → noise
+                    if len(bridge) > 48:
+                        continue  # bridge too long — noise (raised from 8: with
+                        # 5%-sparse span coverage the gaps between selected spans
+                        # are consistently 20–30 tokens, making an 8-token limit
+                        # silently exclude every valid triple)
                     # Bridge must contain at least one relational token so we know
                     # it is a genuine binding phrase and not just whitespace.
                     if len(bridge) > 0 and not any(tid in rel_tid_set for tid in bridge):
