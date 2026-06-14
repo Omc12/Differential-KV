@@ -44,6 +44,8 @@ struct SessionSRLState {
     // --- Token tracking ---
     std::vector<int> recent_generated_tokens;  // rolling window of generated token IDs
     std::vector<int> current_query_tokens;     // current query token IDs
+    std::vector<int> ordered_anchor_idxs;      // anchor token indices in chronological order
+    int cached_len = 0;                        // cached sequence length (turn boundary)
 
     // --- Per-decode-step cached slot selection ---
     std::vector<int32_t> current_step_slots;

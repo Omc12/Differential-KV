@@ -1186,11 +1186,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
     auto & blocks_layer0 = runtime_manager_->get_ingest_manager().get_blocks(0);
     std::vector<int32_t> compressed_slots;
+    std::vector<int> compressed_anchors;
     for (int i = 0; i < (int)blocks_layer0.size(); ++i) {
         if (blocks_layer0[i]->pool_idx != -1 &&
             (blocks_layer0[i]->state == BlockState::CompressedResident ||
              blocks_layer0[i]->state == BlockState::CPUResident)) {
             compressed_slots.push_back(blocks_layer0[i]->pool_idx); // Physical slot ID
+            compressed_anchors.push_back(blocks_layer0[i]->anchor_idx);
         }
     }
     int completed_blocks = compressed_slots.size();
@@ -1218,7 +1220,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             2, // K_temporal
             0.15f, // overlap_threshold
             true, // add_first_as_sink
-            true  // add_last_as_sink
+            true,  // add_last_as_sink
+            &compressed_anchors,
+            cached_len
         );
         session->has_srl_state = true;
 
@@ -1687,11 +1691,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 // Rebuild chunk graph only over compressed slots
                 auto & all_blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
                 std::vector<int32_t> cur_slots;
+                std::vector<int> cur_anchors;
                 for (int i = 0; i < (int)all_blocks.size(); ++i) {
                     if (all_blocks[i]->pool_idx != -1 &&
                         (all_blocks[i]->state == BlockState::CompressedResident ||
                          all_blocks[i]->state == BlockState::CPUResident)) {
                         cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
+                        cur_anchors.push_back(all_blocks[i]->anchor_idx);
                     }
                 }
                 int cur_N = cur_slots.size();
@@ -1712,7 +1718,10 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     cur_N,
                     6, 2,
                     &session->srl_state.inverted_index,
-                    0.15f
+                    0.15f,
+                    &cur_slots,
+                    &cur_anchors,
+                    session->srl_state.cached_len
                 );
             }
             // Sync dense buffers only when block finishes

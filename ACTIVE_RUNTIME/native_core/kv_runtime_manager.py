@@ -842,6 +842,7 @@ class KVRuntimeManager:
                 inv_index=inv_index,
                 overlap_threshold=overlap_threshold,
                 blocks=blocks_layer0,
+                cached_len=cached_len,
             )
 
             # ── 4. Sink blocks (block 0 + special token blocks) ──────────
@@ -901,6 +902,8 @@ class KVRuntimeManager:
                 graph_hop_decay   = graph_hop_decay,
                 srl_age_penalty   = srl_age_penalty,
             )
+            srl_state.ordered_anchor_idxs = [b.anchor_idx for b in blocks_layer0 if getattr(b, "pool_idx", None) is not None and getattr(b, "state", "") == "COMPRESSED"]
+            srl_state.cached_len = cached_len
             srl_state.nothing_found = nothing_found
             srl_state.current_query_tokens = current_query_tokens
             if hasattr(self, "_last_prefill_q") and session_id in self._last_prefill_q:

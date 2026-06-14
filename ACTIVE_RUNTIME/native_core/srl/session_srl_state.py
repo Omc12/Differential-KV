@@ -46,6 +46,9 @@ class SessionSRLState:
     # Rolling window of recently generated token IDs for lexical lookup
     recent_generated_tokens: List[int] = field(default_factory=list)
 
+    ordered_anchor_idxs: List[int] = field(default_factory=list)
+    cached_len: int = 0
+
     # Structured Attention Segmenting (SAS) fields
     segment_ids: Dict[int, int] = field(default_factory=dict)
     current_query_segment_id: int = 0

@@ -716,7 +716,9 @@ SessionSRLState build_srl_state_from_blocks(
     int                            K_temporal         = 2,
     float                          overlap_threshold  = 0.15f,
     bool                           add_first_as_sink  = true,
-    bool                           add_last_as_sink   = true
+    bool                           add_last_as_sink   = true,
+    const std::vector<int>*        block_anchor_idxs  = nullptr,
+    int                            cached_len         = 0
 );
 
 std::string format_routing_stats(const SessionSRLState& state);

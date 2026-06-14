@@ -148,7 +148,8 @@ inline ChunkGraph build_chunk_graph(
     const InvertedTokenIndex*  inv_index          = nullptr,
     float                      overlap_threshold  = 0.15f,
     const std::vector<int32_t>* block_pool_idxs   = nullptr,  // for hierarchical grouping
-    const std::vector<int>*    block_anchor_idxs  = nullptr   // anchor positions (hierarchical)
+    const std::vector<int>*    block_anchor_idxs  = nullptr,  // anchor positions (hierarchical)
+    int                        cached_len         = 0
 ) {
     ChunkGraph g;
     g.N = N;
@@ -277,11 +278,13 @@ inline ChunkGraph build_chunk_graph(
     // ── Handshake Hunting Protocol ──
     std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
     for (int i = 0; i < N; ++i) {
-        int32_t slot_i = slot_ids[i];
+        int anchor_i = (block_anchor_idxs && i < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[i] : 0;
+        bool is_i_new = (cached_len > 0) && (anchor_i >= cached_len);
         
         // Chunks j < i target i (hunt)
         for (int j = 0; j < i; ++j) {
-            int32_t slot_j = slot_ids[j];
+            int anchor_j = (block_anchor_idxs && j < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[j] : 0;
+            bool is_j_new = (cached_len > 0) && (anchor_j >= cached_len);
             
             float sim_score = std::max(0.0f, sim[j * N + i]);
             
@@ -292,15 +295,35 @@ inline ChunkGraph build_chunk_graph(
                 const auto& v_i = vocabs[i];
                 const auto& v_j = vocabs[j];
                 if (!v_i.empty() || !v_j.empty()) {
-                    int overlap_count = 0;
+                    float sum_idf_intersect = 0.0f;
+                    float sum_idf_i = 0.0f;
+                    float sum_idf_j = 0.0f;
+                    
                     for (int tok : v_i) {
-                        if (v_j.count(tok)) overlap_count++;
+                        float idf_val = 1.0f;
+                        auto idf_it = inv_index->idf.find(tok);
+                        if (idf_it != inv_index->idf.end()) {
+                            idf_val = idf_it->second;
+                        }
+                        sum_idf_i += idf_val;
+                        if (v_j.count(tok)) {
+                            sum_idf_intersect += idf_val;
+                        }
                     }
-                    if (!v_i.empty()) {
-                        lex_score_i_to_j = static_cast<float>(overlap_count) / static_cast<float>(v_i.size());
+                    for (int tok : v_j) {
+                        float idf_val = 1.0f;
+                        auto idf_it = inv_index->idf.find(tok);
+                        if (idf_it != inv_index->idf.end()) {
+                            idf_val = idf_it->second;
+                        }
+                        sum_idf_j += idf_val;
                     }
-                    if (!v_j.empty()) {
-                        lex_score_j_to_i = static_cast<float>(overlap_count) / static_cast<float>(v_j.size());
+                    
+                    if (sum_idf_i > 0.0f) {
+                        lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
+                    }
+                    if (sum_idf_j > 0.0f) {
+                        lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
                     }
                 }
             }
@@ -315,8 +338,23 @@ inline ChunkGraph build_chunk_graph(
             bool is_temporal_match = (std::abs(i - j) == 1);
             
             if (is_semantic_match || is_lexical_match || is_temporal_match) {
-                adj[j].push_back({i, weight_j_to_i});
-                adj[i].push_back({j, weight_i_to_j});
+                bool add_i_to_j = true;
+                bool add_j_to_i = true;
+                
+                if (cached_len > 0 && (is_i_new != is_j_new)) {
+                    if (is_i_new) {
+                        add_j_to_i = false; // older j cannot target newer i
+                    } else {
+                        add_i_to_j = false; // older i cannot target newer j
+                    }
+                }
+                
+                if (add_j_to_i) {
+                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
+                }
+                if (add_i_to_j) {
+                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
+                }
             }
         }
     }
@@ -324,6 +362,9 @@ inline ChunkGraph build_chunk_graph(
     // For backwards compatibility and robustness, add top semantic matches
     int k_sem = std::min(K_semantic, N - 1);
     for (int i = 0; i < N; ++i) {
+        int anchor_i = (block_anchor_idxs && i < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[i] : 0;
+        bool is_i_new = (cached_len > 0) && (anchor_i >= cached_len);
+
         std::vector<std::pair<float, int>> sims;
         sims.reserve(N - 1);
         const float* row = sim.data() + i * N;
@@ -336,6 +377,12 @@ inline ChunkGraph build_chunk_graph(
                               [](const auto& a, const auto& b) { return a.first > b.first; });
             for (int t = 0; t < k_sem; ++t) {
                 int j = sims[t].second;
+                int anchor_j = (block_anchor_idxs && j < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[j] : 0;
+                bool is_j_new = (cached_len > 0) && (anchor_j >= cached_len);
+
+                bool allow_i_to_j = (cached_len == 0) || (is_i_new == is_j_new) || (is_i_new && !is_j_new);
+                bool allow_j_to_i = (cached_len == 0) || (is_i_new == is_j_new) || (is_j_new && !is_i_new);
+
                 bool connected = false;
                 for (const auto& p : adj[i]) {
                     if (p.first == j) {
@@ -343,48 +390,72 @@ inline ChunkGraph build_chunk_graph(
                         break;
                     }
                 }
-                if (!connected) {
+                if (allow_i_to_j && !connected) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_i_to_j = 0.0f;
                     if (inv_index && !inv_index->chunk_vocabularies.empty()) {
                         const auto& v_i = vocabs[i];
                         const auto& v_j = vocabs[j];
                         if (!v_i.empty()) {
-                            int overlap = 0;
+                            float sum_idf_intersect = 0.0f;
+                            float sum_idf_i = 0.0f;
                             for (int tok : v_i) {
-                                if (v_j.count(tok)) overlap++;
+                                float idf_val = 1.0f;
+                                auto idf_it = inv_index->idf.find(tok);
+                                if (idf_it != inv_index->idf.end()) {
+                                    idf_val = idf_it->second;
+                                }
+                                sum_idf_i += idf_val;
+                                if (v_j.count(tok)) {
+                                    sum_idf_intersect += idf_val;
+                                }
                             }
-                            lex_score_i_to_j = static_cast<float>(overlap) / static_cast<float>(v_i.size());
+                            if (sum_idf_i > 0.0f) {
+                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i;
+                            }
                         }
                     }
                     float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
                     float weight_i_to_j = 0.5f * sim_score + 0.5f * lex_score_i_to_j + temporal_boost;
                     
-                    adj[i].push_back({j, weight_i_to_j});
-                    
-                    bool reverse_connected = false;
-                    for (const auto& p : adj[j]) {
-                        if (p.first == i) {
-                            reverse_connected = true;
-                            break;
-                        }
+                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
+                }
+                
+                bool reverse_connected = false;
+                for (const auto& p : adj[j]) {
+                    if (p.first == i) {
+                        reverse_connected = true;
+                        break;
                     }
-                    if (!reverse_connected) {
-                        float lex_score_j_to_i = 0.0f;
-                        if (inv_index && !inv_index->chunk_vocabularies.empty()) {
-                            const auto& v_i = vocabs[i];
-                            const auto& v_j = vocabs[j];
-                            if (!v_j.empty()) {
-                                int overlap = 0;
-                                for (int tok : v_i) {
-                                    if (v_j.count(tok)) overlap++;
+                }
+                if (allow_j_to_i && !reverse_connected) {
+                    float sim_score = std::max(0.0f, sim[i * N + j]);
+                    float lex_score_j_to_i = 0.0f;
+                    if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                        const auto& v_i = vocabs[i];
+                        const auto& v_j = vocabs[j];
+                        if (!v_j.empty()) {
+                            float sum_idf_intersect = 0.0f;
+                            float sum_idf_j = 0.0f;
+                            for (int tok : v_j) {
+                                float idf_val = 1.0f;
+                                auto idf_it = inv_index->idf.find(tok);
+                                if (idf_it != inv_index->idf.end()) {
+                                    idf_val = idf_it->second;
                                 }
-                                lex_score_j_to_i = static_cast<float>(overlap) / static_cast<float>(v_j.size());
+                                sum_idf_j += idf_val;
+                                if (v_i.count(tok)) {
+                                    sum_idf_intersect += idf_val;
+                                }
+                            }
+                            if (sum_idf_j > 0.0f) {
+                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j;
                             }
                         }
-                        float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
-                        adj[j].push_back({i, weight_j_to_i});
                     }
+                    float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
+                    float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
+                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
                 }
             }
         }

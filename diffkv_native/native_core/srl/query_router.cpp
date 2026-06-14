@@ -97,8 +97,9 @@ void update_srl_from_compressed_block(
     int                            start_pos,
     const std::unordered_set<int>& stop_tokens
 ) {
-    // 1. Append to ordered slot list and semantic index
+    // 1. Append to ordered slot list, anchor idxs, and semantic index
     state.ordered_slot_ids.push_back(slot_id);
+    state.ordered_anchor_idxs.push_back(start_pos);
     add_block_to_index(state.semantic_index, desc_f32, slot_id);
 
     // 2. Update inverted token index
@@ -137,7 +138,10 @@ void update_srl_from_compressed_block(
             6, // K_semantic
             2, // K_temporal
             &state.inverted_index,
-            0.15f // overlap_threshold
+            0.15f, // overlap_threshold
+            &state.ordered_slot_ids,
+            &state.ordered_anchor_idxs,
+            state.cached_len
         );
     }
 }
@@ -171,10 +175,17 @@ SessionSRLState build_srl_state_from_blocks(
     float  overlap_threshold,
     // Sink blocks: first and last block slots
     bool   add_first_as_sink,
-    bool   add_last_as_sink
+    bool   add_last_as_sink,
+    const std::vector<int>*        block_anchor_idxs,
+    int                            cached_len
 ) {
     SessionSRLState state;
     if (N == 0) return state;
+
+    if (block_anchor_idxs) {
+        state.ordered_anchor_idxs = *block_anchor_idxs;
+    }
+    state.cached_len = cached_len;
 
     // --- Semantic index ---
     state.semantic_index = build_semantic_index(desc_matrix, slot_ids, N);
@@ -211,7 +222,10 @@ SessionSRLState build_srl_state_from_blocks(
         K_semantic,
         K_temporal,
         (token_ids && seq_len > 0) ? &state.inverted_index : nullptr,
-        overlap_threshold);
+        overlap_threshold,
+        &state.ordered_slot_ids,
+        block_anchor_idxs,
+        cached_len);
 
     return state;
 }

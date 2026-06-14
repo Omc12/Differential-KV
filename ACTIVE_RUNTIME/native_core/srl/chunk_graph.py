@@ -111,6 +111,7 @@ def build_chunk_graph(
     inv_index:    Optional["InvertedTokenIndex"] = None,
     overlap_threshold: float = 0.15, # threshold on relative keyword overlap (15%)
     blocks:       Optional[list] = None, # Optional list of KVBlock objects in chronological order
+    cached_len:   int = 0,
 ) -> ChunkGraph:
     """
     Build block-to-block similarity graph.
@@ -231,6 +232,13 @@ def build_chunk_graph(
             else:
                 vocabs.append(set())
 
+    slot_to_anchor = {}
+    if blocks:
+        for b in blocks:
+            p_idx = getattr(b, "pool_idx", None)
+            if p_idx is not None:
+                slot_to_anchor[int(p_idx)] = b.anchor_idx
+
     # ── Handshake Hunting Protocol ──────────────────────────────────────────
     # Simulate sequential/chronological creation of chunks.
     # The newly created ones are targeted by earlier ones (hunting), which
@@ -239,12 +247,18 @@ def build_chunk_graph(
     handshake_neighbors = [[] for _ in range(N)]
     handshake_weights = [[] for _ in range(N)]
 
+    has_idf = (inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf)
+
     for i in range(N):
         slot_i = int(slot_ids[i].item())
+        anchor_i = slot_to_anchor.get(slot_i, 0)
+        is_i_new = (anchor_i >= cached_len) if cached_len > 0 else False
         
         # Earlier chunks j < i are hunting for matching chunks
         for j in range(i):
             slot_j = int(slot_ids[j].item())
+            anchor_j = slot_to_anchor.get(slot_j, 0)
+            is_j_new = (anchor_j >= cached_len) if cached_len > 0 else False
             
             sim_score = max(0.0, float(sim[j, i]))
             
@@ -254,10 +268,22 @@ def build_chunk_graph(
             if vocabs:
                 w_i = vocabs[i]
                 w_j = vocabs[j]
-                if len(w_i) > 0:
-                    lex_score_i_to_j = len(w_i & w_j) / len(w_i)
-                if len(w_j) > 0:
-                    lex_score_j_to_i = len(w_i & w_j) / len(w_j)
+                intersection = w_i & w_j
+                if len(w_i) > 0 or len(w_j) > 0:
+                    if has_idf:
+                        sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
+                        sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
+                        sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
+                        
+                        if sum_idf_i > 0:
+                            lex_score_i_to_j = sum_idf_intersect / sum_idf_i
+                        if sum_idf_j > 0:
+                            lex_score_j_to_i = sum_idf_intersect / sum_idf_j
+                    else:
+                        if len(w_i) > 0:
+                            lex_score_i_to_j = len(intersection) / len(w_i)
+                        if len(w_j) > 0:
+                            lex_score_j_to_i = len(intersection) / len(w_j)
             
             temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
             
@@ -273,11 +299,22 @@ def build_chunk_graph(
             if is_semantic_match or is_lexical_match or is_temporal_match:
                 # Handshake complete:
                 # j targets i (sends request), i returns ID (connects)
-                handshake_neighbors[j].append(i)
-                handshake_weights[j].append(max(1e-5, weight_j_to_i))
+                add_i_to_j = True
+                add_j_to_i = True
                 
-                handshake_neighbors[i].append(j)
-                handshake_weights[i].append(max(1e-5, weight_i_to_j))
+                if cached_len > 0 and (is_i_new != is_j_new):
+                    if is_i_new:
+                        add_j_to_i = False # older j cannot target newer i
+                    else:
+                        add_i_to_j = False # older i cannot target newer j
+                
+                if add_j_to_i:
+                    handshake_neighbors[j].append(i)
+                    handshake_weights[j].append(max(1e-5, weight_j_to_i))
+                
+                if add_i_to_j:
+                    handshake_neighbors[i].append(j)
+                    handshake_weights[i].append(max(1e-5, weight_i_to_j))
 
     # For structural robustness and backwards compatibility, ensure top-k semantic
     # neighbors are also included in the handshake connections.
@@ -289,32 +326,59 @@ def build_chunk_graph(
         sem_list = [[] for _ in range(N)]
 
     for i in range(N):
+        slot_i = int(slot_ids[i].item())
+        anchor_i = slot_to_anchor.get(slot_i, 0)
+        is_i_new = (anchor_i >= cached_len) if cached_len > 0 else False
+
         for j in sem_list[i]:
-            if j not in handshake_neighbors[i]:
+            slot_j = int(slot_ids[j].item())
+            anchor_j = slot_to_anchor.get(slot_j, 0)
+            is_j_new = (anchor_j >= cached_len) if cached_len > 0 else False
+
+            allow_i_to_j = (cached_len == 0) or (is_i_new == is_j_new) or (is_i_new and not is_j_new)
+            allow_j_to_i = (cached_len == 0) or (is_i_new == is_j_new) or (is_j_new and not is_i_new)
+
+            if allow_i_to_j and j not in handshake_neighbors[i]:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_i_to_j = 0.0
                 if vocabs:
                     w_i = vocabs[i]
                     w_j = vocabs[j]
+                    intersection = w_i & w_j
                     if len(w_i) > 0:
-                        lex_score_i_to_j = len(w_i & w_j) / len(w_i)
+                        if has_idf:
+                            sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
+                            sum_idf_i = sum(inv_index.idf.get(t, 1.0) for t in w_i)
+                            if sum_idf_i > 0:
+                                lex_score_i_to_j = sum_idf_intersect / sum_idf_i
+                        else:
+                            lex_score_i_to_j = len(intersection) / len(w_i)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_i_to_j = 0.5 * sim_score + 0.5 * lex_score_i_to_j + temporal_boost
                 
                 handshake_neighbors[i].append(j)
                 handshake_weights[i].append(max(1e-5, weight_i_to_j))
                 
-                if i not in handshake_neighbors[j]:
-                    lex_score_j_to_i = 0.0
-                    if vocabs:
-                        w_i = vocabs[i]
-                        w_j = vocabs[j]
-                        if len(w_j) > 0:
-                            lex_score_j_to_i = len(w_i & w_j) / len(w_j)
-                    weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
-                    
-                    handshake_neighbors[j].append(i)
-                    handshake_weights[j].append(max(1e-5, weight_j_to_i))
+            if allow_j_to_i and i not in handshake_neighbors[j]:
+                sim_score = max(0.0, float(sim[i, j]))
+                lex_score_j_to_i = 0.0
+                if vocabs:
+                    w_i = vocabs[i]
+                    w_j = vocabs[j]
+                    intersection = w_i & w_j
+                    if len(w_j) > 0:
+                        if has_idf:
+                            sum_idf_intersect = sum(inv_index.idf.get(t, 1.0) for t in intersection)
+                            sum_idf_j = sum(inv_index.idf.get(t, 1.0) for t in w_j)
+                            if sum_idf_j > 0:
+                                lex_score_j_to_i = sum_idf_intersect / sum_idf_j
+                        else:
+                            lex_score_j_to_i = len(intersection) / len(w_j)
+                temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
+                weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
+                
+                handshake_neighbors[j].append(i)
+                handshake_weights[j].append(max(1e-5, weight_j_to_i))
 
     # Deduplicate connections per block
     merged_neighbors = []
