@@ -638,7 +638,17 @@ async def run_direct_mode(args):
                         continue
                     srl_state = kv_mgr.get_srl_state(session_id)
                     session_config = getattr(kv_mgr, "session_configs", {}).get(session_id, {})
-                    
+                    # Debug print blocks
+                    try:
+                        blocks = kv_mgr.get_streaming_blocks(session_id, 0)
+                        print(f"DEBUG blocks count: {len(blocks)}")
+                        for idx, b in enumerate(blocks):
+                            print(f"  Block {idx}: anchor={b.anchor_idx}, state={getattr(b, 'state', 'NONE')}, pool_idx={getattr(b, 'pool_idx', 'NONE')}, skip={getattr(b, 'skip_compression', False)}")
+                        print(f"DEBUG token_ids length: {len(kv_mgr._session_token_ids.get(session_id, []))}")
+                        print(f"DEBUG pending_cpu_blocks: {getattr(kv_mgr, '_pending_cpu_blocks', 0)}")
+                    except Exception as de:
+                        print(f"DEBUG block printing error: {de}")
+
                     print(f"\n{COLOR_BOLD}=== SRL SESSION STATS ==={COLOR_RESET}")
                     print(f"Session ID:   {session_id}")
                     print(f"SRL Enabled:  {session_config.get('srl_enabled', True)}")

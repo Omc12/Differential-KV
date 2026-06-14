@@ -486,7 +486,7 @@ inline ChunkGraph build_chunk_graph(
                     }
                 }
 
-                if (allow_i_to_j && !connected) {
+                if (allow_i_to_j && !connected && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_i_to_j = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
@@ -524,7 +524,7 @@ inline ChunkGraph build_chunk_graph(
                         break;
                     }
                 }
-                if (allow_j_to_i && !reverse_connected) {
+                if (allow_j_to_i && !reverse_connected && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_j_to_i = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {

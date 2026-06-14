@@ -396,7 +396,7 @@ def build_chunk_graph(
                     if not has_cross_ref:
                         is_excluded = True
 
-            if allow_i_to_j and j not in handshake_neighbors[i]:
+            if allow_i_to_j and j not in handshake_neighbors[i] and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_i_to_j = 0.0
                 if not is_excluded and vocabs:
@@ -418,7 +418,7 @@ def build_chunk_graph(
                 handshake_neighbors[i].append(j)
                 handshake_weights[i].append(max(1e-5, weight_i_to_j))
                 
-            if allow_j_to_i and i not in handshake_neighbors[j]:
+            if allow_j_to_i and i not in handshake_neighbors[j] and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_j_to_i = 0.0
                 if not is_excluded and vocabs:

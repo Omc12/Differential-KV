@@ -316,7 +316,7 @@ def route_query(
                 top_center_idx = torch.topk(scores_centers, k=1, largest=True, sorted=True).indices
                 selected_centers = centers.to(top_center_idx.device)[top_center_idx].tolist()
             else:
-                selected_centers = centers[active_indices].tolist()
+                selected_centers = centers[active_indices.to(centers.device)].tolist()
 
             # Map matched lexical_slots and rare_lex_slots to parent landmark IDs (prime nodes)
             lexical_parents = []

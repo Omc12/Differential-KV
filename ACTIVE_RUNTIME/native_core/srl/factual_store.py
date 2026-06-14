@@ -175,6 +175,7 @@ class FactualExactStore:
                     
                     # Average K over heads
                     K_avg = K_layer[0].mean(dim=0).float() # [total_seq_len, head_dim]
+                    K_avg = K_avg[:total_seq_len] # Align sequence dimension
                     
                     # Move to GPU/MPS for speed if available
                     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -203,6 +204,7 @@ class FactualExactStore:
                 first_layer = layers[0]
                 K_layer, _ = prefill_kv[first_layer]
                 key_norms = K_layer[0].mean(dim=0).float().norm(dim=-1).cpu()
+                key_norms = key_norms[:total_seq_len] # Align sequence dimension
             except Exception:
                 pass
                 

@@ -1209,7 +1209,7 @@ try:
 except ImportError:
     _HAS_MLX = False
 
-if sys.platform == "darwin" and _HAS_MLX:
+if sys.platform == "darwin" and _HAS_MLX and os.environ.get("DIFFKV_FORCE_PYTORCH") != "1":
     try:
         from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper as DiffKVHFWrapper
         print("[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.")
