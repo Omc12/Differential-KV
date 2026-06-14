@@ -498,12 +498,24 @@ class KVRuntimeManager:
 
         from runtime.native_block_pool import NativeBlockPool
 
-        # pool_rank MUST equal self.rank exactly — it determines the physical shape of
-        # U [int8: pool_block_size × pool_rank] and V_K/V_V [fp16: pool_rank × kv_heads × head_dim]
-        # in the NativeBlockPool. Using max(64, rank) was silently 2–4× over-allocating
-        # when rank=8 or rank=16. The sparse kernel handles variable k-rank blocks via
-        # min(U.shape[1], pool_rank) guards — no minimum needed here.
-        pool_rank = self.rank
+        # pool_rank MUST support the maximum rank used by any layer (which might be boosted
+        # up to 2× self.rank via early_layer_rank_boost in early layers).
+        _cfg = getattr(self, "config", None)
+        _early_boost = getattr(_cfg, "early_layer_rank_boost", False)
+        _max_rank_early = getattr(_cfg, "max_rank_early", 0)
+        if not _early_boost:
+            _early_boost = os.environ.get("DIFFKV_EARLY_LAYER_RANK_BOOST", "0") == "1"
+        if _max_rank_early == 0:
+            try:
+                _max_rank_early = int(os.environ.get("DIFFKV_MAX_RANK_EARLY", "0"))
+            except ValueError:
+                _max_rank_early = 0
+
+        max_possible_rank = max(
+            get_layer_rank(l, self.num_layers, self.rank, early_boost=_early_boost, max_rank_early=_max_rank_early)
+            for l in range(self.num_layers)
+        )
+        pool_rank = max_possible_rank
         # Pool max_seq_len = micro_block_size (default varies by context length).
         pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
         # Ensure pool_block_size can hold the maximum adaptive prefill block size (MBS + 1 anchor)

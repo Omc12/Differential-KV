@@ -706,6 +706,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # layer-0 anchor with layer-N raw_q is semantically incorrect).
                                     raw_q = unrot_query_states[b_idx, :, 0, :]  # [H, D]
                                     if srl_state is not None:
+                                        srl_state.current_step_factual_tokens = set()
+                                        srl_state.current_step_factual_sequences = []
+                                        srl_state.current_step_max_similarity = 0.0
+                                        srl_state.current_step_sequence_entity_ids = []
+                                        srl_state.current_step_sequence_is_prime = []
+                                        srl_state.current_step_sequence_prefixes = []
                                         if srl_state.factual_anchor_q is None:
                                             srl_state.factual_anchor_q = raw_q.detach().clone()
 

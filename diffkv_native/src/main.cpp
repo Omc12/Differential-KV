@@ -2367,7 +2367,9 @@ int main(int argc, char ** argv) {
             //   from their first token and advance in order, fixing entity binding failure.
             if (sfa_active && !srl_state.current_step_factual_sequences.empty()) {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
-                auto allowed = diffkv::get_allowed_tokens_vsl_cpp(srl_state, helper_ids);
+                const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(model);
+                auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
+                    srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
                 float max_sim = srl_state.current_step_max_similarity;
                 for (int i = 0; i < n_vocab; ++i) {
                     if (allowed.count(i) == 0) {
@@ -2439,9 +2441,19 @@ int main(int argc, char ** argv) {
             bool stop_generation = false;
             if (srl_state.current_step_max_similarity >= 0.4f) {
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
-                    if (seq.size() >= 5 && next_token == seq.back()) {
-                        stop_generation = true;
-                        break;
+                    if (seq.size() >= 5 && next_token == seq.back() && generated_tokens.size() >= seq.size() - 1) {
+                        bool match = true;
+                        size_t offset = generated_tokens.size() - (seq.size() - 1);
+                        for (size_t k = 0; k < seq.size() - 1; ++k) {
+                            if (generated_tokens[offset + k] != seq[k]) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match) {
+                            stop_generation = true;
+                            break;
+                        }
                     }
                 }
             }

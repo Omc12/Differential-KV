@@ -2,6 +2,7 @@ import asyncio
 import gc
 import os
 import re
+import sys
 import time
 import threading
 import torch
@@ -993,7 +994,7 @@ class ContinuousBatchEngine:
 
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     dur_pref = (time.perf_counter() - t0_pref) * 1000
-                    print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms")
+                    print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms", file=sys.stderr)
                     if hasattr(self.wrapper.manager, "log_block_states"):
                         self.wrapper.manager.log_block_states(req.session_id)
 
@@ -1036,23 +1037,23 @@ class ContinuousBatchEngine:
                                 print(f"[DiffKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
                                       f"({n_current} blocks, built at {n_at_build}, growth={growth_ratio:.0%}). "
                                       f"Skipping compression barrier and SRL rebuild. "
-                                      f"(saved ~{n_current * 28 // 1000:.1f}k SVD ops)")
+                                      f"(saved ~{n_current * 28 // 1000:.1f}k SVD ops)", file=sys.stderr)
                                 return  # ← decode starts immediately, no wait
                             else:
                                 # ≥ 20% growth — rebuild needed for accurate routing
                                 print(f"[DiffKV BatchEngine] Turn 2+: SRL index stale for session {_sid} "
                                       f"({n_current} blocks vs {n_at_build} at build, growth={growth_ratio:.0%}). "
-                                      f"Triggering incremental SRL rebuild.")
+                                      f"Triggering incremental SRL rebuild.", file=sys.stderr)
 
                     # ── First turn: wait for compression then build SRL ──────────────
-                    print(f"[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...")
+                    print(f"[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...", file=sys.stderr)
                     _t_barrier_start = time.perf_counter()
                     # 1. Wait for SVD compression to finish (async — yields to event loop)
                     await self._wait_for_compression(_sid)
                     if _draft_mgr is not None:
                         await self._wait_for_compression(_sid + "_draft")
                     _t_barrier_end = time.perf_counter()
-                    print(f"[DiffKV BatchEngine] Compression barrier done in {(_t_barrier_end - _t_barrier_start)*1000:.1f}ms")
+                    print(f"[DiffKV BatchEngine] Compression barrier done in {(_t_barrier_end - _t_barrier_start)*1000:.1f}ms", file=sys.stderr)
 
                     # 2. Build SRL index in a thread so the event loop stays live
                     def _do_finalize():
@@ -1065,7 +1066,7 @@ class ContinuousBatchEngine:
                         await _loop.run_in_executor(None, _do_finalize)
                         _t_finalize_end = time.perf_counter()
                         print(f"[DiffKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
-                              f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms")
+                              f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms", file=sys.stderr)
 
                         # ── Pre-warm SRL routing for the first decode step ──
                         srl_state = _mgr.get_srl_state(_sid)
@@ -1092,10 +1093,10 @@ class ContinuousBatchEngine:
                                 srl_state.current_step_count = 0
                                 if os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                                     print(f"[SRL Pre-warm] Pre-warmed routing for session {_sid}: "
-                                          f"selected {selected_slots.numel()}/{srl_state.n_active_blocks()} blocks")
+                                          f"selected {selected_slots.numel()}/{srl_state.n_active_blocks()} blocks", file=sys.stderr)
 
                     except Exception as _e:
-                        print(f"[DiffKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}")
+                        print(f"[DiffKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}", file=sys.stderr)
                         import traceback
                         traceback.print_exc()
                         pass  # SRL index failure is non-fatal; decode continues without routing
@@ -1263,7 +1264,7 @@ class ContinuousBatchEngine:
                 dur_dec = (time.perf_counter() - t0_dec) * 1000
                 graph_tag = " [graph]" if _ran_graph else " [eager]"
                 print(f"[DiffKV Telemetry] Decode Step batch={actual_batch_size} "
-                      f"bucket={bucket_size} dur={dur_dec:.2f}ms{graph_tag}")
+                      f"bucket={bucket_size} dur={dur_dec:.2f}ms{graph_tag}", file=sys.stderr)
 
 
 
@@ -1513,9 +1514,10 @@ class ContinuousBatchEngine:
         if not is_eos and srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
             if getattr(srl_state, "current_step_factual_sequences", None):
                 for seq in srl_state.current_step_factual_sequences:
-                    if len(seq) >= 5 and token_id == seq[-1]:
-                        is_eos = True
-                        break
+                    if len(seq) >= 5 and len(req.generated_ids) >= len(seq):
+                        if req.generated_ids[-len(seq):] == list(seq):
+                            is_eos = True
+                            break
 
         is_max = (len(req.generated_ids) >= req.max_tokens)
 
@@ -1531,7 +1533,8 @@ class ContinuousBatchEngine:
                 print(
                     f"[DiffKV] WARNING: repetition loop detected for session "
                     f"{req.session_id} at token {len(req.generated_ids)}. "
-                    "Escalating penalty window to 256 tokens and strength to 1.3x."
+                    "Escalating penalty window to 256 tokens and strength to 1.3x.",
+                    file=sys.stderr
                 )
 
         # If a loop persists for more than 40 tokens after detection, terminate early.
@@ -1545,7 +1548,8 @@ class ContinuousBatchEngine:
                 # Force stop: the loop has not resolved in 40 tokens.
                 print(
                     f"[DiffKV] WARNING: repetition loop for session {req.session_id} "
-                    f"persisted for 40 tokens after detection — forcing EOS."
+                    f"persisted for 40 tokens after detection — forcing EOS.",
+                    file=sys.stderr
                 )
                 is_eos = True
 

@@ -15,6 +15,7 @@ Mac/MPS: device is auto-detected (CUDA → MPS → CPU).
 import torch
 import torch.nn as nn
 import re
+import sys
 from collections import Counter
 from typing import Optional, List, Tuple, Any, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -879,7 +880,8 @@ class PyTorchDiffKVHFWrapper:
                         self._hf_loop_idx = _n_new
                         print(
                             f"[DiffKV HF] WARNING: repetition loop detected at token "
-                            f"{_n_new}. Escalating penalty window to 256 tokens and strength to 1.3x."
+                            f"{_n_new}. Escalating penalty window to 256 tokens and strength to 1.3x.",
+                            file=sys.stderr
                         )
 
             if _loop_detected:
@@ -888,7 +890,8 @@ class PyTorchDiffKVHFWrapper:
                 elif _n_new - _loop_idx >= 40:
                     print(
                         "[DiffKV HF] WARNING: repetition loop persisted for 40 tokens "
-                        "after detection — forcing EOS."
+                        "after detection — forcing EOS.",
+                        file=sys.stderr
                     )
                     break
 
@@ -990,15 +993,16 @@ class PyTorchDiffKVHFWrapper:
 
             # Apply Dynamic Temperature Scaling (Option 1)
             effective_temperature = temperature
-            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3:
+            if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.55:
                 max_sim = srl_state.current_step_max_similarity
                 effective_temperature = temperature * (1.0 - max_sim * 0.95)
 
-            # SFA threshold lowered 0.4→0.3 to match factual-query threshold: SFA
-            # now activates for ANY confirmed factual match, not just high-sim ones.
+            # SFA threshold aligned to 0.55: at 0.3 almost every topical entry matches,
+            # activating the VSL and forcing generation from a mixed-category token set.
+            # At 0.55 only high-confidence, specific retrieval triggers the constraint.
             sfa_active = (
                 srl_state is not None
-                and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.3
+                and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.55
                 and bool(getattr(srl_state, "current_step_factual_sequences", None))
             )
 
@@ -1050,9 +1054,10 @@ class PyTorchDiffKVHFWrapper:
             if srl_state is not None and getattr(srl_state, "current_step_max_similarity", 0.0) >= 0.5:
                 if getattr(srl_state, "current_step_factual_sequences", None):
                     for seq in srl_state.current_step_factual_sequences:
-                        if len(seq) >= 5 and next_id.item() == seq[-1]:
-                            stop_generation = True
-                            break
+                        if len(seq) >= 5 and len(generated) >= len(seq):
+                            if generated[-len(seq):] == list(seq):
+                                stop_generation = True
+                                break
             if stop_generation:
                 break
 

@@ -1570,9 +1570,19 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         bool stop_generation = false;
         if (session->srl_state.current_step_max_similarity >= 0.5f) {
             for (const auto& seq : session->srl_state.current_step_factual_sequences) {
-                if (seq.size() >= 5 && next_token == seq.back()) {
-                    stop_generation = true;
-                    break;
+                if (seq.size() >= 5 && next_token == seq.back() && req->generated_tokens.size() >= seq.size() - 1) {
+                    bool match = true;
+                    size_t offset = req->generated_tokens.size() - (seq.size() - 1);
+                    for (size_t k = 0; k < seq.size() - 1; ++k) {
+                        if (req->generated_tokens[offset + k] != seq[k]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        stop_generation = true;
+                        break;
+                    }
                 }
             }
         }
@@ -1762,7 +1772,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 if (total_ngrams > 0 && (float)max_count / total_ngrams >= 0.35f) {
                     req->repetition_loop_detected = true;
                     req->loop_detection_idx = n_new;
-                    std::cout << "[DiffKV C++] WARNING: repetition loop detected for session "
+                    std::cerr << "[DiffKV C++] WARNING: repetition loop detected for session "
                               << req->session_id << " at token " << n_new
                               << ". Escalating penalty window to 256 tokens and strength to 1.3x." << std::endl;
                 }
@@ -1771,7 +1781,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         
         // If a loop persists for more than 40 tokens after detection, terminate early.
         if (req->repetition_loop_detected && n_new - req->loop_detection_idx >= 40) {
-            std::cout << "[DiffKV C++] WARNING: repetition loop for session " << req->session_id
+            std::cerr << "[DiffKV C++] WARNING: repetition loop for session " << req->session_id
                       << " persisted for 40 tokens after detection — forcing EOS." << std::endl;
             break;
         }

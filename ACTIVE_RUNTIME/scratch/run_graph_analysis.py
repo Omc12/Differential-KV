@@ -188,11 +188,14 @@ def serialize_srl_graph(wrapper, session_id):
     # Prime neighbors (inter-cluster)
     prime_neighbors = srl_state.chunk_graph.prime_neighbors
     prime_weights = srl_state.chunk_graph.prime_weights
+    slot_set = set(slot_ids)
     if prime_neighbors is not None:
         for slot in range(prime_neighbors.shape[0]):
+            if slot not in slot_set:
+                continue
             for k in range(prime_neighbors.shape[1]):
                 target_slot = int(prime_neighbors[slot, k].item())
-                if target_slot != -1:
+                if target_slot != -1 and target_slot in slot_set:
                     weight = float(prime_weights[slot, k].item()) if prime_weights is not None else 1.0
                     links.append({
                         "source": int(slot),
@@ -204,8 +207,10 @@ def serialize_srl_graph(wrapper, session_id):
     # Parent-child links
     if srl_state.chunk_graph.slot_to_parent_tensor is not None:
         for child_slot in range(srl_state.chunk_graph.slot_to_parent_tensor.shape[0]):
+            if child_slot not in slot_set:
+                continue
             parent_slot = int(srl_state.chunk_graph.slot_to_parent_tensor[child_slot].item())
-            if parent_slot != -1:
+            if parent_slot != -1 and parent_slot in slot_set:
                 links.append({
                     "source": int(parent_slot),
                     "target": int(child_slot),
