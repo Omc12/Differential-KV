@@ -711,29 +711,31 @@ def fused_decode_mps(
     # ── Solution 3: Fact Anchor overrides for Key ──
     fact_pos = getattr(pool, "fact_anchor_positions", None)
     fact_anc_K_pool = getattr(pool, "fact_anchors_K", None)
-    if fact_pos is not None and fact_anc_K_pool is not None:
+    if fact_pos is not None and fact_anc_K_pool is not None and N > 0:
         fact_pos_idx = fact_pos[idx]  # [N, 3]
         fact_anc_K_idx = fact_anc_K_pool[idx].float()  # [N, 3, num_kv_heads, D]
-        for i in range(N):
-            for j in range(3):
-                pos_val = int(fact_pos_idx[i, j].item())
-                if pos_val >= 0:
-                    K_raw = fact_anc_K_idx[i, j]
-                    K_exact = K_raw.repeat_interleave(gpk, dim=0)
-                    
-                    has_rope = (anchor_indices is not None and cos is not None and sin is not None)
-                    if has_rope:
-                        cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-                        sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                        abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
-                        abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
-                        
-                        cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
-                        sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
-                        K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
-                    
-                    score_exact = torch.sum(q * K_exact, dim=-1) * scale
-                    delta_s[:, i, pos_val] = score_exact
+        mask = (fact_pos_idx >= 0)  # [N, 3]
+        if mask.any():
+            K_exact = fact_anc_K_idx.repeat_interleave(gpk, dim=2)  # [N, 3, H_q, D]
+            has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+            if has_rope:
+                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                abs_pos = anchor_indices.unsqueeze(1) + 1 + fact_pos_idx
+                abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1).long()  # [N, 3]
+                cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
+                sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
+                K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+            score_exact = torch.sum(q.view(1, 1, H_q, D) * K_exact, dim=-1) * scale
+            score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
+            fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
+            fact_pos_idx_clamped_expanded = fact_pos_idx_clamped.unsqueeze(0).expand(H_q, -1, -1)  # [H_q, N, 3]
+            mask_expanded = mask.unsqueeze(0).expand(H_q, -1, -1)  # [H_q, N, 3]
+            delta_s_updates = torch.zeros_like(delta_s)
+            delta_s_updates.scatter_(dim=2, index=fact_pos_idx_clamped_expanded, src=score_exact)
+            update_mask = torch.zeros_like(delta_s, dtype=torch.bool)
+            update_mask.scatter_(dim=2, index=fact_pos_idx_clamped_expanded, src=mask_expanded)
+            delta_s = torch.where(update_mask, delta_s_updates, delta_s)
 
 
     if blk_sizes is not None:
@@ -785,23 +787,27 @@ def fused_decode_mps(
     # ── Solution 3: Fact Anchor overrides for Value ──
     fact_pos = getattr(pool, "fact_anchor_positions", None)
     fact_anc_V_pool = getattr(pool, "fact_anchors_V", None)
-    if fact_pos is not None and fact_anc_V_pool is not None:
+    if fact_pos is not None and fact_anc_V_pool is not None and N > 0:
         fact_pos_idx = fact_pos[idx]  # [N, 3]
         fact_anc_V_idx = fact_anc_V_pool[idx].float()  # [N, 3, num_kv_heads, D]
-        for i in range(N):
-            for j in range(3):
-                pos_val = int(fact_pos_idx[i, j].item())
-                if pos_val >= 0:
-                    V_exact_raw = fact_anc_V_idx[i, j]
-                    V_exact = V_exact_raw.repeat_interleave(gpk, dim=0)
-                    
-                    u_val = U_a[i, pos_val]  # [R]
-                    vv_i = VV_e[i]  # [H_q, R, D]
-                    v_svd = torch.sum(u_val.view(1, -1, 1) * vv_i, dim=1) * pool.scales[idx[i]].item() + AncV_e[i] # [H_q, D]
-                    
-                    v_diff = V_exact - v_svd
-                    w_pos = w_d[:, i, pos_val].unsqueeze(-1) # [H_q, 1]
-                    O = O + (w_pos * v_diff)
+        mask = (fact_pos_idx >= 0)  # [N, 3]
+        if mask.any():
+            V_exact = fact_anc_V_idx.repeat_interleave(gpk, dim=2)  # [N, 3, H_q, D]
+            fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
+            R = U_a.shape[2]
+            u_val = torch.gather(U_a, dim=1, index=fact_pos_idx_clamped.unsqueeze(-1).expand(-1, -1, R))
+            v_svd_sum = torch.sum(u_val.unsqueeze(1).unsqueeze(-1) * VV_e.unsqueeze(2), dim=3)  # [N, H_q, 3, D]
+            scales_idx = pool.scales[idx].float()
+            v_svd = v_svd_sum * scales_idx.view(N, 1, 1, 1) + AncV_e.unsqueeze(2)  # [N, H_q, 3, D]
+            v_svd = v_svd.permute(0, 2, 1, 3)  # [N, 3, H_q, D]
+            v_diff = V_exact - v_svd  # [N, 3, H_q, D]
+            w_d_perm = w_d.permute(1, 2, 0)  # [N, S_comp, H_q]
+            w_pos = torch.gather(w_d_perm, dim=1, index=fact_pos_idx_clamped.unsqueeze(-1).expand(-1, -1, H_q))  # [N, 3, H_q]
+            w_pos = w_pos.unsqueeze(-1)  # [N, 3, H_q, 1]
+            update_term = w_pos * v_diff  # [N, 3, H_q, D]
+            mask_expanded = mask.unsqueeze(-1).unsqueeze(-1)  # [N, 3, 1, 1]
+            update_term = update_term.masked_fill(~mask_expanded, 0.0)
+            O = O + torch.sum(update_term, dim=(0, 1))
 
 
     if torch.isnan(O).any() or torch.isinf(O).any() or torch.isnan(lse).any():
@@ -1055,28 +1061,29 @@ def _pytorch_vectorized_sparse_attn_decode(
         if fact_pos is not None and fact_anc_K_pool is not None and N > 0:
             fact_pos_idx = fact_pos[indices]  # [N, 3]
             fact_anc_K_idx = fact_anc_K_pool[indices].float()  # [N, 3, num_kv_heads, D]
-            for i in range(N):
-                for j in range(3):
-                    pos_val = int(fact_pos_idx[i, j].item())
-                    if pos_val >= 0:
-                        K_raw = fact_anc_K_idx[i, j]
-                        K_exact = K_raw.repeat_interleave(num_key_value_groups, dim=0)
-                        
-                        has_rope = (anchor_indices is not None and cos is not None and sin is not None)
-                        if has_rope:
-                            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-                            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                            abs_pos = int(anchor_indices[i].item()) + 1 + pos_val
-                            abs_pos_clamped = min(max(0, abs_pos), cos_flat.shape[0] - 1)
-                            
-                            cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
-                            sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(0)
-                            K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
-                        
-                        score_exact = torch.sum(q_sq_fp32 * K_exact, dim=-1) * inv_scale
-                        scores_block[:, i, pos_val] = score_exact
+            mask = (fact_pos_idx >= 0)  # [N, 3]
+            if mask.any():
+                K_exact = fact_anc_K_idx.repeat_interleave(num_key_value_groups, dim=2)  # [N, 3, H_q, D]
+                has_rope = (anchor_indices is not None and cos is not None and sin is not None)
+                if has_rope:
+                    cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+                    sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+                    abs_pos = anchor_indices.unsqueeze(1) + 1 + fact_pos_idx
+                    abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1).long()  # [N, 3]
+                    cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
+                    sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
+                    K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+                score_exact = torch.sum(q_sq_fp32.view(1, 1, H_q, D) * K_exact, dim=-1) * inv_scale  # [N, 3, H_q]
+                score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
+                fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
+                fact_pos_idx_clamped_expanded = fact_pos_idx_clamped.unsqueeze(0).expand(H_q, -1, -1)  # [H_q, N, 3]
+                mask_expanded = mask.unsqueeze(0).expand(H_q, -1, -1)  # [H_q, N, 3]
+                scores_block_updates = torch.zeros_like(scores_block)
+                scores_block_updates.scatter_(dim=2, index=fact_pos_idx_clamped_expanded, src=score_exact)
+                update_mask = torch.zeros_like(scores_block, dtype=torch.bool)
+                update_mask.scatter_(dim=2, index=fact_pos_idx_clamped_expanded, src=mask_expanded)
+                scores_block = torch.where(update_mask, scores_block_updates, scores_block)
 
-        
         # Mask out-of-bounds tokens
         s_range = torch.arange(block_capacity, device=q.device).view(1, 1, -1)
         valid_mask = s_range < seq_lens_t.view(1, N, 1)
@@ -1187,22 +1194,22 @@ def _pytorch_vectorized_sparse_attn_decode(
     if fact_pos is not None and fact_anc_V_pool is not None and N > 0:
         fact_pos_idx = fact_pos[indices]
         fact_anc_V_idx = fact_anc_V_pool[indices].float()
-        P_comp_reshaped = P_comp.view(H_q, N, block_capacity) # [H_q, N, block_capacity]
-        for i in range(N):
-            for j in range(3):
-                pos_val = int(fact_pos_idx[i, j].item())
-                if pos_val >= 0:
-                    V_exact_raw = fact_anc_V_idx[i, j]
-                    V_exact = V_exact_raw.repeat_interleave(num_key_value_groups, dim=0)
-                    
-                    u_val = U[i, pos_val].float()
-                    v_svd = torch.zeros((H_q, D), device=q.device, dtype=torch.float32)
-                    for h in range(H_q):
-                        v_svd[h] = torch.sum(u_val.unsqueeze(1) * V_V[i, :, h, :].float(), dim=0) * scales[i].item() + anchors_V[i, h].float()
-                    
-                    v_diff = V_exact - v_svd
-                    w_pos = P_comp_reshaped[:, i, pos_val].unsqueeze(-1) # [H_q, 1]
-                    O_final = O_final + (w_pos * v_diff).to(O_final.dtype)
+        mask = (fact_pos_idx >= 0)  # [N, 3]
+        if mask.any():
+            V_exact = fact_anc_V_idx.repeat_interleave(num_key_value_groups, dim=2)  # [N, 3, H_q, D]
+            fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
+            R = U.shape[2]
+            u_val = torch.gather(U, dim=1, index=fact_pos_idx_clamped.unsqueeze(-1).expand(-1, -1, R))  # [N, 3, R]
+            v_svd_sum = torch.sum(u_val.unsqueeze(1).unsqueeze(-1) * V_V.permute(0, 2, 1, 3).unsqueeze(2), dim=3)  # [N, H_q, 3, D]
+            v_svd = v_svd_sum * scales.view(N, 1, 1, 1) + anchors_V.unsqueeze(2)  # [N, H_q, 3, D]
+            v_svd = v_svd.permute(0, 2, 1, 3)  # [N, 3, H_q, D]
+            v_diff = V_exact - v_svd  # [N, 3, H_q, D]
+            w_pos = torch.gather(P_comp_reshaped.permute(1, 2, 0), dim=1, index=fact_pos_idx_clamped.unsqueeze(-1).expand(-1, -1, H_q))  # [N, 3, H_q]
+            w_pos = w_pos.unsqueeze(-1)  # [N, 3, H_q, 1]
+            update_term = w_pos * v_diff  # [N, 3, H_q, D]
+            mask_expanded = mask.unsqueeze(-1).unsqueeze(-1)  # [N, 3, 1, 1]
+            update_term = update_term.masked_fill(~mask_expanded, 0.0)
+            O_final = O_final + torch.sum(update_term, dim=(0, 1)).to(O_final.dtype)
 
 
     return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)

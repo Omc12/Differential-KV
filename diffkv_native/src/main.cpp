@@ -1975,6 +1975,7 @@ int main(int argc, char ** argv) {
                 runtime_manager.get_micro_block_size() + 1,
                 srl_state.inverted_index,
                 prime_slots,
+                get_helper_token_ids_cpp(model),
                 true // use_salience_parser
             );
             srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids, [&](int32_t tid) {

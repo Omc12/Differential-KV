@@ -266,13 +266,17 @@ class FactualExactStore:
             # Select the top 5% most salient tokens (precision mode: max 300 tokens)
             # 50% was selecting half the document — far too broad for exact grounding.
             # 5% keeps only the rarest, most distinctive content words per document.
-            k_num = max(8, int(total_seq_len * 0.05))
+            k_num = max(8, int(total_seq_len * 0.08))
             k_num = min(k_num, 300)  # absolute cap regardless of document length
             k_num = min(k_num, total_seq_len)
             
             if total_seq_len > 0:
                 threshold_val = float(torch.topk(total_salience, k=k_num).values[-1].item())
                 factual_mask = total_salience >= threshold_val
+                # Ensure all rare technical words (IDF >= 3.0) are preserved in the mask
+                for i_t in range(total_seq_len):
+                    if idf_vals[i_t] >= 3.0:
+                        factual_mask[i_t] = True
 
             # 5b. Relational Context Window Expansion — each salient seed token
             # is expanded into a ±3-token window so the factual span captures
@@ -423,8 +427,18 @@ class FactualExactStore:
                     is_prime = True
             if not is_prime:
                 max_idf = 0.0
-                if inv_index is not None and hasattr(inv_index, "idf"):
-                    max_idf = max([inv_index.idf.get(t, 1.0) for t in span_tokens]) if span_tokens else 0.0
+                if inv_index is not None and hasattr(inv_index, "idf") and span_tokens:
+                    from native_core.srl.factual_alignment import get_helper_token_ids
+                    _tokenizer = getattr(inv_index, "_tokenizer_ref", None)
+                    helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
+                    non_helper_tokens = [
+                        t for t in span_tokens 
+                        if (t not in helper_ids) and (not stop_token_ids or t not in stop_token_ids)
+                    ]
+                    if non_helper_tokens:
+                        max_idf = max([inv_index.idf.get(t, 1.0) for t in non_helper_tokens])
+                    else:
+                        max_idf = 0.0
                 # Eagle lookback score for this span (available when salience parser ran)
                 have_eagle = (
                     hasattr(self, "eagle_scores")
@@ -482,8 +496,14 @@ class FactualExactStore:
                             pass
 
                 best_tok, best_idf = None, -1.0
+                from native_core.srl.factual_alignment import get_helper_token_ids
+                _tokenizer = getattr(inv_index, "_tokenizer_ref", None)
+                helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
+
                 for t in span_tokens:
                     if stop_token_ids and t in stop_token_ids:
+                        continue
+                    if helper_ids and t in helper_ids:
                         continue
                     if t in _dist_exclude:
                         continue
@@ -491,6 +511,17 @@ class FactualExactStore:
                     if t_idf > best_idf:
                         best_idf = t_idf
                         best_tok = t
+                if best_tok is None:
+                    # Fallback: relax helper_ids filter, keep stop words/punctuation excluded
+                    for t in span_tokens:
+                        if stop_token_ids and t in stop_token_ids:
+                            continue
+                        if t in _dist_exclude:
+                            continue
+                        t_idf = inv_index.idf.get(t, 1.0)
+                        if t_idf > best_idf:
+                            best_idf = t_idf
+                            best_tok = t
                 if best_tok is None:
                     # Fallback: relax exclusion filter (keep stop-token exclusion)
                     for t in span_tokens:

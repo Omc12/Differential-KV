@@ -23,6 +23,7 @@ void FactualExactStore::build(
     int block_size,
     const InvertedTokenIndex& inv_index,
     const std::unordered_set<int32_t>& semantic_prime_slots,
+    const std::unordered_set<int32_t>& helper_token_ids,
     bool use_salience_parser
 ) {
     clear();
@@ -158,7 +159,7 @@ void FactualExactStore::build(
         // Select the top 5% most salient tokens (precision mode: max 300 tokens)
         // 50% was selecting half the document — far too broad for exact grounding.
         // 5% keeps only the rarest, most distinctive content words per document.
-        int k_num = std::max(8, (int)(L * 0.05f));
+        int k_num = std::max(8, (int)(L * 0.08f));
         k_num = std::min(k_num, 300);  // absolute cap regardless of document length
         k_num = std::min(k_num, L);
 
@@ -167,7 +168,7 @@ void FactualExactStore::build(
             std::nth_element(sorted_salience.begin(), sorted_salience.end() - k_num, sorted_salience.end());
             float threshold_val = sorted_salience[L - k_num];
             for (int t = 0; t < L; ++t) {
-                factual_mask[t] = (total_salience[t] >= threshold_val);
+                factual_mask[t] = (total_salience[t] >= threshold_val) || (idf_vals[t] >= 3.0f);
             }
         }
 
@@ -372,7 +373,10 @@ void FactualExactStore::build(
         }
         if (!is_prime) {
             float max_idf = 0.0f;
-            for (int t : entry.tokens) {
+            for (int32_t t : entry.tokens) {
+                if (stop_token_ids.count(t) || helper_token_ids.count(t)) {
+                    continue;
+                }
                 auto it = inv_index.idf.find(t);
                 float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
                 if (idf > max_idf) max_idf = idf;
@@ -412,11 +416,39 @@ void FactualExactStore::build(
             int32_t best_tok = -1;
             float best_idf = 0.0f;
             for (int32_t t : entry.tokens) {
+                if (stop_token_ids.count(t) || helper_token_ids.count(t)) {
+                    continue;
+                }
                 auto it = inv_index.idf.find(t);
                 float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
                 if (idf >= 3.0f && idf > best_idf) {
                     best_idf = idf;
                     best_tok = t;
+                }
+            }
+            if (best_tok == -1) {
+                // Fallback: relax helper_token_ids filter, keep stop words excluded
+                for (int32_t t : entry.tokens) {
+                    if (stop_token_ids.count(t)) {
+                        continue;
+                    }
+                    auto it = inv_index.idf.find(t);
+                    float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
+                    if (idf > best_idf) {
+                        best_idf = idf;
+                        best_tok = t;
+                    }
+                }
+            }
+            if (best_tok == -1) {
+                // Fallback 2: relax all filters
+                for (int32_t t : entry.tokens) {
+                    auto it = inv_index.idf.find(t);
+                    float idf = (it != inv_index.idf.end() ? it->second : 1.0f);
+                    if (idf > best_idf) {
+                        best_idf = idf;
+                        best_tok = t;
+                    }
                 }
             }
             entry.distinguishing_token = best_tok;

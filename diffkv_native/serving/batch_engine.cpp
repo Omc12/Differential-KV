@@ -1244,6 +1244,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             session->micro_block_size + 1,
             session->srl_state.inverted_index,
             prime_slots,
+            get_helper_token_ids_cpp(*model_),
             true // use_salience_parser
         );
         session->srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids_, [&](int32_t tid) {
