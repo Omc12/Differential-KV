@@ -258,56 +258,45 @@ def build_chunk_graph(
                 vocabs.append(set())
 
     # ── Entity Isolation & Exclusion Pruning ──
-    sig_tokens = []
-    sig_idfs = []
-    if vocabs and inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf:
-        from native_core.srl.factual_alignment import get_helper_token_ids
-        _tokenizer = getattr(inv_index, "_tokenizer_ref", None)
-        helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
-        
-        for i in range(N):
-            best_tok = -1
-            best_idf = -1.0
-            for tok in vocabs[i]:
-                if tok in helper_ids:
-                    continue
-                if _tokenizer is not None:
-                    try:
-                        raw = _tokenizer.decode([tok])
-                        clean = raw.replace("Ġ", "").replace("▁", "").strip()
-                        alnum = "".join(c for c in clean if c.isalnum())
-                        if len(alnum) <= 2 or not any(c.isalpha() for c in clean):
-                            continue
-                    except Exception:
-                        continue
-                idf_val = inv_index.idf.get(tok, 1.0)
-                if idf_val > best_idf:
-                    best_idf = idf_val
-                    best_tok = tok
-            sig_tokens.append(best_tok)
-            sig_idfs.append(best_idf)
-            
-        # Prune similarity matrix for mutually exclusive concept domains
-        for i in range(N):
-            sig_i = sig_tokens[i]
-            idf_i = sig_idfs[i]
-            if sig_i == -1 or idf_i < 2.0:
-                continue
-            for j in range(N):
-                if i == j:
-                    continue
-                sig_j = sig_tokens[j]
-                idf_j = sig_idfs[j]
-                if sig_j == -1 or idf_j < 2.0:
-                    continue
-                if sig_i != sig_j:
-                    has_cross_ref = (sig_j in vocabs[i]) or (sig_i in vocabs[j])
-                    if not has_cross_ref:
-                        sim[i, j] = -1.0
-                        sim[j, i] = -1.0
+    landmarks_list = []
+    if blocks is not None and len(blocks) > 0:
+        landmarks_list = parent_landmarks_tensor.tolist()
     else:
-        sig_tokens = [-1] * N
-        sig_idfs = [-1.0] * N
+        slot_list = slot_ids.tolist()
+        for idx in range(0, len(slot_list), 4):
+            landmarks_list.append(slot_list[idx])
+
+    normalized_profiles = None
+    if len(landmarks_list) >= 2:
+        slot_to_row = {int(slot_ids[r].item()): r for r in range(N)}
+        landmark_row_idxs = [slot_to_row[slot] for slot in landmarks_list if slot in slot_to_row]
+        
+        if len(landmark_row_idxs) >= 2:
+            profiles = torch.zeros((N, len(landmark_row_idxs)), dtype=torch.float32)
+            for r in range(N):
+                for l_idx, p_row in enumerate(landmark_row_idxs):
+                    if p_row != -1:
+                        val = float(torch.dot(desc_f32[r], desc_f32[p_row]).item())
+                        profiles[r, l_idx] = max(0.0, val)
+            
+            norms = torch.norm(profiles, p=2, dim=1, keepdim=True)
+            normalized_profiles = torch.where(norms > 1e-6, profiles / norms, torch.zeros_like(profiles))
+            
+            for i in range(N):
+                slot_i = int(slot_ids[i].item())
+                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
+                for j in range(N):
+                    if i == j:
+                        continue
+                    slot_j = int(slot_ids[j].item())
+                    p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
+                    if p_i != p_j or p_i == -1 or p_j == -1:
+                        if abs(i - j) > 1:
+                            prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
+                            if prof_sim < 0.40:
+                                sim[i, j] = -1.0
+                                sim[j, i] = -1.0
+
 
     slot_to_anchor = {}
     if blocks:
@@ -337,11 +326,14 @@ def build_chunk_graph(
             
             # Check exclusion constraint
             is_excluded = False
-            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
-                if sig_tokens[i] != sig_tokens[j]:
-                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
-                    if not has_cross_ref:
+            if abs(i - j) > 1 and normalized_profiles is not None:
+                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
+                p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
+                if p_i != p_j or p_i == -1 or p_j == -1:
+                    prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
+                    if prof_sim < 0.40:
                         is_excluded = True
+
 
             # Directed relative lexical overlap score
             lex_score_i_to_j = 0.0
@@ -416,11 +408,14 @@ def build_chunk_graph(
 
             # Check exclusion constraint
             is_excluded = False
-            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
-                if sig_tokens[i] != sig_tokens[j]:
-                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
-                    if not has_cross_ref:
+            if abs(i - j) > 1 and normalized_profiles is not None:
+                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
+                p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
+                if p_i != p_j or p_i == -1 or p_j == -1:
+                    prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
+                    if prof_sim < 0.40:
                         is_excluded = True
+
 
             if allow_i_to_j and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
@@ -461,6 +456,15 @@ def build_chunk_graph(
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
                 candidate_edges.append((weight_j_to_i, j, i))
+
+    # Filter out duplicate candidate edges using seen_edges set
+    seen_edges = set()
+    unique_candidates = []
+    for weight, u, v in candidate_edges:
+        if (u, v) not in seen_edges:
+            seen_edges.add((u, v))
+            unique_candidates.append((weight, u, v))
+    candidate_edges = unique_candidates
 
     # Sort candidate edges by weight in descending order
     candidate_edges.sort(key=lambda x: x[0], reverse=True)
@@ -577,24 +581,17 @@ def build_chunk_graph(
             for i in range(L):
                 p_slot_i = valid_parent_slots[i]
                 idx_i = slot_to_idx[p_slot_i]
-                sig_i = sig_tokens[idx_i]
-                idf_i = sig_idfs[idx_i]
-                if sig_i == -1 or idf_i < 2.0:
-                    continue
                 for j in range(L):
                     if i == j:
                         continue
                     p_slot_j = valid_parent_slots[j]
                     idx_j = slot_to_idx[p_slot_j]
-                    sig_j = sig_tokens[idx_j]
-                    idf_j = sig_idfs[idx_j]
-                    if sig_j == -1 or idf_j < 2.0:
-                        continue
-                    if sig_i != sig_j:
-                        has_cross_ref = (sig_j in vocabs[idx_i]) or (sig_i in vocabs[idx_j])
-                        if not has_cross_ref:
+                    if abs(idx_i - idx_j) > 1 and normalized_profiles is not None:
+                        prof_sim = float(torch.dot(normalized_profiles[idx_i], normalized_profiles[idx_j]).item())
+                        if prof_sim < 0.40:
                             parent_sim[i, j] = -1.0
                             parent_sim[j, i] = -1.0
+
             
             prime_candidates = []
             for i in range(L):

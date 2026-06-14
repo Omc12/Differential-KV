@@ -2923,7 +2923,12 @@ int main(int argc, char ** argv) {
                         cur_N,
                         6, 2,
                         &srl_state.inverted_index,
-                        0.15f
+                        0.15f,
+                        nullptr,
+                        nullptr,
+                        0,
+                        {},
+                        [&model](int32_t tid) { return model.token_to_piece(tid); }
                     );
                 }
 
