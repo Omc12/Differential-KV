@@ -25,9 +25,21 @@ public:
 
     // Getters for GGML tensors
     struct ggml_tensor * get_U() { return U_; }
+    struct ggml_tensor * get_U_f16() { return U_f16_; }   // f16 mirror of U (native ggml gather)
     struct ggml_tensor * get_U_scale() { return U_scale_; }
     struct ggml_tensor * get_VK() { return VK_; }
     struct ggml_tensor * get_VV() { return VV_; }
+    // Native-attn precomputed RoPE'd keys (rotated at each block's fixed anchor position).
+    // Filled at upload when native attn is enabled, so the in-graph subgraph can gather f16
+    // and dot with the in-graph query (rotated at the current pos) with NO in-graph RoPE and
+    // NO i32 position gather. nullptr unless DIFFKV_NATIVE_ATTN is set.
+    struct ggml_tensor * get_VK_rot() { return VK_rot_; }
+    struct ggml_tensor * get_anchorK_rot() { return anchorK_rot_; }
+    // [S_max, n_slots] f16 additive bias: 0 for valid tokens (t < seq_len), -inf for padding.
+    struct ggml_tensor * get_valid_mask() { return valid_mask_; }
+    bool native_attn_enabled() const { return native_attn_; }
+    // Must be called once after initialize(), before any upload_slot(), to supply RoPE params.
+    void set_rope_config(bool has_rope, float rope_freq_base) { has_rope_ = has_rope; rope_freq_base_ = rope_freq_base; }
     struct ggml_tensor * get_anchors_K() { return anchors_K_; }
     struct ggml_tensor * get_anchors_V() { return anchors_V_; }
     struct ggml_tensor * get_seq_lens() { return seq_lens_; }
@@ -97,9 +109,13 @@ private:
 
     // Pool Tensors
     struct ggml_tensor * U_ = nullptr;
+    struct ggml_tensor * U_f16_ = nullptr;   // f16 mirror of U (int8 values cast to f16) for native ggml-metal gather/matmul
     struct ggml_tensor * U_scale_ = nullptr;
     struct ggml_tensor * VK_ = nullptr;
     struct ggml_tensor * VV_ = nullptr;
+    struct ggml_tensor * VK_rot_ = nullptr;       // [head_dim, kv_heads, rank, n_slots] f16, RoPE'd at anchor pos (native attn only)
+    struct ggml_tensor * anchorK_rot_ = nullptr;  // [head_dim, kv_heads, n_slots]       f16, RoPE'd at anchor pos (native attn only)
+    struct ggml_tensor * valid_mask_ = nullptr;   // [S_max, n_slots] f16 additive -inf padding bias (native attn only)
     struct ggml_tensor * anchors_K_ = nullptr;
     struct ggml_tensor * anchors_V_ = nullptr;
     struct ggml_tensor * seq_lens_ = nullptr;
@@ -109,9 +125,13 @@ private:
 
     // Host-side mirror buffers
     std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_f16_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_rot_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchorK_rot_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_valid_mask_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_K_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_V_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_seq_lens_;
@@ -127,6 +147,11 @@ private:
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_res_V_val_;
 
     DiffKVBlockStateTable state_table_;
+
+    // Native-attn config / state
+    bool native_attn_ = false;        // set from DIFFKV_NATIVE_ATTN in initialize()
+    bool has_rope_ = true;            // set via set_rope_config()
+    float rope_freq_base_ = 1000000.0f;
 
     // Slot allocator state
     std::vector<int> free_slots_;

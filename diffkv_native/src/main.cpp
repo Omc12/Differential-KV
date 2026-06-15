@@ -992,6 +992,8 @@ int main(int argc, char ** argv) {
 
     // Clear pool tensors for all layers
     for (int l = 0; l < n_layers; ++l) {
+        // Supply RoPE params for the native-attn precomputed-rotation path (no-op when gated off).
+        kv_engines[l]->set_rope_config(true, model.get_config().rope_freq_base);
         kv_engines[l]->zero_all_tensors();
     }
 

@@ -395,6 +395,56 @@ Profiled the residual ~78 ms/token: **CPU command-buffer encode/commit is only ~
 - **Why Ollama/llama.cpp is fast:** they keep the ENTIRE forward pass as native ggml-metal ops, so ggml-metal encodes the whole graph into ONE command-buffer stream — one continuous GPU pipeline, zero per-layer launches, zero cross-queue stalls. diffkv pays 24 launches + stalls/token because its sparse attention is a per-layer CPU `map_custom3` op.
 - **The fix (the real Ollama strategy):** make sparse attention a **native ggml-metal op** (the pool tensors ARE already ggml tensors; gather routed slots via `ggml_get_rows`, do q_proj/scores/softmax/value as ggml matmuls, register the kernel with ggml-metal) so it's encoded into ggml's unified command buffer. Eliminates the 24 launches → should approach Ollama/MLX throughput. CPU-only bits (factual store/VSL/routing) stay on CPU but off the hot per-layer path. **Large refactor (decode graph + ggml-metal), risks the just-fixed quality — deferred to a dedicated, validated effort.**
 
-## Status: COMPLETE. functional mechanisms aligned; **F22/F26 quality regression FIXED — standard NIAH 0.1/0.5/0.9 all PASS, 10/11 depths** (was 0/5); coherence intact; ⚠️ reports dispositioned (F20); **F9 residuals implemented (CPU) + Metal completed via correctness-preserving CPU fallback**. Lone accepted edge: depth-0.95 (last ~5%, non-standard). Not bit-identical by nature (Python/MLX vs C++/ggml numerics).
+---
+
+## Pass 17 — Native ggml-metal attention refactor (IN PROGRESS) — 2026-06-15
+
+**Goal:** replace the per-layer `ggml_map_custom3` sparse attention (24 separate Metal command buffers/token on a dedicated queue → GPU scheduling overhead + cross-queue stalls) with **native ggml ops**, so the whole decode is one fused ggml-metal command-buffer stream (Ollama/MLX strategy). Same algorithm; NIAH-equivalent output (user-approved, not bit-identical). Gated by `DIFFKV_NATIVE_ATTN` and validated against the kernel/NIAH at each step so the working path is never broken.
+
+**Path nuance (important):** the factual store forces the CPU path (`force_cpu`) for retrieval prompts — so the native-Metal subgraph primarily serves the sparse-pool + dense attention; factual (out_facts) + 3-way combine stay CPU but off the per-layer GPU hot path. Final design: native sparse+dense in the ggml graph → small CPU factual+combine only when a factual store is active.
+
+**Current decode speed (post F29+F30, rank16):** factual ~13.9 TPS, non-factual ~19.4 TPS (was ~5.9). Target: approach Ollama/MLX (~75) by removing the 24 launches.
+
+### Plan (incremental, each NIAH-validated)
+1. Expose pool ggml tensors (U/U_scale/VK/VV/anchors_K/V/seq_lens/scales/anchor_positions) to `build_decode_graph` via `userdata[l].kv_engine->get_*()`.
+2. Native **sparse-pool** subgraph (approximate path) per layer, gated:
+   - gather K routed slots: reshape pool tensor to `[…, n_slots]` 2D → `ggml_get_rows(selected_slots)` → reshape back.
+   - RoPE gathered VK & anchors at **anchor positions** via `ggml_rope_ext` with `positions = anchor_positions[slots]` (NEOX), shaped so K is the seq dim.
+   - dequant U: int8→f32 × `U_scale[slot]`.
+   - `q_proj = q · VK_rot` (per slot, GQA-mapped); `token_scores = q_proj · U · block_scale + anchor_score`; `anchor_score = q · anchorK_rot`.
+   - online/standard softmax over {anchor ∪ tokens} across slots → weights.
+   - value = Σ w·(anchorV + U·VV·block_scale).
+3. Add **dense-window** attention as ggml ops (or fold into the same softmax).
+4. Add **residuals** (F9) as gathered exact corrections.
+5. Wire factual+combine on CPU only when factual store active; else fully native.
+6. Validate: NIAH all depths + logits close to kernel; flip default; delete the per-layer custom-op path.
+
+**Status: step 1 DONE; design refined as blockers surfaced.**
+
+### Progress
+- **Step 1 ✅ (compiles, default path intact):** added an **f16 mirror of `U`** to the pool (`U_f16_` + `host_U_f16_`, filled in `upload_slot`/zeroed in `zero_all_tensors`) — ggml-metal `get_rows` can't gather int8, so the native subgraph will gather `U_f16`. ([`native_block_pool.{hpp,cpp}`](diffkv_native/runtime/native_block_pool.cpp))
+- **Step 2 ✅ (compiles, default path BIT-IDENTICAL):** added precomputed **RoPE'd key tensors** `VK_rot_`/`anchorK_rot_` (+ host mirrors + getters `get_VK_rot`/`get_anchorK_rot`), gated behind `DIFFKV_NATIVE_ATTN` (only allocated when set → RAM-conservative default). Filled in `upload_slot` via `rope_rotate_vec()` — a host copy of the kernel's exact NEOX K/anchor rotation (diffkv_attention.cpp:84-91/152-159) at the block's fixed anchor pos; zeroed in `zero_all_tensors`. `set_rope_config(has_rope, freq_base)` wired in main.cpp init loop (line ~995). **Verified:** default and `DIFFKV_NATIVE_ATTN=1` both emit id 382 / logit 13.7686 (identical) — rotation upload is harmless until a subgraph consumes it. Resolves the i32-position-gather blocker.
+- **Step 3 ✅ (compiles, default path BIT-IDENTICAL):** added `valid_mask_` `[S_max,n_slots]` f16 additive bias (0 for `t<seq_len`, `-inf` for padding) + getter `get_valid_mask()`, gated. Filled from `host_seq_lens_` in `upload_slot`, defaults fully-masked in `zero_all_tensors`. Needed because padding tokens have `delta=0` → would otherwise inject `anchor_score` softmax mass. Verified id 374/382 identical with flag on/off.
+
+**→ ALL FOUR precomputed native-attn inputs now exist + verified bit-identical: `U_f16`, `VK_rot`, `anchorK_rot`, `valid_mask`. The remaining work is the in-graph subgraph that consumes them (below).**
+
+### Resume point — the native sparse-attn subgraph (the large unit)
+Build `build_native_sparse_attn(...)` gated behind `DIFFKV_NATIVE_ATTN`, branch in `build_decode_graph` (main.cpp ~497, the `ggml_map_custom3` injection) — fall back to the custom op when factual store is active OR routed blocks have residuals (already CPU-forced). Per kv-head (GQA group = n_head/n_head_kv = 7), approximate path mirroring diffkv_attention.cpp:143-201:
+1. `get_rows`-gather selected slots (reshape 4D pool tensors → 2D `[*, n_slots]` first, gather, reshape back): VK_rot→`[D,kvh,rank,K]`, anchorK_rot→`[D,kvh,K]`, U_f16→`[rank,S_max,K]`, valid_mask→`[S_max,K]`, VV/anchorV, U_scale/scales (`[1,n_slots]`).
+2. `anchor_score[g,k,kv]` = GQA `mul_mat`(Q reshaped `[D,group,kvh]`, anchorK_rot_sel permuted `[D,K,kvh]`).
+3. `q_proj[r,k,kv]` = `mul_mat`(Q, VK_rot_sel `[D,rank,kvh]`-per-K…) then `delta[t,k]` = `mul_mat`(q_proj, U_f16_sel) → scale by `scale_u*block_scale`.
+4. `token_score = (delta*scale_u*block_scale + anchor_score)*scale + valid_mask`; concat anchor entry; `soft_max`; value-accumulate VV (`w_proj·U·scale_u`) + anchor_V. Combine across slots.
+5. Validate: NIAH all depths + per-token logit diff vs custom-op path on a non-factual prompt; then flip default + delete custom-op path.
+Risk: ~200-300 lines of careful ggml permute/reshape/`mul_mat` GQA batching; expect several compile-run-debug cycles. Pool getters ready: `get_VK_rot/get_anchorK_rot/get_U_f16/get_valid_mask/get_VV/get_anchors_V/get_U_scale/get_scales`.
+
+### Blocker-resolving design (refined while implementing)
+- **i32 position gather is unavoidable in-graph** (selected_slots is computed in-graph; i32 `get_rows` unsupported on Metal). **Solution:** precompute **rotated** keys — store `VK_rot`/`anchorK_rot` (RoPE'd at each block's fixed anchor position) as f16 pool tensors, filled at compression/upload. The subgraph then just `get_rows`-gathers these f16 tensors and dots with the in-graph query (rotated at current pos) → correct relative RoPE, NO in-graph rope, NO i32 gather. Bonus: removes the per-step re-rotation the kernel currently redoes.
+- **seq_lens (i32) masking:** precompute an f16 per-(slot,token) valid-mask tensor, gather it (f16), multiply into scores.
+- So the native subgraph needs precomputed f16 pool tensors: `U_f16` (done), `VK_rot`, `anchorK_rot`, `valid_mask` — then gather + GQA `mul_mat` (q_proj, scores) + `soft_max` + value `mul_mat`. Dense-window + residual + factual/CPU-combine layer on after.
+
+### Honest scope update
+Implementing exposed **cascading ggml-metal type blockers** (int8/int32 not gatherable) that each require precomputed f16 pool tensors + fill plumbing (compression/upload), BEFORE the (large, GQA-batched) subgraph, then dense/residual/factual on top — all NIAH-validated and kept gated. This is a **dedicated multi-session reimplementation**, larger than first estimated. Step 1 + the design are in place and resumable; the working binary remains at the F29+F30 speed (2.4–3.3×) with quality intact.
+
+## Status: COMPLETE (reconstruction+quality+initial perf). Native-attention perf refactor IN PROGRESS (Pass 17). functional mechanisms aligned; **F22/F26 quality regression FIXED — standard NIAH 0.1/0.5/0.9 all PASS, 10/11 depths** (was 0/5); coherence intact; ⚠️ reports dispositioned (F20); **F9 residuals implemented (CPU) + Metal completed via correctness-preserving CPU fallback**. Lone accepted edge: depth-0.95 (last ~5%, non-standard). Not bit-identical by nature (Python/MLX vs C++/ggml numerics).
 - ~~Compression~~ (P2: F6–F10). ~~SRL routing~~ (P3: F11–F12). ~~Streaming ingest~~ (P4: F13–F15). ~~Decode kernel~~ (P5: F16–F18). ~~AsyncCompressor + physics tokens~~ (P6: F18b–F21).
 - **Remaining (optional):** empirical RAM/TPS re-measurement vs ACTIVE_RUNTIME reference (benchmark_prod_log: e.g. 882 MB KV @ 8192) to quantify the cumulative effect of F1/F2/F5/F13.
