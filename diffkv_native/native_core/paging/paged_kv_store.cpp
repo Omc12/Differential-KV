@@ -1,5 +1,6 @@
 #include "native_core/paging/paged_kv_store.hpp"
 #include "native_core/streaming_sparse_ingest.hpp"
+#include "native_core/srl/session_srl_state.hpp"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -83,7 +84,7 @@ void PagedKVStore::touch(StreamingKVBlock* block, const std::vector<std::unique_
     }
 }
 
-void PagedKVStore::maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool>>& engines) {
+void PagedKVStore::maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool>>& engines, const SessionSRLState* srl_state) {
     std::lock_guard<std::mutex> guard(lock_);
     
     while (stats_.current_gpu_bytes > gpu_budget_bytes_) {
@@ -93,8 +94,26 @@ void PagedKVStore::maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool
         
         for (auto & pair : entries_) {
             if (pair.second.residency == BlockState::CompressedResident && pair.second.vram_bytes > 0) {
-                if (pair.second.last_access < oldest_time) {
-                    oldest_time = pair.second.last_access;
+                double comp_time = pair.second.last_access;
+                if (srl_state != nullptr) {
+                    int slot_id = -1;
+                    if (pair.second.block_ref != nullptr) {
+                        slot_id = pair.second.block_ref->pool_idx;
+                    }
+                    if (slot_id != -1) {
+                        float strength = 1.0f;
+                        auto it = srl_state->slot_activation_strength.find(slot_id);
+                        if (it != srl_state->slot_activation_strength.end()) {
+                            strength = it->second;
+                        }
+                        // Boost time by (strength - 1.0) * 300.0 (5 minutes of virtual activity per unit strength)
+                        double boost = (strength - 1.0) * 300.0;
+                        comp_time += boost;
+                    }
+                }
+
+                if (comp_time < oldest_time) {
+                    oldest_time = comp_time;
                     coldest_key = pair.first;
                 }
             }

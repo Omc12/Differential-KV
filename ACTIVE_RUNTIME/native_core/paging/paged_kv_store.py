@@ -125,13 +125,28 @@ class PagedKVStore:
                 self._evict_block(coldest_key, self._entries[coldest_key])
 
     def _find_coldest(self) -> Optional[Tuple]:
-        """Return key of the GPU-resident entry with the oldest last_access."""
+        """Return key of the GPU-resident entry with the oldest last_access, adjusted for reinforcement."""
         coldest_key  = None
         coldest_time = float("inf")
+        manager = getattr(self, "manager", None)
+        
         for key, entry in self._entries.items():
             if entry.residency == BlockResidency.GPU and entry.vram_bytes > 0:
-                if entry.last_access < coldest_time:
-                    coldest_time = entry.last_access
+                session_id, layer_idx, block_idx = key
+                strength = 1.0
+                if manager is not None:
+                    srl_state = manager._session_srl.get(session_id)
+                    if srl_state is not None and getattr(srl_state, "slot_activation_strength", None) is not None:
+                        pool_idx = getattr(entry.block_ref, "pool_idx", None)
+                        if pool_idx is not None:
+                            strength = srl_state.slot_activation_strength.get(pool_idx, 1.0)
+                
+                # Boost time by strength * 300 seconds (5 minutes of virtual activity per unit strength)
+                boost = (strength - 1.0) * 300.0
+                composite_time = entry.last_access + boost
+                
+                if composite_time < coldest_time:
+                    coldest_time = composite_time
                     coldest_key  = key
         return coldest_key
 

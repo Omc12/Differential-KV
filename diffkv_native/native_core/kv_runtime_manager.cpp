@@ -1,5 +1,6 @@
 #include "native_core/kv_runtime_manager.hpp"
 #include "native_core/srl/chunk_descriptor.hpp"
+#include "native_core/srl/query_router.hpp"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -66,7 +67,8 @@ bool KVRuntimeManager::initialize(
     for (int l = 0; l < n_layers; ++l) {
         engines_[l] = std::make_unique<NativeBlockPool>();
         int layer_rank = get_layer_rank(l);
-        if (!engines_[l]->initialize(n_slots, layer_rank, head_dim, kv_heads, desc_dim, buft)) {
+        int pool_rank = (layer_rank * 3 + 1) / 2; // ceiling of 1.5 * layer_rank
+        if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft)) {
             std::cerr << "[KVRuntimeManager] Error: Failed to initialize KVEngine for layer " << l << std::endl;
             return false;
         }
@@ -137,7 +139,8 @@ void KVRuntimeManager::ingest_prefill(
     const std::vector<std::vector<float>>& v_layers,
     int chunk_len,
     int position_start,
-    const std::vector<int32_t>& token_ids
+    const std::vector<int32_t>& token_ids,
+    SessionSRLState* srl_state
 ) {
     // 1. Extract query words from the latest 128 tokens of the prompt/prefill
     if (model_) {
@@ -190,7 +193,8 @@ void KVRuntimeManager::ingest_prefill(
             engines_,
             *compressor_,
             r,
-            pager_.get()
+            pager_.get(),
+            srl_state
         );
     }
     
@@ -216,14 +220,15 @@ void KVRuntimeManager::ingest_prefill(
     }
     
     // 3. Evict excess resident memory under budget
-    pager_->maybe_evict(engines_);
+    pager_->maybe_evict(engines_, srl_state);
 }
 
 void KVRuntimeManager::ingest_decode(
     const std::vector<std::vector<float>>& k_layers,
     const std::vector<std::vector<float>>& v_layers,
     int current_pos,
-    const std::vector<int32_t>& token_ids
+    const std::vector<int32_t>& token_ids,
+    SessionSRLState* srl_state
 ) {
     // 1. Sync states of any compressing blocks from background thread to host blocks
     for (int l = 0; l < n_layers_; ++l) {
@@ -251,7 +256,8 @@ void KVRuntimeManager::ingest_decode(
             engines_,
             *compressor_,
             r,
-            pager_.get()
+            pager_.get(),
+            srl_state
         );
     }
     
@@ -275,13 +281,13 @@ void KVRuntimeManager::ingest_decode(
             pager_->register_block(block.get(), engines_);
         }
     }
-    pager_->maybe_evict(engines_);
+    pager_->maybe_evict(engines_, srl_state);
 }
 
 std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     int current_pos,
     const std::vector<int32_t>& token_ids,
-    const SessionSRLState& srl_state,
+    SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& stop_token_ids,
     int srl_k_recency,
     int srl_k_lexical,
@@ -460,6 +466,25 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         host_candidates.resize(srl_k_host);
     }
 
+    // Update slot reinforcement/activation strength for the routed slots
+    std::unordered_set<int32_t> selected_set(host_candidates.begin(), host_candidates.end());
+    float alpha_boost = 0.05f;
+    float decay_rate = 0.99f;
+    for (int32_t slot : selected_set) {
+        if (srl_state.slot_activation_strength.find(slot) == srl_state.slot_activation_strength.end()) {
+            srl_state.slot_activation_strength[slot] = 1.0f;
+        }
+        srl_state.slot_activation_strength[slot] += alpha_boost;
+    }
+    for (auto& pair : srl_state.slot_activation_strength) {
+        if (selected_set.count(pair.first) == 0) {
+            pair.second *= decay_rate;
+            if (pair.second < 1.0f) {
+                pair.second = 1.0f;
+            }
+        }
+    }
+
     return host_candidates;
 }
 
@@ -609,6 +634,150 @@ void KVRuntimeManager::set_micro_block_size(int size) {
     micro_block_size_ = size;
     if (ingest_manager_) {
         ingest_manager_->set_micro_block_size(size);
+    }
+}
+
+void KVRuntimeManager::commit_turn(SessionSRLState& srl_state) {
+    if (srl_state.n_active_blocks() == 0) return;
+
+    // Identify which blocks to keep
+    std::unordered_set<int32_t> keep_slots;
+    
+    // Add sink blocks
+    for (int32_t sink : srl_state.sink_blocks) {
+        keep_slots.insert(sink);
+    }
+    
+    // Add cluster centers / landmarks
+    for (int32_t center : srl_state.chunk_graph.cluster_centers_tensor) {
+        keep_slots.insert(center);
+    }
+    for (int32_t landmark : srl_state.chunk_graph.parent_landmarks) {
+        keep_slots.insert(landmark);
+    }
+    
+    // Add factual exact store slots
+    for (const auto& entry : srl_state.factual_store.entries) {
+        for (int32_t slot : entry.slot_ids) {
+            keep_slots.insert(slot);
+        }
+    }
+    
+    // Scan active blocks (anchor_idx >= srl_state.cached_len)
+    std::unordered_set<int32_t> active_slots;
+    auto & blocks_layer0 = ingest_manager_->get_blocks(0);
+    for (const auto& b : blocks_layer0) {
+        if (b->pool_idx != -1 && b->anchor_idx >= srl_state.cached_len) {
+            active_slots.insert(b->pool_idx);
+            
+            // Check for high-IDF tokens in the block
+            if (!srl_state.inverted_index.idf.empty()) {
+                for (int32_t tok : b->token_indices) {
+                    auto it = srl_state.inverted_index.idf.find(tok);
+                    if (it != srl_state.inverted_index.idf.end() && it->second >= 2.5f) {
+                        keep_slots.insert(b->pool_idx);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Identify slots to prune
+    std::unordered_set<int32_t> pruned_slots;
+    for (int32_t slot : active_slots) {
+        if (keep_slots.count(slot) == 0) {
+            pruned_slots.insert(slot);
+        }
+    }
+    
+    if (pruned_slots.empty()) {
+        srl_state.cached_len = static_cast<int>(ingest_manager_->get_session_token_ids().size());
+        return;
+    }
+    
+    // Free slots in engines and remove blocks from ingest manager
+    for (int32_t slot : pruned_slots) {
+        // Clear from slot reinforcement map
+        srl_state.slot_activation_strength.erase(slot);
+    }
+    
+    for (int l = 0; l < n_layers_; ++l) {
+        auto & blocks = ingest_manager_->get_blocks(l);
+        std::vector<std::unique_ptr<StreamingKVBlock>> kept;
+        for (auto & block : blocks) {
+            if (block->pool_idx != -1 && pruned_slots.count(block->pool_idx)) {
+                engines_[l]->free_slot(block->pool_idx);
+                continue;
+            }
+            kept.push_back(std::move(block));
+        }
+        blocks = std::move(kept);
+    }
+    
+    // Save reinforcement strengths before rebuilding
+    std::unordered_map<int32_t, float> strengths = srl_state.slot_activation_strength;
+    
+    // Update cached_len to current sequence length
+    srl_state.cached_len = static_cast<int>(ingest_manager_->get_session_token_ids().size());
+    
+    // Rebuild the index
+    auto & blocks_l0 = ingest_manager_->get_blocks(0);
+    std::vector<int32_t> compressed_slots;
+    std::vector<int> compressed_anchors;
+    for (const auto& block : blocks_l0) {
+        if (block->pool_idx != -1 &&
+            (block->state == BlockState::CompressedResident ||
+             block->state == BlockState::CPUResident ||
+             block->state == BlockState::Compressing)) {
+            compressed_slots.push_back(block->pool_idx);
+            compressed_anchors.push_back(block->anchor_idx);
+        }
+    }
+    int completed_blocks = compressed_slots.size();
+    if (completed_blocks > 0) {
+        int desc_dim = engines_[0]->get_desc_matrix()->ne[0];
+        std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
+        for (int j = 0; j < completed_blocks; ++j) {
+            int slot_id = compressed_slots[j];
+            ggml_backend_tensor_get(
+                engines_[0]->get_desc_matrix(),
+                desc_matrix_host.data() + j * desc_dim,
+                slot_id * desc_dim * sizeof(float),
+                desc_dim * sizeof(float)
+            );
+        }
+
+        const auto& all_tokens = ingest_manager_->get_session_token_ids();
+        std::unordered_set<int> stop_tokens_int;
+        const auto* stop_ptr = ingest_manager_->get_stop_token_ids();
+        if (stop_ptr) {
+            stop_tokens_int.insert(stop_ptr->begin(), stop_ptr->end());
+        }
+
+        srl_state = build_srl_state_from_blocks(
+            desc_matrix_host.data(),
+            compressed_slots.data(),
+            completed_blocks,
+            all_tokens.data(),
+            all_tokens.size(),
+            micro_block_size_ + 1, // block_size
+            stop_tokens_int,
+            6, // K_semantic
+            2, // K_temporal
+            0.15f, // overlap_threshold
+            true, // add_first_as_sink
+            true,  // add_last_as_sink
+            &compressed_anchors,
+            srl_state.cached_len
+        );
+    }
+    
+    // Restore reinforcement strengths for kept slots
+    for (const auto& pair : strengths) {
+        if (std::find(srl_state.ordered_slot_ids.begin(), srl_state.ordered_slot_ids.end(), pair.first) != srl_state.ordered_slot_ids.end()) {
+            srl_state.slot_activation_strength[pair.first] = pair.second;
+        }
     }
 }
 

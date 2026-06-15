@@ -1670,7 +1670,7 @@ int main(int argc, char ** argv) {
                 std::memcpy(v_activations[l].data() + local_offset * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
             }
             // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
-            runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens);
+            runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
 
             if (pos_start + chunk_len >= L && prefill_logits) {
                 ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
@@ -2316,7 +2316,7 @@ int main(int argc, char ** argv) {
                 std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
             }
 
-            runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+            runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens, &srl_state);
 
             {
                 std::vector<float> k_avg(head_dim, 0.0f);
@@ -2666,9 +2666,9 @@ int main(int argc, char ** argv) {
 
                 // ── Query Anchor Blending ─────────────────────────────────────
                 // Store layer-0 decode-K from the first decode step as a stable
-                // anchor. On subsequent steps blend 65% current + 35% anchor so
+                // anchor. On subsequent steps blend 20% current + 80% anchor so
                 // accumulated generated-token context cannot pull retrieval away
-                // from the original question topic (mirrors Python 0.65/0.35 blend).
+                // from the original question topic (mirrors Python 0.20/0.80 blend).
                 std::vector<float> q_for_factual(F_test);
                 if (srl_state.factual_anchor_q.empty()) {
                     srl_state.factual_anchor_q = decode_k[0];
@@ -3044,6 +3044,13 @@ int main(int argc, char ** argv) {
                 // Emit KV cache size so gateway can skip re-prefilling on next turn
                 std::cout << "__CACHED__:" << ((int)all_tokens.size()) << std::endl;
             }
+        }
+
+        // Call commit_turn to prune low-salience blocks and consolidate the SRL index
+        try {
+            runtime_manager.commit_turn(srl_state);
+        } catch (const std::exception& e) {
+            std::cerr << "[DiffKV Native] Error in commit_turn on turn boundary: " << e.what() << std::endl;
         }
 
 

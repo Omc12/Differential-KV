@@ -12,6 +12,7 @@
 namespace diffkv {
 
 class PagedKVStore;
+struct SessionSRLState;
 
 struct StreamingKVBlock {
     int anchor_idx;
@@ -66,7 +67,8 @@ public:
         std::vector<std::unique_ptr<NativeBlockPool>>& engines,
         AsyncCompressor& compressor,
         int rank,
-        PagedKVStore* pager = nullptr
+        PagedKVStore* pager = nullptr,
+        SessionSRLState* srl_state = nullptr
     );
 
     std::vector<std::unique_ptr<StreamingKVBlock>>& get_blocks(int layer_idx) {
@@ -82,6 +84,7 @@ public:
     }
 
     bool should_skip_compression(int anchor_idx, const std::vector<int32_t>& block_tokens) const;
+    bool should_boost_compression_rank(int anchor_idx, const std::vector<int32_t>& block_tokens) const;
 
     struct Stats {
         uint64_t total_blocks_created = 0;
@@ -110,6 +113,9 @@ public:
     void set_session_id(const std::string& session_id) {
         active_session_id_ = session_id;
     }
+
+    const std::vector<int32_t>& get_session_token_ids() const { return session_token_ids_; }
+    const std::unordered_set<int32_t>* get_stop_token_ids() const { return stop_token_ids_; }
 
 private:
     int next_anchor_idx(int layer_idx) const;

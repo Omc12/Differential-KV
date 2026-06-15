@@ -1041,7 +1041,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             std::memcpy(v_activations[l].data() + pos_start * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
         }
         
-        runtime_manager_->ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens);
+        runtime_manager_->ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &session->srl_state);
         
         if (pos_start + chunk_len >= L && prefill_logits) {
             ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
@@ -1184,6 +1184,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.recent_miss_rate = 0.0f;
     session->srl_state.k_multiplier = 1.0f;
     session->srl_state.call_count = 0;
+    session->srl_state.factual_anchor_q.clear();
 
     auto & blocks_layer0 = runtime_manager_->get_ingest_manager().get_blocks(0);
     std::vector<int32_t> compressed_slots;
@@ -1369,7 +1370,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
         }
         
-        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens);
+        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens, &session->srl_state);
 
         {
             int kv_heads = model_->get_config().n_head_kv;
@@ -1801,6 +1802,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     // Update prefix cache for multi-turn reuse
     session->last_turn_token_prefix = all_tokens;
     session->token_ids = all_tokens;
+    
+    // Call commit_turn to prune low-salience blocks and consolidate the SRL index
+    try {
+        runtime_manager_->commit_turn(session->srl_state);
+    } catch (const std::exception& e) {
+        std::cerr << "[DiffKV C++] Error in commit_turn on turn boundary: " << e.what() << std::endl;
+    }
     
     // Save state back to disk
     session_manager_->save_session(req->session_id);

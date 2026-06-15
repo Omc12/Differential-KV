@@ -109,6 +109,9 @@ class SessionSRLState:
     # Maps layer_idx → ordered list of pool slot IDs (currently identical for every layer)
     layer_slot_ids: Dict[int, List[int]] = field(default_factory=dict)
 
+    # Dynamic Node Reinforcement Strength
+    slot_activation_strength: Dict[int, float] = field(default_factory=dict)
+
     # ── Config (all overridable via SRL_CONFIG or env vars) ──────────────────
     k_min:             int   = 20
     k_max:             int   = 200
@@ -420,4 +423,78 @@ class SessionSRLState:
             stale_keys = [k for k in list(history.keys()) if k > target_len]
             for k in stale_keys:
                 history.pop(k, None)
+
+    def commit_turn(self, manager: "KVRuntimeManager", session_id: str) -> None:
+        """
+        Prune low-salience blocks from the active turn and consolidate the historical graph.
+        """
+        if manager is None or session_id not in manager.session_blocks:
+            return
+
+        # Start of active turn is self.cached_len
+        # Any block with b.anchor_idx >= self.cached_len is active
+        keep_slots = set(self.sink_blocks)
+
+        # Add cluster centers and landmarks
+        if self.chunk_graph is not None:
+            if getattr(self.chunk_graph, "cluster_centers_tensor", None) is not None:
+                keep_slots.update(self.chunk_graph.cluster_centers_tensor.tolist())
+            if getattr(self.chunk_graph, "parent_landmarks", None) is not None:
+                keep_slots.update(self.chunk_graph.parent_landmarks.tolist())
+
+        # Add factual exact store slots
+        fact_store = manager._factual_stores.get(session_id)
+        if fact_store is not None and hasattr(fact_store, "entries"):
+            for entry in fact_store.entries:
+                if hasattr(entry, "slot_ids"):
+                    keep_slots.update(entry.slot_ids)
+
+        # Filter active blocks by high IDF (salience)
+        # Scan active blocks (anchor_idx >= cached_len)
+        active_slots = set()
+        blocks_layer0 = manager.session_blocks[session_id].get(0, [])
+        for b in blocks_layer0:
+            if getattr(b, "pool_idx", None) is not None and b.anchor_idx >= self.cached_len:
+                active_slots.add(b.pool_idx)
+                # Check for high IDF tokens (IDF >= 2.5)
+                if self.inverted_index is not None and getattr(self.inverted_index, "idf", None) is not None:
+                    if getattr(b, "token_indices", None):
+                        if any(self.inverted_index.idf.get(tok, 1.0) >= 2.5 for tok in b.token_indices):
+                            keep_slots.add(b.pool_idx)
+
+        # Prune blocks that are NOT in keep_slots and were active in this turn
+        pruned_slots = active_slots - keep_slots
+        if not pruned_slots:
+            if manager._session_token_ids.get(session_id) is not None:
+                self.cached_len = manager._session_token_ids[session_id].numel()
+            return
+
+        # Free blocks from native pool
+        if getattr(manager, "native_pool", None) is not None:
+            for slot in pruned_slots:
+                manager.native_pool.free_block(slot)
+                # Clear from slot reinforcement dict
+                self.slot_activation_strength.pop(slot, None)
+
+        # Remove pruned blocks from manager.session_blocks
+        num_layers = manager.num_layers
+        for layer_idx in range(num_layers):
+            if session_id in manager.session_blocks:
+                blocks = manager.session_blocks[session_id][layer_idx]
+                manager.session_blocks[session_id][layer_idx] = [
+                    b for b in blocks if getattr(b, "pool_idx", None) not in pruned_slots
+                ]
+            if manager._streaming_mgr is not None and session_id in manager._streaming_mgr.session_blocks:
+                blocks = manager._streaming_mgr.session_blocks[session_id][layer_idx]
+                manager._streaming_mgr.session_blocks[session_id][layer_idx] = [
+                    b for b in blocks if getattr(b, "pool_idx", None) not in pruned_slots
+                ]
+
+        # Update cached_len to current sequence length
+        if manager._session_token_ids.get(session_id) is not None:
+            self.cached_len = manager._session_token_ids[session_id].numel()
+
+        # Re-run finalize_srl_index to clean and update the index
+        manager.finalize_srl_index(session_id, cached_len=self.cached_len)
+
 

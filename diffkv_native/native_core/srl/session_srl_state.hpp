@@ -182,6 +182,9 @@ struct SessionSRLState {
     std::vector<int32_t> generated_token_slots;
     std::vector<int32_t> dynamic_anchors;
 
+    // Dynamic Node Reinforcement Strength
+    std::unordered_map<int32_t, float> slot_activation_strength;
+
     std::vector<int32_t> expand_neighborhood(const std::unordered_set<int32_t>& seed_slots) const {
         std::unordered_set<int32_t> expanded(seed_slots.begin(), seed_slots.end());
         if (chunk_graph.neighbors.empty() || semantic_index.slot_ids.empty() || chunk_graph.max_degree <= 0) {

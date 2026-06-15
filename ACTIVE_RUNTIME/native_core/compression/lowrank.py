@@ -480,8 +480,53 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
 
     # 3. Batched Randomized SVD — O(T × rank × feat) instead of O(T² × feat)
     #    This is ~30x faster than full SVD for typical rank=8, T=256, feat=256.
+    max_rank_for_batch = rank
+    block_ranks = []
+    for block in blocks_list:
+        block_token_ids = []
+        if manager is not None and getattr(manager, "_session_token_ids", None) is not None:
+            session_id = getattr(block, "session_id", None)
+            all_tids = manager._session_token_ids.get(session_id)
+            if all_tids is not None:
+                for pos in getattr(block, "token_indices", []):
+                    if 0 <= pos < len(all_tids):
+                        block_token_ids.append(int(all_tids[pos].item()))
+        
+        boost = False
+        if block_token_ids and getattr(manager, "tokenizer", None) is not None:
+            try:
+                block_text = manager.tokenizer.decode(block_token_ids)
+                if any(c.isdigit() for c in block_text):
+                    boost = True
+                else:
+                    import re
+                    re_math_boost = re.compile(
+                        r'[\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^'
+                    )
+                    if re_math_boost.search(block_text):
+                        boost = True
+                    else:
+                        re_definitions_boost = re.compile(
+                            r'\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b',
+                            re.IGNORECASE
+                        )
+                        if re_definitions_boost.search(block_text):
+                            boost = True
+            except Exception:
+                pass
+
+        if boost:
+            import math
+            block_rank = int(math.ceil(rank * 1.5))
+        else:
+            block_rank = rank
+        
+        block_ranks.append(block_rank)
+        if block_rank > max_rank_for_batch:
+            max_rank_for_batch = block_rank
+
     n_oversamples = 5
-    r_proj = min(rank + n_oversamples, T_active, feat_dim)
+    r_proj = min(max_rank_for_batch + n_oversamples, T_active, feat_dim)
     if r_proj < 1:
         return False
 
@@ -503,13 +548,16 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     ranks = []
     for i in range(N_blocks):
         tot = (S_cpu[i] ** 2).sum().item()
-        k = rank
+        b_rank = block_ranks[i]
+        k = b_rank
         if tot > 1e-9:
             cum = torch.cumsum(S_cpu[i] ** 2, dim=0)
             threshold = 0.999 * tot
             idx = torch.where(cum >= threshold)[0]
             if idx.numel() > 0:
-                k = max(4, min(int(idx[0].item() + 1), rank))
+                k = max(4, min(int(idx[0].item() + 1), b_rank))
+        if k > T_active:
+            k = T_active
         ranks.append(k)
 
     # 5. Conversion and Sanitization

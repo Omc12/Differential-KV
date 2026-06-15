@@ -119,6 +119,15 @@ def two_level_gate(
             penalties_t = torch.tensor(penalties, dtype=anchor_scores.dtype, device=anchor_scores.device)
             anchor_scores = anchor_scores - penalties_t
 
+        # Apply slot reinforcement strength boost
+        if srl_state is not None and getattr(srl_state, "slot_activation_strength", None):
+            boosts = []
+            for slot_id in slot_ids.tolist():
+                strength = srl_state.slot_activation_strength.get(slot_id, 1.0)
+                boosts.append((strength - 1.0) * 0.1)
+            boosts_t = torch.tensor(boosts, dtype=anchor_scores.dtype, device=anchor_scores.device)
+            anchor_scores = anchor_scores + boosts_t
+
     k_keep = min(k_pass, N)
     top_idx = torch.topk(anchor_scores, k=k_keep, largest=True, sorted=True).indices
     return slot_ids[top_idx]
@@ -577,6 +586,13 @@ def route_query(
             # Retention(q, j) = graph_hop_decay * sem_scores_cpu[j]
             graph_hop_decay = getattr(srl_state, "graph_hop_decay", 0.5)
             retention = graph_hop_decay * sem_scores_cpu
+
+            # Precompute slot reinforcement strengths
+            strengths_cpu = torch.ones(N_idx, dtype=torch.float32)
+            if srl_state is not None and getattr(srl_state, "slot_activation_strength", None):
+                for r in range(N_idx):
+                    slot_id = int(idx_map.slot_ids[r].item())
+                    strengths_cpu[r] = srl_state.slot_activation_strength.get(slot_id, 1.0)
             
             # Calculate node degrees for transition dilution (degree damping)
             # degree(i) is number of valid (>= 0) neighbors for node i
@@ -607,7 +623,7 @@ def route_query(
                 
                 valid_mask_1 = (flat_neighbors_1 >= 0) & (flat_neighbors_1 < N_idx)
                 A1_g.scatter_add_(0, flat_neighbors_1[valid_mask_1], flat_signals_1[valid_mask_1])
-                A1_g = A1_g * retention
+                A1_g = A1_g * retention * strengths_cpu
 
                 if forbidden_segment is not None:
                     forbidden_mask = (row_segs_tensor == forbidden_segment)
@@ -630,7 +646,7 @@ def route_query(
                     
                     valid_mask_2 = (flat_neighbors_2 >= 0) & (flat_neighbors_2 < N_idx)
                     A2_g.scatter_add_(0, flat_neighbors_2[valid_mask_2], flat_signals_2[valid_mask_2])
-                    A2_g = A2_g * retention
+                    A2_g = A2_g * retention * strengths_cpu
 
                     if forbidden_segment is not None:
                         A2_g[forbidden_mask] = 0.0
@@ -741,6 +757,27 @@ def route_query(
         
     sink_tensor = torch.tensor(sink, dtype=torch.int32, device=Q.device)
     combined_tensor = torch.cat([sink_tensor, filtered_non_sink.to(torch.int32)])
+
+    # Update slot reinforcement/activation strength for the routed slots using an EMA
+    if srl_state is not None and getattr(srl_state, "slot_activation_strength", None) is not None:
+        selected_slots_set = set(combined_tensor.tolist())
+        alpha_boost = 0.05
+        decay_rate = 0.99
+        
+        # Initialize strength for slots not yet seen
+        for slot in selected_slots_set:
+            if slot not in srl_state.slot_activation_strength:
+                srl_state.slot_activation_strength[slot] = 1.0
+            # Boost strength of selected slots
+            srl_state.slot_activation_strength[slot] += alpha_boost
+            
+        # Slowly decay all slots to prevent permanent locking
+        for slot in list(srl_state.slot_activation_strength.keys()):
+            if slot not in selected_slots_set:
+                srl_state.slot_activation_strength[slot] *= decay_rate
+                # Clamp minimum strength to 1.0 to avoid fading below baseline
+                if srl_state.slot_activation_strength[slot] < 1.0:
+                    srl_state.slot_activation_strength[slot] = 1.0
 
     srl_state.current_step_count += 1
     return combined_tensor.to(torch.int32)

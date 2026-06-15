@@ -414,19 +414,20 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
 
     float scale_u = std::max(max_abs / 127.0f, 1e-5f);
     int S_max = 64; 
-    std::memset(params.out_u_ptr, 0, S_max * R * sizeof(int8_t));
+    int pool_rank = params.pool_rank > 0 ? params.pool_rank : R;
+    std::memset(params.out_u_ptr, 0, S_max * pool_rank * sizeof(int8_t));
     for (int s = 0; s < S_deltas; ++s) {
         for (int r = 0; r < R; ++r) {
             float val = U_scaled[s * R + r] / scale_u;
             int8_t val_i8 = static_cast<int8_t>(std::max(-127.0f, std::min(127.0f, std::round(val))));
-            params.out_u_ptr[s * R + r] = val_i8;
+            params.out_u_ptr[s * pool_rank + r] = val_i8;
         }
     }
 
     *params.out_u_scale = ggml_fp32_to_fp16(scale_u);
 
-    std::memset(params.out_vk_ptr, 0, R * F * sizeof(ggml_fp16_t));
-    std::memset(params.out_vv_ptr, 0, R * F * sizeof(ggml_fp16_t));
+    std::memset(params.out_vk_ptr, 0, pool_rank * F * sizeof(ggml_fp16_t));
+    std::memset(params.out_vv_ptr, 0, pool_rank * F * sizeof(ggml_fp16_t));
     for (int r = 0; r < svd_dim; ++r) {
         if (r < k_dynamic) {
             for (int f = 0; f < F; ++f) {

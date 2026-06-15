@@ -19,6 +19,7 @@ struct CompressJob {
     int block_size;  // S (total tokens in block, typically 64)
     int feat_dim;    // F
     int rank;        // R
+    int pool_rank = 0; // The stride/capacity of the pool for this slot
     int head_dim;    // D
     int anchor_idx;  // Sequence position of block start
     

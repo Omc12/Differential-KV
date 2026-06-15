@@ -129,7 +129,16 @@ inline std::vector<int32_t> two_level_gate(
             }
         }
 
-        scored.push_back({dot - penalty, slot});
+        // Reinforcement boost
+        float boost = 0.0f;
+        if (srl_state) {
+            auto it = srl_state->slot_activation_strength.find(slot);
+            if (it != srl_state->slot_activation_strength.end()) {
+                boost = (it->second - 1.0f) * 0.1f;
+            }
+        }
+
+        scored.push_back({dot - penalty + boost, slot});
     }
 
     // partial_sort to get top k_eff
@@ -630,7 +639,7 @@ inline std::vector<int32_t> route_query(
             retention[i] = srl_state.graph_hop_decay * sem_scores_cpu[i];
 
         // 1. Walk for Segment 1: forbid Segment 2
-        std::vector<float> A1_1 = graph_propagate(g, A0_1, retention, srl_state.graph_hop_decay);
+        std::vector<float> A1_1 = graph_propagate(g, A0_1, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         for (int i = 0; i < N; ++i) {
             int32_t slot = sem_idx.slot_ids[i];
             auto it = srl_state.segment_ids.find(slot);
@@ -638,7 +647,7 @@ inline std::vector<int32_t> route_query(
                 A1_1[i] = 0.0f;
             }
         }
-        std::vector<float> A2_1 = graph_propagate(g, A1_1, retention, srl_state.graph_hop_decay);
+        std::vector<float> A2_1 = graph_propagate(g, A1_1, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         for (int i = 0; i < N; ++i) {
             int32_t slot = sem_idx.slot_ids[i];
             auto it = srl_state.segment_ids.find(slot);
@@ -648,7 +657,7 @@ inline std::vector<int32_t> route_query(
         }
 
         // 2. Walk for Segment 2: forbid Segment 1
-        std::vector<float> A1_2 = graph_propagate(g, A0_2, retention, srl_state.graph_hop_decay);
+        std::vector<float> A1_2 = graph_propagate(g, A0_2, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         for (int i = 0; i < N; ++i) {
             int32_t slot = sem_idx.slot_ids[i];
             auto it = srl_state.segment_ids.find(slot);
@@ -656,7 +665,7 @@ inline std::vector<int32_t> route_query(
                 A1_2[i] = 0.0f;
             }
         }
-        std::vector<float> A2_2 = graph_propagate(g, A1_2, retention, srl_state.graph_hop_decay);
+        std::vector<float> A2_2 = graph_propagate(g, A1_2, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         for (int i = 0; i < N; ++i) {
             int32_t slot = sem_idx.slot_ids[i];
             auto it = srl_state.segment_ids.find(slot);
@@ -666,7 +675,7 @@ inline std::vector<int32_t> route_query(
         }
 
         // 3. Walk for Segment 0: generic, forbid opponent segment dynamically
-        std::vector<float> A1_0 = graph_propagate(g, A0_0, retention, srl_state.graph_hop_decay);
+        std::vector<float> A1_0 = graph_propagate(g, A0_0, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         if (q_seg == 1) {
             for (int i = 0; i < N; ++i) {
                 int32_t slot = sem_idx.slot_ids[i];
@@ -685,7 +694,7 @@ inline std::vector<int32_t> route_query(
             }
         }
 
-        std::vector<float> A2_0 = graph_propagate(g, A1_0, retention, srl_state.graph_hop_decay);
+        std::vector<float> A2_0 = graph_propagate(g, A1_0, retention, srl_state.graph_hop_decay, &sem_idx.slot_ids, &srl_state.slot_activation_strength);
         if (q_seg == 1) {
             for (int i = 0; i < N; ++i) {
                 int32_t slot = sem_idx.slot_ids[i];

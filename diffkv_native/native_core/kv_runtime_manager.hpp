@@ -42,7 +42,8 @@ public:
         const std::vector<std::vector<float>>& v_layers, // [n_layers][chunk_len * F_test]
         int chunk_len,
         int position_start,
-        const std::vector<int32_t>& token_ids
+        const std::vector<int32_t>& token_ids,
+        SessionSRLState* srl_state = nullptr
     );
 
     // Ingest a single decode token's key/value for all layers
@@ -50,7 +51,8 @@ public:
         const std::vector<std::vector<float>>& k_layers, // [n_layers][F_test]
         const std::vector<std::vector<float>>& v_layers, // [n_layers][F_test]
         int current_pos,
-        const std::vector<int32_t>& token_ids
+        const std::vector<int32_t>& token_ids,
+        SessionSRLState* srl_state = nullptr
     );
 
     // Dynamic per-layer adaptive SVD rank schedule
@@ -60,7 +62,7 @@ public:
     std::vector<int32_t> route_decode_slots(
         int current_pos,
         const std::vector<int32_t>& token_ids,
-        const SessionSRLState& srl_state,
+        SessionSRLState& srl_state,
         const std::unordered_set<int32_t>& stop_token_ids,
         int srl_k_recency,
         int srl_k_lexical,
@@ -77,6 +79,9 @@ public:
 
     // Touch slot indexes to trigger reloading from CPU if needed
     void touch_active_slots(const std::vector<int32_t>& active_slots);
+
+    // Prune low-salience blocks and consolidate index
+    void commit_turn(SessionSRLState& srl_state);
 
     void set_micro_block_size(int size);
     int get_micro_block_size() const { return micro_block_size_; }

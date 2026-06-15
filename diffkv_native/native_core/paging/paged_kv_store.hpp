@@ -33,6 +33,8 @@ struct PageEntry {
     std::vector<PagedSlotData> layers_cpu_data; // size = n_layers
 };
 
+struct SessionSRLState;
+
 class PagedKVStore {
 public:
     struct Stats {
@@ -48,7 +50,7 @@ public:
 
     void register_block(StreamingKVBlock* block, const std::vector<std::unique_ptr<NativeBlockPool>>& engines);
     void touch(StreamingKVBlock* block, const std::vector<std::unique_ptr<NativeBlockPool>>& engines);
-    void maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool>>& engines);
+    void maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool>>& engines, const SessionSRLState* srl_state = nullptr);
     void clear();
     void evict_all(const std::vector<std::unique_ptr<NativeBlockPool>>& engines);
     void reload_all(const std::vector<std::unique_ptr<NativeBlockPool>>& engines);

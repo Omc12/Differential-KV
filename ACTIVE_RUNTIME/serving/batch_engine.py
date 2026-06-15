@@ -1608,6 +1608,14 @@ class ContinuousBatchEngine:
             except Exception:
                 pass  # Non-fatal
 
+            # Call commit_turn to prune low-salience blocks and consolidate the SRL index
+            try:
+                srl_state = self.wrapper.manager._session_srl.get(req.session_id)
+                if srl_state is not None and hasattr(srl_state, "commit_turn"):
+                    srl_state.commit_turn(self.wrapper.manager, req.session_id)
+            except Exception as e:
+                print(f"[DiffKV] Error in commit_turn on turn boundary: {e}")
+
             # ── Reference-formatting normalisation (Fix 1) ───────────────────
             # The model sometimes generates inconsistent citation styles within
             # the same reference list (e.g. "* [1] ...", "[2] ...", "In [3] ...").

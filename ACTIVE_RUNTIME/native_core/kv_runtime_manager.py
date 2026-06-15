@@ -515,7 +515,8 @@ class KVRuntimeManager:
             get_layer_rank(l, self.num_layers, self.rank, early_boost=_early_boost, max_rank_early=_max_rank_early)
             for l in range(self.num_layers)
         )
-        pool_rank = max_possible_rank
+        import math
+        pool_rank = int(math.ceil(max_possible_rank * 1.5))
         # Pool max_seq_len = micro_block_size (default varies by context length).
         pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
         # Ensure pool_block_size can hold the maximum adaptive prefill block size (MBS + 1 anchor)
@@ -593,6 +594,7 @@ class KVRuntimeManager:
 
         # ── Phase 7 subsystems ────────────────────────────────────────────
         self.pager       = PagedKVStore(gpu_budget_gb=gpu_budget_gb, device=device)
+        self.pager.manager = self
         self.decode_workspace = {}
 
         # On Apple Silicon/MPS, we disable async background SVD to guarantee thread-safety
@@ -2455,11 +2457,47 @@ class KVRuntimeManager:
         _cfg = getattr(self, "config", None)
         _early_boost     = getattr(_cfg, "early_layer_rank_boost", False)
         _max_rank_early  = getattr(_cfg, "max_rank_early", 0)
-        _layer_idx_safe  = block.layer_idx if block.layer_idx is not None else 0
+        _layer_idx_safe  = getattr(block, "layer_idx", 0)
+        if _layer_idx_safe is None:
+            _layer_idx_safe = 0
         rank = get_layer_rank(
             _layer_idx_safe, self.num_layers, self.rank,
             early_boost=_early_boost, max_rank_early=_max_rank_early,
         )
+
+        # Check if block qualifies for rank boosting (1.5x) to prevent Precision Loss & Concept Compression Failure
+        boost_rank = False
+        if block_token_ids and getattr(self, "tokenizer", None) is not None:
+            try:
+                block_text = self.tokenizer.decode(block_token_ids)
+                # 1. Any digit
+                if any(c.isdigit() for c in block_text):
+                    boost_rank = True
+                else:
+                    # 2. Math formula markers (basic operators, LaTeX symbols)
+                    import re
+                    re_math_boost = re.compile(
+                        r'[\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^'
+                    )
+                    if re_math_boost.search(block_text):
+                        boost_rank = True
+                    else:
+                        # 3. Key definition keywords
+                        re_definitions_boost = re.compile(
+                            r'\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b',
+                            re.IGNORECASE
+                        )
+                        if re_definitions_boost.search(block_text):
+                            boost_rank = True
+            except Exception:
+                pass
+
+        if boost_rank:
+            import math
+            rank = int(math.ceil(rank * 1.5))
+            if rank > seq_len:
+                rank = seq_len
+
         lr_delta = compress_lowrank(normalized_deltas, rank)
 
         # Scale U by token norms to perform token-wise denormalization when reconstructed

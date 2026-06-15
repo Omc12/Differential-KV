@@ -521,11 +521,23 @@ void custom_attention_op_callback(
             srl->current_step_factual_tokens.clear();
             srl->current_step_factual_sequences.clear();
             srl->current_step_max_similarity = 0.0f;
+
+            // Query Anchor Blending (layer-0 Q space only)
+            std::vector<float> q_for_factual(n_q_heads * D);
+            if (srl->factual_anchor_q.empty()) {
+                srl->factual_anchor_q = Q_unrot;
+                q_for_factual = Q_unrot;
+            } else {
+                for (int qi = 0; qi < n_q_heads * D; ++qi) {
+                    q_for_factual[qi] = 0.20f * Q_unrot[qi] + 0.80f * srl->factual_anchor_q[qi];
+                }
+            }
+
             // F26: active_slots=None (match MLX so unrouted/straddled needles still
             // recall); threshold 0.4 is the stable point vs the chunker's fragment.
             (void)active_slots;
             srl->step_cached_entries = srl->factual_store.query(
-                Q_unrot.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.4f, nullptr);
+                q_for_factual.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.4f, nullptr);
             auto& me = srl->step_cached_entries;
             // F26: drop TRUE chunk fragments (same orig_span_start AND token-prefix).
             if (me.size() > 1) {

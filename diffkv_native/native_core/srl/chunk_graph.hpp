@@ -705,7 +705,9 @@ inline std::vector<float> graph_propagate(
     const ChunkGraph&      g,
     const std::vector<float>& seed_scores,   // [N]
     const std::vector<float>& retention,     // [N] pointwise decay
-    float                     hop_decay [[maybe_unused]]
+    float                     hop_decay [[maybe_unused]],
+    const std::vector<int32_t>* slot_ids = nullptr,
+    const std::unordered_map<int32_t, float>* slot_activation_strength = nullptr
 ) {
     int N = g.N;
     std::vector<float> out(N, 0.0f);
@@ -723,9 +725,18 @@ inline std::vector<float> graph_propagate(
         }
     }
 
-    // Apply retention scaling
-    for (int i = 0; i < N; ++i)
-        out[i] *= retention[i];
+    // Apply retention scaling and slot reinforcement strength
+    for (int i = 0; i < N; ++i) {
+        float strength = 1.0f;
+        if (slot_ids && slot_activation_strength && i < static_cast<int>(slot_ids->size())) {
+            int32_t slot = (*slot_ids)[i];
+            auto it = slot_activation_strength->find(slot);
+            if (it != slot_activation_strength->end()) {
+                strength = it->second;
+            }
+        }
+        out[i] *= retention[i] * strength;
+    }
 
     return out;
 }

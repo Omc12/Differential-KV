@@ -333,6 +333,38 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
     return false;
 }
 
+bool StreamingSparseIngestManager::should_boost_compression_rank(int anchor_idx, const std::vector<int32_t>& block_tokens) const {
+    if (!model_) return false;
+    
+    try {
+        std::string block_text = model_->detokenize(block_tokens);
+        
+        // 1. Any digits
+        for (char c : block_text) {
+            if (c >= '0' && c <= '9') {
+                return true;
+            }
+        }
+        
+        // 2. Math formula markers: +, -, *, /, =, or LaTeX markers
+        static const std::regex re_math_boost(
+            R"([\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^)");
+        if (std::regex_search(block_text, re_math_boost)) {
+            return true;
+        }
+        
+        // 3. Key definition keywords
+        static const std::regex re_definitions_boost(
+            R"(\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b)",
+            std::regex::icase);
+        if (std::regex_search(block_text, re_definitions_boost)) {
+            return true;
+        }
+    } catch (...) {}
+    
+    return false;
+}
+
 int StreamingSparseIngestManager::next_anchor_idx(int layer_idx) const {
     if (layers_blocks_[layer_idx].empty()) {
         return 0;
@@ -351,7 +383,8 @@ void StreamingSparseIngestManager::ingest_chunk(
     std::vector<std::unique_ptr<NativeBlockPool>>& engines,
     AsyncCompressor& compressor,
     int rank,
-    PagedKVStore* pager
+    PagedKVStore* pager,
+    SessionSRLState* srl_state
 ) {
     // Append newly ingested chunk of token IDs to session_token_ids_ on layer 0.
     if (layer_idx == 0) {
@@ -372,7 +405,7 @@ void StreamingSparseIngestManager::ingest_chunk(
             // Allocate a new slot index
             int slot_id = engines[layer_idx]->allocate_slot();
             if (slot_id == -1 && pager) {
-                pager->maybe_evict(engines);
+                pager->maybe_evict(engines, srl_state);
                 slot_id = engines[layer_idx]->allocate_slot();
             }
             
@@ -542,13 +575,37 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     // Transition state in table
     engines[layer_idx]->get_state_table().transition(slot_id, BlockState::DenseResident, BlockState::Compressing);
     block->state = BlockState::Compressing;
+
+    // Check if block qualifies for rank boosting (1.5x) to prevent Precision Loss
+    bool boost = false;
+    if (block->anchor_idx + block->token_count() <= (int)session_token_ids_.size()) {
+        std::vector<int32_t> block_toks(
+            session_token_ids_.begin() + block->anchor_idx,
+            session_token_ids_.begin() + block->anchor_idx + block->token_count()
+        );
+        boost = should_boost_compression_rank(block->anchor_idx, block_toks);
+    }
+
+    int pool_rank = engines[layer_idx]->get_rank();
+    int svd_rank = rank;
+    if (boost) {
+        svd_rank = (int)std::ceil(rank * 1.5f);
+        int seq_len = S_total - 1;
+        if (svd_rank > seq_len) {
+            svd_rank = seq_len;
+        }
+        if (svd_rank > pool_rank) {
+            svd_rank = pool_rank;
+        }
+    }
     
     CompressJob job;
     job.session_id = active_session_id_.empty() ? "42" : active_session_id_;
     job.block_id = slot_id;
     job.block_size = S_total;
     job.feat_dim = F_test;
-    job.rank = rank;
+    job.rank = svd_rank;
+    job.pool_rank = pool_rank;
     job.head_dim = head_dim;
     job.anchor_idx = block->anchor_idx;
     job.raw_k_ptr = block->svd_k.data();
@@ -557,10 +614,10 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.stop_token_ids = stop_token_ids_;
     
     // Outputs in block pool host mirrors (CUDA compatible)
-    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * rank;
+    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * pool_rank;
     job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
-    job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * rank * F_test;
-    job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * rank * F_test;
+    job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * pool_rank * F_test;
+    job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * pool_rank * F_test;
     job.out_scale = engines[layer_idx]->get_host_scales() + slot_id;
     job.out_anchor_k = engines[layer_idx]->get_host_anchors_K() + slot_id * F_test;
     job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;

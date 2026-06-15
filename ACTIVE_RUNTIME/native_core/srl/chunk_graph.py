@@ -549,13 +549,24 @@ def build_chunk_graph(
             
             for i in range(L):
                 p_slot = valid_parent_slots[i]
+                anchor_i = slot_to_anchor.get(p_slot, 0)
+                is_i_new = (anchor_i >= cached_len) if cached_len > 0 else False
+
                 sims = []
                 for j in range(L):
                     if i == j:
                         continue
+                    neighbor_slot = valid_parent_slots[j]
+                    anchor_j = slot_to_anchor.get(neighbor_slot, 0)
+                    is_j_new = (anchor_j >= cached_len) if cached_len > 0 else False
+
+                    # Older historic prime node cannot target newer active prime node
+                    if cached_len > 0 and (is_j_new and not is_i_new):
+                        continue
+
                     val = float(parent_sim[i, j].item())
                     if val >= 0.30:
-                        sims.append((val, valid_parent_slots[j]))
+                        sims.append((val, neighbor_slot))
                 
                 # Sort descending by similarity
                 sims.sort(key=lambda x: x[0], reverse=True)
