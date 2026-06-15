@@ -135,6 +135,10 @@ struct SessionSRLState {
     std::unordered_set<int32_t> current_step_factual_tokens;
     std::vector<std::vector<int32_t>> current_step_factual_sequences;
     float current_step_max_similarity = 0.0f;
+    // PERF: the factual store query is layer-independent (layer-0 K is the proxy).
+    // Cache its result at layer 0 and reuse across layers 1..N-1 to avoid running
+    // the query (+ deep K/V copies) once per layer per decode step.
+    std::vector<FactEntry> step_cached_entries;
     std::vector<std::vector<int32_t>> vsl_active_candidates;
     int32_t vsl_consecutive_helpers = 0;
     // First decode-step layer-0 K stored as a query anchor.

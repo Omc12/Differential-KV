@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 
 namespace diffkv {
 
@@ -480,9 +481,10 @@ void custom_attention_op_callback(
     }
 
     // ── Factual Exact Store Attention ──
-    std::vector<FactEntry> matching_entries;
-    if (data->srl_state != nullptr && data->W_proj != nullptr) {
-        SessionSRLState* srl = static_cast<SessionSRLState*>(data->srl_state);
+    // PERF: srl hoisted out of the factual block so the per-step cached entries can be
+    // REFERENCED (not re-copied per layer) by the out_facts loop below.
+    SessionSRLState* srl = (data->srl_state != nullptr) ? static_cast<SessionSRLState*>(data->srl_state) : nullptr;
+    if (srl != nullptr && data->W_proj != nullptr) {
         std::unordered_set<int32_t> active_slots;
         if (K > 0 && slot_indices && slot_indices->data) {
             const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
@@ -511,70 +513,56 @@ void custom_attention_op_callback(
             std::memcpy(Q_unrot.data(), Q_ptr, n_q_heads * D * sizeof(float));
         }
 
+        // PERF: query the factual store ONCE per decode step (layer 0) and cache it;
+        // layers 1..N-1 reuse srl->step_cached_entries. The query is layer-independent
+        // (layer-0 decode-K is the proxy) and returns deep K/V copies, so running it
+        // per layer was ~24x redundant work — a major decode-throughput cost.
         if (data->layer_idx == 0) {
             srl->current_step_factual_tokens.clear();
             srl->current_step_factual_sequences.clear();
             srl->current_step_max_similarity = 0.0f;
-        }
-        // F26 FIX: do NOT filter factual entries by the routed sparse slots. The Mac
-        // reference (mlx_diffkv_wrapper.py:871) calls query(..., active_slots=None) —
-        // factual recall must work even when a salient span's blocks weren't routed
-        // (e.g. a digit needle that straddles a micro-block boundary and so is split
-        // across compressed blocks). Filtering by active_slots dropped such needles
-        // (depth ≥0.9), retrieving only a partial answer. threshold 0.3 matches MLX.
-        (void)active_slots;
-        matching_entries = srl->factual_store.query(
-            Q_unrot.data(),
-            n_q_heads,
-            D,
-            data->W_proj,
-            data->desc_dim,
-            0.4f,
-            nullptr
-        );
-        // F26: belt-and-suspenders fragment guard. merge-before-cap in query()
-        // rejoins most split spans, but a borderline chunk that scored below the
-        // match threshold can still leave a truncated prefix entry; drop any entry
-        // whose tokens are a strict prefix of another's so it can't pull the model
-        // to truncate (e.g. "84729" beside "847291").
-        if (matching_entries.size() > 1) {
-            std::vector<bool> drop(matching_entries.size(), false);
-            for (size_t a = 0; a < matching_entries.size(); ++a) {
-                for (size_t b = 0; b < matching_entries.size(); ++b) {
-                    if (a == b || drop[b]) continue;
-                    const auto& ta = matching_entries[a].tokens;
-                    const auto& tb = matching_entries[b].tokens;
-                    if (ta.size() > tb.size()) continue;
-                    if (ta.size() == tb.size() && a < b) continue;
-                    // Only drop a TRUE chunk fragment: same original span AND a token prefix.
-                    // (Legitimate short entries from a different span are preserved.)
-                    bool same_origin = matching_entries[a].orig_span_start >= 0 &&
-                                       matching_entries[a].orig_span_start == matching_entries[b].orig_span_start;
-                    if (same_origin && std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
+            // F26: active_slots=None (match MLX so unrouted/straddled needles still
+            // recall); threshold 0.4 is the stable point vs the chunker's fragment.
+            (void)active_slots;
+            srl->step_cached_entries = srl->factual_store.query(
+                Q_unrot.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.4f, nullptr);
+            auto& me = srl->step_cached_entries;
+            // F26: drop TRUE chunk fragments (same orig_span_start AND token-prefix).
+            if (me.size() > 1) {
+                std::vector<bool> drop(me.size(), false);
+                for (size_t a = 0; a < me.size(); ++a) {
+                    for (size_t b = 0; b < me.size(); ++b) {
+                        if (a == b || drop[b]) continue;
+                        const auto& ta = me[a].tokens; const auto& tb = me[b].tokens;
+                        if (ta.size() > tb.size()) continue;
+                        if (ta.size() == tb.size() && a < b) continue;
+                        bool same_origin = me[a].orig_span_start >= 0 &&
+                                           me[a].orig_span_start == me[b].orig_span_start;
+                        if (same_origin && std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
+                    }
                 }
+                std::vector<FactEntry> kept;
+                for (size_t i = 0; i < me.size(); ++i) if (!drop[i]) kept.push_back(std::move(me[i]));
+                me.swap(kept);
             }
-            std::vector<FactEntry> kept;
-            for (size_t i = 0; i < matching_entries.size(); ++i)
-                if (!drop[i]) kept.push_back(std::move(matching_entries[i]));
-            matching_entries.swap(kept);
-        }
-        for (const auto& entry : matching_entries) {
-            srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
-            bool exists = false;
-            for (const auto& seq : srl->current_step_factual_sequences) {
-                if (seq == entry.tokens) {
-                    exists = true;
-                    break;
-                }
+            for (const auto& entry : me) {
+                srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
+                bool exists = false;
+                for (const auto& seq : srl->current_step_factual_sequences)
+                    if (seq == entry.tokens) { exists = true; break; }
+                if (!exists) srl->current_step_factual_sequences.push_back(entry.tokens);
+                if (entry.current_sim > srl->current_step_max_similarity)
+                    srl->current_step_max_similarity = entry.current_sim;
             }
-            if (!exists) {
-                srl->current_step_factual_sequences.push_back(entry.tokens);
-            }
-            if (entry.current_sim > srl->current_step_max_similarity) {
-                srl->current_step_max_similarity = entry.current_sim;
-            }
+        } else {
+            (void)active_slots;
         }
     }
+
+    // Reference the per-step cached factual entries (filled at layer 0); no per-layer copy.
+    static const std::vector<FactEntry> kEmptyEntries;
+    const std::vector<FactEntry>& matching_entries =
+        (srl != nullptr) ? srl->step_cached_entries : kEmptyEntries;
 
     std::vector<float> out_facts(n_q_heads * D, 0.0f);
     std::vector<float> lse_facts(n_q_heads, -1e30f);

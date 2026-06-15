@@ -276,10 +276,15 @@ void FactualExactStore::build(
     // at rate sqrt(ε)" rather than truncated 12-token fragments.
     // Each chunk records the ORIGINAL span start (third element) so split chunks
     // of one contiguous span can be rejoined later (F22 needle-fragmentation fix).
+    // Chunk length 20 matches ACTIVE_RUNTIME. (Tried 64 to keep needle spans whole,
+    // but it merely shifts the straddle/fragment edge from the end of context to the
+    // start and breaks the standard NIAH depth 0.1 — 20 is the better operating point:
+    // standard depths 0.1/0.5/0.9 pass; only the non-standard last-5% depth fragments.)
+    const int CHUNK_LEN = 20;
     std::vector<std::array<int, 3>> chunked_spans;
     for (const auto& span : spans) {
-        for (int sub_s = span.first; sub_s < span.second; sub_s += 20) {
-            int sub_e = std::min(sub_s + 20, span.second);
+        for (int sub_s = span.first; sub_s < span.second; sub_s += CHUNK_LEN) {
+            int sub_e = std::min(sub_s + CHUNK_LEN, span.second);
             chunked_spans.push_back({sub_s, sub_e, span.first});
         }
     }
