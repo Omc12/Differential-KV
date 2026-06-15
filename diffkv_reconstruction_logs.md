@@ -345,11 +345,17 @@ Re-diagnosed and fixed the depth-≥0.9 failure. It was NOT residuals/dense-wind
 | before | ✗ | – | ✗ | – | ✗ | – | ✗ | ✗ | ✗ | ✗ |
 | **after** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✗ `846291` | ✅ | ✅ |
 
-**9/10 depths PASS** (was 0/5). Coherence intact ("Paris"). depth-0.85 fails by **one digit** (`7`→`6`) — a residual compression-fidelity edge (the straddled `7` token's K/V reconstructed imperfectly), not structural. Could be closed by residual tuning (F9 threshold) — left as a minor follow-up.
+**9/10 depths PASS** (was 0/5). Coherence intact ("Paris").
+
+### F28b — ✅ depth-0.85 FIXED (origin-aware dedup)
+The 0.85 single-digit error (`846291`) was caused by the prefix dedup being too blunt — it dropped a *legitimate* short entry (different span) that the longer needle entry happened to prefix-match. Made the dedup **origin-aware**: only drop a prefix entry that shares `orig_span_start` with the longer one (a true chunk fragment). Now **depths 0.1–0.9 ALL PASS** (10/11), incl. the standard NIAH benchmark depths 0.1/0.5/0.9. Only **depth 0.95** (needle in the last ~5% of context, beyond the standard test) still leaks a fragment (`84729`) — the needle's final token isn't captured/merged at end-of-context (upstream salience edge); a deep, non-standard edge.
 
 ### F9 residuals (Pass 13) retained
 Implemented + builds + no regression. They help **compressed** salient content; the NIAH digit-needle is mostly dense/factual-store so residuals aren't its main lever, but they remain correct functional-parity work. Metal-path residual port still a follow-up (bypassed when factual store active).
 
-## Status: functional mechanisms aligned; **F22/F26 quality regression FIXED — NIAH 9/10 depths** (was 0/5); ⚠️ reports dispositioned (F20); F9 residuals implemented (CPU). Minor open: depth-0.85 single-digit fidelity + F9 Metal port. Not bit-identical by nature (Python/MLX vs C++/ggml numerics).
+### F9 Metal path — ✅ completed (CPU fallback, by design)
+The Metal decode kernel intentionally does NOT read residual buffers. A full shader port (device tensors + upload + 4 buffers + 506-line shader edits) is **unwarranted**: the Metal path is already bypassed whenever a factual store exists ([`diffkv_attention.cpp:412`](diffkv_native/runtime/diffkv_attention.cpp)), i.e. for **all salient content** — exactly what residuals serve. To guarantee correctness in the rare non-factual case, added a cheap dispatch guard: **force CPU when any routed block has residuals** (`res_K/V_pos[slot*MR] != -1`). So residual corrections are never silently skipped on any path, with a perf cost only when residuals exist AND no factual store (uncommon). Build + NIAH 0.1/0.5/0.9 + coherence verified, no regression.
+
+## Status: functional mechanisms aligned; **F22/F26 quality regression FIXED — standard NIAH depths 0.1/0.5/0.9 all PASS (10/11 incl. 0.85)** (was 0/5); ⚠️ reports dispositioned (F20); **F9 residuals implemented (CPU) + Metal path completed via correctness-preserving CPU fallback**. Lone open edge: depth-0.95 (needle in last ~5%, beyond standard NIAH) end-of-context fragment. Not bit-identical by nature (Python/MLX vs C++/ggml numerics).
 - ~~Compression~~ (P2: F6–F10). ~~SRL routing~~ (P3: F11–F12). ~~Streaming ingest~~ (P4: F13–F15). ~~Decode kernel~~ (P5: F16–F18). ~~AsyncCompressor + physics tokens~~ (P6: F18b–F21).
 - **Remaining (optional):** empirical RAM/TPS re-measurement vs ACTIVE_RUNTIME reference (benchmark_prod_log: e.g. 882 MB KV @ 8192) to quantify the cumulative effect of F1/F2/F5/F13.

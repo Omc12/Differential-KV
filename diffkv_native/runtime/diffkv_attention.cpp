@@ -414,6 +414,27 @@ void custom_attention_op_callback(
         }
     }
 
+    // F9 (Metal completion): residual corrections are applied only on the CPU path.
+    // The Metal kernel intentionally does NOT read residual buffers — porting them
+    // (device tensors + upload + 4 buffers + shader edits) is unwarranted because
+    // the Metal path is already bypassed whenever a factual store exists (i.e. for
+    // ALL salient content, which is what residuals serve). To guarantee correctness
+    // in the rare non-factual case, force CPU whenever a routed block actually has
+    // residuals, so the exact corrections are never silently skipped.
+    if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && data->K > 0) {
+        NativeBlockPool* pool = data->kv_engine;
+        const int32_t* rkp = pool->get_host_res_K_pos();
+        const int32_t* rvp = pool->get_host_res_V_pos();
+        const int MR = NativeBlockPool::MAX_RESIDUAL;
+        int n_slots = pool->get_seq_lens()->ne[0];
+        const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
+        for (int k = 0; k < data->K && !force_cpu; ++k) {
+            int s = slots_ptr[k];
+            if (s < 0 || s >= n_slots) continue;
+            if (rkp[(size_t)s * MR] != -1 || rvp[(size_t)s * MR] != -1) force_cpu = true;
+        }
+    }
+
     if (!force_cpu) {
         // Unified Metal path: one kernel dispatch handles sparse + dense.
         // Output is written directly into dst->data.
@@ -525,7 +546,11 @@ void custom_attention_op_callback(
                     const auto& tb = matching_entries[b].tokens;
                     if (ta.size() > tb.size()) continue;
                     if (ta.size() == tb.size() && a < b) continue;
-                    if (std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
+                    // Only drop a TRUE chunk fragment: same original span AND a token prefix.
+                    // (Legitimate short entries from a different span are preserved.)
+                    bool same_origin = matching_entries[a].orig_span_start >= 0 &&
+                                       matching_entries[a].orig_span_start == matching_entries[b].orig_span_start;
+                    if (same_origin && std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
                 }
             }
             std::vector<FactEntry> kept;
