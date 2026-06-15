@@ -87,6 +87,7 @@ public:
     std::vector<float> eagle_scores;
     int num_layers = 0;
     int F_test = 0;
+    float avg_r = 1.0f;
     // RC3: entity_id (prime start_idx) → that entity's distinguishing token.
     std::unordered_map<int32_t, int32_t> entity_distinguishing;
 
@@ -98,6 +99,7 @@ public:
         entity_distinguishing.clear();
         num_layers = 0;
         F_test = 0;
+        avg_r = 1.0f;
     }
 
     void build(

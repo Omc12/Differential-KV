@@ -39,6 +39,32 @@ void FactualExactStore::build(
     this->num_layers = num_layers;
     this->F_test = F_test;
 
+    std::vector<float> idf_vals(L, 0.0f);
+    for (int t = 0; t < L; ++t) {
+        int tid = token_ids[t];
+        auto it = inv_index.idf.find(tid);
+        if (it != inv_index.idf.end()) {
+            idf_vals[t] = it->second;
+        } else {
+            idf_vals[t] = (stop_token_ids.count(tid) ? 0.1f : 2.5f);
+        }
+    }
+
+    // Relational keyword IDF boost — give binding words (verbs,
+    // prepositions, comparatives) a fixed IDF-equivalent score so they
+    // survive the top-% salience selection.  Without this, they all score
+    // ~0.1 and are systematically excluded, destroying relational structure.
+    for (int t = 0; t < L; ++t) {
+        int tid = token_ids[t];
+        auto it = inv_index.idf.find(tid);
+        if (it != inv_index.idf.end() && it->second < 1.5f) {
+            // Low-IDF token — likely a relational/function word.
+            // Boost to median content-word IDF so it has a chance to
+            // survive salience selection when adjacent to concept tokens.
+            idf_vals[t] = std::max(idf_vals[t], 2.0f);
+        }
+    }
+
     std::vector<bool> factual_mask(L, false);
 
     if (use_salience_parser) {
@@ -46,10 +72,11 @@ void FactualExactStore::build(
         std::vector<float> R(L, 0.0f);
         if (L > 1) {
             std::vector<float> K_avg(L * head_dim, 0.0f);
+            int mid_layer = num_layers / 2;
             for (int t = 0; t < L; ++t) {
                 for (int kh = 0; kh < kv_heads; ++kh) {
                     for (int d = 0; d < head_dim; ++d) {
-                        K_avg[t * head_dim + d] += k_activations[0][t * F_test + kh * head_dim + d];
+                        K_avg[t * head_dim + d] += k_activations[mid_layer][t * F_test + kh * head_dim + d];
                     }
                 }
                 for (int d = 0; d < head_dim; ++d) {
@@ -97,14 +124,17 @@ void FactualExactStore::build(
             }
 
             // Sum columns to get total lookbacks pointing to each token
+            float sum_r = 0.0f;
             for (int j = 0; j < L; ++j) {
                 float col_sum = 0.0f;
                 for (int i = 0; i < L; ++i) {
                     col_sum += sim[i * L + j];
                 }
                 R[j] = col_sum;
+                sum_r += col_sum;
             }
             this->eagle_scores = R;
+            this->avg_r = sum_r / L;
         }
 
         // 2. Compute Key Norms at Layer 0
@@ -122,33 +152,6 @@ void FactualExactStore::build(
                 sum_sq += K_avg_t[d] * K_avg_t[d];
             }
             key_norms[t] = std::sqrt(sum_sq);
-        }
-
-        // 3. Compute IDF values
-        std::vector<float> idf_vals(L, 0.0f);
-        for (int t = 0; t < L; ++t) {
-            int tid = token_ids[t];
-            auto it = inv_index.idf.find(tid);
-            if (it != inv_index.idf.end()) {
-                idf_vals[t] = it->second;
-            } else {
-                idf_vals[t] = (stop_token_ids.count(tid) ? 0.1f : 2.5f);
-            }
-        }
-
-        // 4. Relational keyword IDF boost — give binding words (verbs,
-        // prepositions, comparatives) a fixed IDF-equivalent score so they
-        // survive the top-% salience selection.  Without this, they all score
-        // ~0.1 and are systematically excluded, destroying relational structure.
-        for (int t = 0; t < L; ++t) {
-            int tid = token_ids[t];
-            auto it = inv_index.idf.find(tid);
-            if (it != inv_index.idf.end() && it->second < 1.5f) {
-                // Low-IDF token — likely a relational/function word.
-                // Boost to median content-word IDF so it has a chance to
-                // survive salience selection when adjacent to concept tokens.
-                idf_vals[t] = std::max(idf_vals[t], 2.0f);
-            }
         }
 
         // 5. Compute joint factual salience score
@@ -394,17 +397,27 @@ void FactualExactStore::build(
             bool have_eagle = !eagle_scores.empty();
             float max_r = 0.0f;
             if (have_eagle) {
+                std::vector<float> content_r_vals;
                 for (int t = s; t < e && t < (int)eagle_scores.size(); ++t) {
-                    if (eagle_scores[t] > max_r) max_r = eagle_scores[t];
+                    int32_t tid = token_ids[t];
+                    if (stop_token_ids.count(tid) || helper_token_ids.count(tid)) {
+                        continue;
+                    }
+                    if (idf_vals[t] >= 2.0f) {
+                        content_r_vals.push_back(eagle_scores[t]);
+                    }
+                }
+                if (!content_r_vals.empty()) {
+                    max_r = *std::max_element(content_r_vals.begin(), content_r_vals.end());
                 }
             }
             if (have_eagle) {
                 // RC7: an entity is a rare term the document refers back to —
                 // require BOTH rarity AND reference so one-off jargon doesn't
                 // spawn a phantom entity.
-                if (max_idf >= 3.0f && max_r >= 0.3f) {
+                if (max_idf >= 3.0f && max_r >= 2.0f * this->avg_r) {
                     is_prime = true;
-                } else if (max_r >= 1.5f) {
+                } else if (max_r >= 4.0f * this->avg_r) {
                     // Highly referenced regardless of rarity → entity prime
                     is_prime = true;
                 }

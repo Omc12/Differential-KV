@@ -170,8 +170,8 @@ class FactualExactStore:
             R = torch.zeros(total_seq_len, dtype=torch.float32)
             if total_seq_len > 1:
                 try:
-                    first_layer = layers[0]
-                    K_layer, _ = prefill_kv[first_layer] # K_layer: [1, kv_heads, total_seq_len, head_dim]
+                    middle_layer = layers[len(layers) // 2]
+                    K_layer, _ = prefill_kv[middle_layer] # K_layer: [1, kv_heads, total_seq_len, head_dim]
                     
                     # Average K over heads
                     K_avg = K_layer[0].mean(dim=0).float() # [total_seq_len, head_dim]
@@ -197,6 +197,7 @@ class FactualExactStore:
                 except Exception:
                     R = torch.zeros(total_seq_len, dtype=torch.float32)
             self.eagle_scores = R
+            self.avg_r = float(R.mean().item()) if R.numel() > 0 else 1.0
                     
             # 2. Calculate Key Norms at Layer 0
             key_norms = torch.ones(total_seq_len, dtype=torch.float32)
@@ -447,16 +448,26 @@ class FactualExactStore:
                 )
                 max_r = 0.0
                 if have_eagle and e > s:
-                    r_slice = self.eagle_scores[s:e]
-                    max_r = float(r_slice.max().item()) if r_slice.numel() > 0 else 0.0
+                    content_r_vals = []
+                    from native_core.srl.factual_alignment import get_helper_token_ids
+                    _tokenizer = getattr(inv_index, "_tokenizer_ref", None) if inv_index is not None else None
+                    helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
+                    for idx in range(s, e):
+                        if idx < total_seq_len:
+                            tid = int(token_ids[idx].item())
+                            if tid not in helper_ids and (not stop_token_ids or tid not in stop_token_ids):
+                                if idf_vals[idx] >= 2.0:
+                                    content_r_vals.append(float(self.eagle_scores[idx].item()))
+                    max_r = max(content_r_vals) if content_r_vals else 0.0
                 if have_eagle:
                     # RC7: an entity is a rare term the rest of the document refers
                     # back to — require BOTH rarity AND reference, so one-off jargon
                     # doesn't spawn a phantom entity.
-                    if max_idf >= 3.0 and max_r >= 0.3:
+                    avg_r = getattr(self, "avg_r", 1.0)
+                    if max_idf >= 3.0 and max_r >= 2.0 * avg_r:
                         is_prime = True
                     # Extremely referenced regardless of rarity → entity
-                    elif max_r >= 1.5:
+                    elif max_r >= 4.0 * avg_r:
                         is_prime = True
                 else:
                     # RC7 fallback: no reference signal was computed (salience parser
