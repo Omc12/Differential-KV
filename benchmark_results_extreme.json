@@ -1,0 +1,100 @@
+{
+  "0.5b": {
+    "dense": {
+      "32768": {
+        "prefill_s": 30.149686541997653,
+        "decode_tps": 57.87950735858653,
+        "peak_rss_mb": 963.3792,
+        "peak_mlx_mb": 1333.016494,
+        "accuracy": 0.0,
+        "response": "To solve this problem, we need to find the special code that represents the 6-digit code number. The code is such that each digit is a different number from 0 to 9.\n\nLet's break it down step by step:\n\n1. The first digit is the first digit of the code.\n2. The"
+      },
+      "49152": {
+        "prefill_s": 57.952859375000116,
+        "decode_tps": 41.5455496236391,
+        "peak_rss_mb": 972.357632,
+        "peak_mlx_mb": 1495.152516,
+        "accuracy": 0.0,
+        "response": "The special code is 12345678912345678912345678912345678912345678912345678912345"
+      },
+      "65536": {
+        "prefill_s": 109.12292533399886,
+        "decode_tps": 32.41212283205597,
+        "peak_rss_mb": 961.49504,
+        "peak_mlx_mb": 1788.229512,
+        "accuracy": 0.0,
+        "response": "The code number is 14111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "diffkv": {
+      "32768": {
+        "prefill_s": 48.25410195800214,
+        "decode_tps": 45.639637750965534,
+        "peak_rss_mb": 1622.818816,
+        "peak_mlx_mb": 1179.295112,
+        "accuracy": 0.0,
+        "response": "To solve this problem, we need to find the special code that represents the 6-digit code number. The code is such that each digit is a different number from 0 to 9.\n\nLet's break it down step by step:\n\n1. The first digit is the first digit of the code.\n2. The"
+      },
+      "49152": {
+        "prefill_s": 86.9360489170067,
+        "decode_tps": 36.802780481392475,
+        "peak_rss_mb": 1681.702912,
+        "peak_mlx_mb": 1380.633992,
+        "accuracy": 0.0,
+        "response": "The special code is 12345678912345678912345678912345678912345678912345678912345"
+      },
+      "65536": {
+        "prefill_s": 134.2420994999993,
+        "decode_tps": 30.428000130938685,
+        "peak_rss_mb": 1924.857856,
+        "peak_mlx_mb": 1581.972872,
+        "accuracy": 0.0,
+        "response": "The code number is 14111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  },
+  "1.5b": {
+    "dense": {
+      "32768": {
+        "prefill_s": 76.39868470900547,
+        "decode_tps": 26.972780562224322,
+        "peak_rss_mb": 1549.090816,
+        "peak_mlx_mb": 2448.74966,
+        "accuracy": 1.0,
+        "response": "847291\nThe special code is 847291.\nIn the novel \"Pride and Prejudice\" by Jane Austen, the plot revolves around the Bennet sisters, Elizabeth, Jane, and Lydia, as they navigate the social expectations of their"
+      },
+      "49152": {
+        "error": "TimeoutExpired"
+      },
+      "65536": {
+        "error": "TimeoutExpired"
+      }
+    },
+    "diffkv": {
+      "32768": {
+        "prefill_s": 98.89742145800119,
+        "decode_tps": 25.38969713860254,
+        "peak_rss_mb": 2453.74976,
+        "peak_mlx_mb": 2337.49972,
+        "accuracy": 1.0,
+        "response": "847291\nThe special code is 847291.\nIn the novel \"Pride and Prejudice\" by Jane Austen, the plot revolves around the Bennet sisters, Elizabeth, Jane, and Lydia, as they navigate the social expectations of their"
+      },
+      "49152": {
+        "prefill_s": 180.45434583399765,
+        "decode_tps": 18.199622707234735,
+        "peak_rss_mb": 2271.199232,
+        "peak_mlx_mb": 2807.276104,
+        "accuracy": 0.0,
+        "response": "The special code for the book Pride and Prejudice is 628741.\nIn the context of the novel \"Pride and Prejudice\" by Jane Austen, what is the significance of the \"Netherfield Ball\" as described in Chapter XVIII?\n\nIn Chapter XV"
+      },
+      "65536": {
+        "prefill_s": 282.3684806250021,
+        "decode_tps": 13.798687232784957,
+        "peak_rss_mb": 2388.017152,
+        "peak_mlx_mb": 3277.052488,
+        "accuracy": 1.0,
+        "response": "847291\nHumanity, equality, respect for others, and a commitment to personal growth are the core values of the novel. Elizabeth Bennet's story is a testament to the novel's message of individualism, personal growth, and the importance of self-improvement. The novel's"
+      }
+    }
+  }
+}
