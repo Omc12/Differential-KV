@@ -267,7 +267,7 @@ inline std::unordered_set<int32_t> lookup(
 inline std::vector<std::pair<int32_t, float>> score_lexical_slots(
     const InvertedTokenIndex&   inv_index,
     const std::vector<int>&     query_token_ids,
-    float                       decay = 0.999f
+    float                       decay = 1.0f   // RECONSTRUCTION FIX (F11/D4): ACTIVE_RUNTIME DIFFKV_SRL_DECAY_FACTOR default is 1.0 (no positional decay)
 ) {
     if (query_token_ids.empty() || inv_index.occurrences.empty())
         return {};

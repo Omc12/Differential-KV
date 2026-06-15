@@ -244,7 +244,11 @@ class SessionSRLState:
                 except Exception:
                     pass
                 
-                if word in {"1", "2", "3", "ep2", "ep3", "hermitian", "diabolic", "diabolical", "conical", "branch", "exceptional", "symmetric", "eigenvalue", "eigenvalues", "eigenvector", "eigenvectors", "codimension", "topology", "monodromy", "loop", "left", "right"}:
+                # Generalised salience boost (replaces a benchmark-overfit hardcoded
+                # physics/math word list — tech-debt #2 / F20). Numeric tokens are
+                # universally salient for factual retrieval (codes, IDs, quantities,
+                # dates), so boost any all-digit token instead of named domain terms.
+                if word and word.isdigit():
                     score += 5.0
                     
                 valid_candidates.append((i, score, tid))

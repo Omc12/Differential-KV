@@ -103,25 +103,6 @@ class ChunkGraph:
         return d
 
 
-def can_reach(adj_list, start, target) -> bool:
-    """Check if node target is reachable from start in the given adjacency structure."""
-    if start == target:
-        return True
-    visited = set()
-    stack = [start]
-    while stack:
-        node = stack.pop()
-        if node == target:
-            return True
-        if node not in visited:
-            visited.add(node)
-            neighbors = adj_list.get(node, []) if isinstance(adj_list, dict) else (adj_list[node] if node < len(adj_list) else [])
-            for nb in neighbors:
-                if nb != -1 and nb not in visited:
-                    stack.append(nb)
-    return False
-
-
 def build_chunk_graph(
     desc_matrix:  torch.Tensor,   # [N, DESC_DIM] float16, L2 normalized (from SemanticIndex)
     slot_ids:     torch.Tensor,   # [N] int32 pool slot IDs (from SemanticIndex)
@@ -258,45 +239,41 @@ def build_chunk_graph(
                 vocabs.append(set())
 
     # ── Entity Isolation & Exclusion Pruning ──
-    landmarks_list = []
-    if blocks is not None and len(blocks) > 0:
-        landmarks_list = parent_landmarks_tensor.tolist()
+    sig_tokens = []
+    sig_idfs = []
+    if vocabs and inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf:
+        for i in range(N):
+            best_tok = -1
+            best_idf = -1.0
+            for tok in vocabs[i]:
+                idf_val = inv_index.idf.get(tok, 1.0)
+                if idf_val > best_idf:
+                    best_idf = idf_val
+                    best_tok = tok
+            sig_tokens.append(best_tok)
+            sig_idfs.append(best_idf)
+            
+        # Prune similarity matrix for mutually exclusive concept domains
+        for i in range(N):
+            sig_i = sig_tokens[i]
+            idf_i = sig_idfs[i]
+            if sig_i == -1 or idf_i < 2.0:
+                continue
+            for j in range(N):
+                if i == j:
+                    continue
+                sig_j = sig_tokens[j]
+                idf_j = sig_idfs[j]
+                if sig_j == -1 or idf_j < 2.0:
+                    continue
+                if sig_i != sig_j:
+                    has_cross_ref = (sig_j in vocabs[i]) or (sig_i in vocabs[j])
+                    if not has_cross_ref:
+                        sim[i, j] = -1.0
+                        sim[j, i] = -1.0
     else:
-        slot_list = slot_ids.tolist()
-        for idx in range(0, len(slot_list), 4):
-            landmarks_list.append(slot_list[idx])
-
-    normalized_profiles = None
-    if len(landmarks_list) >= 2:
-        slot_to_row = {int(slot_ids[r].item()): r for r in range(N)}
-        landmark_row_idxs = [slot_to_row[slot] for slot in landmarks_list if slot in slot_to_row]
-        
-        if len(landmark_row_idxs) >= 2:
-            profiles = torch.zeros((N, len(landmark_row_idxs)), dtype=torch.float32)
-            for r in range(N):
-                for l_idx, p_row in enumerate(landmark_row_idxs):
-                    if p_row != -1:
-                        val = float(torch.dot(desc_f32[r], desc_f32[p_row]).item())
-                        profiles[r, l_idx] = max(0.0, val)
-            
-            norms = torch.norm(profiles, p=2, dim=1, keepdim=True)
-            normalized_profiles = torch.where(norms > 1e-6, profiles / norms, torch.zeros_like(profiles))
-            
-            for i in range(N):
-                slot_i = int(slot_ids[i].item())
-                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
-                for j in range(N):
-                    if i == j:
-                        continue
-                    slot_j = int(slot_ids[j].item())
-                    p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
-                    if p_i != p_j or p_i == -1 or p_j == -1:
-                        if abs(i - j) > 1:
-                            prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
-                            if prof_sim < 0.40:
-                                sim[i, j] = -1.0
-                                sim[j, i] = -1.0
-
+        sig_tokens = [-1] * N
+        sig_idfs = [-1.0] * N
 
     slot_to_anchor = {}
     if blocks:
@@ -307,7 +284,11 @@ def build_chunk_graph(
 
     # ── Handshake Hunting Protocol ──────────────────────────────────────────
     # Simulate sequential/chronological creation of chunks.
-    candidate_edges = []
+    # The newly created ones are targeted by earlier ones (hunting), which
+    # send a request with their position/relevance, and the targeted chunk
+    # sends back its ID to form a bidirectional connection.
+    handshake_neighbors = [[] for _ in range(N)]
+    handshake_weights = [[] for _ in range(N)]
 
     has_idf = (inv_index is not None and hasattr(inv_index, "idf") and inv_index.idf)
 
@@ -326,14 +307,11 @@ def build_chunk_graph(
             
             # Check exclusion constraint
             is_excluded = False
-            if abs(i - j) > 1 and normalized_profiles is not None:
-                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
-                p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
-                if p_i != p_j or p_i == -1 or p_j == -1:
-                    prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
-                    if prof_sim < 0.40:
+            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
+                if sig_tokens[i] != sig_tokens[j]:
+                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
+                    if not has_cross_ref:
                         is_excluded = True
-
 
             # Directed relative lexical overlap score
             lex_score_i_to_j = 0.0
@@ -369,6 +347,8 @@ def build_chunk_graph(
             is_temporal_match = (abs(i - j) == 1)
             
             if is_semantic_match or is_lexical_match or is_temporal_match:
+                # Handshake complete:
+                # j targets i (sends request), i returns ID (connects)
                 add_i_to_j = True
                 add_j_to_i = True
                 
@@ -378,14 +358,16 @@ def build_chunk_graph(
                     else:
                         add_i_to_j = False # older i cannot target newer j
                 
-                if add_j_to_i and not is_excluded:
-                    candidate_edges.append((weight_j_to_i, j, i))
+                if add_j_to_i:
+                    handshake_neighbors[j].append(i)
+                    handshake_weights[j].append(max(1e-5, weight_j_to_i))
                 
-                if add_i_to_j and not is_excluded:
-                    candidate_edges.append((weight_i_to_j, i, j))
+                if add_i_to_j:
+                    handshake_neighbors[i].append(j)
+                    handshake_weights[i].append(max(1e-5, weight_i_to_j))
 
     # For structural robustness and backwards compatibility, ensure top-k semantic
-    # neighbors are also included in the candidate edges.
+    # neighbors are also included in the handshake connections.
     k_sem = min(K_semantic, N - 1)
     if k_sem > 0:
         _, sem_idx = torch.topk(sim, k=k_sem, dim=1, largest=True, sorted=True)
@@ -408,16 +390,13 @@ def build_chunk_graph(
 
             # Check exclusion constraint
             is_excluded = False
-            if abs(i - j) > 1 and normalized_profiles is not None:
-                p_i = int(slot_to_parent_tensor[slot_i].item()) if slot_i < len(slot_to_parent_tensor) else -1
-                p_j = int(slot_to_parent_tensor[slot_j].item()) if slot_j < len(slot_to_parent_tensor) else -1
-                if p_i != p_j or p_i == -1 or p_j == -1:
-                    prof_sim = float(torch.dot(normalized_profiles[i], normalized_profiles[j]).item())
-                    if prof_sim < 0.40:
+            if sig_tokens[i] != -1 and sig_idfs[i] >= 2.0 and sig_tokens[j] != -1 and sig_idfs[j] >= 2.0:
+                if sig_tokens[i] != sig_tokens[j]:
+                    has_cross_ref = (sig_tokens[j] in vocabs[i]) or (sig_tokens[i] in vocabs[j])
+                    if not has_cross_ref:
                         is_excluded = True
 
-
-            if allow_i_to_j and not is_excluded:
+            if allow_i_to_j and j not in handshake_neighbors[i] and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_i_to_j = 0.0
                 if not is_excluded and vocabs:
@@ -435,9 +414,11 @@ def build_chunk_graph(
                                 lex_score_i_to_j = len(intersection) / len(w_i)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_i_to_j = 0.5 * sim_score + 0.5 * lex_score_i_to_j + temporal_boost
-                candidate_edges.append((weight_i_to_j, i, j))
                 
-            if allow_j_to_i and not is_excluded:
+                handshake_neighbors[i].append(j)
+                handshake_weights[i].append(max(1e-5, weight_i_to_j))
+                
+            if allow_j_to_i and i not in handshake_neighbors[j] and not is_excluded:
                 sim_score = max(0.0, float(sim[i, j]))
                 lex_score_j_to_i = 0.0
                 if not is_excluded and vocabs:
@@ -455,37 +436,26 @@ def build_chunk_graph(
                                 lex_score_j_to_i = len(intersection) / len(w_j)
                 temporal_boost = 0.2 if abs(i - j) == 1 else 0.0
                 weight_j_to_i = 0.5 * sim_score + 0.5 * lex_score_j_to_i + temporal_boost
-                candidate_edges.append((weight_j_to_i, j, i))
+                
+                handshake_neighbors[j].append(i)
+                handshake_weights[j].append(max(1e-5, weight_j_to_i))
 
-    # Filter out duplicate candidate edges using seen_edges set
-    seen_edges = set()
-    unique_candidates = []
-    for weight, u, v in candidate_edges:
-        if (u, v) not in seen_edges:
-            seen_edges.add((u, v))
-            unique_candidates.append((weight, u, v))
-    candidate_edges = unique_candidates
-
-    # Sort candidate edges by weight in descending order
-    candidate_edges.sort(key=lambda x: x[0], reverse=True)
-
-    # Build local DAG by checking reachability
-    handshake_neighbors = [[] for _ in range(N)]
-    handshake_weights = [[] for _ in range(N)]
-
-    for weight, u, v in candidate_edges:
-        if u == v:
-            continue
-        if len(handshake_neighbors[u]) >= 8:
-            continue
-        if can_reach(handshake_neighbors, v, u):
-            continue
-        handshake_neighbors[u].append(v)
-        handshake_weights[u].append(max(1e-5, weight))
-
-    merged_neighbors = handshake_neighbors
-    merged_weights = handshake_weights
-    max_degree = max((len(nb) for nb in merged_neighbors), default=0)
+    # Deduplicate connections per block
+    merged_neighbors = []
+    merged_weights = []
+    max_degree = 0
+    for i in range(N):
+        unique_nb = []
+        unique_wt = []
+        seen_nb = set()
+        for idx, nb in enumerate(handshake_neighbors[i]):
+            if nb != i and nb not in seen_nb:
+                unique_nb.append(nb)
+                unique_wt.append(handshake_weights[i][idx])
+                seen_nb.add(nb)
+        merged_neighbors.append(unique_nb)
+        merged_weights.append(unique_wt)
+        max_degree = max(max_degree, len(unique_nb))
 
     # Pad all neighbor lists to max_degree with -1 (out-of-bounds sentinel)
     max_degree = max(1, max_degree)
@@ -577,53 +547,25 @@ def build_chunk_graph(
             parent_sim = parent_desc @ parent_desc.T  # [L, L]
             parent_sim.fill_diagonal_(-1.0)
             
-            # Prune parent_sim for mutually exclusive concept domains
             for i in range(L):
-                p_slot_i = valid_parent_slots[i]
-                idx_i = slot_to_idx[p_slot_i]
-                for j in range(L):
-                    if i == j:
-                        continue
-                    p_slot_j = valid_parent_slots[j]
-                    idx_j = slot_to_idx[p_slot_j]
-                    if abs(idx_i - idx_j) > 1 and normalized_profiles is not None:
-                        prof_sim = float(torch.dot(normalized_profiles[idx_i], normalized_profiles[idx_j]).item())
-                        if prof_sim < 0.40:
-                            parent_sim[i, j] = -1.0
-                            parent_sim[j, i] = -1.0
-
-            
-            prime_candidates = []
-            for i in range(L):
-                p_slot_i = valid_parent_slots[i]
+                p_slot = valid_parent_slots[i]
+                sims = []
                 for j in range(L):
                     if i == j:
                         continue
                     val = float(parent_sim[i, j].item())
                     if val >= 0.30:
-                        prime_candidates.append((val, p_slot_i, valid_parent_slots[j]))
-            
-            # Sort prime candidate edges by weight descending
-            prime_candidates.sort(key=lambda x: x[0], reverse=True)
-            
-            # Build prime DAG
-            prime_adj = {p: [] for p in valid_parent_slots}
-            prime_w_adj = {p: [] for p in valid_parent_slots}
-            
-            for val, u_slot, v_slot in prime_candidates:
-                if len(prime_adj[u_slot]) >= 3:
-                    continue
-                if can_reach(prime_adj, v_slot, u_slot):
-                    continue
-                prime_adj[u_slot].append(v_slot)
-                prime_w_adj[u_slot].append(val)
+                        sims.append((val, valid_parent_slots[j]))
                 
-            # Write to prime_neighbors and prime_weights
-            for p_slot, neighbors_list in prime_adj.items():
-                w_list = prime_w_adj[p_slot]
-                for k in range(len(neighbors_list)):
-                    prime_neighbors[p_slot, k] = neighbors_list[k]
-                    prime_weights[p_slot, k] = w_list[k]
+                # Sort descending by similarity
+                sims.sort(key=lambda x: x[0], reverse=True)
+                
+                # Link at most 3
+                num_links = min(3, len(sims))
+                for k in range(num_links):
+                    val, neighbor_slot = sims[k]
+                    prime_neighbors[p_slot, k] = neighbor_slot
+                    prime_weights[p_slot, k] = val
 
     return ChunkGraph(
         neighbors=neighbors_tensor.cpu(),

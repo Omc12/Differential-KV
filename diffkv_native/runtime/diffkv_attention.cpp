@@ -32,6 +32,12 @@ void execute_cpu_attention(
     const int32_t* seq_lens = kv_engine->get_host_seq_lens();
     const ggml_fp16_t* scales = kv_engine->get_host_scales();
     const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
+    // F9 sparse residuals (exact corrections for high-error tokens).
+    const int32_t* res_K_pos = kv_engine->get_host_res_K_pos();
+    const int32_t* res_V_pos = kv_engine->get_host_res_V_pos();
+    const ggml_fp16_t* res_K_val = kv_engine->get_host_res_K_val();
+    const ggml_fp16_t* res_V_val = kv_engine->get_host_res_V_val();
+    const int MR = NativeBlockPool::MAX_RESIDUAL;
 
     // Deduplicate slots
     int n_slots = kv_engine->get_seq_lens()->ne[0];
@@ -164,7 +170,30 @@ void execute_cpu_attention(
                     for (int r = 0; r < rank; ++r) {
                         delta += slot_infos[k].q_proj[r] * (float)U[u_off + r];
                     }
-                    float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+                    // F9: exact residual-K correction for high-error tokens (e.g. digits).
+                    // residual_K is the raw delta the SVD missed; rotate at the anchor
+                    // position (matching the block-level RoPE of VK) and dot with q.
+                    float res_score = 0.0f;
+                    for (int ri = 0; ri < MR; ++ri) {
+                        if (res_K_pos[(size_t)slot_id * MR + ri] != t) continue;
+                        const ggml_fp16_t* rk = res_K_val + ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
+                        for (int d = 0; d < D; ++d) {
+                            float rkd = ggml_fp16_to_fp32(rk[d]);
+                            float rk_rot = rkd;
+                            if (has_rope) {
+                                int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                                float rkp = ggml_fp16_to_fp32(rk[partner]);
+                                float rot_c = (d < half_d) ? -rkp : rkp;
+                                int idx = (d < half_d) ? d : (d - half_d);
+                                float theta = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+                                float angle = anchor_pos * theta;
+                                rk_rot = rkd * std::cos(angle) + rot_c * std::sin(angle);
+                            }
+                            res_score += Q_ptr[h * D + d] * rk_rot;
+                        }
+                        break;
+                    }
+                    float t_score = (delta * scale_u * block_scale + res_score + score_anc) * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
@@ -192,6 +221,7 @@ void execute_cpu_attention(
             double w_anc = std::exp(slot_infos[k].anchor_score * scale - max_score) / sum_exp;
             double sum_w = 0.0;
             std::vector<double> w_proj(rank, 0.0);
+            std::vector<double> res_v_accum(D, 0.0);  // F9 exact residual-V contribution
 
             for (int t = 0; t < slen; ++t) {
                 double w_t = std::exp(slot_infos[k].token_scores[t] - max_score) / sum_exp;
@@ -199,6 +229,13 @@ void execute_cpu_attention(
                 int u_off = slot_id * S_max * rank + t * rank;
                 for (int r = 0; r < rank; ++r) {
                     w_proj[r] += w_t * (float)U[u_off + r] * scale_u;
+                }
+                // F9: add the exact residual-V (raw, no RoPE) for high-error tokens.
+                for (int ri = 0; ri < MR; ++ri) {
+                    if (res_V_pos[(size_t)slot_id * MR + ri] != t) continue;
+                    const ggml_fp16_t* rv = res_V_val + ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) res_v_accum[d] += w_t * ggml_fp16_to_fp32(rv[d]);
+                    break;
                 }
             }
 
@@ -210,7 +247,7 @@ void execute_cpu_attention(
                 for (int r = 0; r < rank; ++r) {
                     svd_v += w_proj[r] * ggml_fp16_to_fp32(VV[base_vv + r * n_kv_heads * D]);
                 }
-                accum[d] += svd_v * block_scale;
+                accum[d] += svd_v * block_scale + res_v_accum[d];   // F9 residual-V
             }
         }
         for (int d = 0; d < D; ++d) cpu_output[h * D + d] = (float)accum[d];
@@ -458,6 +495,13 @@ void custom_attention_op_callback(
             srl->current_step_factual_sequences.clear();
             srl->current_step_max_similarity = 0.0f;
         }
+        // F26 FIX: do NOT filter factual entries by the routed sparse slots. The Mac
+        // reference (mlx_diffkv_wrapper.py:871) calls query(..., active_slots=None) —
+        // factual recall must work even when a salient span's blocks weren't routed
+        // (e.g. a digit needle that straddles a micro-block boundary and so is split
+        // across compressed blocks). Filtering by active_slots dropped such needles
+        // (depth ≥0.9), retrieving only a partial answer. threshold 0.3 matches MLX.
+        (void)active_slots;
         matching_entries = srl->factual_store.query(
             Q_unrot.data(),
             n_q_heads,
@@ -465,8 +509,30 @@ void custom_attention_op_callback(
             data->W_proj,
             data->desc_dim,
             0.4f,
-            &active_slots
+            nullptr
         );
+        // F26: belt-and-suspenders fragment guard. merge-before-cap in query()
+        // rejoins most split spans, but a borderline chunk that scored below the
+        // match threshold can still leave a truncated prefix entry; drop any entry
+        // whose tokens are a strict prefix of another's so it can't pull the model
+        // to truncate (e.g. "84729" beside "847291").
+        if (matching_entries.size() > 1) {
+            std::vector<bool> drop(matching_entries.size(), false);
+            for (size_t a = 0; a < matching_entries.size(); ++a) {
+                for (size_t b = 0; b < matching_entries.size(); ++b) {
+                    if (a == b || drop[b]) continue;
+                    const auto& ta = matching_entries[a].tokens;
+                    const auto& tb = matching_entries[b].tokens;
+                    if (ta.size() > tb.size()) continue;
+                    if (ta.size() == tb.size() && a < b) continue;
+                    if (std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
+                }
+            }
+            std::vector<FactEntry> kept;
+            for (size_t i = 0; i < matching_entries.size(); ++i)
+                if (!drop[i]) kept.push_back(std::move(matching_entries[i]));
+            matching_entries.swap(kept);
+        }
         for (const auto& entry : matching_entries) {
             srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
             bool exists = false;

@@ -32,6 +32,14 @@ struct LowRankCompressParams {
     ggml_fp16_t* out_anchor_v;
     int32_t* out_seq_len;
     int32_t* out_anchor_position;
+
+    // F9 sparse-residual outputs (optional; nullptr to skip). Sized [max_residual]
+    // for positions and [max_residual * feat_dim] for values.
+    int32_t* out_res_K_pos = nullptr;
+    int32_t* out_res_V_pos = nullptr;
+    ggml_fp16_t* out_res_K_val = nullptr;
+    ggml_fp16_t* out_res_V_val = nullptr;
+    int max_residual = 8;
 };
 
 // Perform low-rank SVD compression on a block

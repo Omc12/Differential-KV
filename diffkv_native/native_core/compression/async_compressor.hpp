@@ -40,6 +40,12 @@ struct CompressJob {
     ggml_fp16_t* out_anchor_v;  // [kv_heads * head_dim] destination in pool anchors_V
     int32_t* out_seq_len;
     int32_t* out_anchor_position; // destination in pool anchor_positions
+    // F9 sparse-residual output destinations (pool host buffers; nullptr = skip).
+    int32_t* out_res_K_pos = nullptr;
+    int32_t* out_res_V_pos = nullptr;
+    ggml_fp16_t* out_res_K_val = nullptr;
+    ggml_fp16_t* out_res_V_val = nullptr;
+    int max_residual = 8;
     DiffKVBlockStateTable* state_table = nullptr;
 };
 
@@ -71,7 +77,11 @@ private:
     std::queue<CompressJob> queue_;
     mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    static constexpr size_t MAX_QUEUE_SIZE = 16384;
+    // RECONSTRUCTION FIX (F21): match ACTIVE_RUNTIME async_compressor.py max_queue=32768
+    // (was 16384). Overflow is already handled gracefully (submit() returns false → the
+    // ingest caller reverts the block to DenseResident), so this only reduces drop frequency
+    // under burst; cost is negligible (~100 B/job).
+    static constexpr size_t MAX_QUEUE_SIZE = 32768;
 
     std::atomic<uint64_t> jobs_processed_{0};
     std::atomic<uint64_t> jobs_dropped_{0};

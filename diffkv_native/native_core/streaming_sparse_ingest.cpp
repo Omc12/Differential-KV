@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <regex>
 
 namespace diffkv {
 
@@ -271,7 +272,51 @@ bool StreamingSparseIngestManager::should_skip_compression(int anchor_idx, const
         if (check_unicode_math(codepoints)) {
             return true;
         }
-        
+
+        // RECONSTRUCTION FIX (F14): Rules 3b-3f mirror ACTIVE_RUNTIME
+        // streaming_sparse_ingest.py:98-112 (_RE_LATEX_MATH / _RE_ASCII_EQUATION /
+        // _RE_DEFINITIONS / _RE_CLAIMS / _RE_ACRONYMS) verbatim. Compiled once (static).
+        // Patterns are ASCII so they run on block_text directly.
+        static const std::regex re_latex(
+            R"(\$\$|\\\[|\\\(|\\begin\{(?:equation|align|gather|math|displaymath)\}|\\(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|sum|int|prod|partial|nabla|hbar|infty|approx|neq|le|ge|times|div|cdot|sqrt|frac)\b|_\{[^\}]+\}|\^[^\}]+\})");
+        static const std::regex re_ascii_eq(
+            R"(\b[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[-+]?[a-zA-Z0-9_.\(\)\+\-\*\/]+)");
+        static const std::regex re_definitions(
+            R"(\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b)",
+            std::regex::icase);
+        static const std::regex re_claims(
+            R"(\b(?:theorem|lemma|proposition|corollary|conjecture|hypothesis|proof)\s+\d+(?:\.\d+)*\b|\bour\s+main\s+contribution\b|\bwe\s+(?:prove|show|demonstrate|argue|conclude|find)\s+that\b|\bour\s+(?:results|analysis)\s+show\b)",
+            std::regex::icase);
+        static const std::regex re_acronyms(R"(\b[A-Z]{2,}\b)");
+
+        // Rule 3b: LaTeX math formula block
+        if (std::regex_search(block_text, re_latex)) {
+            return true;
+        }
+        // Rule 3c: ASCII equation statement
+        if (std::regex_search(block_text, re_ascii_eq)) {
+            return true;
+        }
+        // Rule 3d: Verbatim definitions
+        if (std::regex_search(block_text, re_definitions)) {
+            return true;
+        }
+        // Rule 3e: Formal claims / theorems
+        if (std::regex_search(block_text, re_claims)) {
+            return true;
+        }
+        // Rule 3f: Acronym density (>= 3 distinct uppercase acronyms)
+        {
+            std::unordered_set<std::string> acronyms;
+            for (std::sregex_iterator it(block_text.begin(), block_text.end(), re_acronyms), end;
+                 it != end; ++it) {
+                acronyms.insert(it->str());
+            }
+            if (acronyms.size() >= 3) {
+                return true;
+            }
+        }
+
         // Rule 4: Short digits with query word overlap
         if (check_short_digits(codepoints)) {
             if (!query_words_.empty()) {
@@ -390,7 +435,14 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
 
-    int engage_threshold = 4096;
+    // RECONSTRUCTION FIX (F13): this MUST match the decode-side engage_threshold
+    // (main.cpp uses 2048 for the same DIFFKV_ENGAGE_THRESHOLD env var). Previously
+    // this defaulted to 4096 while decode defaulted to 2048 — so prompts in [2048,4096)
+    // switched to the SPARSE decode path (L>=2048) but had ZERO compressed blocks
+    // (bypass kept everything dense), causing ~4x dense-KV RAM vs ACTIVE_RUNTIME AND
+    // sparse routing over an empty pool. ACTIVE_RUNTIME has no such global bypass — it
+    // compresses blocks during prefill regardless of total length.
+    int engage_threshold = 2048;
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }
@@ -514,6 +566,15 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;
     job.out_seq_len = engines[layer_idx]->get_host_seq_lens() + slot_id;
     job.out_anchor_position = engines[layer_idx]->get_host_anchor_positions() + slot_id;
+    // F9 sparse residuals → pool host buffers for this slot.
+    {
+        const int MR = NativeBlockPool::MAX_RESIDUAL;
+        job.out_res_K_pos = engines[layer_idx]->get_host_res_K_pos() + (size_t)slot_id * MR;
+        job.out_res_V_pos = engines[layer_idx]->get_host_res_V_pos() + (size_t)slot_id * MR;
+        job.out_res_K_val = engines[layer_idx]->get_host_res_K_val() + (size_t)slot_id * MR * F_test;
+        job.out_res_V_val = engines[layer_idx]->get_host_res_V_val() + (size_t)slot_id * MR * F_test;
+        job.max_residual  = MR;
+    }
     job.state_table = &engines[layer_idx]->get_state_table();
     
     bool async_svd = true;

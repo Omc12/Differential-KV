@@ -348,8 +348,13 @@ struct SessionSRLState {
                     word.erase(word.find_last_not_of(" \t\r\n") + 1);
                     std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return std::tolower(c); });
                     
-                    if (word == "1" || word == "2" || word == "3" || word == "ep2" || word == "ep3" ||
-                        word == "hermitian" || word == "diabolic" || word == "conical" || word == "branch") {
+                    // F20: generalised salience boost — replaces the benchmark-overfit
+                    // physics/math word list (tech-debt #2) with a domain-agnostic rule.
+                    // Numeric tokens are universally salient for factual retrieval (codes,
+                    // IDs, quantities, dates). Mirrors ACTIVE_RUNTIME session_srl_state.py.
+                    bool is_numeric = !word.empty();
+                    for (char c : word) if (!std::isdigit(static_cast<unsigned char>(c))) { is_numeric = false; break; }
+                    if (is_numeric) {
                         score += 5.0f;
                     }
                 }
@@ -528,10 +533,12 @@ struct SessionSRLState {
 
     KBudget k_components(int K) const {
         KBudget b;
-        b.k_semantic = static_cast<int>(std::round(K * k_semantic_frac));
-        b.k_lexical  = static_cast<int>(std::round(K * k_lexical_frac));
-        b.k_graph    = static_cast<int>(std::round(K * k_graph_frac));
-        b.k_recency  = static_cast<int>(std::round(K * k_recency_frac));
+        // RECONSTRUCTION FIX (F11/D7): ACTIVE_RUNTIME uses int(K*frac) truncation
+        // (query_router.py k_semantic = max(1, int(K*_SEM_FRAC)) etc.), not round().
+        b.k_semantic = static_cast<int>(K * k_semantic_frac);
+        b.k_lexical  = static_cast<int>(K * k_lexical_frac);
+        b.k_graph    = static_cast<int>(K * k_graph_frac);
+        b.k_recency  = static_cast<int>(K * k_recency_frac);
         return b;
     }
 

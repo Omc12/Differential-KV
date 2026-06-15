@@ -608,6 +608,7 @@ async def run_direct_mode(args):
         model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
 
     # Setup environment variables
+    os.environ["DIFFKV_PRESET"] = args.preset
     if args.preset == 'low':
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "256"
     elif args.preset == 'high':

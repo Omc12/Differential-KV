@@ -58,8 +58,8 @@ def get_layer_rank(
     Normal schedule (early_boost=False, default, base_rank=16):
       Layers 0-15%:   base_rank          (e.g. 16)
       Layers 15-50%:  base_rank          (e.g. 16)
-      Layers 50-79%:  max(8, 0.75 * base_rank)   (e.g. 12)
-      Layers 79%+:    max(8, 0.50 * base_rank)   (e.g. 8)
+      Layers 50-79%:  max(6, round(0.75 * base_rank))   (e.g. 12)
+      Layers 79%+:    max(8, round(0.50 * base_rank))   (e.g. 8)
 
     Minimum floor raised from 4 -> 6 for mid layers and 4 -> 8 for final layers:
     at rank 4 the SVD approximation for formula/number blocks degrades enough

@@ -89,6 +89,13 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
     host_desc_matrix_.resize(ggml_nelements(desc_matrix_), 0.0f);
 
+    // F9: residual host buffers (CPU-only path for now; -1 positions = unused).
+    const int F = kv_heads * head_dim;
+    host_res_K_pos_.resize((size_t)n_slots * MAX_RESIDUAL, -1);
+    host_res_V_pos_.resize((size_t)n_slots * MAX_RESIDUAL, -1);
+    host_res_K_val_.resize((size_t)n_slots * MAX_RESIDUAL * F, ggml_fp32_to_fp16(0.0f));
+    host_res_V_val_.resize((size_t)n_slots * MAX_RESIDUAL * F, ggml_fp32_to_fp16(0.0f));
+
     if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
         std::cerr << "[NativeBlockPool] Allocated " 
                   << ggml_backend_buffer_get_size(pool_buffer_) / (1024 * 1024) 

@@ -498,6 +498,52 @@ inline void update_vsl_state_cpp(
     SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& helper_ids
 ) {
+    // RECONSTRUCTION FIX (F24): mirror ACTIVE_RUNTIME update_vsl_state ordering
+    // (factual_alignment.py:302-352). A token that matches the next expected token
+    // of an active lock (or a sequence start) MUST advance/start the lock — even if
+    // it is also a helper token. The previous C++ checked helpers FIRST and returned
+    // early, so it failed to advance the suffix, corrupting verbatim retrieval
+    // (e.g. dropping a digit from a needle). Helper passthrough is the FALLBACK,
+    // only when the token matched nothing.
+    const auto& seqs       = srl_state.current_step_factual_sequences;
+    const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
+
+    std::vector<std::vector<int32_t>> new_candidates;
+
+    // 1. Try to advance existing active locks.
+    for (const auto& suffix : srl_state.vsl_active_candidates) {
+        if (!suffix.empty() && suffix[0] == token_id) {
+            new_candidates.emplace_back(suffix.begin() + 1, suffix.end());
+        }
+    }
+    bool did_match_existing = !new_candidates.empty();
+
+    bool has_active_lock = false;
+    for (const auto& suffix : srl_state.vsl_active_candidates) {
+        if (!suffix.empty()) { has_active_lock = true; break; }
+    }
+
+    // 2. If nothing advanced and we are unlocked, try to START a new lock.
+    bool did_start_new = false;
+    if (!did_match_existing && !has_active_lock) {
+        for (size_t i = 0; i < seqs.size(); ++i) {
+            if (!seqs[i].empty() && seqs[i][0] == token_id) {
+                new_candidates.emplace_back(seqs[i].begin() + 1, seqs[i].end());
+                did_start_new = true;
+                int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                if (seq_entity != -1) srl_state.current_entity_id = seq_entity;
+            }
+        }
+    }
+
+    // 3. Matched an existing candidate or started a new lock → commit.
+    if (did_match_existing || did_start_new) {
+        srl_state.vsl_active_candidates = new_candidates;
+        srl_state.vsl_consecutive_helpers = 0;
+        return;
+    }
+
+    // 4. Otherwise, a helper token passes through WITHOUT breaking the lock.
     if (helper_ids.count(token_id) > 0) {
         srl_state.vsl_consecutive_helpers++;
         if (srl_state.vsl_consecutive_helpers >= 12) {
@@ -506,41 +552,8 @@ inline void update_vsl_state_cpp(
         return;
     }
 
-    std::vector<std::vector<int32_t>> new_candidates;
-
-    for (const auto& suffix : srl_state.vsl_active_candidates) {
-        if (!suffix.empty() && suffix[0] == token_id) {
-            std::vector<int32_t> next_suffix(suffix.begin() + 1, suffix.end());
-            new_candidates.push_back(next_suffix);
-        }
-    }
-
-    bool has_active_lock = false;
-    for (const auto& suffix : srl_state.vsl_active_candidates) {
-        if (!suffix.empty()) {
-            has_active_lock = true;
-            break;
-        }
-    }
-
-    if (new_candidates.empty() && !has_active_lock) {
-        // In entity-filtered fallback mode only sequence-START tokens are reachable,
-        // so we only match seq[0] here.  Record the entity of the entered sequence.
-        const auto& seqs      = srl_state.current_step_factual_sequences;
-        const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
-        for (size_t i = 0; i < seqs.size(); ++i) {
-            if (!seqs[i].empty() && seqs[i][0] == token_id) {
-                std::vector<int32_t> next_suffix(seqs[i].begin() + 1, seqs[i].end());
-                new_candidates.push_back(next_suffix);
-                int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                if (seq_entity != -1) {
-                    srl_state.current_entity_id = seq_entity;
-                }
-            }
-        }
-    }
-
-    srl_state.vsl_active_candidates = new_candidates;
+    // 5. Non-helper token that matched nothing → the lock is broken.
+    srl_state.vsl_active_candidates.clear();
     srl_state.vsl_consecutive_helpers = 0;
 }
 

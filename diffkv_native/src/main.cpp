@@ -2497,6 +2497,28 @@ int main(int argc, char ** argv) {
                 }
             }
 
+            // F22 fix: drop factual sequences that are a strict PREFIX of another
+            // surfaced sequence (the 20-token chunker can leave a fragment like
+            // "84729" beside the full span "847291…"; the fragment lets the VSL
+            // "complete" early and truncate). The longer sequence covers the shorter.
+            {
+                auto& seqs = srl_state.current_step_factual_sequences;
+                if (seqs.size() > 1) {
+                    std::vector<bool> drop(seqs.size(), false);
+                    for (size_t a = 0; a < seqs.size(); ++a) {
+                        for (size_t b = 0; b < seqs.size(); ++b) {
+                            if (a == b || drop[b]) continue;
+                            if (seqs[a].size() > seqs[b].size()) continue;
+                            if (seqs[a].size() == seqs[b].size() && a < b) continue;
+                            if (std::equal(seqs[a].begin(), seqs[a].end(), seqs[b].begin())) { drop[a] = true; break; }
+                        }
+                    }
+                    std::vector<std::vector<int32_t>> kept;
+                    for (size_t i = 0; i < seqs.size(); ++i) if (!drop[i]) kept.push_back(std::move(seqs[i]));
+                    seqs.swap(kept);
+                }
+            }
+
             // SFA threshold raised 0.3→0.55: at 0.3 almost every entry in a topically
             // focused document matches, activating the VSL and merging all categories'
             // tokens into one set. At 0.55 only high-confidence specific retrieval
@@ -2515,8 +2537,15 @@ int main(int argc, char ** argv) {
                 auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
                     srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
                 float max_sim = srl_state.current_step_max_similarity;
+                // F25: never mask a token that IS part of a surfaced factual sequence.
+                // The allowed set is only helpers + sequence-START tokens, so a
+                // mid-sequence content token (e.g. a digit of "847291" when the model
+                // answers directly) would otherwise be hard-masked while helpers like
+                // "." stay free → truncation. Exempting factual tokens keeps the VSL's
+                // anti-hallucination intent without blocking verbatim factual content.
+                const auto& fact_toks = srl_state.current_step_factual_tokens;
                 for (int i = 0; i < n_vocab; ++i) {
-                    if (allowed.count(i) == 0) {
+                    if (allowed.count(i) == 0 && fact_toks.count(i) == 0) {
                         if (max_sim >= 0.70f) {
                             output_logits[i] = -1e10f;   // hard: verbatim
                         } else {
@@ -2923,12 +2952,7 @@ int main(int argc, char ** argv) {
                         cur_N,
                         6, 2,
                         &srl_state.inverted_index,
-                        0.15f,
-                        nullptr,
-                        nullptr,
-                        0,
-                        {},
-                        [&model](int32_t tid) { return model.token_to_piece(tid); }
+                        0.15f
                     );
                 }
 

@@ -336,6 +336,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         }
     }
 
+    // F9: keep the raw (pre-normalisation) delta to compute sparse residuals later.
+    std::vector<float> raw_delta = K_V_joint;
+
     std::vector<float> token_norms(S_deltas);
     for (int s = 0; s < S_deltas; ++s) {
         float sum_sq = 0.0f;
@@ -439,6 +442,60 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
     if (params.out_anchor_position) {
         *params.out_anchor_position = params.anchor_idx + landmark_idx;
+    }
+
+    // ── F9: Post-SVD sparse residual storage ──────────────────────────────────
+    // Mirrors ACTIVE_RUNTIME lowrank.py: for the top max_residual_frac (15%) tokens
+    // by relative reconstruction error (> error_threshold 0.08), store the EXACT
+    // residual delta = raw_delta - low_rank_recon. The decode kernel adds these back
+    // so high-error tokens (e.g. digits) are recovered exactly even when compressed.
+    if (params.out_res_K_pos && params.out_res_V_pos &&
+        params.out_res_K_val && params.out_res_V_val && S_deltas > 0) {
+        const int MR = params.max_residual;
+        const float ERR_THRESH = 0.08f;
+        for (int i = 0; i < MR; ++i) { params.out_res_K_pos[i] = -1; params.out_res_V_pos[i] = -1; }
+        std::memset(params.out_res_K_val, 0, (size_t)MR * F * sizeof(ggml_fp16_t));
+        std::memset(params.out_res_V_val, 0, (size_t)MR * F * sizeof(ggml_fp16_t));
+
+        std::vector<float> resid((size_t)S_deltas * joint_F);
+        std::vector<float> rel_K(S_deltas), rel_V(S_deltas), aerr_K(S_deltas), aerr_V(S_deltas);
+        for (int s = 0; s < S_deltas; ++s) {
+            float eK = 0.0f, eV = 0.0f, nK = 0.0f, nV = 0.0f;
+            for (int f = 0; f < joint_F; ++f) {
+                float recon = 0.0f;
+                for (int r = 0; r < svd_dim; ++r) recon += U_scaled[s * R + r] * VT_joint[r * joint_F + f];
+                recon *= scale;
+                float res = raw_delta[s * joint_F + f] - recon;
+                resid[(size_t)s * joint_F + f] = res;
+                float raw = raw_delta[s * joint_F + f];
+                if (f < F) { eK += res * res; nK += raw * raw; }
+                else       { eV += res * res; nV += raw * raw; }
+            }
+            aerr_K[s] = std::sqrt(eK); aerr_V[s] = std::sqrt(eV);
+            rel_K[s] = aerr_K[s] / std::max(std::sqrt(nK), 1e-8f);
+            rel_V[s] = aerr_V[s] / std::max(std::sqrt(nV), 1e-8f);
+        }
+        int n_max = std::min((int)(S_deltas * 0.15f), MR);
+        auto select = [&](const std::vector<float>& rel, const std::vector<float>& aerr,
+                          int32_t* pos_out, ggml_fp16_t* val_out, int half_off) {
+            std::vector<int> idx(S_deltas);
+            for (int i = 0; i < S_deltas; ++i) idx[i] = i;
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) { return rel[a] > rel[b]; });
+            int written = 0;
+            for (int ii = 0; ii < S_deltas && written < n_max; ++ii) {
+                int s = idx[ii];
+                if (rel[s] <= ERR_THRESH) break;      // sorted desc → rest are smaller
+                if (aerr[s] <= 1e-4f) continue;
+                pos_out[written] = s;                  // block-local delta index = decode token index
+                for (int f = 0; f < F; ++f)
+                    val_out[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + half_off + f]);
+                written++;
+            }
+        };
+        if (n_max > 0) {
+            select(rel_K, aerr_K, params.out_res_K_pos, params.out_res_K_val, 0);
+            select(rel_V, aerr_V, params.out_res_V_pos, params.out_res_V_val, F);
+        }
     }
 
     return true;

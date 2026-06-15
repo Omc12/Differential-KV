@@ -1,3 +1,8 @@
+// chunk_graph.hpp
+// Translation of chunk_graph.py to C++17.
+// Builds a mixed semantic/temporal/lexical similarity graph over KV blocks.
+// Uses Accelerate cblas_sgemm for pairwise cosine similarity.
+
 #pragma once
 
 #include "native_core/srl/chunk_descriptor.hpp"   // DESC_DIM
@@ -12,8 +17,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
-#include <functional>
-#include <string>
 
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
@@ -73,8 +76,6 @@ struct ChunkGraph {
     std::vector<int32_t> role_mapping_tensor;         // [max_slot + 1] int32 role (0=outer, 1=around, 2=center)
     std::vector<int32_t> cluster_centers_tensor;      // [C] int32 slot IDs of cluster centers
     std::vector<int32_t> slot_to_center_tensor;       // [max_slot + 1] int32 slot IDs of center
-    std::vector<int32_t> prime_neighbors;             // [(max_slot + 1) * 3] padded with -1
-    std::vector<float>   prime_weights;               // [(max_slot + 1) * 3] padded with 0.0f
 
     ChunkGraph() : N(0), max_degree(1), max_children(1) {}
 
@@ -126,70 +127,6 @@ static inline void insert_neighbor(
     }
 }
 
-inline bool can_reach(
-    const std::vector<std::vector<std::pair<int32_t, float>>>& adj,
-    int32_t start,
-    int32_t target
-) {
-    int N = static_cast<int>(adj.size());
-    if (start < 0 || start >= N || target < 0 || target >= N) return false;
-    if (start == target) return true;
-    
-    std::vector<bool> visited(N, false);
-    std::vector<int32_t> stack;
-    stack.push_back(start);
-    
-    while (!stack.empty()) {
-        int32_t node = stack.back();
-        stack.pop_back();
-        
-        if (node == target) return true;
-        
-        if (!visited[node]) {
-            visited[node] = true;
-            for (const auto& neighbor : adj[node]) {
-                int32_t nb_node = neighbor.first;
-                if (nb_node >= 0 && nb_node < N && !visited[nb_node]) {
-                    stack.push_back(nb_node);
-                }
-            }
-        }
-    }
-    return false;
-}
-
-inline bool can_reach_map(
-    const std::unordered_map<int32_t, std::vector<int32_t>>& adj,
-    int32_t start,
-    int32_t target
-) {
-    if (start == target) return true;
-    
-    std::unordered_set<int32_t> visited;
-    std::vector<int32_t> stack;
-    stack.push_back(start);
-    
-    while (!stack.empty()) {
-        int32_t node = stack.back();
-        stack.pop_back();
-        
-        if (node == target) return true;
-        
-        if (visited.find(node) == visited.end()) {
-            visited.insert(node);
-            auto it = adj.find(node);
-            if (it != adj.end()) {
-                for (int32_t nb : it->second) {
-                    if (nb != -1 && visited.find(nb) == visited.end()) {
-                        stack.push_back(nb);
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
 // ---------------------------------------------------------------------------
 // build_chunk_graph
 //
@@ -212,9 +149,7 @@ inline ChunkGraph build_chunk_graph(
     float                      overlap_threshold  = 0.15f,
     const std::vector<int32_t>* block_pool_idxs   = nullptr,  // for hierarchical grouping
     const std::vector<int>*    block_anchor_idxs  = nullptr,  // anchor positions (hierarchical)
-    int                        cached_len         = 0,
-    const std::unordered_set<int32_t>& helper_token_ids = {},
-    const std::function<std::string(int32_t)>& token_to_piece = nullptr
+    int                        cached_len         = 0
 ) {
     ChunkGraph g;
     g.N = N;
@@ -229,8 +164,6 @@ inline ChunkGraph build_chunk_graph(
 
     g.role_mapping_tensor.assign(max_slot + 1, -1);
     g.slot_to_center_tensor.assign(max_slot + 1, -1);
-    g.prime_neighbors.assign((max_slot + 1) * 3, -1);
-    g.prime_weights.assign((max_slot + 1) * 3, 0.0f);
 
     if (N == 0) {
         g.max_degree = 1;
@@ -360,96 +293,52 @@ inline ChunkGraph build_chunk_graph(
             }
         }
     }
+
     // ── Entity Isolation & Exclusion Pruning ──
-    std::vector<int32_t> landmarks_list;
-    std::unordered_set<int32_t> seen_landmarks;
-    for (int i = 0; i < N; ++i) {
-        int32_t parent = g.parent_landmarks[i];
-        if (parent != -1 && !seen_landmarks.count(parent)) {
-            seen_landmarks.insert(parent);
-            landmarks_list.push_back(parent);
-        }
-    }
-    if (landmarks_list.empty()) {
-        for (int i = 0; i < N; i += 4) {
-            landmarks_list.push_back(slot_ids[i]);
-        }
-    }
-
-    std::vector<std::vector<float>> normalized_profiles(N);
-    bool has_profiles = false;
-    int L = static_cast<int>(landmarks_list.size());
-    if (L >= 2) {
-        std::vector<int> landmark_row_idxs;
-        std::unordered_map<int32_t, int> slot_to_row;
-        for (int r = 0; r < N; ++r) {
-            slot_to_row[slot_ids[r]] = r;
-        }
-        for (int32_t slot : landmarks_list) {
-            auto it = slot_to_row.find(slot);
-            if (it != slot_to_row.end()) {
-                landmark_row_idxs.push_back(it->second);
-            }
-        }
-        L = static_cast<int>(landmark_row_idxs.size());
-        if (L >= 2) {
-            has_profiles = true;
-            for (int r = 0; r < N; ++r) {
-                std::vector<float> prof(L, 0.0f);
-                float norm = 0.0f;
-                for (int l = 0; l < L; ++l) {
-                    int p_row = landmark_row_idxs[l];
-                    float dot = 0.0f;
-                    for (int k = 0; k < DESC_DIM; ++k) {
-                        dot += desc_matrix[r * DESC_DIM + k] * desc_matrix[p_row * DESC_DIM + k];
-                    }
-                    prof[l] = std::max(0.0f, dot);
-                    norm += prof[l] * prof[l];
+    std::vector<int> sig_tokens(N, -1);
+    std::vector<float> sig_idfs(N, -1.0f);
+    if (inv_index && !inv_index->chunk_vocabularies.empty() && !inv_index->idf.empty()) {
+        for (int i = 0; i < N; ++i) {
+            int best_tok = -1;
+            float best_idf = -1.0f;
+            for (int tok : vocabs[i]) {
+                float idf_val = 1.0f;
+                auto idf_it = inv_index->idf.find(tok);
+                if (idf_it != inv_index->idf.end()) {
+                    idf_val = idf_it->second;
                 }
-                norm = std::sqrt(norm);
-                if (norm > 1e-6f) {
-                    for (int l = 0; l < L; ++l) {
-                        prof[l] /= norm;
-                    }
-                } else {
-                    std::fill(prof.begin(), prof.end(), 0.0f);
+                if (idf_val > best_idf) {
+                    best_idf = idf_val;
+                    best_tok = tok;
                 }
-                normalized_profiles[r] = prof;
             }
+            sig_tokens[i] = best_tok;
+            sig_idfs[i] = best_idf;
+        }
 
-            for (int i = 0; i < N; ++i) {
-                int32_t slot_i = slot_ids[i];
-                auto it_pi = g.slot_to_parent_tensor.empty() ? -1 : (slot_i < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_i] : -1);
-                for (int j = 0; j < N; ++j) {
-                    if (i == j) continue;
-                    int32_t slot_j = slot_ids[j];
-                    auto it_pj = g.slot_to_parent_tensor.empty() ? -1 : (slot_j < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_j] : -1);
-                    if (it_pi != it_pj || it_pi == -1 || it_pj == -1) {
-                        if (std::abs(i - j) > 1) {
-                            float prof_sim = 0.0f;
-                            for (int l = 0; l < L; ++l) {
-                                prof_sim += normalized_profiles[i][l] * normalized_profiles[j][l];
-                            }
-                            if (prof_sim < 0.40f) {
-                                sim[i * N + j] = -1.0f;
-                                sim[j * N + i] = -1.0f;
-                            }
-                        }
+        // Prune similarity matrix for mutually exclusive concept domains
+        for (int i = 0; i < N; ++i) {
+            int sig_i = sig_tokens[i];
+            float idf_i = sig_idfs[i];
+            if (sig_i == -1 || idf_i < 2.0f) continue;
+            for (int j = 0; j < N; ++j) {
+                if (i == j) continue;
+                int sig_j = sig_tokens[j];
+                float idf_j = sig_idfs[j];
+                if (sig_j == -1 || idf_j < 2.0f) continue;
+                if (sig_i != sig_j) {
+                    bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                    if (!has_cross_ref) {
+                        sim[i * N + j] = -1.0f;
+                        sim[j * N + i] = -1.0f;
                     }
                 }
             }
         }
     }
-
 
     // ── Handshake Hunting Protocol ──
-    struct CandidateEdge {
-        float weight;
-        int32_t src;
-        int32_t dst;
-    };
-    std::vector<CandidateEdge> candidate_edges;
-
+    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
     for (int i = 0; i < N; ++i) {
         int anchor_i = (block_anchor_idxs && i < static_cast<int>(block_anchor_idxs->size())) ? (*block_anchor_idxs)[i] : 0;
         bool is_i_new = (cached_len > 0) && (anchor_i >= cached_len);
@@ -465,18 +354,17 @@ inline ChunkGraph build_chunk_graph(
             float lex_score_j_to_i = 0.0f;
             
             bool is_excluded = false;
-            if (std::abs(i - j) > 1 && has_profiles) {
-                int32_t slot_i = slot_ids[i];
-                int32_t slot_j = slot_ids[j];
-                auto it_pi = g.slot_to_parent_tensor.empty() ? -1 : (slot_i < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_i] : -1);
-                auto it_pj = g.slot_to_parent_tensor.empty() ? -1 : (slot_j < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_j] : -1);
-                if (it_pi != it_pj || it_pi == -1 || it_pj == -1) {
-                    float prof_sim = 0.0f;
-                    for (int l = 0; l < L; ++l) {
-                        prof_sim += normalized_profiles[i][l] * normalized_profiles[j][l];
-                    }
-                    if (prof_sim < 0.40f) {
-                        is_excluded = true;
+            if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                int sig_i = sig_tokens[i];
+                float idf_i = sig_idfs[i];
+                int sig_j = sig_tokens[j];
+                float idf_j = sig_idfs[j];
+                if (sig_i != -1 && idf_i >= 2.0f && sig_j != -1 && idf_j >= 2.0f) {
+                    if (sig_i != sig_j) {
+                        bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                        if (!has_cross_ref) {
+                            is_excluded = true;
+                        }
                     }
                 }
             }
@@ -541,11 +429,11 @@ inline ChunkGraph build_chunk_graph(
                     }
                 }
                 
-                if (add_j_to_i && !is_excluded) {
-                    candidate_edges.push_back({std::max(1e-5f, weight_j_to_i), j, i});
+                if (add_j_to_i) {
+                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
                 }
-                if (add_i_to_j && !is_excluded) {
-                    candidate_edges.push_back({std::max(1e-5f, weight_i_to_j), i, j});
+                if (add_i_to_j) {
+                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
                 }
             }
         }
@@ -575,24 +463,30 @@ inline ChunkGraph build_chunk_graph(
                 bool allow_i_to_j = (cached_len == 0) || (is_i_new == is_j_new) || (is_i_new && !is_j_new);
                 bool allow_j_to_i = (cached_len == 0) || (is_i_new == is_j_new) || (is_j_new && !is_i_new);
 
+                bool connected = false;
+                for (const auto& p : adj[i]) {
+                    if (p.first == j) {
+                        connected = true;
+                        break;
+                    }
+                }
                 bool is_excluded = false;
-                if (std::abs(i - j) > 1 && has_profiles) {
-                    int32_t slot_i = slot_ids[i];
-                    int32_t slot_j = slot_ids[j];
-                    auto it_pi = g.slot_to_parent_tensor.empty() ? -1 : (slot_i < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_i] : -1);
-                    auto it_pj = g.slot_to_parent_tensor.empty() ? -1 : (slot_j < static_cast<int>(g.slot_to_parent_tensor.size()) ? g.slot_to_parent_tensor[slot_j] : -1);
-                    if (it_pi != it_pj || it_pi == -1 || it_pj == -1) {
-                        float prof_sim = 0.0f;
-                        for (int l = 0; l < L; ++l) {
-                            prof_sim += normalized_profiles[i][l] * normalized_profiles[j][l];
-                        }
-                        if (prof_sim < 0.40f) {
-                            is_excluded = true;
+                if (inv_index && !inv_index->chunk_vocabularies.empty()) {
+                    int sig_i = sig_tokens[i];
+                    float idf_i = sig_idfs[i];
+                    int sig_j = sig_tokens[j];
+                    float idf_j = sig_idfs[j];
+                    if (sig_i != -1 && idf_i >= 2.0f && sig_j != -1 && idf_j >= 2.0f) {
+                        if (sig_i != sig_j) {
+                            bool has_cross_ref = vocabs[i].count(sig_j) || vocabs[j].count(sig_i);
+                            if (!has_cross_ref) {
+                                is_excluded = true;
+                            }
                         }
                     }
                 }
 
-                if (allow_i_to_j && !is_excluded) {
+                if (allow_i_to_j && !connected && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_i_to_j = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
@@ -619,10 +513,18 @@ inline ChunkGraph build_chunk_graph(
                     }
                     float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
                     float weight_i_to_j = 0.5f * sim_score + 0.5f * lex_score_i_to_j + temporal_boost;
-                    candidate_edges.push_back({std::max(1e-5f, weight_i_to_j), i, j});
+                    
+                    adj[i].push_back({j, std::max(1e-5f, weight_i_to_j)});
                 }
                 
-                if (allow_j_to_i && !is_excluded) {
+                bool reverse_connected = false;
+                for (const auto& p : adj[j]) {
+                    if (p.first == i) {
+                        reverse_connected = true;
+                        break;
+                    }
+                }
+                if (allow_j_to_i && !reverse_connected && !is_excluded) {
                     float sim_score = std::max(0.0f, sim[i * N + j]);
                     float lex_score_j_to_i = 0.0f;
                     if (!is_excluded && inv_index && !inv_index->chunk_vocabularies.empty()) {
@@ -656,34 +558,29 @@ inline ChunkGraph build_chunk_graph(
                     }
                     float temporal_boost = (std::abs(i - j) == 1) ? 0.2f : 0.0f;
                     float weight_j_to_i = 0.5f * sim_score + 0.5f * lex_score_j_to_i + temporal_boost;
-                    candidate_edges.push_back({std::max(1e-5f, weight_j_to_i), j, i});
+                    adj[j].push_back({i, std::max(1e-5f, weight_j_to_i)});
                 }
             }
         }
     }
 
-    // Sort candidate edges by weight descending
-    std::sort(candidate_edges.begin(), candidate_edges.end(), [](const auto& a, const auto& b) {
-        return a.weight > b.weight;
-    });
-
-    // Build local DAG by checking reachability and capping degree
-    std::vector<std::vector<std::pair<int32_t, float>>> adj(N);
-    std::unordered_set<int64_t> seen_edges;
+    // Deduplicate and determine actual max_degree, pad rows with -1
     int actual_max = 0;
-
-    for (const auto& edge : candidate_edges) {
-        if (edge.src == edge.dst) continue;
-        int64_t key = (static_cast<int64_t>(edge.src) << 32) | edge.dst;
-        if (seen_edges.count(key)) continue;
-        if (static_cast<int>(adj[edge.src].size()) >= 8) continue;
-        if (can_reach(adj, edge.dst, edge.src)) continue;
-        
-        adj[edge.src].push_back({edge.dst, edge.weight});
-        seen_edges.insert(key);
-        actual_max = std::max(actual_max, static_cast<int>(adj[edge.src].size()));
+    for (int i = 0; i < N; ++i) {
+        auto& row_adj = adj[i];
+        std::vector<std::pair<int32_t, float>> uniq;
+        std::unordered_set<int32_t> seen;
+        for (const auto& p : row_adj) {
+            if (p.first != i && seen.find(p.first) == seen.end()) {
+                uniq.push_back(p);
+                seen.insert(p.first);
+            }
+        }
+        row_adj = std::move(uniq);
+        std::sort(row_adj.begin(), row_adj.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        actual_max = std::max(actual_max, static_cast<int>(row_adj.size()));
     }
-
     g.max_degree = std::max(1, actual_max);
 
     g.neighbors.assign((size_t)N * g.max_degree, -1);
@@ -787,118 +684,6 @@ inline ChunkGraph build_chunk_graph(
             }
 
             g.role_mapping_tensor[s] = is_around ? 1 : 0;
-        }
-    }
-
-    // Build Prime Node similarity graph (inter-cluster graph)
-    if (!g.parent_landmarks.empty()) {
-        std::unordered_map<int32_t, int> slot_to_idx;
-        for (int idx = 0; idx < N; ++idx) {
-            slot_to_idx[slot_ids[idx]] = idx;
-        }
-        std::vector<int32_t> valid_parent_slots;
-        std::vector<int> valid_parent_idxs;
-        for (int32_t p : g.parent_landmarks) {
-            auto it = slot_to_idx.find(p);
-            if (it != slot_to_idx.end()) {
-                valid_parent_slots.push_back(p);
-                valid_parent_idxs.push_back(it->second);
-            }
-        }
-        
-        int L_parents = valid_parent_slots.size();
-        if (L_parents > 1) {
-            std::vector<float> parent_sim(L_parents * L_parents, 0.0f);
-            for (int i = 0; i < L_parents; ++i) {
-                int row_i = valid_parent_idxs[i];
-                const float* desc_i = desc_matrix + row_i * DESC_DIM;
-                for (int j = 0; j < L_parents; ++j) {
-                    if (i == j) {
-                        parent_sim[i * L_parents + j] = -1.0f;
-                        continue;
-                    }
-                    int row_j = valid_parent_idxs[j];
-                    const float* desc_j = desc_matrix + row_j * DESC_DIM;
-                    float dot = 0.0f;
-                    for (int d = 0; d < DESC_DIM; ++d) {
-                        dot += desc_i[d] * desc_j[d];
-                    }
-                    parent_sim[i * L_parents + j] = dot;
-                }
-            }
-            
-            // Prune parent_sim for mutually exclusive concept domains
-            for (int i = 0; i < L_parents; ++i) {
-                int32_t p_slot_i = valid_parent_slots[i];
-                int idx_i = slot_to_idx[p_slot_i];
-                for (int j = 0; j < L_parents; ++j) {
-                    if (i == j) continue;
-                    int32_t p_slot_j = valid_parent_slots[j];
-                    int idx_j = slot_to_idx[p_slot_j];
-                    if (std::abs(idx_i - idx_j) > 1 && has_profiles) {
-                        float prof_sim = 0.0f;
-                        for (int l = 0; l < L; ++l) {
-                            prof_sim += normalized_profiles[idx_i][l] * normalized_profiles[idx_j][l];
-                        }
-                        if (prof_sim < 0.40f) {
-                            parent_sim[i * L_parents + j] = -1.0f;
-                            parent_sim[j * L_parents + i] = -1.0f;
-                        }
-                    }
-                }
-            }
-            
-            struct PrimeCandidate {
-                float val;
-                int32_t u;
-                int32_t v;
-            };
-            std::vector<PrimeCandidate> prime_candidates;
-            for (int i = 0; i < L_parents; ++i) {
-                int32_t p_slot_i = valid_parent_slots[i];
-                for (int j = 0; j < L_parents; ++j) {
-                    if (i == j) continue;
-                    float val = parent_sim[i * L_parents + j];
-                    if (val >= 0.30f) {
-                        prime_candidates.push_back({val, p_slot_i, valid_parent_slots[j]});
-                    }
-                }
-            }
-            
-            // Sort prime candidates descending
-            std::sort(prime_candidates.begin(), prime_candidates.end(), [](const auto& a, const auto& b) {
-                return a.val > b.val;
-            });
-            
-            // Build prime DAG
-            std::unordered_map<int32_t, std::vector<int32_t>> prime_adj;
-            std::unordered_map<int32_t, std::vector<float>> prime_w_adj;
-            for (int32_t p : valid_parent_slots) {
-                prime_adj[p] = {};
-                prime_w_adj[p] = {};
-            }
-            
-            std::unordered_set<int64_t> seen_prime;
-            for (const auto& pc : prime_candidates) {
-                int64_t key = (static_cast<int64_t>(pc.u) << 32) | pc.v;
-                if (seen_prime.count(key)) continue;
-                if (static_cast<int>(prime_adj[pc.u].size()) >= 3) continue;
-                if (can_reach_map(prime_adj, pc.v, pc.u)) continue;
-                
-                prime_adj[pc.u].push_back(pc.v);
-                prime_w_adj[pc.u].push_back(pc.val);
-                seen_prime.insert(key);
-            }
-            
-            // Write to prime_neighbors and prime_weights
-            for (int32_t p_slot : valid_parent_slots) {
-                const auto& neighbors_list = prime_adj[p_slot];
-                const auto& w_list = prime_w_adj[p_slot];
-                for (size_t k = 0; k < neighbors_list.size(); ++k) {
-                    g.prime_neighbors[p_slot * 3 + k] = neighbors_list[k];
-                    g.prime_weights[p_slot * 3 + k] = w_list[k];
-                }
-            }
         }
     }
 

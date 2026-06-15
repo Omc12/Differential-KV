@@ -1,4 +1,5 @@
 #include "native_core/srl/factual_store.hpp"
+#include <array>
 #include <iostream>
 #include <cmath>
 #include <cstring>
@@ -273,24 +274,27 @@ void FactualExactStore::build(
     // Longer chunks preserve more relational context per sequence — critical for
     // VSL to lock onto full property phrases like "coalesce to a single direction
     // at rate sqrt(ε)" rather than truncated 12-token fragments.
-    std::vector<std::pair<int, int>> chunked_spans;
+    // Each chunk records the ORIGINAL span start (third element) so split chunks
+    // of one contiguous span can be rejoined later (F22 needle-fragmentation fix).
+    std::vector<std::array<int, 3>> chunked_spans;
     for (const auto& span : spans) {
         for (int sub_s = span.first; sub_s < span.second; sub_s += 20) {
             int sub_e = std::min(sub_s + 20, span.second);
-            chunked_spans.push_back({sub_s, sub_e});
+            chunked_spans.push_back({sub_s, sub_e, span.first});
         }
     }
 
     // 7. Extract verbatim KV sequences across all layers for each span
     for (const auto& span : chunked_spans) {
-        int s = span.first;
-        int e = span.second;
+        int s = span[0];
+        int e = span[1];
         int span_len = e - s;
         if (span_len <= 0) continue;
 
         FactEntry entry;
         entry.start_idx = s;
         entry.end_idx = e;
+        entry.orig_span_start = span[2];
         entry.K.resize(num_layers * F_test * span_len);
         entry.V.resize(num_layers * F_test * span_len);
 
@@ -723,7 +727,15 @@ static std::vector<FactEntry> merge_adjacent_entries(const std::vector<FactEntry
     FactEntry curr = sorted_entries[0];
     for (size_t i = 1; i < sorted_entries.size(); ++i) {
         const auto& next_entry = sorted_entries[i];
-        if (next_entry.start_idx == curr.end_idx && curr.entity_id == next_entry.entity_id) {
+        // F22 fix: rejoin directly-adjacent chunks of the SAME original span even
+        // when the 20-token chunker split a digit/number run into two distinct
+        // prime entities (entity_id = own start_idx). Same orig_span_start ⇒ one
+        // logical span ⇒ must not stay fragmented (else needles like "847291"
+        // surface as "84729" + "1").
+        bool same_origin = (curr.orig_span_start >= 0 &&
+                            curr.orig_span_start == next_entry.orig_span_start);
+        if (next_entry.start_idx == curr.end_idx &&
+            (curr.entity_id == next_entry.entity_id || same_origin)) {
             int curr_len = curr.end_idx - curr.start_idx;
             int next_len = next_entry.end_idx - next_entry.start_idx;
             int new_len = curr_len + next_len;
@@ -973,21 +985,30 @@ std::vector<FactEntry> FactualExactStore::query(
         }
     }
 
-    std::sort(merged_results.begin(), merged_results.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    // F26: merge adjacent same-origin chunks BEFORE the k_budget cap. The 20-token
+    // chunker can split one salient span (e.g. a digit run "847291") into two
+    // entries; if the second chunk scores below the cap, a post-cap merge can't
+    // rejoin it and a truncated fragment ("84729") leaks into attention. Merging
+    // first reconstructs the full span (carrying the max chunk sim) so it is scored
+    // and capped as one unit.
+    std::vector<FactEntry> pre_merge;
+    pre_merge.reserve(merged_results.size());
+    for (auto& mr : merged_results) {
+        FactEntry e = mr.first;
+        e.current_sim = mr.second;
+        pre_merge.push_back(std::move(e));
+    }
+    std::vector<FactEntry> merged_entries = merge_adjacent_entries(pre_merge, num_layers, F_test);
+
+    std::sort(merged_entries.begin(), merged_entries.end(),
+              [](const FactEntry& a, const FactEntry& b) { return a.current_sim > b.current_sim; });
 
     // RC6 — entity-proportional budget: scale K with matched prime count so each
     // entity gets coverage in comparison answers (fixed top-5 drops one entity).
     int n_matched_primes = static_cast<int>(prime_seeds.size());
     int k_budget = std::max(5, n_matched_primes * 3 + 2);
-    std::vector<FactEntry> results;
-    int limit = std::min(k_budget, (int)merged_results.size());
-    for (int i = 0; i < limit; ++i) {
-        FactEntry top_entry = merged_results[i].first;
-        top_entry.current_sim = merged_results[i].second;
-        results.push_back(top_entry);
-    }
-    return merge_adjacent_entries(results, num_layers, F_test);
+    if ((int)merged_entries.size() > k_budget) merged_entries.resize(k_budget);
+    return merged_entries;
 }
 
 } // namespace diffkv

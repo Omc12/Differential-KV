@@ -73,6 +73,18 @@ public:
     const float* get_host_desc_matrix() const { return host_desc_matrix_.data(); }
     float* get_host_desc_matrix() { return host_desc_matrix_.data(); }
 
+    // F9: per-block sparse residuals (exact corrections for the highest-error tokens
+    // the low-rank SVD failed to capture — e.g. digits). MAX_RESIDUAL tokens per K/V.
+    static constexpr int MAX_RESIDUAL = 8;
+    int32_t* get_host_res_K_pos() { return host_res_K_pos_.data(); }
+    int32_t* get_host_res_V_pos() { return host_res_V_pos_.data(); }
+    ggml_fp16_t* get_host_res_K_val() { return host_res_K_val_.data(); }
+    ggml_fp16_t* get_host_res_V_val() { return host_res_V_val_.data(); }
+    const int32_t* get_host_res_K_pos() const { return host_res_K_pos_.data(); }
+    const int32_t* get_host_res_V_pos() const { return host_res_V_pos_.data(); }
+    const ggml_fp16_t* get_host_res_K_val() const { return host_res_K_val_.data(); }
+    const ggml_fp16_t* get_host_res_V_val() const { return host_res_V_val_.data(); }
+
 private:
     int n_slots_ = 0;
     int rank_ = 0;
@@ -106,6 +118,13 @@ private:
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_scales_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_anchor_positions_;
     std::vector<float, PageAlignedAllocator<float>> host_desc_matrix_;
+
+    // F9 residual host buffers: positions [n_slots*MAX_RESIDUAL] int32 (-1 = unused),
+    // values [n_slots*MAX_RESIDUAL*kv_heads*head_dim] fp16 (exact delta residual).
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_res_K_pos_;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_res_V_pos_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_res_K_val_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_res_V_val_;
 
     DiffKVBlockStateTable state_table_;
 

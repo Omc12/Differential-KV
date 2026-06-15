@@ -58,6 +58,12 @@ struct FactEntry {
     // in this prime's span, or -1.  A property span containing exactly one
     // prime's distinguishing token binds to that prime with high confidence.
     int32_t distinguishing_token = -1;
+    // Provenance: start index of the ORIGINAL (pre-chunk) contiguous salient span
+    // this entry was carved from. Chunks of one span share this value, letting
+    // merge_adjacent_entries() rejoin a span that the 20-token chunker split
+    // through (e.g. a digit run like "847291") even when the halves were promoted
+    // to distinct prime entities. -1 = unset.
+    int32_t orig_span_start = -1;
     // RC3: deterministic unit signature of this span's owning entity (from that
     // entity's distinguishing token); empty/zero when no owning entity.  Used
     // only when a query supplies an entity bias to rank the queried entity's
