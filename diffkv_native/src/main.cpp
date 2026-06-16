@@ -54,7 +54,11 @@ struct ggml_backend_owner {
             backends.push_back(gpu_backend);
         }
         backends.push_back(cpu_backend);
-        sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), 8192, false, true);
+        // Sched graph capacity must cover the largest graph we build. The native sparse-attn
+        // path builds a ~32k-node decode graph; an undersized sched corrupts buffer planning.
+        size_t sched_size = 8192;
+        if (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1") sched_size = 40960;
+        sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), sched_size, false, true);
     }
 
     ~ggml_backend_owner() {
@@ -381,6 +385,187 @@ struct ggml_cgraph * build_prefill_ctx_graph(
     return gf;
 }
 
+// ── Native ggml-metal sparse attention subgraph (gated by DIFFKV_NATIVE_ATTN) ──
+// Reproduces the custom-op "approximate" path (diffkv_attention.cpp:143-253) as native
+// ggml ops, so sparse decode runs as one fused Metal command stream instead of 24
+// per-layer ggml_map_custom3 CPU dispatches. Used only when the factual store is empty
+// (factual/NIAH sessions keep the CPU custom op, which also does VSL/biasing). Consumes
+// the precomputed pool tensors VK_rot/anchorK_rot/U_f16/valid_mask (RoPE'd at anchor pos).
+// Returns attn_out [n_embd, 1].
+//
+// Per query head h (kv = h/group): standard attention over (1 anchor + S token) entries
+// per slot. token entry value = anchorV + su*bs*(U[t]@VV); project-then-attend reuses U
+// for both scores (q_proj·U) and the value projection (w·U).
+static struct ggml_tensor * build_native_sparse_attn(
+    struct ggml_context * ctx,
+    struct ggml_tensor * q_rope,          // [D, nq, 1] rotated query
+    struct ggml_tensor * k_rope,          // [D, nkv, 1] rotated CURRENT-token key
+    struct ggml_tensor * v_cur,           // [nkv*D] CURRENT-token value (raw)
+    struct ggml_tensor * dense_kr,        // [nkv*D, MAXD] rotated past-dense keys (f32 input)
+    struct ggml_tensor * dense_v,         // [nkv*D, MAXD] past-dense values (f32 input)
+    struct ggml_tensor * dense_mask,      // [MAXD] additive 0/-inf validity (f32 input)
+    int MAXD,
+    struct ggml_tensor * selected_slots,  // [K] i32 (may contain empties/duplicates)
+    struct ggml_tensor * dup_tri,         // [K,K] strict-lower-triangular ones (j<k) const input
+    struct ggml_tensor * half,            // [1] = 0.5 const input
+    diffkv::NativeBlockPool * pool,
+    int nq, int nkv, int D, int R, int S, int K, float scale,
+    struct ggml_tensor ** out_dbg = nullptr
+) {
+    const int group = nq / nkv;
+    const int n_slots = pool->get_seq_lens()->ne[0];
+    const int F_kv = nkv * D;
+
+    // ── Dedup penalty: the routed slots may repeat (padding); the CPU path dedups,
+    // so penalize every NON-first occurrence to -inf. eq[j,k]=1 iff slot[j]==slot[k]
+    // (integer ids → step(0.5-|diff|)); prior_count[k]=Σ_{j<k} eq; drop if >0. → [1,1,K]
+    struct ggml_tensor* sF = ggml_cast(ctx, selected_slots, GGML_TYPE_F32);                 // [K]
+    struct ggml_tensor* AA = ggml_repeat(ctx, ggml_reshape_2d(ctx, sF, K, 1), dup_tri);     // A[j,k]=s[j]
+    struct ggml_tensor* BB = ggml_repeat(ctx, ggml_reshape_2d(ctx, sF, 1, K), dup_tri);     // B[j,k]=s[k]
+    struct ggml_tensor* adiff = ggml_abs(ctx, ggml_sub(ctx, AA, BB));                        // |s[j]-s[k]|
+    struct ggml_tensor* neg_half = ggml_neg(ctx, half);
+    struct ggml_tensor* eq = ggml_step(ctx, ggml_add(ctx, ggml_neg(ctx, adiff), half));     // 1 if equal (add1→add: ADD1 not Metal)
+    struct ggml_tensor* priorc = ggml_sum_rows(ctx, ggml_mul(ctx, eq, dup_tri));            // [1,K] prior dups
+    // DEBUG: DIFFKV_NATIVE_NOSPARSE → drop ALL slots (priorc+0.5 > 0 always) to isolate the dense path.
+    static const bool dbg_nosparse = (std::getenv("DIFFKV_NATIVE_NOSPARSE") != nullptr);
+    struct ggml_tensor* drop = dbg_nosparse
+        ? ggml_step(ctx, ggml_add(ctx, priorc, half))                        // always 1
+        : ggml_step(ctx, ggml_add(ctx, priorc, neg_half));                   // 1 if priorc>=1
+    struct ggml_tensor* dup_add = ggml_reshape_3d(ctx, ggml_scale(ctx, drop, std::getenv("DIFFKV_DBG_NODEDUP")?0.0f:-1e30f), 1, 1, K); // [1,1,K]
+
+    // ── Gather the K selected slots from each pool tensor (f16 get_rows on Metal). ──
+    auto gather = [&](struct ggml_tensor* t, int row_len) -> struct ggml_tensor* {
+        struct ggml_tensor* t2d = ggml_reshape_2d(ctx, t, row_len, n_slots);
+        return ggml_get_rows(ctx, t2d, selected_slots); // [row_len, K]
+    };
+    struct ggml_tensor* aKr  = ggml_reshape_3d(ctx, gather(pool->get_anchorK_rot(), D*nkv),     D, nkv, K);       // [D,nkv,K]
+    struct ggml_tensor* VKr  = ggml_reshape_4d(ctx, gather(pool->get_VK_rot(),      D*nkv*R),   D, nkv, R, K);    // [D,nkv,R,K]
+    struct ggml_tensor* VVs  = ggml_reshape_4d(ctx, gather(pool->get_VV(),          D*nkv*R),   D, nkv, R, K);    // [D,nkv,R,K]
+    struct ggml_tensor* aVs  = ggml_reshape_3d(ctx, gather(pool->get_anchors_V(),   D*nkv),     D, nkv, K);       // [D,nkv,K]
+    struct ggml_tensor* Usel = ggml_reshape_3d(ctx, gather(pool->get_U_f16(),       R*S),       R, S, K);         // [R,S,K]
+    struct ggml_tensor* Msel = gather(pool->get_valid_mask(), S);                                                 // [S,K] additive -inf
+    struct ggml_tensor* USf  = ggml_cast(ctx, gather(pool->get_U_scale(), 1), GGML_TYPE_F32);                     // [1,K]
+    struct ggml_tensor* BSf  = ggml_cast(ctx, gather(pool->get_scales(),  1), GGML_TYPE_F32);                     // [1,K]
+
+    // Per-slot scalars as [1,1,K] for broadcasting.
+    struct ggml_tensor* su    = ggml_reshape_3d(ctx, USf, 1, 1, K);
+    struct ggml_tensor* bs    = ggml_reshape_3d(ctx, BSf, 1, 1, K);
+    struct ggml_tensor* su_bs = ggml_mul(ctx, su, bs); // [1,1,K]
+
+    // anchor-entry mask = valid_mask row 0 (0 if slot non-empty, -inf if empty) → [1,1,K]
+    struct ggml_tensor* anc_mask = ggml_reshape_3d(ctx,
+        ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx, Msel, 1, K, Msel->nb[1], 0)), GGML_TYPE_F32), 1, 1, K);
+
+    struct ggml_tensor* Q2 = ggml_reshape_2d(ctx, q_rope, D, nq); // [D,nq]
+
+    // Buffer-reuse safety: these tensors are computed once and consumed across BOTH kv-head
+    // iterations (long lifetime). ggml_backend_sched's buffer reuse can overwrite them with a
+    // large-valued intermediate before the 2nd iteration reads them → 113× corrupted output on
+    // big-score (repetitive) inputs. Pinning them as outputs stops reuse. The self-test
+    // (DIFFKV_SELFTEST, no buffer reuse) proves the MATH is exact, so this is the real fix.
+    for (struct ggml_tensor* t : {aKr, VKr, VVs, aVs, Usel, Msel, USf, BSf, su, bs, su_bs, anc_mask, dup_add})
+        ggml_set_output(t);
+
+    std::vector<struct ggml_tensor*> kv_outs(nkv);
+    for (int kv = 0; kv < nkv; ++kv) {
+        // Per-kv views (cont to keep matmuls happy).
+        struct ggml_tensor* Qk   = ggml_cont(ctx, ggml_view_2d(ctx, Q2, D, group, Q2->nb[1], (size_t)kv*group*Q2->nb[1])); // [D,group]
+        struct ggml_tensor* aKrk = ggml_cont(ctx, ggml_view_2d(ctx, aKr, D, K, aKr->nb[2], (size_t)kv*aKr->nb[1]));        // [D,K]
+        struct ggml_tensor* aVsk = ggml_cont(ctx, ggml_view_2d(ctx, aVs, D, K, aVs->nb[2], (size_t)kv*aVs->nb[1]));        // [D,K]
+        // VKr/VVs [D,nkv,R,K] → fixed kv → [D,R,K]
+        struct ggml_tensor* VKrk = ggml_cont(ctx, ggml_view_3d(ctx, VKr, D, R, K, VKr->nb[2], VKr->nb[3], (size_t)kv*VKr->nb[1])); // [D,R,K]
+        struct ggml_tensor* VVsk = ggml_cont(ctx, ggml_view_3d(ctx, VVs, D, R, K, VVs->nb[2], VVs->nb[3], (size_t)kv*VVs->nb[1])); // [D,R,K]
+
+        // dense-window views for this kv head
+        struct ggml_tensor* dkr = ggml_cont(ctx, ggml_view_2d(ctx, dense_kr, D, MAXD, dense_kr->nb[1], (size_t)kv*D*dense_kr->nb[0])); // [D,MAXD]
+        struct ggml_tensor* dvk = ggml_cont(ctx, ggml_view_2d(ctx, dense_v,  D, MAXD, dense_v->nb[1],  (size_t)kv*D*dense_v->nb[0]));  // [D,MAXD]
+        struct ggml_tensor* ckr = ggml_cont(ctx, ggml_view_2d(ctx, k_rope,   D, 1,    k_rope->nb[1],   (size_t)kv*k_rope->nb[1]));     // [D,1] current K
+        struct ggml_tensor* cvk = ggml_cont(ctx, ggml_view_1d(ctx, v_cur,    D,       (size_t)kv*D*v_cur->nb[0]));                     // [D]  current V
+
+        // ── Sparse-pool scores → flat_sp [(S+1)*K, group] ──
+        struct ggml_tensor* anc = ggml_mul_mat(ctx, aKrk, Qk); // [K,group] raw anchor score
+        struct ggml_tensor* VKrk2 = ggml_reshape_2d(ctx, VKrk, D, R*K);
+        struct ggml_tensor* qp = ggml_mul_mat(ctx, VKrk2, Qk);          // [R*K, group]
+        qp = ggml_reshape_3d(ctx, qp, R, K, group);                     // [R,K,group]
+        qp = ggml_cont(ctx, ggml_permute(ctx, qp, 0, 2, 1, 3));         // [R,group,K]
+        struct ggml_tensor* delta = ggml_mul_mat(ctx, Usel, qp);        // [S,group,K]
+        struct ggml_tensor* anc_b = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_transpose(ctx, anc)), 1, group, K); // [1,group,K]
+        struct ggml_tensor* ts = ggml_add(ctx, ggml_mul(ctx, delta, su_bs), anc_b); // [S,group,K]
+        ts = ggml_scale(ctx, ts, scale);
+        ts = ggml_add(ctx, ts, ggml_reshape_3d(ctx, Msel, S, 1, K));                 // +token mask [S,1,K]
+        struct ggml_tensor* ae = ggml_add(ctx, ggml_scale(ctx, anc_b, scale), anc_mask); // [1,group,K]
+        struct ggml_tensor* allsp = ggml_concat(ctx, ts, ae, 0);                     // [S+1,group,K]
+        allsp = ggml_add(ctx, allsp, dup_add);                                       // -inf on duplicate slots
+        struct ggml_tensor* perm  = ggml_cont(ctx, ggml_permute(ctx, allsp, 0, 2, 1, 3)); // [S+1,K,group]
+        struct ggml_tensor* flat_sp = ggml_reshape_2d(ctx, perm, (S+1)*K, group);    // [(S+1)*K, group]
+
+        // ── Dense-window scores ──
+        struct ggml_tensor* ds = ggml_scale(ctx, ggml_mul_mat(ctx, dkr, Qk), scale); // [MAXD, group]
+        ds = ggml_add(ctx, ds, ggml_reshape_2d(ctx, dense_mask, MAXD, 1));           // + validity mask
+        struct ggml_tensor* cs = ggml_scale(ctx, ggml_mul_mat(ctx, ckr, Qk), scale); // [1, group] current token
+        // DEBUG: DIFFKV_DBG_DENSEOFF → mask dense+current (-1e30) to isolate the sparse pool.
+        static const bool denseoff = (std::getenv("DIFFKV_DBG_DENSEOFF") != nullptr);
+        if (denseoff) {
+            struct ggml_tensor* bigneg = ggml_scale(ctx, neg_half, 2e30f); // [1] = -1e30
+            ds = ggml_add(ctx, ds, bigneg);
+            cs = ggml_add(ctx, cs, bigneg);
+        }
+        static const bool curoff = (std::getenv("DIFFKV_DBG_CUROFF") != nullptr);
+        if (curoff) cs = ggml_add(ctx, cs, ggml_scale(ctx, neg_half, 2e30f)); // mask current token only
+        static const bool dsoff = (std::getenv("DIFFKV_DBG_DSOFF") != nullptr);
+        if (dsoff) ds = ggml_add(ctx, ds, ggml_scale(ctx, neg_half, 2e30f));  // mask past-dense only
+
+        // ── One softmax over sparse ∪ dense ∪ current ──
+        const int E = (S+1)*K + MAXD + 1;
+        struct ggml_tensor* allsc = ggml_concat(ctx, ggml_concat(ctx, flat_sp, ds, 0), cs, 0); // [E, group]
+        struct ggml_tensor* w = ggml_soft_max(ctx, allsc);                                     // [E, group]
+
+        // split weights (entries along ne0)
+        struct ggml_tensor* w_sp = ggml_cont(ctx, ggml_view_2d(ctx, w, (S+1)*K, group, w->nb[1], 0));                       // [(S+1)*K, group]
+        struct ggml_tensor* w_ds = ggml_cont(ctx, ggml_view_2d(ctx, w, MAXD,    group, w->nb[1], (size_t)((S+1)*K)*w->nb[0])); // [MAXD, group]
+        struct ggml_tensor* w_cs = ggml_cont(ctx, ggml_view_2d(ctx, w, 1,       group, w->nb[1], (size_t)((S+1)*K+MAXD)*w->nb[0])); // [1, group]
+
+        // ── Sparse value (project-then-attend) ──
+        struct ggml_tensor* wsp3 = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, w_sp, S+1, K, group), 0, 2, 1, 3)); // [S+1,group,K]
+        struct ggml_tensor* w_tok = ggml_cont(ctx, ggml_view_3d(ctx, wsp3, S, group, K, wsp3->nb[1], wsp3->nb[2], 0));        // [S,group,K]
+        struct ggml_tensor* w_anc = ggml_view_3d(ctx, wsp3, 1, group, K, wsp3->nb[1], wsp3->nb[2], (size_t)S*wsp3->nb[0]);    // [1,group,K]
+        struct ggml_tensor* w_total = ggml_add(ctx, ggml_sum_rows(ctx, w_tok), w_anc); // [1,group,K]
+        struct ggml_tensor* wt2  = ggml_cont(ctx, ggml_transpose(ctx, ggml_reshape_2d(ctx, ggml_cont(ctx, w_total), group, K))); // [K,group]
+        struct ggml_tensor* aVsT = ggml_cont(ctx, ggml_transpose(ctx, aVsk));          // [K,D]
+        struct ggml_tensor* term1 = ggml_mul_mat(ctx, aVsT, wt2);                       // [D,group]
+        struct ggml_tensor* UselT = ggml_cont(ctx, ggml_transpose(ctx, Usel));          // [S,R,K]
+        struct ggml_tensor* wproj = ggml_mul(ctx, ggml_mul_mat(ctx, UselT, w_tok), su); // [R,group,K]
+        struct ggml_tensor* VVsT = ggml_cont(ctx, ggml_transpose(ctx, VVsk));           // [R,D,K]
+        struct ggml_tensor* t2pre = ggml_mul(ctx, ggml_mul_mat(ctx, VVsT, wproj), bs);  // [D,group,K]
+        struct ggml_tensor* t2p = ggml_cont(ctx, ggml_permute(ctx, t2pre, 1, 2, 0, 3)); // [K,D,group]
+        struct ggml_tensor* term2 = ggml_reshape_2d(ctx, ggml_sum_rows(ctx, t2p), D, group); // [D,group]
+
+        // ── Dense value: Σ_t w_ds[t]·dvk[:,t] + w_cs·cvk ──
+        struct ggml_tensor* dvkT  = ggml_cont(ctx, ggml_transpose(ctx, dvk));           // [MAXD,D]
+        struct ggml_tensor* dense_out = ggml_mul_mat(ctx, dvkT, w_ds);                  // [D,group]
+        struct ggml_tensor* cvk2  = ggml_reshape_2d(ctx, cvk, 1, D);                    // [1,D]
+        struct ggml_tensor* cur_out = ggml_mul_mat(ctx, cvk2, w_cs);                    // [D,group]
+
+        // DEBUG term toggles to localize the sparse magnitude bug.
+        static const bool t1off = (std::getenv("DIFFKV_DBG_T1OFF") != nullptr);
+        static const bool t2off = (std::getenv("DIFFKV_DBG_T2OFF") != nullptr);
+        if (t1off) term1 = ggml_scale(ctx, term1, 0.0f);
+        if (t2off) term2 = ggml_scale(ctx, term2, 0.0f);
+
+        kv_outs[kv] = ggml_add(ctx, ggml_add(ctx, term1, term2), ggml_add(ctx, dense_out, cur_out)); // [D,group]
+    }
+
+    // Assemble [n_embd,1] from the per-head [D,group] outputs. Each kv block occupies a
+    // contiguous [D*group] slice (flat index = (kv*group+g)*D + d). We reshape each kv_outs to
+    // [D*group,1] (materialised via cont) and concat along dim0 — this yields a REAL [n_embd,1]
+    // tensor, NOT a reshape-of-concat VIEW (whose source buffer the sched freed early → the
+    // 113× output corruption on large-score inputs).
+    struct ggml_tensor* out = ggml_reshape_2d(ctx, ggml_cont(ctx, kv_outs[0]), D*group, 1);
+    for (int kv = 1; kv < nkv; ++kv)
+        out = ggml_concat(ctx, out, ggml_reshape_2d(ctx, ggml_cont(ctx, kv_outs[kv]), D*group, 1), 0); // [n_embd,1]
+    return ggml_cont(ctx, out);
+}
+
 // Helper to build the Qwen 2.5 sparse decode forward pass graph with SRL routing and custom Metal attention
 struct ggml_cgraph * build_decode_graph(
     struct ggml_context * ctx,
@@ -404,10 +589,24 @@ struct ggml_cgraph * build_decode_graph(
     int engage_threshold = 2048,
     struct ggml_tensor ** dense_k_past_inputs = nullptr,
     struct ggml_tensor ** dense_v_past_inputs = nullptr,
-    struct ggml_tensor * dense_attn_mask = nullptr
+    struct ggml_tensor * dense_attn_mask = nullptr,
+    struct ggml_tensor ** native_dense_kr = nullptr,   // [n_layer] each [F_kv, native_maxd] rotated past-dense K
+    struct ggml_tensor ** native_dense_v = nullptr,    // [n_layer] each [F_kv, native_maxd] past-dense V
+    struct ggml_tensor * native_dense_mask = nullptr,  // [native_maxd] validity bias
+    int native_maxd = 0,
+    struct ggml_tensor * native_dup_tri = nullptr,     // [srl_k_keep,srl_k_keep] strict-lower ones
+    struct ggml_tensor * native_half = nullptr,        // [1] = 0.5
+    struct ggml_tensor * native_dense_pos = nullptr,   // [native_maxd] i32 past-dense positions
+    struct ggml_tensor ** out_dbg_anc = nullptr        // DEBUG: layer-0 anchor scores [K,group]
 ) {
     const auto & config = model.get_config();
-    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    // Native sparse-attn adds ~40 ggml ops/layer; bump graph capacity well past the
+    // 2048 default when it's enabled (the larger node arena is otherwise harmless).
+    static const bool native_graph =
+        (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+    struct ggml_cgraph * gf = native_graph
+        ? ggml_new_graph_custom(ctx, 32768, false)
+        : ggml_new_graph(ctx);
 
     int F_test = config.n_embd / config.n_head * config.n_head_kv;
     struct ggml_tensor * concat_k = nullptr;
@@ -491,7 +690,38 @@ struct ggml_cgraph * build_decode_graph(
             struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
             struct ggml_tensor * q_rope_flat = ggml_reshape_1d(ctx, q_rope, config.n_embd);
 
-            if (userdata && selected_slots) {
+            // Native ggml-metal sparse attention path (gated). Decided at graph-build time:
+            // the factual store is populated during prefill, so if it's empty we can run the
+            // fully-native fused subgraph; factual/NIAH sessions keep the CPU custom op (which
+            // also drives VSL masking + logit biasing). Static graph → decision is per-build.
+            static const bool native_attn_env =
+                (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+            bool factual_empty = true;
+            if (userdata && userdata[l].srl_state) {
+                factual_empty = static_cast<diffkv::SessionSRLState*>(userdata[l].srl_state)->factual_store.entries.empty();
+            }
+            bool use_native_attn = native_attn_env && factual_empty &&
+                                   userdata && userdata[l].kv_engine &&
+                                   userdata[l].kv_engine->native_attn_enabled();
+
+            if (use_native_attn && selected_slots && native_dense_kr && native_dense_v && native_dense_mask) {
+                // Current-token key rotated at the current position (dense self-entry).
+                struct ggml_tensor * k_reshaped_n = ggml_reshape_3d(ctx, k, head_dim, config.n_head_kv, 1);
+                struct ggml_tensor * k_rope_n = ggml_rope_ext(ctx, k_reshaped_n, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+                // Past-dense keys are uploaded RAW; RoPE them in-graph at their actual positions.
+                struct ggml_tensor * dkr3 = ggml_reshape_3d(ctx, native_dense_kr[l], head_dim, config.n_head_kv, native_maxd);
+                struct ggml_tensor * dkr_roped = ggml_rope_ext(ctx, dkr3, native_dense_pos, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+                struct ggml_tensor * dkr_flat = ggml_reshape_2d(ctx, dkr_roped, head_dim * config.n_head_kv, native_maxd);
+                if (std::getenv("DIFFKV_DBG_NOROPE")) dkr_flat = native_dense_kr[l]; // DEBUG: bypass dense rope
+                attn_out = build_native_sparse_attn(
+                    ctx, q_rope, k_rope_n, v, dkr_flat, native_dense_v[l], native_dense_mask, native_maxd,
+                    selected_slots, native_dup_tri, native_half, userdata[l].kv_engine,
+                    config.n_head, config.n_head_kv, head_dim,
+                    userdata[l].kv_engine->get_rank(), 64, srl_k_keep,
+                    1.0f / std::sqrt((float)head_dim),
+                    nullptr
+                );
+            } else if (userdata && selected_slots) {
                 struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
                 // Reconstruct attention output using the custom Metal kernel!
                 struct ggml_tensor * custom_attn = ggml_map_custom3(
@@ -843,7 +1073,132 @@ int32_t sample_logits(const std::vector<float>& logits, float temp, float top_p,
     return dist(rng);
 }
 
+namespace diffkv {
+// External (non-static) reference attention used by the self-test.
+void execute_cpu_attention(const float*, const int32_t*, float*, float*, NativeBlockPool*,
+                           int,int,int,int,int,int,float,bool,float,bool);
+void cpu_dense_attention(const float*, const float*, const float*, const int32_t*,
+                         int,int,int,int,float,bool,float,int,float*,float*);
+}
+
+// DIFFKV_SELFTEST=1: standalone unit test of build_native_sparse_attn vs execute_cpu_attention
+// with tiny KNOWN inputs on the CPU backend. Each graph tensor gets its OWN buffer (no sched
+// reuse), so a match ⇒ the subgraph MATH is correct (bug is sched buffer-reuse in the full model);
+// a mismatch ⇒ a math/op bug, localized here without 24-layer / pool-timing / capture noise.
+static void run_native_attn_selftest() {
+    using namespace diffkv;
+    const int n_slots=4, rank=4, D=8, nkv=2, desc_dim=8, nq=4, K=3, S_max=64, MAXD=8;
+    const int Tpast=3;                  // past-dense tokens (current token added separately)
+    const float scale = 1.0f/std::sqrt((float)D), freq=1000000.0f;
+    setenv("DIFFKV_NATIVE_ATTN","1",1); // pool allocates VK_rot/anchorK_rot/valid_mask/U_f16
+    // FULL path test (sparse ∪ dense ∪ current). has_rope=false → no rotation to match.
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    NativeBlockPool pool;
+    pool.initialize(n_slots, rank, D, nkv, desc_dim, buft);
+    const bool HR = (std::getenv("DIFFKV_SELFTEST_ROPE") != nullptr); // test WITH rotation
+    pool.set_rope_config(HR, freq);
+    pool.zero_all_tensors();
+
+    std::mt19937 g(42);
+    std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+    auto H=[&](float f){return ggml_fp32_to_fp16(f);};
+    for (int s=0;s<K;++s){
+        int8_t* U=pool.get_host_U(); ggml_fp16_t* VK=pool.get_host_VK(); ggml_fp16_t* VV=pool.get_host_VV();
+        ggml_fp16_t* aK=pool.get_host_anchors_K(); ggml_fp16_t* aV=pool.get_host_anchors_V();
+        int32_t* sl=pool.get_host_seq_lens(); ggml_fp16_t* sc=pool.get_host_scales();
+        ggml_fp16_t* us=pool.get_host_U_scale(); int32_t* ap=pool.get_host_anchor_positions();
+        int seqlen = 20 + s*10;  // longer blocks
+        sl[s]=seqlen; sc[s]=H(0.3f+0.1f*s); us[s]=H(0.2f); ap[s]=10+s*7;
+        // EXTREME data to reproduce the real failure: massive anchor-K (|aK|~per-elem 30, like
+        // Qwen layer-0), and slots 1,2 NEAR-IDENTICAL to slot 0 (mimics repetitive-prompt blocks).
+        int src = (s==0)?0:0; (void)src;
+        for(int t=0;t<seqlen;++t) for(int r=0;r<rank;++r) U[(size_t)s*S_max*rank + t*rank + r]=(int8_t)((int)((g()+s*7)%21)-10);
+        for(int r=0;r<rank;++r) for(int kv=0;kv<nkv;++kv) for(int d=0;d<D;++d){
+            VK[(size_t)s*rank*nkv*D + r*nkv*D + kv*D + d]=H(dist(g)*0.5f + (s>0?0.02f*s:0.0f));
+            VV[(size_t)s*rank*nkv*D + r*nkv*D + kv*D + d]=H(dist(g)*0.5f);
+        }
+        for(int kv=0;kv<nkv;++kv) for(int d=0;d<D;++d){
+            aK[(size_t)s*nkv*D + kv*D + d]=H(dist(g)*64.0f + (s>0?0.5f*s:0.0f));  // massive K + near-dup
+            aV[(size_t)s*nkv*D + kv*D + d]=H(dist(g));
+        }
+        pool.upload_slot(s);
+    }
+
+    std::vector<float> Q(nq*D); for(auto&x:Q)x=dist(g);
+    std::vector<int32_t> slots={0,1,2};
+    const int F=nkv*D, Tdense=Tpast+1;
+    std::vector<float> pastK((size_t)Tpast*F), pastV((size_t)Tpast*F), curK(F), curV(F);
+    for(auto&x:pastK)x=dist(g)*0.4f; for(auto&x:pastV)x=dist(g)*0.4f;
+    for(auto&x:curK)x=dist(g)*0.4f; for(auto&x:curV)x=dist(g)*0.4f;
+
+    // ── Reference: sparse + dense(Tpast+current) + 3-way LSE combine (has_rope=false) ──
+    std::vector<float> outS(nq*D,0.0f), lseS(nq,-1e30f), outD(nq*D,0.0f), lseD(nq,-1e30f);
+    execute_cpu_attention(Q.data(), slots.data(), outS.data(), lseS.data(), &pool, nq, nkv, rank, S_max, K, D, scale, HR, freq, true);
+    std::vector<float> denseK((size_t)Tdense*F), denseV((size_t)Tdense*F); std::vector<int32_t> dpos(Tdense);
+    std::memcpy(denseK.data(), pastK.data(), pastK.size()*4); std::memcpy(denseK.data()+(size_t)Tpast*F, curK.data(), F*4);
+    std::memcpy(denseV.data(), pastV.data(), pastV.size()*4); std::memcpy(denseV.data()+(size_t)Tpast*F, curV.data(), F*4);
+    const int curpos=Tpast; for(int t=0;t<Tdense;++t)dpos[t]=t;  // past 0..Tpast-1, current=Tpast
+    cpu_dense_attention(Q.data(), denseK.data(), denseV.data(), dpos.data(), Tdense, nq, nkv, D, scale, HR, freq, 0, outD.data(), lseD.data());
+    std::vector<float> out_ref(nq*D);
+    for(int h=0;h<nq;++h){ double lmax=std::max(lseS[h],lseD[h]); double ws=(lseS[h]<=-1e20?0.0:std::exp(lseS[h]-lmax)), wd=(lseD[h]<=-1e20?0.0:std::exp(lseD[h]-lmax)); double den=std::max(ws+wd,1e-9); for(int d=0;d<D;++d) out_ref[h*D+d]=(float)((outS[h*D+d]*ws+outD[h*D+d]*wd)/den); }
+
+    // ── Native graph (FULL path, no DENSEOFF) ──
+    ggml_init_params ip={ (size_t)16*1024*1024, nullptr, true };
+    ggml_context* ctx=ggml_init(ip);
+    ggml_tensor* q_rope=ggml_new_tensor_3d(ctx,GGML_TYPE_F32,D,nq,1); ggml_set_input(q_rope);
+    ggml_tensor* k_rope=ggml_new_tensor_3d(ctx,GGML_TYPE_F32,D,nkv,1); ggml_set_input(k_rope);
+    ggml_tensor* v_cur=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,F); ggml_set_input(v_cur);
+    ggml_tensor* dkr=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,F,MAXD); ggml_set_input(dkr);
+    ggml_tensor* dv=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,F,MAXD); ggml_set_input(dv);
+    ggml_tensor* dmask=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,MAXD); ggml_set_input(dmask);
+    ggml_tensor* sel=ggml_new_tensor_1d(ctx,GGML_TYPE_I32,K); ggml_set_input(sel);
+    ggml_tensor* tri=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,K,K); ggml_set_input(tri);
+    ggml_tensor* half=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,1); ggml_set_input(half);
+    ggml_tensor* dpos_t=ggml_new_tensor_1d(ctx,GGML_TYPE_I32,MAXD); ggml_set_input(dpos_t);
+    ggml_tensor* cpos_t=ggml_new_tensor_1d(ctx,GGML_TYPE_I32,1); ggml_set_input(cpos_t);
+    // With rotation: rope the dense K (raw) and current K in-graph, exactly as build_decode_graph does.
+    ggml_tensor* dkr_use=dkr, *krope_use=k_rope;
+    if (HR) {
+        ggml_tensor* d3=ggml_reshape_3d(ctx,dkr,D,nkv,MAXD);
+        dkr_use=ggml_reshape_2d(ctx, ggml_rope_ext(ctx,d3,dpos_t,nullptr,D,GGML_ROPE_TYPE_NEOX,0,freq,1.0f,0.0f,1.0f,0.0f,0.0f), F, MAXD);
+        krope_use=ggml_rope_ext(ctx, k_rope, cpos_t, nullptr, D, GGML_ROPE_TYPE_NEOX, 0, freq, 1.0f,0.0f,1.0f,0.0f,0.0f);
+    }
+    ggml_tensor* out = build_native_sparse_attn(ctx, q_rope, krope_use, v_cur, dkr_use, dv, dmask, MAXD,
+                                                sel, tri, half, &pool, nq, nkv, D, rank, S_max, K, scale, nullptr);
+    ggml_set_output(out);
+    ggml_cgraph* gf=ggml_new_graph_custom(ctx, 8192, false);
+    ggml_build_forward_expand(gf, out);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    std::vector<float> dkrbuf((size_t)F*MAXD,0.0f), dvbuf((size_t)F*MAXD,0.0f), dmbuf(MAXD,-INFINITY), trih((size_t)K*K,0.0f);
+    std::memcpy(dkrbuf.data(), pastK.data(), pastK.size()*4); std::memcpy(dvbuf.data(), pastV.data(), pastV.size()*4);
+    for(int t=0;t<Tpast;++t)dmbuf[t]=0.0f;
+    for(int kk=0;kk<K;++kk) for(int j=0;j<kk;++j) trih[j+kk*K]=1.0f;
+    float halfv=0.5f;
+    ggml_backend_tensor_set(q_rope,Q.data(),0,Q.size()*4);
+    ggml_backend_tensor_set(k_rope,curK.data(),0,F*4);
+    ggml_backend_tensor_set(v_cur,curV.data(),0,F*4);
+    ggml_backend_tensor_set(dkr,dkrbuf.data(),0,dkrbuf.size()*4);
+    ggml_backend_tensor_set(dv,dvbuf.data(),0,dvbuf.size()*4);
+    ggml_backend_tensor_set(dmask,dmbuf.data(),0,dmbuf.size()*4);
+    ggml_backend_tensor_set(sel,slots.data(),0,slots.size()*4);
+    ggml_backend_tensor_set(tri,trih.data(),0,trih.size()*4);
+    ggml_backend_tensor_set(half,&halfv,0,4);
+    std::vector<int32_t> dposb(MAXD,0); for(int t=0;t<Tpast;++t)dposb[t]=dpos[t]; int32_t cposv=curpos;
+    ggml_backend_tensor_set(dpos_t,dposb.data(),0,dposb.size()*4);
+    ggml_backend_tensor_set(cpos_t,&cposv,0,4);
+    ggml_backend_graph_compute(backend, gf);
+    std::vector<float> nat(nq*D); ggml_backend_tensor_get(out,nat.data(),0,nat.size()*4);
+
+    double maxd=0,rn=0,nn=0; for(int i=0;i<nq*D;++i){ double d=std::abs((double)nat[i]-out_ref[i]); maxd=std::max(maxd,d); rn+=(double)out_ref[i]*out_ref[i]; nn+=(double)nat[i]*nat[i]; }
+    std::cerr<<"[SELFTEST] |native|="<<std::sqrt(nn)<<" |ref|="<<std::sqrt(rn)<<" maxAbsDiff="<<maxd<<(maxd<1e-2*std::sqrt(rn)+1e-3?"  PASS":"  FAIL")<<std::endl;
+    std::cerr<<"[SELFTEST] native[0..7]="; for(int i=0;i<8;++i)std::cerr<<nat[i]<<" "; std::cerr<<"\n[SELFTEST] ref   [0..7]="; for(int i=0;i<8;++i)std::cerr<<out_ref[i]<<" "; std::cerr<<std::endl;
+    ggml_backend_buffer_free(buf); ggml_free(ctx); ggml_backend_free(backend);
+}
+
 int main(int argc, char ** argv) {
+    if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <gguf_model_path> [prompt]" << std::endl;
         return 1;
@@ -1688,6 +2043,9 @@ int main(int argc, char ** argv) {
         }
         runtime_manager.wait_for_compressor();
         runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
+        // Native attn: push prefill-compressed slots host→device before decode (async SVD
+        // only wrote host mirrors). Decode-time blocks are handled inside ingest_decode.
+        runtime_manager.sync_device_for_native();
 
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << "[DEBUG ACTIVATIONS] cached_len=" << cached_len << " L=" << L << "\n";
@@ -1764,7 +2122,9 @@ int main(int argc, char ** argv) {
             std::cerr << "[DiffKV Native] Building fresh decode graph..." << std::flush;
         }
         struct ggml_init_params decode_params = {
-            /*.mem_size   =*/ 4 * 1024 * 1024,
+            // Native sparse-attn builds far more op/tensor metadata + a 32k-node graph arena.
+            /*.mem_size   =*/ (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1")
+                                  ? (size_t)48 * 1024 * 1024 : (size_t)4 * 1024 * 1024,
             /*.mem_buffer =*/ nullptr,
             /*.no_alloc   =*/ true,
         };
@@ -1828,6 +2188,7 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * decode_selected_slots = nullptr;
         struct ggml_tensor * decode_concat_k = nullptr;
         struct ggml_tensor * decode_concat_v = nullptr;
+        struct ggml_tensor * dbg_anc = nullptr;
 
         struct ggml_init_params dense_past_params = {
             /*.mem_size   =*/ 4 * 1024 * 1024,
@@ -1843,8 +2204,52 @@ int main(int argc, char ** argv) {
             dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
             ggml_set_input(dense_v_past_inputs[l]);
         }
-        ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
 
+        // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
+        // persistent (survive graph rebuilds), filled each decode step. Gated.
+        const int native_maxd = 2048;
+        const bool native_attn_on = (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+        std::vector<struct ggml_tensor *> native_dense_kr(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> native_dense_v(n_layers, nullptr);
+        struct ggml_tensor * native_dense_mask = nullptr;
+        if (native_attn_on) {
+            for (int l = 0; l < n_layers; ++l) {
+                native_dense_kr[l] = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, native_maxd);
+                ggml_set_input(native_dense_kr[l]);
+                native_dense_v[l]  = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, native_maxd);
+                ggml_set_input(native_dense_v[l]);
+            }
+            native_dense_mask = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_F32, native_maxd);
+            ggml_set_input(native_dense_mask);
+        }
+        // Past-dense token positions (for in-graph RoPE of the raw dense K).
+        struct ggml_tensor * native_dense_pos = nullptr;
+        if (native_attn_on) {
+            native_dense_pos = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_I32, native_maxd);
+            ggml_set_input(native_dense_pos);
+        }
+        // Dedup constants for the native path: strict-lower-triangular ones + 0.5 scalar.
+        struct ggml_tensor * native_dup_tri = nullptr;
+        struct ggml_tensor * native_half = nullptr;
+        if (native_attn_on) {
+            native_dup_tri = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F32, srl_k_keep, srl_k_keep);
+            ggml_set_input(native_dup_tri);
+            native_half = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_F32, 1);
+            ggml_set_input(native_half);
+        }
+        ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
+        if (native_attn_on) {
+            // Fill the dedup constants once (persistent). tri[j,k] = 1 if j<k else 0 (column-major: idx = j + k*K).
+            std::vector<float> tri((size_t)srl_k_keep * srl_k_keep, 0.0f);
+            for (int k = 0; k < srl_k_keep; ++k)
+                for (int j = 0; j < k; ++j)
+                    tri[(size_t)j + (size_t)k * srl_k_keep] = 1.0f;
+            ggml_backend_tensor_set(native_dup_tri, tri.data(), 0, tri.size() * sizeof(float));
+            float halfv = 0.5f;
+            ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
+        }
+
+        ggml_backend_buffer_t native_decode_buf = nullptr; // no-reuse alloc for the native decode path
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
             kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
@@ -1854,22 +2259,36 @@ int main(int argc, char ** argv) {
             &decode_concat_k, &decode_concat_v,
             decode_use_sparse, L, engage_threshold,
             dense_k_past_inputs.data(), dense_v_past_inputs.data(),
-            dense_attn_mask_decode
+            dense_attn_mask_decode,
+            native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
+            native_dup_tri, native_half, native_dense_pos, &dbg_anc
         );
+        if (dbg_anc) ggml_set_output(dbg_anc);
         ggml_set_output(decode_logits);
         if (decode_selected_slots) ggml_set_output(decode_selected_slots);
         if (decode_concat_k) ggml_set_output(decode_concat_k);
         if (decode_concat_v) ggml_set_output(decode_concat_v);
 
-        ggml_backend_sched_reset(sched);
-        if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
-        if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
-        for (int l = 0; l < n_layers; ++l) {
-            if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
-            if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+        // Native path: allocate the decode graph with NO buffer reuse (ggml_backend_sched's
+        // reuse corrupts the native sparse-attn subgraph on big-score inputs — verified: the
+        // subgraph MATH is exact under no-reuse via DIFFKV_SELFTEST). Direct backend compute.
+        bool decode_alloc_ok;
+        if (native_attn_on) {
+            if (native_decode_buf) ggml_backend_buffer_free(native_decode_buf);
+            native_decode_buf = ggml_backend_alloc_ctx_tensors(decode_ctx, backend);
+            decode_alloc_ok = (native_decode_buf != nullptr);
+        } else {
+            ggml_backend_sched_reset(sched);
+            if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
+            if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
+            for (int l = 0; l < n_layers; ++l) {
+                if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
+                if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+            }
+            if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+            decode_alloc_ok = ggml_backend_sched_alloc_graph(sched, decode_graph);
         }
-        if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
-        if (!ggml_backend_sched_alloc_graph(sched, decode_graph)) {
+        if (!decode_alloc_ok) {
             // Always emit sentinels so the gateway doesn't hang waiting for __RESPONSE__
             if (interactive) {
                 std::cout << "__RESPONSE__" << std::endl;
@@ -2136,22 +2555,32 @@ int main(int argc, char ** argv) {
                     &decode_concat_k, &decode_concat_v,
                     decode_use_sparse, current_pos, engage_threshold,
                     dense_k_past_inputs.data(), dense_v_past_inputs.data(),
-                    dense_attn_mask_decode
+                    dense_attn_mask_decode,
+                    native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
+                    native_dup_tri, native_half, native_dense_pos
                 );
                 ggml_set_output(decode_logits);
                 if (decode_selected_slots) ggml_set_output(decode_selected_slots);
                 if (decode_concat_k) ggml_set_output(decode_concat_k);
                 if (decode_concat_v) ggml_set_output(decode_concat_v);
-                
-                ggml_backend_sched_reset(sched);
-                if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
-                if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
-                for (int l = 0; l < n_layers; ++l) {
-                    if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
-                    if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+
+                bool realloc_ok;
+                if (native_attn_on) {
+                    if (native_decode_buf) ggml_backend_buffer_free(native_decode_buf);
+                    native_decode_buf = ggml_backend_alloc_ctx_tensors(decode_ctx, backend);
+                    realloc_ok = (native_decode_buf != nullptr);
+                } else {
+                    ggml_backend_sched_reset(sched);
+                    if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched, decode_concat_k, backend);
+                    if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched, decode_concat_v, backend);
+                    for (int l = 0; l < n_layers; ++l) {
+                        if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
+                        if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+                    }
+                    if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+                    realloc_ok = ggml_backend_sched_alloc_graph(sched, decode_graph);
                 }
-                if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
-                if (!ggml_backend_sched_alloc_graph(sched, decode_graph)) {
+                if (!realloc_ok) {
                     std::cerr << "Error: Decode graph reallocation failed" << std::endl;
                     break;
                 }
@@ -2290,13 +2719,84 @@ int main(int argc, char ** argv) {
                 userdata[l].current_pos = current_pos;  // for Metal dense-window RoPE
             }
 
+            // Native sparse-attn: upload the past dense window (rotated K + raw V) and its
+            // validity mask into the persistent graph inputs (current token handled in-graph).
+            if (native_attn_on && decode_use_sparse) {
+                const int cnt0 = std::min(total_dense_tokens[0], native_maxd);
+                if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
+                    double n0=0,nv=0,nvlast=0; for (int i=0;i<F_test;++i){ float x=active_k_dense[0][i]; n0+=(double)x*x; float y=active_v_dense[0][i]; nv+=(double)y*y; float z=active_v_dense[0][(cnt0-1)*F_test+i]; nvlast+=(double)z*z; }
+                    std::cerr << "[DBG_UPLOAD] step0 cnt0=" << cnt0 << " |active_k[tok0]|=" << std::sqrt(n0)
+                              << " |active_v[tok0]|=" << std::sqrt(nv) << " |active_v[last]|=" << std::sqrt(nvlast) << std::endl;
+                }
+                std::vector<float> dmask(native_maxd, -INFINITY);
+                for (int t = 0; t < cnt0; ++t) dmask[t] = 0.0f;
+                ggml_backend_tensor_set(native_dense_mask, dmask.data(), 0, (size_t)native_maxd * sizeof(float));
+                // Positions for in-graph RoPE of the raw past-dense keys (clamp/pad to 0).
+                std::vector<int32_t> pbuf(native_maxd, 0);
+                for (int t = 0; t < cnt0; ++t) pbuf[t] = active_positions_dense[t];
+                ggml_backend_tensor_set(native_dense_pos, pbuf.data(), 0, (size_t)native_maxd * sizeof(int32_t));
+                std::vector<float> kbuf((size_t)native_maxd * F_test), vbuf((size_t)native_maxd * F_test);
+                for (int l = 0; l < n_layers; ++l) {
+                    const int c2 = std::min(total_dense_tokens[l], native_maxd);
+                    std::fill(kbuf.begin(), kbuf.end(), 0.0f);
+                    std::fill(vbuf.begin(), vbuf.end(), 0.0f);
+                    if (c2 > 0) {
+                        std::memcpy(kbuf.data(), active_k_dense[l].data(), (size_t)c2 * F_test * sizeof(float)); // RAW K (roped in-graph)
+                        std::memcpy(vbuf.data(), active_v_dense[l].data(), (size_t)c2 * F_test * sizeof(float));
+                    }
+                    ggml_backend_tensor_set(native_dense_kr[l], kbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
+                    ggml_backend_tensor_set(native_dense_v[l],  vbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
+                }
+                if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
+                    std::vector<float> rb(F_test), rv(F_test);
+                    ggml_backend_tensor_get(native_dense_kr[0], rb.data(), 0, F_test*sizeof(float));
+                    ggml_backend_tensor_get(native_dense_v[0], rv.data(), 0, F_test*sizeof(float));
+                    double n=0,nv=0; for(int i=0;i<F_test;++i){ n+=(double)rb[i]*rb[i]; nv+=(double)rv[i]*rv[i]; }
+                    std::cerr << "[DBG_DEV] native_dense_kr[0] dev |tok0|=" << std::sqrt(n) << " native_dense_v[0] dev |tok0|=" << std::sqrt(nv) << std::endl;
+                }
+            }
 
             auto t_before_compute = std::chrono::high_resolution_clock::now();
-            if (ggml_backend_sched_graph_compute(sched, decode_graph) != GGML_STATUS_SUCCESS) {
+            ggml_status decode_st = native_attn_on
+                ? ggml_backend_graph_compute(backend, decode_graph)
+                : ggml_backend_sched_graph_compute(sched, decode_graph);
+            if (decode_st != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
                 break;
             }
             auto t_after_compute = std::chrono::high_resolution_clock::now();
+
+            if (std::getenv("DIFFKV_DBG_SEL") && step == 0 && dbg_anc) {
+                std::vector<float> a(ggml_nelements(dbg_anc));
+                ggml_backend_tensor_get(dbg_anc, a.data(), 0, a.size()*sizeof(float));
+                double mn=1e30,mx=-1e30,ss=0; for (float x : a){ mn=std::min(mn,(double)x); mx=std::max(mx,(double)x); ss+=(double)x*x; }
+                std::cerr << "[DBG_ANC] L0 anchor scores: n=" << a.size() << " min=" << mn << " max=" << mx << " rms=" << std::sqrt(ss/a.size()) << " first8=";
+                for (int i=0;i<8 && i<(int)a.size();++i) std::cerr << a[i] << " ";
+                std::cerr << std::endl;
+            }
+            if (std::getenv("DIFFKV_DBG_SEL") && step == 0 && decode_selected_slots) {
+                std::vector<int32_t> sel(decode_selected_slots->ne[0]);
+                ggml_backend_tensor_get(decode_selected_slots, sel.data(), 0, sel.size()*sizeof(int32_t));
+                // Reliably check DEVICE anchorK_rot norm per selected slot vs HOST host_anchors_K
+                // (what execute_cpu_attention reads). A device-zero-but-host-nonzero slot = the bug.
+                { ggml_tensor* aKr=kv_engines[0]->get_anchorK_rot(); const ggml_fp16_t* hAK=kv_engines[0]->get_host_anchors_K();
+                  const int32_t* sls=kv_engines[0]->get_host_seq_lens(); int Fkv=kv_heads*head_dim;
+                  std::cerr<<"[DBG_DEVSLOT] slot(seq:devAKr/hostAK): ";
+                  for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<ggml_fp16_t> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(ggml_fp16_t),Fkv*sizeof(ggml_fp16_t));
+                    double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=ggml_fp16_to_fp32(d[j]); nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
+                    std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") "; }
+                  std::cerr<<std::endl; }
+                if (dbg_anc) {
+                    // dkr is [D, MAXD]; dump norm of token 0 (column 0) and token 1.
+                    std::vector<float> a(ggml_nelements(dbg_anc));
+                    ggml_backend_tensor_get(dbg_anc, a.data(), 0, a.size()*sizeof(float));
+                    // a is [D, nq]=[64,14]: head h = column h. norm per head.
+                    const int D=head_dim, nq=a.size()/D; double tot=0;
+                    std::cerr << "[DBG_KVOUT] per-head norms: ";
+                    for(int h=0;h<nq;++h){ double nh=0; for(int d=0;d<D;++d){ double x=a[d+h*D]; nh+=x*x; tot+=x*x; } std::cerr<<std::sqrt(nh)<<" "; }
+                    std::cerr << " | total="<<std::sqrt(tot)<<std::endl;
+                }
+            }
 
             std::vector<float> output_logits(n_vocab);
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
@@ -2316,6 +2816,10 @@ int main(int argc, char ** argv) {
                 std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
             }
 
+            if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
+                double nk=0,nv=0,nk0=0,nv0=0; for(int i=0;i<F_test;++i){ nk+=(double)decode_k[0][i]*decode_k[0][i]; nv+=(double)decode_v[0][i]*decode_v[0][i]; if(i<head_dim){nk0+=(double)decode_k[0][i]*decode_k[0][i]; nv0+=(double)decode_v[0][i]*decode_v[0][i];} }
+                std::cerr << "[DBG_CURV] current token L0: |k|="<<std::sqrt(nk)<<" |v|="<<std::sqrt(nv)<<" |k[0..63]|="<<std::sqrt(nk0)<<" |v[0..63]|="<<std::sqrt(nv0)<<std::endl;
+            }
             runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens, &srl_state);
 
             {

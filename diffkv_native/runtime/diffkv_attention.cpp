@@ -95,6 +95,8 @@ void execute_cpu_attention(
             slot_infos[k].anchor_score = score_anc;
             float s_anc_scaled = score_anc * scale;
             if (s_anc_scaled > max_score) max_score = s_anc_scaled;
+            if (std::getenv("DIFFKV_DBG_KANC") && h == 0 && k < 8)
+                std::cerr << "[DBG_KANC] slot=" << slot_id << " score_anc=" << score_anc << " (scaled=" << s_anc_scaled << ")" << std::endl;
 
             if (!approximate_attn) {
                 slot_infos[k].token_scores.resize(slen);
@@ -256,7 +258,7 @@ void execute_cpu_attention(
 }
 
 // ── CPU dense window attention helper (used by CPU fallback path only) ────────
-static void cpu_dense_attention(
+void cpu_dense_attention(
     const float* Q_ptr,          // [n_q_heads, D]
     const float* active_k_dense, // [T, n_kv, D]
     const float* active_v_dense, // [T, n_kv, D]
@@ -315,6 +317,9 @@ static void cpu_dense_attention(
         float sum_e = 0.0f;
         for (int t = 0; t < T; ++t) sum_e += std::exp(scores[t] - max_s);
         lse_dense_out[h] = max_s + std::log(std::max(sum_e, 1e-9f));
+        if (std::getenv("DIFFKV_DBG_KDENSE") && h < 7)
+            std::cerr << "[DBG_KDENSE] h" << h << " kv=" << kv_head << " current(last)=" << (T>0?scores[T-1]:0.0f)
+                      << " max=" << max_s << (h==0?" T_dense="+std::to_string(T):"") << std::endl;
 
         for (int d = 0; d < D; ++d) out_dense[h * D + d] = 0.0f;
         for (int t = 0; t < T; ++t) {
@@ -708,6 +713,12 @@ void custom_attention_op_callback(
         }
     }
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
+    if (std::getenv("DIFFKV_DBG_ATTN0") && data->layer_idx == 0) {
+        double nrm=0; for (int i=0;i<n_q_heads*D;++i) nrm += (double)final_out[i]*final_out[i];
+        std::cerr << "[DBG_ATTN0] CPU L0 attn_out norm=" << std::sqrt(nrm) << " head0[0..5]=";
+        for (int i=0;i<6;++i) std::cerr << final_out[i] << " ";
+        std::cerr << std::endl;
+    }
     if (cache_active) {
         get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
     }

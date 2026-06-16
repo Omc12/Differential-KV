@@ -269,6 +269,12 @@ void NativeBlockPool::zero_all_tensors() {
 
 void NativeBlockPool::upload_slot(int slot_id) {
     if (slot_id < 0 || slot_id >= n_slots_) return;
+    if (std::getenv("DIFFKV_DBG_ROT")) {
+        static std::atomic<int> cnt{0};
+        if (cnt.fetch_add(1) < 5)
+            std::cerr << "[DBG_UP] upload_slot(" << slot_id << ") native_attn_=" << native_attn_
+                      << " VK_rot_=" << (void*)VK_rot_ << " has_rope_=" << has_rope_ << std::endl;
+    }
     
     ggml_backend_tensor_set(U_, host_U_.data() + slot_id * rank_ * 64, slot_id * U_->nb[2], rank_ * 64 * sizeof(int8_t));
     // f16 mirror of U (native ggml gather): cast this slot's int8 values to f16.
@@ -314,6 +320,15 @@ void NativeBlockPool::upload_slot(int slot_id) {
         }
         ggml_backend_tensor_set(VK_rot_, host_VK_rot_.data() + (size_t)slot_id * rank_ * kv_heads_ * D,
                                 slot_id * VK_rot_->nb[3], (size_t)rank_ * kv_heads_ * D * sizeof(ggml_fp16_t));
+        static std::atomic<int> rotcnt{0};
+        if (std::getenv("DIFFKV_DBG_ROT") && rotcnt.fetch_add(1) < 4) {
+            double nvk = 0, nvkr = 0, nak = 0, nakr = 0;
+            const ggml_fp16_t* vk = host_VK_.data() + (size_t)slot_id * rank_ * kv_heads_ * D;
+            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(vk[i]); nvk += a*a; double b = ggml_fp16_to_fp32(host_VK_rot_[(size_t)slot_id*rank_*kv_heads_*D + i]); nvkr += b*b; }
+            const ggml_fp16_t* ak = host_anchors_K_.data() + (size_t)slot_id * kv_heads_ * D;
+            for (int i = 0; i < kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(ak[i]); nak += a*a; double b = ggml_fp16_to_fp32(host_anchorK_rot_[(size_t)slot_id*kv_heads_*D + i]); nakr += b*b; }
+            std::cerr << "[DBG_ROT] slot " << slot_id << " pos=" << pos << " |VK|=" << std::sqrt(nvk) << " |VK_rot|=" << std::sqrt(nvkr) << " |aK|=" << std::sqrt(nak) << " |aK_rot|=" << std::sqrt(nakr) << " seq_len=" << host_seq_lens_[slot_id] << std::endl;
+        }
     }
     if (native_attn_ && valid_mask_) {
         const int S_max = 64;

@@ -274,6 +274,9 @@ void KVRuntimeManager::ingest_decode(
         }
     }
     
+    // 3b. Native attn: push host→device for compressed-but-unsynced slots (main thread).
+    sync_device_for_native();
+
     // 4. Register any new compressed blocks
     auto & blocks = ingest_manager_->get_blocks(0);
     for (auto & block : blocks) {
@@ -634,6 +637,26 @@ void KVRuntimeManager::set_micro_block_size(int size) {
     micro_block_size_ = size;
     if (ingest_manager_) {
         ingest_manager_->set_micro_block_size(size);
+    }
+}
+
+void KVRuntimeManager::sync_device_for_native() {
+    // Async SVD writes only the HOST pool mirrors + flips block state; upload_slot does the
+    // device push AND computes the native VK_rot/anchorK_rot/valid_mask/U_f16. The custom op
+    // reads host buffers (immune), but the native ggml subgraph reads the device tensors, so
+    // we must push them on the main thread before the decode graph runs.
+    if (engines_.empty() || !engines_[0]->native_attn_enabled()) return;
+    for (int l = 0; l < n_layers_; ++l) {
+        for (auto & block : ingest_manager_->get_blocks(l)) {
+            if (block->device_synced || block->pool_idx == -1) continue;
+            // Use the state table (authoritative) — block->state can lag the bg thread.
+            BlockState st = engines_[l]->get_state_table().get(block->pool_idx);
+            if (st == BlockState::CompressedResident) {
+                engines_[l]->upload_slot(block->pool_idx);
+                block->state = st;
+                block->device_synced = true;
+            }
+        }
     }
 }
 

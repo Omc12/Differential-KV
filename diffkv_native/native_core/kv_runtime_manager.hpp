@@ -83,6 +83,11 @@ public:
     // Prune low-salience blocks and consolidate index
     void commit_turn(SessionSRLState& srl_state);
 
+    // Native attn: push host→device pool tensors (incl. VK_rot/anchorK_rot/valid_mask/U_f16)
+    // for any compressed-but-unsynced slot. Async SVD only writes host mirrors, so the native
+    // ggml subgraph (which reads device tensors) needs this on the main thread before compute.
+    void sync_device_for_native();
+
     void set_micro_block_size(int size);
     int get_micro_block_size() const { return micro_block_size_; }
 
