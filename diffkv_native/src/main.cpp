@@ -1502,7 +1502,9 @@ int main(int argc, char ** argv) {
     }
 
 
+    ggml_backend_buffer_t native_decode_buf = nullptr;
     while (true) {
+        bool full_upload_needed = true;
         std::string prompt;
         int cached_len = 0; // tokens already in KV pool for this request (ACTIVE_RUNTIME prefix skip)
         if (is_warmup_run) {
@@ -2340,7 +2342,7 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
         }
 
-        ggml_backend_buffer_t native_decode_buf = nullptr; // no-reuse alloc for the native decode path
+        native_decode_buf = nullptr; // no-reuse alloc for the native decode path
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
             kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
@@ -2610,6 +2612,7 @@ int main(int argc, char ** argv) {
             bool rebuild_needed = (step_use_sparse != decode_use_sparse);
             if (rebuild_needed) {
                 decode_use_sparse = step_use_sparse;
+                full_upload_needed = true;
                 ggml_free(decode_ctx);
                 decode_ctx = ggml_init(decode_params);
                 if (!decode_ctx) {
@@ -2814,36 +2817,58 @@ int main(int argc, char ** argv) {
             // validity mask into the persistent graph inputs (current token handled in-graph).
             if (native_attn_on && decode_use_sparse) {
                 const int cnt0 = std::min(total_dense_tokens[0], native_maxd);
-                if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
-                    double n0=0,nv=0,nvlast=0; for (int i=0;i<F_test;++i){ float x=active_k_dense[0][i]; n0+=(double)x*x; float y=active_v_dense[0][i]; nv+=(double)y*y; float z=active_v_dense[0][(cnt0-1)*F_test+i]; nvlast+=(double)z*z; }
-                    std::cerr << "[DBG_UPLOAD] step0 cnt0=" << cnt0 << " |active_k[tok0]|=" << std::sqrt(n0)
-                              << " |active_v[tok0]|=" << std::sqrt(nv) << " |active_v[last]|=" << std::sqrt(nvlast) << std::endl;
-                }
-                std::vector<float> dmask(native_maxd, -INFINITY);
-                for (int t = 0; t < cnt0; ++t) dmask[t] = 0.0f;
-                ggml_backend_tensor_set(native_dense_mask, dmask.data(), 0, (size_t)native_maxd * sizeof(float));
-                // Positions for in-graph RoPE of the raw past-dense keys (clamp/pad to 0).
-                std::vector<int32_t> pbuf(native_maxd, 0);
-                for (int t = 0; t < cnt0; ++t) pbuf[t] = active_positions_dense[t];
-                ggml_backend_tensor_set(native_dense_pos, pbuf.data(), 0, (size_t)native_maxd * sizeof(int32_t));
-                std::vector<float> kbuf((size_t)native_maxd * F_test), vbuf((size_t)native_maxd * F_test);
-                for (int l = 0; l < n_layers; ++l) {
-                    const int c2 = std::min(total_dense_tokens[l], native_maxd);
-                    std::fill(kbuf.begin(), kbuf.end(), 0.0f);
-                    std::fill(vbuf.begin(), vbuf.end(), 0.0f);
-                    if (c2 > 0) {
-                        std::memcpy(kbuf.data(), active_k_dense[l].data(), (size_t)c2 * F_test * sizeof(float)); // RAW K (roped in-graph)
-                        std::memcpy(vbuf.data(), active_v_dense[l].data(), (size_t)c2 * F_test * sizeof(float));
+                if (full_upload_needed) {
+                    if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
+                        double n0=0,nv=0,nvlast=0; for (int i=0;i<F_test;++i){ float x=active_k_dense[0][i]; n0+=(double)x*x; float y=active_v_dense[0][i]; nv+=(double)y*y; float z=active_v_dense[0][(cnt0-1)*F_test+i]; nvlast+=(double)z*z; }
+                        std::cerr << "[DBG_UPLOAD] step0 cnt0=" << cnt0 << " |active_k[tok0]|=" << std::sqrt(n0)
+                                  << " |active_v[tok0]|=" << std::sqrt(nv) << " |active_v[last]|=" << std::sqrt(nvlast) << std::endl;
                     }
-                    ggml_backend_tensor_set(native_dense_kr[l], kbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
-                    ggml_backend_tensor_set(native_dense_v[l],  vbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
-                }
-                if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
-                    std::vector<float> rb(F_test), rv(F_test);
-                    ggml_backend_tensor_get(native_dense_kr[0], rb.data(), 0, F_test*sizeof(float));
-                    ggml_backend_tensor_get(native_dense_v[0], rv.data(), 0, F_test*sizeof(float));
-                    double n=0,nv=0; for(int i=0;i<F_test;++i){ n+=(double)rb[i]*rb[i]; nv+=(double)rv[i]*rv[i]; }
-                    std::cerr << "[DBG_DEV] native_dense_kr[0] dev |tok0|=" << std::sqrt(n) << " native_dense_v[0] dev |tok0|=" << std::sqrt(nv) << std::endl;
+                    std::vector<float> dmask(native_maxd, -INFINITY);
+                    for (int t = 0; t < cnt0; ++t) dmask[t] = 0.0f;
+                    ggml_backend_tensor_set(native_dense_mask, dmask.data(), 0, (size_t)native_maxd * sizeof(float));
+                    // Positions for in-graph RoPE of the raw past-dense keys (clamp/pad to 0).
+                    std::vector<int32_t> pbuf(native_maxd, 0);
+                    for (int t = 0; t < cnt0; ++t) pbuf[t] = active_positions_dense[t];
+                    ggml_backend_tensor_set(native_dense_pos, pbuf.data(), 0, (size_t)native_maxd * sizeof(int32_t));
+                    std::vector<float> kbuf((size_t)native_maxd * F_test), vbuf((size_t)native_maxd * F_test);
+                    for (int l = 0; l < n_layers; ++l) {
+                        const int c2 = std::min(total_dense_tokens[l], native_maxd);
+                        std::fill(kbuf.begin(), kbuf.end(), 0.0f);
+                        std::fill(vbuf.begin(), vbuf.end(), 0.0f);
+                        if (c2 > 0) {
+                            std::memcpy(kbuf.data(), active_k_dense[l].data(), (size_t)c2 * F_test * sizeof(float)); // RAW K (roped in-graph)
+                            std::memcpy(vbuf.data(), active_v_dense[l].data(), (size_t)c2 * F_test * sizeof(float));
+                        }
+                        ggml_backend_tensor_set(native_dense_kr[l], kbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
+                        ggml_backend_tensor_set(native_dense_v[l],  vbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
+                    }
+                    if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
+                        std::vector<float> rb(F_test), rv(F_test);
+                        ggml_backend_tensor_get(native_dense_kr[0], rb.data(), 0, F_test*sizeof(float));
+                        ggml_backend_tensor_get(native_dense_v[0], rv.data(), 0, F_test*sizeof(float));
+                        double n=0,nv=0; for(int i=0;i<F_test;++i){ n+=(double)rb[i]*rb[i]; nv+=(double)rv[i]*rv[i]; }
+                        std::cerr << "[DBG_DEV] native_dense_kr[0] dev |tok0|=" << std::sqrt(n) << " native_dense_v[0] dev |tok0|=" << std::sqrt(nv) << std::endl;
+                    }
+                    full_upload_needed = false;
+                } else {
+                    // Upload ONLY the single new token added at the end of the previous step
+                    for (int l = 0; l < n_layers; ++l) {
+                        const int idx = total_dense_tokens[l] - 1;
+                        if (idx >= 0 && idx < native_maxd) {
+                            const float* new_k = active_k_dense[l].data() + (size_t)idx * F_test;
+                            const float* new_v = active_v_dense[l].data() + (size_t)idx * F_test;
+                            ggml_backend_tensor_set(native_dense_kr[l], new_k, (size_t)idx * F_test * sizeof(float), F_test * sizeof(float));
+                            ggml_backend_tensor_set(native_dense_v[l],  new_v, (size_t)idx * F_test * sizeof(float), F_test * sizeof(float));
+                        }
+                    }
+                    // Update single elements of mask and position
+                    const int idx0 = total_dense_tokens[0] - 1;
+                    if (idx0 >= 0 && idx0 < native_maxd) {
+                        float val = 0.0f;
+                        ggml_backend_tensor_set(native_dense_mask, &val, (size_t)idx0 * sizeof(float), sizeof(float));
+                        int32_t pos_val = active_positions_dense[idx0];
+                        ggml_backend_tensor_set(native_dense_pos, &pos_val, (size_t)idx0 * sizeof(int32_t), sizeof(int32_t));
+                    }
                 }
             }
 
@@ -3720,6 +3745,11 @@ int main(int argc, char ** argv) {
 
     // Stop compressor and cleanup
     compressor.stop();
+
+    if (native_decode_buf) {
+        ggml_backend_buffer_free(native_decode_buf);
+        native_decode_buf = nullptr;
+    }
 
     std::cerr << "[DiffKV Native] Text generation completed successfully!" << std::endl;
     return 0;

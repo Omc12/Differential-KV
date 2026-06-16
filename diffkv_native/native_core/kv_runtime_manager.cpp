@@ -664,10 +664,12 @@ void KVRuntimeManager::sync_device_for_native() {
     for (int l = 0; l < n_layers_; ++l) {
         int ns = engines_[l]->get_seq_lens()->ne[0];
         
-        // Build map of currently active slots (both compressed and dense)
+        // Build map of currently active slots and a slot-to-block lookup array
+        std::vector<StreamingKVBlock*> slot_to_block(ns, nullptr);
         std::vector<bool> active_slots(ns, false);
         for (auto & block : ingest_manager_->get_blocks(l)) {
-            if (block->pool_idx != -1) {
+            if (block->pool_idx != -1 && block->pool_idx < ns) {
+                slot_to_block[block->pool_idx] = block.get();
                 BlockState st = engines_[l]->get_state_table().get(block->pool_idx);
                 if (st == BlockState::CompressedResident || st == BlockState::DenseResident) {
                     active_slots[block->pool_idx] = true;
@@ -678,14 +680,7 @@ void KVRuntimeManager::sync_device_for_native() {
         // For each slot, synchronize state
         for (int s = 0; s < ns; ++s) {
             if (active_slots[s]) {
-                // Find block associated with this slot
-                StreamingKVBlock* block = nullptr;
-                for (auto & b : ingest_manager_->get_blocks(l)) {
-                    if (b->pool_idx == s) {
-                        block = b.get();
-                        break;
-                    }
-                }
+                StreamingKVBlock* block = slot_to_block[s];
                 if (block && (!block->device_synced || !engines_[l]->slot_device_has_data(s))) {
                     engines_[l]->upload_slot(s);
                     block->device_synced = true;

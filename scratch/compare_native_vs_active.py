@@ -92,6 +92,7 @@ def run_single_benchmark(mode, context_len):
             env["DIFFKV_TIME_DECODE"] = "1"
             env["DIFFKV_MICRO_BLOCK_SIZE"] = "64"
             env["DIFFKV_MAX_CONTEXT_SLOTS"] = "512"
+            env["DIFFKV_MAX_TOKENS"] = "64"
             
             t_prefill_start = None
             t_prefill_end = None
