@@ -2,6 +2,10 @@
 #include "ggml-alloc.h"
 #include <cstdio>
 #include <iostream>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace diffkv {
 
@@ -72,10 +76,25 @@ bool DiffKVModel::load_from_file(const std::string & filename, ggml_backend_t ba
               << ggml_backend_buffer_get_size(model_buffer_) / (1024 * 1024) 
               << " MB on backend: " << ggml_backend_name(backend) << std::endl;
 
-    // Open GGUF file and read/set tensor weight data to backend tensors
-    FILE * f = fopen(filename.c_str(), "rb");
-    if (!f) {
+    // Memory-map the GGUF file for zero-copy weight transfer
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd < 0) {
         std::cerr << "[DiffKV Model] Error: Failed to open model file for reading weights!" << std::endl;
+        return false;
+    }
+
+    struct stat sb;
+    if (fstat(fd, &sb) != 0) {
+        std::cerr << "[DiffKV Model] Error: Failed to get model file status!" << std::endl;
+        close(fd);
+        return false;
+    }
+    size_t file_size = sb.st_size;
+
+    void* mmap_data = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (mmap_data == MAP_FAILED) {
+        std::cerr << "[DiffKV Model] Error: Failed to mmap model file!" << std::endl;
+        close(fd);
         return false;
     }
 
@@ -90,22 +109,19 @@ bool DiffKVModel::load_from_file(const std::string & filename, ggml_backend_t ba
         size_t offset = gguf_get_tensor_offset(gguf_ctx_, i);
         size_t size = gguf_get_tensor_size(gguf_ctx_, i);
         
-        if (fseek(f, data_offset + offset, SEEK_SET) != 0) {
-            std::cerr << "[DiffKV Model] Error: Failed to seek to tensor " << name << " in file!" << std::endl;
-            fclose(f);
+        if (data_offset + offset + size > file_size) {
+            std::cerr << "[DiffKV Model] Error: Tensor offset out of bounds for " << name << std::endl;
+            munmap(mmap_data, file_size);
+            close(fd);
             return false;
         }
-        
-        std::vector<uint8_t> temp_buffer(size);
-        if (fread(temp_buffer.data(), 1, size, f) != size) {
-            std::cerr << "[DiffKV Model] Error: Failed to read tensor data for " << name << std::endl;
-            fclose(f);
-            return false;
-        }
-        
-        ggml_backend_tensor_set(tensor, temp_buffer.data(), 0, size);
+
+        const uint8_t* tensor_ptr = (const uint8_t*)mmap_data + data_offset + offset;
+        ggml_backend_tensor_set(tensor, tensor_ptr, 0, size);
     }
-    fclose(f);
+
+    munmap(mmap_data, file_size);
+    close(fd);
 
     // ── Parse configuration KVs (architecture independent) ────────────────────
     int64_t n_kv = gguf_get_n_kv(gguf_ctx_);

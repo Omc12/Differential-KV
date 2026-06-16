@@ -113,6 +113,16 @@ class SubprocessWrapper:
         self.session_prompt_text.pop(session_id, None)
 
 
+    def _read_stderr(self):
+        try:
+            for line in self.process.stderr:
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                self.stderr_log.append(decoded)
+                if len(self.stderr_log) > 100:
+                    self.stderr_log.pop(0)
+        except Exception:
+            pass
+
     def start(self):
         if self.process is not None:
             try:
@@ -125,21 +135,39 @@ class SubprocessWrapper:
         model_path  = os.getenv("DIFFKV_MODEL_PATH",  MODEL_PATH_DEFAULT)
 
         print(f"[Server] Launching C++ subprocess: {binary_path} {model_path} -")
+        
+        self.verbose = os.environ.get("DIFFKV_VERBOSE") == "1"
+        stderr_dest = None if self.verbose else subprocess.PIPE
+        self.stderr_log = []
+
         self.process = subprocess.Popen(
             [binary_path, model_path, "-"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,   # inherit stderr so logs go to terminal
+            stderr=stderr_dest,
             text=False,
             bufsize=0,
             env=os.environ,
         )
 
+        if not self.verbose:
+            self.stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+            self.stderr_thread.start()
+
         # Drain stdout until __READY__
         buf = b""
         while True:
+            if self.process.poll() is not None:
+                print("[Server] Error: Subprocess failed to start (exited early). Stderr logs:")
+                for line in self.stderr_log:
+                    print(f"  {line}")
+                raise RuntimeError("Subprocess exited early")
+
             chunk = os.read(self.process.stdout.fileno(), 4096)
             if not chunk:
+                print("[Server] Error: Subprocess failed to start (stdout closed). Stderr logs:")
+                for line in self.stderr_log:
+                    print(f"  {line}")
                 raise RuntimeError("Subprocess failed to start (stdout closed)")
             buf += chunk
             if _SENTINEL_READY in buf:
