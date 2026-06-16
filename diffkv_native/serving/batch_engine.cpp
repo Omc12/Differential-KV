@@ -616,10 +616,32 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     int kv_heads = model_->get_config().n_head_kv;
     int desc_dim = 64;
     int n_slots = model_->get_config().n_ctx / 64;
-    
-    // Override max context slots from env if present
-    if (const char* env_slots = std::getenv("DIFFKV_MAX_CONTEXT_SLOTS")) {
+    bool overridden = false;
+
+    const char* env_tokens = std::getenv("max_ctx_tk");
+    if (!env_tokens) {
+        env_tokens = std::getenv("DIFFKV_MAX_CTX_TK");
+    }
+    if (env_tokens) {
+        int max_tokens = std::stoi(env_tokens);
+        n_slots = (max_tokens + 63) / 64;
+        overridden = true;
+    } else if (const char* env_slots = std::getenv("DIFFKV_MAX_CONTEXT_SLOTS")) {
         n_slots = std::stoi(env_slots);
+        overridden = true;
+    }
+
+    if (!overridden) {
+        if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
+            std::string preset(env_preset);
+            if (preset == "low") {
+                n_slots = 64; // 4096 tokens
+            } else if (preset == "mid") {
+                n_slots = 128; // 8192 tokens
+            } else if (preset == "high") {
+                n_slots = 256; // 16384 tokens
+            }
+        }
     }
     
     int micro_block_size = 64;

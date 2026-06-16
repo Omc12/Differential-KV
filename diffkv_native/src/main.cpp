@@ -1351,9 +1351,45 @@ int main(int argc, char ** argv) {
 
     // Initialize NativeBlockPool block pool for all layers
     int n_slots = model.get_config().n_ctx / 64;
-    if (const char* env_slots = std::getenv("DIFFKV_MAX_CONTEXT_SLOTS")) {
+    bool overridden = false;
+
+    const char* env_tokens = std::getenv("max_ctx_tk");
+    if (!env_tokens) {
+        env_tokens = std::getenv("DIFFKV_MAX_CTX_TK");
+    }
+    if (env_tokens) {
+        int max_tokens = std::stoi(env_tokens);
+        n_slots = (max_tokens + 63) / 64;
+        std::cerr << "[DiffKV Native] Overriding context limit from max_ctx_tk: " 
+                  << max_tokens << " tokens (" << n_slots << " slots)" << std::endl;
+        overridden = true;
+    } else if (const char* env_slots = std::getenv("DIFFKV_MAX_CONTEXT_SLOTS")) {
         n_slots = std::stoi(env_slots);
-        std::cerr << "[DiffKV Native] Overriding n_slots from DIFFKV_MAX_CONTEXT_SLOTS: " << n_slots << std::endl;
+        std::cerr << "[DiffKV Native] Overriding context limit from DIFFKV_MAX_CONTEXT_SLOTS: " 
+                  << n_slots << " slots" << std::endl;
+        overridden = true;
+    }
+
+    if (!overridden) {
+        if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
+            std::string preset(env_preset);
+            if (preset == "low") {
+                n_slots = 64; // 4096 tokens
+                std::cerr << "[DiffKV Native] Preset 'low' detected: capping context size to 4096 tokens (64 slots)" << std::endl;
+            } else if (preset == "mid") {
+                n_slots = 128; // 8192 tokens
+                std::cerr << "[DiffKV Native] Preset 'mid' detected: capping context size to 8192 tokens (128 slots)" << std::endl;
+            } else if (preset == "high") {
+                n_slots = 256; // 16384 tokens
+                std::cerr << "[DiffKV Native] Preset 'high' detected: capping context size to 16384 tokens (256 slots)" << std::endl;
+            } else {
+                std::cerr << "[DiffKV Native] Using default model context length: " 
+                          << model.get_config().n_ctx << " tokens (" << n_slots << " slots)" << std::endl;
+            }
+        } else {
+            std::cerr << "[DiffKV Native] Using default model context length: " 
+                      << model.get_config().n_ctx << " tokens (" << n_slots << " slots)" << std::endl;
+        }
     }
     srl_k_semantic = std::min(srl_k_semantic, n_slots);
     srl_k_keep = std::min(srl_k_keep, n_slots);
