@@ -714,8 +714,10 @@ void custom_attention_op_callback(
     }
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
     if (std::getenv("DIFFKV_DBG_ATTN0") && data->layer_idx == 0) {
-        double nrm=0; for (int i=0;i<n_q_heads*D;++i) nrm += (double)final_out[i]*final_out[i];
-        std::cerr << "[DBG_ATTN0] CPU L0 attn_out norm=" << std::sqrt(nrm) << " head0[0..5]=";
+        double nrm=0, nf=0; for (int i=0;i<n_q_heads*D;++i){ nrm += (double)final_out[i]*final_out[i]; nf += (double)out_facts[i]*out_facts[i]; }
+        int facts_active=0; for(int h=0;h<n_q_heads;++h) if(lse_facts[h] > -1e20f) facts_active++;
+        std::cerr << "[DBG_ATTN0] CPU L0 attn_out norm=" << std::sqrt(nrm) << " |out_facts|=" << std::sqrt(nf)
+                  << " facts_active_heads=" << facts_active << "/" << n_q_heads << " head0[0..5]=";
         for (int i=0;i<6;++i) std::cerr << final_out[i] << " ";
         std::cerr << std::endl;
     }

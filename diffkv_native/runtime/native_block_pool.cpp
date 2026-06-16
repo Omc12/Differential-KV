@@ -26,6 +26,22 @@ inline void rope_rotate_vec(const ggml_fp16_t* in, ggml_fp16_t* out, int D, floa
         out[d] = ggml_fp32_to_fp16(raw * std::cos(angle) + rot_contrib * std::sin(angle));
     }
 }
+// fp32-output overload: the native pool stores RoPE'd K as fp32 so the precomputed rotation
+// matches the CPU reference's runtime fp32 rotation (storing fp16 loses precision at large
+// anchor positions ~500+ and cascades into token flips on degenerate repetitive prompts).
+inline void rope_rotate_vec(const ggml_fp16_t* in, float* out, int D, float pos, float freq_base) {
+    const int half_d = D / 2;
+    for (int d = 0; d < D; ++d) {
+        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+        float raw  = ggml_fp16_to_fp32(in[d]);
+        float rawp = ggml_fp16_to_fp32(in[partner]);
+        float rot_contrib = (d < half_d) ? -rawp : rawp;
+        int idx = (d < half_d) ? d : (d - half_d);
+        float theta = 1.0f / std::pow(freq_base, (2.0f * idx) / D);
+        float angle = pos * theta;
+        out[d] = raw * std::cos(angle) + rot_contrib * std::sin(angle);
+    }
+}
 } // namespace
 
 NativeBlockPool::NativeBlockPool() {}
@@ -86,8 +102,8 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     // Native-attn precomputed RoPE'd keys (same shapes as VK_ / anchors_K_). Only allocated
     // when native attn is enabled, to keep the default path RAM-conservative.
     if (native_attn_) {
-        VK_rot_      = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, rank, n_slots);
-        anchorK_rot_ = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, n_slots);
+        VK_rot_      = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F32, head_dim, kv_heads, rank, n_slots);
+        anchorK_rot_ = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F32, head_dim, kv_heads, n_slots);
         valid_mask_  = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F16, S_max, n_slots);
     }
     
@@ -130,8 +146,8 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     host_scales_.resize(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
     host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
     host_desc_matrix_.resize(ggml_nelements(desc_matrix_), 0.0f);
-    if (VK_rot_)      host_VK_rot_.resize(ggml_nelements(VK_rot_), ggml_fp32_to_fp16(0.0f));
-    if (anchorK_rot_) host_anchorK_rot_.resize(ggml_nelements(anchorK_rot_), ggml_fp32_to_fp16(0.0f));
+    if (VK_rot_)      host_VK_rot_.resize(ggml_nelements(VK_rot_), 0.0f);
+    if (anchorK_rot_) host_anchorK_rot_.resize(ggml_nelements(anchorK_rot_), 0.0f);
     if (valid_mask_)  host_valid_mask_.resize(ggml_nelements(valid_mask_), ggml_fp32_to_fp16(-INFINITY));
 
     // F9: residual host buffers (CPU-only path for now; -1 positions = unused).
@@ -233,14 +249,14 @@ void NativeBlockPool::zero_all_tensors() {
         ggml_backend_tensor_set(anchors_V_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
     }
     if (VK_rot_) {
-        std::fill(host_VK_rot_.begin(), host_VK_rot_.end(), ggml_fp32_to_fp16(0.0f));
-        std::vector<ggml_fp16_t> zeros(ggml_nelements(VK_rot_), ggml_fp32_to_fp16(0.0f));
-        ggml_backend_tensor_set(VK_rot_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+        std::fill(host_VK_rot_.begin(), host_VK_rot_.end(), 0.0f);
+        std::vector<float> zeros(ggml_nelements(VK_rot_), 0.0f);
+        ggml_backend_tensor_set(VK_rot_, zeros.data(), 0, zeros.size() * sizeof(float));
     }
     if (anchorK_rot_) {
-        std::fill(host_anchorK_rot_.begin(), host_anchorK_rot_.end(), ggml_fp32_to_fp16(0.0f));
-        std::vector<ggml_fp16_t> zeros(ggml_nelements(anchorK_rot_), ggml_fp32_to_fp16(0.0f));
-        ggml_backend_tensor_set(anchorK_rot_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+        std::fill(host_anchorK_rot_.begin(), host_anchorK_rot_.end(), 0.0f);
+        std::vector<float> zeros(ggml_nelements(anchorK_rot_), 0.0f);
+        ggml_backend_tensor_set(anchorK_rot_, zeros.data(), 0, zeros.size() * sizeof(float));
     }
     if (valid_mask_) {
         // Default to fully-masked (-inf); upload_slot fills the valid prefix per slot.
@@ -302,31 +318,31 @@ void NativeBlockPool::upload_slot(int slot_id) {
         for (int kv = 0; kv < kv_heads_; ++kv) {
             const size_t off = (size_t)slot_id * kv_heads_ * D + (size_t)kv * D;
             const ggml_fp16_t* src = host_anchors_K_.data() + off;
-            ggml_fp16_t* dst = host_anchorK_rot_.data() + off;
+            float* dst = host_anchorK_rot_.data() + off;
             if (has_rope_) rope_rotate_vec(src, dst, D, pos, rope_freq_base_);
-            else std::copy(src, src + D, dst);
+            else for (int d = 0; d < D; ++d) dst[d] = ggml_fp16_to_fp32(src[d]);
         }
         ggml_backend_tensor_set(anchorK_rot_, host_anchorK_rot_.data() + (size_t)slot_id * kv_heads_ * D,
-                                slot_id * anchorK_rot_->nb[2], (size_t)kv_heads_ * D * sizeof(ggml_fp16_t));
+                                slot_id * anchorK_rot_->nb[2], (size_t)kv_heads_ * D * sizeof(float));
         // VK_rot: one head_dim vector per (rank, kv_head)
         for (int r = 0; r < rank_; ++r) {
             for (int kv = 0; kv < kv_heads_; ++kv) {
                 const size_t off = (size_t)slot_id * rank_ * kv_heads_ * D + (size_t)r * kv_heads_ * D + (size_t)kv * D;
                 const ggml_fp16_t* src = host_VK_.data() + off;
-                ggml_fp16_t* dst = host_VK_rot_.data() + off;
+                float* dst = host_VK_rot_.data() + off;
                 if (has_rope_) rope_rotate_vec(src, dst, D, pos, rope_freq_base_);
-                else std::copy(src, src + D, dst);
+                else for (int d = 0; d < D; ++d) dst[d] = ggml_fp16_to_fp32(src[d]);
             }
         }
         ggml_backend_tensor_set(VK_rot_, host_VK_rot_.data() + (size_t)slot_id * rank_ * kv_heads_ * D,
-                                slot_id * VK_rot_->nb[3], (size_t)rank_ * kv_heads_ * D * sizeof(ggml_fp16_t));
+                                slot_id * VK_rot_->nb[3], (size_t)rank_ * kv_heads_ * D * sizeof(float));
         static std::atomic<int> rotcnt{0};
         if (std::getenv("DIFFKV_DBG_ROT") && rotcnt.fetch_add(1) < 4) {
             double nvk = 0, nvkr = 0, nak = 0, nakr = 0;
             const ggml_fp16_t* vk = host_VK_.data() + (size_t)slot_id * rank_ * kv_heads_ * D;
-            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(vk[i]); nvk += a*a; double b = ggml_fp16_to_fp32(host_VK_rot_[(size_t)slot_id*rank_*kv_heads_*D + i]); nvkr += b*b; }
+            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(vk[i]); nvk += a*a; double b = host_VK_rot_[(size_t)slot_id*rank_*kv_heads_*D + i]; nvkr += b*b; }
             const ggml_fp16_t* ak = host_anchors_K_.data() + (size_t)slot_id * kv_heads_ * D;
-            for (int i = 0; i < kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(ak[i]); nak += a*a; double b = ggml_fp16_to_fp32(host_anchorK_rot_[(size_t)slot_id*kv_heads_*D + i]); nakr += b*b; }
+            for (int i = 0; i < kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(ak[i]); nak += a*a; double b = host_anchorK_rot_[(size_t)slot_id*kv_heads_*D + i]; nakr += b*b; }
             std::cerr << "[DBG_ROT] slot " << slot_id << " pos=" << pos << " |VK|=" << std::sqrt(nvk) << " |VK_rot|=" << std::sqrt(nvkr) << " |aK|=" << std::sqrt(nak) << " |aK_rot|=" << std::sqrt(nakr) << " seq_len=" << host_seq_lens_[slot_id] << std::endl;
         }
     }

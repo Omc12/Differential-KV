@@ -113,8 +113,8 @@ private:
     struct ggml_tensor * U_scale_ = nullptr;
     struct ggml_tensor * VK_ = nullptr;
     struct ggml_tensor * VV_ = nullptr;
-    struct ggml_tensor * VK_rot_ = nullptr;       // [head_dim, kv_heads, rank, n_slots] f16, RoPE'd at anchor pos (native attn only)
-    struct ggml_tensor * anchorK_rot_ = nullptr;  // [head_dim, kv_heads, n_slots]       f16, RoPE'd at anchor pos (native attn only)
+    struct ggml_tensor * VK_rot_ = nullptr;       // [head_dim, kv_heads, rank, n_slots] FP32, RoPE'd at anchor pos (native attn only)
+    struct ggml_tensor * anchorK_rot_ = nullptr;  // [head_dim, kv_heads, n_slots]       FP32, RoPE'd at anchor pos (native attn only)
     struct ggml_tensor * valid_mask_ = nullptr;   // [S_max, n_slots] f16 additive -inf padding bias (native attn only)
     struct ggml_tensor * anchors_K_ = nullptr;
     struct ggml_tensor * anchors_V_ = nullptr;
@@ -129,8 +129,8 @@ private:
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_rot_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchorK_rot_;
+    std::vector<float, PageAlignedAllocator<float>> host_VK_rot_;       // fp32 (precision-match CPU)
+    std::vector<float, PageAlignedAllocator<float>> host_anchorK_rot_;  // fp32 (precision-match CPU)
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_valid_mask_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_K_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_V_;

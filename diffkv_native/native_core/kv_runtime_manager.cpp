@@ -646,6 +646,18 @@ void KVRuntimeManager::sync_device_for_native() {
     // reads host buffers (immune), but the native ggml subgraph reads the device tensors, so
     // we must push them on the main thread before the decode graph runs.
     if (engines_.empty() || !engines_[0]->native_attn_enabled()) return;
+    // Brute-force: mirror EVERY slot's host buffers to the device. The custom-op reference reads
+    // HOST buffers directly (incl. stale data left in freed slots, which the SRL router can still
+    // select as padding/sink); the native subgraph reads DEVICE tensors. Syncing all slots keeps
+    // them bit-consistent so a re-selected stale slot (e.g. an anchor-only block, seq_len 0) is
+    // identical in both paths. Gated so we can A/B it.
+    static const bool sync_all = std::getenv("DIFFKV_SYNC_ALL") != nullptr;
+    if (sync_all) {
+        int ns = engines_[0]->get_seq_lens()->ne[0];
+        for (int l = 0; l < n_layers_; ++l)
+            for (int s = 0; s < ns; ++s) engines_[l]->upload_slot(s);
+        return;
+    }
     for (int l = 0; l < n_layers_; ++l) {
         for (auto & block : ingest_manager_->get_blocks(l)) {
             if (block->device_synced || block->pool_idx == -1) continue;

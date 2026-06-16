@@ -493,7 +493,13 @@ static struct ggml_tensor * build_native_sparse_attn(
         struct ggml_tensor* ts = ggml_add(ctx, ggml_mul(ctx, delta, su_bs), anc_b); // [S,group,K]
         ts = ggml_scale(ctx, ts, scale);
         ts = ggml_add(ctx, ts, ggml_reshape_3d(ctx, Msel, S, 1, K));                 // +token mask [S,1,K]
-        struct ggml_tensor* ae = ggml_add(ctx, ggml_scale(ctx, anc_b, scale), anc_mask); // [1,group,K]
+        // Anchor entry: ALWAYS included (matches execute_cpu_attention, which adds every selected
+        // slot's anchor to the softmax with NO seq_len check — diffkv_attention.cpp:95-97/209).
+        // Masking it by valid_mask[0] (seq_len==0) wrongly drops legit anchors of newly-started /
+        // stale slots that the CPU reference DOES include → loses the attention "sink" → echo.
+        struct ggml_tensor* ae = std::getenv("DIFFKV_MASK_EMPTY_ANCHOR")
+            ? ggml_add(ctx, ggml_scale(ctx, anc_b, scale), anc_mask)
+            : ggml_scale(ctx, anc_b, scale);                                              // [1,group,K]
         struct ggml_tensor* allsp = ggml_concat(ctx, ts, ae, 0);                     // [S+1,group,K]
         allsp = ggml_add(ctx, allsp, dup_add);                                       // -inf on duplicate slots
         struct ggml_tensor* perm  = ggml_cont(ctx, ggml_permute(ctx, allsp, 0, 2, 1, 3)); // [S+1,K,group]
@@ -565,6 +571,14 @@ static struct ggml_tensor * build_native_sparse_attn(
         out = ggml_concat(ctx, out, ggml_reshape_2d(ctx, ggml_cont(ctx, kv_outs[kv]), D*group, 1), 0); // [n_embd,1]
     return ggml_cont(ctx, out);
 }
+
+// DEBUG (DIFFKV_DBG_CMP): capture layer-0 native q_rope + sparse attn_out so main can diff vs
+// execute_cpu_attention in-process (definitive native-vs-CPU input check, immune to warmup noise).
+static struct ggml_tensor* g_dbg_qrope = nullptr;
+static struct ggml_tensor* g_dbg_attn0 = nullptr;
+static struct ggml_tensor* g_dbg_sel0  = nullptr;
+static struct ggml_tensor* g_dbg_curk  = nullptr;
+static struct ggml_tensor* g_dbg_curv  = nullptr;
 
 // Helper to build the Qwen 2.5 sparse decode forward pass graph with SRL routing and custom Metal attention
 struct ggml_cgraph * build_decode_graph(
@@ -721,6 +735,13 @@ struct ggml_cgraph * build_decode_graph(
                     1.0f / std::sqrt((float)head_dim),
                     nullptr
                 );
+                { const char* cl = std::getenv("DIFFKV_DBG_CMP_LAYER"); int cmpL = cl ? atoi(cl) : 0;
+                  if (l == cmpL && std::getenv("DIFFKV_DBG_CMP")) {
+                    g_dbg_qrope = q_rope; g_dbg_attn0 = attn_out; g_dbg_sel0 = selected_slots;
+                    g_dbg_curk = k; g_dbg_curv = v;
+                    ggml_set_output(q_rope); ggml_set_output(attn_out); ggml_set_output(selected_slots);
+                    ggml_set_output(k); ggml_set_output(v);
+                } }
             } else if (userdata && selected_slots) {
                 struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
                 // Reconstruct attention output using the custom Metal kernel!
@@ -2766,6 +2787,48 @@ int main(int argc, char ** argv) {
             }
             auto t_after_compute = std::chrono::high_resolution_clock::now();
 
+            // DEFINITIVE native-vs-CPU sparse check (run with DIFFKV_DBG_DENSEOFF=1 so native attn_out
+            // is sparse-only). Feeds the SAME in-graph q_rope + selected_slots into execute_cpu_attention
+            // (host pool) and diffs against the native L0 output. maxAbsDiff≈0 ⇒ inputs match (math proven);
+            // large ⇒ a device/host input diverges for these exact slots.
+            if (std::getenv("DIFFKV_DBG_CMP") && step < 12 && g_dbg_attn0 && g_dbg_qrope && g_dbg_sel0) {
+                const auto & cfg = model.get_config();
+                const char* clp = std::getenv("DIFFKV_DBG_CMP_LAYER"); int cmpL = clp ? atoi(clp) : 0;
+                int nq=cfg.n_head, nkv=cfg.n_head_kv, D=cfg.n_embd/cfg.n_head, K=(int)g_dbg_sel0->ne[0];
+                int rank=kv_engines[cmpL]->get_rank(); float scale=1.0f/std::sqrt((float)D), freq=cfg.rope_freq_base;
+                std::vector<float> qh((size_t)nq*D); ggml_backend_tensor_get(g_dbg_qrope, qh.data(), 0, qh.size()*sizeof(float));
+                std::vector<int32_t> sl(K); ggml_backend_tensor_get(g_dbg_sel0, sl.data(), 0, (size_t)K*sizeof(int32_t));
+                std::vector<float> natv((size_t)nq*D); ggml_backend_tensor_get(g_dbg_attn0, natv.data(), 0, natv.size()*sizeof(float));
+                std::vector<float> outS((size_t)nq*D,0.0f), lseS(nq,-1e30f);
+                diffkv::execute_cpu_attention(qh.data(), sl.data(), outS.data(), lseS.data(), kv_engines[cmpL].get(),
+                                              nq, nkv, rank, 64, K, D, scale, true, freq, true);
+                // FULL ref = sparse ⊕ dense(active_k_dense[0] + current token) via 3-way LSE combine.
+                int F=nkv*D, Td=total_dense_tokens[cmpL];
+                // Match the real callback: ignore_c=true → DO NOT attend the current token here
+                // (it's appended to active_k_dense after compute, for the NEXT step). DIFFKV_DBG_CMP_CUR
+                // re-adds it to A/B the effect.
+                bool add_cur = std::getenv("DIFFKV_DBG_CMP_CUR") != nullptr;
+                int Tc = Td + (add_cur?1:0);
+                std::vector<float> dk((size_t)Tc*F), dv((size_t)Tc*F); std::vector<int32_t> dp(Tc);
+                std::memcpy(dk.data(), active_k_dense[cmpL].data(), (size_t)Td*F*sizeof(float));
+                std::memcpy(dv.data(), active_v_dense[cmpL].data(), (size_t)Td*F*sizeof(float));
+                for(int t=0;t<Td;++t)dp[t]=active_positions_dense[t];
+                if (add_cur) {
+                    std::vector<float> ck((size_t)F), cv((size_t)F);
+                    ggml_backend_tensor_get(g_dbg_curk, ck.data(), 0, ck.size()*sizeof(float));
+                    ggml_backend_tensor_get(g_dbg_curv, cv.data(), 0, cv.size()*sizeof(float));
+                    std::memcpy(dk.data()+(size_t)Td*F, ck.data(), (size_t)F*sizeof(float));
+                    std::memcpy(dv.data()+(size_t)Td*F, cv.data(), (size_t)F*sizeof(float));
+                    dp[Td]=current_pos;
+                }
+                std::vector<float> outD((size_t)nq*D,0.0f), lseD(nq,-1e30f);
+                diffkv::cpu_dense_attention(qh.data(), dk.data(), dv.data(), dp.data(), Tc, nq, nkv, D, scale, true, freq, 0, outD.data(), lseD.data());
+                std::vector<float> cpuv((size_t)nq*D);
+                for(int h=0;h<nq;++h){ double lmax=std::max(lseS[h],lseD[h]); double ws=(lseS[h]<=-1e20?0.0:std::exp(lseS[h]-lmax)), wd=(lseD[h]<=-1e20?0.0:std::exp(lseD[h]-lmax)); double den=std::max(ws+wd,1e-9); for(int d=0;d<D;++d) cpuv[h*D+d]=(float)((outS[h*D+d]*ws+outD[h*D+d]*wd)/den); }
+                double md=0,nn=0,cn=0; int worst=0; for(int i=0;i<nq*D;++i){ double d=std::fabs((double)natv[i]-cpuv[i]); if(d>md){md=d;worst=i;} nn+=(double)natv[i]*natv[i]; cn+=(double)cpuv[i]*cpuv[i]; }
+                std::cerr<<"[DBG_CMP] step="<<step<<" FULL L"<<cmpL<<" (K="<<K<<" Td="<<Td<<"): |native|="<<std::sqrt(nn)<<" |cpu|="<<std::sqrt(cn)<<" maxAbsDiff="<<md<<" @"<<worst<<" head"<<worst/D<<std::endl;
+            }
+
             if (std::getenv("DIFFKV_DBG_SEL") && step == 0 && dbg_anc) {
                 std::vector<float> a(ggml_nelements(dbg_anc));
                 ggml_backend_tensor_get(dbg_anc, a.data(), 0, a.size()*sizeof(float));
@@ -2782,8 +2845,8 @@ int main(int argc, char ** argv) {
                 { ggml_tensor* aKr=kv_engines[0]->get_anchorK_rot(); const ggml_fp16_t* hAK=kv_engines[0]->get_host_anchors_K();
                   const int32_t* sls=kv_engines[0]->get_host_seq_lens(); int Fkv=kv_heads*head_dim;
                   std::cerr<<"[DBG_DEVSLOT] slot(seq:devAKr/hostAK): ";
-                  for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<ggml_fp16_t> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(ggml_fp16_t),Fkv*sizeof(ggml_fp16_t));
-                    double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=ggml_fp16_to_fp32(d[j]); nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
+                  for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<float> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(float),Fkv*sizeof(float));
+                    double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=d[j]; nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
                     std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") "; }
                   std::cerr<<std::endl; }
                 if (dbg_anc) {
