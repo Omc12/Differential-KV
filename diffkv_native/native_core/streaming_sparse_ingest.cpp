@@ -239,7 +239,9 @@ void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::uni
                 if (block->pool_idx != -1) {
                     // Update sequence length in engine
                     int32_t slen = keep_active;
+                    engines[l]->get_host_seq_lens()[block->pool_idx] = slen;
                     ggml_backend_tensor_set(engines[l]->get_seq_lens(), &slen, block->pool_idx * sizeof(int32_t), sizeof(int32_t));
+                    block->device_synced = false;
                 }
             }
             kept.push_back(std::move(block));
@@ -654,6 +656,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
         compressor.compress_sync(job);
         block->state = engines[layer_idx]->get_state_table().get(slot_id);
         engines[layer_idx]->upload_slot(slot_id);
+        block->device_synced = true;
         stats_.total_compressed++;
     }
 }

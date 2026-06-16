@@ -28,6 +28,14 @@
 
 using namespace diffkv;
 
+static bool is_native_attn_enabled() {
+    const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
+    if (e) {
+        return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
+    }
+    return true; // ENABLED BY DEFAULT!
+}
+
 struct ggml_backend_owner {
     ggml_backend_t gpu_backend = nullptr;
     ggml_backend_t cpu_backend = nullptr;
@@ -57,7 +65,7 @@ struct ggml_backend_owner {
         // Sched graph capacity must cover the largest graph we build. The native sparse-attn
         // path builds a ~32k-node decode graph; an undersized sched corrupts buffer planning.
         size_t sched_size = 8192;
-        if (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1") sched_size = 40960;
+        if (is_native_attn_enabled()) sched_size = 40960;
         sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), sched_size, false, true);
     }
 
@@ -410,6 +418,7 @@ static struct ggml_tensor * build_native_sparse_attn(
     struct ggml_tensor * half,            // [1] = 0.5 const input
     diffkv::NativeBlockPool * pool,
     int nq, int nkv, int D, int R, int S, int K, float scale,
+    bool ignore_c,
     struct ggml_tensor ** out_dbg = nullptr
 ) {
     const int group = nq / nkv;
@@ -479,8 +488,6 @@ static struct ggml_tensor * build_native_sparse_attn(
         // dense-window views for this kv head
         struct ggml_tensor* dkr = ggml_cont(ctx, ggml_view_2d(ctx, dense_kr, D, MAXD, dense_kr->nb[1], (size_t)kv*D*dense_kr->nb[0])); // [D,MAXD]
         struct ggml_tensor* dvk = ggml_cont(ctx, ggml_view_2d(ctx, dense_v,  D, MAXD, dense_v->nb[1],  (size_t)kv*D*dense_v->nb[0]));  // [D,MAXD]
-        struct ggml_tensor* ckr = ggml_cont(ctx, ggml_view_2d(ctx, k_rope,   D, 1,    k_rope->nb[1],   (size_t)kv*k_rope->nb[1]));     // [D,1] current K
-        struct ggml_tensor* cvk = ggml_cont(ctx, ggml_view_1d(ctx, v_cur,    D,       (size_t)kv*D*v_cur->nb[0]));                     // [D]  current V
 
         // ── Sparse-pool scores → flat_sp [(S+1)*K, group] ──
         struct ggml_tensor* anc = ggml_mul_mat(ctx, aKrk, Qk); // [K,group] raw anchor score
@@ -508,28 +515,50 @@ static struct ggml_tensor * build_native_sparse_attn(
         // ── Dense-window scores ──
         struct ggml_tensor* ds = ggml_scale(ctx, ggml_mul_mat(ctx, dkr, Qk), scale); // [MAXD, group]
         ds = ggml_add(ctx, ds, ggml_reshape_2d(ctx, dense_mask, MAXD, 1));           // + validity mask
-        struct ggml_tensor* cs = ggml_scale(ctx, ggml_mul_mat(ctx, ckr, Qk), scale); // [1, group] current token
-        // DEBUG: DIFFKV_DBG_DENSEOFF → mask dense+current (-1e30) to isolate the sparse pool.
-        static const bool denseoff = (std::getenv("DIFFKV_DBG_DENSEOFF") != nullptr);
-        if (denseoff) {
-            struct ggml_tensor* bigneg = ggml_scale(ctx, neg_half, 2e30f); // [1] = -1e30
-            ds = ggml_add(ctx, ds, bigneg);
-            cs = ggml_add(ctx, cs, bigneg);
+
+        // ── Softmax and split weights (conditional on ignore_c) ──
+        struct ggml_tensor* w_sp = nullptr;
+        struct ggml_tensor* w_ds = nullptr;
+        struct ggml_tensor* w_cs = nullptr;
+
+        if (ignore_c) {
+            // DEBUG: DIFFKV_DBG_DENSEOFF → mask dense (-1e30) to isolate the sparse pool.
+            static const bool denseoff = (std::getenv("DIFFKV_DBG_DENSEOFF") != nullptr);
+            if (denseoff) {
+                struct ggml_tensor* bigneg = ggml_scale(ctx, neg_half, 2e30f); // [1] = -1e30
+                ds = ggml_add(ctx, ds, bigneg);
+            }
+            static const bool dsoff = (std::getenv("DIFFKV_DBG_DSOFF") != nullptr);
+            if (dsoff) ds = ggml_add(ctx, ds, ggml_scale(ctx, neg_half, 2e30f));  // mask past-dense only
+
+            struct ggml_tensor* allsc = ggml_concat(ctx, flat_sp, ds, 0); // [(S+1)*K + MAXD, group]
+            struct ggml_tensor* w = ggml_soft_max(ctx, allsc);            // [(S+1)*K + MAXD, group]
+
+            w_sp = ggml_cont(ctx, ggml_view_2d(ctx, w, (S+1)*K, group, w->nb[1], 0));
+            w_ds = ggml_cont(ctx, ggml_view_2d(ctx, w, MAXD,    group, w->nb[1], (size_t)((S+1)*K)*w->nb[0]));
+        } else {
+            struct ggml_tensor* ckr = ggml_cont(ctx, ggml_view_2d(ctx, k_rope,   D, 1,    k_rope->nb[1],   (size_t)kv*k_rope->nb[1]));     // [D,1] current K
+            struct ggml_tensor* cs = ggml_scale(ctx, ggml_mul_mat(ctx, ckr, Qk), scale); // [1, group] current token
+
+            // DEBUG: DIFFKV_DBG_DENSEOFF → mask dense+current (-1e30) to isolate the sparse pool.
+            static const bool denseoff = (std::getenv("DIFFKV_DBG_DENSEOFF") != nullptr);
+            if (denseoff) {
+                struct ggml_tensor* bigneg = ggml_scale(ctx, neg_half, 2e30f); // [1] = -1e30
+                ds = ggml_add(ctx, ds, bigneg);
+                cs = ggml_add(ctx, cs, bigneg);
+            }
+            static const bool curoff = (std::getenv("DIFFKV_DBG_CUROFF") != nullptr);
+            if (curoff) cs = ggml_add(ctx, cs, ggml_scale(ctx, neg_half, 2e30f)); // mask current token only
+            static const bool dsoff = (std::getenv("DIFFKV_DBG_DSOFF") != nullptr);
+            if (dsoff) ds = ggml_add(ctx, ds, ggml_scale(ctx, neg_half, 2e30f));  // mask past-dense only
+
+            struct ggml_tensor* allsc = ggml_concat(ctx, ggml_concat(ctx, flat_sp, ds, 0), cs, 0); // [(S+1)*K + MAXD + 1, group]
+            struct ggml_tensor* w = ggml_soft_max(ctx, allsc);                                     // [E, group]
+
+            w_sp = ggml_cont(ctx, ggml_view_2d(ctx, w, (S+1)*K, group, w->nb[1], 0));
+            w_ds = ggml_cont(ctx, ggml_view_2d(ctx, w, MAXD,    group, w->nb[1], (size_t)((S+1)*K)*w->nb[0]));
+            w_cs = ggml_cont(ctx, ggml_view_2d(ctx, w, 1,       group, w->nb[1], (size_t)((S+1)*K+MAXD)*w->nb[0]));
         }
-        static const bool curoff = (std::getenv("DIFFKV_DBG_CUROFF") != nullptr);
-        if (curoff) cs = ggml_add(ctx, cs, ggml_scale(ctx, neg_half, 2e30f)); // mask current token only
-        static const bool dsoff = (std::getenv("DIFFKV_DBG_DSOFF") != nullptr);
-        if (dsoff) ds = ggml_add(ctx, ds, ggml_scale(ctx, neg_half, 2e30f));  // mask past-dense only
-
-        // ── One softmax over sparse ∪ dense ∪ current ──
-        const int E = (S+1)*K + MAXD + 1;
-        struct ggml_tensor* allsc = ggml_concat(ctx, ggml_concat(ctx, flat_sp, ds, 0), cs, 0); // [E, group]
-        struct ggml_tensor* w = ggml_soft_max(ctx, allsc);                                     // [E, group]
-
-        // split weights (entries along ne0)
-        struct ggml_tensor* w_sp = ggml_cont(ctx, ggml_view_2d(ctx, w, (S+1)*K, group, w->nb[1], 0));                       // [(S+1)*K, group]
-        struct ggml_tensor* w_ds = ggml_cont(ctx, ggml_view_2d(ctx, w, MAXD,    group, w->nb[1], (size_t)((S+1)*K)*w->nb[0])); // [MAXD, group]
-        struct ggml_tensor* w_cs = ggml_cont(ctx, ggml_view_2d(ctx, w, 1,       group, w->nb[1], (size_t)((S+1)*K+MAXD)*w->nb[0])); // [1, group]
 
         // ── Sparse value (project-then-attend) ──
         struct ggml_tensor* wsp3 = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, w_sp, S+1, K, group), 0, 2, 1, 3)); // [S+1,group,K]
@@ -546,11 +575,16 @@ static struct ggml_tensor * build_native_sparse_attn(
         struct ggml_tensor* t2p = ggml_cont(ctx, ggml_permute(ctx, t2pre, 1, 2, 0, 3)); // [K,D,group]
         struct ggml_tensor* term2 = ggml_reshape_2d(ctx, ggml_sum_rows(ctx, t2p), D, group); // [D,group]
 
-        // ── Dense value: Σ_t w_ds[t]·dvk[:,t] + w_cs·cvk ──
+        // ── Dense value: Σ_t w_ds[t]·dvk[:,t] (+ w_cs·cvk if !ignore_c) ──
         struct ggml_tensor* dvkT  = ggml_cont(ctx, ggml_transpose(ctx, dvk));           // [MAXD,D]
         struct ggml_tensor* dense_out = ggml_mul_mat(ctx, dvkT, w_ds);                  // [D,group]
-        struct ggml_tensor* cvk2  = ggml_reshape_2d(ctx, cvk, 1, D);                    // [1,D]
-        struct ggml_tensor* cur_out = ggml_mul_mat(ctx, cvk2, w_cs);                    // [D,group]
+        struct ggml_tensor* final_dense = dense_out;
+        if (!ignore_c) {
+            struct ggml_tensor* cvk = ggml_cont(ctx, ggml_view_1d(ctx, v_cur, D, (size_t)kv*D*v_cur->nb[0])); // [D] current V
+            struct ggml_tensor* cvk2  = ggml_reshape_2d(ctx, cvk, 1, D);                                     // [1,D]
+            struct ggml_tensor* cur_out = ggml_mul_mat(ctx, cvk2, w_cs);                                     // [D,group]
+            final_dense = ggml_add(ctx, dense_out, cur_out);
+        }
 
         // DEBUG term toggles to localize the sparse magnitude bug.
         static const bool t1off = (std::getenv("DIFFKV_DBG_T1OFF") != nullptr);
@@ -558,7 +592,7 @@ static struct ggml_tensor * build_native_sparse_attn(
         if (t1off) term1 = ggml_scale(ctx, term1, 0.0f);
         if (t2off) term2 = ggml_scale(ctx, term2, 0.0f);
 
-        kv_outs[kv] = ggml_add(ctx, ggml_add(ctx, term1, term2), ggml_add(ctx, dense_out, cur_out)); // [D,group]
+        kv_outs[kv] = ggml_add(ctx, ggml_add(ctx, term1, term2), final_dense); // [D,group]
     }
 
     // Assemble [n_embd,1] from the per-head [D,group] outputs. Each kv block occupies a
@@ -616,8 +650,7 @@ struct ggml_cgraph * build_decode_graph(
     const auto & config = model.get_config();
     // Native sparse-attn adds ~40 ggml ops/layer; bump graph capacity well past the
     // 2048 default when it's enabled (the larger node arena is otherwise harmless).
-    static const bool native_graph =
-        (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+    static const bool native_graph = is_native_attn_enabled();
     struct ggml_cgraph * gf = native_graph
         ? ggml_new_graph_custom(ctx, 32768, false)
         : ggml_new_graph(ctx);
@@ -708,8 +741,7 @@ struct ggml_cgraph * build_decode_graph(
             // the factual store is populated during prefill, so if it's empty we can run the
             // fully-native fused subgraph; factual/NIAH sessions keep the CPU custom op (which
             // also drives VSL masking + logit biasing). Static graph → decision is per-build.
-            static const bool native_attn_env =
-                (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+            static const bool native_attn_env = is_native_attn_enabled();
             bool factual_empty = true;
             if (userdata && userdata[l].srl_state) {
                 factual_empty = static_cast<diffkv::SessionSRLState*>(userdata[l].srl_state)->factual_store.entries.empty();
@@ -733,6 +765,7 @@ struct ggml_cgraph * build_decode_graph(
                     config.n_head, config.n_head_kv, head_dim,
                     userdata[l].kv_engine->get_rank(), 64, srl_k_keep,
                     1.0f / std::sqrt((float)head_dim),
+                    userdata[l].ignore_c,
                     nullptr
                 );
                 { const char* cl = std::getenv("DIFFKV_DBG_CMP_LAYER"); int cmpL = cl ? atoi(cl) : 0;
@@ -1187,7 +1220,8 @@ static void run_native_attn_selftest() {
         krope_use=ggml_rope_ext(ctx, k_rope, cpos_t, nullptr, D, GGML_ROPE_TYPE_NEOX, 0, freq, 1.0f,0.0f,1.0f,0.0f,0.0f);
     }
     ggml_tensor* out = build_native_sparse_attn(ctx, q_rope, krope_use, v_cur, dkr_use, dv, dmask, MAXD,
-                                                sel, tri, half, &pool, nq, nkv, D, rank, S_max, K, scale, nullptr);
+                                                sel, tri, half, &pool, nq, nkv, D, rank, S_max, K, scale,
+                                                false, nullptr);
     ggml_set_output(out);
     ggml_cgraph* gf=ggml_new_graph_custom(ctx, 8192, false);
     ggml_build_forward_expand(gf, out);
@@ -2144,7 +2178,7 @@ int main(int argc, char ** argv) {
         }
         struct ggml_init_params decode_params = {
             // Native sparse-attn builds far more op/tensor metadata + a 32k-node graph arena.
-            /*.mem_size   =*/ (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1")
+            /*.mem_size   =*/ is_native_attn_enabled()
                                   ? (size_t)48 * 1024 * 1024 : (size_t)4 * 1024 * 1024,
             /*.mem_buffer =*/ nullptr,
             /*.no_alloc   =*/ true,
@@ -2229,7 +2263,7 @@ int main(int argc, char ** argv) {
         // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
         // persistent (survive graph rebuilds), filled each decode step. Gated.
         const int native_maxd = 2048;
-        const bool native_attn_on = (std::getenv("DIFFKV_NATIVE_ATTN") && std::string(std::getenv("DIFFKV_NATIVE_ATTN")) == "1");
+        const bool native_attn_on = is_native_attn_enabled();
         std::vector<struct ggml_tensor *> native_dense_kr(n_layers, nullptr);
         std::vector<struct ggml_tensor *> native_dense_v(n_layers, nullptr);
         struct ggml_tensor * native_dense_mask = nullptr;

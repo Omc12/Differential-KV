@@ -269,6 +269,9 @@ void KVRuntimeManager::ingest_decode(
                 BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
                 if (current_state != BlockState::Compressing) {
                     block->state = current_state;
+                    if (current_state == BlockState::CompressedResident) {
+                        block->device_synced = false;
+                    }
                 }
             }
         }
@@ -530,6 +533,9 @@ void KVRuntimeManager::wait_for_compressor() {
                 BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
                 if (current_state != BlockState::Compressing) {
                     block->state = current_state;
+                    if (current_state == BlockState::CompressedResident) {
+                        block->device_synced = false;
+                    }
                 }
             }
         }
@@ -646,11 +652,7 @@ void KVRuntimeManager::sync_device_for_native() {
     // reads host buffers (immune), but the native ggml subgraph reads the device tensors, so
     // we must push them on the main thread before the decode graph runs.
     if (engines_.empty() || !engines_[0]->native_attn_enabled()) return;
-    // Brute-force: mirror EVERY slot's host buffers to the device. The custom-op reference reads
-    // HOST buffers directly (incl. stale data left in freed slots, which the SRL router can still
-    // select as padding/sink); the native subgraph reads DEVICE tensors. Syncing all slots keeps
-    // them bit-consistent so a re-selected stale slot (e.g. an anchor-only block, seq_len 0) is
-    // identical in both paths. Gated so we can A/B it.
+    
     static const bool sync_all = std::getenv("DIFFKV_SYNC_ALL") != nullptr;
     if (sync_all) {
         int ns = engines_[0]->get_seq_lens()->ne[0];
@@ -658,15 +660,42 @@ void KVRuntimeManager::sync_device_for_native() {
             for (int s = 0; s < ns; ++s) engines_[l]->upload_slot(s);
         return;
     }
+
     for (int l = 0; l < n_layers_; ++l) {
+        int ns = engines_[l]->get_seq_lens()->ne[0];
+        
+        // Build map of currently active slots (both compressed and dense)
+        std::vector<bool> active_slots(ns, false);
         for (auto & block : ingest_manager_->get_blocks(l)) {
-            if (block->device_synced || block->pool_idx == -1) continue;
-            // Use the state table (authoritative) — block->state can lag the bg thread.
-            BlockState st = engines_[l]->get_state_table().get(block->pool_idx);
-            if (st == BlockState::CompressedResident) {
-                engines_[l]->upload_slot(block->pool_idx);
-                block->state = st;
-                block->device_synced = true;
+            if (block->pool_idx != -1) {
+                BlockState st = engines_[l]->get_state_table().get(block->pool_idx);
+                if (st == BlockState::CompressedResident || st == BlockState::DenseResident) {
+                    active_slots[block->pool_idx] = true;
+                }
+            }
+        }
+        
+        // For each slot, synchronize state
+        for (int s = 0; s < ns; ++s) {
+            if (active_slots[s]) {
+                // Find block associated with this slot
+                StreamingKVBlock* block = nullptr;
+                for (auto & b : ingest_manager_->get_blocks(l)) {
+                    if (b->pool_idx == s) {
+                        block = b.get();
+                        break;
+                    }
+                }
+                if (block && (!block->device_synced || !engines_[l]->slot_device_has_data(s))) {
+                    engines_[l]->upload_slot(s);
+                    block->device_synced = true;
+                }
+            } else {
+                // If it is NOT occupied by any active block, we must ensure
+                // that the device knows it is empty (i.e. seq_len = 0, valid_mask = -inf).
+                if (engines_[l]->slot_device_has_data(s)) {
+                    engines_[l]->upload_slot(s);
+                }
             }
         }
     }

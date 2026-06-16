@@ -172,6 +172,7 @@ void PagedKVStore::evict_block(PageEntry& entry, const std::vector<std::unique_p
     
     block->pool_idx = -1;
     block->state = BlockState::CPUResident;
+    block->device_synced = false;
     entry.residency = BlockState::CPUResident;
 }
 
@@ -236,6 +237,7 @@ void PagedKVStore::reload_block(PageEntry& entry, const std::vector<std::unique_
     stats_.bytes_paged_in += entry.vram_bytes;
     stats_.current_gpu_bytes += entry.vram_bytes;
     block->state = BlockState::CompressedResident;
+    block->device_synced = false;
     entry.residency = BlockState::CompressedResident;
 }
 

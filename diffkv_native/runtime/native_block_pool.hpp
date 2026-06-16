@@ -63,6 +63,11 @@ public:
     int get_pool_version() const { return pool_version_.load(); }
     void increment_pool_version() { pool_version_.fetch_add(1); }
 
+    bool slot_device_has_data(int slot_id) const {
+        if (slot_id < 0 || slot_id >= (int)slot_device_has_data_.size()) return false;
+        return slot_device_has_data_[slot_id];
+    }
+
     // Host mirror getters
     const int8_t* get_host_U() const { return host_U_.data(); }
     int8_t* get_host_U() { return host_U_.data(); }
@@ -157,6 +162,7 @@ private:
     std::vector<int> free_slots_;
     std::mutex slot_mutex_;
     std::atomic<int> pool_version_{0};
+    std::vector<bool> slot_device_has_data_;
 };
 
 } // namespace diffkv

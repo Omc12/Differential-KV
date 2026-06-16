@@ -64,8 +64,9 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
 
     // Native ggml-metal attention path (gated). When enabled, we allocate + fill the
     // precomputed RoPE'd key tensors so the in-graph subgraph never has to rope/gather i32.
+    native_attn_ = true; // ENABLED BY DEFAULT!
     if (const char* e = std::getenv("DIFFKV_NATIVE_ATTN")) {
-        native_attn_ = (std::string(e) == "1");
+        native_attn_ = (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
     }
 
     if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
@@ -170,6 +171,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         free_slots_.push_back(i);
     }
 
+    slot_device_has_data_.resize(n_slots, false);
     pool_version_.store(0);
     return true;
 }
@@ -189,6 +191,7 @@ void NativeBlockPool::free_slot(int slot_id) {
     if (std::find(free_slots_.begin(), free_slots_.end(), slot_id) == free_slots_.end()) {
         state_table_.force_invalidate(slot_id);
         free_slots_.push_back(slot_id);
+        host_seq_lens_[slot_id] = 0;
     }
 }
 
@@ -198,7 +201,9 @@ void NativeBlockPool::reset_slots() {
     for (int i = 0; i < n_slots_; ++i) {
         state_table_.force_invalidate(i);
         free_slots_.push_back(i);
+        host_seq_lens_[i] = 0;
     }
+    std::fill(slot_device_has_data_.begin(), slot_device_has_data_.end(), false);
     increment_pool_version();
 }
 
@@ -280,6 +285,7 @@ void NativeBlockPool::zero_all_tensors() {
         std::vector<int32_t> zeros(ggml_nelements(anchor_positions_), 0);
         ggml_backend_tensor_set(anchor_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
     }
+    std::fill(slot_device_has_data_.begin(), slot_device_has_data_.end(), false);
     increment_pool_version();
 }
 
@@ -353,6 +359,7 @@ void NativeBlockPool::upload_slot(int slot_id) {
         for (int t = 0; t < S_max; ++t) m[t] = ggml_fp32_to_fp16(t < slen ? 0.0f : -INFINITY);
         ggml_backend_tensor_set(valid_mask_, m, slot_id * valid_mask_->nb[1], (size_t)S_max * sizeof(ggml_fp16_t));
     }
+    slot_device_has_data_[slot_id] = (host_seq_lens_[slot_id] > 0);
     increment_pool_version();
 }
 
