@@ -179,6 +179,43 @@ inline const std::unordered_set<int32_t>& get_structural_helper_token_ids_cpp(Mo
 // 2. Coherence Cap: limit the active sequences to 8, sorted by retrieval similarity
 // 3. Entity-Subgraph Tagging: tag sequences with their assigned entity_ids (Jaccard token-overlap based)
 inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
+    // 0. Build cache/lookup structures lazily on the first decode step after store build/reset
+    if (!srl_state.entries_map_built) {
+        srl_state.entries_by_tokens_map.clear();
+        srl_state.prime_entries.clear();
+        srl_state.cached_triple_hash_to_entity.clear();
+        srl_state.cached_prime_tokens_by_entity.clear();
+        srl_state.cached_property_tokens_by_entity.clear();
+        srl_state.entries_by_token_id.clear();
+
+        auto vec_hash = [](const std::vector<int32_t>& v) -> size_t {
+            size_t seed = v.size();
+            for (auto x : v) seed ^= (size_t)x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
+        };
+
+        for (const auto& fe : srl_state.factual_store.entries) {
+            srl_state.entries_by_tokens_map[fe.tokens] = &fe;
+            for (int32_t tok : fe.tokens) {
+                srl_state.entries_by_token_id[tok].push_back(&fe);
+            }
+            if (fe.is_prime) {
+                srl_state.prime_entries.push_back(&fe);
+                for (const auto& ts : fe.triple_sequences) {
+                    srl_state.cached_triple_hash_to_entity[vec_hash(ts)] = fe.start_idx;
+                }
+            }
+            if (fe.entity_id != -1) {
+                if (fe.is_prime) {
+                    srl_state.cached_prime_tokens_by_entity[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
+                } else {
+                    srl_state.cached_property_tokens_by_entity[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
+                }
+            }
+        }
+        srl_state.entries_map_built = true;
+    }
+
     // 1. Contrastive Category Anchor
     {
         std::unordered_set<int32_t> recent_set;
@@ -193,21 +230,19 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         int second_best_overlap = 0;
         int active_prime_count  = 0;
 
-        for (const auto& fe : srl_state.factual_store.entries) {
-            if (fe.is_prime) {
-                int overlap = 0;
-                for (int32_t t : fe.tokens) {
-                    if (recent_set.count(t)) overlap++;
-                }
-                if (overlap >= 1) {
-                    active_prime_count++;
-                    if (overlap > best_overlap) {
-                        second_best_overlap = best_overlap;
-                        best_overlap   = overlap;
-                        best_prime_pos = fe.start_idx;
-                    } else if (overlap > second_best_overlap) {
-                        second_best_overlap = overlap;
-                    }
+        for (const FactEntry* fe : srl_state.prime_entries) {
+            int overlap = 0;
+            for (int32_t t : fe->tokens) {
+                if (recent_set.count(t)) overlap++;
+            }
+            if (overlap >= 1) {
+                active_prime_count++;
+                if (overlap > best_overlap) {
+                    second_best_overlap = best_overlap;
+                    best_overlap   = overlap;
+                    best_prime_pos = fe->start_idx;
+                } else if (overlap > second_best_overlap) {
+                    second_best_overlap = overlap;
                 }
             }
         }
@@ -229,8 +264,9 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
                 std::unordered_set<int32_t> filtered_toks;
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
                     int seq_pos = -1;
-                    for (const auto& fe : srl_state.factual_store.entries) {
-                        if (fe.tokens == seq) { seq_pos = fe.start_idx; break; }
+                    auto it = srl_state.entries_by_tokens_map.find(seq);
+                    if (it != srl_state.entries_by_tokens_map.end()) {
+                        seq_pos = it->second->start_idx;
                     }
                     bool keep = (seq_pos < 0) || (std::abs(seq_pos - effective_prime_pos) < 512);
                     if (keep) {
@@ -255,20 +291,13 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         for (int ri = std::max(0, rgt_size - 30); ri < rgt_size; ++ri) {
             recent_set.insert(srl_state.recent_generated_tokens[ri]);
         }
-        std::unordered_map<int32_t, std::unordered_set<int32_t>> prime_tok_by_ent;
-        std::unordered_map<int32_t, std::unordered_set<int32_t>> prop_tok_by_ent;
-        for (const auto& fe : srl_state.factual_store.entries) {
-            if (fe.entity_id == -1) continue;
-            if (fe.is_prime) prime_tok_by_ent[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
-            else             prop_tok_by_ent[fe.entity_id].insert(fe.tokens.begin(), fe.tokens.end());
-        }
         int new_idx = advance_comparison_entity(
             srl_state.comparison_entities,
             srl_state.comparison_active_idx,
             srl_state.comparison_covered,
             recent_set,
-            prime_tok_by_ent,
-            prop_tok_by_ent
+            srl_state.cached_prime_tokens_by_entity,
+            srl_state.cached_property_tokens_by_entity
         );
         srl_state.comparison_active_idx = new_idx;
         srl_state.current_entity_id = srl_state.comparison_entities[new_idx];
@@ -277,8 +306,8 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
     // 2. Coherence Cap — RC6 entity-proportional budget.
     {
         int n_active_primes = 0;
-        for (const auto& fe : srl_state.factual_store.entries) {
-            if (fe.is_prime && fe.current_sim > 0.0f) n_active_primes++;
+        for (const FactEntry* fe : srl_state.prime_entries) {
+            if (fe->current_sim > 0.0f) n_active_primes++;
         }
         // 4 sequences per active entity + 4 overhead; minimum 8.
         int coherence_cap = std::max(8, n_active_primes * 4 + 4);
@@ -288,9 +317,9 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
             for (size_t si = 0; si < n_seqs; ++si) {
                 const auto& seq = srl_state.current_step_factual_sequences[si];
                 float best_sim = 0.0f;
-                for (const auto& fe : srl_state.factual_store.entries) {
-                    if (fe.tokens == seq && fe.current_sim > best_sim)
-                        best_sim = fe.current_sim;
+                auto it = srl_state.entries_by_tokens_map.find(seq);
+                if (it != srl_state.entries_by_tokens_map.end()) {
+                    best_sim = it->second->current_sim;
                 }
                 seq_sims[si] = best_sim;
             }
@@ -317,27 +346,6 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
     // matching) not positional proximity.  RC1: triple sequences inherit their
     // prime's entity_id since they were extracted from that prime's context.
     {
-        // Build lookup: tokens → (entity_id, is_prime)
-        std::unordered_map<const std::vector<int32_t>*, std::pair<int32_t, bool>> entry_meta;
-        for (const auto& fe : srl_state.factual_store.entries) {
-            // Store pointer-based to avoid O(N^2) copies; we match by value below
-            (void)fe; // pointer map not ideal in C++ — use value scan below
-        }
-        // Build triple→entity map for RC1 triple sequences
-        std::unordered_map<size_t, int32_t> triple_hash_to_entity;
-        auto vec_hash = [](const std::vector<int32_t>& v) -> size_t {
-            size_t seed = v.size();
-            for (auto x : v) seed ^= (size_t)x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-            return seed;
-        };
-        for (const auto& fe : srl_state.factual_store.entries) {
-            if (fe.is_prime) {
-                for (const auto& ts : fe.triple_sequences) {
-                    triple_hash_to_entity[vec_hash(ts)] = fe.start_idx;
-                }
-            }
-        }
-
         const auto& seqs = srl_state.current_step_factual_sequences;
         std::vector<int32_t> ent_ids(seqs.size(), -1);
         std::vector<bool>    is_prime_flags(seqs.size(), false);
@@ -345,24 +353,30 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         // connectives allowed to bridge into it. empty for triples (their bridge
         // connective is already part of the captured sequence).
         std::vector<std::vector<int32_t>> seq_prefixes(seqs.size());
+
+        auto vec_hash = [](const std::vector<int32_t>& v) -> size_t {
+            size_t seed = v.size();
+            for (auto x : v) seed ^= (size_t)x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
+        };
+
         for (size_t si = 0; si < seqs.size(); ++si) {
             const auto& seq = seqs[si];
             int32_t matched_entity = -1;
             bool    seq_prime = false;
             // Try matching against known entries
-            for (const auto& fe : srl_state.factual_store.entries) {
-                if (fe.tokens == seq) {
-                    matched_entity = fe.entity_id;
-                    seq_prime = fe.is_prime;
-                    seq_prefixes[si] = fe.prefix_tokens;
-                    break;
-                }
+            auto it = srl_state.entries_by_tokens_map.find(seq);
+            if (it != srl_state.entries_by_tokens_map.end()) {
+                const FactEntry* fe = it->second;
+                matched_entity = fe->entity_id;
+                seq_prime = fe->is_prime;
+                seq_prefixes[si] = fe->prefix_tokens;
             }
             // Fallback: check if this is a triple sequence
             if (matched_entity == -1) {
-                auto it = triple_hash_to_entity.find(vec_hash(seq));
-                if (it != triple_hash_to_entity.end()) {
-                    matched_entity = it->second;
+                auto it2 = srl_state.cached_triple_hash_to_entity.find(vec_hash(seq));
+                if (it2 != srl_state.cached_triple_hash_to_entity.end()) {
+                    matched_entity = it2->second;
                 }
             }
             ent_ids[si] = matched_entity;

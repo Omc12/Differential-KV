@@ -37,6 +37,7 @@ struct CustomAttnUserData {
     void * srl_state = nullptr;
     const float * W_proj = nullptr;
     int desc_dim = 0;
+    int max_active_dense_tokens = 16384;
 
     // Cached Metal buffers to avoid per-token allocations
     void * mtl_dense_k = nullptr;
@@ -102,6 +103,7 @@ void custom_attention_op_callback(
     void * userdata
 );
 
+void cleanup_metal_attention();
 double get_and_reset_accumulated_wait_ms();
 
 } // namespace diffkv

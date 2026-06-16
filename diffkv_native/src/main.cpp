@@ -1515,11 +1515,8 @@ int main(int argc, char ** argv) {
                 break;
             }
             if (prompt.rfind("__CACHED__:", 0) == 0) {
-                try {
-                    cached_len = std::stoi(prompt.substr(11));
-                } catch (...) {
-                    cached_len = 0;
-                }
+                // Ignore prefix caching to avoid garbage token output
+                cached_len = 0;
                 if (!std::getline(std::cin, prompt)) {
                     break;
                 }
@@ -2342,7 +2339,10 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
         }
 
-        native_decode_buf = nullptr; // no-reuse alloc for the native decode path
+        if (native_decode_buf) {
+            ggml_backend_buffer_free(native_decode_buf);
+            native_decode_buf = nullptr;
+        }
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
             kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
@@ -2978,7 +2978,14 @@ int main(int argc, char ** argv) {
                 double nk=0,nv=0,nk0=0,nv0=0; for(int i=0;i<F_test;++i){ nk+=(double)decode_k[0][i]*decode_k[0][i]; nv+=(double)decode_v[0][i]*decode_v[0][i]; if(i<head_dim){nk0+=(double)decode_k[0][i]*decode_k[0][i]; nv0+=(double)decode_v[0][i]*decode_v[0][i];} }
                 std::cerr << "[DBG_CURV] current token L0: |k|="<<std::sqrt(nk)<<" |v|="<<std::sqrt(nv)<<" |k[0..63]|="<<std::sqrt(nk0)<<" |v[0..63]|="<<std::sqrt(nv0)<<std::endl;
             }
+            double t_ingest_dec_ms = 0;
+            double t_dense_append_ms = 0;
+            double t_vsl_query_ms = 0;
+            double t_vsl_process_ms = 0;
+
+            auto t_ingest_dec_start = std::chrono::high_resolution_clock::now();
             runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens, &srl_state);
+            t_ingest_dec_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_ingest_dec_start).count();
 
             {
                 std::vector<float> k_avg(head_dim, 0.0f);
@@ -3013,6 +3020,7 @@ int main(int argc, char ** argv) {
                 sin_tok[i] = std::sin(theta);
             }
 
+            auto t_dense_append_start = std::chrono::high_resolution_clock::now();
             // Manual append newly ingested token to host-side dense resident buffers
             for (int l = 0; l < n_layers; ++l) {
                 int offset = total_dense_tokens[l] * F_test;
@@ -3034,6 +3042,7 @@ int main(int argc, char ** argv) {
             if (total_positions < (int)active_positions_dense.size()) {
                 active_positions_dense[total_positions++] = current_pos;
             }
+            t_dense_append_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_dense_append_start).count();
             auto t_step_end = std::chrono::high_resolution_clock::now();
 
             int32_t current_entity = srl_state.current_entity_id;
@@ -3311,6 +3320,7 @@ int main(int argc, char ** argv) {
             all_tokens.push_back(next_token);
             last_token = next_token;
 
+            auto t_vsl_query_start = std::chrono::high_resolution_clock::now();
             // ── Factual store query ──────────────────────────────────────────
             // Use layer-0 decode K as a proxy Q vector to find matching factual
             // spans. Results populate current_step_factual_tokens/sequences and
@@ -3518,8 +3528,10 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                // ── Contrastive Category Anchor, Coherence Cap, & Entity-Subgraph Tagging ──────
+                t_vsl_query_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_vsl_query_start).count();
+                auto t_vsl_process_start = std::chrono::high_resolution_clock::now();
                 diffkv::process_and_tag_vsl_step(srl_state);
+                t_vsl_process_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_vsl_process_start).count();
             }
             // ────────────────────────────────────────────────────────────────
 
@@ -3540,7 +3552,11 @@ int main(int argc, char ** argv) {
                           << "ms (Metal Wait: " << metal_wait_ms << "ms) | Logits: " << logits_ms 
                           << "ms | KV Get: " << kv_get_ms 
                           << "ms | Ingest: " << ingest_ms 
-                          << "ms | Total: " << total_ms << "ms" << std::endl;
+                          << "ms (IngestDec: " << t_ingest_dec_ms
+                          << "ms, DenseAppend: " << t_dense_append_ms
+                          << "ms, VSLQuery: " << t_vsl_query_ms
+                          << "ms, VSLProcess: " << t_vsl_process_ms
+                          << "ms) | Total: " << total_ms << "ms" << std::endl;
             }
 
             int old_active_slot = active_slot;
@@ -3750,6 +3766,8 @@ int main(int argc, char ** argv) {
         ggml_backend_buffer_free(native_decode_buf);
         native_decode_buf = nullptr;
     }
+
+    diffkv::cleanup_metal_attention();
 
     std::cerr << "[DiffKV Native] Text generation completed successfully!" << std::endl;
     return 0;

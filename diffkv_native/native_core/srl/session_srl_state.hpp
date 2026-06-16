@@ -11,6 +11,7 @@
 
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -561,6 +562,13 @@ struct SessionSRLState {
 
     // --- Decode History & Rollback support ---
     std::unordered_map<int, SessionSRLStateHistoryEntry> step_history;
+    mutable std::map<std::vector<int32_t>, const FactEntry*> entries_by_tokens_map;
+    mutable std::vector<const FactEntry*> prime_entries;
+    mutable std::unordered_map<size_t, int32_t> cached_triple_hash_to_entity;
+    mutable std::unordered_map<int32_t, std::unordered_set<int32_t>> cached_prime_tokens_by_entity;
+    mutable std::unordered_map<int32_t, std::unordered_set<int32_t>> cached_property_tokens_by_entity;
+    mutable std::unordered_map<int32_t, std::vector<const FactEntry*>> entries_by_token_id;
+    mutable bool entries_map_built = false;
 
     void save_step_state(int seq_len) {
         SessionSRLStateHistoryEntry entry;

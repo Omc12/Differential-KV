@@ -148,7 +148,7 @@ CustomAttnUserData::CustomAttnUserData()
       rank(0), S_max(0), K(0), D(0), scale(0.0f), has_rope(false), rope_freq_base(0.0f), approximate_attn(false),
       active_k_dense(nullptr), active_v_dense(nullptr), active_positions_dense(nullptr),
       active_block_tokens(0), active_slot(0), ignore_c(false), current_pos(0),
-      srl_state(nullptr), W_proj(nullptr), desc_dim(0),
+      srl_state(nullptr), W_proj(nullptr), desc_dim(0), max_active_dense_tokens(16384),
       mtl_dense_k(nullptr), mtl_dense_v(nullptr), mtl_dense_pos(nullptr),
       mtl_slot_indices(nullptr), mtl_output_buf(nullptr), mtl_lse_buf(nullptr),
       mtl_q_buf(nullptr), mtl_u_pool(nullptr), mtl_u_scale(nullptr), mtl_vk_pool(nullptr), mtl_vv_pool(nullptr),
@@ -247,6 +247,7 @@ CustomAttnUserData::CustomAttnUserData(CustomAttnUserData&& other) noexcept {
     srl_state = other.srl_state;
     W_proj = other.W_proj;
     desc_dim = other.desc_dim;
+    max_active_dense_tokens = other.max_active_dense_tokens;
 
     mtl_dense_k = other.mtl_dense_k;
     mtl_dense_v = other.mtl_dense_v;
@@ -376,6 +377,7 @@ CustomAttnUserData& CustomAttnUserData::operator=(CustomAttnUserData&& other) no
         srl_state = other.srl_state;
         W_proj = other.W_proj;
         desc_dim = other.desc_dim;
+        max_active_dense_tokens = other.max_active_dense_tokens;
 
         mtl_dense_k = other.mtl_dense_k;
         mtl_dense_v = other.mtl_dense_v;
@@ -501,9 +503,9 @@ void execute_metal_attention(
         const int   F_kv        = n_kv_heads * D;
         const int   T_clamped   = T_dense;
         
-        size_t max_k_bytes   = 16384 * F_kv * sizeof(float);
-        size_t max_v_bytes   = 16384 * F_kv * sizeof(float);
-        size_t max_pos_bytes = 16384 * sizeof(int32_t);
+        size_t max_k_bytes   = data->max_active_dense_tokens * F_kv * sizeof(float);
+        size_t max_v_bytes   = data->max_active_dense_tokens * F_kv * sizeof(float);
+        size_t max_pos_bytes = data->max_active_dense_tokens * sizeof(int32_t);
 
         id<MTLBuffer> dense_k_buf   = nil;
         id<MTLBuffer> dense_v_buf   = nil;
@@ -797,6 +799,13 @@ void execute_metal_attention(
             memcpy(lse_out, lse_buf.contents, n_q_heads * sizeof(float));
         }
     }
+}
+
+void cleanup_metal_attention() {
+    g_dummy_rope_buf = nil;
+    g_pipeline = nil;
+    g_queue = nil;
+    g_device = nil;
 }
 
 double get_and_reset_accumulated_wait_ms() {

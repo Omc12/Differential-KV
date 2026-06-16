@@ -90,6 +90,7 @@ public:
     float avg_r = 1.0f;
     // RC3: entity_id (prime start_idx) → that entity's distinguishing token.
     std::unordered_map<int32_t, int32_t> entity_distinguishing;
+    std::unordered_map<int32_t, std::vector<int>> slot_to_entry_indices;
 
     FactualExactStore(const std::string& sess_id = "default") : session_id(sess_id), num_layers(0), F_test(0) {}
 
@@ -97,6 +98,7 @@ public:
         entries.clear();
         eagle_scores.clear();
         entity_distinguishing.clear();
+        slot_to_entry_indices.clear();
         num_layers = 0;
         F_test = 0;
         avg_r = 1.0f;

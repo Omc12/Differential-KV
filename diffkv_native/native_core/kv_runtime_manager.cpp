@@ -206,16 +206,11 @@ void KVRuntimeManager::ingest_prefill(
                 BlockState current_state = engines_[l]->get_state_table().get(block->pool_idx);
                 if (current_state != BlockState::Compressing) {
                     block->state = current_state;
+                    if (l == 0 && current_state == BlockState::CompressedResident) {
+                        pager_->register_block(block.get(), engines_);
+                    }
                 }
             }
-        }
-    }
-
-    // Register newly compressed blocks with the pager
-    auto & blocks = ingest_manager_->get_blocks(0);
-    for (auto & block : blocks) {
-        if (block->state == BlockState::CompressedResident) {
-            pager_->register_block(block.get(), engines_);
         }
     }
     
@@ -271,6 +266,9 @@ void KVRuntimeManager::ingest_decode(
                     block->state = current_state;
                     if (current_state == BlockState::CompressedResident) {
                         block->device_synced = false;
+                        if (l == 0) {
+                            pager_->register_block(block.get(), engines_);
+                        }
                     }
                 }
             }
@@ -279,14 +277,6 @@ void KVRuntimeManager::ingest_decode(
     
     // 3b. Native attn: push host→device for compressed-but-unsynced slots (main thread).
     sync_device_for_native();
-
-    // 4. Register any new compressed blocks
-    auto & blocks = ingest_manager_->get_blocks(0);
-    for (auto & block : blocks) {
-        if (block->state == BlockState::CompressedResident) {
-            pager_->register_block(block.get(), engines_);
-        }
-    }
     pager_->maybe_evict(engines_, srl_state);
 }
 
@@ -534,18 +524,13 @@ void KVRuntimeManager::wait_for_compressor() {
                 if (current_state != BlockState::Compressing) {
                     block->state = current_state;
                     if (current_state == BlockState::CompressedResident) {
-                        block->device_synced = false;
+                        block->device_synced = true;
+                        if (l == 0) {
+                            pager_->register_block(block.get(), engines_);
+                        }
                     }
                 }
             }
-        }
-    }
-
-    // Register newly compressed blocks with the pager
-    auto & blocks = ingest_manager_->get_blocks(0);
-    for (auto & block : blocks) {
-        if (block->state == BlockState::CompressedResident) {
-            pager_->register_block(block.get(), engines_);
         }
     }
 }
@@ -681,7 +666,7 @@ void KVRuntimeManager::sync_device_for_native() {
         for (int s = 0; s < ns; ++s) {
             if (active_slots[s]) {
                 StreamingKVBlock* block = slot_to_block[s];
-                if (block && (!block->device_synced || !engines_[l]->slot_device_has_data(s))) {
+                if (block && !block->device_synced) {
                     engines_[l]->upload_slot(s);
                     block->device_synced = true;
                 }

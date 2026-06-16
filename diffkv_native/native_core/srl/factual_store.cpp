@@ -734,6 +734,13 @@ void FactualExactStore::build(
             }
         }
     }
+
+    slot_to_entry_indices.clear();
+    for (size_t idx = 0; idx < entries.size(); ++idx) {
+        for (int32_t slot : entries[idx].slot_ids) {
+            slot_to_entry_indices[slot].push_back((int)idx);
+        }
+    }
 }
 
 static std::vector<FactEntry> merge_adjacent_entries(const std::vector<FactEntry>& entries, int num_layers, int F_test) {
@@ -860,18 +867,15 @@ std::vector<FactEntry> FactualExactStore::query(
 
     // 3. Base Layer: Candidate indexes matching active_slots
     std::unordered_set<int> candidate_indices;
+    std::vector<bool> entry_has_active_slot(entries.size(), false);
     if (active_slots) {
-        for (size_t idx = 0; idx < entries.size(); ++idx) {
-            const auto& entry = entries[idx];
-            bool has_slot = false;
-            for (int slot : entry.slot_ids) {
-                if (active_slots->count(slot)) {
-                    has_slot = true;
-                    break;
+        for (int32_t slot : *active_slots) {
+            auto it = slot_to_entry_indices.find(slot);
+            if (it != slot_to_entry_indices.end()) {
+                for (int entry_idx : it->second) {
+                    candidate_indices.insert(entry_idx);
+                    entry_has_active_slot[entry_idx] = true;
                 }
-            }
-            if (has_slot) {
-                candidate_indices.insert(idx);
             }
         }
     } else {
@@ -914,7 +918,7 @@ std::vector<FactEntry> FactualExactStore::query(
     }
 
     // 6. Merge candidates
-    std::vector<std::pair<FactEntry, float>> merged_results;
+    std::vector<std::pair<int, float>> merged_results;
     std::unordered_set<int> all_candidate_idxs = candidate_indices;
     for (const auto& pair : walk_candidates) {
         all_candidate_idxs.insert(pair.first);
@@ -929,15 +933,8 @@ std::vector<FactEntry> FactualExactStore::query(
 
         bool passes_main = (sim >= threshold);
         bool passes_relaxed = false;
-        if (active_slots) {
-            bool has_slot = false;
-            for (int slot : entry.slot_ids) {
-                if (active_slots->count(slot)) {
-                    has_slot = true;
-                    break;
-                }
-            }
-            if (has_slot && sim >= 0.15f) {
+        if (active_slots && entry_has_active_slot[idx]) {
+            if (sim >= 0.15f) {
                 passes_relaxed = true;
             }
         }
@@ -976,13 +973,13 @@ std::vector<FactEntry> FactualExactStore::query(
                 final_score = std::min(final_score * 1.5f, 1.0f);
             }
             entry.current_sim = final_score;
-            merged_results.push_back({entry, final_score});
+            merged_results.push_back({idx, final_score});
         }
     }
 
     // Fallback
     if (active_slots && merged_results.empty()) {
-        std::vector<std::pair<FactEntry, float>> fallback_matches;
+        std::vector<std::pair<int, float>> fallback_matches;
         for (int idx : candidate_indices) {
             const auto& entry = entries[idx];
             float sim = 0.0f;
@@ -991,15 +988,15 @@ std::vector<FactEntry> FactualExactStore::query(
             }
             if (sim >= 0.15f) {
                 entry.current_sim = sim;
-                fallback_matches.push_back({entry, sim});
+                fallback_matches.push_back({idx, sim});
             }
         }
         std::sort(fallback_matches.begin(), fallback_matches.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
         if (!fallback_matches.empty()) {
-            FactEntry fb_entry = fallback_matches[0].first;
-            fb_entry.current_sim = fallback_matches[0].second;
-            merged_results.push_back({fb_entry, fallback_matches[0].second});
+            int fb_idx = fallback_matches[0].first;
+            entries[fb_idx].current_sim = fallback_matches[0].second;
+            merged_results.push_back({fb_idx, fallback_matches[0].second});
         }
     }
 
@@ -1012,7 +1009,7 @@ std::vector<FactEntry> FactualExactStore::query(
     std::vector<FactEntry> pre_merge;
     pre_merge.reserve(merged_results.size());
     for (auto& mr : merged_results) {
-        FactEntry e = mr.first;
+        FactEntry e = entries[mr.first];
         e.current_sim = mr.second;
         pre_merge.push_back(std::move(e));
     }

@@ -688,10 +688,15 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     
     // Initialize session-specific lists if empty
+    int engage_threshold = 2048;
+    if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+        engage_threshold = std::stoi(env_et);
+    }
+    int max_active_dense_tokens = std::max(n_slots * 64, engage_threshold);
     if (session->active_k_dense.empty()) {
-        session->active_k_dense.assign(n_layers, AlignedFloatVector(16384 * F_test, 0.0f));
-        session->active_v_dense.assign(n_layers, AlignedFloatVector(16384 * F_test, 0.0f));
-        session->active_positions_dense.assign(16384, 0);
+        session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
+        session->active_v_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
+        session->active_positions_dense.assign(max_active_dense_tokens, 0);
     }
     if (session->seq_lens_by_layer.empty()) {
         session->seq_lens_by_layer.assign(n_layers, std::vector<int32_t>(n_slots, 0));
@@ -1141,6 +1146,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].srl_state = &session->srl_state;
         userdata[l].W_proj = W_proj_host.data();
         userdata[l].desc_dim = desc_dim;
+        userdata[l].max_active_dense_tokens = max_active_dense_tokens;
     }
     
     struct ggml_tensor * decode_logits = nullptr;
@@ -1270,6 +1276,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             get_helper_token_ids_cpp(*model_),
             true // use_salience_parser
         );
+        session->srl_state.entries_map_built = false;
         session->srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids_, [&](int32_t tid) {
             return model_->token_to_piece(tid);
         });
@@ -1491,9 +1498,15 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             !srl_state.dual_entity_mode &&
             !srl_state.current_step_factual_tokens.empty()) {
             const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(*model_);
+            std::vector<bool> allowed_mask_penalty(n_vocab, false);
+            for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                if (tok_id >= 0 && tok_id < n_vocab) allowed_mask_penalty[tok_id] = true;
+            }
+            for (int32_t tok_id : helper_ids_penalty) {
+                if (tok_id >= 0 && tok_id < n_vocab) allowed_mask_penalty[tok_id] = true;
+            }
             for (int i = 0; i < n_vocab; ++i) {
-                if (srl_state.current_step_factual_tokens.count(i) == 0 &&
-                    helper_ids_penalty.count(i) == 0) {
+                if (!allowed_mask_penalty[i]) {
                     output_logits[i] -= 3.5f;
                 }
             }
@@ -1601,8 +1614,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 session->srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
             int n_vocab = model_->get_config().n_vocab;
             float max_sim = session->srl_state.current_step_max_similarity;
+            std::vector<bool> allowed_mask(n_vocab, false);
+            for (int32_t tok_id : allowed) {
+                if (tok_id >= 0 && tok_id < n_vocab) allowed_mask[tok_id] = true;
+            }
             for (int i = 0; i < n_vocab; ++i) {
-                if (allowed.count(i) == 0) {
+                if (!allowed_mask[i]) {
                     if (max_sim >= 0.70f) {
                         output_logits[i] = -1e10f;   // hard: verbatim
                     } else {
