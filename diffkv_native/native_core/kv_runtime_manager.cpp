@@ -68,7 +68,7 @@ bool KVRuntimeManager::initialize(
         engines_[l] = std::make_unique<NativeBlockPool>();
         int layer_rank = get_layer_rank(l);
         int pool_rank = (layer_rank * 3 + 1) / 2; // ceiling of 1.5 * layer_rank
-        if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft)) {
+        if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft, micro_block_size_)) {
             std::cerr << "[KVRuntimeManager] Error: Failed to initialize KVEngine for layer " << l << std::endl;
             return false;
         }
@@ -563,7 +563,7 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
         if (block->state == BlockState::CompressedResident || block->state == BlockState::CPUResident) {
             auto & engine = engines_[0];
             int rank = engine->get_U()->ne[0];
-            int S_max = 64; // Block size
+            int S_max = micro_block_size_; // Block size
             
             std::vector<ggml_fp16_t> desc_f16(desc_dim);
             compute_descriptor(

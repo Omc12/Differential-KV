@@ -55,12 +55,13 @@ NativeBlockPool::~NativeBlockPool() {
     }
 }
 
-bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft) {
+bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft, int S_max) {
     n_slots_ = n_slots;
     rank_ = rank;
     head_dim_ = head_dim;
     kv_heads_ = kv_heads;
     desc_dim_ = desc_dim;
+    S_max_ = S_max;
 
     // Native ggml-metal attention path (gated). When enabled, we allocate + fill the
     // precomputed RoPE'd key tensors so the in-graph subgraph never has to rope/gather i32.
@@ -85,11 +86,9 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         return false;
     }
 
-    const int S_max = 64; // Block size
-
     // Create tensor descriptors in the pool context
-    U_           = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_I8,  rank, S_max, n_slots);
-    U_f16_       = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, rank, S_max, n_slots);  // native-ggml mirror
+    U_           = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_I8,  rank, S_max_, n_slots);
+    U_f16_       = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, rank, S_max_, n_slots);  // native-ggml mirror
     U_scale_     = ggml_new_tensor_1d(pool_ctx_, GGML_TYPE_F16, n_slots);
     
     // VK and VV shape: [head_dim, kv_heads, rank, n_slots]
@@ -105,7 +104,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     if (native_attn_) {
         VK_rot_      = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F32, head_dim, kv_heads, rank, n_slots);
         anchorK_rot_ = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F32, head_dim, kv_heads, n_slots);
-        valid_mask_  = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F16, S_max, n_slots);
+        valid_mask_  = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F16, S_max_, n_slots);
     }
     
     seq_lens_    = ggml_new_tensor_1d(pool_ctx_, GGML_TYPE_I32, n_slots);
@@ -298,13 +297,13 @@ void NativeBlockPool::upload_slot(int slot_id) {
                       << " VK_rot_=" << (void*)VK_rot_ << " has_rope_=" << has_rope_ << std::endl;
     }
     
-    ggml_backend_tensor_set(U_, host_U_.data() + slot_id * rank_ * 64, slot_id * U_->nb[2], rank_ * 64 * sizeof(int8_t));
+    ggml_backend_tensor_set(U_, host_U_.data() + slot_id * rank_ * S_max_, slot_id * U_->nb[2], rank_ * S_max_ * sizeof(int8_t));
     // f16 mirror of U (native ggml gather): cast this slot's int8 values to f16.
     {
-        const int8_t* src = host_U_.data() + slot_id * rank_ * 64;
-        ggml_fp16_t* dst = host_U_f16_.data() + slot_id * rank_ * 64;
-        for (int i = 0; i < rank_ * 64; ++i) dst[i] = ggml_fp32_to_fp16((float)src[i]);
-        ggml_backend_tensor_set(U_f16_, dst, slot_id * U_f16_->nb[2], rank_ * 64 * sizeof(ggml_fp16_t));
+        const int8_t* src = host_U_.data() + slot_id * rank_ * S_max_;
+        ggml_fp16_t* dst = host_U_f16_.data() + slot_id * rank_ * S_max_;
+        for (int i = 0; i < rank_ * S_max_; ++i) dst[i] = ggml_fp32_to_fp16((float)src[i]);
+        ggml_backend_tensor_set(U_f16_, dst, slot_id * U_f16_->nb[2], rank_ * S_max_ * sizeof(ggml_fp16_t));
     }
     ggml_backend_tensor_set(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
@@ -353,7 +352,7 @@ void NativeBlockPool::upload_slot(int slot_id) {
         }
     }
     if (native_attn_ && valid_mask_) {
-        const int S_max = 64;
+        const int S_max = S_max_;
         const int slen = host_seq_lens_[slot_id];
         ggml_fp16_t* m = host_valid_mask_.data() + (size_t)slot_id * S_max;
         for (int t = 0; t < S_max; ++t) m[t] = ggml_fp32_to_fp16(t < slen ? 0.0f : -INFINITY);
@@ -366,7 +365,7 @@ void NativeBlockPool::upload_slot(int slot_id) {
 void NativeBlockPool::download_slot(int slot_id) {
     if (slot_id < 0 || slot_id >= n_slots_) return;
     
-    ggml_backend_tensor_get(U_, host_U_.data() + slot_id * rank_ * 64, slot_id * U_->nb[2], rank_ * 64 * sizeof(int8_t));
+    ggml_backend_tensor_get(U_, host_U_.data() + slot_id * rank_ * S_max_, slot_id * U_->nb[2], rank_ * S_max_ * sizeof(int8_t));
     ggml_backend_tensor_get(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
     ggml_backend_tensor_get(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_get(VV_, host_VV_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VV_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));

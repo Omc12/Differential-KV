@@ -476,16 +476,39 @@ DiffKVBatchEngine::DiffKVBatchEngine(
     runtime_manager_(runtime_manager),
     session_manager_(session_manager) {
     
-    // Initialize stop word patterns for the inverted index to filter out common tokens
+    // N3.3 fix: Align stopword list to Python's _STOP_WORDS_COMPRESS
+    // (ACTIVE_RUNTIME/native_core/streaming_sparse_ingest.py:61-87).
+    // Previously: ~40-word list + first-200 token ID blanket. The blanket is C++-only
+    // and the short list omits many common words, polluting important_vocab/IDF scores.
     std::vector<std::string> stop_words = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been",
-        "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "shall", "can", "need",
-        "to", "of", "in", "on", "at", "by", "for", "with", "as",
-        "and", "or", "but", "if", "then", "that", "this", "it",
-        "he", "she", "they", "we", "you", "i", "not", "no",
+        "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you",
+        "you're", "you've", "you'll", "you'd", "your", "yours", "yourself",
+        "yourselves", "he", "him", "his", "himself", "she", "she's", "her",
+        "hers", "herself", "it", "it's", "its", "itself", "they", "them",
+        "their", "theirs", "themselves", "a", "an", "the", "and", "but",
+        "or", "because", "as", "until", "while", "of", "at", "by", "for",
+        "with", "about", "against", "between", "into", "through", "during",
+        "before", "after", "above", "below", "to", "from", "up", "down",
+        "in", "out", "on", "off", "over", "under", "again", "further",
+        "then", "once", "here", "there", "when", "where", "why", "how",
+        "all", "any", "both", "each", "few", "more", "most", "other",
+        "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+        "than", "too", "very", "s", "t", "can", "will", "just", "now",
+        "should", "should've", "would", "could", "may", "might", "must",
+        "shall", "am", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "having", "do", "does", "did", "doing",
+        "get", "got", "make", "made", "go", "went", "take", "took",
+        "see", "saw", "say", "said", "use", "used", "find", "found",
+        "question", "answer", "text", "context", "information", "prompt",
+        "query", "assistant", "system", "user", "file", "document", "page",
+        "line", "passage", "following", "please", "write", "read",
+        "describe", "explain", "summarize", "extract", "retrieve", "give",
+        "tell", "show", "list", "what", "who", "whom", "which", "detail",
+        "details", "brief", "exact", "exactly", "correct", "correctly",
+        "true", "false", "yes", "no",
+        // Special/punctuation tokens
         ",", ".", ":", ";", "?", "!", "(", ")", "'", "\"", "-", "\n",
-        "system", "user", "assistant", "im_start", "im_end"
+        "im_start", "im_end"
     };
     for (const auto & word : stop_words) {
         auto t = model_->tokenize(word, false);
@@ -493,9 +516,7 @@ DiffKVBatchEngine::DiffKVBatchEngine(
             stop_token_ids_.insert(tok);
         }
     }
-    for (int i = 0; i < 200; ++i) {
-        stop_token_ids_.insert(i);
-    }
+    // NOTE: No first-200 token ID blanket — Python has no such blanket.
     runtime_manager_->get_ingest_manager().set_stop_token_ids(&stop_token_ids_);
 }
 
@@ -615,7 +636,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     int head_dim = model_->get_config().n_embd / model_->get_config().n_head;
     int kv_heads = model_->get_config().n_head_kv;
     int desc_dim = 64;
-    int n_slots = model_->get_config().n_ctx / 64;
+    int micro_block_size = 16;
+    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
+        micro_block_size = std::stoi(env_mbs);
+    }
+
+    int n_slots = model_->get_config().n_ctx / micro_block_size;
     bool overridden = false;
 
     const char* env_tokens = std::getenv("max_ctx_tk");
@@ -624,7 +650,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     if (env_tokens) {
         int max_tokens = std::stoi(env_tokens);
-        n_slots = (max_tokens + 63) / 64;
+        n_slots = (max_tokens + micro_block_size - 1) / micro_block_size;
         overridden = true;
     } else if (const char* env_slots = std::getenv("DIFFKV_MAX_CONTEXT_SLOTS")) {
         n_slots = std::stoi(env_slots);
@@ -635,18 +661,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
             std::string preset(env_preset);
             if (preset == "low") {
-                n_slots = 64; // 4096 tokens
+                n_slots = 4096 / micro_block_size; // 4096 tokens
             } else if (preset == "mid") {
-                n_slots = 128; // 8192 tokens
+                n_slots = 8192 / micro_block_size; // 8192 tokens
             } else if (preset == "high") {
-                n_slots = 256; // 16384 tokens
+                n_slots = 16384 / micro_block_size; // 16384 tokens
             }
         }
-    }
-    
-    int micro_block_size = 64;
-    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
-        micro_block_size = std::stoi(env_mbs);
     }
     
     // Hyperparameters for SRL candidate selection
@@ -692,7 +713,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }
-    int max_active_dense_tokens = std::max(n_slots * 64, engage_threshold);
+    int max_active_dense_tokens = std::max(n_slots * micro_block_size, engage_threshold);
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
         session->active_v_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
@@ -776,8 +797,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     
     int L = prompt_tokens.size();
-    if (L > n_slots * 64) {
-        L = n_slots * 64;
+    if (L > n_slots * micro_block_size) {
+        L = n_slots * micro_block_size;
         prompt_tokens.resize(L);
     }
     
@@ -820,10 +841,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         runtime_manager_->reset();
         
         // Determine adaptive micro-block size matching Python's logic
-        int default_mbs = 64;
-        if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
-            default_mbs = std::stoi(env_mbs);
-        }
+        int default_mbs = micro_block_size;
         int adaptive_mbs = default_mbs;
         if (L > 0) {
             int raw_target = 16;
@@ -897,7 +915,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                                 float sum_k = 0.0f;
                                 float sum_v = 0.0f;
                                 for (int r = 0; r < rank; ++r) {
-                                    float u_val = (float)engine->get_host_U()[slot_id * 64 * rank + s * rank + r];
+                                    float u_val = (float)engine->get_host_U()[slot_id * engine->get_S_max() * rank + s * rank + r];
                                     float vk_val = ggml_fp16_to_fp32(engine->get_host_VK()[slot_id * rank * F_test + r * F_test + f]);
                                     float vv_val = ggml_fp16_to_fp32(engine->get_host_VV()[slot_id * rank * F_test + r * F_test + f]);
                                     sum_k += (u_val * scale_u) * vk_val;
@@ -1134,8 +1152,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].slot_indices = nullptr;
         userdata[l].n_q_heads = model_->get_config().n_head;
         userdata[l].n_kv_heads = model_->get_config().n_head_kv;
-        userdata[l].rank = 32;
-        userdata[l].S_max = 64;
+        userdata[l].rank = kv_engines[l]->get_rank();
+        userdata[l].S_max = session->micro_block_size;
         userdata[l].K = 0;
         userdata[l].D = head_dim;
         userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
@@ -1551,45 +1569,17 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
 
         if (penalty_val != 1.0f) {
-            thread_local std::vector<int8_t> alnum_cache;
-            if (alnum_cache.empty()) {
-                alnum_cache.assign(n_vocab, -1);
-            }
-            auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
-                if (tok_id < 0 || tok_id >= n_vocab) return false;
-                if (alnum_cache[tok_id] != -1) {
-                    return alnum_cache[tok_id] == 1;
+            // Combine prompt and generated tokens, then take the last penalty_window tokens
+            int total_tokens = (int)prompt_tokens.size() + (int)req->generated_tokens.size();
+            int start_idx = std::max(0, total_tokens - penalty_window);
+            for (int i = start_idx; i < total_tokens; ++i) {
+                int32_t tok;
+                if (i < (int)prompt_tokens.size()) {
+                    tok = prompt_tokens[i];
+                } else {
+                    tok = req->generated_tokens[i - prompt_tokens.size()];
                 }
-                std::string piece = model_->token_to_piece(tok_id);
-                bool has_alnum = false;
-                for (char c : piece) {
-                    if (std::isalnum(static_cast<unsigned char>(c))) {
-                        has_alnum = true;
-                        break;
-                    }
-                }
-                alnum_cache[tok_id] = has_alnum ? 1 : 0;
-                return has_alnum;
-            };
-
-            // 1. Add generated tokens (last penalty_window)
-            int gen_start = std::max(0, (int)req->generated_tokens.size() - penalty_window);
-            for (size_t i = gen_start; i < req->generated_tokens.size(); ++i) {
-                int32_t tok = req->generated_tokens[i];
-                if (is_alphanumeric_token(tok)) {
-                    penalty_tokens.push_back(tok);
-                }
-            }
-
-            // 2. Add prompt tokens (last 512) if prompt penalty is active
-            if (!loop_detected && prompt_penalty_active) {
-                int prompt_start = std::max(0, (int)prompt_tokens.size() - 512);
-                for (size_t i = prompt_start; i < prompt_tokens.size(); ++i) {
-                    int32_t tok = prompt_tokens[i];
-                    if (is_alphanumeric_token(tok)) {
-                        penalty_tokens.push_back(tok);
-                    }
-                }
+                penalty_tokens.push_back(tok);
             }
         }
 

@@ -439,3 +439,130 @@ One-token phase shift; does not affect correctness.
 3. N2.4 / N2.5 / N2.6: minor parity / cleanup.
 4. Decide on H (RC8) and L (dense bypass) — still divergent from the MLX reference.
 5. A remains the ceiling; sparse decode won't fully match dense on long-form coherence.
+
+---
+---
+
+# ROUND 3 — verification of N2.* fixes + full-pipeline walk (2026-06-17)
+
+Build passes (`cmake --build build` → 100%). The user's actual run path is the **main.cpp
+binary** launched by `serving/cli.py` via subprocess (`batch_engine.cpp` is the separate HTTP
+gateway, which received the same fixes in parallel). I traced a prompt through every stage
+(tokenize → pool sizing → prefill/RoPE → compression → SRL/factual build → routing → sparse
+attention → factual query → VSL/logit-bias → sampling → stop) and diffed each against the MLX
+reference. Below: N2.* verification, then NEW issues.
+
+## ✅ Round-2 items VERIFIED FIXED
+| Item | Verdict |
+|---|---|
+| **N2.1** pool sizing | **Fixed everywhere.** `n_slots = n_ctx / micro_block_size` (main.cpp:1360), presets `4096/8192/16384 ÷ mbs` (:1384-1390), capacity guard `L > n_slots*micro_block_size` (:1650), `userdata.S_max = micro_block_size` (:2271), U-stride `slot_id*micro_block_size*rank` (:1823). Pool `S_max_` now a param (native_block_pool.cpp:86-108, hpp:22), threaded through `kv_runtime_manager.cpp:71`, `lowrank.cpp:416` (`params.pool_block_size`), `async_compressor`, `streaming_sparse_ingest.cpp:620`. |
+| **N2.2** S_max RAM waste | **Fixed** (same change — per-slot tensors now sized to `micro_block_size`, not 64). |
+| **N2.3** rep penalty prompt | **Fixed** — now iterates `all_tokens` (prompt+generated) at main.cpp:3196-3201. |
+| **N2.5** `if(true)` smell | **Fixed** — dead guard removed (main.cpp:3129). |
+| (bonus) | `batch_engine.cpp` got the parallel sizing fix **and** another latent hardcode fixed: `userdata.rank = 32` → `kv_engines[l]->get_rank()`, `S_max = 64` → `session->micro_block_size` (:1134-1135). |
+
+Also verified **faithful (not bugs):** sampling/top-p (`sample_logits` main.cpp:1055 keeps the
+token that crosses `top_p`, == MLX:1196-1199); rep-penalty default 1.15 + loop boost
+`max(.,1.3)` (== MLX); prefill chunk 512 (== MLX `PREFILL_CHUNK`); generation EOS is EOG/eos
+only (main.cpp:3252, not the lexical stop-word set); factual salience ±3-token window
+(== factual_store.py:283-294); adaptive block-size cap logic (== streaming_sparse_ingest.py:558).
+
+## ⏸ Still open from earlier rounds
+- **A** architectural sparse-vs-dense ceiling — unchanged.
+- **H** RC8 foreign-entity penalty (main.cpp:3083) — still present, no MLX counterpart.
+- **L** global dense bypass <2048 (streaming_sparse_ingest.cpp:480) — unchanged.
+- **N2.4** `C_active` dedup vs Python per-block count — still present (see N3.4, minor).
+
+---
+
+## 🆕 N3.1 — TWO conflicting factual-store queries per decode step (quality **and** speed)
+
+This is the biggest new finding. There are **two full factual-store queries every step**, in
+two places, with **different parameters**, and they fight over the same SRL state:
+
+| | **Callback** (diffkv_attention.cpp:525-577) | **Decode loop** (main.cpp:3363-3509) |
+|---|---|---|
+| When | layer-0 **forward pass** (every step) | **after sampling**, "for the NEXT step" |
+| Query proxy | `Q_unrot` — the **QUERY** vector | `decode_k[0]` — the **KEY** |
+| threshold | **0.30** | **0.50** |
+| active_slots | **None** (`nullptr`) | **`slot_filter`** (non-null) |
+| entity bias | none | `qbias` |
+| neighbor injection | **none** (direct entries only) | 1-hop ≥0.45 + 2-hop ≥0.65 + triples |
+| writes | clears+sets `current_step_factual_{tokens,sequences,max_sim}` | clears+sets those **plus** `current_step_sequence_{entity_ids,is_prime,prefixes}` + `current_entity_id` |
+
+Problems:
+1. **The "fix F" (0.30 / active_slots=None) only applies to the callback.** The decode-loop
+   query still uses the old HF-path values (0.50 / `slot_filter`). So the MLX-alignment is
+   half-applied.
+2. **Wrong query proxy in the callback.** MLX uses the layer-0 **KEY** as the proxy
+   (`k_torch = keys[:, :, 0, :]`, mlx:868) — the decode-loop path matches that (`decode_k[0]`),
+   but the callback uses the **query** (`Q_unrot`). So the path that actually drives the VSL
+   (see #3) is matching on the wrong vector.
+3. **Overwrite + parallel-array desync.** By execution order the callback runs in each step's
+   forward (before that step's logit post-processing), so it is the **last writer** of
+   `current_step_factual_{tokens,sequences,max_sim}` → the VSL mask and the +7/−3.5/transition
+   logit biases all read the **callback's** set (0.30 / None / query-proxy / **no neighbor
+   injection**). Meanwhile `current_entity_id` and the parallel
+   `current_step_sequence_{entity_ids,is_prime,prefixes}` arrays retain the **decode-loop's**
+   values from the previous step. The callback does **not** update those parallel arrays, so
+   `current_step_factual_sequences[i]` (callback) and `entity_ids[i]` (decode-loop, stale,
+   different length) are **out of sync** → entity-filtered boost (main.cpp:3054-3063), RC8
+   (:3083), and VSL entry gating (`get_allowed_tokens_vsl_cpp`) index a mismatched
+   `entity_ids[i]`, falling back to `-1` (entity-agnostic) for out-of-range sequences →
+   wrong/loose entity gating.
+4. **The decode-loop's neighbor injection + triples + qbias are effectively discarded** for
+   VSL/logit purposes (overwritten by the callback next forward), so the work is wasted.
+5. **Redundant cost (speed):** the callback was added as the F29 "query once per step + cache"
+   optimization, but the **old decode-loop query was never removed** → **two** full factual
+   queries per step (descriptor projection + graph walk + merge each time) instead of one. On a
+   large store this is a measurable decode-throughput tax.
+
+MLX does this in **one** place (the attention forward), with the key proxy, threshold 0.3,
+active_slots=None, and the neighbor injection all together (mlx:857-902). The C++ should
+collapse to a single query and decide one set of parameters. Net effect today: the VSL is
+driven by an un-injected, query-proxy, 0.30/None match with desynced entity metadata.
+
+## 🆕 N3.2 — Neighbor-injection thresholds diverge from MLX
+
+Where the C++ does inject (decode-loop, main.cpp:3492/3502): **1-hop ≥ 0.45, 2-hop ≥ 0.65**.
+MLX (mlx:889/895): **1-hop ≥ 0.35, 2-hop ≥ 0.50**. The C++ bars are higher → fewer neighbor
+sequences surfaced → narrower VSL allowed-set (more masking). (Compounded by N3.1, which then
+discards even this for VSL.) Align to 0.35 / 0.50.
+
+## 🆕 N3.3 — Lexical/inverted-index stopword list diverges from Python
+
+`main.cpp:1321-1339` builds the stop set from a ~60-word hand list **plus the first 200 token
+IDs**. Python uses `_STOP_WORDS_COMPRESS` (streaming_sparse_ingest.py:61) — a ~150-word
+NLTK-style set (contractions, `about/against/between/few/more/most/own/same/…`) and does **not**
+blanket-add the first 200 IDs. Consequences (quality): (a) real stopwords the C++ omits get
+indexed into `important_vocab` and `occurrences` → they pollute rare-/high-IDF lexical routing
+**and** the newly-added important-vocab anchor-overlap filter in `process_and_tag_vsl_step`
+(factual_alignment.hpp:247-262); (b) the "first 200 IDs" blanket is a C++-only heuristic that
+may stop-list legitimate early-vocab tokens. This is the long-standing "stopword list
+duplicated in 3 places / diverging" tech-debt, now confirmed to affect routing + VSL.
+
+## 🆕 N3.4 — `C_active` parent dedup (minor parity; was N2.4)
+
+`query_router.hpp:218-243` dedups parent landmarks; `query_router.py:180-191` counts per-block
+(duplicates included) → Python's cluster boost is larger → routes to slightly more blocks.
+Low-severity magnitude divergence in the boost.
+
+## 🆕 N3.5 — Capacity guard under-counts by the anchor token (negligible)
+
+`main.cpp:1650` guards `L > n_slots * micro_block_size`, but a full block holds
+`micro_block_size + 1` tokens (1 anchor + `micro_block_size` deltas; see
+streaming_sparse_ingest.cpp:406). True capacity is `n_slots*(micro_block_size+1)`, so the guard
+truncates ~`n_slots` tokens early. Harmless (conservative); fix for exactness only.
+
+---
+
+## Updated triage (Round 3)
+1. **N3.1 is the priority** — collapse the two factual queries into one (keep the key proxy +
+   single parameter set + neighbor injection in one place, like MLX), fixing the overwrite,
+   the entity-array desync, the half-applied threshold/active_slots, and the 2× query cost in
+   one move.
+2. N3.2: 1-hop/2-hop thresholds → 0.35 / 0.50.
+3. N3.3: unify the stopword list with Python's `_STOP_WORDS_COMPRESS`; reconsider the first-200
+   blanket.
+4. N3.4 / N3.5: minor parity / exactness.
+5. A / H / L unchanged from prior rounds.

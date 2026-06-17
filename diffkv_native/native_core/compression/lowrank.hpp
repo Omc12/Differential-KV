@@ -14,6 +14,7 @@ struct LowRankCompressParams {
     int feat_dim;    // F
     int rank;        // R
     int pool_rank = 0; // The stride/capacity of the pool for this slot
+    int pool_block_size = 64; // S_max of the pool slot
     int head_dim;    // D
     int anchor_idx;  // Sequence position of block start
     

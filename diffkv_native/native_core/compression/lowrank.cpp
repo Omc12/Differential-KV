@@ -413,7 +413,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
 
     float scale_u = std::max(max_abs / 127.0f, 1e-5f);
-    int S_max = 64; 
+    int S_max = params.pool_block_size; 
     int pool_rank = params.pool_rank > 0 ? params.pool_rank : R;
     std::memset(params.out_u_ptr, 0, S_max * pool_rank * sizeof(int8_t));
     for (int s = 0; s < S_deltas; ++s) {

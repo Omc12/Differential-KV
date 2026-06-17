@@ -1318,15 +1318,42 @@ int main(int argc, char ** argv) {
 
     std::unordered_set<int32_t> stop_token_ids;
     {
+        // N3.3 fix: Align stopword list to Python's _STOP_WORDS_COMPRESS
+        // (ACTIVE_RUNTIME/native_core/streaming_sparse_ingest.py:61-87).
+        // Previously: ~40-word list + first-200 token ID blanket. Problems:
+        //   (a) Omitted stopwords get indexed into important_vocab/occurrences,
+        //       polluting rare/high-IDF lexical routing and VSL anchor overlap.
+        //   (b) First-200 ID blanket is C++-only — stops legitimate early-vocab tokens.
+        // Now: full ~150-word NLTK-style set, no ID blanket.
         std::vector<std::string> stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "be", "been",
-            "have", "has", "had", "do", "does", "did", "will", "would",
-            "could", "should", "may", "might", "shall", "can", "need",
-            "to", "of", "in", "on", "at", "by", "for", "with", "as",
-            "and", "or", "but", "if", "then", "that", "this", "it",
-            "he", "she", "they", "we", "you", "i", "not", "no",
+            "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you",
+            "you're", "you've", "you'll", "you'd", "your", "yours", "yourself",
+            "yourselves", "he", "him", "his", "himself", "she", "she's", "her",
+            "hers", "herself", "it", "it's", "its", "itself", "they", "them",
+            "their", "theirs", "themselves", "a", "an", "the", "and", "but",
+            "or", "because", "as", "until", "while", "of", "at", "by", "for",
+            "with", "about", "against", "between", "into", "through", "during",
+            "before", "after", "above", "below", "to", "from", "up", "down",
+            "in", "out", "on", "off", "over", "under", "again", "further",
+            "then", "once", "here", "there", "when", "where", "why", "how",
+            "all", "any", "both", "each", "few", "more", "most", "other",
+            "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+            "than", "too", "very", "s", "t", "can", "will", "just", "now",
+            "should", "should've", "would", "could", "may", "might", "must",
+            "shall", "am", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "having", "do", "does", "did", "doing",
+            "get", "got", "make", "made", "go", "went", "take", "took",
+            "see", "saw", "say", "said", "use", "used", "find", "found",
+            "question", "answer", "text", "context", "information", "prompt",
+            "query", "assistant", "system", "user", "file", "document", "page",
+            "line", "passage", "following", "please", "write", "read",
+            "describe", "explain", "summarize", "extract", "retrieve", "give",
+            "tell", "show", "list", "what", "who", "whom", "which", "detail",
+            "details", "brief", "exact", "exactly", "correct", "correctly",
+            "true", "false", "yes", "no",
+            // Special/punctuation tokens
             ",", ".", ":", ";", "?", "!", "(", ")", "'", "\"", "-", "\n",
-            "system", "user", "assistant", "im_start", "im_end"
+            "im_start", "im_end"
         };
         for (const auto & word : stop_words) {
             auto t = model.tokenize(word, false);
@@ -1334,9 +1361,7 @@ int main(int argc, char ** argv) {
                 stop_token_ids.insert(tok);
             }
         }
-        for (int i = 0; i < 200; ++i) {
-            stop_token_ids.insert(i);
-        }
+        // NOTE: No first-200 token ID blanket — Python has no such blanket.
     }
 
     diffkv::SessionSRLState srl_state;
@@ -1349,8 +1374,15 @@ int main(int argc, char ** argv) {
     // Backend is already initialized at the start of main
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
 
+    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
+    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
+    int micro_block_size = 16;
+    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
+        micro_block_size = std::stoi(env_mbs);
+    }
+
     // Initialize NativeBlockPool block pool for all layers
-    int n_slots = model.get_config().n_ctx / 64;
+    int n_slots = model.get_config().n_ctx / micro_block_size;
     bool overridden = false;
 
     const char* env_tokens = std::getenv("max_ctx_tk");
@@ -1359,7 +1391,7 @@ int main(int argc, char ** argv) {
     }
     if (env_tokens) {
         int max_tokens = std::stoi(env_tokens);
-        n_slots = (max_tokens + 63) / 64;
+        n_slots = (max_tokens + micro_block_size - 1) / micro_block_size;
         std::cerr << "[DiffKV Native] Overriding context limit from max_ctx_tk: " 
                   << max_tokens << " tokens (" << n_slots << " slots)" << std::endl;
         overridden = true;
@@ -1374,14 +1406,14 @@ int main(int argc, char ** argv) {
         if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
             std::string preset(env_preset);
             if (preset == "low") {
-                n_slots = 64; // 4096 tokens
-                std::cerr << "[DiffKV Native] Preset 'low' detected: capping context size to 4096 tokens (64 slots)" << std::endl;
+                n_slots = 4096 / micro_block_size; // 4096 tokens
+                std::cerr << "[DiffKV Native] Preset 'low' detected: capping context size to 4096 tokens (" << n_slots << " slots)" << std::endl;
             } else if (preset == "mid") {
-                n_slots = 128; // 8192 tokens
-                std::cerr << "[DiffKV Native] Preset 'mid' detected: capping context size to 8192 tokens (128 slots)" << std::endl;
+                n_slots = 8192 / micro_block_size; // 8192 tokens
+                std::cerr << "[DiffKV Native] Preset 'mid' detected: capping context size to 8192 tokens (" << n_slots << " slots)" << std::endl;
             } else if (preset == "high") {
-                n_slots = 256; // 16384 tokens
-                std::cerr << "[DiffKV Native] Preset 'high' detected: capping context size to 16384 tokens (256 slots)" << std::endl;
+                n_slots = 16384 / micro_block_size; // 16384 tokens
+                std::cerr << "[DiffKV Native] Preset 'high' detected: capping context size to 16384 tokens (" << n_slots << " slots)" << std::endl;
             } else {
                 std::cerr << "[DiffKV Native] Using default model context length: " 
                           << model.get_config().n_ctx << " tokens (" << n_slots << " slots)" << std::endl;
@@ -1404,12 +1436,6 @@ int main(int argc, char ** argv) {
     int n_vocab = model.get_config().n_vocab;
     int n_layers = model.get_config().n_layer;
 
-    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
-    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
-    int micro_block_size = 16;
-    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
-        micro_block_size = std::stoi(env_mbs);
-    }
     float gpu_budget_gb = 2.0f;
     if (const char* env_budget = std::getenv("DIFFKV_GPU_BUDGET_GB")) {
         gpu_budget_gb = std::stof(env_budget);
@@ -1646,11 +1672,15 @@ int main(int argc, char ** argv) {
         }
 
         int L = prompt_tokens.size();
-        if (L > n_slots * 64) {
+        // N3.5 fix: Each slot stores 1 anchor token + micro_block_size delta tokens
+        // = (micro_block_size + 1) tokens total (streaming_sparse_ingest.cpp:406).
+        // The old guard used micro_block_size, truncating ~n_slots tokens early.
+        int true_capacity = n_slots * (micro_block_size + 1);
+        if (L > true_capacity) {
             std::cerr << "[DiffKV Native] Warning: Prompt tokens length " << L 
-                      << " exceeds maximum capacity " << n_slots * 64 
+                      << " exceeds maximum capacity " << true_capacity
                       << ". Truncating prompt." << std::endl;
-            L = n_slots * 64;
+            L = true_capacity;
             prompt_tokens.resize(L);
         }
 
@@ -1819,7 +1849,7 @@ int main(int argc, char ** argv) {
                         if (non_anchor_len > 0) {
                             // Pre-convert U to float and scale it
                             std::vector<float> U_float(non_anchor_len * rank);
-                            const int8_t* u_src = engine->get_host_U() + (slot_id * 64 * rank);
+                            const int8_t* u_src = engine->get_host_U() + (slot_id * micro_block_size * rank);
                             for (int i = 0; i < non_anchor_len * rank; ++i) {
                                 U_float[i] = (float)u_src[i] * scale_u;
                             }
@@ -2267,7 +2297,7 @@ int main(int argc, char ** argv) {
             userdata[l].n_q_heads = model.get_config().n_head;
             userdata[l].n_kv_heads = model.get_config().n_head_kv;
             userdata[l].rank = kv_engines[l]->get_rank();
-            userdata[l].S_max = 64;
+            userdata[l].S_max = micro_block_size;
             userdata[l].K = 0;
             userdata[l].D = head_dim;
             userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
@@ -2906,7 +2936,7 @@ int main(int argc, char ** argv) {
                 std::vector<float> natv((size_t)nq*D); ggml_backend_tensor_get(g_dbg_attn0, natv.data(), 0, natv.size()*sizeof(float));
                 std::vector<float> outS((size_t)nq*D,0.0f), lseS(nq,-1e30f);
                 diffkv::execute_cpu_attention(qh.data(), sl.data(), outS.data(), lseS.data(), kv_engines[cmpL].get(),
-                                              nq, nkv, rank, 64, K, D, scale, true, freq, true);
+                                              nq, nkv, rank, micro_block_size, K, D, scale, true, freq, true);
                 // FULL ref = sparse ⊕ dense(active_k_dense[0] + current token) via 3-way LSE combine.
                 int F=nkv*D, Td=total_dense_tokens[cmpL];
                 // Match the real callback: ignore_c=true → DO NOT attend the current token here
@@ -3128,26 +3158,24 @@ int main(int argc, char ** argv) {
             // to match mlx_diffkv_wrapper.py:1300-1313 which has no such guard.
             // Bug 🅘 fix.
             if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
-                if (true) {  // unconditional — removed helper-word gate to match MLX reference
-                    std::unordered_set<int32_t> transition_candidates;
-                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
-                        int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                        if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
-                            continue; // skip cross-entity transitions
-                        }
-                        const auto& seq = srl_state.current_step_factual_sequences[i];
-                        if (seq.size() > 1) {
-                            for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
-                                if (seq[idx] == last_token) {
-                                    transition_candidates.insert(seq[idx + 1]);
-                                }
+                std::unordered_set<int32_t> transition_candidates;
+                for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                    int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                    if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
+                        continue; // skip cross-entity transitions
+                    }
+                    const auto& seq = srl_state.current_step_factual_sequences[i];
+                    if (seq.size() > 1) {
+                        for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
+                            if (seq[idx] == last_token) {
+                                transition_candidates.insert(seq[idx + 1]);
                             }
                         }
                     }
-                    for (int32_t tok_id : transition_candidates) {
-                        if (tok_id >= 0 && tok_id < n_vocab) {
-                            output_logits[tok_id] += 10.0f;
-                        }
+                }
+                for (int32_t tok_id : transition_candidates) {
+                    if (tok_id >= 0 && tok_id < n_vocab) {
+                        output_logits[tok_id] += 10.0f;
                     }
                 }
             }
@@ -3196,9 +3224,9 @@ int main(int argc, char ** argv) {
             int rep_window    = loop_detected ? 256 : 64;
 
             std::unordered_set<int32_t> unique_penalized;
-            int gen_start = std::max(0, (int)generated_tokens.size() - rep_window);
-            for (size_t i = gen_start; i < generated_tokens.size(); ++i) {
-                int32_t tok = generated_tokens[i];
+            int combined_start = std::max(0, (int)all_tokens.size() - rep_window);
+            for (size_t i = combined_start; i < all_tokens.size(); ++i) {
+                int32_t tok = all_tokens[i];
                 if (tok >= 0 && tok < n_vocab) unique_penalized.insert(tok);
             }
             if (last_token >= 0 && last_token < n_vocab) unique_penalized.insert(last_token);
@@ -3441,14 +3469,18 @@ int main(int argc, char ** argv) {
                 }
                 const std::unordered_set<int32_t>* qbias_ptr = qbias.empty() ? nullptr : &qbias;
 
+                // N3.1 fix: Use 0.30 threshold and nullptr active_slots to match the MLX
+                // reference (mlx_diffkv_wrapper.py:874-875). This is now the SOLE factual
+                // store query per decode step (the callback no longer re-queries).
+                // The slot_filter and qbias_ptr are kept for entity-relative ranking only.
                 auto fact_hits = srl_state.factual_store.query(
                     q_for_factual.data(),
                     kv_heads,
                     head_dim,
                     W_proj_host.data(),
                     desc_dim,
-                    0.50f,
-                    slot_filter,
+                    0.30f,
+                    nullptr,      // active_slots=None (MLX ref); slot_filter removed
                     qbias_ptr
                 );
 
@@ -3458,6 +3490,12 @@ int main(int argc, char ** argv) {
                 srl_state.current_step_sequence_entity_ids.clear();
                 srl_state.current_step_sequence_is_prime.clear();
                 srl_state.current_step_sequence_prefixes.clear();
+
+                // N3.1: Store fact_hits in step_cached_entries so the NEXT step's
+                // attention callback can use the K/V data for exact-attention blending
+                // (it reads srl->step_cached_entries, which must hold FactEntry objects
+                // with per-layer K/V arrays, not just token IDs).
+                srl_state.step_cached_entries = fact_hits;
 
                 // Helper lambda to add a sequence if not already present
                 auto add_seq = [&](const std::vector<int32_t>& seq) {
@@ -3487,10 +3525,12 @@ int main(int argc, char ** argv) {
                         }
                     }
                     // ── 1-hop neighbor injection ────────────────────────────────
+                    // N3.2 fix: thresholds aligned to MLX reference (mlx:889/895):
+                    //   1-hop >= 0.35 (was 0.45), 2-hop >= 0.50 (was 0.65)
                     for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
                         int nb_idx = hit.neighbors[ni];
                         float nb_w  = hit.weights[ni];
-                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {
+                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.45→0.35 per MLX
                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                             add_seq(nb_e.tokens);
                             if (nb_e.is_prime) {
@@ -3500,7 +3540,7 @@ int main(int argc, char ** argv) {
                             for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
                                 int nb2_idx = nb_e.neighbors[ni2];
                                 float nb2_w  = nb_e.weights[ni2];
-                                if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {
+                                if (nb2_w >= 0.50f && nb2_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.65→0.50 per MLX
                                     const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
                                     add_seq(nb2_e.tokens);
                                 }
@@ -3547,7 +3587,7 @@ int main(int argc, char ** argv) {
                                     for (size_t ni = 0; ni < fe.neighbors.size(); ++ni) {
                                         int nb_idx = fe.neighbors[ni];
                                         float nb_w  = (ni < fe.weights.size()) ? fe.weights[ni] : 0.0f;
-                                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {
+                                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.45→0.35 per MLX
                                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                                             if (!nb_e.tokens.empty()) {
                                                 bool alr = false;

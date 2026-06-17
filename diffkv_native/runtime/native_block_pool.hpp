@@ -19,9 +19,10 @@ public:
     NativeBlockPool();
     ~NativeBlockPool();
 
-    bool initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft);
+    bool initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft, int S_max = 64);
 
     int get_rank() const { return rank_; }
+    int get_S_max() const { return S_max_; }
 
     // Getters for GGML tensors
     struct ggml_tensor * get_U() { return U_; }
@@ -108,6 +109,7 @@ private:
     int head_dim_ = 0;
     int kv_heads_ = 0;
     int desc_dim_ = 0;
+    int S_max_ = 64;
 
     struct ggml_context * pool_ctx_ = nullptr;
     struct ggml_backend_buffer * pool_buffer_ = nullptr;

@@ -486,101 +486,21 @@ void custom_attention_op_callback(
     }
 
     // ── Factual Exact Store Attention ──
-    // PERF: srl hoisted out of the factual block so the per-step cached entries can be
-    // REFERENCED (not re-copied per layer) by the out_facts loop below.
+    // N3.1 fix: The factual store is queried ONCE per decode step by the decode loop
+    // in main.cpp (after sampling, using the layer-0 key as proxy, threshold=0.30,
+    // active_slots=None, with 1-hop/2-hop neighbor injection and process_and_tag_vsl_step).
+    // The callback MUST NOT re-query here — doing so would:
+    //   1. Overwrite current_step_factual_{tokens,sequences,max_similarity} written by the
+    //      decode loop, discarding richer neighbor-injected + entity-tagged state.
+    //   2. Leave current_step_sequence_{entity_ids,is_prime,prefixes} from the decode loop
+    //      desynced vs current_step_factual_sequences from the callback (different lengths).
+    //   3. Add a 2nd full factual query cost per decode step (descriptor projection + graph walk).
+    // The callback's only job here is to READ step_cached_entries (populated by the decode
+    // loop at the end of the PREVIOUS step) for K/V exact-attention blending.
     SessionSRLState* srl = (data->srl_state != nullptr) ? static_cast<SessionSRLState*>(data->srl_state) : nullptr;
-    if (srl != nullptr && data->W_proj != nullptr) {
-        std::unordered_set<int32_t> active_slots;
-        if (K > 0 && slot_indices && slot_indices->data) {
-            const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
-            for (int k = 0; k < K; ++k) {
-                if (slots_ptr[k] >= 0) active_slots.insert(slots_ptr[k]);
-            }
-        }
-        // Align Query-Key RoPE rotation states: unrotate Q prior to descriptor matching
-        std::vector<float> Q_unrot(n_q_heads * D);
-        const float* Q_ptr = (const float*)Q->data;
-        if (has_rope) {
-            int half_d = D / 2;
-            for (int h = 0; h < n_q_heads; ++h) {
-                for (int d = 0; d < half_d; ++d) {
-                    float theta_val = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
-                    float angle = data->current_pos * theta_val;
-                    float cos_a = std::cos(angle);
-                    float sin_a = std::sin(angle);
-                    float q_rot_d = Q_ptr[h * D + d];
-                    float q_rot_partner = Q_ptr[h * D + d + half_d];
-                    Q_unrot[h * D + d] = q_rot_d * cos_a + q_rot_partner * sin_a;
-                    Q_unrot[h * D + d + half_d] = -q_rot_d * sin_a + q_rot_partner * cos_a;
-                }
-            }
-        } else {
-            std::memcpy(Q_unrot.data(), Q_ptr, n_q_heads * D * sizeof(float));
-        }
 
-        // PERF: query the factual store ONCE per decode step (layer 0) and cache it;
-        // layers 1..N-1 reuse srl->step_cached_entries. The query is layer-independent
-        // (layer-0 decode-K is the proxy) and returns deep K/V copies, so running it
-        // per layer was ~24x redundant work — a major decode-throughput cost.
-        if (data->layer_idx == 0) {
-            srl->current_step_factual_tokens.clear();
-            srl->current_step_factual_sequences.clear();
-            srl->current_step_max_similarity = 0.0f;
-
-            // Query Anchor Blending (layer-0 Q space only)
-            std::vector<float> q_for_factual(n_q_heads * D);
-            if (srl->factual_anchor_q.empty()) {
-                srl->factual_anchor_q = Q_unrot;
-                q_for_factual = Q_unrot;
-            } else {
-                for (int qi = 0; qi < n_q_heads * D; ++qi) {
-                    q_for_factual[qi] = 0.20f * Q_unrot[qi] + 0.80f * srl->factual_anchor_q[qi];
-                }
-            }
-
-            // Bug 🅕 fix: align to the MLX Mac reference (mlx_diffkv_wrapper.py:874-875):
-            //   threshold=0.3,  active_slots=None
-            // The previous value (0.50, active_slots) matched diffkv_attention.py (HF/Triton path)
-            // — the WRONG reference. Passing active_slots filters out slots whose straddle
-            // boundaries weren't routed, causing factual misses on long prompts; the higher
-            // threshold further shrinks the result set. Both changes documented as F27/F28 fix.
-            const std::unordered_set<int32_t>* aslots_ptr = nullptr;  // always nullptr (MLX ref)
-            srl->step_cached_entries = srl->factual_store.query(
-                q_for_factual.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.30f, aslots_ptr);
-            auto& me = srl->step_cached_entries;
-            // F26: drop TRUE chunk fragments (same orig_span_start AND token-prefix).
-            if (me.size() > 1) {
-                std::vector<bool> drop(me.size(), false);
-                for (size_t a = 0; a < me.size(); ++a) {
-                    for (size_t b = 0; b < me.size(); ++b) {
-                        if (a == b || drop[b]) continue;
-                        const auto& ta = me[a].tokens; const auto& tb = me[b].tokens;
-                        if (ta.size() > tb.size()) continue;
-                        if (ta.size() == tb.size() && a < b) continue;
-                        bool same_origin = me[a].orig_span_start >= 0 &&
-                                           me[a].orig_span_start == me[b].orig_span_start;
-                        if (same_origin && std::equal(ta.begin(), ta.end(), tb.begin())) { drop[a] = true; break; }
-                    }
-                }
-                std::vector<FactEntry> kept;
-                for (size_t i = 0; i < me.size(); ++i) if (!drop[i]) kept.push_back(std::move(me[i]));
-                me.swap(kept);
-            }
-            for (const auto& entry : me) {
-                srl->current_step_factual_tokens.insert(entry.tokens.begin(), entry.tokens.end());
-                bool exists = false;
-                for (const auto& seq : srl->current_step_factual_sequences)
-                    if (seq == entry.tokens) { exists = true; break; }
-                if (!exists) srl->current_step_factual_sequences.push_back(entry.tokens);
-                if (entry.current_sim > srl->current_step_max_similarity)
-                    srl->current_step_max_similarity = entry.current_sim;
-            }
-        } else {
-            (void)active_slots;
-        }
-    }
-
-    // Reference the per-step cached factual entries (filled at layer 0); no per-layer copy.
+    // Reference the per-step cached factual entries (populated by the decode loop at
+    // end of the previous step); reused across all layers without re-querying.
     static const std::vector<FactEntry> kEmptyEntries;
     const std::vector<FactEntry>& matching_entries =
         (srl != nullptr) ? srl->step_cached_entries : kEmptyEntries;

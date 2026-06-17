@@ -608,6 +608,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.feat_dim = F_test;
     job.rank = svd_rank;
     job.pool_rank = pool_rank;
+    job.pool_block_size = micro_block_size_;
     job.head_dim = head_dim;
     job.anchor_idx = block->anchor_idx;
     job.raw_k_ptr = block->svd_k.data();
@@ -616,7 +617,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.stop_token_ids = stop_token_ids_;
     
     // Outputs in block pool host mirrors (CUDA compatible)
-    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * 64 * pool_rank;
+    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * micro_block_size_ * pool_rank;
     job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
     job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * pool_rank * F_test;
     job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * pool_rank * F_test;

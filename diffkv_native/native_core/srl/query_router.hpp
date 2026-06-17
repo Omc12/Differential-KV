@@ -213,18 +213,19 @@ inline int adaptive_k(
     int k_scaled = static_cast<int>(k_raw * srl_state.k_multiplier);
 
     // ── C_active cluster boost (matches query_router.py:176-194) ──
-    // C_active = number of parent landmark blocks whose descriptor similarity
-    // to q_desc is >= max(0.30, 0.85 * S_max).
+    // C_active = number of parent landmark blocks (with duplicates, per Python)
+    // whose descriptor similarity to q_desc is >= max(0.30, 0.85 * S_max).
+    // N3.4 fix: Python iterates parent_landmarks WITHOUT dedup (a popular parent is
+    // counted once per child block), making C_active larger → bigger boost → more blocks.
+    // Previously we deduped with seen_parents, undershooting Python's boost magnitude.
     int C_active = 1;
     {
         const ChunkGraph& cg = srl_state.chunk_graph;
         if (!cg.parent_landmarks.empty()) {
             float S_max = 0.0f;
-            std::unordered_set<int32_t> seen_parents;
             std::vector<float> parent_scores_vec;
             for (int32_t pslot : cg.parent_landmarks) {
-                if (pslot < 0 || seen_parents.count(pslot)) continue;
-                seen_parents.insert(pslot);
+                if (pslot < 0) continue;  // skip -1 sentinel
                 int row = srl_state.semantic_index.slot_to_idx(pslot);
                 if (row < 0) continue;
                 const float* desc = srl_state.semantic_index.desc_matrix.data() + (size_t)row * DESC_DIM;

@@ -99,6 +99,7 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     params.feat_dim = job.feat_dim;
     params.rank = job.rank;
     params.pool_rank = job.pool_rank;
+    params.pool_block_size = job.pool_block_size;
     params.head_dim = job.head_dim;
     params.anchor_idx = job.anchor_idx;
     params.raw_k_ptr = job.raw_k_ptr;
