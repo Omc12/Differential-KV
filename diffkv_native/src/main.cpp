@@ -763,7 +763,7 @@ struct ggml_cgraph * build_decode_graph(
                     ctx, q_rope, k_rope_n, v, dkr_flat, native_dense_v[l], native_dense_mask, native_maxd,
                     selected_slots, native_dup_tri, native_half, userdata[l].kv_engine,
                     config.n_head, config.n_head_kv, head_dim,
-                    userdata[l].kv_engine->get_rank(), 64, srl_k_keep,
+                    userdata[l].kv_engine->get_rank(), userdata[l].kv_engine->get_S_max(), srl_k_keep,
                     1.0f / std::sqrt((float)head_dim),
                     userdata[l].ignore_c,
                     nullptr
@@ -1284,6 +1284,13 @@ int main(int argc, char ** argv) {
 
     model.print_info();
     
+    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
+    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
+    int micro_block_size = 16;
+    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
+        micro_block_size = std::stoi(env_mbs);
+    }
+
     // ── SRL configuration (with defaults) ───────────────────────────────────
     int srl_k_semantic = 32;
     int srl_k_lexical = 8;
@@ -1312,6 +1319,40 @@ int main(int argc, char ** argv) {
         } else if (arg == "--srl-k-keep" && i + 1 < argc) {
             srl_k_keep = std::stoi(argv[++i]);
         }
+    }
+
+    // ── N4.2 fix: scale srl_k_keep with micro_block_size ─────────────────────
+    // Item J changed micro_block_size from 64→16, so each block now covers 4× fewer
+    // tokens. The old default srl_k_keep=16 used to cover 16×64=1024 tokens; after
+    // item J it covers only 16×16=256 tokens (≈1% of a 24k prompt) — causing the
+    // model to emit EOS within 4 tokens because it sees almost no context.
+    //
+    // Fix: raise srl_k_keep to at least (1024 / micro_block_size) so the attended
+    // token budget is always >= 1024 tokens regardless of mbs.  With mbs=16 that
+    // gives srl_k_keep=64 (4× more blocks, same token coverage as before item J).
+    // Users can still override upward via DIFFKV_SRL_K_KEEP / --srl-k-keep.
+    {
+        int srl_k_keep_floor = std::max(16, 1024 / micro_block_size);
+        if (srl_k_keep < srl_k_keep_floor) {
+            std::cerr << "[DiffKV] N4.2: srl_k_keep raised from " << srl_k_keep
+                      << " → " << srl_k_keep_floor
+                      << " to preserve ≥1024 token coverage (mbs=" << micro_block_size << ")\n";
+            srl_k_keep = srl_k_keep_floor;
+        }
+        // anchor_screen needs a candidate pool larger than srl_k_keep.
+        // Raise srl_k_semantic so that sem_slots + host_slots >= 3 × srl_k_keep.
+        int sem_floor = srl_k_keep * 3;
+        if (srl_k_semantic < sem_floor) {
+            std::cerr << "[DiffKV] N4.2: srl_k_semantic raised from " << srl_k_semantic
+                      << " → " << sem_floor << " (= 3 × srl_k_keep)\n";
+            srl_k_semantic = sem_floor;
+        }
+        // Scale host channel budgets proportionally: each channel gets at least
+        // srl_k_keep / 4 slots (so the 4 host channels together match srl_k_keep).
+        int host_floor = std::max(8, srl_k_keep / 4);
+        if (srl_k_recency < host_floor) { srl_k_recency = host_floor; }
+        if (srl_k_lexical < host_floor) { srl_k_lexical = host_floor; }
+        if (srl_k_graph   < host_floor) { srl_k_graph   = host_floor; }
     }
 
     int srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
@@ -1374,12 +1415,7 @@ int main(int argc, char ** argv) {
     // Backend is already initialized at the start of main
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
 
-    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
-    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
-    int micro_block_size = 16;
-    if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
-        micro_block_size = std::stoi(env_mbs);
-    }
+    // micro_block_size is defined and parsed above, before the SRL configuration block
 
     // Initialize NativeBlockPool block pool for all layers
     int n_slots = model.get_config().n_ctx / micro_block_size;

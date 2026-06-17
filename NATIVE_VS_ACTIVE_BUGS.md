@@ -566,3 +566,89 @@ truncates ~`n_slots` tokens early. Harmless (conservative); fix for exactness on
    blanket.
 4. N3.4 / N3.5: minor parity / exactness.
 5. A / H / L unchanged from prior rounds.
+
+---
+---
+
+# ROUND 4 — why the long prompt STILL fails (2026-06-17)
+
+Symptom after the latest fixes: `Pasted 95310 chars` → `AI > regiment against` →
+`Generated: ~4 tokens` then stop (1.9 tok/s, TTFT 8.0s). N3.1 is verified fixed (single
+factual query feeding `step_cached_entries`; callback only reads it). But the model now emits
+**EOS after ~4 tokens** — it stops at the normal EOS check (main.cpp:3325), i.e. the *base
+distribution itself* favors ending. Tracing the decode-attention path end-to-end revealed why,
+and it is **not** in any subsystem fixed so far.
+
+## 🔴 N4.1 — `route_query` / `adaptive_k` (all of item B) is DEAD CODE — never called
+
+`grep -rn "route_query(\|adaptive_k(\|route_query_fixed_k("` over all of `diffkv_native`
+(excluding the defining header) returns **zero callers**. The entire SRL pipeline in
+`query_router.hpp` — `adaptive_k` (165), `route_query` (270), `route_query_fixed_k` (928) — is
+**defined but never invoked** by the runtime.
+
+⇒ **Every fix made to `adaptive_k` across Rounds 1–3 (the `0.15·N_total` k_min floor, the
+`C_active` boost, the `int()`/normalization parity — item B, N2.4, N3.4) has had ZERO effect on
+the running binary.** That work was spent on dead code. The binary's real routing is a separate
+function, `KVRuntimeManager::route_decode_slots` (kv_runtime_manager.cpp:283), called once per
+`retrieval_interval` at main.cpp:2778.
+
+## 🔴 N4.2 — Decode attention attends only `srl_k_keep = 16` blocks → ~256 tokens of a 24k prompt (~1%)
+
+The real decode slot-selection pipeline (build_decode_graph, layer 0, main.cpp:704-731):
+1. `route_decode_slots` (host) → `physical_candidates` → `host_slots` (fixed-budget set).
+2. `sem_slots = semantic_search_topk(q_desc, …, srl_k_semantic=32)`.
+3. `candidate_slots = concat(sem_slots, host_slots)`.
+4. **`selected_slots = anchor_screen(Q, anchors_K, candidate_slots, srl_k_keep)`** → top **16**.
+
+And the attention K is hard-capped: `current_k = min(srl_k_keep, active_slot)` (main.cpp:2837),
+`userdata[l].K = current_k` (:2847). So **the sparse decode attends at most 16 blocks per
+step.** With the item-J change to `micro_block_size = 16`, that is **16 × 16 = 256 tokens** out
+of ~24 000 — **≈ 1 % of the context.**
+
+This is almost certainly the direct cause of the current symptom: the model can "see" only ~256
+tokens of compressed context (plus the tiny dense tail of the prompt that hadn't compressed
+yet), so after the prefill's first reasonable token it has no coherent continuation and emits
+EOS within a few tokens.
+
+**Interaction with item J (regression):** before item J, `micro_block_size = 64`, so 16 blocks
+covered `16 × 64 = 1024` tokens. After item J (`16`), the same 16 blocks cover only `256`
+tokens — **item J quartered the decode context coverage** because `srl_k_keep` was not raised to
+compensate. So the well-intentioned mbs fix made long-prompt coverage 4× worse on this path.
+
+**vs the reference:** MLX decode is **fully dense** (attends all 24k). The Python sparse/triton
+path attends the *entire routed set* (`route_query` K, up to `k_max = 200` blocks — and that
+routing actually runs there). The C++ attends **16**. So C++ looks at ~12× fewer blocks than
+even Python's sparse path, and each block is now 4× smaller.
+
+## 🔴 N4.3 — The real router (`route_decode_slots`) uses FIXED budgets, no context scaling
+
+`route_decode_slots` (kv_runtime_manager.cpp:283-402) builds candidates from fixed per-channel
+budgets: sink + recency (`srl_k_recency = 8`) + lexical (`srl_k_lexical = 8`) + 2-hop graph
+(`srl_k_graph = 8`), with `srl_k_semantic = 32` added graph-side. None of these scale with
+context length (unlike the dead `adaptive_k`, which was the whole point of item B). For a 24k
+prompt the candidate pool is ~`srl_k_host = 1+8+8+32+8 = 57`, then `anchor_screen` cuts to 16.
+So no matter how long the prompt, the model sees a fixed, tiny slice.
+
+## 🟢 N4.4 — Immediate levers (all env-overridable) + the real fix
+
+Quick experiments (no rebuild): `srl_k_keep` (`DIFFKV_SRL_K_KEEP`), `srl_k_semantic`
+(`DIFFKV_SRL_K_SEM`), `srl_k_lexical/graph/recency` are all env vars (main.cpp:1295-1299).
+Bumping `DIFFKV_SRL_K_KEEP` to e.g. 64–128 and the candidate budgets accordingly should
+immediately widen attended context and likely fixes the early-stop on long prompts (at a
+decode-speed cost). The principled fixes:
+1. **Scale `srl_k_keep` to compensate for `micro_block_size`** (≈ `1024 / mbs` to preserve the
+   old token budget, or higher to approach the Python sparse path's block count).
+2. **Either wire the real `adaptive_k` into `route_decode_slots`** (so K grows with context and
+   the item-B work actually runs) **or delete the dead `query_router.hpp` routing** so future
+   audits don't keep "fixing" code that never executes.
+3. Re-evaluate item J: if `srl_k_keep` can't be raised enough for speed reasons, a larger
+   `micro_block_size` trades anchor-fidelity for far better per-block coverage.
+
+## Updated triage (Round 4)
+1. **N4.2 + N4.1 are the headline:** the binary attends ~1% of a long context via a 16-block cap,
+   and the adaptive-K routing meant to widen that is dead code. This explains why every prior
+   round's fixes didn't change the long-prompt behavior. Fix `srl_k_keep` scaling first
+   (fastest path to a visible improvement), then reconcile the two routing implementations.
+2. N4.3: give `route_decode_slots` context-aware budgets (or revive `adaptive_k`).
+3. Prior open items (A architectural ceiling, H RC8, L dense bypass) still stand, but they are
+   secondary to N4.2.

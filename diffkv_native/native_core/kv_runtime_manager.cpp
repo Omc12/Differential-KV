@@ -305,8 +305,13 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     const auto& ord = srl_state.ordered_slot_ids;
     int n_ord = static_cast<int>(ord.size());
 
-    // 1. Recency window: latest srl_k_recency slots from ordered slot list
-    int take_r = std::min(srl_k_recency, n_ord);
+    // N4.3 fix: scale channel budgets with context length like Python's adaptive_k.
+    int eff_recency = std::max(srl_k_recency, std::min(n_ord / 10, srl_k_recency * 4));
+    int eff_lexical = std::max(srl_k_lexical, std::min(n_ord / 8,  srl_k_lexical * 4));
+    int eff_graph   = std::max(srl_k_graph,   std::min(n_ord / 8,  srl_k_graph * 4));
+
+    // 1. Recency window: latest eff_recency slots from ordered slot list
+    int take_r = std::min(eff_recency, n_ord);
     for (int i = n_ord - take_r; i < n_ord; ++i) {
         int32_t slot = ord[i];
         if (slot >= 0 && slot < active_slot) {
@@ -329,7 +334,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
 
     auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, 0.999f);
     std::vector<int32_t> lexical_slots;
-    for (int i = 0; i < std::min(srl_k_lexical, (int)lex_scored.size()); ++i) {
+    for (int i = 0; i < std::min(eff_lexical, (int)lex_scored.size()); ++i) {
         int32_t slot = lex_scored[i].first;
         if (slot >= 0 && slot < active_slot) {
             lexical_slots.push_back(slot);
@@ -378,7 +383,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             }
         }
 
-        int take_g = std::min(srl_k_graph, (int)gscore_slots.size());
+        int take_g = std::min(eff_graph, (int)gscore_slots.size());
         if (take_g > 0) {
             std::partial_sort(gscore_slots.begin(), gscore_slots.begin() + take_g, gscore_slots.end(),
                               [](const auto& a, const auto& b) { return a.first > b.first; });
