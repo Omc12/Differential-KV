@@ -91,6 +91,15 @@ public:
     const float* get_host_desc_matrix() const { return host_desc_matrix_.data(); }
     float* get_host_desc_matrix() { return host_desc_matrix_.data(); }
 
+    // Precomputed RoPE-rotated key buffers (fp32); filled by upload_slot when
+    // native_attn_ is enabled. Returns nullptr when disabled or not yet allocated.
+    // Layout: host_VK_rot_     [slot * rank * kv_heads * D + r * kv_heads * D + kv * D + d]
+    //         host_anchorK_rot_[slot * kv_heads * D + kv * D + d]
+    const float* get_host_VK_rot() const      { return host_VK_rot_.empty()      ? nullptr : host_VK_rot_.data(); }
+    float*       get_host_VK_rot()            { return host_VK_rot_.empty()      ? nullptr : host_VK_rot_.data(); }
+    const float* get_host_anchorK_rot() const { return host_anchorK_rot_.empty() ? nullptr : host_anchorK_rot_.data(); }
+    float*       get_host_anchorK_rot()       { return host_anchorK_rot_.empty() ? nullptr : host_anchorK_rot_.data(); }
+
     // F9: per-block sparse residuals (exact corrections for the highest-error tokens
     // the low-rank SVD failed to capture — e.g. digits). MAX_RESIDUAL tokens per K/V.
     static constexpr int MAX_RESIDUAL = 8;

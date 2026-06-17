@@ -608,16 +608,20 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.feat_dim = F_test;
     job.rank = svd_rank;
     job.pool_rank = pool_rank;
-    job.pool_block_size = micro_block_size_;
+    // Bug 10 fix (write-side): pool_block_size and out_u_ptr must use the pool's fixed
+    // S_max, not micro_block_size_ which may have been updated by set_micro_block_size().
+    // Using micro_block_size_ here would write U data at a stride that doesn't match the
+    // pool tensor layout, corrupting every subsequent U read from execute_cpu_attention.
+    const int pool_s_max = engines[layer_idx]->get_S_max();
+    job.pool_block_size = pool_s_max;
+    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * pool_s_max * pool_rank;
     job.head_dim = head_dim;
     job.anchor_idx = block->anchor_idx;
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
-    
     // Outputs in block pool host mirrors (CUDA compatible)
-    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * micro_block_size_ * pool_rank;
     job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
     job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * pool_rank * F_test;
     job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * pool_rank * F_test;

@@ -1153,7 +1153,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].n_q_heads = model_->get_config().n_head;
         userdata[l].n_kv_heads = model_->get_config().n_head_kv;
         userdata[l].rank = kv_engines[l]->get_rank();
-        userdata[l].S_max = session->micro_block_size;
+        // Bug 10 fix: use pool's fixed S_max (get_S_max()) not session->micro_block_size.
+        // session->micro_block_size can be changed by set_micro_block_size(adaptive_mbs)
+        // without reinitialising the pool. Using the stale session value gives a wrong
+        // U matrix stride and indexes into wrong memory for every compressed block lookup.
+        userdata[l].S_max = kv_engines[l]->get_S_max();
         userdata[l].K = 0;
         userdata[l].D = head_dim;
         userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
@@ -1186,8 +1190,10 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (decode_concat_v) ggml_set_output(decode_concat_v);
     
     ggml_backend_sched_reset(sched_);
-    if (decode_concat_k) ggml_backend_sched_set_tensor_backend(sched_, decode_concat_k, backend_);
-    if (decode_concat_v) ggml_backend_sched_set_tensor_backend(sched_, decode_concat_v, backend_);
+    // Note: decode_concat_k/v are no longer forced to the Metal backend here.
+    // Their raw K/V data is captured inside custom_attention_op_callback via
+    // userdata[l].captured_kv, which avoids a second blocking Metal→CPU sync
+    // for each layer after the graph runs (Bug 3 fix).
     if (!ggml_backend_sched_alloc_graph(sched_, decode_graph)) {
         ggml_free(decode_ctx);
         req->set_error("Failed to allocate memory for decode graph");
@@ -1405,16 +1411,17 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         std::vector<float> output_logits(n_vocab);
         ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
 
-        std::vector<float> concat_k_host(n_layers * F_test);
-        std::vector<float> concat_v_host(n_layers * F_test);
-        ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
-        ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
-
-        std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
-        std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
+        // Bug 3 fix: use K/V captured inside the callback (userdata[l].captured_kv)
+        // instead of a separate blocking ggml_backend_tensor_get per layer.
+        // captured_kv layout: [K_flat (F_test floats) || V_flat (F_test floats)],
+        // written by custom_attention_op_callback before the Metal/CPU attention branch.
+        std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test, 0.0f));
+        std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test, 0.0f));
         for (int l = 0; l < n_layers; ++l) {
-            std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
-            std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
+            if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
+                std::memcpy(decode_k[l].data(), userdata[l].captured_kv.data(),          F_test * sizeof(float));
+                std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
+            }
         }
         
         runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens, &session->srl_state);
@@ -1431,8 +1438,16 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 k_avg[d] /= kv_heads;
             }
             session->srl_state.recent_decode_keys.push_back(k_avg);
-            if (session->srl_state.recent_decode_keys.size() > 512) {
-                session->srl_state.recent_decode_keys.erase(session->srl_state.recent_decode_keys.begin());
+            // Bug 4 fix: batch-slice the window instead of erase(begin()) every step.
+            // erase(begin()) on a std::vector is O(N) — it shifts all 512 elements.
+            // By trimming only when size exceeds 576 (512+64), we do one O(N) slice
+            // roughly every 64 steps, making the amortised cost O(1) per step.
+            if (session->srl_state.recent_decode_keys.size() > 576) {
+                auto& rdk = session->srl_state.recent_decode_keys;
+                rdk = std::vector<std::vector<float>>(
+                    std::make_move_iterator(rdk.end() - 512),
+                    std::make_move_iterator(rdk.end())
+                );
             }
 
             int32_t current_slot_id = 0;

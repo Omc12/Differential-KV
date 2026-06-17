@@ -39,6 +39,13 @@ struct CustomAttnUserData {
     int desc_dim = 0;
     int max_active_dense_tokens = 16384;
 
+    // Bug 3 fix: K/V captured inside the GGML callback from tensor c (kv_concat).
+    // Layout: [K_flat (n_kv_heads*D) || V_flat (n_kv_heads*D)] in fp32.
+    // Written before the Metal/CPU branch so it is always populated.
+    // Consumed by batch_engine.cpp after graph compute to avoid a separate
+    // blocking ggml_backend_tensor_get per layer per decode step.
+    std::vector<float> captured_kv;
+
     // Cached Metal buffers to avoid per-token allocations
     void * mtl_dense_k = nullptr;
     void * mtl_dense_v = nullptr;

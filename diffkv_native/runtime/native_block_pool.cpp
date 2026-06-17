@@ -8,41 +8,43 @@
 namespace diffkv {
 
 namespace {
-// Rotate a single head_dim vector by NEOX RoPE at absolute position `pos`.
-// Matches the kernel's K/anchor rotation exactly (diffkv_attention.cpp lines 84-91 / 152-159):
-//   out[d] = raw[d]*cos(angle) + rot_contrib*sin(angle)
-// with partner = d±half_d, rot_contrib = (d<half) ? -raw[partner] : +raw[partner],
-//      idx = d % half_d, theta = freq_base^(-2*idx/D), angle = pos*theta.
+// Rotate a single head_dim vector by NeoX RoPE at absolute position `pos`.
+// Processes (d, d+half_d) pairs together: one std::pow + one cos/sin per pair
+// instead of two std::pow + two cos/sin per pair in the old element-wise loop.
+// Rotation formula (matches runtime attention and the Metal kernel):
+//   out[d]        = x * cos - y * sin
+//   out[d+half_d] = y * cos + x * sin
+// where x = in[d], y = in[d+half_d], angle = pos / freq_base^(2d/D).
 inline void rope_rotate_vec(const ggml_fp16_t* in, ggml_fp16_t* out, int D, float pos, float freq_base) {
     const int half_d = D / 2;
-    for (int d = 0; d < D; ++d) {
-        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-        float raw  = ggml_fp16_to_fp32(in[d]);
-        float rawp = ggml_fp16_to_fp32(in[partner]);
-        float rot_contrib = (d < half_d) ? -rawp : rawp;
-        int idx = (d < half_d) ? d : (d - half_d);
-        float theta = 1.0f / std::pow(freq_base, (2.0f * idx) / D);
+    for (int d = 0; d < half_d; ++d) {
+        float theta = 1.0f / std::pow(freq_base, (2.0f * d) / D);
         float angle = pos * theta;
-        out[d] = ggml_fp32_to_fp16(raw * std::cos(angle) + rot_contrib * std::sin(angle));
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        float x = ggml_fp16_to_fp32(in[d]);
+        float y = ggml_fp16_to_fp32(in[d + half_d]);
+        out[d]          = ggml_fp32_to_fp16(x * cos_a - y * sin_a);
+        out[d + half_d] = ggml_fp32_to_fp16(y * cos_a + x * sin_a);
     }
 }
-// fp32-output overload: the native pool stores RoPE'd K as fp32 so the precomputed rotation
-// matches the CPU reference's runtime fp32 rotation (storing fp16 loses precision at large
-// anchor positions ~500+ and cascades into token flips on degenerate repetitive prompts).
+// fp32-output overload: host_anchorK_rot_ / host_VK_rot_ are fp32 to avoid precision
+// loss at large positions (~500+) which cascades into token flips on repetitive prompts.
 inline void rope_rotate_vec(const ggml_fp16_t* in, float* out, int D, float pos, float freq_base) {
     const int half_d = D / 2;
-    for (int d = 0; d < D; ++d) {
-        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-        float raw  = ggml_fp16_to_fp32(in[d]);
-        float rawp = ggml_fp16_to_fp32(in[partner]);
-        float rot_contrib = (d < half_d) ? -rawp : rawp;
-        int idx = (d < half_d) ? d : (d - half_d);
-        float theta = 1.0f / std::pow(freq_base, (2.0f * idx) / D);
+    for (int d = 0; d < half_d; ++d) {
+        float theta = 1.0f / std::pow(freq_base, (2.0f * d) / D);
         float angle = pos * theta;
-        out[d] = raw * std::cos(angle) + rot_contrib * std::sin(angle);
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        float x = ggml_fp16_to_fp32(in[d]);
+        float y = ggml_fp16_to_fp32(in[d + half_d]);
+        out[d]          = x * cos_a - y * sin_a;
+        out[d + half_d] = y * cos_a + x * sin_a;
     }
 }
-} // namespace
+} // anonymous namespace
+
 
 NativeBlockPool::NativeBlockPool() {}
 
