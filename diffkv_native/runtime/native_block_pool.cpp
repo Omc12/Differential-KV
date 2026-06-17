@@ -148,7 +148,8 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     host_scales_.resize(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
     host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
     host_desc_matrix_.resize(ggml_nelements(desc_matrix_), 0.0f);
-    if (VK_rot_)      host_VK_rot_.resize(ggml_nelements(VK_rot_), 0.0f);
+    if (VK_rot_)      { /* host_VK_rot_ intentionally not allocated: CPU path uses on-the-fly vk_local
+                           (cache-friendly). GPU tensor VK_rot_ is populated per upload_slot for Metal. */ }
     if (anchorK_rot_) host_anchorK_rot_.resize(ggml_nelements(anchorK_rot_), 0.0f);
     if (valid_mask_)  host_valid_mask_.resize(ggml_nelements(valid_mask_), ggml_fp32_to_fp16(-INFINITY));
 
@@ -331,26 +332,34 @@ void NativeBlockPool::upload_slot(int slot_id) {
         }
         ggml_backend_tensor_set(anchorK_rot_, host_anchorK_rot_.data() + (size_t)slot_id * kv_heads_ * D,
                                 slot_id * anchorK_rot_->nb[2], (size_t)kv_heads_ * D * sizeof(float));
-        // VK_rot: one head_dim vector per (rank, kv_head)
-        for (int r = 0; r < rank_; ++r) {
-            for (int kv = 0; kv < kv_heads_; ++kv) {
-                const size_t off = (size_t)slot_id * rank_ * kv_heads_ * D + (size_t)r * kv_heads_ * D + (size_t)kv * D;
-                const ggml_fp16_t* src = host_VK_.data() + off;
-                float* dst = host_VK_rot_.data() + off;
-                if (has_rope_) rope_rotate_vec(src, dst, D, pos, rope_freq_base_);
-                else for (int d = 0; d < D; ++d) dst[d] = ggml_fp16_to_fp32(src[d]);
+        // VK_rot: rotate VK vectors at anchor_pos and upload directly to GPU tensor.
+        // host_VK_rot_ is intentionally not allocated (saves ~32 MB CPU RAM per layer).
+        // The CPU approximate path uses per-call vk_local extraction instead.
+        {
+            // Compute rotation into a temporary buffer and upload to GPU.
+            std::vector<float> tmp_rot(rank_ * kv_heads_ * D);
+            for (int r = 0; r < rank_; ++r) {
+                for (int kv = 0; kv < kv_heads_; ++kv) {
+                    const size_t off = (size_t)r * kv_heads_ * D + (size_t)kv * D;
+                    const ggml_fp16_t* src = host_VK_.data() +
+                        (size_t)slot_id * rank_ * kv_heads_ * D + off;
+                    float* dst = tmp_rot.data() + off;
+                    if (has_rope_) rope_rotate_vec(src, dst, D, pos, rope_freq_base_);
+                    else for (int d = 0; d < D; ++d) dst[d] = ggml_fp16_to_fp32(src[d]);
+                }
             }
-        }
-        ggml_backend_tensor_set(VK_rot_, host_VK_rot_.data() + (size_t)slot_id * rank_ * kv_heads_ * D,
-                                slot_id * VK_rot_->nb[3], (size_t)rank_ * kv_heads_ * D * sizeof(float));
+            ggml_backend_tensor_set(VK_rot_, tmp_rot.data(),
+                                    slot_id * VK_rot_->nb[3], (size_t)rank_ * kv_heads_ * D * sizeof(float));
         static std::atomic<int> rotcnt{0};
         if (std::getenv("DIFFKV_DBG_ROT") && rotcnt.fetch_add(1) < 4) {
             double nvk = 0, nvkr = 0, nak = 0, nakr = 0;
             const ggml_fp16_t* vk = host_VK_.data() + (size_t)slot_id * rank_ * kv_heads_ * D;
-            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(vk[i]); nvk += a*a; double b = host_VK_rot_[(size_t)slot_id*rank_*kv_heads_*D + i]; nvkr += b*b; }
+            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(vk[i]); nvk += a*a; }
+            for (int i = 0; i < rank_ * kv_heads_ * D; ++i) { double b = tmp_rot[i]; nvkr += b*b; }
             const ggml_fp16_t* ak = host_anchors_K_.data() + (size_t)slot_id * kv_heads_ * D;
             for (int i = 0; i < kv_heads_ * D; ++i) { double a = ggml_fp16_to_fp32(ak[i]); nak += a*a; double b = host_anchorK_rot_[(size_t)slot_id*kv_heads_*D + i]; nakr += b*b; }
             std::cerr << "[DBG_ROT] slot " << slot_id << " pos=" << pos << " |VK|=" << std::sqrt(nvk) << " |VK_rot|=" << std::sqrt(nvkr) << " |aK|=" << std::sqrt(nak) << " |aK_rot|=" << std::sqrt(nakr) << " seq_len=" << host_seq_lens_[slot_id] << std::endl;
+        }
         }
     }
     if (native_attn_ && valid_mask_) {

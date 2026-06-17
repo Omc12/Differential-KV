@@ -713,13 +713,13 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }
-    // RAM fix: cap max_active_dense_tokens at 8192 regardless of context size.
-    // Without this, large presets (e.g. --preset high, n_slots=1024) would allocate
-    // n_slots * micro_block_size = 16384 tokens × 1024 dims × 4B × 2 × 28 layers ≈ 3.6 GB
-    // just for the dense sliding window buffers. The dense window only ever holds the
-    // recent active tokens (~a few hundred at most), so 8192 is a safe upper bound.
+    // RAM fix: cap max_active_dense_tokens at engage_threshold (2048 by default).
+    // Without this, large presets allocate max_ctx_tokens × kv_dim × 4 × 2 × 28 layers
+    // for the dense sliding window — up to 3.6 GB for --preset high.
+    // The dense window only holds recently DenseResident tokens (< few hundred), so
+    // engage_threshold is a safe upper bound and matches Python behaviour.
     // Configurable via DIFFKV_MAX_DENSE_TOKENS env var.
-    int max_dense_cap = 8192;
+    int max_dense_cap = engage_threshold;  // default = 2048
     if (const char* env_mdc = std::getenv("DIFFKV_MAX_DENSE_TOKENS")) {
         max_dense_cap = std::stoi(env_mdc);
     }
