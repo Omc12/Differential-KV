@@ -38,6 +38,7 @@ struct CustomAttnUserData {
     const float * W_proj = nullptr;
     int desc_dim = 0;
     int max_active_dense_tokens = 16384;
+    int dense_capacity = 0;  // max tokens the dense K/V buffer can hold (set by batch_engine)
 
     // Bug 3 fix: K/V captured inside the GGML callback from tensor c (kv_concat).
     // Layout: [K_flat (n_kv_heads*D) || V_flat (n_kv_heads*D)] in fp32.

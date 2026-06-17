@@ -713,7 +713,20 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }
-    int max_active_dense_tokens = std::max(n_slots * micro_block_size, engage_threshold);
+    // RAM fix: cap max_active_dense_tokens at 8192 regardless of context size.
+    // Without this, large presets (e.g. --preset high, n_slots=1024) would allocate
+    // n_slots * micro_block_size = 16384 tokens × 1024 dims × 4B × 2 × 28 layers ≈ 3.6 GB
+    // just for the dense sliding window buffers. The dense window only ever holds the
+    // recent active tokens (~a few hundred at most), so 8192 is a safe upper bound.
+    // Configurable via DIFFKV_MAX_DENSE_TOKENS env var.
+    int max_dense_cap = 8192;
+    if (const char* env_mdc = std::getenv("DIFFKV_MAX_DENSE_TOKENS")) {
+        max_dense_cap = std::stoi(env_mdc);
+    }
+    int max_active_dense_tokens = std::min(
+        std::max(n_slots * micro_block_size, engage_threshold),
+        max_dense_cap
+    );
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
         session->active_v_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
@@ -1169,6 +1182,10 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].W_proj = W_proj_host.data();
         userdata[l].desc_dim = desc_dim;
         userdata[l].max_active_dense_tokens = max_active_dense_tokens;
+        // Dense buffer capacity guard: tells the callback the max number of tokens
+        // it may write to active_k_dense/active_v_dense without overflowing.
+        // session->active_k_dense[l] is allocated to max_active_dense_tokens * F_test.
+        userdata[l].dense_capacity = max_active_dense_tokens;
     }
     
     struct ggml_tensor * decode_logits = nullptr;
@@ -1419,8 +1436,18 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test, 0.0f));
         for (int l = 0; l < n_layers; ++l) {
             if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
+                // Fast path: K/V captured inside callback — zero extra GPU readback.
                 std::memcpy(decode_k[l].data(), userdata[l].captured_kv.data(),          F_test * sizeof(float));
                 std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
+            } else if (decode_concat_k && decode_concat_v) {
+                // Fallback: captured_kv wasn't populated (e.g. c==nullptr in graph).
+                // Fall back to the original GPU readback for this layer so decode_k[l]
+                // is never all-zeros. Zeros corrupt the dense window from step 2 onwards,
+                // causing wrong output ("starts from between" symptom).
+                ggml_backend_tensor_get(decode_concat_k,
+                    decode_k[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
+                ggml_backend_tensor_get(decode_concat_v,
+                    decode_v[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
             }
         }
         

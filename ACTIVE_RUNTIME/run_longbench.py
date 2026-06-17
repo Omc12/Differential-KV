@@ -29,6 +29,8 @@ Options:
     --output             JSON output path       (default: longbench_results.json)
     --datasets           comma-separated list   (default: narrativeqa,govreport,qasper,hotpotqa)
     --temperature        generation temperature (default: 0.0 = greedy)
+    --dense              Run vanilla dense model only (no DiffKV compression)
+    --compare            Run BOTH dense and DiffKV then print a side-by-side comparison table
 """
 
 import os
@@ -295,7 +297,7 @@ def load_dataset_subset(hf_name, hf_split, n, tokenizer, max_input_tokens, promp
     ds = None
     for split_try in ["test", "train", "validation"]:
         try:
-            ds = load_dataset(hf_name, hf_split, split=split_try)
+            ds = load_dataset(hf_name, hf_split, split=split_try, trust_remote_code=True)
             print(f"  Using split='{split_try}' ({len(ds)} total examples)")
             break
         except Exception as e:
@@ -360,15 +362,56 @@ def flush_memory(wrapper, deep=False):
     except Exception:
         pass
 
+# ── Dense inference helper (vanilla mlx_lm, no KV compression) ───────────────
+def dense_generate(mlx_model, mlx_tokenizer, prompt_str, max_new_tokens, temperature):
+    """
+    Run vanilla dense generation using mlx_lm.generate.
+    Returns (prediction_str, total_wall_s, n_input_tokens, n_output_tokens).
+    """
+    from mlx_lm import generate as mlx_gen
+    from mlx_lm.sample_utils import make_sampler
+    t0 = time.perf_counter()
+    sampler = make_sampler(temp=temperature)
+    # mlx_lm.generate returns the full string (prompt + generated)
+    full = mlx_gen(
+        mlx_model,
+        mlx_tokenizer,
+        prompt=prompt_str,
+        max_tokens=max_new_tokens,
+        verbose=False,
+        sampler=sampler,
+    )
+    total_s = time.perf_counter() - t0
+    # Strip prompt: mlx_lm returns prompt + generation
+    if full.startswith(prompt_str):
+        prediction = full[len(prompt_str):]
+    else:
+        prompt_clean = mlx_tokenizer.decode(
+            mlx_tokenizer.encode(prompt_str), skip_special_tokens=True
+        )
+        if full.startswith(prompt_clean):
+            prediction = full[len(prompt_clean):]
+        else:
+            idx = full.find("assistant\n")
+            prediction = full[idx + len("assistant\n"):] if idx != -1 else full
+    prediction = prediction.strip()
+    n_in  = len(mlx_tokenizer.encode(prompt_str))
+    n_out = len(mlx_tokenizer.encode(prediction))
+    return prediction, total_s, n_in, n_out
+
+
 # ── Main evaluation ───────────────────────────────────────────────────────────
 def run_evaluation(args):
     import torch
+
+    mode_label = "Dense" if getattr(args, "dense", False) else ("Dense + DiffKV" if getattr(args, "compare", False) else "DiffKV")
 
     print()
     print("╔" + "═" * 68 + "╗")
     print("║   DiffKV LongBench Evaluation" + " " * 38 + "║")
     print("╠" + "═" * 68 + "╣")
     print(f"║  Model        : {args.model:<51}║")
+    print(f"║  Mode         : {mode_label:<51}║")
     print(f"║  Preset       : {args.preset:<51}║")
     print(f"║  Serving Mode : {args.serving_mode:<51}║")
     print(f"║  SVD Rank     : {args.rank:<51}║")
@@ -395,27 +438,55 @@ def run_evaluation(args):
     if device == "mps":
         os.environ.setdefault("DIFFKV_MPS_APPROXIMATE_ATTN", "1")
 
-    # ── Load model ────────────────────────────────────────────────────────────
-    print(f"\n[1/3] Loading model …")
-    t0 = time.perf_counter()
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    run_dense  = getattr(args, "dense",   False)
+    run_diffkv = not run_dense  # True for normal or --compare
+    run_compare = getattr(args, "compare", False)
+    if run_compare:
+        run_dense  = True
+        run_diffkv = True
 
-    wrapper = DiffKVHFWrapper(
-        model_id=args.model,
-        config={
-            "rank":             args.rank,
-            "micro_block_size": 256,
-            "block_size":       256,
-            "serving_mode":     args.serving_mode,
-            "mode":             "fp16",
-            "preset":           args.preset,
-        },
-        device=device,
-    )
-    load_time = time.perf_counter() - t0
-    print(f"  Loaded in {load_time:.1f}s")
+    # ── Load dense model (mlx_lm) when needed ─────────────────────────────────
+    mlx_model = None
+    mlx_tokenizer = None
+    if run_dense:
+        print(f"\n[1/{3 if run_diffkv and run_compare else 3}] Loading dense model (mlx_lm) …")
+        try:
+            from mlx_lm import load as mlx_load_fn
+            # Prefer 4-bit quant to keep memory reasonable on MacBook
+            dense_model_id = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+            t0 = time.perf_counter()
+            mlx_model, mlx_tokenizer = mlx_load_fn(dense_model_id)
+            print(f"  Dense model loaded in {time.perf_counter()-t0:.1f}s  ({dense_model_id})")
+        except Exception as e:
+            print(f"[ERROR] Could not load dense mlx_lm model: {e}")
+            sys.exit(1)
 
-    tokenizer = wrapper.tokenizer
+    # ── Load DiffKV wrapper when needed ───────────────────────────────────────
+    wrapper = None
+    tokenizer = None
+    if run_diffkv:
+        print(f"\n[{'2' if run_dense and run_compare else '1'}/3] Loading DiffKV model …")
+        t0 = time.perf_counter()
+        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+        wrapper = DiffKVHFWrapper(
+            model_id=args.model,
+            config={
+                "rank":             args.rank,
+                "micro_block_size": 256,
+                "block_size":       256,
+                "serving_mode":     args.serving_mode,
+                "mode":             "fp16",
+                "preset":           args.preset,
+            },
+            device=device,
+        )
+        load_time = time.perf_counter() - t0
+        print(f"  DiffKV loaded in {load_time:.1f}s")
+        tokenizer = wrapper.tokenizer
+
+    # If dense-only, still need a tokenizer for prompt building
+    if tokenizer is None and mlx_tokenizer is not None:
+        tokenizer = mlx_tokenizer
 
     # ── Validate datasets ─────────────────────────────────────────────────────
     dataset_list = [d.strip().lower() for d in args.datasets.split(",")]
@@ -456,6 +527,10 @@ def run_evaluation(args):
         "datasets":     {},    # detailed per-example breakdown
     }
 
+    # Track dense results separately for comparison table
+    dense_summary_rows   = []  # list of dicts per dataset
+    diffkv_summary_rows  = []
+
     summary_rows = []
 
     for ds_key in dataset_list:
@@ -464,8 +539,114 @@ def run_evaluation(args):
         is_qa     = cfg["metric"] == "f1"
         max_gen   = min(args.max_tokens, cfg["max_gen"])
 
+        # ── Dense pass ───────────────────────────────────────────────────────
+        dense_summary = None
+        if run_dense:
+            print()
+            print(f"  ┌─ [Dense] {cfg['description']}")
+            print(f"  │  {len(examples)} examples | max_gen={max_gen}")
+            print(f"  │")
+
+            d_em, d_f1, d_rl = [], [], []
+            d_pfill, d_dectps, d_mlx, d_rss = [], [], [], []
+            d_per, d_start = [], time.perf_counter()
+
+            mem_sampler.start()  # reset at block level for dense
+            mem_sampler.stop()
+
+            for i, ex in enumerate(examples):
+                messages = [
+                    {"role": "system", "content": ex["system"]},
+                    {"role": "user",   "content": ex["user"]},
+                ]
+                prompt_str = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                )
+
+                mem_sampler.start()
+                try:
+                    pred, ex_s, n_in, n_out = dense_generate(
+                        mlx_model, mlx_tokenizer, prompt_str, max_gen, args.temperature
+                    )
+                except Exception as e:
+                    print(f"  │  [WARN] Dense example {i+1} error: {e}")
+                    pred, ex_s, n_in, n_out = "", 0.0, 0, 0
+                mem_sampler.stop()
+
+                em = compute_em(pred, ex["answers"])
+                f1 = compute_f1(pred, ex["answers"])
+                rl = compute_rouge_l(pred, ex["answers"])
+                pfill_s, dec_tps, _ = estimate_prefill_decode(
+                    tokenizer, prompt_str, pred, ex_s, n_in
+                )
+                pk_mlx = round(mem_sampler.peak_mlx_mb, 1)
+                pk_rss = round(mem_sampler.peak_rss_mb, 1)
+
+                d_em.append(em); d_f1.append(f1); d_rl.append(rl)
+                d_pfill.append(pfill_s); d_dectps.append(dec_tps)
+                d_mlx.append(pk_mlx); d_rss.append(pk_rss)
+
+                bar = progress_bar(i + 1, len(examples))
+                short_pred = pred[:50].replace("\n", " ")
+                print(
+                    f"  │  {bar}  "
+                    f"EM={em:.0f} F1={f1:.3f} RL={rl:.3f}  "
+                    f"pf={pfill_s:.1f}s dec={dec_tps:.1f}t/s  "
+                    f"mlx={pk_mlx:.0f}MB rss={pk_rss:.0f}MB  "
+                    f"→ {short_pred!r}"
+                )
+                d_per.append({
+                    "index": i, "prediction": pred, "answers": ex["answers"],
+                    "n_input_toks": n_in, "n_output_toks": n_out,
+                    "EM": round(em,4), "F1": round(f1,4), "Rouge_L": round(rl,4),
+                    "total_s": round(ex_s,2), "prefill_s": pfill_s,
+                    "decode_tps": dec_tps, "peak_mlx_mb": pk_mlx, "peak_rss_mb": pk_rss,
+                })
+
+            d_time = time.perf_counter() - d_start
+            avg_em  = round(sum(d_em)/len(d_em), 4) if d_em else 0.0
+            avg_f1  = round(sum(d_f1)/len(d_f1), 4) if d_f1 else 0.0
+            avg_rl  = round(sum(d_rl)/len(d_rl), 4) if d_rl else 0.0
+            tot_pf  = round(sum(d_pfill), 2)
+            avg_dt  = round(sum(d_dectps)/len(d_dectps), 2) if d_dectps else 0.0
+            pk_mlx  = round(max(d_mlx), 1) if d_mlx else 0.0
+            pk_rss  = round(max(d_rss), 1) if d_rss else 0.0
+
+            print(f"  │")
+            print(f"  └─ [Dense] DONE  EM={avg_em:.4f}  F1={avg_f1:.4f}  RL={avg_rl:.4f}  "
+                  f"prefill={tot_pf:.1f}s  dec={avg_dt:.1f}t/s  "
+                  f"mlx={pk_mlx:.0f}MB  rss={pk_rss:.0f}MB  "
+                  f"[{len(d_em)} ex, {d_time:.1f}s total]")
+
+            dense_summary = {
+                "dataset": cfg["description"], "method": "Dense",
+                "EM": avg_em, "F1": avg_f1, "Rouge_L": avg_rl,
+                "prefill_s": tot_pf, "decode_tps": avg_dt,
+                "peak_mlx_mb": pk_mlx, "peak_rss_mb": pk_rss,
+            }
+            dense_summary_rows.append(dense_summary)
+            all_results["summary"].append(dense_summary)
+            all_results["datasets"][f"{ds_key}_dense"] = {
+                "description": cfg["description"] + " [Dense]",
+                "metric": cfg["metric"], "num_examples": len(d_em),
+                "avg_EM": avg_em, "avg_F1": avg_f1, "avg_Rouge_L": avg_rl,
+                "total_prefill_s": tot_pf, "avg_decode_tps": avg_dt,
+                "peak_mlx_mb": pk_mlx, "peak_rss_mb": pk_rss,
+                "total_time_s": round(d_time, 2), "per_example": d_per,
+            }
+
+            # Flush between dense and DiffKV passes
+            import mlx.core as mx
+            try: mx.clear_cache()
+            except Exception: pass
+            gc.collect(); gc.collect()
+
+        # ── DiffKV pass ──────────────────────────────────────────────────────
+        if not run_diffkv:
+            continue
+
         print()
-        print(f"  ┌─ {cfg['description']}")
+        print(f"  ┌─ {'[DiffKV] ' if run_compare else ''}{cfg['description']}")
         print(f"  │  {len(examples)} examples | max_gen={max_gen}")
         print(f"  │")
 
@@ -505,6 +686,21 @@ def run_evaluation(args):
                 )
                 if prediction.startswith(prompt_str):
                     prediction = prediction[len(prompt_str):]
+                else:
+                    # Strip based on prompt clean (special tokens skipped)
+                    prompt_clean = tokenizer.decode(tokenizer.encode(prompt_str), skip_special_tokens=True)
+                    if prediction.startswith(prompt_clean):
+                        prediction = prediction[len(prompt_clean):]
+                    else:
+                        from serving.hf_diffkv_wrapper import _normalize_references
+                        prompt_clean_norm = _normalize_references(prompt_clean)
+                        if prediction.startswith(prompt_clean_norm):
+                            prediction = prediction[len(prompt_clean_norm):]
+                        else:
+                            # Fallback: search for "assistant\n" which is the end of Qwen2.5 chat template
+                            idx = prediction.find("assistant\n")
+                            if idx != -1:
+                                prediction = prediction[idx + len("assistant\n"):]
                 prediction = prediction.strip()
             except Exception as e:
                 print(f"  │  [WARN] Example {i+1} error: {e}")
@@ -593,6 +789,7 @@ def run_evaluation(args):
         }
         all_results["summary"].append(summary_entry)
         summary_rows.append(summary_entry)
+        diffkv_summary_rows.append(summary_entry)
 
         all_results["datasets"][ds_key] = {
             "description":  cfg["description"],
@@ -615,19 +812,80 @@ def run_evaluation(args):
 
     # ── Final summary table ───────────────────────────────────────────────────
     print()
-    print("╔" + "═" * 88 + "╗")
-    print("║   FINAL RESULTS SUMMARY" + " " * 64 + "║")
-    print("╠" + "═" * 88 + "╣")
-    hdr = f"  {'Dataset':<32} {'EM':>6} {'F1':>6} {'RL':>6}  {'pfill_s':>8}  {'dec_tps':>8}  {'mlx_MB':>7}  {'rss_MB':>7}"
-    print(f"║{hdr:<88}║")
-    print("╠" + "─" * 88 + "╣")
-    for r in summary_rows:
-        name = r["dataset"][:30]
-        row  = (f"  {name:<32} {r['EM']:>6.4f} {r['F1']:>6.4f} {r['Rouge_L']:>6.4f}"
-                f"  {r['prefill_s']:>8.1f}  {r['decode_tps']:>8.1f}"
-                f"  {r['peak_mlx_mb']:>7.1f}  {r['peak_rss_mb']:>7.1f}")
-        print(f"║{row:<88}║")
-    print("╚" + "═" * 88 + "╝")
+    if run_dense and not run_diffkv:
+        # Dense-only table
+        print("╔" + "═" * 88 + "╗")
+        print("║   FINAL RESULTS SUMMARY (Dense)" + " " * 56 + "║")
+        print("╠" + "═" * 88 + "╣")
+        hdr = f"  {'Dataset':<32} {'EM':>6} {'F1':>6} {'RL':>6}  {'pfill_s':>8}  {'dec_tps':>8}  {'mlx_MB':>7}  {'rss_MB':>7}"
+        print(f"║{hdr:<88}║")
+        print("╠" + "─" * 88 + "╣")
+        for r in dense_summary_rows:
+            name = r["dataset"][:30]
+            row  = (f"  {name:<32} {r['EM']:>6.4f} {r['F1']:>6.4f} {r['Rouge_L']:>6.4f}"
+                    f"  {r['prefill_s']:>8.1f}  {r['decode_tps']:>8.1f}"
+                    f"  {r['peak_mlx_mb']:>7.1f}  {r['peak_rss_mb']:>7.1f}")
+            print(f"║{row:<88}║")
+        print("╚" + "═" * 88 + "╝")
+    elif not run_compare:
+        # Normal DiffKV-only table
+        print("╔" + "═" * 88 + "╗")
+        print("║   FINAL RESULTS SUMMARY" + " " * 64 + "║")
+        print("╠" + "═" * 88 + "╣")
+        hdr = f"  {'Dataset':<32} {'EM':>6} {'F1':>6} {'RL':>6}  {'pfill_s':>8}  {'dec_tps':>8}  {'mlx_MB':>7}  {'rss_MB':>7}"
+        print(f"║{hdr:<88}║")
+        print("╠" + "─" * 88 + "╣")
+        for r in summary_rows:
+            name = r["dataset"][:30]
+            row  = (f"  {name:<32} {r['EM']:>6.4f} {r['F1']:>6.4f} {r['Rouge_L']:>6.4f}"
+                    f"  {r['prefill_s']:>8.1f}  {r['decode_tps']:>8.1f}"
+                    f"  {r['peak_mlx_mb']:>7.1f}  {r['peak_rss_mb']:>7.1f}")
+            print(f"║{row:<88}║")
+        print("╚" + "═" * 88 + "╝")
+    else:
+        # ── Comparison table: Dense vs DiffKV ─────────────────────────────
+        # Build lookup by dataset name
+        d_map = {r["dataset"]: r for r in dense_summary_rows}
+        k_map = {r["dataset"]: r for r in diffkv_summary_rows}
+        datasets_in_order = [r["dataset"] for r in dense_summary_rows]
+
+        W = 108
+        print("╔" + "═" * W + "╗")
+        print("║   COMPARISON: Dense vs DiffKV" + " " * (W - 30) + "║")
+        print("╠" + "═" * W + "╣")
+        hdr = (f"  {'Dataset':<28} {'Method':<8}"
+               f" {'EM':>6} {'F1':>6} {'RL':>6}"
+               f"  {'pfill_s':>8}  {'dec_tps':>8}"
+               f"  {'mlx_MB':>7}  {'rss_MB':>7}")
+        print(f"║{hdr:<{W}}║")
+        print("╠" + "─" * W + "╣")
+        for dname in datasets_in_order:
+            dr = d_map.get(dname)
+            kr = k_map.get(dname)
+            for r, method in [(dr, "Dense"), (kr, "DiffKV")]:
+                if r is None:
+                    continue
+                name = dname[:26]
+                row = (f"  {name:<28} {method:<8}"
+                       f" {r['EM']:>6.4f} {r['F1']:>6.4f} {r['Rouge_L']:>6.4f}"
+                       f"  {r['prefill_s']:>8.1f}  {r['decode_tps']:>8.1f}"
+                       f"  {r['peak_mlx_mb']:>7.1f}  {r['peak_rss_mb']:>7.1f}")
+                print(f"║{row:<{W}}║")
+            # Delta row
+            if dr and kr:
+                def _sgn(v): return "+" if v >= 0 else ""
+                df1  = kr["F1"]       - dr["F1"]
+                drl  = kr["Rouge_L"]  - dr["Rouge_L"]
+                dem  = kr["EM"]       - dr["EM"]
+                dspd = kr["decode_tps"] - dr["decode_tps"]
+                delta = (f"  {'  Δ DiffKV-Dense':<36}"
+                         f" {_sgn(dem)}{dem:>5.4f} {_sgn(df1)}{df1:>5.4f} {_sgn(drl)}{drl:>5.4f}"
+                         f"  {'':>8}  {_sgn(dspd)}{dspd:>7.1f}t/s"
+                         f"  {'':>7}  {'':>7}")
+                print(f"║{delta:<{W}}║")
+                print("╠" + "─" * W + "╣")
+        # Remove last separator
+        print("╚" + "═" * W + "╝")
 
     # ── Save JSON ─────────────────────────────────────────────────────────────
     out_path = args.output if os.path.isabs(args.output) else os.path.join(_script_dir, args.output)
@@ -659,6 +917,16 @@ def parse_args():
     p.add_argument("--temperature",  type=float, default=0.0)
     p.add_argument("--top-p",        type=float, default=1.0, dest="top_p")
     p.add_argument("--repetition-penalty", type=float, default=1.05, dest="repetition_penalty")
+    # Dense / comparison flags
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dense", action="store_true", default=False,
+        help="Run only vanilla dense mlx_lm model (no DiffKV compression)"
+    )
+    mode.add_argument(
+        "--compare", action="store_true", default=False,
+        help="Run BOTH dense and DiffKV sequentially and print a side-by-side delta table"
+    )
     return p.parse_args()
 
 

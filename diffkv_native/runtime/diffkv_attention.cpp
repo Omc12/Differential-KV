@@ -26,7 +26,7 @@ void execute_cpu_attention(
 ) {
     const float* Q_ptr = Q;
     const int8_t* U = kv_engine->get_host_U();
-    const ggml_fp16_t* U_scale = kv_engine->get_host_U_scale();
+    const ggml_fp16_t* U_scale_arr = kv_engine->get_host_U_scale();
     const ggml_fp16_t* VK = kv_engine->get_host_VK();
     const ggml_fp16_t* VV = kv_engine->get_host_VV();
     const ggml_fp16_t* anchors_K = kv_engine->get_host_anchors_K();
@@ -34,24 +34,22 @@ void execute_cpu_attention(
     const int32_t* seq_lens = kv_engine->get_host_seq_lens();
     const ggml_fp16_t* scales = kv_engine->get_host_scales();
     const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
-    // F9 sparse residuals (exact corrections for high-error tokens).
     const int32_t* res_K_pos = kv_engine->get_host_res_K_pos();
     const int32_t* res_V_pos = kv_engine->get_host_res_V_pos();
     const ggml_fp16_t* res_K_val = kv_engine->get_host_res_K_val();
     const ggml_fp16_t* res_V_val = kv_engine->get_host_res_V_val();
     const int MR = NativeBlockPool::MAX_RESIDUAL;
 
-    // Bug 2 fix: O(1) deduplication using unordered_set instead of O(K²) std::find.
+    // Bug 2 fix: O(1) dedup via unordered_set.
     int n_slots = kv_engine->get_seq_lens()->ne[0];
     std::unordered_set<int32_t> seen_set;
     seen_set.reserve(K);
     std::vector<int32_t> unique_slots;
     unique_slots.reserve(K);
     for (int k = 0; k < K; ++k) {
-        int32_t slot_id = slots[k];
-        if (slot_id >= 0 && slot_id < n_slots && seen_set.insert(slot_id).second) {
-            unique_slots.push_back(slot_id);
-        }
+        int32_t sid = slots[k];
+        if (sid >= 0 && sid < n_slots && seen_set.insert(sid).second)
+            unique_slots.push_back(sid);
     }
     const int32_t* active_slots = unique_slots.data();
     int active_K = (int)unique_slots.size();
@@ -59,16 +57,12 @@ void execute_cpu_attention(
     const int half_d = D / 2;
     const int g = n_q_heads / n_kv_heads;
 
-    // Bug 9/1 fix: use precomputed RoPE-rotated key buffers (filled by upload_slot).
-    // When available these completely eliminate std::pow/cos/sin for anchor scoring
-    // and for q_proj in the approximate path.
+    // Bug 9/1 fix: precomputed RoPE-rotated key buffers.
     const float* anc_k_rot  = kv_engine->get_host_anchorK_rot();
     const float* vk_rot_buf = kv_engine->get_host_VK_rot();
     const bool use_precomp_rot = (has_rope && anc_k_rot != nullptr && vk_rot_buf != nullptr);
 
-    // Bug 1 fix: pre-compute theta table once per call (half_d std::pow calls total
-    // instead of D * active_K * slen per head).  Used for non-approx per-token RoPE
-    // and for residual key rotation in the approx path.
+    // ── theta_table: half_d std::pow calls, once per call ─────────────────────
     std::vector<float> theta_table;
     if (has_rope) {
         theta_table.resize(half_d);
@@ -76,133 +70,194 @@ void execute_cpu_attention(
             theta_table[i] = 1.0f / std::pow(rope_freq_base, (2.0f * i) / D);
     }
 
+    // ── cos_step / sin_step: half_d cos+sin calls, computed ONCE per call ─────
+    // Enables angular recurrence in the non-approx token loop:
+    //   cos((pos+1)·θ_d) = cos(pos·θ_d)·cos_step[d] - sin(pos·θ_d)·sin_step[d]
+    // → 4 multiplies per dim-pair per token step, zero transcendental calls.
+    std::vector<float> cos_step(half_d, 1.0f), sin_step(half_d, 0.0f);
+    if (has_rope && !approximate_attn) {
+        for (int d = 0; d < half_d; ++d) {
+            cos_step[d] = std::cos(theta_table[d]);
+            sin_step[d] = std::sin(theta_table[d]);
+        }
+    }
+
+    // ── Per-block anchor cos/sin: computed ONCE per block, OUTSIDE the head loop.
+    // anchor_pos depends only on the block (not on the query head), so these values
+    // are identical for all n_q_heads query heads. Computing once and reusing saves
+    //   active_K × half_d × (n_q_heads - 1)   cos+sin calls per execute call.
+    // They also serve as the initial rotation state for the non-approx recurrence.
+    struct BlockRope { std::vector<float> ca, sa; };
+    std::vector<BlockRope> blk_rope(active_K);
+    if (has_rope) {
+        for (int k = 0; k < active_K; ++k) {
+            int ap = anchor_positions[active_slots[k]];
+            blk_rope[k].ca.resize(half_d);
+            blk_rope[k].sa.resize(half_d);
+            for (int d = 0; d < half_d; ++d) {
+                float angle = (float)ap * theta_table[d];  // multiply only — no pow
+                blk_rope[k].ca[d] = std::cos(angle);
+                blk_rope[k].sa[d] = std::sin(angle);
+            }
+        }
+    }
+
+    // ── Per-head attention ───────────────────────────────────────────────────
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
 
         float max_score = -1e30f;
-        struct SlotScoreInfo {
+        struct SlotInfo {
             float anchor_score;
             std::vector<float> q_proj;
             std::vector<float> token_scores;
         };
-        std::vector<SlotScoreInfo> slot_infos(active_K);
+        std::vector<SlotInfo> slot_infos(active_K);
 
         for (int k = 0; k < active_K; ++k) {
-            int slot_id = active_slots[k];
-            int slen = seq_lens[slot_id];
-            float scale_u    = ggml_fp16_to_fp32(U_scale[slot_id]);
-            float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
-            int anchor_pos   = anchor_positions[slot_id];
+            int slot_id   = active_slots[k];
+            int slen      = seq_lens[slot_id];
+            float scale_u = ggml_fp16_to_fp32(U_scale_arr[slot_id]);
+            float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
 
-            // ── 1. Rotated anchor score ───────────────────────────────────────
+            // Reuse precomputed per-block anchor cos/sin — zero new trig per head.
+            const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
+            const float* sa = has_rope ? blk_rope[k].sa.data() : nullptr;
+
+            // ── 1. Anchor score ──────────────────────────────────────────────
             float score_anc = 0.0f;
             if (use_precomp_rot) {
-                // Zero-trig fast path: read precomputed anchor-pos-rotated key.
-                const float* ak_r = anc_k_rot + (size_t)slot_id * n_kv_heads * D + kv_head * D;
+                // Precomputed anchor-pos-rotated K — zero trig.
+                const float* ak_r = anc_k_rot +
+                    (size_t)slot_id * n_kv_heads * D + kv_head * D;
                 for (int d = 0; d < D; ++d)
                     score_anc += Q_ptr[h * D + d] * ak_r[d];
             } else {
-                // Fallback: pair-wise RoPE using theta table (no std::pow in loop).
-                const ggml_fp16_t* ak_base = anchors_K + slot_id * n_kv_heads * D + kv_head * D;
+                const ggml_fp16_t* ak_base = anchors_K +
+                    slot_id * n_kv_heads * D + kv_head * D;
                 if (has_rope) {
+                    // ca[d]/sa[d] precomputed — zero new trig.
                     for (int d = 0; d < half_d; ++d) {
-                        float angle = anchor_pos * theta_table[d];
-                        float cos_a = std::cos(angle), sin_a = std::sin(angle);
                         float x = ggml_fp16_to_fp32(ak_base[d]);
                         float y = ggml_fp16_to_fp32(ak_base[d + half_d]);
-                        score_anc += Q_ptr[h * D + d]          * (x * cos_a - y * sin_a);
-                        score_anc += Q_ptr[h * D + d + half_d] * (y * cos_a + x * sin_a);
+                        score_anc += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
+                        score_anc += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
                     }
                 } else {
                     for (int d = 0; d < D; ++d)
-                        score_anc += Q_ptr[h * D + d] * ggml_fp16_to_fp32(ak_base[d]);
+                        score_anc += Q_ptr[h * D + d] *
+                                     ggml_fp16_to_fp32(ak_base[d]);
                 }
             }
             slot_infos[k].anchor_score = score_anc;
-            float s_anc_scaled = score_anc * scale;
-            if (s_anc_scaled > max_score) max_score = s_anc_scaled;
+            { float s = score_anc * scale; if (s > max_score) max_score = s; }
+
             if (std::getenv("DIFFKV_DBG_KANC") && h == 0 && k < 8)
-                std::cerr << "[DBG_KANC] slot=" << slot_id << " score_anc=" << score_anc << " (scaled=" << s_anc_scaled << ")" << std::endl;
+                std::cerr << "[DBG_KANC] slot=" << slot_id
+                          << " score_anc=" << score_anc << "\n";
 
             if (!approximate_attn) {
-                // ── Non-approximate: reconstruct full K per token, rotate at actual pos.
-                // Bug 1 fix: theta_table[d] replaces std::pow inside the loop.
+                // ── Non-approximate: full K reconstruction + angular recurrence ──
+                //
+                // Initialise cos_run at position (anchor_pos + 1) by advancing the
+                // per-block ca/sa by one step with cos_step (4 mults, 0 trig).
+                // Each subsequent token advances by one more position — still 4
+                // multiplies per dim-pair, zero transcendental function calls.
+                std::vector<float> cos_run(half_d), sin_run(half_d);
+                if (has_rope) {
+                    for (int d = 0; d < half_d; ++d) {
+                        cos_run[d] = ca[d] * cos_step[d] - sa[d] * sin_step[d];
+                        sin_run[d] = sa[d] * cos_step[d] + ca[d] * sin_step[d];
+                    }
+                }
+
                 slot_infos[k].token_scores.resize(slen);
+                int ak_off = slot_id * n_kv_heads * D + kv_head * D;
+
                 for (int t = 0; t < slen; ++t) {
+                    // cos_run[d] = cos((anchor_pos + t + 1)·θ_d) — exact, no trig
                     float score_t = 0.0f;
                     int u_off = slot_id * S_max * rank + t * rank;
-                    int pos   = anchor_pos + t + 1;
-                    int ak_base_off = slot_id * n_kv_heads * D + kv_head * D;
 
                     for (int d = 0; d < half_d; ++d) {
                         int d2 = d + half_d;
-                        // Reconstruct K pair (anchor + SVD delta)
-                        float raw_k1 = ggml_fp16_to_fp32(anchors_K[ak_base_off + d]);
-                        float raw_k2 = ggml_fp16_to_fp32(anchors_K[ak_base_off + d2]);
-                        float delta_k1 = 0.0f, delta_k2 = 0.0f;
-                        int vk_off1 = slot_id * rank * n_kv_heads * D + kv_head * D + d;
-                        int vk_off2 = slot_id * rank * n_kv_heads * D + kv_head * D + d2;
+                        // Reconstruct K pair: anchor + SVD delta
+                        float raw_k1 = ggml_fp16_to_fp32(anchors_K[ak_off + d]);
+                        float raw_k2 = ggml_fp16_to_fp32(anchors_K[ak_off + d2]);
+                        float dk1 = 0.0f, dk2 = 0.0f;
+                        int vk1 = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                        int vk2 = slot_id * rank * n_kv_heads * D + kv_head * D + d2;
                         for (int r = 0; r < rank; ++r) {
                             float ur = (float)U[u_off + r];
-                            delta_k1 += ur * ggml_fp16_to_fp32(VK[vk_off1 + r * n_kv_heads * D]);
-                            delta_k2 += ur * ggml_fp16_to_fp32(VK[vk_off2 + r * n_kv_heads * D]);
+                            dk1 += ur * ggml_fp16_to_fp32(VK[vk1 + r * n_kv_heads * D]);
+                            dk2 += ur * ggml_fp16_to_fp32(VK[vk2 + r * n_kv_heads * D]);
                         }
-                        float k1 = raw_k1 + delta_k1 * scale_u * block_scale;
-                        float k2 = raw_k2 + delta_k2 * scale_u * block_scale;
+                        float k1 = raw_k1 + dk1 * scale_u * blk_sc;
+                        float k2 = raw_k2 + dk2 * scale_u * blk_sc;
 
-                        // Rotate pair at token's actual position (no std::pow)
-                        float k_rot1 = k1, k_rot2 = k2;
+                        // Rotate using recurrence state — zero cos/sin calls.
+                        float kr1, kr2;
                         if (has_rope) {
-                            float angle = pos * theta_table[d];
-                            float cos_a = std::cos(angle), sin_a = std::sin(angle);
-                            k_rot1 = k1 * cos_a - k2 * sin_a;
-                            k_rot2 = k2 * cos_a + k1 * sin_a;
-                        }
-                        score_t += Q_ptr[h * D + d] * k_rot1 + Q_ptr[h * D + d2] * k_rot2;
+                            kr1 = k1 * cos_run[d] - k2 * sin_run[d];
+                            kr2 = k2 * cos_run[d] + k1 * sin_run[d];
+                        } else { kr1 = k1; kr2 = k2; }
+
+                        score_t += Q_ptr[h * D + d]  * kr1
+                                 + Q_ptr[h * D + d2] * kr2;
                     }
+
                     float t_score = score_t * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
+
+                    // Advance recurrence to next token (4 mults × half_d, 0 trig)
+                    if (has_rope && t + 1 < slen) {
+                        for (int d = 0; d < half_d; ++d) {
+                            float nc = cos_run[d] * cos_step[d] - sin_run[d] * sin_step[d];
+                            float ns = sin_run[d] * cos_step[d] + cos_run[d] * sin_step[d];
+                            cos_run[d] = nc;
+                            sin_run[d] = ns;
+                        }
+                    }
                 }
+
             } else {
-                // ── Approximate Project-Then-Attend path ─────────────────────
-                // 2. q_proj[r] = Q · VK_rot[r]  (VK rotated at anchor_pos)
+                // ── Approximate path ─────────────────────────────────────────
                 slot_infos[k].q_proj.resize(rank, 0.0f);
                 if (use_precomp_rot) {
-                    // Zero-trig fast path: VK already rotated at anchor_pos.
+                    // VK already rotated at anchor_pos — zero trig.
                     for (int r = 0; r < rank; ++r) {
                         float proj = 0.0f;
                         const float* vkr = vk_rot_buf +
                             (size_t)slot_id * rank * n_kv_heads * D +
-                            (size_t)r       * n_kv_heads * D +
-                            kv_head * D;
+                            (size_t)r       * n_kv_heads * D + kv_head * D;
                         for (int d = 0; d < D; ++d)
                             proj += Q_ptr[h * D + d] * vkr[d];
                         slot_infos[k].q_proj[r] = proj;
                     }
                 } else {
-                    // Fallback: pair-wise RoPE with theta table (no std::pow in loop).
+                    // Fallback: reuse per-block ca/sa at anchor_pos — zero new trig.
                     for (int r = 0; r < rank; ++r) {
                         float proj = 0.0f;
-                        int base_vk = slot_id * rank * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                        int bvk = slot_id * rank * n_kv_heads * D +
+                                  r * n_kv_heads * D + kv_head * D;
                         if (has_rope) {
                             for (int d = 0; d < half_d; ++d) {
-                                float angle = anchor_pos * theta_table[d];
-                                float cos_a = std::cos(angle), sin_a = std::sin(angle);
-                                float x = ggml_fp16_to_fp32(VK[base_vk + d]);
-                                float y = ggml_fp16_to_fp32(VK[base_vk + d + half_d]);
-                                proj += Q_ptr[h * D + d]          * (x * cos_a - y * sin_a);
-                                proj += Q_ptr[h * D + d + half_d] * (y * cos_a + x * sin_a);
+                                float x = ggml_fp16_to_fp32(VK[bvk + d]);
+                                float y = ggml_fp16_to_fp32(VK[bvk + d + half_d]);
+                                // ca[d]/sa[d] precomputed — zero new trig.
+                                proj += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
+                                proj += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
                             }
                         } else {
                             for (int d = 0; d < D; ++d)
-                                proj += Q_ptr[h * D + d] * ggml_fp16_to_fp32(VK[base_vk + d]);
+                                proj += Q_ptr[h * D + d] *
+                                        ggml_fp16_to_fp32(VK[bvk + d]);
                         }
                         slot_infos[k].q_proj[r] = proj;
                     }
                 }
 
-                // 3. Token delta scores
                 slot_infos[k].token_scores.resize(slen);
                 for (int t = 0; t < slen; ++t) {
                     float delta = 0.0f;
@@ -210,8 +265,7 @@ void execute_cpu_attention(
                     for (int r = 0; r < rank; ++r)
                         delta += slot_infos[k].q_proj[r] * (float)U[u_off + r];
 
-                    // F9: exact residual-K correction.
-                    // Rotated at anchor_pos using theta_table (no std::pow in loop).
+                    // F9: residual-K correction — reuse ca/sa, zero new trig.
                     float res_score = 0.0f;
                     for (int ri = 0; ri < MR; ++ri) {
                         if (res_K_pos[(size_t)slot_id * MR + ri] != t) continue;
@@ -219,20 +273,19 @@ void execute_cpu_attention(
                             ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
                         if (has_rope) {
                             for (int d = 0; d < half_d; ++d) {
-                                float angle = anchor_pos * theta_table[d];
-                                float cos_a = std::cos(angle), sin_a = std::sin(angle);
                                 float x = ggml_fp16_to_fp32(rk[d]);
                                 float y = ggml_fp16_to_fp32(rk[d + half_d]);
-                                res_score += Q_ptr[h * D + d]          * (x * cos_a - y * sin_a);
-                                res_score += Q_ptr[h * D + d + half_d] * (y * cos_a + x * sin_a);
+                                res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
+                                res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
                             }
                         } else {
                             for (int d = 0; d < D; ++d)
-                                res_score += Q_ptr[h * D + d] * ggml_fp16_to_fp32(rk[d]);
+                                res_score += Q_ptr[h * D + d] *
+                                             ggml_fp16_to_fp32(rk[d]);
                         }
                         break;
                     }
-                    float t_score = (delta * scale_u * block_scale + res_score + score_anc) * scale;
+                    float t_score = (delta * scale_u * blk_sc + res_score + score_anc) * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
@@ -251,15 +304,15 @@ void execute_cpu_attention(
         // Value accumulation
         std::vector<double> accum(D, 0.0);
         for (int k = 0; k < active_K; ++k) {
-            int slot_id    = active_slots[k];
-            int slen       = seq_lens[slot_id];
-            float block_scale = ggml_fp16_to_fp32(scales[slot_id]);
-            float scale_u  = ggml_fp16_to_fp32(U_scale[slot_id]);
+            int slot_id   = active_slots[k];
+            int slen      = seq_lens[slot_id];
+            float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
+            float scale_u = ggml_fp16_to_fp32(U_scale_arr[slot_id]);
 
             double w_anc = std::exp(slot_infos[k].anchor_score * scale - max_score) / sum_exp;
             double sum_w = 0.0;
             std::vector<double> w_proj(rank, 0.0);
-            std::vector<double> res_v_accum(D, 0.0);  // F9 exact residual-V contribution
+            std::vector<double> res_v_accum(D, 0.0);
 
             for (int t = 0; t < slen; ++t) {
                 double w_t = std::exp(slot_infos[k].token_scores[t] - max_score) / sum_exp;
@@ -267,7 +320,6 @@ void execute_cpu_attention(
                 int u_off = slot_id * S_max * rank + t * rank;
                 for (int r = 0; r < rank; ++r)
                     w_proj[r] += w_t * (float)U[u_off + r] * scale_u;
-                // F9: add exact residual-V (raw, no RoPE) for high-error tokens.
                 for (int ri = 0; ri < MR; ++ri) {
                     if (res_V_pos[(size_t)slot_id * MR + ri] != t) continue;
                     const ggml_fp16_t* rv = res_V_val +
@@ -280,12 +332,14 @@ void execute_cpu_attention(
 
             double w_total = w_anc + sum_w;
             for (int d = 0; d < D; ++d) {
-                accum[d] += w_total * ggml_fp16_to_fp32(anchors_V[slot_id * n_kv_heads * D + kv_head * D + d]);
+                accum[d] += w_total * ggml_fp16_to_fp32(
+                    anchors_V[slot_id * n_kv_heads * D + kv_head * D + d]);
                 double svd_v = 0.0;
-                int base_vv = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                int bvv = slot_id * rank * n_kv_heads * D + kv_head * D + d;
                 for (int r = 0; r < rank; ++r)
-                    svd_v += w_proj[r] * ggml_fp16_to_fp32(VV[base_vv + r * n_kv_heads * D]);
-                accum[d] += svd_v * block_scale + res_v_accum[d];   // F9 residual-V
+                    svd_v += w_proj[r] *
+                             ggml_fp16_to_fp32(VV[bvv + r * n_kv_heads * D]);
+                accum[d] += svd_v * blk_sc + res_v_accum[d];
             }
         }
         for (int d = 0; d < D; ++d) cpu_output[h * D + d] = (float)accum[d];
@@ -307,29 +361,85 @@ void cpu_dense_attention(
     const int g = n_q_heads / n_kv_heads;
     const int half_d = D / 2;
 
+    // theta table: half_d pow calls, once.
     std::vector<float> theta(half_d);
-    for (int idx = 0; idx < half_d; ++idx) {
+    for (int idx = 0; idx < half_d; ++idx)
         theta[idx] = 1.0f / std::pow(rope_freq_base, (2.0f * idx) / D);
+
+    // Pre-rotate K for each KV head using pair-wise RoPE (halves trig vs per-d loop).
+    // Where positions are consecutive, angular recurrence eliminates per-token trig:
+    //   cos_run advances by cos(theta[d]) each step — 4 mults, 0 cos/sin per token.
+    std::vector<float> K_rot(T * n_kv_heads * D, 0.0f);
+
+    // Detect consecutive positions for recurrence path.
+    bool consecutive = (T > 0);
+    if (consecutive && positions != nullptr) {
+        int base_pos = positions[0];
+        for (int t = 1; t < T; ++t) {
+            if (positions[t] != base_pos + t) { consecutive = false; break; }
+        }
     }
 
-    // Pre-rotate K for each KV head
-    std::vector<float> K_rot(T * n_kv_heads * D);
     for (int kv_head = 0; kv_head < n_kv_heads; ++kv_head) {
-        for (int t = 0; t < T; ++t) {
-            int pos = positions ? positions[t] : (anchor_pos + t);
-            int src = t * n_kv_heads * D + kv_head * D;
-            int dst_off = (t * n_kv_heads + kv_head) * D;
-            for (int d = 0; d < D; ++d) {
-                float raw_k = active_k_dense[src + d];
-                if (has_rope) {
-                    int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                    float raw_p = active_k_dense[src + partner];
-                    float rot_c = (d < half_d) ? -raw_p : raw_p;
-                    int idx = (d < half_d) ? d : (d - half_d);
-                    float angle = pos * theta[idx];
-                    K_rot[dst_off + d] = raw_k * std::cos(angle) + rot_c * std::sin(angle);
-                } else {
-                    K_rot[dst_off + d] = raw_k;
+        if (!has_rope) {
+            // No rotation — copy as-is.
+            for (int t = 0; t < T; ++t) {
+                int src = t * n_kv_heads * D + kv_head * D;
+                int dst = (t * n_kv_heads + kv_head) * D;
+                for (int d = 0; d < D; ++d)
+                    K_rot[dst + d] = active_k_dense[src + d];
+            }
+            continue;
+        }
+
+        int pos0 = positions ? positions[0] : anchor_pos;
+
+        if (consecutive) {
+            // Angular recurrence path: half_d cos+sin for init, 4 mults/dim for steps.
+            // Initialise cos_run at pos0, compute cos_step once.
+            std::vector<float> cos_run(half_d), sin_run(half_d);
+            std::vector<float> cos_stp(half_d), sin_stp(half_d);
+            for (int d = 0; d < half_d; ++d) {
+                float angle0 = (float)pos0 * theta[d];
+                cos_run[d] = std::cos(angle0);
+                sin_run[d] = std::sin(angle0);
+                cos_stp[d] = std::cos(theta[d]);
+                sin_stp[d] = std::sin(theta[d]);
+            }
+            for (int t = 0; t < T; ++t) {
+                int src = t * n_kv_heads * D + kv_head * D;
+                int dst = (t * n_kv_heads + kv_head) * D;
+                for (int d = 0; d < half_d; ++d) {
+                    int d2 = d + half_d;
+                    float x = active_k_dense[src + d];
+                    float y = active_k_dense[src + d2];
+                    K_rot[dst + d]  = x * cos_run[d] - y * sin_run[d];
+                    K_rot[dst + d2] = y * cos_run[d] + x * sin_run[d];
+                }
+                // Advance recurrence (0 trig)
+                if (t + 1 < T) {
+                    for (int d = 0; d < half_d; ++d) {
+                        float nc = cos_run[d] * cos_stp[d] - sin_run[d] * sin_stp[d];
+                        float ns = sin_run[d] * cos_stp[d] + cos_run[d] * sin_stp[d];
+                        cos_run[d] = nc;
+                        sin_run[d] = ns;
+                    }
+                }
+            }
+        } else {
+            // Non-consecutive positions: pair-wise trig per token (halved vs old per-d loop).
+            for (int t = 0; t < T; ++t) {
+                int pos = positions ? positions[t] : (anchor_pos + t);
+                int src = t * n_kv_heads * D + kv_head * D;
+                int dst = (t * n_kv_heads + kv_head) * D;
+                for (int d = 0; d < half_d; ++d) {
+                    int d2 = d + half_d;
+                    float x = active_k_dense[src + d];
+                    float y = active_k_dense[src + d2];
+                    float angle = (float)pos * theta[d];
+                    float c = std::cos(angle), s = std::sin(angle);
+                    K_rot[dst + d]  = x * c - y * s;
+                    K_rot[dst + d2] = y * c + x * s;
                 }
             }
         }
@@ -337,13 +447,11 @@ void cpu_dense_attention(
 
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
-        const float* Kh = K_rot.data() + kv_head * T * D; // not right index
 
         float max_s = -1e30f;
         std::vector<float> scores(T);
         for (int t = 0; t < T; ++t) {
             float dot = 0.0f;
-            // K_rot layout: [T, n_kv, D] — stride per kv_head
             const float* k_t = K_rot.data() + (t * n_kv_heads + kv_head) * D;
             for (int d = 0; d < D; ++d) dot += Q_ptr[h * D + d] * k_t[d];
             scores[t] = dot * scale;
@@ -352,9 +460,12 @@ void cpu_dense_attention(
         float sum_e = 0.0f;
         for (int t = 0; t < T; ++t) sum_e += std::exp(scores[t] - max_s);
         lse_dense_out[h] = max_s + std::log(std::max(sum_e, 1e-9f));
+
         if (std::getenv("DIFFKV_DBG_KDENSE") && h < 7)
-            std::cerr << "[DBG_KDENSE] h" << h << " kv=" << kv_head << " current(last)=" << (T>0?scores[T-1]:0.0f)
-                      << " max=" << max_s << (h==0?" T_dense="+std::to_string(T):"") << std::endl;
+            std::cerr << "[DBG_KDENSE] h" << h << " kv=" << kv_head
+                      << " current(last)=" << (T > 0 ? scores[T - 1] : 0.0f)
+                      << " max=" << max_s
+                      << (h == 0 ? " T_dense=" + std::to_string(T) : "") << "\n";
 
         for (int d = 0; d < D; ++d) out_dense[h * D + d] = 0.0f;
         for (int t = 0; t < T; ++t) {
@@ -412,9 +523,9 @@ void custom_attention_op_callback(
 
     // ── Step 1: Append current token K/V to the dense buffer ─────────────────
     // The dense buffer (active_k_dense / active_v_dense) is a flat CPU array
-    // maintained by main.cpp. When ignore_c == false, we append the current
-    // token's projected K/V here so the Metal kernel can see it.
-    int T_dense = data->active_block_tokens;  // count of tokens already in dense buf
+    // maintained by batch_engine.cpp. When ignore_c == false, we append the
+    // current token's projected K/V here so the CPU/Metal kernel can see it.
+    int T_dense = data->active_block_tokens;  // tokens already in dense buf
 
     if (c != nullptr && !data->ignore_c &&
         data->active_k_dense != nullptr && data->active_v_dense != nullptr) {
@@ -433,18 +544,30 @@ void custom_attention_op_callback(
         // the graph without a second blocking ggml_backend_tensor_get per layer.
         data->captured_kv = cur_kv;
 
-        // Append to dense buffer at slot T_dense
-        float* k_dst = data->active_k_dense + (size_t)T_dense * F_kv;
-        float* v_dst = data->active_v_dense + (size_t)T_dense * F_kv;
-        std::memcpy(k_dst, cur_kv.data(),         F_kv * sizeof(float));
-        std::memcpy(v_dst, cur_kv.data() + F_kv,  F_kv * sizeof(float));
+        // Dense buffer bounds guard (Issue 2 fix): only write if capacity allows.
+        // dense_capacity is set by batch_engine from session->active_k_dense[l].size()/F_kv.
+        // Without this guard, T_dense >= capacity causes a silent buffer overflow that
+        // zeros-out the dense K/V window and corrupts every subsequent decode step.
+        bool cap_ok = (data->dense_capacity <= 0) || (T_dense < data->dense_capacity);
+        if (cap_ok) {
+            float* k_dst = data->active_k_dense + (size_t)T_dense * F_kv;
+            float* v_dst = data->active_v_dense + (size_t)T_dense * F_kv;
+            std::memcpy(k_dst, cur_kv.data(),        F_kv * sizeof(float));
+            std::memcpy(v_dst, cur_kv.data() + F_kv, F_kv * sizeof(float));
 
-        // Record the actual sequence position for this token so the kernel can
-        // apply exact per-token RoPE.  current_pos is set by main.cpp each step.
-        if (data->active_positions_dense != nullptr) {
-            data->active_positions_dense[T_dense] = data->current_pos;
+            // Record the actual sequence position for this token.
+            if (data->active_positions_dense != nullptr)
+                data->active_positions_dense[T_dense] = data->current_pos;
+            T_dense++;
+        } else {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::cerr << "[DiffKV] WARNING: dense buffer full (T_dense=" << T_dense
+                          << " >= dense_capacity=" << data->dense_capacity
+                          << "). Skipping dense write to prevent corruption.\n";
+            }
         }
-        T_dense++;
     }
 
     // ── Step 2: Dispatch GPU or CPU attention ─────────────────────────────────
