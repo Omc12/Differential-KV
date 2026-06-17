@@ -94,18 +94,31 @@ inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& mo
     }
 
     static const std::unordered_set<std::string> ALLOWED_HELPER_WORDS = {
+        // Pronouns & Determiners
         "i", "me", "my", "myself", "we", "us", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
         "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
         "who", "whom", "whose", "which", "that", "this", "these", "those", "each", "every", "some", "any", "no", "all", "both",
         "either", "neither", "another", "other", "such", "what", "a", "an", "the",
+        // Prepositions & Conjunctions
         "of", "in", "to", "for", "with", "on", "at", "by", "from", "about", "as", "into", "through", "during", "before", "after",
         "above", "below", "up", "down", "over", "under", "between", "among", "out", "off", "within", "without", "again", "further",
         "then", "once", "here", "there", "when", "where", "why", "how", "and", "or", "but", "so", "yet", "nor", "although",
         "because", "since", "unless", "until", "while", "whereas", "if", "else", "than",
+        // Verbs (core + modal + reporting) — matching Python ACTIVE_RUNTIME ALLOWED_HELPER_WORDS
         "is", "was", "were", "are", "be", "been", "being", "am", "have", "has", "had", "having", "do", "does", "did", "doing",
+        "can", "could", "will", "would", "shall", "should", "may", "might", "must", "say", "says", "said", "saying",
+        "state", "states", "stated", "stating", "give", "gives", "given", "giving", "show", "shows", "shown", "showing",
+        "write", "writes", "written", "writing", "read", "reads", "mention", "mentions", "mentioned", "describe", "describes",
+        "described", "refer", "refers", "referred", "contain", "contains", "contained", "include", "includes", "included",
+        "follow", "follows", "following", "followed", "find", "finds", "found", "express", "expresses", "expressed",
+        // Nouns & Adjectives (meta/structural) — matching Python ACTIVE_RUNTIME ALLOWED_HELPER_WORDS
+        "source", "document", "text", "passage", "file", "formula", "relation", "equation", "equations",
+        "theorem", "definition", "fact", "facts", "retrieval", "information", "detail", "details", "exact", "exactly",
         "correct", "correctly", "faithful", "faithfully", "verbatim", "missing", "present", "clear", "clearly",
         "uncertain", "certain", "provide", "provided", "provides", "note", "noted", "notes",
+        // Common helper adverbs/adjectives
         "not", "only", "very", "too", "just", "well", "also", "now", "first", "second", "third", "one", "two", "three",
+        // Mathematical and relational verbs/nouns
         "case", "cases", "correspond", "corresponds", "corresponding", "example", "examples", "result", "results",
         "value", "values", "number", "numbers", "term", "terms", "word", "words", "mean", "means", "meant", "meaning",
         "define", "defines", "defined", "definition", "definitions", "represent", "represents", "represented",
@@ -230,10 +243,29 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
         int second_best_overlap = 0;
         int active_prime_count  = 0;
 
+        // Build important-vocab-filtered recent set (matching Python ACTIVE_RUNTIME
+        // diffkv_attention.py:857 — only high-IDF tokens count for anchor overlap
+        // to avoid stopwords like "the"/"is" triggering the wrong entity).
+        std::unordered_set<int32_t> recent_important;
+        const auto& important_vocab = srl_state.inverted_index.important_vocab;
+        for (int ri = rgt_start; ri < rgt_size; ++ri) {
+            int32_t t = srl_state.recent_generated_tokens[ri];
+            if (important_vocab.empty() || important_vocab.count(t)) {
+                recent_important.insert(t);
+            }
+        }
+        // Fall back to raw recent_set if important_vocab is empty (unbuilt)
+        const std::unordered_set<int32_t>& effective_recent =
+            important_vocab.empty() ? recent_set : recent_important;
+
         for (const FactEntry* fe : srl_state.prime_entries) {
             int overlap = 0;
             for (int32_t t : fe->tokens) {
-                if (recent_set.count(t)) overlap++;
+                // Only count overlap on important (high-IDF) tokens
+                if (effective_recent.count(t) &&
+                    (important_vocab.empty() || important_vocab.count(t))) {
+                    overlap++;
+                }
             }
             if (overlap >= 1) {
                 active_prime_count++;
@@ -322,6 +354,22 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
                     best_sim = it->second->current_sim;
                 }
                 seq_sims[si] = best_sim;
+            }
+            // Fix #5: Triple sequences don't appear in entries_by_tokens_map so they
+            // score 0.0 and are evicted first — but they're the most factually valuable.
+            // Inherit the owning prime's current_sim (matching Python ACTIVE_RUNTIME
+            // diffkv_attention.py:946-955 "DX1: triple sequences inherit their prime's score").
+            for (const FactEntry* fe : srl_state.prime_entries) {
+                float prime_sim = fe->current_sim;
+                if (prime_sim <= 0.0f) continue;
+                for (const auto& triple_seq : fe->triple_sequences) {
+                    for (size_t si = 0; si < n_seqs; ++si) {
+                        if (seq_sims[si] == 0.0f &&
+                            srl_state.current_step_factual_sequences[si] == triple_seq) {
+                            seq_sims[si] = prime_sim;
+                        }
+                    }
+                }
             }
             std::vector<size_t> order(n_seqs);
             std::iota(order.begin(), order.end(), 0);
@@ -427,16 +475,6 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
         const auto& seq_prefixes  = srl_state.current_step_sequence_prefixes;
         const auto& seqs          = srl_state.current_step_factual_sequences;
 
-        // Build a mapping of prime tokens by entity
-        std::unordered_map<int32_t, std::unordered_set<int32_t>> prime_tokens_by_entity;
-        for (size_t i = 0; i < seqs.size(); ++i) {
-            bool seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
-            int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-            if (seq_is_prime && seq_entity != -1) {
-                prime_tokens_by_entity[seq_entity].insert(seqs[i].begin(), seqs[i].end());
-            }
-        }
-
         // Single pass: decide which sequence starts we may enter (entity-filtered)
         // and collect the source-adjacent connectives that bridge into them.
         std::unordered_set<int32_t> enterable_starts;
@@ -447,27 +485,16 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
             bool    seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
 
             bool enter = false;
-            if (seq_is_prime) {
-                // Prime sequences are always allowed (they gate entity transitions)
+            if (seq_is_prime || seq_entity == -1) {
+                // Prime sequences always allowed; entity-agnostic sequences too
+                // (matching Python ACTIVE_RUNTIME get_allowed_tokens_vsl lines 266-267)
                 enter = true;
-            } else if (current_entity == -1 && !dual_mode) {
-                enter = true;                       // No entity context yet — allow all
-            } else if (dual_mode) {
-                enter = (dual_ids.count(seq_entity) || seq_entity == -1);
-            } else if (seq_entity == current_entity) {
-                enter = true;                       // Single-entity strict gating
-            } else if (seq_entity == -1) {
-                // Unknown-entity restriction: only allow if tokens overlap with the
-                // current entity's prime token set (else fallback-allow when unknown).
-                auto it = prime_tokens_by_entity.find(current_entity);
-                if (it != prime_tokens_by_entity.end()) {
-                    const auto& prime_toks = it->second;
-                    for (int32_t t : seqs[i]) {
-                        if (prime_toks.count(t)) { enter = true; break; }
-                    }
-                } else {
-                    enter = true;
-                }
+            } else if (current_entity != -1) {
+                enter = (seq_entity == current_entity);
+            } else if (dual_mode && !dual_ids.empty()) {
+                enter = (dual_ids.count(seq_entity) > 0);
+            } else {
+                enter = true;
             }
 
             if (enter) {
@@ -579,7 +606,10 @@ inline bool is_token_id_allowed_cpp(
     ModelType& model
 ) {
     const auto& helper_ids = get_helper_token_ids_cpp(model);
-    auto allowed = get_allowed_tokens_vsl_cpp(srl_state, helper_ids);
+    const auto& structural_ids = get_structural_helper_token_ids_cpp(model);
+    bool sfa_active = srl_state.current_step_max_similarity >= 0.55f &&
+                      !srl_state.current_step_factual_sequences.empty();
+    auto allowed = get_allowed_tokens_vsl_cpp(srl_state, helper_ids, &structural_ids, sfa_active);
     return allowed.count(token_id) > 0;
 }
 

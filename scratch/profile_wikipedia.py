@@ -45,6 +45,8 @@ def run_cpp_benchmark(model_path, prompt, max_tokens=32, preset="low"):
     env["DIFFKV_VERBOSE"] = "1"
     env["DIFFKV_MAX_TOKENS"] = str(max_tokens)
     env["DIFFKV_PRESET"] = preset
+    env["max_ctx_tk"] = "16384"
+    env["DIFFKV_TIME_DECODE"] = "1"
     
     # We pass the prompt via argv[2]
     cmd = [binary_path, model_path, prompt]
@@ -204,6 +206,8 @@ mx.eval()
 t_decode = time.perf_counter() - t1
 tps = {max_tokens} / max(t_decode, 0.001)
 print(f"Decode TPS: {{tps:.2f}}", flush=True)
+decoded_text = wrapper.tokenizer.decode(generated)
+print(f"PYTHON_DECODED: {{decoded_text}}", flush=True)
 """
     
     with open("scratch/run_py_bench_temp.py", "w") as f:
@@ -253,11 +257,17 @@ print(f"Decode TPS: {{tps:.2f}}", flush=True)
     if os.path.exists("scratch/run_py_bench_temp.py"):
         os.remove("scratch/run_py_bench_temp.py")
         
+    py_response = ""
+    for line in stdout_lines:
+        if "PYTHON_DECODED:" in line:
+            py_response = line.split("PYTHON_DECODED:")[1].strip()
+
     return {
         "peak_rss": tracker.peak_rss,
         "total_time": total_time,
         "prefill_time": prefill_time,
-        "decode_tps": decode_tps
+        "decode_tps": decode_tps,
+        "response": py_response
     }
 
 if __name__ == "__main__":
@@ -299,4 +309,10 @@ if __name__ == "__main__":
     print(f"{'Prefill Time':<25} | {py_pref:<20} | {cpp_pref:<20}")
     print(f"{'Decode Throughput (TPS)':<25} | {py_dec:<20} | {cpp_dec:<20}")
     print(f"{'Total Execution Time':<25} | {py_tot:<20} | {cpp_tot:<20}")
+    print("="*50)
+    
+    print("\n[Python 1.5B Response]:")
+    print(py.get("response"))
+    print("\n[C++ 1.5B Response]:")
+    print(cpp.get("response"))
     print("="*50)

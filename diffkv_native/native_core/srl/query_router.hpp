@@ -196,16 +196,57 @@ inline int adaptive_k(
             entropy -= probs[i] * std::log(probs[i]);
     }
 
-    // Normalise to [0,1] by log(N)
-    float log_N      = std::log(static_cast<float>(N > 1 ? N : 2));
-    float complexity = std::min(1.0f, entropy / log_N);
+    // Normalise to [0,1] by log(N_total) — matches Python: max_ent = log(N_total)
+    float log_N_total = std::log(static_cast<float>(N_total > 1 ? N_total : 2));
+    float complexity  = std::min(1.0f, entropy / std::max(log_N_total, 1e-8f));
 
-    float k_raw    = srl_state.k_min + (srl_state.k_max - srl_state.k_min) * complexity;
-    float k_scaled = k_raw * srl_state.k_multiplier;
+    // ── k_min floor scales with context length (matches query_router.py:151) ──
+    // k_max is capped at N_total so we never request more blocks than exist
+    int k_max   = std::min(srl_state.k_max, N_total);
+    int k_min   = std::min(std::max(srl_state.k_min, static_cast<int>(0.15f * N_total)), k_max);
 
-    int K = static_cast<int>(std::round(k_scaled));
-    K = std::max(srl_state.k_min, std::min(srl_state.k_max, K));
-    return K;
+    // Early return: pool is already small enough — attend to everything
+    if (N_total <= k_min) return N_total;
+
+    // Scale K linearly with complexity (use int() truncation like Python)
+    int k_raw    = k_min + static_cast<int>((k_max - k_min) * complexity);
+    int k_scaled = static_cast<int>(k_raw * srl_state.k_multiplier);
+
+    // ── C_active cluster boost (matches query_router.py:176-194) ──
+    // C_active = number of parent landmark blocks whose descriptor similarity
+    // to q_desc is >= max(0.30, 0.85 * S_max).
+    int C_active = 1;
+    {
+        const ChunkGraph& cg = srl_state.chunk_graph;
+        if (!cg.parent_landmarks.empty()) {
+            float S_max = 0.0f;
+            std::unordered_set<int32_t> seen_parents;
+            std::vector<float> parent_scores_vec;
+            for (int32_t pslot : cg.parent_landmarks) {
+                if (pslot < 0 || seen_parents.count(pslot)) continue;
+                seen_parents.insert(pslot);
+                int row = srl_state.semantic_index.slot_to_idx(pslot);
+                if (row < 0) continue;
+                const float* desc = srl_state.semantic_index.desc_matrix.data() + (size_t)row * DESC_DIM;
+                float dot = 0.0f;
+                for (int d = 0; d < DESC_DIM; ++d) dot += desc[d] * q_desc[d];
+                parent_scores_vec.push_back(dot);
+                S_max = std::max(S_max, dot);
+            }
+            if (!parent_scores_vec.empty()) {
+                float theta = std::max(0.30f, 0.85f * S_max);
+                int n_active = 0;
+                for (float s : parent_scores_vec) {
+                    if (s >= theta) ++n_active;
+                }
+                C_active = std::max(1, n_active);
+            }
+        }
+    }
+    // Apply the cluster boost: k_scaled *= (1 + 0.35 * ln(C_active))
+    k_scaled = static_cast<int>(k_scaled * (1.0f + 0.35f * std::log(static_cast<float>(C_active))));
+
+    return std::max(k_min, std::min(k_max, k_scaled));
 }
 
 // ---------------------------------------------------------------------------

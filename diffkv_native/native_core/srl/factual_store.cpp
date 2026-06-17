@@ -815,6 +815,8 @@ std::vector<FactEntry> FactualExactStore::query(
 ) const {
     if (entries.empty() || !W_proj) return {};
 
+
+
     // RC3 — build the entity-bias signature from the queried entities'
     // distinguishing tokens.  Empty when no bias supplied (null-safe: ranking is
     // then identical to before).
@@ -865,6 +867,8 @@ std::vector<FactEntry> FactualExactStore::query(
         q_desc[r] /= norm;
     }
 
+
+
     // 3. Base Layer: Candidate indexes matching active_slots
     std::unordered_set<int> candidate_indices;
     std::vector<bool> entry_has_active_slot(entries.size(), false);
@@ -884,6 +888,8 @@ std::vector<FactEntry> FactualExactStore::query(
         }
     }
 
+
+
     // 4. Factual Prime Node Activation (seeds)
     std::vector<std::pair<int, float>> prime_seeds;
     for (size_t idx = 0; idx < entries.size(); ++idx) {
@@ -898,6 +904,8 @@ std::vector<FactEntry> FactualExactStore::query(
             }
         }
     }
+
+
 
     // 5. Factual Graph Walk
     std::unordered_map<int, float> walk_candidates;
@@ -916,6 +924,8 @@ std::vector<FactEntry> FactualExactStore::query(
             }
         }
     }
+
+
 
     // 6. Merge candidates
     std::vector<std::pair<int, float>> merged_results;
@@ -1023,6 +1033,7 @@ std::vector<FactEntry> FactualExactStore::query(
     int n_matched_primes = static_cast<int>(prime_seeds.size());
     int k_budget = std::max(5, n_matched_primes * 3 + 2);
     if ((int)merged_entries.size() > k_budget) merged_entries.resize(k_budget);
+
     return merged_entries;
 }
 

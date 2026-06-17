@@ -538,11 +538,15 @@ void custom_attention_op_callback(
                 }
             }
 
-            // F26: active_slots=None (match MLX so unrouted/straddled needles still
-            // recall); threshold 0.4 is the stable point vs the chunker's fragment.
-            (void)active_slots;
+            // Bug 🅕 fix: align to the MLX Mac reference (mlx_diffkv_wrapper.py:874-875):
+            //   threshold=0.3,  active_slots=None
+            // The previous value (0.50, active_slots) matched diffkv_attention.py (HF/Triton path)
+            // — the WRONG reference. Passing active_slots filters out slots whose straddle
+            // boundaries weren't routed, causing factual misses on long prompts; the higher
+            // threshold further shrinks the result set. Both changes documented as F27/F28 fix.
+            const std::unordered_set<int32_t>* aslots_ptr = nullptr;  // always nullptr (MLX ref)
             srl->step_cached_entries = srl->factual_store.query(
-                q_for_factual.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.4f, nullptr);
+                q_for_factual.data(), n_q_heads, D, data->W_proj, data->desc_dim, 0.30f, aslots_ptr);
             auto& me = srl->step_cached_entries;
             // F26: drop TRUE chunk fragments (same orig_span_start AND token-prefix).
             if (me.size() > 1) {

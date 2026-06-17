@@ -1393,14 +1393,20 @@ int main(int argc, char ** argv) {
     }
     srl_k_semantic = std::min(srl_k_semantic, n_slots);
     srl_k_keep = std::min(srl_k_keep, n_slots);
-    int rank = 32;
+    // Bug 🅚 fix: rank 32→16 to match Python serving default (lowrank.py, F1 fix).
+    int rank = 16;
+    if (const char* env_rank = std::getenv("DIFFKV_RANK")) {
+        rank = std::max(1, std::stoi(env_rank));
+    }
     int head_dim = model.get_config().n_embd / model.get_config().n_head;
     int kv_heads = model.get_config().n_head_kv;
     int desc_dim = 64;
     int n_vocab = model.get_config().n_vocab;
     int n_layers = model.get_config().n_layer;
 
-    int micro_block_size = 64;
+    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
+    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
+    int micro_block_size = 16;
     if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }
@@ -2600,6 +2606,10 @@ int main(int argc, char ** argv) {
         const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
         bool time_decode = (env_td && std::string(env_td) == "1");
 
+        // Bug 🅓 fix: n-gram loop detection state (mirrors mlx_diffkv_wrapper.py:1204-1238)
+        bool   loop_detected     = false;
+        int    loop_detected_idx = -1;   // step index when loop was first detected
+
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
             if (active_slot >= n_slots) {
@@ -3099,11 +3109,10 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // -3.5 anti-hallucination penalty: only at sim ≥ 0.55 — at 0.3/0.4 the
-            // excluded set is almost the full domain vocabulary (every entry in a focused
-            // document passes the lower bar) making the penalty meaningless and the model
-            // unable to generate anything outside the retrieved-but-wrong sequences.
-            if (srl_state.current_step_max_similarity >= 0.55f &&
+            // -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4 to match
+            // mlx_diffkv_wrapper.py:1287 ("threshold lowered 0.55→0.4").
+            // Bug 🅖 fix.
+            if (srl_state.current_step_max_similarity >= 0.4f &&
                 !srl_state.dual_entity_mode &&
                 !srl_state.current_step_factual_tokens.empty()) {
                 const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(model);
@@ -3115,12 +3124,11 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // +10.0 transition bias — only when last_token is a CONTENT word (not a
-            // helper word). Helper words appear at many positions across all sequences;
-            // boosting their successors adds random noise and drives wrong continuations.
+            // +10.0 transition bias — applied unconditionally (no helper-word gate)
+            // to match mlx_diffkv_wrapper.py:1300-1313 which has no such guard.
+            // Bug 🅘 fix.
             if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
-                const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
-                if (helper_ids_trans.count(last_token) == 0) {
+                if (true) {  // unconditional — removed helper-word gate to match MLX reference
                     std::unordered_set<int32_t> transition_candidates;
                     for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
                         int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
@@ -3145,23 +3153,55 @@ int main(int argc, char ** argv) {
             }
             t_after_logits = std::chrono::high_resolution_clock::now();
 
-            float rep_penalty = repetition_penalty;
-            auto is_alphanumeric_token = [&](int32_t tok_id) -> bool {
-                if (tok_id < 0 || tok_id >= n_vocab) return false;
-                return alnum_cache[tok_id] == 1;
-            };
-
-            std::unordered_set<int32_t> unique_penalized;
-            int gen_start = std::max(0, (int)generated_tokens.size() - 64);
-            for (size_t i = gen_start; i < generated_tokens.size(); ++i) {
-                int32_t tok = generated_tokens[i];
-                if (is_alphanumeric_token(tok)) {
-                    unique_penalized.insert(tok);
+            // Bug 🅓: n-gram loop detection (mirrors mlx_diffkv_wrapper.py:1204-1238)
+            // Every 10 tokens, check 5-gram repetition in the last 80 generated tokens.
+            // On detection: widen penalty window 64→256, boost penalty 1.3×.
+            // After 40 tokens with no recovery: force-stop.
+            if (!loop_detected && (int)generated_tokens.size() >= 30 && (int)generated_tokens.size() % 10 == 0) {
+                int window_start = std::max(0, (int)generated_tokens.size() - 80);
+                std::vector<int32_t> window(generated_tokens.begin() + window_start, generated_tokens.end());
+                const int NG = 5;
+                if ((int)window.size() >= NG + 1) {
+                    std::unordered_map<size_t, int> ngram_counts;
+                    int total_ngrams = 0;
+                    for (int ni = 0; ni <= (int)window.size() - NG; ++ni) {
+                        // Hash the 5-gram
+                        size_t h = 0;
+                        for (int nj = 0; nj < NG; ++nj) {
+                            h = h * 151001 + (size_t)window[ni + nj];
+                        }
+                        ngram_counts[h]++;
+                        total_ngrams++;
+                    }
+                    int top_count = 0;
+                    for (auto& kv : ngram_counts) top_count = std::max(top_count, kv.second);
+                    if (total_ngrams > 0 && (float)top_count / total_ngrams >= 0.35f) {
+                        loop_detected     = true;
+                        loop_detected_idx = step;
+                        std::cerr << "\n[DiffKV Native] WARNING: repetition loop detected at step "
+                                  << step << ". Escalating penalty window to 256 and strength to 1.3x.\n";
+                    }
                 }
             }
-            if (is_alphanumeric_token(last_token)) {
-                unique_penalized.insert(last_token);
+            if (loop_detected && loop_detected_idx >= 0 && (step - loop_detected_idx) >= 40) {
+                std::cerr << "\n[DiffKV Native] WARNING: repetition loop persisted 40 tokens after detection — forcing EOS.\n";
+                break;
             }
+
+            // Bug 🅒 fix: penalize ALL repeated tokens (not just alphanumeric).
+            // This allows periods, spaces, newlines etc. to be penalized — preventing
+            // the runaway ". . . . ." spam. Matches mlx_diffkv_wrapper.py:1244 which
+            // iterates set(generated[-window:]) with no character-class filter.
+            float rep_penalty = loop_detected ? std::max(repetition_penalty, 1.3f) : repetition_penalty;
+            int rep_window    = loop_detected ? 256 : 64;
+
+            std::unordered_set<int32_t> unique_penalized;
+            int gen_start = std::max(0, (int)generated_tokens.size() - rep_window);
+            for (size_t i = gen_start; i < generated_tokens.size(); ++i) {
+                int32_t tok = generated_tokens[i];
+                if (tok >= 0 && tok < n_vocab) unique_penalized.insert(tok);
+            }
+            if (last_token >= 0 && last_token < n_vocab) unique_penalized.insert(last_token);
 
             for (int32_t tok : unique_penalized) {
                 if (tok >= 0 && tok < n_vocab) {
@@ -3209,14 +3249,14 @@ int main(int argc, char ** argv) {
                 const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(model);
                 auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
                     srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
-                float max_sim = srl_state.current_step_max_similarity;
-                // F25: never mask a token that IS part of a surfaced factual sequence.
-                // The allowed set is only helpers + sequence-START tokens, so a
-                // mid-sequence content token (e.g. a digit of "847291" when the model
-                // answers directly) would otherwise be hard-masked while helpers like
-                // "." stay free → truncation. Exempting factual tokens keeps the VSL's
-                // anti-hallucination intent without blocking verbatim factual content.
+                // Bug 🅔 fix: restore F25 factual-token exemption.
+                // factual tokens (mid-sequence content) are exempt from masking, so the
+                // model can emit them even when VSL is active. This was the documented fix
+                // that made NIAH pass (0/5 → pass). Removing it collapses output to
+                // helpers + sequence-starts only (the entity/period soup symptom).
+                // Matches the last-known-good C++ state (pre-revert).
                 const auto& fact_toks = srl_state.current_step_factual_tokens;
+                float max_sim = srl_state.current_step_max_similarity;
                 for (int i = 0; i < n_vocab; ++i) {
                     if (allowed.count(i) == 0 && fact_toks.count(i) == 0) {
                         if (max_sim >= 0.70f) {
