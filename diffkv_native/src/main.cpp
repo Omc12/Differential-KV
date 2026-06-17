@@ -1708,13 +1708,23 @@ int main(int argc, char ** argv) {
         }
 
         int L = prompt_tokens.size();
+        // Reserve decode headroom: we must reserve enough free slots for max_generate tokens,
+        // so that decode generation does not fail due to slot capacity exhaustion (active_slot >= n_slots).
+        int max_generate = 2048;
+        if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
+            max_generate = std::max(1, std::stoi(env_mt));
+        }
+        int effective_max_generate = std::min(max_generate, n_slots * micro_block_size);
+        int headroom_slots = (effective_max_generate + micro_block_size - 1) / micro_block_size;
+        headroom_slots = std::min(headroom_slots, n_slots / 2);
+        int safe_n_slots = std::max(2, n_slots - headroom_slots);
+
         // N3.5 fix: Each slot stores 1 anchor token + micro_block_size delta tokens
         // = (micro_block_size + 1) tokens total (streaming_sparse_ingest.cpp:406).
-        // The old guard used micro_block_size, truncating ~n_slots tokens early.
-        int true_capacity = n_slots * (micro_block_size + 1);
+        int true_capacity = safe_n_slots * (micro_block_size + 1);
         if (L > true_capacity) {
             std::cerr << "[DiffKV Native] Warning: Prompt tokens length " << L 
-                      << " exceeds maximum capacity " << true_capacity
+                      << " exceeds maximum capacity (with reserved decode headroom) " << true_capacity
                       << ". Truncating prompt." << std::endl;
             L = true_capacity;
             prompt_tokens.resize(L);
@@ -1822,7 +1832,7 @@ int main(int argc, char ** argv) {
             }
             int target = std::min(raw_target, micro_block_size);
             int adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
-            if (adaptive_mbs != micro_block_size) {
+            if (adaptive_mbs != micro_block_size && !is_warmup_run) {
                 std::cerr << "[DiffKV Native] Adaptive micro_block_size: " << micro_block_size
                           << " -> " << adaptive_mbs << " (L=" << L << ")" << std::endl;
             }
@@ -2488,7 +2498,7 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> generated_tokens;
         generated_tokens.push_back(last_token);
         // max_generate: default 2048, overridable via DIFFKV_MAX_TOKENS env var or request
-        int max_generate = 2048;
+        max_generate = 2048;
         if (is_warmup_run) {
             max_generate = 2;
         } else if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {

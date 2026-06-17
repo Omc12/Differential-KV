@@ -839,7 +839,7 @@ def main():
                         help="Path to built diffkv_native C++ executable.")
     parser.add_argument('--use-gpu', type=int, choices=[0, 1], default=1,
                         help="Enable GPU/Metal execution in C++ binary.")
-    parser.add_argument('--micro-block-size', type=int, default=64,
+    parser.add_argument('--micro-block-size', type=int, default=16,
                         help="Micro block size for KV compression.")
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid',
                         help="Optimization preset (influences chunk prefill size).")

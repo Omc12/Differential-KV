@@ -652,3 +652,95 @@ decode-speed cost). The principled fixes:
 2. N4.3: give `route_decode_slots` context-aware budgets (or revive `adaptive_k`).
 3. Prior open items (A architectural ceiling, H RC8, L dense bypass) still stand, but they are
    secondary to N4.2.
+
+---
+---
+
+# ROUND 5 — EMPIRICAL root cause (ran the binary) — 2026-06-17
+
+I stopped reading and **ran the actual binary** (`build/diffkv_native`, rebuilt 13:03) with the
+real `scratch/pride_and_prejudice.txt`, reproducing the cli.py invocation. This overturns the
+earlier *speculation* that the base distribution / EOS was the problem. **The pipeline works; the
+failure is slot-capacity exhaustion.**
+
+## 🟥 N5.1 — THE BUG: the prompt fills the whole pool, leaving zero headroom for decode → generation stops after ~4 tokens
+
+**Repro (full 95 310-char prompt, preset `mid`, greedy):**
+```
+[DiffKV Native] Preset 'mid' detected: capping context size to 8192 tokens (128 slots)
+[DiffKV Native] Warning: Prompt tokens length 21525 exceeds maximum capacity 8320. Truncating prompt.
+[DiffKV Native] Warning: Context slot capacity reached during decode. Stopping generation.
+AI>  is this        ← 4 tokens, then stop
+```
+The decode loop's very first guard is `if (active_slot >= n_slots) { break; }`
+(src/main.cpp:2681-2683) — **a hard stop with NO eviction, paging, or sliding window.** The
+prompt is truncated to *exactly fill* all 128 slots (8320 tokens ≈ 128 blocks), so `active_slot`
+is already at the limit when decode starts; the partially-filled last block absorbs ~2-4 decode
+tokens, then slot 128 is needed → `active_slot >= n_slots` → **stop.** This — not EOS, not the
+VSL mask, not a bad distribution — is why the user sees "regiment against" / " is this" + ~4
+tokens every time.
+
+**Control test — short prompt (~1692 tokens, lots of slot headroom), same binary/settings:**
+```
+AI> Jane Austen's novel Pride and Prejudice is widely regarded as one of her finest
+    works, with a strong claim on primacy among her novels.   ← coherent, complete
+[DiffKV Native] Text generation completed successfully!
+```
+⇒ **The sparse attention, routing, VSL, compression, and sampling are all functioning.** The
+only thing that breaks long prompts is that the fixed pool is filled by the prompt with no room
+to generate. (This also means the Round 1–4 items, while real divergences, were **not** the
+cause of the reported symptom.)
+
+### Why it happens
+- Context budget comes from the **preset** (`mid` → `n_slots = 8192/mbs = 128`,
+  cap ≈ 8192 tokens). cli.py sets `DIFFKV_PRESET=mid` and does **not** set any context override,
+  so a 21 525-token prompt is truncated to ~8320 and packed into all 128 slots.
+- The capacity guard (src/main.cpp:1650) truncates the *prompt* to the pool size but **nothing
+  reserves space for the `max_generate` decode tokens.**
+- At the wall, there is **no eviction / recycling** (src/main.cpp:2681 just `break`s). Python
+  never hits this: MLX decode is dense over a growing native cache, and the Python
+  `NativeBlockPool` **grows** `n_blocks` up to `max_blocks` (native_block_pool.py:124,196) rather
+  than truncating the prompt to a fixed size.
+
+### Confirmed fixes (in order of effort)
+1. **Reserve decode headroom.** Truncate the prompt to `capacity − headroom_blocks·mbs` (e.g.
+   leave `max_generate` tokens of slots free), instead of letting it fill all `n_slots`.
+   One-line-ish change at the truncation site (src/main.cpp:1650) + the `n_slots` sizing.
+2. **Make the context budget exceed prompt+generation.** Empirically, running the *same* full
+   prompt with `DIFFKV_MAX_CTX_TK` set well above the prompt length gives the pool headroom and
+   lets decode proceed (see N5.2). This is the immediate workaround; the preset caps
+   (4096/8192/16384) are the trap because a longer prompt always truncates to fill them.
+3. **Proper fix: evict/slide at the capacity wall.** When `active_slot >= n_slots`, recycle the
+   least-relevant (or oldest non-sink) compressed block's slot instead of stopping — a sliding
+   compressed-KV window. There is already a pager/`PAGED` lifecycle in the architecture; it is
+   simply not invoked here.
+
+## 🟧 N5.2 — Preset caps make this unavoidable for any long prompt
+
+Because every preset (`low/mid/high` = 4096/8192/16384 tokens) sizes the pool to a fixed budget
+and the prompt is truncated to fill it, **any prompt at or above the preset budget will fill the
+pool and stop decode immediately** — regardless of all the routing/VSL/attention fixes. The
+budget must be `prompt + generation`, or eviction must free slots during decode (N5.1 fix 3).
+
+## 🟨 N5.3 — Secondary (the user's other two complaints)
+- **Low TPS (~1.5 tok/s):** this is the known per-layer Metal custom-op dispatch cost (24
+  `ggml_map_custom3` launches + syncs per token; memory F29/F30). The native fused subgraph
+  (`DIFFKV_NATIVE_ATTN`) that would fix it is gated off due to its unresolved echo bug. Not
+  related to N5.1.
+- **Long prefill (~8 s):** chunked prefill (512-token chunks) with per-block SVD compression over
+  ~8 k tokens; O(n²) attention within the growing cache. Inherent to the design; would be larger
+  for the untruncated 21 k prompt. Secondary to N5.1.
+
+## 🪵 N5.4 — Minor/confusing: warmup logs `Adaptive micro_block_size: 64 -> 16 (L=21)`
+The adaptive-mbs line prints with `L=21` (a tiny warmup run), not the real prompt length. For the
+real prompt (`L≈21525 → raw_target 256 → min(256,64)=64 == current`) it doesn't print (no
+change), so mbs stays 64. Harmless, but the stray `L=21` log is misleading — it looks like the
+block size is being set from a 21-token context. Cosmetic.
+
+## Updated triage (Round 5) — START HERE
+1. **N5.1 is the whole ballgame for long prompts.** Reserve decode headroom (fix 1) or add
+   eviction at `active_slot >= n_slots` (fix 3). Verified: with pool headroom the model generates
+   coherent output; without it, it stops at ~4 tokens. Everything else (Rounds 1–4) is real but
+   secondary — the pipeline demonstrably works when the pool isn't full.
+2. N5.2: don't truncate the prompt to exactly the preset budget; budget = prompt + generation.
+3. N5.3 (TPS / prefill): the known custom-op dispatch cost; separate effort.
