@@ -486,6 +486,22 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         }
     }
 
+    // ── Write result back to srl_state (mirrors ACTIVE_RUNTIME) ──────────────
+    // ACTIVE_RUNTIME/runtime/diffkv_attention.py:544:
+    //   srl_state.current_step_slots = selected_slots  ← set once at layer 0
+    //   selected_slots = srl_state.current_step_slots  ← reused layers 1-N
+    // Here we do the same: any caller that throttles routing can read the last
+    // result from srl_state.current_step_slots instead of re-running routing.
+    srl_state.current_step_slots = host_candidates;
+    srl_state.current_step_count++;
+
+    if (std::getenv("DIFFKV_ROUTING_VERBOSE")) {
+        std::cerr << "[ROUTE] pos=" << current_pos
+                  << " n_blocks=" << srl_state.n_active_blocks()
+                  << " routed=" << host_candidates.size()
+                  << " call#" << srl_state.current_step_count << "\n";
+    }
+
     return host_candidates;
 }
 

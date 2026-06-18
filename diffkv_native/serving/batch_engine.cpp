@@ -1340,7 +1340,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
     
     // Decode generation loop
-    int retrieval_interval = 8;
+    // Matches ACTIVE_RUNTIME: CPU lexical+graph routing is expensive (~815K ops
+    // for 20K context). GPU semantic search at layer 0 handles per-token Q
+    // changes for free. CPU routing only needs to refresh on topic shifts.
+    // Default = 32 steps (raised from 8). Override: DIFFKV_RETRIEVAL_INTERVAL=N
+    int retrieval_interval = 32;
     if (const char* env_ri = std::getenv("DIFFKV_RETRIEVAL_INTERVAL")) {
         retrieval_interval = std::max(1, std::stoi(env_ri));
     }
@@ -1357,7 +1361,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             break;
         }
         int current_pos = L + step - 1;
-        
+
+        // Mirrors ACTIVE_RUNTIME: invalidate per-step routing cache at the top
+        // of each decode step before layer-0 re-routes via GPU semantic search.
+        session->srl_state.clear_step_cache();
+
         bool do_retrieval = (step - last_retrieval_step >= retrieval_interval) || (session->active_slot != last_retrieval_active_slot);
         if (do_retrieval) {
             cached_routed_blocks = runtime_manager_->route_decode_slots(
@@ -1373,9 +1381,22 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             );
             last_retrieval_step = step;
             last_retrieval_active_slot = session->active_slot;
+            // current_step_slots written inside route_decode_slots() —
+            // mirrors ACTIVE_RUNTIME diffkv_attention.py:544.
+            session->srl_state.current_step_step = step;
 
             // Map block indices to physical pool slot indices
             cached_physical_candidates = cached_routed_blocks;
+
+            if (std::getenv("DIFFKV_ROUTING_VERBOSE")) {
+                std::cerr << "[ROUTE/batch] step=" << step
+                          << " interval=" << retrieval_interval
+                          << " re-routed " << cached_routed_blocks.size() << " blocks\n";
+            }
+        } else if (std::getenv("DIFFKV_ROUTING_VERBOSE")) {
+            std::cerr << "[ROUTE/batch] step=" << step
+                      << " reusing cache (next re-route at step "
+                      << (last_retrieval_step + retrieval_interval) << ")\n";
         }
         
         std::vector<int32_t> routed_blocks = cached_routed_blocks;

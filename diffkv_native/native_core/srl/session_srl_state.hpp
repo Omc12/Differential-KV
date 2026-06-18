@@ -67,8 +67,21 @@ struct SessionSRLState {
     int cached_len = 0;                        // cached sequence length (turn boundary)
 
     // --- Per-decode-step cached slot selection ---
+    // Mirrors ACTIVE_RUNTIME/runtime/diffkv_attention.py:544
+    //   srl_state.current_step_slots = selected_slots  (set at layer 0)
+    //   selected_slots = srl_state.current_step_slots  (reused for layers 1-N)
+    // In diffkv_native this is populated by route_decode_slots() and read
+    // back by any subsystem that needs the current routing result.
     std::vector<int32_t> current_step_slots;
     int current_step_count = 0;
+    int current_step_step  = -1;  // decode step index for which current_step_slots is valid
+
+    // Clear per-step routing cache (call at the start of each decode step,
+    // mirroring Python's implicit invalidation before layer-0 re-routes).
+    void clear_step_cache() {
+        current_step_slots.clear();
+        current_step_step = -1;
+    }
 
     // --- Configuration knobs ---
     int   k_min              = 20;
