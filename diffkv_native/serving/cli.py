@@ -450,10 +450,14 @@ class SubprocessWrapper:
                 loop.call_soon_threadsafe(out_queue.put_nowait, {"text": text})
 
         # Phase 2: Stream tokens until __FINISH__
+        # Use small read chunks (64 B) so each os.read() returns ~1-2 tokens at most,
+        # avoiding the burst-pause-burst pattern caused by reading 4096 B at a time
+        # (which lets 50-100 tokens pile up in the OS pipe buffer before flushing).
         accumulated = b""
+        _CHUNK = 64  # small enough to get ~1 token per read at typical token sizes
         try:
             while True:
-                chunk = os.read(self.process.stdout.fileno(), 4096)
+                chunk = os.read(self.process.stdout.fileno(), _CHUNK)
                 if not chunk:
                     break
                 accumulated += chunk
@@ -657,7 +661,11 @@ async def run_direct_mode(args):
     os.environ["DIFFKV_MODEL_PATH"] = model_path
     if "DIFFKV_MPS_APPROXIMATE_ATTN" not in os.environ:
         os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
+    # Correctness is guaranteed by the spin-wait inside execute_metal_attention:
+    # after [commandBuffer commit], the C++ polls MTLCommandBufferStatus until
+    # Completed before returning — no race condition, no METAL_SYNC env var needed.
     os.environ["DIFFKV_TEMPERATURE"] = str(args.temperature)
+
     os.environ["DIFFKV_TOP_P"] = str(args.top_p)
     os.environ["DIFFKV_REPETITION_PENALTY"] = str(args.repetition_penalty)
 

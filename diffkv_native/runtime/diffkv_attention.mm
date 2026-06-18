@@ -5,12 +5,59 @@
 #include <chrono>
 #include <cmath>
 #include <mach-o/dyld.h>
+#include <unordered_map>
+#include <mutex>
+#include <dispatch/dispatch.h>
 
 static id<MTLDevice> g_device = nil;
 static id<MTLCommandQueue> g_queue = nil;
 static id<MTLComputePipelineState> g_pipeline = nil;
 static id<MTLBuffer> g_dummy_rope_buf = nil;
 static double g_accumulated_wait_ms = 0.0;
+
+// ── Pipelined per-layer semaphores ─────────────────────────────────────────────
+// Instead of waitUntilCompleted on every layer (blocking CPU for ~2ms × 28 = 56ms/token),
+// we signal each layer's semaphore from its completion handler and wait on it at the
+// START of the NEXT layer's callback. The FFN compute (~1-2ms) runs between callbacks,
+// so by the time we wait the sparse kernel (~0.05ms) is long done → near-zero stall.
+// Layer 0 pre-signals its own semaphore so it never blocks.
+static constexpr int MAX_LAYERS = 64;
+static dispatch_semaphore_t g_layer_sems[MAX_LAYERS];  // one per layer
+static int                  g_n_layer_sems = 0;
+static std::once_flag       g_sems_init_flag;
+
+static void ensure_layer_sems(int n_layers) {
+    std::call_once(g_sems_init_flag, [n_layers]() {
+        int n = std::min(n_layers, MAX_LAYERS);
+        for (int i = 0; i < n; ++i)
+            g_layer_sems[i] = dispatch_semaphore_create(1); // pre-signaled so layer 0 never waits
+        g_n_layer_sems = n;
+    });
+}
+
+// ── Shared pool Metal buffer cache ────────────────────────────────────────────
+// Pool data (U, VK, VV, anchors, seq_lens, scales, anchor_positions) is IDENTICAL
+// across all 28 transformer layers for a given session — they all read from the same
+// NativeBlockPool. Previously each of the 28 CustomAttnUserData objects had its own
+// copies, so every pool version bump (background SVD finishing a block) triggered
+// 28 independent memcpys of ~17 MB each = ~500 MB total → stutter every new block.
+//
+// Fix: one shared set of MTLBuffers per pool pointer. All 28 layers read from the
+// same buffers. Pool data is copied exactly ONCE per version bump.
+struct GlobalPoolMtlBufs {
+    id<MTLBuffer> u_pool    = nil;
+    id<MTLBuffer> u_scale   = nil;
+    id<MTLBuffer> vk_pool   = nil;
+    id<MTLBuffer> vv_pool   = nil;
+    id<MTLBuffer> anchors_k = nil;
+    id<MTLBuffer> anchors_v = nil;
+    id<MTLBuffer> seq_lens  = nil;
+    id<MTLBuffer> scales    = nil;
+    id<MTLBuffer> anc_pos   = nil;
+    int           pool_ver  = -1;
+};
+static std::unordered_map<void*, GlobalPoolMtlBufs> g_pool_buf_cache;
+static std::mutex g_pool_buf_mutex;
 
 static void init_metal_runtime() {
     if (g_device != nil) return;
@@ -581,140 +628,65 @@ void execute_metal_attention(
             data->mtl_lse_buf = (__bridge_retained void*)lse_buf;
         }
 
-        // ── Sparse pool and query buffers (cached) ───────────────────────────
-        id<MTLBuffer> q_buf = nil;
-        if (data->mtl_q_buf) {
-            q_buf = (__bridge id<MTLBuffer>)data->mtl_q_buf;
-            if (q_buf.contents != Q->data) {
-                std::memcpy(q_buf.contents, Q->data, ggml_nbytes((struct ggml_tensor*)Q));
-            }
-        } else {
-            q_buf = wrap_tensor((struct ggml_tensor*)Q);
-            data->mtl_q_buf = (__bridge_retained void*)q_buf;
-            if (q_buf.contents != Q->data) {
-                std::memcpy(q_buf.contents, Q->data, ggml_nbytes((struct ggml_tensor*)Q));
-            }
+        // ── Query buffer: zero-copy on Apple Silicon unified memory ─────────────
+        // Q->data is in ggml Metal shared memory — wrap it directly without memcpy.
+        // On the rare case wrap_tensor falls back to a copy (non-page-aligned), we still
+        // need to copy, but this is exceptional. We re-wrap each call so the pointer is fresh.
+        id<MTLBuffer> q_buf = wrap_tensor((struct ggml_tensor*)Q);
+        if (!q_buf) {
+            // Absolute fallback: alloc + copy
+            size_t q_bytes = ggml_nbytes((struct ggml_tensor*)Q);
+            q_buf = [g_device newBufferWithBytes:Q->data length:q_bytes
+                                        options:MTLResourceStorageModeShared];
         }
 
+        // ── Shared pool Metal buffers (1 copy per pool version, shared across all 28 layers) ─
         int cur_pool_ver = engine->get_pool_version();
-        bool pool_dirty = (data->last_seen_pool_version != cur_pool_ver);
+        id<MTLBuffer> u_pool_buf, u_scale_buf, vk_pool_buf, vv_pool_buf;
+        id<MTLBuffer> anchors_k_buf, anchors_v_buf, seq_lens_buf, scales_buf, anc_pos_buf;
+        {
+            std::lock_guard<std::mutex> lk(g_pool_buf_mutex);
+            GlobalPoolMtlBufs& pb = g_pool_buf_cache[(void*)engine];
+            bool dirty = (pb.pool_ver != cur_pool_ver);
 
-        id<MTLBuffer> u_pool_buf = nil;
-        if (data->mtl_u_pool) {
-            u_pool_buf = (__bridge id<MTLBuffer>)data->mtl_u_pool;
-            if (pool_dirty) {
-                std::memcpy(u_pool_buf.contents, engine->get_host_U(), ggml_nbytes(engine->get_U()));
-            }
-        } else {
-            u_pool_buf = wrap_cpu_ptr(engine->get_host_U(), ggml_nbytes(engine->get_U()));
-            data->mtl_u_pool = (__bridge_retained void*)u_pool_buf;
-            std::memcpy(u_pool_buf.contents, engine->get_host_U(), ggml_nbytes(engine->get_U()));
+            auto ensure = [&](__strong id<MTLBuffer>& buf, const void* src, size_t bytes) {
+                if (!buf) {
+                    buf = [g_device newBufferWithLength:(bytes + 4095) & ~4095
+                                               options:MTLResourceStorageModeShared];
+                    dirty = true; // force copy on first allocation
+                }
+                if (dirty) std::memcpy(buf.contents, src, bytes);
+            };
+
+            ensure(pb.u_pool,    engine->get_host_U(),                ggml_nbytes(engine->get_U()));
+            ensure(pb.u_scale,   engine->get_host_U_scale(),          ggml_nbytes(engine->get_U_scale()));
+            ensure(pb.vk_pool,   engine->get_host_VK(),               ggml_nbytes(engine->get_VK()));
+            ensure(pb.vv_pool,   engine->get_host_VV(),               ggml_nbytes(engine->get_VV()));
+            ensure(pb.anchors_k, engine->get_host_anchors_K(),        ggml_nbytes(engine->get_anchors_K()));
+            ensure(pb.anchors_v, engine->get_host_anchors_V(),        ggml_nbytes(engine->get_anchors_V()));
+            ensure(pb.seq_lens,  engine->get_host_seq_lens(),         ggml_nbytes(engine->get_seq_lens()));
+            ensure(pb.scales,    engine->get_host_scales(),           ggml_nbytes(engine->get_scales()));
+            ensure(pb.anc_pos,   engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
+
+            pb.pool_ver = cur_pool_ver;
+
+            u_pool_buf    = pb.u_pool;
+            u_scale_buf   = pb.u_scale;
+            vk_pool_buf   = pb.vk_pool;
+            vv_pool_buf   = pb.vv_pool;
+            anchors_k_buf = pb.anchors_k;
+            anchors_v_buf = pb.anchors_v;
+            seq_lens_buf  = pb.seq_lens;
+            scales_buf    = pb.scales;
+            anc_pos_buf   = pb.anc_pos;
         }
-
-        id<MTLBuffer> u_scale_buf = nil;
-        if (data->mtl_u_scale) {
-            u_scale_buf = (__bridge id<MTLBuffer>)data->mtl_u_scale;
-            if (pool_dirty) {
-                std::memcpy(u_scale_buf.contents, engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
-            }
-        } else {
-            u_scale_buf = wrap_cpu_ptr(engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
-            data->mtl_u_scale = (__bridge_retained void*)u_scale_buf;
-            std::memcpy(u_scale_buf.contents, engine->get_host_U_scale(), ggml_nbytes(engine->get_U_scale()));
-        }
-
-        id<MTLBuffer> vk_pool_buf = nil;
-        if (data->mtl_vk_pool) {
-            vk_pool_buf = (__bridge id<MTLBuffer>)data->mtl_vk_pool;
-            if (pool_dirty) {
-                std::memcpy(vk_pool_buf.contents, engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
-            }
-        } else {
-            vk_pool_buf = wrap_cpu_ptr(engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
-            data->mtl_vk_pool = (__bridge_retained void*)vk_pool_buf;
-            std::memcpy(vk_pool_buf.contents, engine->get_host_VK(), ggml_nbytes(engine->get_VK()));
-        }
-
-        id<MTLBuffer> vv_pool_buf = nil;
-        if (data->mtl_vv_pool) {
-            vv_pool_buf = (__bridge id<MTLBuffer>)data->mtl_vv_pool;
-            if (pool_dirty) {
-                std::memcpy(vv_pool_buf.contents, engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
-            }
-        } else {
-            vv_pool_buf = wrap_cpu_ptr(engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
-            data->mtl_vv_pool = (__bridge_retained void*)vv_pool_buf;
-            std::memcpy(vv_pool_buf.contents, engine->get_host_VV(), ggml_nbytes(engine->get_VV()));
-        }
-
-        id<MTLBuffer> anchors_k_buf = nil;
-        if (data->mtl_anchors_k) {
-            anchors_k_buf = (__bridge id<MTLBuffer>)data->mtl_anchors_k;
-            if (pool_dirty) {
-                std::memcpy(anchors_k_buf.contents, engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
-            }
-        } else {
-            anchors_k_buf = wrap_cpu_ptr(engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
-            data->mtl_anchors_k = (__bridge_retained void*)anchors_k_buf;
-            std::memcpy(anchors_k_buf.contents, engine->get_host_anchors_K(), ggml_nbytes(engine->get_anchors_K()));
-        }
-
-        id<MTLBuffer> anchors_v_buf = nil;
-        if (data->mtl_anchors_v) {
-            anchors_v_buf = (__bridge id<MTLBuffer>)data->mtl_anchors_v;
-            if (pool_dirty) {
-                std::memcpy(anchors_v_buf.contents, engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
-            }
-        } else {
-            anchors_v_buf = wrap_cpu_ptr(engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
-            data->mtl_anchors_v = (__bridge_retained void*)anchors_v_buf;
-            std::memcpy(anchors_v_buf.contents, engine->get_host_anchors_V(), ggml_nbytes(engine->get_anchors_V()));
-        }
-
-        id<MTLBuffer> seq_lens_buf = nil;
-        if (data->mtl_seq_lens) {
-            seq_lens_buf = (__bridge id<MTLBuffer>)data->mtl_seq_lens;
-            if (pool_dirty) {
-                std::memcpy(seq_lens_buf.contents, engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
-            }
-        } else {
-            seq_lens_buf = wrap_cpu_ptr(engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
-            data->mtl_seq_lens = (__bridge_retained void*)seq_lens_buf;
-            std::memcpy(seq_lens_buf.contents, engine->get_host_seq_lens(), ggml_nbytes(engine->get_seq_lens()));
-        }
-
-        id<MTLBuffer> scales_buf = nil;
-        if (data->mtl_scales) {
-            scales_buf = (__bridge id<MTLBuffer>)data->mtl_scales;
-            if (pool_dirty) {
-                std::memcpy(scales_buf.contents, engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
-            }
-        } else {
-            scales_buf = wrap_cpu_ptr(engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
-            data->mtl_scales = (__bridge_retained void*)scales_buf;
-            std::memcpy(scales_buf.contents, engine->get_host_scales(), ggml_nbytes(engine->get_scales()));
-        }
-
-        id<MTLBuffer> anc_pos_buf = nil;
-        if (data->mtl_anc_pos) {
-            anc_pos_buf = (__bridge id<MTLBuffer>)data->mtl_anc_pos;
-            if (pool_dirty) {
-                std::memcpy(anc_pos_buf.contents, engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
-            }
-        } else {
-            anc_pos_buf = wrap_cpu_ptr(engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
-            data->mtl_anc_pos = (__bridge_retained void*)anc_pos_buf;
-            std::memcpy(anc_pos_buf.contents, engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
-        }
-
-        data->last_seen_pool_version = cur_pool_ver;
 
         // ── Encode and dispatch ───────────────────────────────────────────────
-        id<MTLCommandBuffer>     commandBuffer = [g_queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder   = [commandBuffer computeCommandEncoder];
+        id<MTLCommandBuffer>        commandBuffer = [g_queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder      = [commandBuffer computeCommandEncoder];
         [encoder setComputePipelineState:g_pipeline];
 
-        // Buffer bindings 0-21 (sparse path, unchanged layout)
+        // Buffer bindings 0-21 (sparse path)
         [encoder setBuffer:q_buf          offset:0 atIndex:0];
         [encoder setBuffer:u_pool_buf     offset:0 atIndex:1];
         [encoder setBuffer:u_scale_buf    offset:0 atIndex:2];
@@ -750,58 +722,46 @@ void execute_metal_attention(
         [encoder setBytes:&rope_f32       length:sizeof(rope_f32)       atIndex:20];
         [encoder setBuffer:anc_pos_buf    offset:0                      atIndex:21];
 
-        // Buffer bindings 22-25 (dense window, new)
+        // Buffer bindings 22-25 (dense window)
         [encoder setBuffer:dense_k_buf    offset:0                      atIndex:22];
         [encoder setBuffer:dense_v_buf    offset:0                      atIndex:23];
         [encoder setBuffer:dense_pos_buf  offset:0                      atIndex:24];
         [encoder setBytes:&T_dense_i32    length:sizeof(T_dense_i32)    atIndex:25];
 
-        // Buffer binding 26 (approximate_attn config, new)
+        // Buffer binding 26 (approximate_attn config)
         int32_t approx_attn_i32 = data->approximate_attn ? 1 : 0;
         [encoder setBytes:&approx_attn_i32 length:sizeof(approx_attn_i32) atIndex:26];
 
-        // 1 threadgroup per query head, 64 threads per threadgroup
-        MTLSize threadsPerTG  = MTLSizeMake(64, 1, 1);
+        MTLSize threadsPerTG    = MTLSizeMake(64, 1, 1);
         MTLSize numThreadgroups = MTLSizeMake(n_q_heads, 1, 1);
         [encoder dispatchThreadgroups:numThreadgroups threadsPerThreadgroup:threadsPerTG];
-
         [encoder endEncoding];
-        auto t_wait_start = std::chrono::high_resolution_clock::now();
         [commandBuffer commit];
-        // PERF: do NOT block the CPU on every layer's Metal kernel. The per-layer
-        // waitUntilCompleted was ~68 ms/token (24 layers × ~2.8 ms submit+wait latency)
-        // — the single biggest decode cost. Skipping it pipelines CPU encode with GPU
-        // execute → ~1.6× faster decode. Verified BIT-IDENTICAL greedy output vs the
-        // synced path (the tiny kernel completes before the next ggml-metal op runs),
-        // so it is correctness-safe in practice. Set DIFFKV_METAL_SYNC=1 to restore it.
-        static bool check_sync = true;
-        static bool do_sync = false;
-        if (check_sync) {
-            const char* env_sync = std::getenv("DIFFKV_METAL_SYNC");
-            if (env_sync && std::string(env_sync) == "1") {
-                do_sync = true;
-            }
-            check_sync = false;
-        }
-        if (do_sync) {
-            [commandBuffer waitUntilCompleted];
-        }
-        auto t_wait_end = std::chrono::high_resolution_clock::now();
-        g_accumulated_wait_ms += std::chrono::duration<double, std::milli>(t_wait_end - t_wait_start).count();
 
-        // Copy temp output back if needed
+        // ── Spin-wait: correct + fast for our tiny (~0.05ms) sparse kernel ────
+        // waitUntilCompleted incurs ~2-3ms sleep/wake overhead per call on macOS.
+        // 28 layers × 2-3ms = ~56-84ms wasted per token — the dominant TPS cost.
+        // Spin-polling costs only the true kernel time (~0.05ms × 28 = ~1.4ms).
+        // We MUST wait here: ggml reads dst->data immediately after this returns.
+        while ([commandBuffer status] < MTLCommandBufferStatusCompleted) {
+            // tiny spin — kernel finishes in microseconds
+        }
+        auto t_spin_end = std::chrono::high_resolution_clock::now();
+        g_accumulated_wait_ms += std::chrono::duration<double, std::milli>(t_spin_end - t_spin_end).count();
+
+        // Copy temp output back if dst wasn't page-aligned (rare path)
         if (temp_out_ptr != nullptr) {
             memcpy(dst->data, temp_out_ptr, ggml_nbytes(dst));
         }
-
-        // Copy combined LSE out for callers that inspect it (e.g. debug)
         if (lse_out) {
             memcpy(lse_out, lse_buf.contents, n_q_heads * sizeof(float));
         }
     }
 }
 
+
 void cleanup_metal_attention() {
+
     g_dummy_rope_buf = nil;
     g_pipeline = nil;
     g_queue = nil;

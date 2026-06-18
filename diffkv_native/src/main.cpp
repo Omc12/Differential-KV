@@ -491,29 +491,33 @@ static struct ggml_tensor * build_native_sparse_attn(
         struct ggml_tensor* dvk = ggml_cont(ctx, ggml_view_2d(ctx, dense_v,  D, MAXD, dense_v->nb[1],  (size_t)kv*D*dense_v->nb[0]));  // [D,MAXD]
 
         // ── Sparse-pool scores → flat_sp [(S+1)*K, group] ──
-        struct ggml_tensor* anc = ggml_mul_mat(ctx, aKrk, Qk); // [K,group] raw anchor score
+        // ACTIVE_RUNTIME lines 222-224: q_proj = q @ VK * scale (baked in)
+        // delta_scores = U @ q_proj * block_scale  (no extra *scale needed)
+        // s = s_anchor + delta_scores,  s_anchor = q @ ancK * scale
+        struct ggml_tensor* anc_s = ggml_scale(ctx, ggml_mul_mat(ctx, aKrk, Qk), scale); // [K,group] scaled anchor score
         struct ggml_tensor* VKrk2 = ggml_reshape_2d(ctx, VKrk, D, R*K);
-        struct ggml_tensor* qp = ggml_mul_mat(ctx, VKrk2, Qk);          // [R*K, group]
+        struct ggml_tensor* qp = ggml_scale(ctx, ggml_mul_mat(ctx, VKrk2, Qk), scale); // [R*K, group] — scale baked in
         qp = ggml_reshape_3d(ctx, qp, R, K, group);                     // [R,K,group]
         qp = ggml_cont(ctx, ggml_permute(ctx, qp, 0, 2, 1, 3));         // [R,group,K]
-        struct ggml_tensor* delta = ggml_mul_mat(ctx, Usel, qp);        // [S,group,K]
-        struct ggml_tensor* anc_b = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_transpose(ctx, anc)), 1, group, K); // [1,group,K]
-        struct ggml_tensor* ts = ggml_add(ctx, ggml_mul(ctx, delta, su_bs), anc_b); // [S,group,K]
-        ts = ggml_scale(ctx, ts, scale);
+        struct ggml_tensor* delta = ggml_mul_mat(ctx, Usel, qp);        // [S,group,K] (scale already in qp)
+        struct ggml_tensor* anc_b = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_transpose(ctx, anc_s)), 1, group, K); // [1,group,K] scaled
+        struct ggml_tensor* ts = ggml_add(ctx, ggml_mul(ctx, delta, su_bs), anc_b); // [S,group,K] — already scaled
+        // (no extra ggml_scale(ts, scale) — scale is baked into qp and anc_s above)
         ts = ggml_add(ctx, ts, ggml_reshape_3d(ctx, Msel, S, 1, K));                 // +token mask [S,1,K]
         // Anchor entry: ALWAYS included (matches execute_cpu_attention, which adds every selected
         // slot's anchor to the softmax with NO seq_len check — diffkv_attention.cpp:95-97/209).
         // Masking it by valid_mask[0] (seq_len==0) wrongly drops legit anchors of newly-started /
         // stale slots that the CPU reference DOES include → loses the attention "sink" → echo.
+        // Anchor entry score (scaled).
         struct ggml_tensor* ae = std::getenv("DIFFKV_MASK_EMPTY_ANCHOR")
-            ? ggml_add(ctx, ggml_scale(ctx, anc_b, scale), anc_mask)
-            : ggml_scale(ctx, anc_b, scale);                                              // [1,group,K]
+            ? ggml_add(ctx, anc_b, anc_mask)     // anc_b is already scaled
+            : anc_b;                              // [1,group,K]
         struct ggml_tensor* allsp = ggml_concat(ctx, ts, ae, 0);                     // [S+1,group,K]
         allsp = ggml_add(ctx, allsp, dup_add);                                       // -inf on duplicate slots
         struct ggml_tensor* perm  = ggml_cont(ctx, ggml_permute(ctx, allsp, 0, 2, 1, 3)); // [S+1,K,group]
         struct ggml_tensor* flat_sp = ggml_reshape_2d(ctx, perm, (S+1)*K, group);    // [(S+1)*K, group]
 
-        // ── Dense-window scores ──
+        // Dense-window scores (scale already applied inline).
         struct ggml_tensor* ds = ggml_scale(ctx, ggml_mul_mat(ctx, dkr, Qk), scale); // [MAXD, group]
         ds = ggml_add(ctx, ds, ggml_reshape_2d(ctx, dense_mask, MAXD, 1));           // + validity mask
 

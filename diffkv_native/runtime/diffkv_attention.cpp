@@ -608,7 +608,13 @@ void custom_attention_op_callback(
 
     if (data->srl_state != nullptr) {
         SessionSRLState* srl = static_cast<SessionSRLState*>(data->srl_state);
-        if (!srl->factual_store.entries.empty()) {
+        // Only force CPU when step_cached_entries is actually non-empty for this
+        // decode step. factual_store.entries is populated by the background SVD
+        // thread ~50 tokens into generation; using it as the trigger caused every
+        // subsequent token to fall into the slow CPU path even when no factual
+        // entries matched the current query — producing garbage once the background
+        // thread finished. step_cached_entries is set by the decode loop per step.
+        if (!srl->step_cached_entries.empty()) {
             force_cpu = true;
         }
     }
@@ -651,11 +657,18 @@ void custom_attention_op_callback(
     const float rope_freq_base = data->rope_freq_base;
     NativeBlockPool* kv_engine = data->kv_engine;
 
+    // Sync Q from GPU (Metal backend) to host memory before CPU computation.
+    // Q->data may not yet reflect completed GPU writes; ggml_backend_tensor_get
+    // issues the correct backend-specific sync/copy.
+    std::vector<float> q_cpu(n_q_heads * D);
+    ggml_backend_tensor_get(Q, q_cpu.data(), 0, n_q_heads * D * sizeof(float));
+    const float* Q_cpu = q_cpu.data();
+
     std::vector<float> out_sparse(n_q_heads * D, 0.0f);
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
     if (K > 0 && slot_indices && slot_indices->data) {
         execute_cpu_attention(
-            (const float*)Q->data,
+            Q_cpu,
             (const int32_t*)slot_indices->data,
             out_sparse.data(), lse_sparse.data(),
             kv_engine,
@@ -718,7 +731,7 @@ void custom_attention_op_callback(
             }
         }
 
-        const float* Q_ptr = (const float*)Q->data;
+        const float* Q_ptr = Q_cpu;
         const int g = n_q_heads / n_kv_heads;
         for (int h = 0; h < n_q_heads; ++h) {
             int kv_head = h / g;
@@ -754,7 +767,7 @@ void custom_attention_op_callback(
     std::vector<float> lse_dense(n_q_heads, -1e30f);
     if (T_dense > 0) {
         cpu_dense_attention(
-            (const float*)Q->data,
+            Q_cpu,
             data->active_k_dense, data->active_v_dense,
             data->active_positions_dense,
             T_dense, n_q_heads, n_kv_heads, D,

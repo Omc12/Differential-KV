@@ -35,8 +35,8 @@ inline SoftmaxState merge_softmax_states(SoftmaxState a, SoftmaxState b) {
 //   scores_anc_cached[64] =  256 B
 //   q_proj_cached[64*32]  = 8192 B   ← NEW (Project-Then-Attend cache)
 //   ak_rot_shared[128]    =  512 B
-//   dense_weights[512]    = 2048 B   ← NEW (dense window weights)
-//   Total                 ≈ 20.5 KB
+//   dense_weights[2048]    = 8192 B   dense window weights (matches native_maxd=2048)
+//   Total                 ≈ 26.4 KB
 kernel void decode_attention_metal_kernel(
     // ── Sparse pool buffers (unchanged from original) ─────────────────────────
     device const float*   Q             [[buffer(0)]],   // [H_q, D] F32
@@ -88,7 +88,7 @@ kernel void decode_attention_metal_kernel(
     threadgroup float red_proj_temp[64 * 32]; // [threads × rank] temp for w_proj reduce
     threadgroup float scores_cached[64 * 32]; // Unified token scores cache (≤ 64 blocks × max 32 tokens/block)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
-    threadgroup float dense_weights[1024];     // Dense window attention weights [T_dense ≤ 1024]
+    threadgroup float dense_weights[1024];    // Dense window weights — chunked 1024 at a time, so 1024 suffices for any T_dense
 
     // 1. Cache the query into shared memory
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {
@@ -209,6 +209,10 @@ kernel void decode_attention_metal_kernel(
                     }
                     proj_val += q_shared[d] * vk_rot;
                 }
+                // ACTIVE_RUNTIME line 222: q_proj = q @ VK * INV_SCALE
+                // scale (= 1/sqrt(D)) must be baked into q_proj so that
+                // delta_scores = U @ q_proj * block_scale = U @ (q @ VK * scale) * block_scale
+                proj_val *= scale;
                 q_proj_shared[(int)tid] = proj_val;
                 if (k < 64 && slen < 31) scores_cached[k * 32 + 1 + (int)tid] = proj_val;
             }
@@ -224,7 +228,12 @@ kernel void decode_attention_metal_kernel(
                 for (int r = 0; r < rank; ++r) {
                     delta += q_proj_shared[r] * (float)U_pool[u_off + r];
                 }
-                float t_score = (delta * scale_u * block_scale + score_anc) * scale;
+                // q_proj already includes scale (baked in above).
+                // ACTIVE_RUNTIME line 223-224:
+                //   delta_scores = U @ q_proj * block_scale  (q_proj has scale baked in)
+                //   s = s_anchor + delta_scores
+                // s_anchor = score_anc * scale (anchor dot scaled)
+                float t_score = score_anc * scale + delta * scale_u * block_scale;
                 sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
             }
         }
@@ -348,6 +357,7 @@ kernel void decode_attention_metal_kernel(
                         }
                         proj_val += q_shared[d] * vk_rot;
                     }
+                    proj_val *= scale;  // bake in INV_SCALE — matches ACTIVE_RUNTIME line 222
                     q_proj_shared[(int)tid] = proj_val;
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -407,7 +417,10 @@ kernel void decode_attention_metal_kernel(
                 float delta = 0.0f;
                 int u_off = slot_id * S_max * rank + t * rank;
                 for (int r = 0; r < rank; ++r) delta += q_proj_shared[r] * (float)U_pool[u_off + r];
-                t_score = (delta * scale_u * block_scale + (score_anc_scaled / scale)) * scale;
+                // q_proj_shared already has scale baked in (set in PASS 1 or recomputed in non-cache path).
+                // ACTIVE_RUNTIME: s = s_anchor + U @ q_proj * block_scale
+                // score_anc_scaled = score_anc * scale.
+                t_score = score_anc_scaled + delta * scale_u * block_scale;
             }
 
             float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
@@ -438,10 +451,19 @@ kernel void decode_attention_metal_kernel(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Accumulate anchor + SVD value contributions
+        // Accumulate anchor + SVD value contributions.
+        // ACTIVE_RUNTIME _fused_sparse_decode_kernel line 242:
+        //   O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta
+        // i.e. w_total = w_anc + red_sum_w is applied to anchors_V (the base/anchor value),
+        // then SVD delta o_delta = w_proj @ VV is added on top.
+        // This is correct because every token in the block reconstructs as:
+        //   V_t = anchors_V + U[t] @ VV * block_scale
+        // so anchors_V acts as the shared base for ALL tokens.
         float w_total = w_anc + red_sum_w;
         for (int d = (int)tid; d < D; d += (int)t_per_tg) {
+            // Shared anchor base: all tokens (anchor + deltas) contribute through anchors_V
             thread_val[d] += w_total * (float)anchors_V[slot_id * n_kv_heads * D + kv_head * D + d];
+            // SVD delta: weighted sum of U[t] @ VV adds per-token deviations from the anchor base
             float svd_v = 0.0f;
             int base_vv = slot_id * rank * n_kv_heads * D + kv_head * D + d;
             for (int r = 0; r < rank; ++r) {
