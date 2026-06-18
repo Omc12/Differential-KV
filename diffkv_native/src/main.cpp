@@ -11,6 +11,7 @@
 #include <map>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
+#include <pthread.h>
 #endif
 #include "runtime/diffkv_model.hpp"
 #include "ggml.h"
@@ -2517,15 +2518,15 @@ int main(int argc, char ** argv) {
         all_tokens.push_back(last_token);
 
         // ── Background SRL build thread (ACTIVE_RUNTIME: _build_srl_index_async) ──────────
-        // Declared before all_tokens so the lambda captures by reference safely.
         // srl_state starts empty → route_decode_slots returns sink+recency (safe fallback).
         std::atomic<bool> srl_build_done{false};
         std::atomic<bool> srl_needs_gpu_sync{false};
         SessionSRLState  srl_state_pending;
         bool             srl_swapped = false;
 
-        // Capture everything the thread needs by value/pointer (safe: decode loop runs
-        // concurrently but doesn't touch srl_state_pending until srl_swapped)
+        // Only copy small scalars and token IDs into the thread.
+        // k_activations/v_activations are NOT copied — they are read-only during decode
+        // (main thread never writes to them after prefill), so passing const refs is safe.
         const int        _mbs        = runtime_manager.get_micro_block_size();
         const int        _desc_dim   = desc_dim;
         const int        _head_dim   = head_dim;
@@ -2533,10 +2534,16 @@ int main(int argc, char ** argv) {
         const int        _L          = L;
         std::vector<int32_t> _prompt_tokens_copy = prompt_tokens; // thread-safe copy
         std::vector<float>   _W_proj_copy        = W_proj_host;   // thread-safe copy
-        std::vector<std::vector<float>> _k_act_copy = k_activations; // copy prefill KV
-        std::vector<std::vector<float>> _v_act_copy = v_activations;
+        // k_activations and v_activations are used read-only — referenced directly
+        const auto& _k_act_ref = k_activations;
+        const auto& _v_act_ref = v_activations;
 
         std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L]() {
+            // Set background QoS: decode thread always preempts this, audio never starved.
+            // Mirrors ACTIVE_RUNTIME: asyncio executor yields to the event loop naturally.
+#ifdef __APPLE__
+            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#endif
             // Step 1: wait for all SVD compression (ACTIVE_RUNTIME: _wait_for_compression)
             runtime_manager.wait_for_compressor();
             runtime_manager.update_descriptors(_W_proj_copy, _desc_dim, _head_dim);
@@ -2557,7 +2564,6 @@ int main(int argc, char ** argv) {
             // Step 3: build SRL state (ACTIVE_RUNTIME: finalize_srl_index)
             int n_comp = (int)comp_slots.size();
             if (n_comp > 0) {
-                // Read host descriptor matrix (CPU side — safe without GPU sync)
                 const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
                 std::vector<float> desc_mat(n_comp * _desc_dim);
                 for (int j = 0; j < n_comp; ++j) {
@@ -2573,25 +2579,11 @@ int main(int argc, char ** argv) {
                     6, 2, 0.15f, true, true
                 );
                 srl_state_pending.n_blocks_at_last_graph_build = n_comp;
-
-                // Factual store (ACTIVE_RUNTIME: FactualExactStore.build inside finalize_srl_index)
-                std::unordered_set<int32_t> prime_slots(
-                    srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
-                    srl_state_pending.chunk_graph.cluster_centers_tensor.end()
-                );
-                srl_state_pending.factual_store.build(
-                    _k_act_copy, _v_act_copy,
-                    _prompt_tokens_copy,
-                    _W_proj_copy.data(),
-                    _desc_dim, _head_dim, _kv_heads,
-                    stop_token_ids,
-                    srl_state_pending.ordered_slot_ids,
-                    _mbs + 1,
-                    srl_state_pending.inverted_index,
-                    prime_slots,
-                    get_helper_token_ids_cpp(model),
-                    true
-                );
+                // NOTE: factual_store.build() is intentionally NOT called here.
+                // ACTIVE_RUNTIME: factual store is built post-decode (kv_runtime_manager.py:955)
+                // and only affects multi-turn routing quality. Running it here would
+                // allocate O(L × n_layers × head_dim) bytes concurrently with decode,
+                // causing 500-900MB RAM pressure spikes that stall the Mac.
                 srl_state_pending.setup_sas_and_eqa(
                     _prompt_tokens_copy, stop_token_ids,
                     [&](int32_t tid) { return model.token_to_piece(tid); }
@@ -4058,6 +4050,33 @@ int main(int argc, char ** argv) {
         // ACTIVE_RUNTIME equivalent: the async task is awaited at session teardown.
         if (srl_build_thread.joinable()) {
             srl_build_thread.join();
+        }
+
+        // \u2500\u2500 Post-decode factual store build (ACTIVE_RUNTIME: kv_runtime_manager.py:955) \u2500\u2500
+        // Build AFTER decode completes so it never races with the decode loop.
+        // Uses the final srl_state (already swapped in) for accurate prime_slots.
+        if (srl_swapped && !srl_state.ordered_slot_ids.empty()) {
+            try {
+                std::unordered_set<int32_t> prime_slots(
+                    srl_state.chunk_graph.cluster_centers_tensor.begin(),
+                    srl_state.chunk_graph.cluster_centers_tensor.end()
+                );
+                srl_state.factual_store.build(
+                    k_activations, v_activations,
+                    prompt_tokens,
+                    W_proj_host.data(),
+                    desc_dim, head_dim, kv_heads,
+                    stop_token_ids,
+                    srl_state.ordered_slot_ids,
+                    runtime_manager.get_micro_block_size() + 1,
+                    srl_state.inverted_index,
+                    prime_slots,
+                    get_helper_token_ids_cpp(model),
+                    true
+                );
+            } catch (const std::exception& e) {
+                std::cerr << "[DiffKV] factual_store.build() failed: " << e.what() << std::endl;
+            }
         }
 
         // Free decode context — must happen before next iteration rebuilds it

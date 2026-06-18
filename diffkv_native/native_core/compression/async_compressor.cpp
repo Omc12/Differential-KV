@@ -1,6 +1,12 @@
 #include "native_core/compression/async_compressor.hpp"
 #include "native_core/compression/lowrank.hpp"
 #include <iostream>
+#ifdef __APPLE__
+#  include <pthread.h>
+#else
+#  include <pthread.h>
+#  include <sys/resource.h>
+#endif
 
 namespace diffkv {
 
@@ -14,7 +20,12 @@ AsyncCompressor::~AsyncCompressor() {
 bool AsyncCompressor::start() {
     if (running_.load(std::memory_order_acquire)) return true;
     running_.store(true, std::memory_order_release);
-    int num_threads = 2; // Matches PyTorch's background thread configuration
+    // 1 worker thread for preset low — avoids two SVD threads competing with decode.
+    // ACTIVE_RUNTIME uses a ThreadPoolExecutor(max_workers=1) for the same reason.
+    int num_threads = 1;
+    if (const char* env_nt = std::getenv("DIFFKV_COMPRESSOR_THREADS")) {
+        num_threads = std::max(1, std::stoi(env_nt));
+    }
     workers_.clear();
     for (int i = 0; i < num_threads; ++i) {
         workers_.emplace_back(&AsyncCompressor::worker_loop, this);
@@ -57,6 +68,19 @@ void AsyncCompressor::compress_sync(const CompressJob& job) {
 }
 
 void AsyncCompressor::worker_loop() {
+    // ── Background / utility QoS so decode + audio are never starved ──────────
+    // ACTIVE_RUNTIME: compression runs in a ThreadPoolExecutor that yields to
+    // the asyncio event loop. Here we achieve the same by setting the thread
+    // to the lowest scheduler class the OS offers.
+#ifdef __APPLE__
+    // QOS_CLASS_BACKGROUND: only runs when no other thread needs the CPU.
+    // Decode thread (DEFAULT QoS) and Metal GPU drivers always preempt this.
+    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#else
+    // Linux: set nice +19 (lowest priority) for this thread
+    setpriority(PRIO_PROCESS, 0, 19);
+#endif
+
     while (running_.load(std::memory_order_acquire)) {
         CompressJob job;
         {

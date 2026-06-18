@@ -21,6 +21,7 @@ struct StreamingKVBlock {
     BlockState state = BlockState::DenseResident;
     bool is_outlier = false;
     bool skip_compression = false;
+    bool skip_compression_evaluated = false; // regex result cached: never re-run should_skip_compression
     bool device_synced = false; // native-attn: host→device pool tensors pushed (incl. VK_rot etc.)
     std::vector<int32_t> token_indices;
     

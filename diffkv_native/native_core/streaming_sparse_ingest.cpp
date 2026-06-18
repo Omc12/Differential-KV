@@ -497,7 +497,9 @@ void StreamingSparseIngestManager::ingest_chunk(
                 skip = true;
             } else if (b->anchor_idx + b->token_count() < short_context_threshold_) {
                 skip = true;
-            } else {
+            } else if (!b->skip_compression_evaluated) {
+                // should_skip_compression runs 6 std::regex searches — expensive.
+                // Cache the result: once evaluated, never re-run (block text is immutable).
                 if (b->anchor_idx + b->token_count() <= (int)session_token_ids_.size()) {
                     std::vector<int32_t> block_toks(
                         session_token_ids_.begin() + b->anchor_idx,
@@ -507,7 +509,10 @@ void StreamingSparseIngestManager::ingest_chunk(
                 } else {
                     skip = true;
                 }
+                b->skip_compression_evaluated = true; // cache: never re-run regex for this block
             }
+            // If skip_compression_evaluated && !skip_compression: block should be compressed,
+            // just not ready yet (recency window). Fall through to the submit logic below.
 
             if (skip) {
                 b->skip_compression = true;
