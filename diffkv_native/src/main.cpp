@@ -4,11 +4,13 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <algorithm>
 #include <numeric>
 #include <unordered_set>
 #include <random>
 #include <map>
+#include <unistd.h>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #include <pthread.h>
@@ -1258,6 +1260,11 @@ static void run_native_attn_selftest() {
 }
 
 int main(int argc, char ** argv) {
+    // Eliminate streaming bursts: set stdout fully unbuffered so each token
+    // reaches the pipe the instant it's written, regardless of OS buffering.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    std::ios::sync_with_stdio(false);
+
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <gguf_model_path> [prompt]" << std::endl;
@@ -2703,7 +2710,53 @@ int main(int argc, char ** argv) {
                 active_positions_dense[i] = i;
             }
             total_positions = L;
+        } else {
+            // ── Recency window supplement (matches ACTIVE_RUNTIME recency_window=512) ──
+            // After the DenseResident block scan above, total_dense_tokens[l] is often 0
+            // at long contexts because the async compressor has compressed all blocks.
+            // Python's assemble_dense_window_kv keeps `recency_window` exact tokens dense
+            // regardless of compression state (mlx_diffkv_wrapper.py:333).
+            // Fix: supplement the dense window with the last recency_window tokens from
+            // k_activations/v_activations, which hold all L prefill tokens' raw K/V.
+            const int recency_window = 512;
+            const int recency_start = std::max(0, L - recency_window);
+            const int recency_len   = L - recency_start;
+
+            for (int l = 0; l < n_layers; ++l) {
+                if (total_dense_tokens[l] < recency_len) {
+                    // How many recency tokens are NOT already covered by the block scan?
+                    // Block scan tokens start at dense_start_positions[l]; recency tokens
+                    // start at recency_start. Anything already covered, skip.
+                    // Simplest safe approach: overwrite dense window with recency tokens,
+                    // as the recency tokens are a strict superset of the DenseResident ones
+                    // (recent blocks are both DenseResident AND in the recency window).
+                    std::memcpy(
+                        active_k_dense[l].data(),
+                        k_activations[l].data() + recency_start * F_test,
+                        recency_len * F_test * sizeof(float)
+                    );
+                    std::memcpy(
+                        active_v_dense[l].data(),
+                        v_activations[l].data() + recency_start * F_test,
+                        recency_len * F_test * sizeof(float)
+                    );
+                    total_dense_tokens[l] = recency_len;
+                    if (l == 0) {
+                        dense_start_positions[l] = recency_start;
+                    }
+                }
+            }
+
+            // Update active_positions_dense to cover the recency window (layer-0 only,
+            // positions are shared across layers).
+            if (total_positions < recency_len) {
+                for (int i = 0; i < recency_len; ++i) {
+                    active_positions_dense[i] = recency_start + i;
+                }
+                total_positions = recency_len;
+            }
         }
+
 
         const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
         bool time_decode = (env_td && std::string(env_td) == "1");
@@ -3591,7 +3644,12 @@ int main(int argc, char ** argv) {
 
             std::string piece = model.token_to_piece(next_token);
             if (!is_warmup_run) {
-                std::cout << piece << std::flush;
+                // Use raw write() to bypass C++ stream buffering entirely.
+                // cout << flush only guarantees the stream buffer is flushed;
+                // write() goes directly to the file descriptor.
+                if (!piece.empty()) {
+                    ::write(STDOUT_FILENO, piece.data(), piece.size());
+                }
             }
 
             srl_state.update_generated_tokens(next_token);
