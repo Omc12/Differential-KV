@@ -83,6 +83,14 @@ struct SessionSRLState {
         current_step_step = -1;
     }
 
+    // --- Chunk graph rebuild throttle ---
+    // Mirrors ACTIVE_RUNTIME batch_engine.py:1034:
+    //   n_at_build = getattr(srl_state_existing, "n_blocks_at_build", n_current)
+    //   growth_ratio = (n_current - n_at_build) / max(1, n_at_build)
+    //   if growth_ratio < 0.20: skip rebuild
+    // Tracks how many blocks were present the last time chunk_graph was built.
+    int n_blocks_at_last_graph_build = 0;
+
     // --- Configuration knobs ---
     int   k_min              = 20;
     int   k_max              = 200;

@@ -3168,18 +3168,31 @@ int main(int argc, char ** argv) {
             auto t_after_logits = std::chrono::high_resolution_clock::now();
 
             auto t_before_kv_get = std::chrono::high_resolution_clock::now();
-            std::vector<float> concat_k_host(n_layers * F_test);
-            std::vector<float> concat_v_host(n_layers * F_test);
-            ggml_backend_tensor_get(decode_concat_k, concat_k_host.data(), 0, n_layers * F_test * sizeof(float));
-            ggml_backend_tensor_get(decode_concat_v, concat_v_host.data(), 0, n_layers * F_test * sizeof(float));
-            auto t_after_kv_get = std::chrono::high_resolution_clock::now();
-
-            std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test));
-            std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test));
+            // Fast path: K/V captured INSIDE custom_attention_op_callback — zero GPU readback.
+            // Mirrors batch_engine.cpp bug-3 fix and ACTIVE_RUNTIME's in-callback capture.
+            // In native_attn_on mode the callback doesn't run, so captured_kv is empty;
+            // we fall back to per-layer individual reads (avoids the two 28KB bulk transfers
+            // that flush the full GPU pipeline and cause the 10ms stall per token).
+            std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test, 0.0f));
+            std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test, 0.0f));
+            bool any_from_gpu = false;
             for (int l = 0; l < n_layers; ++l) {
-                std::memcpy(decode_k[l].data(), concat_k_host.data() + l * F_test, F_test * sizeof(float));
-                std::memcpy(decode_v[l].data(), concat_v_host.data() + l * F_test, F_test * sizeof(float));
+                if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
+                    // Callback captured K/V on the CPU side — no GPU transfer needed.
+                    std::memcpy(decode_k[l].data(), userdata[l].captured_kv.data(),          F_test * sizeof(float));
+                    std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
+                } else if (decode_concat_k && decode_concat_v) {
+                    // Fallback: per-layer individual read (smaller Metal→CPU transfer per layer
+                    // vs the old two 28KB bulk reads that stall the full pipeline).
+                    ggml_backend_tensor_get(decode_concat_k,
+                        decode_k[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
+                    ggml_backend_tensor_get(decode_concat_v,
+                        decode_v[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
+                    any_from_gpu = true;
+                }
             }
+            (void)any_from_gpu; // suppress unused warning
+            auto t_after_kv_get = std::chrono::high_resolution_clock::now();
 
             if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
                 double nk=0,nv=0,nk0=0,nv0=0; for(int i=0;i<F_test;++i){ nk+=(double)decode_k[0][i]*decode_k[0][i]; nv+=(double)decode_v[0][i]*decode_v[0][i]; if(i<head_dim){nk0+=(double)decode_k[0][i]*decode_k[0][i]; nv0+=(double)decode_v[0][i]*decode_v[0][i];} }
@@ -3844,44 +3857,70 @@ int main(int argc, char ** argv) {
                     update_srl_from_compressed_block(
                         srl_state,
                         desc.data(),
-                        block->pool_idx, // Physical slot ID
-                        all_tokens.data() + block->anchor_idx, // Correct token IDs
+                        block->pool_idx,
+                        all_tokens.data() + block->anchor_idx,
                         block->token_count(),
                         block->anchor_idx,
                         stop_token_ids
                     );
 
-                    // Rebuild chunk graph only over compressed slots (including those currently compressing)
-                    auto & all_blocks = runtime_manager.get_ingest_manager().get_blocks(0);
-                    std::vector<int32_t> cur_slots;
-                    for (int i = 0; i < (int)all_blocks.size(); ++i) {
-                        if (all_blocks[i]->pool_idx != -1 &&
-                            (all_blocks[i]->state == BlockState::CompressedResident ||
-                             all_blocks[i]->state == BlockState::CPUResident ||
-                             all_blocks[i]->state == BlockState::Compressing)) {
-                            cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
+                    // ── Chunk graph rebuild — mirror ACTIVE_RUNTIME batch_engine.py:1029-1042 ──
+                    // ACTIVE_RUNTIME: only rebuilds when block count grows by >20% since the
+                    // last build. It NEVER rebuilds inside the decode loop on every new block.
+                    // diffkv_native was doing this every 16 tokens → O(N²) CBLAS sgemm spike
+                    // per 16 tokens = audio crackling + system lag on long contexts.
+                    {
+                        int n_current = srl_state.n_active_blocks();
+                        int n_at_build = srl_state.n_blocks_at_last_graph_build;
+                        float growth_ratio = (n_at_build > 0)
+                            ? (float)(n_current - n_at_build) / (float)n_at_build
+                            : 1.0f; // first build always runs
+
+                        if (growth_ratio >= 0.20f) {
+                            // Rebuild chunk graph (ACTIVE_RUNTIME: triggered when growth ≥ 20%)
+                            auto& all_blocks_r = runtime_manager.get_ingest_manager().get_blocks(0);
+                            std::vector<int32_t> cur_slots;
+                            for (int i = 0; i < (int)all_blocks_r.size(); ++i) {
+                                if (all_blocks_r[i]->pool_idx != -1 &&
+                                    (all_blocks_r[i]->state == BlockState::CompressedResident ||
+                                     all_blocks_r[i]->state == BlockState::CPUResident ||
+                                     all_blocks_r[i]->state == BlockState::Compressing)) {
+                                    cur_slots.push_back(all_blocks_r[i]->pool_idx);
+                                }
+                            }
+                            int cur_N = (int)cur_slots.size();
+                            std::vector<float> cur_desc_matrix(cur_N * desc_dim);
+                            const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
+                            for (int j = 0; j < cur_N; ++j) {
+                                int sid = cur_slots[j];
+                                std::memcpy(
+                                    cur_desc_matrix.data() + j * desc_dim,
+                                    host_desc + sid * desc_dim,
+                                    desc_dim * sizeof(float)
+                                );
+                            }
+                            srl_state.chunk_graph = build_chunk_graph(
+                                cur_desc_matrix.data(),
+                                cur_slots.data(),
+                                cur_N,
+                                6, 2,
+                                &srl_state.inverted_index,
+                                0.15f
+                            );
+                            srl_state.n_blocks_at_last_graph_build = n_current;
+
+                            if (std::getenv("DIFFKV_ROUTING_VERBOSE")) {
+                                std::cerr << "[GRAPH] Rebuilt chunk graph: N=" << cur_N
+                                          << " growth=" << (int)(growth_ratio * 100) << "%\n";
+                            }
+                        } else if (std::getenv("DIFFKV_ROUTING_VERBOSE")) {
+                            // ACTIVE_RUNTIME: "SRL index already valid ... Skipping"
+                            std::cerr << "[GRAPH] Skipping chunk graph rebuild: N=" << n_current
+                                      << " vs " << n_at_build << " at last build ("
+                                      << (int)(growth_ratio * 100) << "% growth < 20%)\n";
                         }
                     }
-                    int cur_N = cur_slots.size();
-                    std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                    for (int j = 0; j < cur_N; ++j) {
-                        int slot_id = cur_slots[j];
-                        std::memcpy(
-                            cur_desc_matrix.data() + j * desc_dim,
-                            host_desc + slot_id * desc_dim,
-                            desc_dim * sizeof(float)
-                        );
-                    }
-
-                    srl_state.chunk_graph = build_chunk_graph(
-                        cur_desc_matrix.data(),
-                        cur_slots.data(),
-                        cur_N,
-                        6, 2,
-                        &srl_state.inverted_index,
-                        0.15f
-                    );
-                }
+                } // if (prev_slot >= 0)
 
                 // When a block completes, also sync the dense buffer for ALL layers
                 // (this is the correct place — before this guard it ran every token)

@@ -1780,48 +1780,60 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 update_srl_from_compressed_block(
                     session->srl_state,
                     desc.data(),
-                    block->pool_idx, // Physical slot ID
-                    all_tokens.data() + block->anchor_idx, // Correct token IDs
+                    block->pool_idx,
+                    all_tokens.data() + block->anchor_idx,
                     block->token_count(),
                     block->anchor_idx,
                     stop_token_ids_
                 );
 
-                // Rebuild chunk graph only over compressed slots
-                auto & all_blocks = runtime_manager_->get_ingest_manager().get_blocks(0);
-                std::vector<int32_t> cur_slots;
-                std::vector<int> cur_anchors;
-                for (int i = 0; i < (int)all_blocks.size(); ++i) {
-                    if (all_blocks[i]->pool_idx != -1 &&
-                        (all_blocks[i]->state == BlockState::CompressedResident ||
-                         all_blocks[i]->state == BlockState::CPUResident)) {
-                        cur_slots.push_back(all_blocks[i]->pool_idx); // Physical slot ID
-                        cur_anchors.push_back(all_blocks[i]->anchor_idx);
+                // ── Chunk graph rebuild — mirror ACTIVE_RUNTIME batch_engine.py:1029-1042 ──
+                // Only rebuild when block count grows >20% since the last build.
+                // Was firing every 16 tokens → O(N²) CBLAS sgemm per 16 tokens.
+                {
+                    int n_current = session->srl_state.n_active_blocks();
+                    int n_at_build = session->srl_state.n_blocks_at_last_graph_build;
+                    float growth_ratio = (n_at_build > 0)
+                        ? (float)(n_current - n_at_build) / (float)n_at_build
+                        : 1.0f;
+
+                    if (growth_ratio >= 0.20f) {
+                        auto& all_blocks_r = runtime_manager_->get_ingest_manager().get_blocks(0);
+                        std::vector<int32_t> cur_slots;
+                        std::vector<int> cur_anchors;
+                        for (int i = 0; i < (int)all_blocks_r.size(); ++i) {
+                            if (all_blocks_r[i]->pool_idx != -1 &&
+                                (all_blocks_r[i]->state == BlockState::CompressedResident ||
+                                 all_blocks_r[i]->state == BlockState::CPUResident)) {
+                                cur_slots.push_back(all_blocks_r[i]->pool_idx);
+                                cur_anchors.push_back(all_blocks_r[i]->anchor_idx);
+                            }
+                        }
+                        int cur_N = (int)cur_slots.size();
+                        std::vector<float> cur_desc_matrix(cur_N * desc_dim);
+                        for (int j = 0; j < cur_N; ++j) {
+                            int sid = cur_slots[j];
+                            ggml_backend_tensor_get(
+                                runtime_manager_->get_engines()[0]->get_desc_matrix(),
+                                cur_desc_matrix.data() + j * desc_dim,
+                                sid * desc_dim * sizeof(float),
+                                desc_dim * sizeof(float)
+                            );
+                        }
+                        session->srl_state.chunk_graph = build_chunk_graph(
+                            cur_desc_matrix.data(),
+                            cur_slots.data(),
+                            cur_N,
+                            6, 2,
+                            &session->srl_state.inverted_index,
+                            0.15f,
+                            &cur_slots,
+                            &cur_anchors,
+                            session->srl_state.cached_len
+                        );
+                        session->srl_state.n_blocks_at_last_graph_build = n_current;
                     }
                 }
-                int cur_N = cur_slots.size();
-                std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                for (int j = 0; j < cur_N; ++j) {
-                    int slot_id = cur_slots[j];
-                    ggml_backend_tensor_get(
-                        runtime_manager_->get_engines()[0]->get_desc_matrix(),
-                        cur_desc_matrix.data() + j * desc_dim,
-                        slot_id * desc_dim * sizeof(float),
-                        desc_dim * sizeof(float)
-                    );
-                }
-
-                session->srl_state.chunk_graph = build_chunk_graph(
-                    cur_desc_matrix.data(),
-                    cur_slots.data(),
-                    cur_N,
-                    6, 2,
-                    &session->srl_state.inverted_index,
-                    0.15f,
-                    &cur_slots,
-                    &cur_anchors,
-                    session->srl_state.cached_len
-                );
             }
             // Sync dense buffers only when block finishes
             sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
