@@ -635,6 +635,12 @@ async def run_direct_mode(args):
     else:
         model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
 
+    # Force single-threaded BLAS/LAPACK/OpenMP to avoid audio driver preemption and latency
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
     # Setup environment variables
     os.environ["DIFFKV_PRESET"] = args.preset
     if args.preset == 'low':
