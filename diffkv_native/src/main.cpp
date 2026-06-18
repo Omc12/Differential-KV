@@ -2210,14 +2210,22 @@ int main(int argc, char ** argv) {
             ggml_free(prefill_ctx);
         }
 
-        if (!interactive) {
-            std::cerr << "[DiffKV Native] Waiting for background SVD compressor to catch up..." << std::endl;
-        }
-        runtime_manager.wait_for_compressor();
+        // ── ACTIVE_RUNTIME batch_engine.py Fix 4: Fire-and-forget compression + SRL build ──
+        // ACTIVE_RUNTIME: "The first token is already streamed above via _emit_token.
+        //   Compression and SRL index are built in background so they don't block the
+        //   decode loop. CRITICAL: finalize_srl_index is CPU-heavy sync code."
+        //
+        // In diffkv_native we do the same:
+        //   1. Do a quick non-blocking sync of already-compressed slots (Metal-safe)
+        //   2. Fire background std::thread: wait_for_compressor → update_descriptors →
+        //      build_srl_state_from_blocks → factual_store.build
+        //   3. Decode starts immediately (empty SRL = recency-only routing)
+        //   4. When thread done: main thread does final GPU sync + swaps in SRL state
+        //
+        // Metal thread safety: sync_device_for_native() ONLY called from main thread
+        // (via srl_needs_gpu_sync atomic flag). Background thread is CPU-only.
         runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
-        // Native attn: push prefill-compressed slots host→device before decode (async SVD
-        // only wrote host mirrors). Decode-time blocks are handled inside ingest_decode.
-        runtime_manager.sync_device_for_native();
+        runtime_manager.sync_device_for_native(); // quick sync of already-done slots
 
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << "[DEBUG ACTIVATIONS] cached_len=" << cached_len << " L=" << L << "\n";
@@ -2508,76 +2516,90 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> all_tokens = prompt_tokens;
         all_tokens.push_back(last_token);
 
-        // Build initial SessionSRLState for all completed blocks in prefill using runtime_manager
-        srl_state.vsl_active_candidates.clear();
-        srl_state.vsl_consecutive_helpers = 0;
-        srl_state.ordered_slot_ids.clear();
-        srl_state.sink_blocks.clear();
-        srl_state.inverted_index.clear();
-        srl_state.chunk_graph = diffkv::ChunkGraph();
-        srl_state.semantic_index = diffkv::SemanticIndex();
+        // ── Background SRL build thread (ACTIVE_RUNTIME: _build_srl_index_async) ──────────
+        // Declared before all_tokens so the lambda captures by reference safely.
+        // srl_state starts empty → route_decode_slots returns sink+recency (safe fallback).
+        std::atomic<bool> srl_build_done{false};
+        std::atomic<bool> srl_needs_gpu_sync{false};
+        SessionSRLState  srl_state_pending;
+        bool             srl_swapped = false;
 
-        auto & blocks_layer0 = runtime_manager.get_ingest_manager().get_blocks(0);
-        std::vector<int32_t> compressed_slots;
-        for (int i = 0; i < (int)blocks_layer0.size(); ++i) {
-            if (blocks_layer0[i]->pool_idx != -1 &&
-                (blocks_layer0[i]->state == BlockState::CompressedResident ||
-                 blocks_layer0[i]->state == BlockState::CPUResident)) {
-                compressed_slots.push_back(blocks_layer0[i]->pool_idx); // Physical slot ID
+        // Capture everything the thread needs by value/pointer (safe: decode loop runs
+        // concurrently but doesn't touch srl_state_pending until srl_swapped)
+        const int        _mbs        = runtime_manager.get_micro_block_size();
+        const int        _desc_dim   = desc_dim;
+        const int        _head_dim   = head_dim;
+        const int        _kv_heads   = kv_heads;
+        const int        _L          = L;
+        std::vector<int32_t> _prompt_tokens_copy = prompt_tokens; // thread-safe copy
+        std::vector<float>   _W_proj_copy        = W_proj_host;   // thread-safe copy
+        std::vector<std::vector<float>> _k_act_copy = k_activations; // copy prefill KV
+        std::vector<std::vector<float>> _v_act_copy = v_activations;
+
+        std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L]() {
+            // Step 1: wait for all SVD compression (ACTIVE_RUNTIME: _wait_for_compression)
+            runtime_manager.wait_for_compressor();
+            runtime_manager.update_descriptors(_W_proj_copy, _desc_dim, _head_dim);
+            // Signal main thread to do the GPU sync (Metal is single-threaded)
+            srl_needs_gpu_sync.store(true, std::memory_order_release);
+
+            // Step 2: collect compressed slots (CPU-only read, compressor is done)
+            auto& blocks_l0 = runtime_manager.get_ingest_manager().get_blocks(0);
+            std::vector<int32_t> comp_slots;
+            for (int i = 0; i < (int)blocks_l0.size(); ++i) {
+                if (blocks_l0[i]->pool_idx != -1 &&
+                    (blocks_l0[i]->state == BlockState::CompressedResident ||
+                     blocks_l0[i]->state == BlockState::CPUResident)) {
+                    comp_slots.push_back(blocks_l0[i]->pool_idx);
+                }
             }
-        }
-        int completed_blocks = compressed_slots.size();
-        if (completed_blocks > 0) {
-            std::vector<float> desc_matrix_host(completed_blocks * desc_dim);
-            for (int j = 0; j < completed_blocks; ++j) {
-                int slot_id = compressed_slots[j];
-                ggml_backend_tensor_get(
-                    runtime_manager.get_engines()[0]->get_desc_matrix(),
-                    desc_matrix_host.data() + j * desc_dim,
-                    slot_id * desc_dim * sizeof(float),
-                    desc_dim * sizeof(float)
+
+            // Step 3: build SRL state (ACTIVE_RUNTIME: finalize_srl_index)
+            int n_comp = (int)comp_slots.size();
+            if (n_comp > 0) {
+                // Read host descriptor matrix (CPU side — safe without GPU sync)
+                const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
+                std::vector<float> desc_mat(n_comp * _desc_dim);
+                for (int j = 0; j < n_comp; ++j) {
+                    int sid = comp_slots[j];
+                    std::memcpy(desc_mat.data() + j * _desc_dim,
+                                host_desc + sid * _desc_dim,
+                                _desc_dim * sizeof(float));
+                }
+                srl_state_pending = build_srl_state_from_blocks(
+                    desc_mat.data(), comp_slots.data(), n_comp,
+                    _prompt_tokens_copy.data(), _L,
+                    _mbs + 1, stop_token_ids,
+                    6, 2, 0.15f, true, true
                 );
+                srl_state_pending.n_blocks_at_last_graph_build = n_comp;
+
+                // Factual store (ACTIVE_RUNTIME: FactualExactStore.build inside finalize_srl_index)
+                std::unordered_set<int32_t> prime_slots(
+                    srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
+                    srl_state_pending.chunk_graph.cluster_centers_tensor.end()
+                );
+                srl_state_pending.factual_store.build(
+                    _k_act_copy, _v_act_copy,
+                    _prompt_tokens_copy,
+                    _W_proj_copy.data(),
+                    _desc_dim, _head_dim, _kv_heads,
+                    stop_token_ids,
+                    srl_state_pending.ordered_slot_ids,
+                    _mbs + 1,
+                    srl_state_pending.inverted_index,
+                    prime_slots,
+                    get_helper_token_ids_cpp(model),
+                    true
+                );
+                srl_state_pending.setup_sas_and_eqa(
+                    _prompt_tokens_copy, stop_token_ids,
+                    [&](int32_t tid) { return model.token_to_piece(tid); }
+                );
+                std::cerr << "[DiffKV] SRL index ready: " << n_comp << " blocks." << std::endl;
             }
-
-            srl_state = build_srl_state_from_blocks(
-                desc_matrix_host.data(),
-                compressed_slots.data(),
-                completed_blocks,
-                prompt_tokens.data(),
-                L,
-                runtime_manager.get_micro_block_size() + 1, // block_size (adaptive)
-                stop_token_ids,
-                6, // K_semantic
-                2, // K_temporal
-                0.15f, // overlap_threshold
-                true, // add_first_as_sink
-                true  // add_last_as_sink
-            );
-
-            std::unordered_set<int32_t> prime_slots(
-                srl_state.chunk_graph.cluster_centers_tensor.begin(),
-                srl_state.chunk_graph.cluster_centers_tensor.end()
-            );
-            srl_state.factual_store.build(
-                k_activations,
-                v_activations,
-                prompt_tokens,
-                W_proj_host.data(),
-                desc_dim,
-                head_dim,
-                kv_heads,
-                stop_token_ids,
-                srl_state.ordered_slot_ids,
-                runtime_manager.get_micro_block_size() + 1,
-                srl_state.inverted_index,
-                prime_slots,
-                get_helper_token_ids_cpp(model),
-                true // use_salience_parser
-            );
-            srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids, [&](int32_t tid) {
-                return model.token_to_piece(tid);
-            });
-        }
+            srl_build_done.store(true, std::memory_order_release);
+        });
 
         int active_slot = runtime_manager.get_ingest_manager().get_blocks(0).size() - 1;
         if (active_slot < 0) {
@@ -2715,6 +2737,22 @@ int main(int argc, char ** argv) {
 
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
+
+            // \u2500\u2500 ACTIVE_RUNTIME fix 4: swap in SRL state when background thread finishes \u2500\u2500
+            // Mirrors batch_engine.py: once _build_srl_index_async completes, the full
+            // SRL state (chunk_graph + inverted_index + factual_store) is swapped in.
+            // GPU sync is done here (main thread) for Metal thread safety.
+            if (!srl_swapped && srl_build_done.load(std::memory_order_acquire)) {
+                if (srl_needs_gpu_sync.load(std::memory_order_acquire)) {
+                    // All blocks now compressed; upload them to Metal buffers (main thread only)
+                    runtime_manager.sync_device_for_native();
+                }
+                // Swap in the fully-built SRL state
+                srl_state = std::move(srl_state_pending);
+                srl_swapped = true;
+                std::cerr << "[DiffKV] SRL routing active from step " << step << std::endl;
+            }
+
             if (active_slot >= n_slots) {
                 std::cerr << "\n[DiffKV Native] Warning: Context slot capacity reached during decode. Stopping generation." << std::endl;
                 break;
@@ -2723,8 +2761,6 @@ int main(int argc, char ** argv) {
 
             // Mirrors ACTIVE_RUNTIME: invalidate the per-step routing cache at the
             // top of each decode step, before layer 0 re-routes.
-            // Python equivalent: the cache is implicitly stale after each step since
-            // current_step_slots is overwritten at layer 0 on the next step.
             srl_state.clear_step_cache();
 
             bool step_use_sparse = (current_pos >= engage_threshold);
@@ -4017,6 +4053,12 @@ int main(int argc, char ** argv) {
             std::cerr << "[DiffKV Native] Error in commit_turn on turn boundary: " << e.what() << std::endl;
         }
 
+
+        // Join background SRL build thread before freeing shared resources.
+        // ACTIVE_RUNTIME equivalent: the async task is awaited at session teardown.
+        if (srl_build_thread.joinable()) {
+            srl_build_thread.join();
+        }
 
         // Free decode context — must happen before next iteration rebuilds it
         ggml_free(decode_ctx);
