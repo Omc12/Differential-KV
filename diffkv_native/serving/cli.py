@@ -659,6 +659,9 @@ async def run_direct_mode(args):
     os.environ["DIFFKV_MICRO_BLOCK_SIZE"] = str(args.micro_block_size)
     os.environ["DIFFKV_BINARY_PATH"] = os.path.abspath(args.binary_path)
     os.environ["DIFFKV_MODEL_PATH"] = model_path
+    if hasattr(args, 'context') and args.context is not None:
+        os.environ["DIFFKV_MAX_CTX_TK"] = str(args.context)
+        print_system(f"Context override: {args.context} tokens (--context flag)")
     if "DIFFKV_MPS_APPROXIMATE_ATTN" not in os.environ:
         os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
     # Correctness is guaranteed by the spin-wait inside execute_metal_attention:
@@ -856,7 +859,10 @@ def main():
     parser.add_argument('--micro-block-size', type=int, default=16,
                         help="Micro block size for KV compression.")
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid',
-                        help="Optimization preset (influences chunk prefill size).")
+                        help="Optimization preset (influences chunk prefill size). Use --context to override token budget.")
+    parser.add_argument('--context', type=int, default=None,
+                        help="Override context token budget (e.g. 22000 for a 20k-token prompt). "
+                             "Overrides the preset's default limit. Leave unset to use preset default.")
     
     # Generation parameters
     parser.add_argument('--max-tokens', type=int, default=16384,

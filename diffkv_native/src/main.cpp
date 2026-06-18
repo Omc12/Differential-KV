@@ -3327,21 +3327,20 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // RC8 — generation-time binding validator.  While locked to an entity,
-            // penalise tokens that belong exclusively to OTHER entities so the model
-            // cannot emit "EP2 has codimension 3".  Also fires in comparison mode
-            // (RC5 locks one entity per block) and escalates once retrieval is
-            // confident.
-            if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
-                std::unordered_set<int32_t> licensed, foreign;
-                diffkv::compute_entity_token_license(
-                    srl_state.current_step_factual_sequences,
-                    entity_ids, is_prime_list, current_entity, licensed, foreign);
-                float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
-                for (int32_t tok_id : foreign) {
-                    if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
-                }
-            }
+            // RC8 — disabled: the MLX reference has NO foreign-entity penalty, and on
+            // multi-character literary prompts (Pride & Prejudice: Elizabeth, Darcy, Bingley,
+            // Wickham, …) this aggressively suppresses legitimate tokens from "other"
+            // characters. Bug 🅗 from NATIVE_VS_ACTIVE_BUGS.md.
+            // if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
+            //     std::unordered_set<int32_t> licensed, foreign;
+            //     diffkv::compute_entity_token_license(
+            //         srl_state.current_step_factual_sequences,
+            //         entity_ids, is_prime_list, current_entity, licensed, foreign);
+            //     float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
+            //     for (int32_t tok_id : foreign) {
+            //         if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
+            //     }
+            // }
 
             // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
             // exact next token is confirmed. Give it a decisive advantage.

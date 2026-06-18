@@ -758,7 +758,7 @@ void custom_attention_op_callback(
             for (const auto& entry : matching_entries)
                 if (entry.current_sim > max_sim) max_sim = entry.current_sim;
             if (max_sim >= 0.4f)
-                lse_facts[h] += 4.0f * (max_sim - 0.4f) / 0.6f;
+                lse_facts[h] += 8.0f * (max_sim - 0.4f) / 0.6f;
         }
     }
 
