@@ -465,10 +465,10 @@ void StreamingSparseIngestManager::ingest_chunk(
     // Start from last_compression_scan_idx_[layer_idx] to avoid re-scanning
     // already-processed blocks (O(N) → amortized O(1) per block).
     int current_seq_len = position_start + chunk_len;
-    bool immediate_prefill = true;
+    bool immediate_prefill = false;
     if (const char* env_p = std::getenv("DIFFKV_IMMEDIATE_PREFILL_COMPRESS")) {
-        if (std::string(env_p) == "0") {
-            immediate_prefill = false;
+        if (std::string(env_p) == "1") {
+            immediate_prefill = true;
         }
     }
 

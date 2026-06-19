@@ -503,7 +503,7 @@ void execute_metal_attention(
     NativeBlockPool* engine = data->kv_engine;
 
     // ── Deduplicate and validate slot indices ──────────────────────────────────
-    const int raw_K   = data->K;
+    const int raw_K   = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
     const int n_slots = engine->get_seq_lens()->ne[0];
 
     std::vector<int32_t> unique_slots;

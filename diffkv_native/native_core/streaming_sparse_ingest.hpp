@@ -16,7 +16,7 @@ struct SessionSRLState;
 
 struct StreamingKVBlock {
     int anchor_idx;
-    int micro_block_size = 16;
+    int micro_block_size = 256;
     int pool_idx = -1; // slot index in NativeBlockPool
     BlockState state = BlockState::DenseResident;
     bool is_outlier = false;
@@ -45,7 +45,7 @@ struct StreamingKVBlock {
 class StreamingSparseIngestManager {
 public:
     StreamingSparseIngestManager(
-        int micro_block_size = 16,
+        int micro_block_size = 256,
         int recency_window = 512,
         int short_context_threshold = 256,
         bool protect_block_zero = true

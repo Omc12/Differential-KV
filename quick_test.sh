@@ -18,7 +18,9 @@ export DIFFKV_MAX_TOKENS=50
 
 # Find model
 MODEL=""
-if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
+if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
+    MODEL="qwen2.5-1.5b-instruct-q4_k_m.gguf"
+elif [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q8_0.gguf"
 elif [ -f "diffkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
     MODEL="qwen2.5-0.5b-instruct.gguf"
@@ -34,7 +36,7 @@ echo "Paste your prompt and press Ctrl+D (or type a prompt):"
 echo "───────────────────────────────────────────────────────────────────"
 
 cd diffkv_native
-python serving/cli.py \
+../diffkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
     --binary-path build/diffkv_native \
     --preset mid \

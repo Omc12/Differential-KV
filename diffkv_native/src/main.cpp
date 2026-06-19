@@ -118,6 +118,60 @@ static void apply_rope_neox_cpu_fast(
     }
 }
 
+// fp16 KV overload: src/dst are float16 storage; the rotation math runs in fp32
+// (identical numerics to the fp32 version) and the result is stored back as fp16.
+static void apply_rope_neox_cpu_fast(
+    const ggml_fp16_t* k_raw, ggml_fp16_t* k_rotated,
+    const float* cos_table, const float* sin_table,
+    int num_tokens, int kv_heads, int head_dim
+) {
+    const int D    = head_dim;
+    const int half = D / 2;
+    for (int t = 0; t < num_tokens; ++t) {
+        const float* cos_t = cos_table + t * half;
+        const float* sin_t = sin_table + t * half;
+        for (int h = 0; h < kv_heads; ++h) {
+            const ggml_fp16_t* src = k_raw     + (t * kv_heads + h) * D;
+            ggml_fp16_t*       dst = k_rotated + (t * kv_heads + h) * D;
+            for (int i = 0; i < half; ++i) {
+                float cos_th = cos_t[i];
+                float sin_th = sin_t[i];
+                float x      = ggml_fp16_to_fp32(src[i]);
+                float y      = ggml_fp16_to_fp32(src[i + half]);
+                dst[i]        = ggml_fp32_to_fp16(x * cos_th - y * sin_th);
+                dst[i + half] = ggml_fp32_to_fp16(y * cos_th + x * sin_th);
+            }
+        }
+    }
+}
+
+// Mixed overload: fp16 source (k_activations) → fp32 destination (active_k_dense_rotated,
+// the decode dense window which stays fp32). Used by the multi-turn rebuild path.
+static void apply_rope_neox_cpu_fast(
+    const ggml_fp16_t* k_raw, float* k_rotated,
+    const float* cos_table, const float* sin_table,
+    int num_tokens, int kv_heads, int head_dim
+) {
+    const int D    = head_dim;
+    const int half = D / 2;
+    for (int t = 0; t < num_tokens; ++t) {
+        const float* cos_t = cos_table + t * half;
+        const float* sin_t = sin_table + t * half;
+        for (int h = 0; h < kv_heads; ++h) {
+            const ggml_fp16_t* src = k_raw     + (t * kv_heads + h) * D;
+            float*             dst = k_rotated + (t * kv_heads + h) * D;
+            for (int i = 0; i < half; ++i) {
+                float cos_th = cos_t[i];
+                float sin_th = sin_t[i];
+                float x      = ggml_fp16_to_fp32(src[i]);
+                float y      = ggml_fp16_to_fp32(src[i + half]);
+                dst[i]        = x * cos_th - y * sin_th;
+                dst[i + half] = y * cos_th + x * sin_th;
+            }
+        }
+    }
+}
+
 struct ggml_cgraph * build_prefill_graph(
     struct ggml_context * ctx,
     DiffKVModel & model,
@@ -305,16 +359,21 @@ struct ggml_cgraph * build_prefill_ctx_graph(
         struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, v->ne[1]);
         struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
 
-        // 6. Concatenate prior context with current chunk along seq dim (dim=1 in permuted layout)
-        struct ggml_tensor * k_ctx_perm = k_perm;
-        struct ggml_tensor * v_ctx_perm = v_perm;
+        // 6. Cast current chunk K/V to F16 (flash-attn's standard K/V dtype; matches the
+        //    F16 prior tensors so the concat dtypes agree and the GPU prior context is halved).
+        struct ggml_tensor * k_perm16 = ggml_cast(ctx, ggml_cont(ctx, k_perm), GGML_TYPE_F16);
+        struct ggml_tensor * v_perm16 = ggml_cast(ctx, ggml_cont(ctx, v_perm), GGML_TYPE_F16);
+
+        // Concatenate prior context with current chunk along seq dim (dim=1 in permuted layout)
+        struct ggml_tensor * k_ctx_perm = k_perm16;
+        struct ggml_tensor * v_ctx_perm = v_perm16;
         bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
         if (has_prior) {
-            // prior tensors are already [head_dim, kv_heads, prior_len] — permute to [head_dim, prior_len, kv_heads]
+            // prior tensors are F16 [head_dim, kv_heads, prior_len] — permute to [head_dim, prior_len, kv_heads]
             struct ggml_tensor * pk = ggml_permute(ctx, (*prior_k_ctx)[l], 0, 2, 1, 3);
             struct ggml_tensor * pv = ggml_permute(ctx, (*prior_v_ctx)[l], 0, 2, 1, 3);
-            k_ctx_perm = ggml_concat(ctx, pk, k_perm, 1);
-            v_ctx_perm = ggml_concat(ctx, pv, v_perm, 1);
+            k_ctx_perm = ggml_concat(ctx, pk, k_perm16, 1);
+            v_ctx_perm = ggml_concat(ctx, pv, v_perm16, 1);
         }
 
         // 7. Flash Attention with full context mask
@@ -720,7 +779,7 @@ struct ggml_cgraph * build_decode_graph(
 
                 // Semantic search topk: [srl_k_semantic, 1]
                 struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
-                struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, srl_k_semantic);
+                struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, sem_slots->ne[0]);
 
                 // Concatenate semantic and host slots
                 struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
@@ -1300,9 +1359,9 @@ int main(int argc, char ** argv) {
     model.print_info();
     
     
-    // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
-    // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
-    int micro_block_size = 16;
+    // Bug 🅙 fix: micro_block_size 64→256 to match MLX reference.
+    // 256 gives dense anchors matching MLX.
+    int micro_block_size = 256;
     if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }
@@ -1532,10 +1591,31 @@ int main(int argc, char ** argv) {
 
     // Allocate persistent dense vectors and tables
     int F_test = kv_heads * head_dim;
-    std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
-    std::vector<diffkv::AlignedFloatVector> active_k_dense_rotated(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
-    std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers, diffkv::AlignedFloatVector(16384 * F_test, 0.0f));
-    diffkv::AlignedInt32Vector active_positions_dense(16384, 0);
+
+    // ── Dense-window buffer cap (RAM fix) ────────────────────────────────────
+    // These three fp32 buffers were hardcoded to 16384 tokens × F × n_layers × 3,
+    // costing ~1.4 GB (1.5B model) even though the dense window only ever holds:
+    //   • non-sparse path  : up to engage_threshold prompt tokens, OR
+    //   • sparse path      : the recency window (~512 tokens),
+    //   plus the decode-time generated tokens (≤ max_generate).
+    // Size to the real worst case (engage_threshold + max_generate + slack). The
+    // per-append guards (`offset + F_test <= active_k_dense[l].size()`) already
+    // prevent overflow, so this only trims unused RAM. MLX keeps no such fp32 host
+    // copy at all (KV lives fp16 in unified memory).
+    int dense_cap_engage = 2048;  // DIFFKV_ENGAGE_THRESHOLD default
+    if (const char* e = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+        try { dense_cap_engage = std::max(dense_cap_engage, std::stoi(e)); } catch (...) {}
+    }
+    int dense_cap_gen = 2048;     // DIFFKV_MAX_TOKENS default
+    if (const char* e = std::getenv("DIFFKV_MAX_TOKENS")) {
+        try { dense_cap_gen = std::max(1, std::stoi(e)); } catch (...) {}
+    }
+    int DENSE_WINDOW_CAP = dense_cap_engage + dense_cap_gen + 512;  // ~4608 default
+
+    std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
+    std::vector<diffkv::AlignedFloatVector> active_k_dense_rotated(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
+    std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
+    diffkv::AlignedInt32Vector active_positions_dense(DENSE_WINDOW_CAP, 0);
     int total_positions = 0;
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
@@ -1724,6 +1804,31 @@ int main(int argc, char ** argv) {
         }
 
         int L = prompt_tokens.size();
+
+        // ── Adaptive micro-block size (matches Python ACTIVE_RUNTIME logic) ──────
+        {
+            int raw_target;
+            if (L < 256) {
+                raw_target = 16;
+            } else if (L < 1024) {
+                raw_target = 32;
+            } else if (L < 4096) {
+                raw_target = 64;
+            } else if (L < 8192) {
+                raw_target = 128;
+            } else {
+                raw_target = 256;
+            }
+            int target = std::min(raw_target, micro_block_size);
+            int adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
+            if (adaptive_mbs != micro_block_size && !is_warmup_run) {
+                std::cerr << "[DiffKV Native] Adaptive micro_block_size: " << micro_block_size
+                          << " -> " << adaptive_mbs << " (L=" << L << ")" << std::endl;
+            }
+            micro_block_size = adaptive_mbs; // Update the local variable!
+            runtime_manager.set_micro_block_size(adaptive_mbs);
+        }
+
         // Reserve decode headroom: we must reserve enough free slots for max_generate tokens,
         // so that decode generation does not fail due to slot capacity exhaustion.
         int max_generate = 2048;
@@ -1746,6 +1851,14 @@ int main(int argc, char ** argv) {
                               << " → " << new_n_slots << " slots to fit " << L
                               << "-token prompt (Python parity: dynamic pool)." << std::endl;
                     n_slots = new_n_slots;
+                    // Re-initialize the pool since we need more slots!
+                    runtime_manager.reset();
+                    if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
+                        std::cerr << "Failed to re-initialize KVRuntimeManager during auto-expansion!" << std::endl;
+                        return 1;
+                    }
+                    runtime_manager.get_ingest_manager().set_stop_token_ids(&stop_token_ids);
+                    runtime_manager.get_ingest_manager().set_session_id("interactive_session");
                 }
             }
         }
@@ -1859,29 +1972,6 @@ int main(int argc, char ** argv) {
             session_cached_token_ids.clear();
         }
 
-        // ── Adaptive micro-block size (matches Python ACTIVE_RUNTIME logic) ──────
-        {
-            int raw_target;
-            if (L < 256) {
-                raw_target = 16;
-            } else if (L < 1024) {
-                raw_target = 32;
-            } else if (L < 4096) {
-                raw_target = 64;
-            } else if (L < 8192) {
-                raw_target = 128;
-            } else {
-                raw_target = 256;
-            }
-            int target = std::min(raw_target, micro_block_size);
-            int adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
-            if (adaptive_mbs != micro_block_size && !is_warmup_run) {
-                std::cerr << "[DiffKV Native] Adaptive micro_block_size: " << micro_block_size
-                          << " -> " << adaptive_mbs << " (L=" << L << ")" << std::endl;
-            }
-            runtime_manager.set_micro_block_size(adaptive_mbs);
-        }
-
         // ── 1. PREFILL PHASE ──
         if (!interactive) {
             std::cerr << "[DiffKV Native] Running Prefill phase in chunks..." << std::endl;
@@ -1891,9 +1981,16 @@ int main(int argc, char ** argv) {
         // For continuation turns (cached_len > 0), we only fill offsets [cached_len..L-1]
         // and upload the already-stored prefix K/V from the prior chunk's data (if pos_start > cached_len).
         // This matches ACTIVE_RUNTIME: full prompt is sent, only new tokens are prefilled.
-        std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
-        std::vector<std::vector<float>> k_rotated_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
-        std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
+        // ── fp16 KV storage (RAM fix, mirrors MLX which keeps dense KV in float16) ──
+        // These three full-length host buffers are the single biggest native-vs-MLX RAM
+        // overhead (3 × L × F × 4 bytes × n_layers ≈ 2 GB at 24k/1.5B). MLX stores the
+        // equivalent in float16 (mlx_diffkv_wrapper.py:345 "float16 explicitly to halve RAM").
+        // Stored as ggml_fp16_t; every consumer converts at its boundary (ggml_fp16_to_fp32
+        // on read, ggml_fp32_to_fp16 on write). The fp32 MATH is unchanged — only storage
+        // halves. The GPU prior tensors + prefill flash-attn are F16 to match (no fp32 temp).
+        std::vector<std::vector<ggml_fp16_t>> k_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
+        std::vector<std::vector<ggml_fp16_t>> k_rotated_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
+        std::vector<std::vector<ggml_fp16_t>> v_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
         std::vector<float> prefill_output_logits(n_vocab);
 
         int chunk_size = 512; // Default to balanced preset size
@@ -2007,19 +2104,19 @@ int main(int argc, char ** argv) {
                                 if (t == landmark_idx) {
                                     // This is the landmark token, stored as the anchor in the pool
                                     for (int f = 0; f < F_test; ++f) {
-                                        k_activations[l][global_pos * F_test + f] = anchor_k_float[f];
-                                        v_activations[l][global_pos * F_test + f] = anchor_v_float[f];
+                                        k_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(anchor_k_float[f]);
+                                        v_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(anchor_v_float[f]);
                                     }
                                 } else {
                                     // Reconstructed from SVD delta
                                     int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
-                                    float* k_act_row = &k_activations[l][global_pos * F_test];
-                                    float* v_act_row = &v_activations[l][global_pos * F_test];
+                                    ggml_fp16_t* k_act_row = &k_activations[l][global_pos * F_test];
+                                    ggml_fp16_t* v_act_row = &v_activations[l][global_pos * F_test];
                                     const float* k_del_row = &K_delta[s * F_test];
                                     const float* v_del_row = &V_delta[s * F_test];
                                     for (int f = 0; f < F_test; ++f) {
-                                        k_act_row[f] = anchor_k_float[f] + k_del_row[f] * block_scale;
-                                        v_act_row[f] = anchor_v_float[f] + v_del_row[f] * block_scale;
+                                        k_act_row[f] = ggml_fp32_to_fp16(anchor_k_float[f] + k_del_row[f] * block_scale);
+                                        v_act_row[f] = ggml_fp32_to_fp16(anchor_v_float[f] + v_del_row[f] * block_scale);
                                     }
                                 }
                             }
@@ -2028,8 +2125,9 @@ int main(int argc, char ** argv) {
                             int global_pos = block->anchor_idx;
                             if (global_pos < cached_len) {
                                 for (int f = 0; f < F_test; ++f) {
-                                    k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                    v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                    // anchors are already fp16 storage — copy directly (no round-trip).
+                                    k_activations[l][global_pos * F_test + f] = engine->get_host_anchors_K()[slot_id * F_test + f];
+                                    v_activations[l][global_pos * F_test + f] = engine->get_host_anchors_V()[slot_id * F_test + f];
                                 }
                             }
                         }
@@ -2046,12 +2144,16 @@ int main(int argc, char ** argv) {
                             if (global_pos >= cached_len) break;
                             
                             if (t == 0) {
-                                std::memcpy(k_activations[l].data() + global_pos * F_test, block->anchor_k.data(), F_test * sizeof(float));
-                                std::memcpy(v_activations[l].data() + global_pos * F_test, block->anchor_v.data(), F_test * sizeof(float));
+                                for (int f = 0; f < F_test; ++f) {
+                                    k_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(block->anchor_k[f]);
+                                    v_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(block->anchor_v[f]);
+                                }
                             } else {
                                 int s = t - 1;
-                                std::memcpy(k_activations[l].data() + global_pos * F_test, block->active_k.data() + s * F_test, F_test * sizeof(float));
-                                std::memcpy(v_activations[l].data() + global_pos * F_test, block->active_v.data() + s * F_test, F_test * sizeof(float));
+                                for (int f = 0; f < F_test; ++f) {
+                                    k_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(block->active_k[s * F_test + f]);
+                                    v_activations[l][global_pos * F_test + f] = ggml_fp32_to_fp16(block->active_v[s * F_test + f]);
+                                }
                             }
                         }
                     }
@@ -2151,11 +2253,12 @@ int main(int argc, char ** argv) {
             if (has_prior) {
                 int prior_intra_len = pos_start; // all prior intra-turn chunks
                 for (int l = 0; l < n_layers; ++l) {
-                    // prior_k: [head_dim, kv_heads, prior_intra_len] — raw K from THIS turn's prior chunks
-                    prior_k_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                    // prior_k: [head_dim, kv_heads, prior_intra_len] — fp16 (matches the fp16 host
+                    // buffers + flash-attn's standard F16 K/V; halves the GPU prior context RAM).
+                    prior_k_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F16,
                         head_dim, kv_heads, prior_intra_len);
                     ggml_set_input(prior_k_tensors[l]);
-                    prior_v_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F32,
+                    prior_v_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F16,
                         head_dim, kv_heads, prior_intra_len);
                     ggml_set_input(prior_v_tensors[l]);
                 }
@@ -2211,12 +2314,13 @@ int main(int argc, char ** argv) {
             if (has_prior) {
                 int intra_prior_len = pos_start;
                 for (int l = 0; l < n_layers; ++l) {
+                    // prior tensors are F16 (see decl); host buffers are already fp16 → direct copy.
                     ggml_backend_tensor_set(prior_k_tensors[l],
                         k_rotated_activations[l].data(),
-                        0, intra_prior_len * F_test * sizeof(float));
+                        0, intra_prior_len * F_test * sizeof(ggml_fp16_t));
                     ggml_backend_tensor_set(prior_v_tensors[l],
                         v_activations[l].data(),
-                        0, intra_prior_len * F_test * sizeof(float));
+                        0, intra_prior_len * F_test * sizeof(ggml_fp16_t));
                 }
             }
 
@@ -2237,8 +2341,11 @@ int main(int argc, char ** argv) {
             for (int l = 0; l < n_layers; ++l) {
                 ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
                 ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
-                std::memcpy(k_activations[l].data() + local_offset * F_test, chunk_k[l].data(), chunk_len * F_test * sizeof(float));
-                std::memcpy(v_activations[l].data() + local_offset * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
+                // Store raw K/V into the fp16 host buffers (chunk_k/v stay fp32 for ingest/SVD).
+                for (int i = 0; i < chunk_len * F_test; ++i) {
+                    k_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_k[l][i]);
+                    v_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_v[l][i]);
+                }
             }
 
             // RoPE-rotate only the current chunk and store it in k_rotated_activations
@@ -2285,6 +2392,15 @@ int main(int argc, char ** argv) {
             ggml_free(prefill_ctx);
         }
 
+        // ── RAM fix (mirror MLX mx.clear_cache() at the prefill→decode boundary) ──
+        // k_rotated_activations is used ONLY during prefill (the per-chunk RoPE'd-K
+        // re-upload). It is dead weight through the entire decode phase, where it
+        // costs L × F × 4 × n_layers bytes (~700 MB at 24k tokens, 1.5B). Release it
+        // now so it does not sit resident (and swapping) while decode runs.
+        for (auto & v : k_rotated_activations) {
+            std::vector<ggml_fp16_t>().swap(v);  // free capacity, not just size
+        }
+
         // ── ACTIVE_RUNTIME batch_engine.py Fix 4: Fire-and-forget compression + SRL build ──
         // ACTIVE_RUNTIME: "The first token is already streamed above via _emit_token.
         //   Compression and SRL index are built in background so they don't block the
@@ -2305,17 +2421,17 @@ int main(int argc, char ** argv) {
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << "[DEBUG ACTIVATIONS] cached_len=" << cached_len << " L=" << L << "\n";
             std::cerr << "  k_activations[0] at 0 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][0 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(k_activations[0][0 * F_test + i]);
             std::cerr << "\n  k_activations[0] at 21 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][21 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(k_activations[0][21 * F_test + i]);
             std::cerr << "\n  k_activations[0] at 77 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << k_activations[0][77 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(k_activations[0][77 * F_test + i]);
             std::cerr << "\n  v_activations[0] at 0 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][0 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(v_activations[0][0 * F_test + i]);
             std::cerr << "\n  v_activations[0] at 21 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][21 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(v_activations[0][21 * F_test + i]);
             std::cerr << "\n  v_activations[0] at 77 (first 5):";
-            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << v_activations[0][77 * F_test + i];
+            for (int i = 0; i < std::min(5, F_test); ++i) std::cerr << " " << ggml_fp16_to_fp32(v_activations[0][77 * F_test + i]);
             std::cerr << std::endl;
         }
 
@@ -2355,6 +2471,40 @@ int main(int argc, char ** argv) {
             engage_threshold = std::stoi(env_et);
         }
         bool decode_use_sparse = (L >= engage_threshold);
+
+        // §3.1 fix: Adaptive-k — scale srl_k_keep with context length to match the HF reference.
+        // ACTIVE_RUNTIME/native_core/srl/query_router.py:150-196 (adaptive_k):
+        //   k_min = max(20, int(0.15 * N_total))    (scales with context)
+        //   k_max = min(200, N_total)
+        // C++ previously used a fixed srl_k_keep=64 regardless of context size.
+        // At ~1500 blocks: Python attends ≥225 blocks; C++ attended 64 (⅓ coverage shrinking as doc grows).
+        //
+        // Fix: compute adaptive floor from current block count and update srl_k_keep before the graph build.
+        // The decode graph is static for a turn, so we use the block count at prefill completion.
+        // DIFFKV_SRL_K_KEEP overrides this (manual cap still respected).
+        {
+            int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
+            if (n_comp_blocks > 0) {
+                // Mirror Python: k_min = max(20, 0.15 * N_total), k_max = min(200, N_total)
+                int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
+                int adaptive_k_max = std::min(200, n_comp_blocks);
+                int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
+                if (adaptive_k > srl_k_keep) {
+                    std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
+                              << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
+                    srl_k_keep = adaptive_k;
+                    // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
+                    int sem_floor2 = srl_k_keep * 3;
+                    if (srl_k_semantic < sem_floor2) {
+                        srl_k_semantic = sem_floor2;
+                        std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_semantic raised to " << srl_k_semantic << "\n";
+                    }
+                    // Update host-slot total to reflect any changed channel budgets
+                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                }
+            }
+        }
 
         if (!decode_use_sparse) {
             int half_dim = head_dim / 2;
@@ -2514,39 +2664,7 @@ int main(int argc, char ** argv) {
             native_decode_buf = nullptr;
         }
 
-        // §3.1 fix: Adaptive-k — scale srl_k_keep with context length to match the HF reference.
-        // ACTIVE_RUNTIME/native_core/srl/query_router.py:150-196 (adaptive_k):
-        //   k_min = max(20, int(0.15 * N_total))    (scales with context)
-        //   k_max = min(200, N_total)
-        // C++ previously used a fixed srl_k_keep=64 regardless of context size.
-        // At ~1500 blocks: Python attends ≥225 blocks; C++ attended 64 (⅓ coverage shrinking as doc grows).
-        //
-        // Fix: compute adaptive floor from current block count and update srl_k_keep before the graph build.
-        // The decode graph is static for a turn, so we use the block count at prefill completion.
-        // DIFFKV_SRL_K_KEEP overrides this (manual cap still respected).
-        {
-            int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
-            if (n_comp_blocks > 0) {
-                // Mirror Python: k_min = max(20, 0.15 * N_total), k_max = min(200, N_total)
-                int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
-                int adaptive_k_max = std::min(200, n_comp_blocks);
-                int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
-                // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
-                if (adaptive_k > srl_k_keep) {
-                    std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
-                              << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
-                    srl_k_keep = adaptive_k;
-                    // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
-                    int sem_floor2 = srl_k_keep * 3;
-                    if (srl_k_semantic < sem_floor2) {
-                        srl_k_semantic = sem_floor2;
-                        std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_semantic raised to " << srl_k_semantic << "\n";
-                    }
-                    // Update host-slot total to reflect any changed channel budgets
-                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
-                }
-            }
-        }
+        // Note: §3.1 Adaptive-k scaling block moved to start of decode phase to ensure correct size allocations.
 
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
@@ -2701,7 +2819,7 @@ int main(int argc, char ** argv) {
                 );
 
                 // §3.2 fix: Build factual store HERE (pre-decode), matching ACTIVE_RUNTIME.
-                // ACTIVE_RUNTIME: hf_diffkv_wrapper.py:837 calls finalize_srl_index() BEFORE
+                // ACTIVE_RUNTIME: mlx_diffkv_wrapper.py calls finalize_srl_index() BEFORE
                 // the generate loop; finalize_srl_index calls factual_store.build() at kv_runtime_manager.py:955.
                 // Previously C++ built this post-decode, making all factual biases/masks/VSL no-ops
                 // in turn 1 (the store was empty during every decode step).
@@ -2836,8 +2954,11 @@ int main(int argc, char ** argv) {
         if (!decode_use_sparse) {
             for (int l = 0; l < n_layers; ++l) {
                 total_dense_tokens[l] = L;
-                std::memcpy(active_k_dense[l].data(), k_activations[l].data(), L * F_test * sizeof(float));
-                std::memcpy(active_v_dense[l].data(), v_activations[l].data(), L * F_test * sizeof(float));
+                // active_k_dense is fp32 (decode custom-op reads float*); convert from fp16 store.
+                for (int i = 0; i < L * F_test; ++i) {
+                    active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][i]);
+                    active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][i]);
+                }
             }
             for (int i = 0; i < L; ++i) {
                 active_positions_dense[i] = i;
@@ -2848,7 +2969,7 @@ int main(int argc, char ** argv) {
             // After the DenseResident block scan above, total_dense_tokens[l] is often 0
             // at long contexts because the async compressor has compressed all blocks.
             // Python's assemble_dense_window_kv keeps `recency_window` exact tokens dense
-            // regardless of compression state (hf_diffkv_wrapper.py).
+            // regardless of compression state (mlx_diffkv_wrapper.py).
             // Fix: supplement the dense window with the last recency_window tokens from
             // k_activations/v_activations, which hold all L prefill tokens' raw K/V.
             const int recency_window = 512;
@@ -2863,16 +2984,10 @@ int main(int argc, char ** argv) {
                     // Simplest safe approach: overwrite dense window with recency tokens,
                     // as the recency tokens are a strict superset of the DenseResident ones
                     // (recent blocks are both DenseResident AND in the recency window).
-                    std::memcpy(
-                        active_k_dense[l].data(),
-                        k_activations[l].data() + recency_start * F_test,
-                        recency_len * F_test * sizeof(float)
-                    );
-                    std::memcpy(
-                        active_v_dense[l].data(),
-                        v_activations[l].data() + recency_start * F_test,
-                        recency_len * F_test * sizeof(float)
-                    );
+                    for (int i = 0; i < recency_len * F_test; ++i) {
+                        active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][recency_start * F_test + i]);
+                        active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][recency_start * F_test + i]);
+                    }
                     total_dense_tokens[l] = recency_len;
                     dense_start_positions[l] = recency_start;
                 }
@@ -2892,7 +3007,7 @@ int main(int argc, char ** argv) {
         const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
         bool time_decode = (env_td && std::string(env_td) == "1");
 
-        // Bug 🅓 fix: n-gram loop detection state (mirrors hf_diffkv_wrapper.py:1204-1238)
+        // Bug 🅓 fix: n-gram loop detection state (mirrors mlx_diffkv_wrapper.py:1204-1238)
         bool   loop_detected     = false;
         int    loop_detected_idx = -1;   // step index when loop was first detected
 
@@ -3363,9 +3478,13 @@ int main(int argc, char ** argv) {
                 { ggml_tensor* aKr=kv_engines[0]->get_anchorK_rot(); const ggml_fp16_t* hAK=kv_engines[0]->get_host_anchors_K();
                   const int32_t* sls=kv_engines[0]->get_host_seq_lens(); int Fkv=kv_heads*head_dim;
                   std::cerr<<"[DBG_DEVSLOT] slot(seq:devAKr/hostAK): ";
-                  for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<float> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(float),Fkv*sizeof(float));
-                    double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=d[j]; nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
-                    std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") "; }
+                  if (aKr != nullptr) {
+                      for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<float> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(float),Fkv*sizeof(float));
+                        double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=d[j]; nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
+                        std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") "; }
+                  } else {
+                      std::cerr<<"aKr is null (native attention disabled) ";
+                  }
                   std::cerr<<std::endl; }
                 if (dbg_anc) {
                     // dkr is [D, MAXD]; dump norm of token 0 (column 0) and token 1.
@@ -3535,7 +3654,7 @@ int main(int argc, char ** argv) {
             }
 
             // -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4 to match
-            // hf_diffkv_wrapper.py ("threshold lowered 0.55→0.4").
+            // mlx_diffkv_wrapper.py ("threshold lowered 0.55→0.4").
             // Bug 🅖 fix.
             if (srl_state.current_step_max_similarity >= 0.4f &&
                 !srl_state.dual_entity_mode &&
@@ -3550,7 +3669,7 @@ int main(int argc, char ** argv) {
             }
 
             // +10.0 transition bias — applied unconditionally (no helper-word gate)
-            // to match hf_diffkv_wrapper.py which has no such guard.
+            // to match mlx_diffkv_wrapper.py which has no such guard.
             // Bug 🅘 fix.
             if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
                 std::unordered_set<int32_t> transition_candidates;
@@ -3576,7 +3695,7 @@ int main(int argc, char ** argv) {
             }
             t_after_logits = std::chrono::high_resolution_clock::now();
 
-            // Bug 🅓: n-gram loop detection (mirrors hf_diffkv_wrapper.py:1204-1238)
+            // Bug 🅓: n-gram loop detection (mirrors mlx_diffkv_wrapper.py:1204-1238)
             // Every 10 tokens, check 5-gram repetition in the last 80 generated tokens.
             // On detection: widen penalty window 64→256, boost penalty 1.3×.
             // After 40 tokens with no recovery: force-stop.
@@ -3757,7 +3876,7 @@ int main(int argc, char ** argv) {
             }
 
             // Factual Early Stopping (Option 2 Extension)
-            // §3.6 fix: gate raised 0.4→0.5 to match HF reference (hf_diffkv_wrapper.py:1063).
+            // §3.6 fix: gate raised 0.4→0.5 to match MLX reference (mlx_diffkv_wrapper.py).
             bool stop_generation = false;
             if (max_generate < 64 && srl_state.current_step_max_similarity >= 0.5f) {
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
@@ -3937,13 +4056,13 @@ int main(int argc, char ** argv) {
                         }
                     }
                     // ── 1-hop neighbor injection ────────────────────────────────
-                    // §3.4 (§5) fix: thresholds corrected to HF reference (diffkv_attention.py:795/807):
-                    //   1-hop >= 0.45 (was 0.35 per MLX), 2-hop >= 0.65 (was 0.50 per MLX)
-                    // The MLX values were looser; HF is the actual live reference on this Mac.
+                    // §3.4 (§5) fix: thresholds aligned with MLX reference (mlx_diffkv_wrapper.py):
+                    //   1-hop >= 0.35, 2-hop >= 0.50
+                    // MLX is the actual live reference on this Mac.
                     for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
                         int nb_idx = hit.neighbors[ni];
                         float nb_w  = hit.weights[ni];
-                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.4: 0.35→0.45 per HF ref
+                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.5: 0.35 per MLX ref
                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                             add_seq(nb_e.tokens);
                             if (nb_e.is_prime) {
@@ -3953,7 +4072,7 @@ int main(int argc, char ** argv) {
                             for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
                                 int nb2_idx = nb_e.neighbors[ni2];
                                 float nb2_w  = nb_e.weights[ni2];
-                                if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {  // §3.4: 0.50→0.65 per HF ref
+                                if (nb2_w >= 0.50f && nb2_idx < (int)srl_state.factual_store.entries.size()) {  // §3.4: 0.50 per MLX ref
                                     const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
                                     add_seq(nb2_e.tokens);
                                 }
@@ -4000,7 +4119,7 @@ int main(int argc, char ** argv) {
                                     for (size_t ni = 0; ni < fe.neighbors.size(); ++ni) {
                                         int nb_idx = fe.neighbors[ni];
                                         float nb_w  = (ni < fe.weights.size()) ? fe.weights[ni] : 0.0f;
-                                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.5: 0.45 per HF ref
+                                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.5: 0.35 per MLX ref
                                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                                             if (!nb_e.tokens.empty()) {
                                                 bool alr = false;
@@ -4258,7 +4377,7 @@ int main(int argc, char ** argv) {
         }
 
         // §3.2 fix: factual store is now built inside srl_build_thread (pre-decode),
-        // matching ACTIVE_RUNTIME hf_diffkv_wrapper.py:837 / kv_runtime_manager.py:955.
+        // matching ACTIVE_RUNTIME mlx_diffkv_wrapper.py / kv_runtime_manager.py:955.
         // The post-decode build has been removed to avoid building it twice.
 
         // Free decode context — must happen before next iteration rebuilds it

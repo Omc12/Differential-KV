@@ -37,8 +37,9 @@ struct ggml_tensor * semantic_search_topk(
     // Cast scores to F32 to ensure compatibility with ggml_argsort_top_k
     struct ggml_tensor * scores_f32 = ggml_cast(ctx, scores, GGML_TYPE_F32);
 
-    // Get top-k indices (sorted descending)
-    struct ggml_tensor * top_idx = ggml_argsort_top_k(ctx, scores_f32, k); // [k, 1]
+    // Get top-k indices (sorted descending) - clamp to scores_f32->ne[0] to prevent GGML_ASSERT failure
+    int k_clamped = std::min(k, (int)scores_f32->ne[0]);
+    struct ggml_tensor * top_idx = ggml_argsort_top_k(ctx, scores_f32, k_clamped); // [k_clamped, 1]
 
     return top_idx;
 }
@@ -74,8 +75,9 @@ struct ggml_tensor * anchor_screen(
     // Cast scaled scores to F32 to prevent runtime type mismatch in argmax
     struct ggml_tensor * scaled_scores_f32 = ggml_cast(ctx, scaled_scores, GGML_TYPE_F32);
 
-    // 8. argsort top-k kept slots (descending order)
-    struct ggml_tensor * top_idx = ggml_argsort_top_k(ctx, scaled_scores_f32, k_keep); // [k_clamped, 1]
+    // 8. argsort top-k kept slots (descending order) - clamp to scaled_scores_f32->ne[0] to prevent GGML_ASSERT failure
+    int k_keep_clamped = std::min(k_keep, (int)scaled_scores_f32->ne[0]);
+    struct ggml_tensor * top_idx = ggml_argsort_top_k(ctx, scaled_scores_f32, k_keep_clamped); // [k_clamped, 1]
 
     // Flatten top_idx to 1D
     struct ggml_tensor * top_idx_1d = ggml_reshape_1d(ctx, top_idx, top_idx->ne[0]);

@@ -8,6 +8,7 @@
 #include <memory>
 #include <algorithm>
 #include <cmath>
+#include <ggml.h>
 
 #include "native_core/srl/inverted_index.hpp"
 
@@ -105,8 +106,8 @@ public:
     }
 
     void build(
-        const std::vector<std::vector<float>>& k_activations, // [n_layers][L * kv_heads * head_dim]
-        const std::vector<std::vector<float>>& v_activations,
+        const std::vector<std::vector<ggml_fp16_t>>& k_activations, // [n_layers][L * kv_heads * head_dim] (fp16)
+        const std::vector<std::vector<ggml_fp16_t>>& v_activations,
         const std::vector<int32_t>& token_ids,
         const float* W_proj, // [DESC_DIM * head_dim]
         int desc_dim,

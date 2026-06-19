@@ -610,14 +610,15 @@ void custom_attention_op_callback(
     // as factual K/V attention injection has been removed (matching HF reference).
 
     // F9: force CPU if any selected block has residuals (Metal doesn't handle them).
-    if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && data->K > 0) {
+    int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
+    if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && actual_K > 0) {
         NativeBlockPool* pool = data->kv_engine;
         const int32_t* rkp = pool->get_host_res_K_pos();
         const int32_t* rvp = pool->get_host_res_V_pos();
         const int MR = NativeBlockPool::MAX_RESIDUAL;
         int n_slots = pool->get_seq_lens()->ne[0];
         const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
-        for (int k = 0; k < data->K && !force_cpu; ++k) {
+        for (int k = 0; k < actual_K && !force_cpu; ++k) {
             int s = slots_ptr[k];
             if (s < 0 || s >= n_slots) continue;
             if (rkp[(size_t)s * MR] != -1 || rvp[(size_t)s * MR] != -1) force_cpu = true;
@@ -639,7 +640,7 @@ void custom_attention_op_callback(
 #endif
 
     // ── CPU fallback ─────────────────────────────────────────────────────────
-    const int K = data->K;
+    const int K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
     const int rank = data->rank;
     const int S_max = data->S_max;
     const float scale = data->scale;

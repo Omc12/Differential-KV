@@ -634,13 +634,29 @@ async def run_direct_mode(args):
     elif "0.5b" in model_arg.lower():
         model_path = os.path.join(native_root, "qwen2.5-0.5b-instruct.gguf")
     elif "1.5b" in model_arg.lower():
-        model_path = os.path.join(native_root, "qwen2.5-1.5b-instruct-q8_0.gguf")
+        model_path = os.path.join(native_root, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+        if not os.path.exists(model_path):
+            model_path = os.path.join(native_root, "qwen2.5-1.5b-instruct-q8_0.gguf")
     elif os.path.exists(model_arg):
         model_path = os.path.abspath(model_arg)
     else:
         model_path = os.path.join(native_root, "qwen2.5-0.5b-instruct.gguf")
 
-    # Force single-threaded BLAS/LAPACK/OpenMP to avoid audio driver preemption and latency
+    # Force single-threaded BLAS/LAPACK/OpenMP to avoid audio driver preemption and
+    # system-wide lag.
+    #
+    # WHY (do NOT remove): the SVD compressor runs on a worker thread that sets itself
+    # to QOS_CLASS_BACKGROUND (async_compressor.cpp) so it yields to the UI/audio/decode.
+    # But multi-threaded Accelerate/veclib spawns its OWN internal worker threads to run
+    # sgesdd, and those do NOT inherit the background QoS — they run at default priority
+    # and saturate every performance core, starving the rest of the system → the whole
+    # Mac lags during long-prompt prefill. (ACTIVE_RUNTIME does not need this because MLX
+    # runs the forward on the GPU and its SVD volume is far smaller — matching the env var
+    # does NOT match the behavior.)
+    #
+    # For lag-SAFE parallel SVD, raise the number of *compressor workers* instead
+    # (DIFFKV_COMPRESSOR_THREADS=N) — those threads are background-QoS and yield to the
+    # system, unlike BLAS-internal threads.
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -654,6 +670,12 @@ async def run_direct_mode(args):
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "2048"
     else:
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "512"
+
+    # Lag-safe parallel SVD: more *background-QoS* compressor workers (these yield to
+    # decode/UI, unlike BLAS-internal threads) so prefill compression keeps up without
+    # saturating the system. Default to a modest 4; user/env override is respected.
+    if "DIFFKV_COMPRESSOR_THREADS" not in os.environ:
+        os.environ["DIFFKV_COMPRESSOR_THREADS"] = "4"
 
     os.environ["DIFFKV_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["DIFFKV_USE_GPU"] = "1" if args.use_gpu else "0"
@@ -857,7 +879,7 @@ def main():
                         help="Path to built diffkv_native C++ executable.")
     parser.add_argument('--use-gpu', type=int, choices=[0, 1], default=1,
                         help="Enable GPU/Metal execution in C++ binary.")
-    parser.add_argument('--micro-block-size', type=int, default=16,
+    parser.add_argument('--micro-block-size', type=int, default=256,
                         help="Micro block size for KV compression.")
     parser.add_argument('--preset', type=str, choices=['low', 'mid', 'high'], default='mid',
                         help="Optimization preset (influences chunk prefill size). Use --context to override token budget.")

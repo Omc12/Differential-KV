@@ -11,7 +11,9 @@ from pathlib import Path
 # ── Config ──────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent.parent
 BINARY     = str(ROOT / "build" / "diffkv_native")
-MODEL      = str(ROOT / "qwen2.5-1.5b-instruct-q8_0.gguf")
+MODEL      = str(ROOT / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+if not os.path.exists(MODEL):
+    MODEL = str(ROOT / "qwen2.5-1.5b-instruct-q8_0.gguf")
 PYTHON     = str(ROOT.parent / "diffkv_venv" / "bin" / "python3")
 CLI        = str(ROOT / "serving" / "cli.py")
 INPUT_FILE = str(ROOT.parent / "scratch" / "pride_and_prejudice.txt")

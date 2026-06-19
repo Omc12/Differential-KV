@@ -12,8 +12,8 @@
 namespace diffkv {
 
 void FactualExactStore::build(
-    const std::vector<std::vector<float>>& k_activations,
-    const std::vector<std::vector<float>>& v_activations,
+    const std::vector<std::vector<ggml_fp16_t>>& k_activations,
+    const std::vector<std::vector<ggml_fp16_t>>& v_activations,
     const std::vector<int32_t>& token_ids,
     const float* W_proj,
     int desc_dim,
@@ -76,7 +76,7 @@ void FactualExactStore::build(
             for (int t = 0; t < L; ++t) {
                 for (int kh = 0; kh < kv_heads; ++kh) {
                     for (int d = 0; d < head_dim; ++d) {
-                        K_avg[t * head_dim + d] += k_activations[mid_layer][t * F_test + kh * head_dim + d];
+                        K_avg[t * head_dim + d] += ggml_fp16_to_fp32(k_activations[mid_layer][t * F_test + kh * head_dim + d]);
                     }
                 }
                 for (int d = 0; d < head_dim; ++d) {
@@ -143,7 +143,7 @@ void FactualExactStore::build(
             std::vector<float> K_avg_t(head_dim, 0.0f);
             for (int kh = 0; kh < kv_heads; ++kh) {
                 for (int d = 0; d < head_dim; ++d) {
-                    K_avg_t[d] += k_activations[0][t * F_test + kh * head_dim + d];
+                    K_avg_t[d] += ggml_fp16_to_fp32(k_activations[0][t * F_test + kh * head_dim + d]);
                 }
             }
             float sum_sq = 0.0f;
@@ -307,12 +307,11 @@ void FactualExactStore::build(
         entry.V.resize(num_layers * F_test * span_len);
 
         for (int l = 0; l < num_layers; ++l) {
-            std::memcpy(entry.K.data() + l * F_test * span_len,
-                        k_activations[l].data() + s * F_test,
-                        span_len * F_test * sizeof(float));
-            std::memcpy(entry.V.data() + l * F_test * span_len,
-                        v_activations[l].data() + s * F_test,
-                        span_len * F_test * sizeof(float));
+            // FactEntry.K/V stay fp32 (read by the decode attention); convert from fp16 store.
+            for (int i = 0; i < span_len * F_test; ++i) {
+                entry.K[l * F_test * span_len + i] = ggml_fp16_to_fp32(k_activations[l][s * F_test + i]);
+                entry.V[l * F_test * span_len + i] = ggml_fp16_to_fp32(v_activations[l][s * F_test + i]);
+            }
         }
 
         // Compute descriptor for the span using layer 0 max-pooled key.

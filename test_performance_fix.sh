@@ -28,7 +28,9 @@ fi
 
 # Check for model
 MODEL=""
-if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
+if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
+    MODEL="qwen2.5-1.5b-instruct-q4_k_m.gguf"
+elif [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q8_0.gguf"
 elif [ -f "diffkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
     MODEL="qwen2.5-0.5b-instruct.gguf"
@@ -45,7 +47,7 @@ echo ""
 export DIFFKV_MAX_CTX_TK=8192  # Smaller for quick test
 export DIFFKV_PRESET=mid
 export DIFFKV_PREFILL_CHUNK_SIZE=512
-export DIFFKV_MICRO_BLOCK_SIZE=16
+export DIFFKV_MICRO_BLOCK_SIZE=256
 export DIFFKV_RANK=16
 export DIFFKV_GPU_BUDGET_GB=1.5
 export DIFFKV_MPS_APPROXIMATE_ATTN=1
@@ -56,7 +58,7 @@ echo "Configuration:"
 echo "  Context: 8192 tokens"
 echo "  Preset: mid"
 echo "  Chunk size: 512"
-echo "  Micro block: 16"
+echo "  Micro block: 256"
 echo "  Max generation: 128 tokens"
 echo ""
 

@@ -262,7 +262,7 @@ static struct ggml_cgraph * build_decode_graph(
 
             // Semantic search topk: [srl_k_semantic, 1]
             struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
-            struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, srl_k_semantic);
+            struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, sem_slots->ne[0]);
 
             // Concatenate semantic and host slots
             struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
@@ -636,7 +636,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     int head_dim = model_->get_config().n_embd / model_->get_config().n_head;
     int kv_heads = model_->get_config().n_head_kv;
     int desc_dim = 64;
-    int micro_block_size = 16;
+    int micro_block_size = 256;
     if (const char* env_mbs = std::getenv("DIFFKV_MICRO_BLOCK_SIZE")) {
         micro_block_size = std::stoi(env_mbs);
     }
@@ -1346,9 +1346,21 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             session->srl_state.chunk_graph.cluster_centers_tensor.begin(),
             session->srl_state.chunk_graph.cluster_centers_tensor.end()
         );
+        // factual_store.build now takes fp16 K/V (main path stores fp16). This gateway path
+        // keeps k_activations fp32, so convert to fp16 here just for the call.
+        std::vector<std::vector<ggml_fp16_t>> k_act_f16(k_activations.size());
+        std::vector<std::vector<ggml_fp16_t>> v_act_f16(v_activations.size());
+        for (size_t _l = 0; _l < k_activations.size(); ++_l) {
+            k_act_f16[_l].resize(k_activations[_l].size());
+            v_act_f16[_l].resize(v_activations[_l].size());
+            for (size_t _i = 0; _i < k_activations[_l].size(); ++_i) {
+                k_act_f16[_l][_i] = ggml_fp32_to_fp16(k_activations[_l][_i]);
+                v_act_f16[_l][_i] = ggml_fp32_to_fp16(v_activations[_l][_i]);
+            }
+        }
         session->srl_state.factual_store.build(
-            k_activations,
-            v_activations,
+            k_act_f16,
+            v_act_f16,
             prompt_tokens,
             W_proj_host.data(),
             desc_dim,

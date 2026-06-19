@@ -740,7 +740,11 @@ if __name__ == '__main__':
         elif "0.5b" in model_arg.lower():
             os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
         elif "1.5b" in model_arg.lower():
-            os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+            q4_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+            if os.path.exists(q4_path):
+                os.environ["DIFFKV_MODEL_PATH"] = q4_path
+            else:
+                os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
         else:
             os.environ["DIFFKV_MODEL_PATH"] = MODEL_PATH_DEFAULT
 
