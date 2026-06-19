@@ -606,18 +606,8 @@ void custom_attention_op_callback(
     const char* env_cpu = std::getenv("DIFFKV_FORCE_CPU_ATTN");
     bool force_cpu = (env_cpu && std::string(env_cpu) == "1");
 
-    if (data->srl_state != nullptr) {
-        SessionSRLState* srl = static_cast<SessionSRLState*>(data->srl_state);
-        // Only force CPU when step_cached_entries is actually non-empty for this
-        // decode step. factual_store.entries is populated by the background SVD
-        // thread ~50 tokens into generation; using it as the trigger caused every
-        // subsequent token to fall into the slow CPU path even when no factual
-        // entries matched the current query — producing garbage once the background
-        // thread finished. step_cached_entries is set by the decode loop per step.
-        if (!srl->step_cached_entries.empty()) {
-            force_cpu = true;
-        }
-    }
+    // §3.8: We no longer force CPU attention when step_cached_entries is non-empty,
+    // as factual K/V attention injection has been removed (matching HF reference).
 
     // F9: force CPU if any selected block has residuals (Metal doesn't handle them).
     if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && data->K > 0) {
@@ -677,91 +667,6 @@ void custom_attention_op_callback(
         );
     }
 
-    // ── Factual Exact Store Attention ─────────────────────────────────────────
-    // N3.1 fix: factual store is queried once per decode step by the decode loop.
-    // The callback only reads step_cached_entries (populated by the decode loop).
-    SessionSRLState* srl = (data->srl_state != nullptr) ?
-        static_cast<SessionSRLState*>(data->srl_state) : nullptr;
-
-    static const std::vector<FactEntry> kEmptyEntries;
-    const std::vector<FactEntry>& matching_entries =
-        (srl != nullptr) ? srl->step_cached_entries : kEmptyEntries;
-
-    std::vector<float> out_facts(n_q_heads * D, 0.0f);
-    std::vector<float> lse_facts(n_q_heads, -1e30f);
-
-    std::vector<float> fact_k, fact_v;
-    std::vector<int> fact_positions;
-    int F_test = n_kv_heads * D;
-
-    for (const auto& entry : matching_entries) {
-        int span_len = entry.end_idx - entry.start_idx;
-        int offset = data->layer_idx * F_test * span_len;
-        fact_k.insert(fact_k.end(), entry.K.begin() + offset, entry.K.begin() + offset + F_test * span_len);
-        fact_v.insert(fact_v.end(), entry.V.begin() + offset, entry.V.begin() + offset + F_test * span_len);
-        for (int p = entry.start_idx; p < entry.end_idx; ++p)
-            fact_positions.push_back(p);
-    }
-
-    int total_fact_len = (int)fact_positions.size();
-    if (total_fact_len > 0) {
-        int half_d = D / 2;
-        std::vector<float> theta(half_d);
-        for (int d = 0; d < half_d; ++d)
-            theta[d] = 1.0f / std::pow(rope_freq_base, (2.0f * d) / D);
-
-        std::vector<float> fact_k_rot(total_fact_len * F_test);
-        for (int t = 0; t < total_fact_len; ++t) {
-            int pos = fact_positions[t];
-            for (int kh = 0; kh < n_kv_heads; ++kh) {
-                int head_off = t * F_test + kh * D;
-                for (int d = 0; d < D; ++d) {
-                    float raw_k = fact_k[head_off + d];
-                    if (has_rope) {
-                        int partner = (d < half_d) ? (d + half_d) : (d - half_d);
-                        float raw_p = fact_k[head_off + partner];
-                        float rot_c = (d < half_d) ? -raw_p : raw_p;
-                        int idx = (d < half_d) ? d : (d - half_d);
-                        float angle = pos * theta[idx];
-                        fact_k_rot[head_off + d] = raw_k * std::cos(angle) + rot_c * std::sin(angle);
-                    } else {
-                        fact_k_rot[head_off + d] = raw_k;
-                    }
-                }
-            }
-        }
-
-        const float* Q_ptr = Q_cpu;
-        const int g = n_q_heads / n_kv_heads;
-        for (int h = 0; h < n_q_heads; ++h) {
-            int kv_head = h / g;
-            float max_s = -1e30f;
-            std::vector<float> scores(total_fact_len);
-            float fact_scale = scale / 0.12f;
-            for (int t = 0; t < total_fact_len; ++t) {
-                float dot = 0.0f;
-                const float* k_t = fact_k_rot.data() + t * F_test + kv_head * D;
-                for (int d = 0; d < D; ++d) dot += Q_ptr[h * D + d] * k_t[d];
-                scores[t] = dot * fact_scale;
-                if (scores[t] > max_s) max_s = scores[t];
-            }
-            float sum_e = 0.0f;
-            for (int t = 0; t < total_fact_len; ++t) sum_e += std::exp(scores[t] - max_s);
-            lse_facts[h] = max_s + std::log(std::max(sum_e, 1e-9f));
-            for (int d = 0; d < D; ++d) out_facts[h * D + d] = 0.0f;
-            for (int t = 0; t < total_fact_len; ++t) {
-                float w = std::exp(scores[t] - lse_facts[h]);
-                const float* v_t = fact_v.data() + t * F_test + kv_head * D;
-                for (int d = 0; d < D; ++d) out_facts[h * D + d] += w * v_t[d];
-            }
-            float max_sim = 0.0f;
-            for (const auto& entry : matching_entries)
-                if (entry.current_sim > max_sim) max_sim = entry.current_sim;
-            if (max_sim >= 0.4f)
-                lse_facts[h] += 8.0f * (max_sim - 0.4f) / 0.6f;
-        }
-    }
-
     // Dense window attention
     std::vector<float> out_dense(n_q_heads * D, 0.0f);
     std::vector<float> lse_dense(n_q_heads, -1e30f);
@@ -777,34 +682,29 @@ void custom_attention_op_callback(
         );
     }
 
-    // Three-way LSE combine
+    // Two-way LSE combine (sparse ⊕ dense)
     std::vector<float> final_out(n_q_heads * D);
     for (int h = 0; h < n_q_heads; ++h) {
-        float ld = lse_dense[h], ls = lse_sparse[h], lf = lse_facts[h];
-        float lse_max = std::max({ld, ls, lf});
+        float ld = lse_dense[h], ls = lse_sparse[h];
+        float lse_max = std::max(ld, ls);
         if (lse_max <= -1e20f) {
             for (int d = 0; d < D; ++d) final_out[h * D + d] = 0.0f;
         } else {
             float wd = (std::isinf(ld) || ld <= -1e20f) ? 0.0f : std::exp(ld - lse_max);
             float ws = (std::isinf(ls) || ls <= -1e20f) ? 0.0f : std::exp(ls - lse_max);
-            float wf = (std::isinf(lf) || lf <= -1e20f) ? 0.0f : std::exp(lf - lse_max);
-            float denom = std::max(wd + ws + wf, 1e-9f);
+            float denom = std::max(wd + ws, 1e-9f);
             for (int d = 0; d < D; ++d)
                 final_out[h * D + d] = (out_dense[h * D + d] * wd +
-                                        out_sparse[h * D + d] * ws +
-                                        out_facts[h * D + d] * wf) / denom;
+                                        out_sparse[h * D + d] * ws) / denom;
         }
     }
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
 
     if (std::getenv("DIFFKV_DBG_ATTN0") && data->layer_idx == 0) {
-        double nrm=0, nf=0;
-        for (int i=0;i<n_q_heads*D;++i){ nrm += (double)final_out[i]*final_out[i]; nf += (double)out_facts[i]*out_facts[i]; }
-        int facts_active=0;
-        for(int h=0;h<n_q_heads;++h) if(lse_facts[h] > -1e20f) facts_active++;
+        double nrm=0;
+        for (int i=0;i<n_q_heads*D;++i){ nrm += (double)final_out[i]*final_out[i]; }
         std::cerr << "[DBG_ATTN0] CPU L0 norm=" << std::sqrt(nrm)
-                  << " |facts|=" << std::sqrt(nf)
-                  << " facts_heads=" << facts_active << "/" << n_q_heads << " head0[0..5]=";
+                  << " head0[0..5]=";
         for (int i=0;i<6;++i) std::cerr << final_out[i] << " ";
         std::cerr << "\n";
     }

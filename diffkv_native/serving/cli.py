@@ -626,18 +626,19 @@ async def run_client_mode(args):
 # Direct Mode Helper (spawns native C++ binary directly)
 # ---------------------------------------------------------------------------
 async def run_direct_mode(args):
+    native_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     # Setup GGUF model path
     model_arg = args.model
     if model_arg.endswith(".gguf") and os.path.exists(model_arg):
         model_path = os.path.abspath(model_arg)
     elif "0.5b" in model_arg.lower():
-        model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
+        model_path = os.path.join(native_root, "qwen2.5-0.5b-instruct.gguf")
     elif "1.5b" in model_arg.lower():
-        model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+        model_path = os.path.join(native_root, "qwen2.5-1.5b-instruct-q8_0.gguf")
     elif os.path.exists(model_arg):
         model_path = os.path.abspath(model_arg)
     else:
-        model_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
+        model_path = os.path.join(native_root, "qwen2.5-0.5b-instruct.gguf")
 
     # Force single-threaded BLAS/LAPACK/OpenMP to avoid audio driver preemption and latency
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
@@ -852,7 +853,7 @@ def main():
     
     # Executable config
     parser.add_argument('--binary-path', type=str,
-                        default='/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/build/diffkv_native',
+                        default=os.path.abspath(os.path.join(os.path.dirname(__file__), '../build/diffkv_native')),
                         help="Path to built diffkv_native C++ executable.")
     parser.add_argument('--use-gpu', type=int, choices=[0, 1], default=1,
                         help="Enable GPU/Metal execution in C++ binary.")

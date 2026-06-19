@@ -2848,7 +2848,7 @@ int main(int argc, char ** argv) {
             // After the DenseResident block scan above, total_dense_tokens[l] is often 0
             // at long contexts because the async compressor has compressed all blocks.
             // Python's assemble_dense_window_kv keeps `recency_window` exact tokens dense
-            // regardless of compression state (mlx_diffkv_wrapper.py:333).
+            // regardless of compression state (hf_diffkv_wrapper.py).
             // Fix: supplement the dense window with the last recency_window tokens from
             // k_activations/v_activations, which hold all L prefill tokens' raw K/V.
             const int recency_window = 512;
@@ -2874,9 +2874,7 @@ int main(int argc, char ** argv) {
                         recency_len * F_test * sizeof(float)
                     );
                     total_dense_tokens[l] = recency_len;
-                    if (l == 0) {
-                        dense_start_positions[l] = recency_start;
-                    }
+                    dense_start_positions[l] = recency_start;
                 }
             }
 
@@ -2894,7 +2892,7 @@ int main(int argc, char ** argv) {
         const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
         bool time_decode = (env_td && std::string(env_td) == "1");
 
-        // Bug 🅓 fix: n-gram loop detection state (mirrors mlx_diffkv_wrapper.py:1204-1238)
+        // Bug 🅓 fix: n-gram loop detection state (mirrors hf_diffkv_wrapper.py:1204-1238)
         bool   loop_detected     = false;
         int    loop_detected_idx = -1;   // step index when loop was first detected
 
@@ -3513,7 +3511,7 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // RC8 — disabled: the MLX reference has NO foreign-entity penalty, and on
+            // RC8 — disabled: the HF reference has NO foreign-entity penalty, and on
             // multi-character literary prompts (Pride & Prejudice: Elizabeth, Darcy, Bingley,
             // Wickham, …) this aggressively suppresses legitimate tokens from "other"
             // characters. Bug 🅗 from NATIVE_VS_ACTIVE_BUGS.md.
@@ -3537,7 +3535,7 @@ int main(int argc, char ** argv) {
             }
 
             // -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4 to match
-            // mlx_diffkv_wrapper.py:1287 ("threshold lowered 0.55→0.4").
+            // hf_diffkv_wrapper.py ("threshold lowered 0.55→0.4").
             // Bug 🅖 fix.
             if (srl_state.current_step_max_similarity >= 0.4f &&
                 !srl_state.dual_entity_mode &&
@@ -3552,7 +3550,7 @@ int main(int argc, char ** argv) {
             }
 
             // +10.0 transition bias — applied unconditionally (no helper-word gate)
-            // to match mlx_diffkv_wrapper.py:1300-1313 which has no such guard.
+            // to match hf_diffkv_wrapper.py which has no such guard.
             // Bug 🅘 fix.
             if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
                 std::unordered_set<int32_t> transition_candidates;
@@ -3578,7 +3576,7 @@ int main(int argc, char ** argv) {
             }
             t_after_logits = std::chrono::high_resolution_clock::now();
 
-            // Bug 🅓: n-gram loop detection (mirrors mlx_diffkv_wrapper.py:1204-1238)
+            // Bug 🅓: n-gram loop detection (mirrors hf_diffkv_wrapper.py:1204-1238)
             // Every 10 tokens, check 5-gram repetition in the last 80 generated tokens.
             // On detection: widen penalty window 64→256, boost penalty 1.3×.
             // After 40 tokens with no recovery: force-stop.
@@ -4002,7 +4000,7 @@ int main(int argc, char ** argv) {
                                     for (size_t ni = 0; ni < fe.neighbors.size(); ++ni) {
                                         int nb_idx = fe.neighbors[ni];
                                         float nb_w  = (ni < fe.weights.size()) ? fe.weights[ni] : 0.0f;
-                                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.45→0.35 per MLX
+                                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.5: 0.45 per HF ref
                                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                                             if (!nb_e.tokens.empty()) {
                                                 bool alr = false;
