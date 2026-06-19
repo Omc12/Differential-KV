@@ -31,6 +31,31 @@ static std::unordered_set<std::string> extract_words(const std::string& text, co
     return words;
 }
 
+static void deallocate_synced_raw_activations(StreamingSparseIngestManager& ingest_mgr,
+                                             const std::vector<std::unique_ptr<NativeBlockPool>>& engines,
+                                             int n_layers) {
+    for (int l = 0; l < n_layers; ++l) {
+        auto & blocks = ingest_mgr.get_blocks(l);
+        for (auto & block : blocks) {
+            if (block->pool_idx != -1) {
+                BlockState st = engines[l]->get_state_table().get(block->pool_idx);
+                if ((st == BlockState::CompressedResident || st == BlockState::CPUResident || st == BlockState::PagingOut || st == BlockState::Reloading) && block->device_synced) {
+                    if (!block->active_k.empty() || !block->svd_k.empty()) {
+                        block->active_k.clear();
+                        block->active_k.shrink_to_fit();
+                        block->active_v.clear();
+                        block->active_v.shrink_to_fit();
+                        block->svd_k.clear();
+                        block->svd_k.shrink_to_fit();
+                        block->svd_v.clear();
+                        block->svd_v.shrink_to_fit();
+                    }
+                }
+            }
+        }
+    }
+}
+
 KVRuntimeManager::KVRuntimeManager(
     int base_rank,
     int micro_block_size,
@@ -554,6 +579,7 @@ void KVRuntimeManager::wait_for_compressor() {
             }
         }
     }
+    deallocate_synced_raw_activations(*ingest_manager_, engines_, n_layers_);
 }
 
 
@@ -700,6 +726,7 @@ void KVRuntimeManager::sync_device_for_native() {
             }
         }
     }
+    deallocate_synced_raw_activations(*ingest_manager_, engines_, n_layers_);
 }
 
 void KVRuntimeManager::commit_turn(SessionSRLState& srl_state) {

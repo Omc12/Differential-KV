@@ -84,54 +84,42 @@ void FactualExactStore::build(
                 }
             }
 
-            std::vector<float> sim(L * L, 0.0f);
+            std::vector<float> sim_row(L, 0.0f);
+            for (int i = 1; i < L; ++i) {
 #ifdef __APPLE__
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, L, L, head_dim,
-                        1.0f / std::sqrt(head_dim), K_avg.data(), head_dim,
-                        K_avg.data(), head_dim, 0.0f, sim.data(), L);
+                cblas_sgemv(CblasRowMajor, CblasNoTrans, i, head_dim,
+                            1.0f / std::sqrt(head_dim), K_avg.data(), head_dim,
+                            K_avg.data() + i * head_dim, 1, 0.0f, sim_row.data(), 1);
 #else
-            for (int i = 0; i < L; ++i) {
-                for (int j = 0; j < L; ++j) {
+                for (int j = 0; j < i; ++j) {
                     float dot = 0.0f;
                     for (int d = 0; d < head_dim; ++d) {
                         dot += K_avg[i * head_dim + d] * K_avg[j * head_dim + d];
                     }
-                    sim[i * L + j] = dot / std::sqrt(head_dim);
+                    sim_row[j] = dot / std::sqrt(head_dim);
                 }
-            }
 #endif
 
-            // Apply causal mask and softmax along key dimensions
-            for (int i = 0; i < L; ++i) {
                 float max_val = -1e9f;
-                for (int j = 0; j < L; ++j) {
-                    if (j >= i) {
-                        sim[i * L + j] = -1e9f;
-                    }
-                    if (sim[i * L + j] > max_val) {
-                        max_val = sim[i * L + j];
+                for (int j = 0; j < i; ++j) {
+                    if (sim_row[j] > max_val) {
+                        max_val = sim_row[j];
                     }
                 }
                 float sum_exp = 0.0f;
-                for (int j = 0; j < L; ++j) {
-                    sim[i * L + j] = std::exp(sim[i * L + j] - max_val);
-                    sum_exp += sim[i * L + j];
+                for (int j = 0; j < i; ++j) {
+                    sim_row[j] = std::exp(sim_row[j] - max_val);
+                    sum_exp += sim_row[j];
                 }
                 float inv_sum = 1.0f / (sum_exp + 1e-10f);
-                for (int j = 0; j < L; ++j) {
-                    sim[i * L + j] *= inv_sum;
+                for (int j = 0; j < i; ++j) {
+                    R[j] += sim_row[j] * inv_sum;
                 }
             }
 
-            // Sum columns to get total lookbacks pointing to each token
             float sum_r = 0.0f;
             for (int j = 0; j < L; ++j) {
-                float col_sum = 0.0f;
-                for (int i = 0; i < L; ++i) {
-                    col_sum += sim[i * L + j];
-                }
-                R[j] = col_sum;
-                sum_r += col_sum;
+                sum_r += R[j];
             }
             this->eagle_scores = R;
             this->avg_r = sum_r / L;
@@ -303,17 +291,6 @@ void FactualExactStore::build(
         entry.start_idx = s;
         entry.end_idx = e;
         entry.orig_span_start = span[2];
-        entry.K.resize(num_layers * F_test * span_len);
-        entry.V.resize(num_layers * F_test * span_len);
-
-        for (int l = 0; l < num_layers; ++l) {
-            // FactEntry.K/V stay fp32 (read by the decode attention); convert from fp16 store.
-            for (int i = 0; i < span_len * F_test; ++i) {
-                entry.K[l * F_test * span_len + i] = ggml_fp16_to_fp32(k_activations[l][s * F_test + i]);
-                entry.V[l * F_test * span_len + i] = ggml_fp16_to_fp32(v_activations[l][s * F_test + i]);
-            }
-        }
-
         // Compute descriptor for the span using layer 0 max-pooled key.
         // Max-pool over positions retains the most activated (distinctive) features
         // for each head, rather than averaging them away. This is critical for
@@ -323,7 +300,7 @@ void FactualExactStore::build(
         for (int t = 0; t < span_len; ++t) {
             for (int kh = 0; kh < kv_heads; ++kh) {
                 for (int d = 0; d < head_dim; ++d) {
-                    float val = entry.K[kh * head_dim + t * F_test + d];
+                    float val = ggml_fp16_to_fp32(k_activations[0][(s + t) * F_test + kh * head_dim + d]);
                     if (val > max_k[d]) max_k[d] = val;
                 }
             }
@@ -760,32 +737,7 @@ static std::vector<FactEntry> merge_adjacent_entries(const std::vector<FactEntry
                             curr.orig_span_start == next_entry.orig_span_start);
         if (next_entry.start_idx == curr.end_idx &&
             (curr.entity_id == next_entry.entity_id || same_origin)) {
-            int curr_len = curr.end_idx - curr.start_idx;
-            int next_len = next_entry.end_idx - next_entry.start_idx;
-            int new_len = curr_len + next_len;
-            
-            std::vector<float> new_K(num_layers * F_test * new_len);
-            std::vector<float> new_V(num_layers * F_test * new_len);
-            
-            for (int l = 0; l < num_layers; ++l) {
-                std::memcpy(new_K.data() + l * F_test * new_len,
-                            curr.K.data() + l * F_test * curr_len,
-                            curr_len * F_test * sizeof(float));
-                std::memcpy(new_V.data() + l * F_test * new_len,
-                            curr.V.data() + l * F_test * curr_len,
-                            curr_len * F_test * sizeof(float));
-                            
-                std::memcpy(new_K.data() + l * F_test * new_len + curr_len * F_test,
-                            next_entry.K.data() + l * F_test * next_len,
-                            next_len * F_test * sizeof(float));
-                std::memcpy(new_V.data() + l * F_test * new_len + curr_len * F_test,
-                            next_entry.V.data() + l * F_test * next_len,
-                            next_len * F_test * sizeof(float));
-            }
-            
             curr.end_idx = next_entry.end_idx;
-            curr.K = std::move(new_K);
-            curr.V = std::move(new_V);
             
             std::unordered_set<int32_t> slots(curr.slot_ids.begin(), curr.slot_ids.end());
             slots.insert(next_entry.slot_ids.begin(), next_entry.slot_ids.end());

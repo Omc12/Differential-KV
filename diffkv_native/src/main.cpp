@@ -1553,6 +1553,15 @@ int main(int argc, char ** argv) {
     }
     size_t gpu_budget_bytes = static_cast<size_t>(gpu_budget_gb * 1024.0f * 1024.0f * 1024.0f);
 
+    const int base_micro_block_size = micro_block_size;
+    const int base_n_slots = n_slots;
+    const int base_srl_k_semantic = srl_k_semantic;
+    const int base_srl_k_recency = srl_k_recency;
+    const int base_srl_k_lexical = srl_k_lexical;
+    const int base_srl_k_graph = srl_k_graph;
+    const int base_srl_k_keep = srl_k_keep;
+    const int base_srl_k_host = srl_k_host;
+
     diffkv::KVRuntimeManager runtime_manager(rank, micro_block_size, gpu_budget_bytes);
     if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
         std::cerr << "Failed to initialize KVRuntimeManager!" << std::endl;
@@ -1668,6 +1677,27 @@ int main(int argc, char ** argv) {
 
     ggml_backend_buffer_t native_decode_buf = nullptr;
     while (true) {
+        // Restore base configuration values at start of turn to prevent leakage from previous turns
+        micro_block_size = base_micro_block_size;
+        srl_k_semantic = base_srl_k_semantic;
+        srl_k_recency = base_srl_k_recency;
+        srl_k_lexical = base_srl_k_lexical;
+        srl_k_graph = base_srl_k_graph;
+        srl_k_keep = base_srl_k_keep;
+        srl_k_host = base_srl_k_host;
+
+        if (n_slots != base_n_slots) {
+            n_slots = base_n_slots;
+            runtime_manager.reset();
+            if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
+                std::cerr << "Failed to re-initialize KVRuntimeManager during config restore!" << std::endl;
+                return 1;
+            }
+            runtime_manager.get_ingest_manager().set_stop_token_ids(&stop_token_ids);
+            runtime_manager.get_ingest_manager().set_session_id("interactive_session");
+        }
+        runtime_manager.set_micro_block_size(micro_block_size);
+
         bool full_upload_needed = true;
         std::string prompt;
         int cached_len = 0; // tokens already in KV pool for this request (ACTIVE_RUNTIME prefix skip)
@@ -1884,7 +1914,24 @@ int main(int argc, char ** argv) {
             L = true_capacity;
             prompt_tokens.resize(L);
         }
+        // Ensure dense buffers have enough capacity for the current turn's context length + generation headroom
+        int engage_threshold = 4096;
+        if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+            engage_threshold = std::stoi(env_et);
+        }
+        bool decode_use_sparse = (L >= engage_threshold);
+        int required_dense_cap = decode_use_sparse ? DENSE_WINDOW_CAP : std::max(DENSE_WINDOW_CAP, L + max_generate + 512);
 
+        for (int l = 0; l < n_layers; ++l) {
+            if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
+                active_k_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                active_k_dense_rotated[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                active_v_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+            }
+        }
+        if (active_positions_dense.size() < (size_t)required_dense_cap) {
+            active_positions_dense.resize(required_dense_cap, 0);
+        }
 
         // Prefix verification guard: check mismatch index for token-level prefix verification.
         bool cache_valid = true;
@@ -2466,42 +2513,47 @@ int main(int argc, char ** argv) {
         //   ≤4K: DiffKV bypasses to pure dense. Dense handles these contexts fine without memory pressure.
         //   4K+: DiffKV engages. Decode is faster and VRAM is dramatically lower."
         // Previously C++ went lossy-sparse at [2048,4096) while Python stayed exact-dense.
-        int engage_threshold = 4096;
         if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
             engage_threshold = std::stoi(env_et);
         }
-        bool decode_use_sparse = (L >= engage_threshold);
+        decode_use_sparse = (L >= engage_threshold);
 
-        // §3.1 fix: Adaptive-k — scale srl_k_keep with context length to match the HF reference.
-        // ACTIVE_RUNTIME/native_core/srl/query_router.py:150-196 (adaptive_k):
-        //   k_min = max(20, int(0.15 * N_total))    (scales with context)
-        //   k_max = min(200, N_total)
-        // C++ previously used a fixed srl_k_keep=64 regardless of context size.
-        // At ~1500 blocks: Python attends ≥225 blocks; C++ attended 64 (⅓ coverage shrinking as doc grows).
-        //
-        // Fix: compute adaptive floor from current block count and update srl_k_keep before the graph build.
-        // The decode graph is static for a turn, so we use the block count at prefill completion.
-        // DIFFKV_SRL_K_KEEP overrides this (manual cap still respected).
         {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks > 0) {
-                // Mirror Python: k_min = max(20, 0.15 * N_total), k_max = min(200, N_total)
-                int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
-                int adaptive_k_max = std::min(200, n_comp_blocks);
-                int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
-                // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
-                if (adaptive_k > srl_k_keep) {
-                    std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
-                              << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
-                    srl_k_keep = adaptive_k;
-                    // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
+                bool mlx_parity = true;
+                if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
+                    mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
+                }
+                if (mlx_parity) {
+                    int target_k = std::min(n_comp_blocks, n_slots);
+                    std::cerr << "[DiffKV] MLX parity active: srl_k_keep raised from " << srl_k_keep
+                              << " → " << target_k << " (attending all compressed blocks)\n";
+                    srl_k_keep = target_k;
                     int sem_floor2 = srl_k_keep * 3;
                     if (srl_k_semantic < sem_floor2) {
                         srl_k_semantic = sem_floor2;
-                        std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_semantic raised to " << srl_k_semantic << "\n";
                     }
-                    // Update host-slot total to reflect any changed channel budgets
                     srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                } else {
+                    // Mirror Python: k_min = max(20, 0.15 * N_total), k_max = min(200, N_total)
+                    int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
+                    int adaptive_k_max = std::min(200, n_comp_blocks);
+                    int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                    // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
+                    if (adaptive_k > srl_k_keep) {
+                        std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
+                                  << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
+                        srl_k_keep = adaptive_k;
+                        // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
+                        int sem_floor2 = srl_k_keep * 3;
+                        if (srl_k_semantic < sem_floor2) {
+                            srl_k_semantic = sem_floor2;
+                            std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_semantic raised to " << srl_k_semantic << "\n";
+                        }
+                        // Update host-slot total to reflect any changed channel budgets
+                        srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                    }
                 }
             }
         }
@@ -2592,6 +2644,8 @@ int main(int argc, char ** argv) {
             userdata[l].srl_state = &srl_state;
             userdata[l].W_proj = W_proj_host.data();
             userdata[l].desc_dim = desc_dim;
+            userdata[l].max_active_dense_tokens = required_dense_cap;
+            userdata[l].dense_capacity = required_dense_cap;
         }
 
         struct ggml_tensor * decode_logits = nullptr;
@@ -3046,6 +3100,17 @@ int main(int argc, char ** argv) {
                 srl_state = std::move(srl_state_pending);
                 srl_swapped = true;
                 std::cerr << "[DiffKV] SRL routing active from step " << step << std::endl;
+
+                if (srl_build_thread.joinable()) {
+                    srl_build_thread.join();
+                }
+                for (auto & v : k_activations) {
+                    std::vector<ggml_fp16_t>().swap(v);
+                }
+                for (auto & v : v_activations) {
+                    std::vector<ggml_fp16_t>().swap(v);
+                }
+                std::cerr << "[DiffKV] Prefill activations memory reclaimed early." << std::endl;
             }
 
             if (active_slot >= n_slots) {

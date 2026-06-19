@@ -723,14 +723,37 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (const char* env_mdc = std::getenv("DIFFKV_MAX_DENSE_TOKENS")) {
         max_dense_cap = std::stoi(env_mdc);
     }
+    
+    // Pre-calculate the maximum possible number of dense tokens we will copy from the blocks
+    int required_dense_cap = engage_threshold + 512;
+    {
+        auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(0);
+        int possible_dense_tokens = 0;
+        for (auto & block : b_list) {
+            if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                possible_dense_tokens += 1;
+                possible_dense_tokens += block->active_k.size() / F_test;
+            }
+        }
+        required_dense_cap = std::max(required_dense_cap, possible_dense_tokens + 512);
+    }
+
     int max_active_dense_tokens = std::min(
         std::max(n_slots * micro_block_size, engage_threshold),
         max_dense_cap
     );
+    max_active_dense_tokens = std::max(max_active_dense_tokens, required_dense_cap);
+
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
         session->active_v_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
         session->active_positions_dense.assign(max_active_dense_tokens, 0);
+    } else if ((int)session->active_positions_dense.size() < max_active_dense_tokens) {
+        for (int l = 0; l < n_layers; ++l) {
+            session->active_k_dense[l].resize(max_active_dense_tokens * F_test, 0.0f);
+            session->active_v_dense[l].resize(max_active_dense_tokens * F_test, 0.0f);
+        }
+        session->active_positions_dense.resize(max_active_dense_tokens, 0);
     }
     if (session->seq_lens_by_layer.empty()) {
         session->seq_lens_by_layer.assign(n_layers, std::vector<int32_t>(n_slots, 0));
