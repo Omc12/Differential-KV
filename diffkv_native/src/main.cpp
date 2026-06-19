@@ -2345,7 +2345,12 @@ int main(int argc, char ** argv) {
         // Resources already freed inside the chunk loop
 
         // ── 2. DECODE PHASE — rebuild decode graph fresh (avoids sched-ctx pointer corruption) ──
-        int engage_threshold = 2048;
+        // §3.3 fix: default raised from 2048 → 4096 to match ACTIVE_RUNTIME diffkv_attention.py:75.
+        // Comment from Python: "Default raised from 2048 → 4096 based on MPS benchmarks:
+        //   ≤4K: DiffKV bypasses to pure dense. Dense handles these contexts fine without memory pressure.
+        //   4K+: DiffKV engages. Decode is faster and VRAM is dramatically lower."
+        // Previously C++ went lossy-sparse at [2048,4096) while Python stayed exact-dense.
+        int engage_threshold = 4096;
         if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
             engage_threshold = std::stoi(env_et);
         }
@@ -2508,6 +2513,41 @@ int main(int argc, char ** argv) {
             ggml_backend_buffer_free(native_decode_buf);
             native_decode_buf = nullptr;
         }
+
+        // §3.1 fix: Adaptive-k — scale srl_k_keep with context length to match the HF reference.
+        // ACTIVE_RUNTIME/native_core/srl/query_router.py:150-196 (adaptive_k):
+        //   k_min = max(20, int(0.15 * N_total))    (scales with context)
+        //   k_max = min(200, N_total)
+        // C++ previously used a fixed srl_k_keep=64 regardless of context size.
+        // At ~1500 blocks: Python attends ≥225 blocks; C++ attended 64 (⅓ coverage shrinking as doc grows).
+        //
+        // Fix: compute adaptive floor from current block count and update srl_k_keep before the graph build.
+        // The decode graph is static for a turn, so we use the block count at prefill completion.
+        // DIFFKV_SRL_K_KEEP overrides this (manual cap still respected).
+        {
+            int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
+            if (n_comp_blocks > 0) {
+                // Mirror Python: k_min = max(20, 0.15 * N_total), k_max = min(200, N_total)
+                int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
+                int adaptive_k_max = std::min(200, n_comp_blocks);
+                int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
+                if (adaptive_k > srl_k_keep) {
+                    std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
+                              << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
+                    srl_k_keep = adaptive_k;
+                    // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
+                    int sem_floor2 = srl_k_keep * 3;
+                    if (srl_k_semantic < sem_floor2) {
+                        srl_k_semantic = sem_floor2;
+                        std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_semantic raised to " << srl_k_semantic << "\n";
+                    }
+                    // Update host-slot total to reflect any changed channel budgets
+                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                }
+            }
+        }
+
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
             kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
@@ -2653,15 +2693,45 @@ int main(int argc, char ** argv) {
                     6, 2, 0.15f, true, true
                 );
                 srl_state_pending.n_blocks_at_last_graph_build = n_comp;
-                // NOTE: factual_store.build() is intentionally NOT called here.
-                // ACTIVE_RUNTIME: factual store is built post-decode (kv_runtime_manager.py:955)
-                // and only affects multi-turn routing quality. Running it here would
-                // allocate O(L × n_layers × head_dim) bytes concurrently with decode,
-                // causing 500-900MB RAM pressure spikes that stall the Mac.
+
+                // Step 4: setup SAS and EQA structures
                 srl_state_pending.setup_sas_and_eqa(
                     _prompt_tokens_copy, stop_token_ids,
                     [&](int32_t tid) { return model.token_to_piece(tid); }
                 );
+
+                // §3.2 fix: Build factual store HERE (pre-decode), matching ACTIVE_RUNTIME.
+                // ACTIVE_RUNTIME: hf_diffkv_wrapper.py:837 calls finalize_srl_index() BEFORE
+                // the generate loop; finalize_srl_index calls factual_store.build() at kv_runtime_manager.py:955.
+                // Previously C++ built this post-decode, making all factual biases/masks/VSL no-ops
+                // in turn 1 (the store was empty during every decode step).
+                // This background thread runs at QoS_BACKGROUND so decode preempts it naturally.
+                // The factual store is read by the decode loop only after srl_swapped=true AND
+                // factual_store.entries is non-empty — so partial builds are safe (empty = no bias).
+                try {
+                    std::unordered_set<int32_t> prime_slots_thread(
+                        srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
+                        srl_state_pending.chunk_graph.cluster_centers_tensor.end()
+                    );
+                    srl_state_pending.factual_store.build(
+                        _k_act_ref, _v_act_ref,
+                        _prompt_tokens_copy,
+                        _W_proj_copy.data(),
+                        _desc_dim, _head_dim, _kv_heads,
+                        stop_token_ids,
+                        comp_slots,
+                        _mbs + 1,
+                        srl_state_pending.inverted_index,
+                        prime_slots_thread,
+                        get_helper_token_ids_cpp(model),
+                        true
+                    );
+                    std::cerr << "[DiffKV] Factual store built (pre-decode): "
+                              << srl_state_pending.factual_store.entries.size() << " entries.\n";
+                } catch (const std::exception& fe) {
+                    std::cerr << "[DiffKV] factual_store.build() in srl_build_thread failed: " << fe.what() << "\n";
+                }
+
                 std::cerr << "[DiffKV] SRL index ready: " << n_comp << " blocks." << std::endl;
             }
             srl_build_done.store(true, std::memory_order_release);
@@ -3543,10 +3613,11 @@ int main(int argc, char ** argv) {
                 break;
             }
 
-            // Bug 🅒 fix: penalize ALL repeated tokens (not just alphanumeric).
-            // This allows periods, spaces, newlines etc. to be penalized — preventing
-            // the runaway ". . . . ." spam. Matches mlx_diffkv_wrapper.py:1244 which
-            // iterates set(generated[-window:]) with no character-class filter.
+            // §3.7 fix: Skip non-alphanumeric tokens in rep penalty to match HF reference.
+            // HF: hf_diffkv_wrapper.py:904-912 skips tokens with no alphanumeric characters
+            // to avoid suppressing list/format punctuation (bullets, periods, newlines).
+            // HF stays coherent through coverage+grounding (§3.1/§3.2), not by penalizing punct.
+            // Previously matched MLX which penalizes ALL tokens — but MLX was not the live reference.
             float rep_penalty = loop_detected ? std::max(repetition_penalty, 1.3f) : repetition_penalty;
             int rep_window    = loop_detected ? 256 : 64;
 
@@ -3560,10 +3631,19 @@ int main(int argc, char ** argv) {
 
             for (int32_t tok : unique_penalized) {
                 if (tok >= 0 && tok < n_vocab) {
+                    // §3.7: skip non-alphanumeric tokens (punctuation, whitespace, newlines)
+                    // to avoid suppressing list/format characters — matches HF reference.
+                    std::string tok_str = model.token_to_piece(tok);
+                    bool has_alnum = false;
+                    for (char c : tok_str) {
+                        if (std::isalnum((unsigned char)c)) { has_alnum = true; break; }
+                    }
+                    if (!has_alnum) continue;  // skip punctuation/whitespace tokens
                     float& l = output_logits[tok];
                     l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
                 }
             }
+
 
             // F22 fix: drop factual sequences that are a strict PREFIX of another
             // surfaced sequence (the 20-token chunker can leave a fragment like
@@ -3679,8 +3759,9 @@ int main(int argc, char ** argv) {
             }
 
             // Factual Early Stopping (Option 2 Extension)
+            // §3.6 fix: gate raised 0.4→0.5 to match HF reference (hf_diffkv_wrapper.py:1063).
             bool stop_generation = false;
-            if (max_generate < 64 && srl_state.current_step_max_similarity >= 0.4f) {
+            if (max_generate < 64 && srl_state.current_step_max_similarity >= 0.5f) {
                 for (const auto& seq : srl_state.current_step_factual_sequences) {
                     if (seq.size() >= 5 && next_token == seq.back() && generated_tokens.size() >= seq.size() - 1) {
                         bool match = true;
@@ -3801,18 +3882,19 @@ int main(int argc, char ** argv) {
                 }
                 const std::unordered_set<int32_t>* qbias_ptr = qbias.empty() ? nullptr : &qbias;
 
-                // N3.1 fix: Use 0.30 threshold and nullptr active_slots to match the MLX
-                // reference (mlx_diffkv_wrapper.py:874-875). This is now the SOLE factual
-                // store query per decode step (the callback no longer re-queries).
-                // The slot_filter and qbias_ptr are kept for entity-relative ranking only.
+                // §3.4 fix: Use 0.50 threshold and pass active_slots to match the HF reference.
+                // HF reference: diffkv_attention.py:771-777 uses threshold=0.50 and
+                // active_slots=set(block_indices) (the currently routed slots).
+                // Previously these matched the MLX reference (0.30, nullptr) — MLX was wrong target.
+                // The slot_filter (built above from cached_physical_candidates) IS the active_slots set.
                 auto fact_hits = srl_state.factual_store.query(
                     q_for_factual.data(),
                     kv_heads,
                     head_dim,
                     W_proj_host.data(),
                     desc_dim,
-                    0.30f,
-                    nullptr,      // active_slots=None (MLX ref); slot_filter removed
+                    0.50f,        // §3.4: 0.30→0.50 per HF ref (diffkv_attention.py:774)
+                    slot_filter,  // §3.4: pass routed slots as active_slots (diffkv_attention.py:775)
                     qbias_ptr
                 );
 
@@ -3857,12 +3939,13 @@ int main(int argc, char ** argv) {
                         }
                     }
                     // ── 1-hop neighbor injection ────────────────────────────────
-                    // N3.2 fix: thresholds aligned to MLX reference (mlx:889/895):
-                    //   1-hop >= 0.35 (was 0.45), 2-hop >= 0.50 (was 0.65)
+                    // §3.4 (§5) fix: thresholds corrected to HF reference (diffkv_attention.py:795/807):
+                    //   1-hop >= 0.45 (was 0.35 per MLX), 2-hop >= 0.65 (was 0.50 per MLX)
+                    // The MLX values were looser; HF is the actual live reference on this Mac.
                     for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
                         int nb_idx = hit.neighbors[ni];
                         float nb_w  = hit.weights[ni];
-                        if (nb_w >= 0.35f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.45→0.35 per MLX
+                        if (nb_w >= 0.45f && nb_idx < (int)srl_state.factual_store.entries.size()) {  // §3.4: 0.35→0.45 per HF ref
                             const auto& nb_e = srl_state.factual_store.entries[nb_idx];
                             add_seq(nb_e.tokens);
                             if (nb_e.is_prime) {
@@ -3872,7 +3955,7 @@ int main(int argc, char ** argv) {
                             for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
                                 int nb2_idx = nb_e.neighbors[ni2];
                                 float nb2_w  = nb_e.weights[ni2];
-                                if (nb2_w >= 0.50f && nb2_idx < (int)srl_state.factual_store.entries.size()) {  // N3.2: 0.65→0.50 per MLX
+                                if (nb2_w >= 0.65f && nb2_idx < (int)srl_state.factual_store.entries.size()) {  // §3.4: 0.50→0.65 per HF ref
                                     const auto& nb2_e = srl_state.factual_store.entries[nb2_idx];
                                     add_seq(nb2_e.tokens);
                                 }
@@ -4176,32 +4259,9 @@ int main(int argc, char ** argv) {
             srl_build_thread.join();
         }
 
-        // \u2500\u2500 Post-decode factual store build (ACTIVE_RUNTIME: kv_runtime_manager.py:955) \u2500\u2500
-        // Build AFTER decode completes so it never races with the decode loop.
-        // Uses the final srl_state (already swapped in) for accurate prime_slots.
-        if (srl_swapped && !srl_state.ordered_slot_ids.empty()) {
-            try {
-                std::unordered_set<int32_t> prime_slots(
-                    srl_state.chunk_graph.cluster_centers_tensor.begin(),
-                    srl_state.chunk_graph.cluster_centers_tensor.end()
-                );
-                srl_state.factual_store.build(
-                    k_activations, v_activations,
-                    prompt_tokens,
-                    W_proj_host.data(),
-                    desc_dim, head_dim, kv_heads,
-                    stop_token_ids,
-                    srl_state.ordered_slot_ids,
-                    runtime_manager.get_micro_block_size() + 1,
-                    srl_state.inverted_index,
-                    prime_slots,
-                    get_helper_token_ids_cpp(model),
-                    true
-                );
-            } catch (const std::exception& e) {
-                std::cerr << "[DiffKV] factual_store.build() failed: " << e.what() << std::endl;
-            }
-        }
+        // §3.2 fix: factual store is now built inside srl_build_thread (pre-decode),
+        // matching ACTIVE_RUNTIME hf_diffkv_wrapper.py:837 / kv_runtime_manager.py:955.
+        // The post-decode build has been removed to avoid building it twice.
 
         // Free decode context — must happen before next iteration rebuilds it
         ggml_free(decode_ctx);
