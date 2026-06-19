@@ -648,7 +648,7 @@ async def run_direct_mode(args):
     # Setup environment variables
     os.environ["DIFFKV_PRESET"] = args.preset
     if args.preset == 'low':
-        os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "256"
+        os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "512"
     elif args.preset == 'high':
         os.environ["DIFFKV_PREFILL_CHUNK_SIZE"] = "2048"
     else:

@@ -1263,7 +1263,10 @@ int main(int argc, char ** argv) {
     // Eliminate streaming bursts: set stdout fully unbuffered so each token
     // reaches the pipe the instant it's written, regardless of OS buffering.
     setvbuf(stdout, nullptr, _IONBF, 0);
-    std::ios::sync_with_stdio(false);
+    // NOTE: do NOT call sync_with_stdio(false) here — it decouples std::cout
+    // from C's FILE* stdout, which causes ordering issues when we mix
+    // std::cout sentinel writes (__RESPONSE__, __FINISH__) with raw ::write()
+    // token output. Keep them synced so ordering is guaranteed.
 
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (argc < 2) {
@@ -1295,6 +1298,7 @@ int main(int argc, char ** argv) {
     }
 
     model.print_info();
+    
     
     // Bug 🅙 fix: micro_block_size 64→16 to match Python streaming_sparse_ingest.py:131.
     // 16 gives 4× more dense anchors (1 exact KV per 16 tokens vs 1 per 64).
@@ -1721,26 +1725,53 @@ int main(int argc, char ** argv) {
 
         int L = prompt_tokens.size();
         // Reserve decode headroom: we must reserve enough free slots for max_generate tokens,
-        // so that decode generation does not fail due to slot capacity exhaustion (active_slot >= n_slots).
+        // so that decode generation does not fail due to slot capacity exhaustion.
         int max_generate = 2048;
         if (const char* env_mt = std::getenv("DIFFKV_MAX_TOKENS")) {
             max_generate = std::max(1, std::stoi(env_mt));
         }
-        int effective_max_generate = std::min(max_generate, n_slots * micro_block_size);
+
+        // ── Auto-expand pool to fit prompt (matches Python dynamic pool sizing) ──
+        // Python's NativeBlockPool grows on-demand (via _grow_pool) — the preset only
+        // controls chunk_size/srl_threshold, NOT the context window.
+        // Compute raw slots needed for just the prompt (no headroom yet), then expand.
+        {
+            int model_max_slots = model.get_config().n_ctx / micro_block_size;
+            // Slots needed: ceil(L / (mbs+1)) to hold L tokens in blocks of (mbs+1)
+            int prompt_slots_needed = (L + micro_block_size) / (micro_block_size + 1) + 2;
+            if (prompt_slots_needed > n_slots) {
+                int new_n_slots = std::min(prompt_slots_needed, model_max_slots);
+                if (new_n_slots > n_slots) {
+                    std::cerr << "[DiffKV Native] Auto-expanding pool: " << n_slots
+                              << " → " << new_n_slots << " slots to fit " << L
+                              << "-token prompt (Python parity: dynamic pool)." << std::endl;
+                    n_slots = new_n_slots;
+                }
+            }
+        }
+
+        // Now compute headroom on the (possibly expanded) n_slots.
+        // Cap headroom at 512 tokens (32 slots at mbs=16) — realistic max response length.
+        // The old n_slots/2 cap was eating 50% of the pool for decode tokens that would
+        // never be used, leaving only half the pool for the prompt.
+        const int headroom_tokens_cap = 512;
+        int effective_max_generate = std::min(max_generate, headroom_tokens_cap);
         int headroom_slots = (effective_max_generate + micro_block_size - 1) / micro_block_size;
-        headroom_slots = std::min(headroom_slots, n_slots / 2);
+        // Hard safety: never exceed 25% of n_slots for headroom
+        headroom_slots = std::min(headroom_slots, n_slots / 4);
         int safe_n_slots = std::max(2, n_slots - headroom_slots);
 
         // N3.5 fix: Each slot stores 1 anchor token + micro_block_size delta tokens
         // = (micro_block_size + 1) tokens total (streaming_sparse_ingest.cpp:406).
         int true_capacity = safe_n_slots * (micro_block_size + 1);
         if (L > true_capacity) {
-            std::cerr << "[DiffKV Native] Warning: Prompt tokens length " << L 
-                      << " exceeds maximum capacity (with reserved decode headroom) " << true_capacity
-                      << ". Truncating prompt." << std::endl;
+            // Prompt still too large (hit model absolute max) — truncate as last resort
+            std::cerr << "[DiffKV Native] Warning: Prompt (" << L << " tokens) exceeds model max capacity ("
+                      << true_capacity << "). Truncating." << std::endl;
             L = true_capacity;
             prompt_tokens.resize(L);
         }
+
 
         // Prefix verification guard: check mismatch index for token-level prefix verification.
         bool cache_valid = true;
@@ -1861,6 +1892,7 @@ int main(int argc, char ** argv) {
         // and upload the already-stored prefix K/V from the prior chunk's data (if pos_start > cached_len).
         // This matches ACTIVE_RUNTIME: full prompt is sent, only new tokens are prefilled.
         std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
+        std::vector<std::vector<float>> k_rotated_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
         std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test, 0.0f));
         std::vector<float> prefill_output_logits(n_vocab);
 
@@ -1869,7 +1901,7 @@ int main(int argc, char ** argv) {
             std::string p(env_preset);
             std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return std::tolower(c); });
             if (p == "low") {
-                chunk_size = 256;
+                chunk_size = 512;
             } else if (p == "high") {
                 chunk_size = 2048;
             }
@@ -2027,6 +2059,36 @@ int main(int argc, char ** argv) {
             }
         }
 
+        if (cached_len > 0) {
+            std::vector<int32_t> prior_positions(cached_len);
+            for (int t = 0; t < cached_len; ++t) prior_positions[t] = t;
+            
+            int half_dim = head_dim / 2;
+            std::vector<float> inv_freq(half_dim);
+            for (int i = 0; i < half_dim; ++i) {
+                inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+            }
+            std::vector<float> cos_table(cached_len * half_dim);
+            std::vector<float> sin_table(cached_len * half_dim);
+            for (int t = 0; t < cached_len; ++t) {
+                float pos = (float)prior_positions[t];
+                for (int i = 0; i < half_dim; ++i) {
+                    float theta = pos * inv_freq[i];
+                    cos_table[t * half_dim + i] = std::cos(theta);
+                    sin_table[t * half_dim + i] = std::sin(theta);
+                }
+            }
+            for (int l = 0; l < n_layers; ++l) {
+                apply_rope_neox_cpu_fast(
+                    k_activations[l].data(),
+                    k_rotated_activations[l].data(),
+                    cos_table.data(),
+                    sin_table.data(),
+                    cached_len, kv_heads, head_dim
+                );
+            }
+        }
+
         int pos_start = cached_len;
 
         // ── CHUNKED PREFILL WITH FULL PRIOR-CONTEXT ATTENTION ──────────────────
@@ -2148,39 +2210,9 @@ int main(int argc, char ** argv) {
             // k_activations[l][0..pos_start-1] stores raw K from this turn's prior chunks.
             if (has_prior) {
                 int intra_prior_len = pos_start;
-                // Positions for prior tokens [0..pos_start-1]
-                std::vector<int32_t> prior_positions(intra_prior_len);
-                for (int t = 0; t < intra_prior_len; ++t) prior_positions[t] = t;
-
-                // Precompute cos/sin tables for intra-turn prior positions
-                int half_dim = head_dim / 2;
-                std::vector<float> inv_freq(half_dim);
-                for (int i = 0; i < half_dim; ++i) {
-                    inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
-                }
-                std::vector<float> cos_table(intra_prior_len * half_dim);
-                std::vector<float> sin_table(intra_prior_len * half_dim);
-                for (int t = 0; t < intra_prior_len; ++t) {
-                    float pos = (float)prior_positions[t];
-                    for (int i = 0; i < half_dim; ++i) {
-                        float theta = pos * inv_freq[i];
-                        cos_table[t * half_dim + i] = std::cos(theta);
-                        sin_table[t * half_dim + i] = std::sin(theta);
-                    }
-                }
-
-                // RoPE-rotate the intra-turn prior raw K and upload
-                std::vector<float> prior_k_rotated(intra_prior_len * F_test);
                 for (int l = 0; l < n_layers; ++l) {
-                    apply_rope_neox_cpu_fast(
-                        k_activations[l].data(),   // raw K from index 0 (= cached_len in prompt)
-                        prior_k_rotated.data(),
-                        cos_table.data(),
-                        sin_table.data(),
-                        intra_prior_len, kv_heads, head_dim
-                    );
                     ggml_backend_tensor_set(prior_k_tensors[l],
-                        prior_k_rotated.data(),
+                        k_rotated_activations[l].data(),
                         0, intra_prior_len * F_test * sizeof(float));
                     ggml_backend_tensor_set(prior_v_tensors[l],
                         v_activations[l].data(),
@@ -2207,6 +2239,37 @@ int main(int argc, char ** argv) {
                 ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
                 std::memcpy(k_activations[l].data() + local_offset * F_test, chunk_k[l].data(), chunk_len * F_test * sizeof(float));
                 std::memcpy(v_activations[l].data() + local_offset * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
+            }
+
+            // RoPE-rotate only the current chunk and store it in k_rotated_activations
+            {
+                std::vector<int32_t> chunk_positions(chunk_len);
+                for (int i = 0; i < chunk_len; ++i) chunk_positions[i] = pos_start + i;
+
+                int half_dim = head_dim / 2;
+                std::vector<float> inv_freq(half_dim);
+                for (int i = 0; i < half_dim; ++i) {
+                    inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+                }
+                std::vector<float> cos_table(chunk_len * half_dim);
+                std::vector<float> sin_table(chunk_len * half_dim);
+                for (int t = 0; t < chunk_len; ++t) {
+                    float pos = (float)chunk_positions[t];
+                    for (int i = 0; i < half_dim; ++i) {
+                        float theta = pos * inv_freq[i];
+                        cos_table[t * half_dim + i] = std::cos(theta);
+                        sin_table[t * half_dim + i] = std::sin(theta);
+                    }
+                }
+                for (int l = 0; l < n_layers; ++l) {
+                    apply_rope_neox_cpu_fast(
+                        k_activations[l].data() + pos_start * F_test,
+                        k_rotated_activations[l].data() + pos_start * F_test,
+                        cos_table.data(),
+                        sin_table.data(),
+                        chunk_len, kv_heads, head_dim
+                    );
+                }
             }
             // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
             runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);

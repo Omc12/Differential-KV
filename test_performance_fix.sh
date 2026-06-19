@@ -61,7 +61,12 @@ echo "  Max generation: 128 tokens"
 echo ""
 
 # Create test prompt
-TEST_PROMPT="Write a detailed summary of the major events in World War II, including the key battles, turning points, and outcomes."
+if [ -f "diffkv_native/scratch_longprompt.txt" ]; then
+    TEST_PROMPT=$(cat diffkv_native/scratch_longprompt.txt | tr '\n' ' ')
+    echo "✓ Loaded long prompt from scratch_longprompt.txt ($(wc -c < diffkv_native/scratch_longprompt.txt) bytes)"
+else
+    TEST_PROMPT="Write a detailed summary of the major events in World War II, including the key battles, turning points, and outcomes."
+fi
 
 echo "═══════════════════════════════════════════════════════════════════"
 echo "  Test 1: With Native Attention (OPTIMIZED)"
@@ -75,7 +80,7 @@ echo "Running... (this may take a moment for first-time initialization)"
 echo ""
 
 cd diffkv_native
-echo "$TEST_PROMPT" | timeout 60 python serving/cli.py \
+echo "$TEST_PROMPT" | ../diffkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
     --binary-path build/diffkv_native \
     --preset mid \
@@ -91,7 +96,7 @@ echo ""
 export DIFFKV_NATIVE_ATTN=0
 
 cd diffkv_native
-echo "$TEST_PROMPT" | timeout 60 python serving/cli.py \
+echo "$TEST_PROMPT" | ../diffkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
     --binary-path build/diffkv_native \
     --preset mid \

@@ -1,0 +1,657 @@
+[DiffKV Model] Loading model from GGUF file: ./qwen2.5-1.5b-instruct-q8_0.gguf ...
+llama_model_loader: loaded meta data with 26 key-value pairs and 339 tensors from ./qwen2.5-1.5b-instruct-q8_0.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen2
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = qwen2.5-1.5b-instruct
+llama_model_loader: - kv   3:                            general.version str              = v0.1
+llama_model_loader: - kv   4:                           general.finetune str              = qwen2.5-1.5b-instruct
+llama_model_loader: - kv   5:                         general.size_label str              = 1.8B
+llama_model_loader: - kv   6:                          qwen2.block_count u32              = 28
+llama_model_loader: - kv   7:                       qwen2.context_length u32              = 32768
+llama_model_loader: - kv   8:                     qwen2.embedding_length u32              = 1536
+llama_model_loader: - kv   9:                  qwen2.feed_forward_length u32              = 8960
+llama_model_loader: - kv  10:                 qwen2.attention.head_count u32              = 12
+llama_model_loader: - kv  11:              qwen2.attention.head_count_kv u32              = 2
+llama_model_loader: - kv  12:                       qwen2.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  13:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  14:                          general.file_type u32              = 7
+llama_model_loader: - kv  15:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  16:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  17:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  18:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  19:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  20:                tokenizer.ggml.eos_token_id u32              = 151645
+llama_model_loader: - kv  21:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  22:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  23:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  24:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - kv  25:               general.quantization_version u32              = 2
+llama_model_loader: - type  f32:  141 tensors
+llama_model_loader: - type q8_0:  198 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = Q8_0
+print_info: file size   = 1.76 GiB (8.50 BPW) 
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.028 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M3)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  =  5726.63 MB
+llama_prepare_model_devices: using device MTL0 (Apple M3) (unknown id) - 5460 MiB free
+init_tokenizer: initializing tokenizer for type 2
+load: 0 unused tokens
+load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
+load: control token: 151656 '<|video_pad|>' is not marked as EOG
+load: control token: 151655 '<|image_pad|>' is not marked as EOG
+load: control token: 151653 '<|vision_end|>' is not marked as EOG
+load: control token: 151652 '<|vision_start|>' is not marked as EOG
+load: control token: 151651 '<|quad_end|>' is not marked as EOG
+load: control token: 151649 '<|box_end|>' is not marked as EOG
+load: control token: 151648 '<|box_start|>' is not marked as EOG
+load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
+load: control token: 151644 '<|im_start|>' is not marked as EOG
+load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
+load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
+load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+load: control token: 151660 '<|fim_middle|>' is not marked as EOG
+load: control token: 151654 '<|vision_pad|>' is not marked as EOG
+load: control token: 151650 '<|quad_start|>' is not marked as EOG
+load: printing all EOG tokens:
+load:   - 128247 ('</s>')
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 23
+load: token to piece cache size = 0.9310 MB
+print_info: arch                  = qwen2
+print_info: vocab_only            = 1
+print_info: no_alloc              = 0
+print_info: vocab type            = BPE
+print_info: n_vocab               = 151936
+print_info: n_merges              = 151387
+print_info: BOS token             = 151643 '<|endoftext|>'
+print_info: EOS token             = 151645 '<|im_end|>'
+print_info: EOT token             = 151645 '<|im_end|>'
+print_info: PAD token             = 151643 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
+print_info: FIM MID token         = 151660 '<|fim_middle|>'
+print_info: FIM PAD token         = 151662 '<|fim_pad|>'
+print_info: FIM REP token         = 151663 '<|repo_name|>'
+print_info: FIM SEP token         = 151664 '<|file_sep|>'
+print_info: EOG token             = 128247 '</s>'
+print_info: EOG token             = 151643 '<|endoftext|>'
+print_info: EOG token             = 151645 '<|im_end|>'
+print_info: EOG token             = 151662 '<|fim_pad|>'
+print_info: EOG token             = 151663 '<|repo_name|>'
+print_info: EOG token             = 151664 '<|file_sep|>'
+print_info: max token length      = 256
+llama_model_load: vocab only - skipping tensors
+[DiffKV Model] Allocated weight buffer of size 1801 MB on backend: CPU
+[DiffKV Model] Loaded successfully.
+── Model Config Info ──
+  n_vocab:        151936
+  n_embd:         1536
+  n_layer:        28
+  n_head:         12
+  n_head_kv:      2
+  n_ff:           8960
+  n_rot:          128 (head_dim: 128)
+  rms_norm_eps:   1.000000e-06
+  rope_freq_base: 1000000.000000
+  n_ctx:          32768
+───────────────────────
+[DiffKV] N4.2: srl_k_keep raised from 16 → 64 to preserve ≥1024 token coverage (mbs=16)
+[DiffKV] N4.2: srl_k_semantic raised from 32 → 192 (= 3 × srl_k_keep)
+[DiffKV Native] Using default model context length: 32768 tokens (2048 slots)
+[DiffKV Native] Prompt: "warmup"
+[DiffKV Native] Prompt tokens (28): 151644 8948 198 2610 525 1207 16948 11 264 3460 4128 1614 7881 553 54364 13 151645 198 151644 872 198 82597 454 151645 198 151644 77091 198 
+[DiffKV Native] Running Prefill phase in chunks...
+
+[Prefill Phase Top predictions]:
+  0: "Sure" (id: 39814, logit: 17.6484)
+  1: "Warm" (id: 95275, logit: 17.3829)
+  2: "I" (id: 40, logit: 17.078)
+  3: "Hello" (id: 9707, logit: 16.5411)
+  4: "Certainly" (id: 95456, logit: 15.6051)
+[DiffKV] SRL routing active from step 0
+
+[Step 0 Top predictions]:
+  0: "!" (id: 0, logit: 27.9114)
+  1: "," (id: 11, logit: 25.3542)
+  2: " thing" (id: 3166, logit: 22.5757)
+  3: "thing" (id: 1596, logit: 19.8878)
+  4: "!
+" (id: 4894, logit: 19.5584)
+
+[Step 1 Top predictions]:
+  0: " How" (id: 2585, logit: 20.568)
+  1: " What" (id: 3555, logit: 20.3741)
+  2: " Warm" (id: 45763, logit: 19.5136)
+  3: " I" (id: 358, logit: 19.4073)
+  4: " Let" (id: 6771, logit: 18.5554)
+[DiffKV Native] Prompt: "who are you?"
+[DiffKV Native] Prompt tokens (30): 151644 8948 198 2610 525 1207 16948 11 264 3460 4128 1614 7881 553 54364 13 151645 198 151644 872 198 14623 525 498 30 151645 198 151644 77091 198 
+[DiffKV Native] Running Prefill phase in chunks...
+
+[Prefill Phase Top predictions]:
+  0: "I" (id: 40, logit: 27.2358)
+  1: "As" (id: 2121, logit: 23.6071)
+  2: "Hello" (id: 9707, logit: 20.3412)
+  3: "Q" (id: 48, logit: 19.8248)
+  4: ""I" (id: 7044, logit: 19.1558)
+[Response] I[DiffKV] SRL routing active from step 0
+
+[Step 0 Top predictions]:
+  0: " am" (id: 1079, logit: 28.8195)
+  1: "'m" (id: 2776, logit: 24.3272)
+  2: " is" (id: 374, logit: 20.2338)
+  3: " exist" (id: 3000, logit: 19.9128)
+  4: " AM" (id: 6769, logit: 19.6417)
+ am
+[Step 1 Top predictions]:
+  0: " Q" (id: 1207, logit: 22.6598)
+  1: " a" (id: 264, logit: 19.9538)
+  2: " G" (id: 479, logit: 19.3889)
+  3: " an" (id: 458, logit: 18.9206)
+  4: " called" (id: 2598, logit: 18.1455)
+ Q
+[Step 2 Top predictions]:
+  0: "wen" (id: 16948, logit: 29.4244)
+  1: "W" (id: 54, logit: 18.9542)
+  2: "n" (id: 77, logit: 16.3189)
+  3: "want" (id: 52657, logit: 16.1264)
+  4: "," (id: 11, logit: 16.0568)
+wen
+[Step 3 Top predictions]:
+  0: "," (id: 11, logit: 26.2364)
+  1: " -" (id: 481, logit: 20.6419)
+  2: ",a" (id: 15012, logit: 20.4754)
+  3: "." (id: 13, logit: 20.0069)
+  4: " (" (id: 320, logit: 19.6822)
+,
+[Step 4 Top predictions]:
+  0: " an" (id: 458, logit: 25.3623)
+  1: " a" (id: 264, logit: 24.9931)
+  2: " the" (id: 279, logit: 21.1094)
+  3: " I" (id: 358, logit: 20.6524)
+  4: " one" (id: 825, logit: 20.1312)
+ an
+[Step 5 Top predictions]:
+  0: " AI" (id: 15235, logit: 26.9045)
+  1: " artificial" (id: 20443, logit: 24.8044)
+  2: " advanced" (id: 10847, logit: 20.4877)
+  3: " open" (id: 1787, logit: 20.4051)
+  4: " impressive" (id: 15978, logit: 20.1661)
+ AI
+[Step 6 Top predictions]:
+  0: " assistant" (id: 17847, logit: 25.3859)
+  1: " language" (id: 4128, logit: 22.1232)
+  2: " developed" (id: 7881, logit: 21.7671)
+  3: " model" (id: 1614, logit: 21.642)
+  4: " designed" (id: 6188, logit: 20.1807)
+ assistant
+[Step 7 Top predictions]:
+  0: " created" (id: 3465, logit: 28.1107)
+  1: " designed" (id: 6188, logit: 24.4601)
+  2: " developed" (id: 7881, logit: 24.2261)
+  3: " trained" (id: 16176, logit: 22.8652)
+  4: " built" (id: 5798, logit: 22.3333)
+ created
+[Step 8 Top predictions]:
+  0: " by" (id: 553, logit: 30.0568)
+  1: " and" (id: 323, logit: 27.3048)
+  2: " for" (id: 369, logit: 25.5706)
+  3: " to" (id: 311, logit: 24.9689)
+  4: " using" (id: 1667, logit: 24.0344)
+ by
+[Step 9 Top predictions]:
+  0: " Alibaba" (id: 54364, logit: 24.3873)
+  1: "阿里" (id: 102661, logit: 19.6311)
+  2: " the" (id: 279, logit: 18.4943)
+  3: " Al" (id: 1674, logit: 17.9118)
+  4: " B" (id: 425, logit: 17.8857)
+ Alibaba
+[Step 10 Top predictions]:
+  0: " Cloud" (id: 14817, logit: 24.0386)
+  1: " to" (id: 311, logit: 20.3512)
+  2: " Group" (id: 5737, logit: 19.9803)
+  3: "." (id: 13, logit: 18.9819)
+  4: " with" (id: 448, logit: 18.6906)
+ Cloud
+[Step 11 Top predictions]:
+  0: " to" (id: 311, logit: 22.5816)
+  1: "." (id: 13, logit: 22.5743)
+  2: " for" (id: 369, logit: 21.0672)
+  3: " with" (id: 448, logit: 20.6084)
+  4: " in" (id: 304, logit: 19.9894)
+ to
+[Step 12 Top predictions]:
+  0: " help" (id: 1492, logit: 26.2735)
+  1: " provide" (id: 3410, logit: 25.36)
+  2: " be" (id: 387, logit: 25.1046)
+  3: " assist" (id: 7789, logit: 24.4374)
+  4: " process" (id: 1882, logit: 23.962)
+ help
+[Step 13 Top predictions]:
+  0: " with" (id: 448, logit: 26.2264)
+  1: " answer" (id: 4226, logit: 22.9026)
+  2: " users" (id: 3847, logit: 22.723)
+  3: " humans" (id: 12677, logit: 22.3945)
+  4: " provide" (id: 3410, logit: 21.6758)
+ with
+[Step 14 Top predictions]:
+  0: " tasks" (id: 9079, logit: 27.6976)
+  1: " various" (id: 5257, logit: 26.8658)
+  2: " natural" (id: 5810, logit: 24.4024)
+  3: " information" (id: 1995, logit: 23.4867)
+  4: " text" (id: 1467, logit: 23.0949)
+ tasks
+[Step 15 Top predictions]:
+  0: " and" (id: 323, logit: 29.4193)
+  1: " like" (id: 1075, logit: 28.328)
+  2: " such" (id: 1741, logit: 27.8038)
+  3: " related" (id: 5435, logit: 25.7491)
+  4: " that" (id: 429, logit: 24.8553)
+ and
+[Step 16 Top predictions]:
+  0: " answer" (id: 4226, logit: 27.2198)
+  1: " provide" (id: 3410, logit: 25.3676)
+  2: " generate" (id: 6923, logit: 23.4114)
+  3: " inquiries" (id: 43883, logit: 21.5319)
+  4: " conversations" (id: 20959, logit: 21.4168)
+ answer
+[Step 17 Top predictions]:
+  0: " questions" (id: 4755, logit: 29.317)
+  1: " your" (id: 697, logit: 25.2645)
+  2: " queries" (id: 19556, logit: 23.485)
+  3: " general" (id: 4586, logit: 22.3436)
+  4: " inquiries" (id: 43883, logit: 22.1749)
+ questions
+[Step 18 Top predictions]:
+  0: "." (id: 13, logit: 23.5785)
+  1: " through" (id: 1526, logit: 22.3562)
+  2: " related" (id: 5435, logit: 21.3452)
+  3: " in" (id: 304, logit: 21.0317)
+  4: " efficiently" (id: 29720, logit: 20.907)
+.
+[Step 19 Top predictions]:
+  0: " I" (id: 358, logit: 19.1577)
+  1: " My" (id: 3017, logit: 16.9091)
+  2: "<|im_end|>" (id: 151645, logit: 16.5208)
+  3: " Is" (id: 2160, logit: 14.1056)
+  4: " How" (id: 2585, logit: 13.5042)
+ I
+[Step 20 Top predictions]:
+  0: " can" (id: 646, logit: 25.9704)
+  1: "'m" (id: 2776, logit: 24.9691)
+  2: " was" (id: 572, logit: 23.4951)
+  3: " use" (id: 990, logit: 23.3729)
+  4: " am" (id: 1079, logit: 22.3407)
+ can
+[Step 21 Top predictions]:
+  0: " provide" (id: 3410, logit: 26.0145)
+  1: " assist" (id: 7789, logit: 24.994)
+  2: " generate" (id: 6923, logit: 24.3232)
+  3: " perform" (id: 2736, logit: 23.8197)
+  4: " engage" (id: 16579, logit: 23.3951)
+ provide
+[Step 22 Top predictions]:
+  0: " information" (id: 1995, logit: 29.1017)
+  1: " general" (id: 4586, logit: 23.2992)
+  2: " answers" (id: 11253, logit: 23.1105)
+  3: " various" (id: 5257, logit: 22.6811)
+  4: " assistance" (id: 12994, logit: 22.3703)
+ information
+[Step 23 Top predictions]:
+  0: " on" (id: 389, logit: 31.5104)
+  1: "," (id: 11, logit: 26.46)
+  2: " about" (id: 911, logit: 26.0385)
+  3: " and" (id: 323, logit: 24.6436)
+  4: " in" (id: 304, logit: 24.5904)
+ on
+[Step 24 Top predictions]:
+  0: " various" (id: 5257, logit: 29.8389)
+  1: " many" (id: 1657, logit: 27.1292)
+  2: " a" (id: 264, logit: 26.2585)
+  3: " topics" (id: 13347, logit: 24.0374)
+  4: " numerous" (id: 12114, logit: 23.5606)
+ various
+[Step 25 Top predictions]:
+  0: " topics" (id: 13347, logit: 35.1911)
+  1: " subjects" (id: 14878, logit: 30.8985)
+  2: " themes" (id: 21386, logit: 23.9928)
+  3: " domains" (id: 30476, logit: 22.7081)
+  4: " topic" (id: 8544, logit: 22.4047)
+ topics
+[Step 26 Top predictions]:
+  0: "," (id: 11, logit: 26.4212)
+  1: " and" (id: 323, logit: 25.9006)
+  2: " including" (id: 2670, logit: 25.282)
+  3: " such" (id: 1741, logit: 24.6452)
+  4: " based" (id: 3118, logit: 24.5496)
+,
+[Step 27 Top predictions]:
+  0: " generate" (id: 6923, logit: 24.6098)
+  1: " assist" (id: 7789, logit: 24.5465)
+  2: " write" (id: 3270, logit: 22.7368)
+  3: " express" (id: 3158, logit: 22.297)
+  4: " such" (id: 1741, logit: 22.1931)
+ generate
+[Step 28 Top predictions]:
+  0: " text" (id: 1467, logit: 26.7888)
+  1: " writing" (id: 4378, logit: 24.237)
+  2: " content" (id: 2213, logit: 23.719)
+  3: " responses" (id: 14507, logit: 23.51)
+  4: " written" (id: 5326, logit: 22.9516)
+ text
+[Step 29 Top predictions]:
+  0: " based" (id: 3118, logit: 29.084)
+  1: "," (id: 11, logit: 25.3561)
+  2: " such" (id: 1741, logit: 25.1634)
+  3: " in" (id: 304, logit: 25.1517)
+  4: " for" (id: 369, logit: 24.1377)
+ based
+[Step 30 Top predictions]:
+  0: " on" (id: 389, logit: 31.0994)
+  1: " off" (id: 1007, logit: 26.0947)
+  2: " upon" (id: 5193, logit: 23.0989)
+  3: " responses" (id: 14507, logit: 22.416)
+  4: " in" (id: 304, logit: 21.5609)
+ on
+[Step 31 Top predictions]:
+  0: " prompts" (id: 50932, logit: 27.6888)
+  1: " given" (id: 2661, logit: 25.4992)
+  2: " the" (id: 279, logit: 25.2399)
+  3: " input" (id: 1946, logit: 24.4739)
+  4: " your" (id: 697, logit: 24.0173)
+ prompts
+[Step 32 Top predictions]:
+  0: "," (id: 11, logit: 29.9933)
+  1: " given" (id: 2661, logit: 29.5359)
+  2: " or" (id: 476, logit: 28.9386)
+  3: " provided" (id: 3897, logit: 27.0304)
+  4: " you" (id: 498, logit: 23.3494)
+,
+[Step 33 Top predictions]:
+  0: " assist" (id: 7789, logit: 25.2002)
+  1: " and" (id: 323, logit: 25.0652)
+  2: " translate" (id: 14683, logit: 24.1039)
+  3: " summarize" (id: 62079, logit: 24.0247)
+  4: " engage" (id: 16579, logit: 23.7635)
+ assist
+[Step 34 Top predictions]:
+  0: " with" (id: 448, logit: 28.8001)
+  1: " in" (id: 304, logit: 28.6179)
+  2: " users" (id: 3847, logit: 24.3862)
+  3: " developers" (id: 13402, logit: 21.4636)
+  4: " you" (id: 498, logit: 20.9598)
+ with
+[Step 35 Top predictions]:
+  0: " writing" (id: 4378, logit: 24.2426)
+  1: " research" (id: 3412, logit: 22.9132)
+  2: " translation" (id: 14468, logit: 22.7289)
+  3: " problem" (id: 3491, logit: 22.1896)
+  4: " coding" (id: 10822, logit: 22.0802)
+ writing
+[Step 36 Top predictions]:
+  0: " essays" (id: 22844, logit: 23.5595)
+  1: "," (id: 11, logit: 23.3053)
+  2: " articles" (id: 9709, logit: 22.5654)
+  3: " assignments" (id: 31172, logit: 21.7937)
+  4: " or" (id: 476, logit: 21.7128)
+ essays
+[Step 37 Top predictions]:
+  0: " or" (id: 476, logit: 31.2858)
+  1: "," (id: 11, logit: 27.4549)
+  2: " and" (id: 323, logit: 26.7768)
+  3: " for" (id: 369, logit: 23.8491)
+  4: "/" (id: 14, logit: 21.8289)
+ or
+[Step 38 Top predictions]:
+  0: " reports" (id: 6682, logit: 24.5062)
+  1: " stories" (id: 7343, logit: 24.1457)
+  2: " articles" (id: 9709, logit: 24.0235)
+  3: " other" (id: 1008, logit: 23.682)
+  4: " research" (id: 3412, logit: 23.4207)
+ reports
+[Step 39 Top predictions]:
+  0: "," (id: 11, logit: 28.811)
+  1: " for" (id: 369, logit: 24.5179)
+  2: " using" (id: 1667, logit: 24.0437)
+  3: " if" (id: 421, logit: 23.282)
+  4: " from" (id: 504, logit: 23.1143)
+,
+[Step 40 Top predictions]:
+  0: " translate" (id: 14683, logit: 24.3473)
+  1: " and" (id: 323, logit: 24.1061)
+  2: " summarize" (id: 62079, logit: 23.5949)
+  3: " engage" (id: 16579, logit: 22.7174)
+  4: " offer" (id: 3010, logit: 22.374)
+ translate
+[Step 41 Top predictions]:
+  0: " between" (id: 1948, logit: 29.57)
+  1: " languages" (id: 15459, logit: 28.9368)
+  2: " texts" (id: 21984, logit: 26.4324)
+  3: " content" (id: 2213, logit: 26.4148)
+  4: " text" (id: 1467, logit: 25.2387)
+ between
+[Step 42 Top predictions]:
+  0: " languages" (id: 15459, logit: 28.8344)
+  1: " different" (id: 2155, logit: 27.7539)
+  2: " multiple" (id: 5248, logit: 27.4326)
+  3: " several" (id: 3807, logit: 26.1837)
+  4: " many" (id: 1657, logit: 24.9866)
+ languages
+[Step 43 Top predictions]:
+  0: "," (id: 11, logit: 27.7152)
+  1: " (" (id: 320, logit: 24.4265)
+  2: " if" (id: 421, logit: 24.0332)
+  3: " when" (id: 979, logit: 23.5049)
+  4: " using" (id: 1667, logit: 22.8678)
+,
+[Step 44 Top predictions]:
+  0: " play" (id: 1486, logit: 24.819)
+  1: " summarize" (id: 62079, logit: 23.8895)
+  2: " and" (id: 323, logit: 23.6131)
+  3: " offer" (id: 3010, logit: 22.4043)
+  4: " engage" (id: 16579, logit: 22.3326)
+ play
+[Step 45 Top predictions]:
+  0: " games" (id: 3868, logit: 25.0825)
+  1: " trivia" (id: 72932, logit: 23.689)
+  2: " simple" (id: 4285, logit: 22.9324)
+  3: " music" (id: 4627, logit: 20.6894)
+  4: " word" (id: 3409, logit: 20.4495)
+ games
+[Step 46 Top predictions]:
+  0: "," (id: 11, logit: 25.1388)
+  1: " against" (id: 2348, logit: 24.2829)
+  2: " (" (id: 320, logit: 23.2165)
+  3: " for" (id: 369, logit: 23.0314)
+  4: " like" (id: 1075, logit: 23.03)
+,
+[Step 47 Top predictions]:
+  0: " and" (id: 323, logit: 22.9834)
+  1: " solve" (id: 11625, logit: 22.4112)
+  2: " tell" (id: 3291, logit: 22.3715)
+  3: " engage" (id: 16579, logit: 22.3336)
+  4: " chat" (id: 6236, logit: 22.3047)
+ and
+[Step 48 Top predictions]:
+  0: " much" (id: 1753, logit: 27.1231)
+  1: " more" (id: 803, logit: 26.2748)
+  2: " many" (id: 1657, logit: 24.6772)
+  3: " even" (id: 1496, logit: 24.6401)
+  4: " perform" (id: 2736, logit: 24.3721)
+ much
+[Step 49 Top predictions]:
+  0: " more" (id: 803, logit: 35.7762)
+  1: "," (id: 11, logit: 22.6968)
+  2: " else" (id: 770, logit: 22.2173)
+  3: " other" (id: 1008, logit: 22.1527)
+  4: " much" (id: 1753, logit: 21.5567)
+ more
+[Step 50 Top predictions]:
+  0: "!" (id: 0, logit: 28.3182)
+  1: "." (id: 13, logit: 26.4685)
+  2: " if" (id: 421, logit: 22.9782)
+  3: " depending" (id: 11649, logit: 22.8391)
+  4: " while" (id: 1393, logit: 22.7988)
+!
+[Step 51 Top predictions]:
+  0: " If" (id: 1416, logit: 17.7941)
+  1: " Please" (id: 5209, logit: 17.7519)
+  2: " Feel" (id: 31733, logit: 17.152)
+  3: " Is" (id: 2160, logit: 16.7818)
+  4: " Just" (id: 4599, logit: 16.5267)
+ If
+[Step 52 Top predictions]:
+  0: " you" (id: 498, logit: 28.2607)
+  1: " there" (id: 1052, logit: 27.7963)
+  2: " this" (id: 419, logit: 22.3889)
+  3: " I" (id: 358, logit: 22.151)
+  4: " your" (id: 697, logit: 21.4497)
+ you
+[Step 53 Top predictions]:
+  0: " have" (id: 614, logit: 30.7479)
+  1: " need" (id: 1184, logit: 25.6099)
+  2: "'d" (id: 4172, logit: 23.2637)
+  3: " tell" (id: 3291, logit: 23.1521)
+  4: "'ve" (id: 3003, logit: 23.1279)
+ have
+[Step 54 Top predictions]:
+  0: " any" (id: 894, logit: 34.4952)
+  1: " a" (id: 264, logit: 31.605)
+  2: " anything" (id: 4113, logit: 28.609)
+  3: " specific" (id: 3151, logit: 27.2318)
+  4: " something" (id: 2494, logit: 27.1205)
+ any
+[Step 55 Top predictions]:
+  0: " specific" (id: 3151, logit: 28.287)
+  1: " questions" (id: 4755, logit: 25.8268)
+  2: " queries" (id: 19556, logit: 25.1299)
+  3: " other" (id: 1008, logit: 24.482)
+  4: " inquiries" (id: 43883, logit: 24.0723)
+ specific
+[Step 56 Top predictions]:
+  0: " question" (id: 3405, logit: 29.2134)
+  1: " requests" (id: 7388, logit: 27.4568)
+  2: " queries" (id: 19556, logit: 27.4422)
+  3: " questions" (id: 4755, logit: 27.3943)
+  4: " task" (id: 3383, logit: 27.2575)
+ question
+[Step 57 Top predictions]:
+  0: " or" (id: 476, logit: 28.2818)
+  1: " for" (id: 369, logit: 26.8273)
+  2: " about" (id: 911, logit: 25.1577)
+  3: " that" (id: 429, logit: 25.1442)
+  4: "," (id: 11, logit: 24.5332)
+ or
+[Step 58 Top predictions]:
+  0: " task" (id: 3383, logit: 32.7724)
+  1: " request" (id: 1681, logit: 28.5297)
+  2: " need" (id: 1184, logit: 28.5159)
+  3: " topic" (id: 8544, logit: 26.7395)
+  4: " project" (id: 2390, logit: 24.5872)
+ task
+[Step 59 Top predictions]:
+  0: " in" (id: 304, logit: 29.6965)
+  1: " for" (id: 369, logit: 28.8011)
+  2: " that" (id: 429, logit: 27.1413)
+  3: " you" (id: 498, logit: 26.8957)
+  4: " related" (id: 5435, logit: 24.8903)
+ in
+[Step 60 Top predictions]:
+  0: " mind" (id: 3971, logit: 35.0242)
+  1: " need" (id: 1184, logit: 23.6381)
+  2: " your" (id: 697, logit: 22.3539)
+  3: " which" (id: 892, logit: 22.0942)
+  4: " the" (id: 279, logit: 21.5071)
+ mind
+[Step 61 Top predictions]:
+  0: "," (id: 11, logit: 28.3274)
+  1: " that" (id: 429, logit: 27.9727)
+  2: " for" (id: 369, logit: 24.5151)
+  3: " related" (id: 5435, logit: 23.2509)
+  4: " please" (id: 4486, logit: 22.2814)
+,
+[Step 62 Top predictions]:
+  0: " feel" (id: 2666, logit: 31.4458)
+  1: " please" (id: 4486, logit: 27.1252)
+  2: " just" (id: 1101, logit: 25.9502)
+  3: " don" (id: 1513, logit: 24.183)
+  4: " let" (id: 1077, logit: 23.9041)
+ feel
+[Step 63 Top predictions]:
+  0: " free" (id: 1910, logit: 30.7664)
+  1: " welcome" (id: 10565, logit: 19.115)
+  2: " empowered" (id: 61835, logit: 17.4731)
+  3: " comfortable" (id: 10655, logit: 17.4064)
+  4: " encouraged" (id: 20548, logit: 17.1534)
+ free
+[Step 64 Top predictions]:
+  0: " to" (id: 311, logit: 30.6574)
+  1: " ask" (id: 2548, logit: 23.1684)
+  2: " either" (id: 2987, logit: 19.6144)
+  3: "!" (id: 0, logit: 17.2988)
+  4: " let" (id: 1077, logit: 17.1938)
+ to
+[Step 65 Top predictions]:
+  0: " ask" (id: 2548, logit: 30.9084)
+  1: " let" (id: 1077, logit: 26.8752)
+  2: " tell" (id: 3291, logit: 23.7945)
+  3: " discuss" (id: 4263, logit: 21.8436)
+  4: " share" (id: 4332, logit: 21.5447)
+ ask
+[Step 66 Top predictions]:
+  0: " me" (id: 752, logit: 25.5381)
+  1: " and" (id: 323, logit: 22.679)
+  2: "!" (id: 0, logit: 21.9262)
+  3: " or" (id: 476, logit: 21.6722)
+  4: "." (id: 13, logit: 21.1493)
+ me
+[Step 67 Top predictions]:
+  0: " for" (id: 369, logit: 24.1568)
+  1: " anything" (id: 4113, logit: 23.7523)
+  2: "!" (id: 0, logit: 23.7252)
+  3: " about" (id: 911, logit: 23.3089)
+  4: " and" (id: 323, logit: 23.2864)
+ for
+[Step 68 Top predictions]:
+  0: " assistance" (id: 12994, logit: 31.3983)
+  1: " help" (id: 1492, logit: 30.9578)
+  2: " guidance" (id: 18821, logit: 28.6901)
+  3: " advice" (id: 9462, logit: 26.3728)
+  4: " a" (id: 264, logit: 26.3322)
+ assistance
+[Step 69 Top predictions]:
+  0: "." (id: 13, logit: 26.124)
+  1: "!" (id: 0, logit: 25.1069)
+  2: " or" (id: 476, logit: 21.6801)
+  3: " and" (id: 323, logit: 21.559)
+  4: "," (id: 11, logit: 21.3598)
+.
+[Step 70 Top predictions]:
+  0: "<|im_end|>" (id: 151645, logit: 20.7388)
+  1: " How" (id: 2585, logit: 16.0665)
+  2: " Let" (id: 6771, logit: 15.1474)
+  3: " Please" (id: 5209, logit: 14.7568)
+  4: " What" (id: 3555, logit: 14.3301)
+ [EOS]
+
+[DiffKV Native] Text generation completed successfully!

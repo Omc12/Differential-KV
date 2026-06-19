@@ -402,6 +402,9 @@ void StreamingSparseIngestManager::ingest_chunk(
     auto & blocks = layers_blocks_[layer_idx];
     int F_test = engines[layer_idx]->get_VK()->ne[0] * engines[layer_idx]->get_VK()->ne[1];
     
+    int min_slot = -1;
+    int max_slot = -1;
+
     for (int t = 0; t < chunk_len; ++t) {
         if (blocks.empty() || blocks.back()->token_count() == 1 + micro_block_size_) {
             // Allocate a new slot index
@@ -424,21 +427,20 @@ void StreamingSparseIngestManager::ingest_chunk(
             std::memcpy(new_block->anchor_v.data(), v_chunk + t * F_test, F_test * sizeof(float));
             
             if (slot_id != -1) {
+                if (min_slot == -1 || slot_id < min_slot) min_slot = slot_id;
+                if (max_slot == -1 || slot_id > max_slot) max_slot = slot_id;
+
                 std::vector<ggml_fp16_t> k_fp16(F_test);
                 std::vector<ggml_fp16_t> v_fp16(F_test);
                 for (int i = 0; i < F_test; ++i) {
                     k_fp16[i] = ggml_fp32_to_fp16(new_block->anchor_k[i]);
                     v_fp16[i] = ggml_fp32_to_fp16(new_block->anchor_v[i]);
                 }
-                ggml_backend_tensor_set(engines[layer_idx]->get_anchors_K(), k_fp16.data(), slot_id * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                ggml_backend_tensor_set(engines[layer_idx]->get_anchors_V(), v_fp16.data(), slot_id * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
-                
-                int32_t anchor_pos = new_block->anchor_idx;
-                ggml_backend_tensor_set(engines[layer_idx]->get_anchor_positions(), &anchor_pos, slot_id * sizeof(int32_t), sizeof(int32_t));
                 
                 // Keep host-side mirrors in sync
                 std::copy(k_fp16.begin(), k_fp16.end(), engines[layer_idx]->get_host_anchors_K() + slot_id * F_test);
                 std::copy(v_fp16.begin(), v_fp16.end(), engines[layer_idx]->get_host_anchors_V() + slot_id * F_test);
+                int32_t anchor_pos = new_block->anchor_idx;
                 engines[layer_idx]->get_host_anchor_positions()[slot_id] = anchor_pos;
 
                 engines[layer_idx]->get_state_table().transition(slot_id, BlockState::Freed, BlockState::DenseResident);
@@ -552,6 +554,31 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
     stats_.peak_dense_tokens = std::max(stats_.peak_dense_tokens, current_dense);
+
+    if (min_slot != -1 && max_slot != -1) {
+        int count = max_slot - min_slot + 1;
+        // Batch upload anchors K to GPU
+        ggml_backend_tensor_set(
+            engines[layer_idx]->get_anchors_K(),
+            engines[layer_idx]->get_host_anchors_K() + min_slot * F_test,
+            min_slot * F_test * sizeof(ggml_fp16_t),
+            count * F_test * sizeof(ggml_fp16_t)
+        );
+        // Batch upload anchors V to GPU
+        ggml_backend_tensor_set(
+            engines[layer_idx]->get_anchors_V(),
+            engines[layer_idx]->get_host_anchors_V() + min_slot * F_test,
+            min_slot * F_test * sizeof(ggml_fp16_t),
+            count * F_test * sizeof(ggml_fp16_t)
+        );
+        // Batch upload anchor positions to GPU
+        ggml_backend_tensor_set(
+            engines[layer_idx]->get_anchor_positions(),
+            engines[layer_idx]->get_host_anchor_positions() + min_slot,
+            min_slot * sizeof(int32_t),
+            count * sizeof(int32_t)
+        );
+    }
 }
 
 void StreamingSparseIngestManager::submit_block_for_compression(

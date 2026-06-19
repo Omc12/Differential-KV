@@ -879,7 +879,16 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     
     // ── 1. PREFILL PHASE ──
-    int chunk_size = 2048;
+    int chunk_size = 512; // Default to balanced preset size
+    if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
+        std::string p(env_preset);
+        std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return std::tolower(c); });
+        if (p == "low") {
+            chunk_size = 512;
+        } else if (p == "high") {
+            chunk_size = 2048;
+        }
+    }
     if (const char* env_pcs = std::getenv("DIFFKV_PREFILL_CHUNK_SIZE")) {
         try { chunk_size = std::stoi(env_pcs); } catch (...) {}
     }
@@ -887,6 +896,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     int cached_len = prefill_offset;
     
     std::vector<std::vector<float>> k_activations(n_layers, std::vector<float>(L * F_test));
+    std::vector<std::vector<float>> k_rotated_activations(n_layers, std::vector<float>(L * F_test));
     std::vector<std::vector<float>> v_activations(n_layers, std::vector<float>(L * F_test));
     std::vector<float> prefill_output_logits(n_vocab);
     
@@ -958,6 +968,37 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     }
                 }
             }
+        }
+    }
+    
+    if (cached_len > 0) {
+        // Pre-rotate all decompressed prefix blocks once
+        std::vector<int32_t> prior_positions(cached_len);
+        for (int t = 0; t < cached_len; ++t) prior_positions[t] = t;
+        
+        int half_dim = head_dim / 2;
+        std::vector<float> inv_freq(half_dim);
+        for (int i = 0; i < half_dim; ++i) {
+            inv_freq[i] = 1.0f / std::pow(model_->get_config().rope_freq_base, 2.0f * i / head_dim);
+        }
+        std::vector<float> cos_table(cached_len * half_dim);
+        std::vector<float> sin_table(cached_len * half_dim);
+        for (int t = 0; t < cached_len; ++t) {
+            float pos = (float)prior_positions[t];
+            for (int i = 0; i < half_dim; ++i) {
+                float theta = pos * inv_freq[i];
+                cos_table[t * half_dim + i] = std::cos(theta);
+                sin_table[t * half_dim + i] = std::sin(theta);
+            }
+        }
+        for (int l = 0; l < n_layers; ++l) {
+            apply_rope_neox_cpu_fast(
+                k_activations[l].data(),
+                k_rotated_activations[l].data(),
+                cos_table.data(),
+                sin_table.data(),
+                cached_len, kv_heads, head_dim
+            );
         }
     }
     
@@ -1047,36 +1088,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         // Upload prior K/V context (from this turn's prior chunks)
         if (has_prior) {
             int intra_prior_len = pos_start;
-            std::vector<int32_t> prior_positions(intra_prior_len);
-            for (int t = 0; t < intra_prior_len; ++t) prior_positions[t] = t;
-            
-            int half_dim = head_dim / 2;
-            std::vector<float> inv_freq(half_dim);
-            for (int i = 0; i < half_dim; ++i) {
-                inv_freq[i] = 1.0f / std::pow(model_->get_config().rope_freq_base, 2.0f * i / head_dim);
-            }
-            std::vector<float> cos_table(intra_prior_len * half_dim);
-            std::vector<float> sin_table(intra_prior_len * half_dim);
-            for (int t = 0; t < intra_prior_len; ++t) {
-                float pos = (float)prior_positions[t];
-                for (int i = 0; i < half_dim; ++i) {
-                    float theta = pos * inv_freq[i];
-                    cos_table[t * half_dim + i] = std::cos(theta);
-                    sin_table[t * half_dim + i] = std::sin(theta);
-                }
-            }
-            
-            std::vector<float> prior_k_rotated(intra_prior_len * F_test);
             for (int l = 0; l < n_layers; ++l) {
-                apply_rope_neox_cpu_fast(
-                    k_activations[l].data(),
-                    prior_k_rotated.data(),
-                    cos_table.data(),
-                    sin_table.data(),
-                    intra_prior_len, kv_heads, head_dim
-                );
                 ggml_backend_tensor_set(prior_k_tensors[l],
-                    prior_k_rotated.data(),
+                    k_rotated_activations[l].data(),
                     0, intra_prior_len * F_test * sizeof(float));
                 ggml_backend_tensor_set(prior_v_tensors[l],
                     v_activations[l].data(),
@@ -1097,6 +1111,37 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
             std::memcpy(k_activations[l].data() + pos_start * F_test, chunk_k[l].data(), chunk_len * F_test * sizeof(float));
             std::memcpy(v_activations[l].data() + pos_start * F_test, chunk_v[l].data(), chunk_len * F_test * sizeof(float));
+        }
+        
+        // RoPE-rotate only the current chunk and store it in k_rotated_activations
+        {
+            std::vector<int32_t> chunk_positions(chunk_len);
+            for (int i = 0; i < chunk_len; ++i) chunk_positions[i] = pos_start + i;
+            
+            int half_dim = head_dim / 2;
+            std::vector<float> inv_freq(half_dim);
+            for (int i = 0; i < half_dim; ++i) {
+                inv_freq[i] = 1.0f / std::pow(model_->get_config().rope_freq_base, 2.0f * i / head_dim);
+            }
+            std::vector<float> cos_table(chunk_len * half_dim);
+            std::vector<float> sin_table(chunk_len * half_dim);
+            for (int t = 0; t < chunk_len; ++t) {
+                float pos = (float)chunk_positions[t];
+                for (int i = 0; i < half_dim; ++i) {
+                    float theta = pos * inv_freq[i];
+                    cos_table[t * half_dim + i] = std::cos(theta);
+                    sin_table[t * half_dim + i] = std::sin(theta);
+                }
+            }
+            for (int l = 0; l < n_layers; ++l) {
+                apply_rope_neox_cpu_fast(
+                    k_activations[l].data() + pos_start * F_test,
+                    k_rotated_activations[l].data() + pos_start * F_test,
+                    cos_table.data(),
+                    sin_table.data(),
+                    chunk_len, kv_heads, head_dim
+                );
+            }
         }
         
         runtime_manager_->ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &session->srl_state);

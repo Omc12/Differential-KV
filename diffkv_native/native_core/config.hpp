@@ -122,7 +122,7 @@ private:
         if (p == "low") {
             decode_cache_enabled    = false;
             decode_cache_max_tokens = 0;
-            prefill_chunk_size      = 256;
+            prefill_chunk_size      = 512;
             srl_threshold           = 30;
             async_svd               = false;
             mps_watermark           = 0.0f;
