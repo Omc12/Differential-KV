@@ -209,7 +209,7 @@ void PagedKVStore::reload_block(PageEntry& entry, const std::vector<std::unique_
         int kv_heads = engine->get_VK()->ne[1];
 
         // Update host mirrors (CUDA compatible)
-        std::memcpy(engine->get_host_U() + slot_id * rank * 64, cpu.U.data(), cpu.U.size() * sizeof(int8_t));
+        std::memcpy(engine->get_host_U() + slot_id * rank * engine->get_S_max(), cpu.U.data(), cpu.U.size() * sizeof(int8_t));
         *(engine->get_host_U_scale() + slot_id) = cpu.U_scale;
         std::memcpy(engine->get_host_VK() + slot_id * head_dim * kv_heads * rank, cpu.VK.data(), cpu.VK.size() * sizeof(ggml_fp16_t));
         std::memcpy(engine->get_host_VV() + slot_id * head_dim * kv_heads * rank, cpu.VV.data(), cpu.VV.size() * sizeof(ggml_fp16_t));

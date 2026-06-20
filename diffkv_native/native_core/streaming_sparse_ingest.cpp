@@ -479,7 +479,7 @@ void StreamingSparseIngestManager::ingest_chunk(
     // (bypass kept everything dense), causing ~4x dense-KV RAM vs ACTIVE_RUNTIME AND
     // sparse routing over an empty pool. ACTIVE_RUNTIME has no such global bypass — it
     // compresses blocks during prefill regardless of total length.
-    int engage_threshold = 2048;
+    int engage_threshold = 4096;
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }

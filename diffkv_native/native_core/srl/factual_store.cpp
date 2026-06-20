@@ -25,6 +25,7 @@ void FactualExactStore::build(
     const InvertedTokenIndex& inv_index,
     const std::unordered_set<int32_t>& semantic_prime_slots,
     const std::unordered_set<int32_t>& helper_token_ids,
+    const std::unordered_set<int32_t>& relational_token_ids,
     bool use_salience_parser
 ) {
     clear();
@@ -57,7 +58,7 @@ void FactualExactStore::build(
     for (int t = 0; t < L; ++t) {
         int tid = token_ids[t];
         auto it = inv_index.idf.find(tid);
-        if (it != inv_index.idf.end() && it->second < 1.5f) {
+        if (it != inv_index.idf.end() && it->second < 1.5f && relational_token_ids.count(tid)) {
             // Low-IDF token — likely a relational/function word.
             // Boost to median content-word IDF so it has a chance to
             // survive salience selection when adjacent to concept tokens.
@@ -84,36 +85,59 @@ void FactualExactStore::build(
                 }
             }
 
-            std::vector<float> sim_row(L, 0.0f);
-            for (int i = 1; i < L; ++i) {
+            const int B = 512;
+            std::vector<float> sim_block;
+            for (int b_start = 0; b_start < L; b_start += B) {
+                int b_end = std::min(L, b_start + B);
+                int b_size = b_end - b_start;
+                int num_keys = b_end;
+                if (num_keys == 0) continue;
+
+                sim_block.assign((size_t)b_size * num_keys, 0.0f);
+
 #ifdef __APPLE__
-                cblas_sgemv(CblasRowMajor, CblasNoTrans, i, head_dim,
-                            1.0f / std::sqrt(head_dim), K_avg.data(), head_dim,
-                            K_avg.data() + i * head_dim, 1, 0.0f, sim_row.data(), 1);
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, b_size, num_keys, head_dim,
+                            1.0f / std::sqrt(head_dim), 
+                            K_avg.data() + b_start * head_dim, head_dim,
+                            K_avg.data(), head_dim, 
+                            0.0f, sim_block.data(), num_keys);
 #else
-                for (int j = 0; j < i; ++j) {
-                    float dot = 0.0f;
-                    for (int d = 0; d < head_dim; ++d) {
-                        dot += K_avg[i * head_dim + d] * K_avg[j * head_dim + d];
+                for (int r = 0; r < b_size; ++r) {
+                    int i = b_start + r;
+                    for (int j = 0; j < num_keys; ++j) {
+                        float dot = 0.0f;
+                        for (int d = 0; d < head_dim; ++d) {
+                            dot += K_avg[i * head_dim + d] * K_avg[j * head_dim + d];
+                        }
+                        sim_block[r * num_keys + j] = dot / std::sqrt(head_dim);
                     }
-                    sim_row[j] = dot / std::sqrt(head_dim);
                 }
 #endif
 
-                float max_val = -1e9f;
-                for (int j = 0; j < i; ++j) {
-                    if (sim_row[j] > max_val) {
-                        max_val = sim_row[j];
+                for (int r = 0; r < b_size; ++r) {
+                    int i = b_start + r;
+                    if (i == 0) {
+                        float val = 1.0f / L;
+                        for (int j = 0; j < L; ++j) {
+                            R[j] += val;
+                        }
+                    } else {
+                        float max_val = -1e9f;
+                        for (int j = 0; j < i; ++j) {
+                            if (sim_block[r * num_keys + j] > max_val) {
+                                max_val = sim_block[r * num_keys + j];
+                            }
+                        }
+                        float sum_exp = 0.0f;
+                        for (int j = 0; j < i; ++j) {
+                            sum_exp += std::exp(sim_block[r * num_keys + j] - max_val);
+                        }
+                        float inv_sum = 1.0f / (sum_exp + 1e-10f);
+                        for (int j = 0; j < i; ++j) {
+                            float val = std::exp(sim_block[r * num_keys + j] - max_val) * inv_sum;
+                            R[j] += val;
+                        }
                     }
-                }
-                float sum_exp = 0.0f;
-                for (int j = 0; j < i; ++j) {
-                    sim_row[j] = std::exp(sim_row[j] - max_val);
-                    sum_exp += sim_row[j];
-                }
-                float inv_sum = 1.0f / (sum_exp + 1e-10f);
-                for (int j = 0; j < i; ++j) {
-                    R[j] += sim_row[j] * inv_sum;
                 }
             }
 
@@ -296,17 +320,25 @@ void FactualExactStore::build(
         // for each head, rather than averaging them away. This is critical for
         // formula/math spans where a single rare token dominates the span semantics.
         // Then mean over heads to produce the final descriptor vector.
-        std::vector<float> max_k(head_dim, -1e9f);
+        std::vector<float> max_k_heads(kv_heads * head_dim, -1e9f);
         for (int t = 0; t < span_len; ++t) {
             for (int kh = 0; kh < kv_heads; ++kh) {
                 for (int d = 0; d < head_dim; ++d) {
                     float val = ggml_fp16_to_fp32(k_activations[0][(s + t) * F_test + kh * head_dim + d]);
-                    if (val > max_k[d]) max_k[d] = val;
+                    if (val > max_k_heads[kh * head_dim + d]) {
+                        max_k_heads[kh * head_dim + d] = val;
+                    }
                 }
             }
         }
-        // Mean over heads by averaging max_k with itself (max is already position-pooled);
-        // no further reduction needed — max_k[d] is already the per-position max.
+        std::vector<float> max_k(head_dim, 0.0f);
+        for (int d = 0; d < head_dim; ++d) {
+            float sum_val = 0.0f;
+            for (int kh = 0; kh < kv_heads; ++kh) {
+                sum_val += max_k_heads[kh * head_dim + d];
+            }
+            max_k[d] = sum_val / kv_heads;
+        }
 
         // Project descriptor using W_proj [desc_dim, head_dim] — using max_k
         entry.descriptor.resize(desc_dim, 0.0f);

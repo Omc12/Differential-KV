@@ -119,6 +119,7 @@ public:
         const InvertedTokenIndex& inv_index,
         const std::unordered_set<int32_t>& semantic_prime_slots,
         const std::unordered_set<int32_t>& helper_token_ids,
+        const std::unordered_set<int32_t>& relational_token_ids,
         bool use_salience_parser = true
     );
 

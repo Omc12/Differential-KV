@@ -610,7 +610,7 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
         if (block->state == BlockState::CompressedResident || block->state == BlockState::CPUResident) {
             auto & engine = engines_[0];
             int rank = engine->get_U()->ne[0];
-            int S_max = micro_block_size_; // Block size
+            int S_max = engine->get_S_max(); // Pool stride size
             
             std::vector<ggml_fp16_t> desc_f16(desc_dim);
             compute_descriptor(

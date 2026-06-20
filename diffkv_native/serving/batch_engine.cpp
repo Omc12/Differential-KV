@@ -709,7 +709,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     
     // Initialize session-specific lists if empty
-    int engage_threshold = 2048;
+    int engage_threshold = 4096;
     if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         engage_threshold = std::stoi(env_et);
     }
@@ -1381,6 +1381,43 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 v_act_f16[_l][_i] = ggml_fp32_to_fp16(v_activations[_l][_i]);
             }
         }
+        std::unordered_set<int32_t> relational_token_ids;
+        {
+            static const std::unordered_set<std::string> RELATIONAL_KEYWORDS = {
+                "unlike", "whereas", "while", "although", "however", "but",
+                "instead", "rather", "conversely", "nevertheless", "nonetheless",
+                "yet", "though", "notwithstanding",
+                "compared", "differs", "differ", "different", "difference",
+                "differences", "distinct", "distinction", "distinguishes",
+                "greater", "larger", "smaller", "higher", "lower", "fewer",
+                "more", "less", "most", "least",
+                "causes", "caused", "because", "therefore", "hence", "thus",
+                "leads", "results", "produces", "induces", "triggers",
+                "consequently", "accordingly",
+                "is", "are", "was", "were", "has", "have", "had",
+                "exhibits", "possesses", "contains", "involves",
+                "requires", "lacks", "features",
+                "called", "named", "known", "defined", "characterized",
+                "classified", "denoted", "refers", "represents",
+                "only", "exclusively", "specifically", "solely",
+                "except", "excluding", "neither", "nor"
+            };
+
+            for (int32_t tid : prompt_tokens) {
+                if (relational_token_ids.count(tid)) continue;
+                std::string text = model_->token_to_piece(tid);
+                std::string cleaned = "";
+                for (char c : text) {
+                    if (std::isalnum((unsigned char)c)) {
+                        cleaned += std::tolower((unsigned char)c);
+                    }
+                }
+                if (RELATIONAL_KEYWORDS.count(cleaned)) {
+                    relational_token_ids.insert(tid);
+                }
+            }
+        }
+
         session->srl_state.factual_store.build(
             k_act_f16,
             v_act_f16,
@@ -1395,6 +1432,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             session->srl_state.inverted_index,
             prime_slots,
             get_helper_token_ids_cpp(*model_),
+            relational_token_ids,
             true // use_salience_parser
         );
         session->srl_state.entries_map_built = false;
@@ -1402,6 +1440,16 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             return model_->token_to_piece(tid);
         });
     }
+    
+    // Reclaim prefill activations memory early before decode loop starts
+    for (int l = 0; l < n_layers; ++l) {
+        std::vector<float>().swap(k_activations[l]);
+        std::vector<float>().swap(k_rotated_activations[l]);
+        std::vector<float>().swap(v_activations[l]);
+    }
+    std::vector<std::vector<float>>().swap(k_activations);
+    std::vector<std::vector<float>>().swap(k_rotated_activations);
+    std::vector<std::vector<float>>().swap(v_activations);
     
     session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
     if (session->active_slot < 0) {
@@ -1996,6 +2044,18 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     
     // Save state back to disk
     session_manager_->save_session(req->session_id);
+    
+    // Reclaim active dense buffers memory when session goes idle
+    for (int l = 0; l < n_layers; ++l) {
+        AlignedFloatVector().swap(session->active_k_dense[l]);
+        AlignedFloatVector().swap(session->active_v_dense[l]);
+    }
+    session->active_k_dense.clear();
+    session->active_k_dense.shrink_to_fit();
+    session->active_v_dense.clear();
+    session->active_v_dense.shrink_to_fit();
+    session->active_positions_dense.clear();
+    session->active_positions_dense.shrink_to_fit();
     
     ggml_free(decode_ctx);
     req->is_finished = true;

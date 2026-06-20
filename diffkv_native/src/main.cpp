@@ -45,10 +45,10 @@ struct ggml_backend_owner {
     ggml_backend_sched_t sched = nullptr;
 
     ggml_backend_owner() {
-        bool use_gpu = false;
+        bool use_gpu = true;
         if (const char* env_gpu = std::getenv("DIFFKV_USE_GPU")) {
-            if (std::string(env_gpu) == "1") {
-                use_gpu = true;
+            if (std::string(env_gpu) == "0" || std::string(env_gpu) == "false" || std::string(env_gpu) == "off") {
+                use_gpu = false;
             }
         }
         cpu_backend = ggml_backend_cpu_init();
@@ -353,28 +353,25 @@ struct ggml_cgraph * build_prefill_ctx_graph(
         // For the prior-context prefill path, caller pre-rotates k_activations in CPU.
         if (k_layers) (*k_layers)[l] = k;  // raw K, shape [n_embd, chunk_len]
 
-        // 5. Permute Q/K/V of current chunk: [head_dim, kv_heads, chunk_len] -> [head_dim, chunk_len, kv_heads]
-        struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-        struct ggml_tensor * k_perm = ggml_permute(ctx, k_rope, 0, 2, 1, 3);
-        struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, v->ne[1]);
-        struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
-
-        // 6. Cast current chunk K/V to F16 (flash-attn's standard K/V dtype; matches the
+        // 5. Cast current chunk K/V to F16 (flash-attn's standard K/V dtype; matches the
         //    F16 prior tensors so the concat dtypes agree and the GPU prior context is halved).
-        struct ggml_tensor * k_perm16 = ggml_cast(ctx, ggml_cont(ctx, k_perm), GGML_TYPE_F16);
-        struct ggml_tensor * v_perm16 = ggml_cast(ctx, ggml_cont(ctx, v_perm), GGML_TYPE_F16);
+        struct ggml_tensor * k_rope_f16 = ggml_cast(ctx, k_rope, GGML_TYPE_F16);
+        struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, v->ne[1]);
+        struct ggml_tensor * v_reshaped_f16 = ggml_cast(ctx, v_reshaped, GGML_TYPE_F16);
 
-        // Concatenate prior context with current chunk along seq dim (dim=1 in permuted layout)
-        struct ggml_tensor * k_ctx_perm = k_perm16;
-        struct ggml_tensor * v_ctx_perm = v_perm16;
+        // Concatenate prior context with current chunk along seq dim (dim=2 in unpermuted layout)
+        struct ggml_tensor * k_ctx = k_rope_f16;
+        struct ggml_tensor * v_ctx = v_reshaped_f16;
         bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
         if (has_prior) {
-            // prior tensors are F16 [head_dim, kv_heads, prior_len] — permute to [head_dim, prior_len, kv_heads]
-            struct ggml_tensor * pk = ggml_permute(ctx, (*prior_k_ctx)[l], 0, 2, 1, 3);
-            struct ggml_tensor * pv = ggml_permute(ctx, (*prior_v_ctx)[l], 0, 2, 1, 3);
-            k_ctx_perm = ggml_concat(ctx, pk, k_perm16, 1);
-            v_ctx_perm = ggml_concat(ctx, pv, v_perm16, 1);
+            k_ctx = ggml_concat(ctx, (*prior_k_ctx)[l], k_rope_f16, 2);
+            v_ctx = ggml_concat(ctx, (*prior_v_ctx)[l], v_reshaped_f16, 2);
         }
+
+        // Permute to [head_dim, seq_len, kv_heads] layout expected by flash attention
+        struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
+        struct ggml_tensor * k_ctx_perm = ggml_permute(ctx, k_ctx, 0, 2, 1, 3);
+        struct ggml_tensor * v_ctx_perm = ggml_permute(ctx, v_ctx, 0, 2, 1, 3);
 
         // 7. Flash Attention with full context mask
         float scale_val = 1.0f / std::sqrt((float)head_dim);
@@ -497,17 +494,31 @@ static struct ggml_tensor * build_native_sparse_attn(
     struct ggml_tensor* neg_half = ggml_neg(ctx, half);
     struct ggml_tensor* eq = ggml_step(ctx, ggml_add(ctx, ggml_neg(ctx, adiff), half));     // 1 if equal (add1→add: ADD1 not Metal)
     struct ggml_tensor* priorc = ggml_sum_rows(ctx, ggml_mul(ctx, eq, dup_tri));            // [1,K] prior dups
+
+    // Mask negative slot IDs (empty padding/invalid slots represented by -1).
+    // since slot IDs are integers, < 0 means <= -1.0.
+    // step( neg( sF + 0.5 ) ) = step( -sF - 0.5 ) which is 1.0 if sF <= -1.0, 0.0 otherwise.
+    struct ggml_tensor* is_neg = ggml_step(ctx, ggml_neg(ctx, ggml_add(ctx, sF, half)));    // [K]
+    struct ggml_tensor* is_neg_2d = ggml_reshape_2d(ctx, is_neg, 1, K);                     // [1,K]
+    struct ggml_tensor* drop_or_neg = ggml_add(ctx, priorc, is_neg_2d);                     // [1,K]
+
     // DEBUG: DIFFKV_NATIVE_NOSPARSE → drop ALL slots (priorc+0.5 > 0 always) to isolate the dense path.
     static const bool dbg_nosparse = (std::getenv("DIFFKV_NATIVE_NOSPARSE") != nullptr);
     struct ggml_tensor* drop = dbg_nosparse
         ? ggml_step(ctx, ggml_add(ctx, priorc, half))                        // always 1
-        : ggml_step(ctx, ggml_add(ctx, priorc, neg_half));                   // 1 if priorc>=1
+        : ggml_step(ctx, ggml_add(ctx, drop_or_neg, neg_half));              // 1 if drop_or_neg >= 1
     struct ggml_tensor* dup_add = ggml_reshape_3d(ctx, ggml_scale(ctx, drop, std::getenv("DIFFKV_DBG_NODEDUP")?0.0f:-1e30f), 1, 1, K); // [1,1,K]
+
+    // To prevent out-of-bounds reads in ggml_get_rows, clamp the selected_slots to [0, n_slots - 1].
+    // Since negative slot IDs are masked out in dup_add, clamping them to a valid index (like 0)
+    // is safe and avoids any out-of-bounds reads on CPU or Metal.
+    struct ggml_tensor* clamped_sF = ggml_clamp(ctx, sF, 0.0f, (float)(n_slots - 1));
+    struct ggml_tensor* clamped_slots = ggml_cast(ctx, clamped_sF, GGML_TYPE_I32);          // [K]
 
     // ── Gather the K selected slots from each pool tensor (f16 get_rows on Metal). ──
     auto gather = [&](struct ggml_tensor* t, int row_len) -> struct ggml_tensor* {
         struct ggml_tensor* t2d = ggml_reshape_2d(ctx, t, row_len, n_slots);
-        return ggml_get_rows(ctx, t2d, selected_slots); // [row_len, K]
+        return ggml_get_rows(ctx, t2d, clamped_slots); // [row_len, K]
     };
     struct ggml_tensor* aKr  = ggml_reshape_3d(ctx, gather(pool->get_anchorK_rot(), D*nkv),     D, nkv, K);       // [D,nkv,K]
     struct ggml_tensor* VKr  = ggml_reshape_4d(ctx, gather(pool->get_VK_rot(),      D*nkv*R),   D, nkv, R, K);    // [D,nkv,R,K]
@@ -700,7 +711,7 @@ struct ggml_cgraph * build_decode_graph(
     struct ggml_tensor ** out_concat_v = nullptr,
     bool use_sparse = true,
     int T_past = 0,
-    int engage_threshold = 2048,
+    int engage_threshold = 4096,
     struct ggml_tensor ** dense_k_past_inputs = nullptr,
     struct ggml_tensor ** dense_v_past_inputs = nullptr,
     struct ggml_tensor * dense_attn_mask = nullptr,
@@ -876,25 +887,23 @@ struct ggml_cgraph * build_decode_graph(
             struct ggml_tensor * k_past = dense_k_past_inputs[l];
             struct ggml_tensor * v_past = dense_v_past_inputs[l];
 
-            // Permute current token
+            // Reshape current token keys/values
             struct ggml_tensor * q_reshaped = ggml_reshape_3d(ctx, q, head_dim_val, config.n_head, 1);
             struct ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k, head_dim_val, config.n_head_kv, 1);
+            struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim_val, config.n_head_kv, 1);
 
+            // Apply RoPE to current token queries/keys
             struct ggml_tensor * q_rope = ggml_rope_ext(ctx, q_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
             struct ggml_tensor * k_rope = ggml_rope_ext(ctx, k_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
+            // Concat past with current along dim 2 (the sequence length dimension)
+            struct ggml_tensor * k_ctx = ggml_concat(ctx, k_past, k_rope, 2);
+            struct ggml_tensor * v_ctx = ggml_concat(ctx, v_past, v_reshaped, 2);
+
+            // Permute to [head_dim, seq_len, kv_heads] layout expected by flash attention
             struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-            struct ggml_tensor * k_perm = ggml_permute(ctx, k_rope, 0, 2, 1, 3);
-            struct ggml_tensor * v_reshaped = ggml_reshape_3d(ctx, v, head_dim_val, config.n_head_kv, 1);
-            struct ggml_tensor * v_perm = ggml_permute(ctx, v_reshaped, 0, 2, 1, 3);
-
-            // Permute past
-            struct ggml_tensor * pk = ggml_permute(ctx, k_past, 0, 2, 1, 3);
-            struct ggml_tensor * pv = ggml_permute(ctx, v_past, 0, 2, 1, 3);
-
-            // Concat
-            struct ggml_tensor * k_ctx_perm = ggml_concat(ctx, pk, k_perm, 1);
-            struct ggml_tensor * v_ctx_perm = ggml_concat(ctx, pv, v_perm, 1);
+            struct ggml_tensor * k_ctx_perm = ggml_permute(ctx, k_ctx, 0, 2, 1, 3);
+            struct ggml_tensor * v_ctx_perm = ggml_permute(ctx, v_ctx, 0, 2, 1, 3);
 
             // Flash attention
             float scale_val = 1.0f / std::sqrt((float)head_dim_val);
@@ -1611,7 +1620,7 @@ int main(int argc, char ** argv) {
     // per-append guards (`offset + F_test <= active_k_dense[l].size()`) already
     // prevent overflow, so this only trims unused RAM. MLX keeps no such fp32 host
     // copy at all (KV lives fp16 in unified memory).
-    int dense_cap_engage = 2048;  // DIFFKV_ENGAGE_THRESHOLD default
+    int dense_cap_engage = 4096;  // DIFFKV_ENGAGE_THRESHOLD default
     if (const char* e = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         try { dense_cap_engage = std::max(dense_cap_engage, std::stoi(e)); } catch (...) {}
     }
@@ -1621,10 +1630,10 @@ int main(int argc, char ** argv) {
     }
     int DENSE_WINDOW_CAP = dense_cap_engage + dense_cap_gen + 512;  // ~4608 default
 
-    std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
-    std::vector<diffkv::AlignedFloatVector> active_k_dense_rotated(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
-    std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers, diffkv::AlignedFloatVector((size_t)DENSE_WINDOW_CAP * F_test, 0.0f));
-    diffkv::AlignedInt32Vector active_positions_dense(DENSE_WINDOW_CAP, 0);
+    std::vector<diffkv::AlignedFloatVector> active_k_dense(n_layers);
+    std::vector<diffkv::AlignedFloatVector> active_k_dense_rotated(n_layers);
+    std::vector<diffkv::AlignedFloatVector> active_v_dense(n_layers);
+    diffkv::AlignedInt32Vector active_positions_dense;
     int total_positions = 0;
     std::map<int, std::vector<float>> persistent_k_dense;
     std::map<int, std::vector<float>> persistent_v_dense;
@@ -1920,7 +1929,7 @@ int main(int argc, char ** argv) {
             engage_threshold = std::stoi(env_et);
         }
         bool decode_use_sparse = (L >= engage_threshold);
-        int required_dense_cap = decode_use_sparse ? DENSE_WINDOW_CAP : std::max(DENSE_WINDOW_CAP, L + max_generate + 512);
+        int required_dense_cap = is_warmup_run ? (L + max_generate + 512) : (decode_use_sparse ? DENSE_WINDOW_CAP : std::max(DENSE_WINDOW_CAP, L + max_generate + 512));
 
         for (int l = 0; l < n_layers; ++l) {
             if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
@@ -2083,7 +2092,7 @@ int main(int argc, char ** argv) {
                         if (non_anchor_len > 0) {
                             // Pre-convert U to float and scale it
                             std::vector<float> U_float(non_anchor_len * rank);
-                            const int8_t* u_src = engine->get_host_U() + (slot_id * micro_block_size * rank);
+                            const int8_t* u_src = engine->get_host_U() + (slot_id * engine->get_S_max() * rank);
                             for (int i = 0; i < non_anchor_len * rank; ++i) {
                                 U_float[i] = (float)u_src[i] * scale_u;
                             }
@@ -2633,7 +2642,7 @@ int main(int argc, char ** argv) {
             userdata[l].n_q_heads = model.get_config().n_head;
             userdata[l].n_kv_heads = model.get_config().n_head_kv;
             userdata[l].rank = kv_engines[l]->get_rank();
-            userdata[l].S_max = micro_block_size;
+            userdata[l].S_max = kv_engines[l]->get_S_max();
             userdata[l].K = 0;
             userdata[l].D = head_dim;
             userdata[l].scale = 1.0f / std::sqrt((float)head_dim);
@@ -2662,11 +2671,13 @@ int main(int argc, char ** argv) {
         struct ggml_context * dense_past_ctx = ggml_init(dense_past_params);
         std::vector<struct ggml_tensor *> dense_k_past_inputs(n_layers, nullptr);
         std::vector<struct ggml_tensor *> dense_v_past_inputs(n_layers, nullptr);
-        for (int l = 0; l < n_layers; ++l) {
-            dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
-            ggml_set_input(dense_k_past_inputs[l]);
-            dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
-            ggml_set_input(dense_v_past_inputs[l]);
+        if (!decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+                ggml_set_input(dense_k_past_inputs[l]);
+                dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+                ggml_set_input(dense_v_past_inputs[l]);
+            }
         }
 
         // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
@@ -2824,7 +2835,44 @@ int main(int argc, char ** argv) {
         const auto& _k_act_ref = k_activations;
         const auto& _v_act_ref = v_activations;
 
-        std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L]() {
+        std::unordered_set<int32_t> relational_token_ids;
+        {
+            static const std::unordered_set<std::string> RELATIONAL_KEYWORDS = {
+                "unlike", "whereas", "while", "although", "however", "but",
+                "instead", "rather", "conversely", "nevertheless", "nonetheless",
+                "yet", "though", "notwithstanding",
+                "compared", "differs", "differ", "different", "difference",
+                "differences", "distinct", "distinction", "distinguishes",
+                "greater", "larger", "smaller", "higher", "lower", "fewer",
+                "more", "less", "most", "least",
+                "causes", "caused", "because", "therefore", "hence", "thus",
+                "leads", "results", "produces", "induces", "triggers",
+                "consequently", "accordingly",
+                "is", "are", "was", "were", "has", "have", "had",
+                "exhibits", "possesses", "contains", "involves",
+                "requires", "lacks", "features",
+                "called", "named", "known", "defined", "characterized",
+                "classified", "denoted", "refers", "represents",
+                "only", "exclusively", "specifically", "solely",
+                "except", "excluding", "neither", "nor"
+            };
+
+            for (int32_t tid : prompt_tokens) {
+                if (relational_token_ids.count(tid)) continue;
+                std::string text = model.token_to_piece(tid);
+                std::string cleaned = "";
+                for (char c : text) {
+                    if (std::isalnum((unsigned char)c)) {
+                        cleaned += std::tolower((unsigned char)c);
+                    }
+                }
+                if (RELATIONAL_KEYWORDS.count(cleaned)) {
+                    relational_token_ids.insert(tid);
+                }
+            }
+        }
+
+        std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L, relational_token_ids]() {
             // Set background QoS: decode thread always preempts this, audio never starved.
             // Mirrors ACTIVE_RUNTIME: asyncio executor yields to the event loop naturally.
 #ifdef __APPLE__
@@ -2896,6 +2944,7 @@ int main(int argc, char ** argv) {
                         srl_state_pending.inverted_index,
                         prime_slots_thread,
                         get_helper_token_ids_cpp(model),
+                        relational_token_ids,
                         true
                     );
                     std::cerr << "[DiffKV] Factual store built (pre-decode): "
@@ -3499,7 +3548,7 @@ int main(int argc, char ** argv) {
                 std::vector<float> natv((size_t)nq*D); ggml_backend_tensor_get(g_dbg_attn0, natv.data(), 0, natv.size()*sizeof(float));
                 std::vector<float> outS((size_t)nq*D,0.0f), lseS(nq,-1e30f);
                 diffkv::execute_cpu_attention(qh.data(), sl.data(), outS.data(), lseS.data(), kv_engines[cmpL].get(),
-                                              nq, nkv, rank, micro_block_size, K, D, scale, true, freq, true);
+                                              nq, nkv, rank, kv_engines[cmpL]->get_S_max(), K, D, scale, true, freq, true);
                 // FULL ref = sparse ⊕ dense(active_k_dense[0] + current token) via 3-way LSE combine.
                 int F=nkv*D, Td=total_dense_tokens[cmpL];
                 // Match the real callback: ignore_c=true → DO NOT attend the current token here
@@ -3849,11 +3898,11 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // SFA threshold raised 0.3→0.55: at 0.3 almost every entry in a topically
-            // focused document matches, activating the VSL and merging all categories'
-            // tokens into one set. At 0.55 only high-confidence specific retrieval
-            // triggers the sequence constraint.
-            sfa_active = (srl_state.current_step_max_similarity >= 0.55f &&
+            bool disable_vsl = false;
+            if (const char* env_vsl = std::getenv("DIFFKV_DISABLE_VSL")) {
+                disable_vsl = (std::string(env_vsl) == "1");
+            }
+            sfa_active = !disable_vsl && (srl_state.current_step_max_similarity >= 0.55f &&
                           !srl_state.current_step_factual_sequences.empty());
 
             // LM-VSL (Logit Masking) — graduated by retrieval confidence.
@@ -3871,11 +3920,9 @@ int main(int argc, char ** argv) {
                 // model can emit them even when VSL is active. This was the documented fix
                 // that made NIAH pass (0/5 → pass). Removing it collapses output to
                 // helpers + sequence-starts only (the entity/period soup symptom).
-                // Matches the last-known-good C++ state (pre-revert).
-                const auto& fact_toks = srl_state.current_step_factual_tokens;
                 float max_sim = srl_state.current_step_max_similarity;
                 for (int i = 0; i < n_vocab; ++i) {
-                    if (allowed.count(i) == 0 && fact_toks.count(i) == 0) {
+                    if (allowed.count(i) == 0) {
                         if (max_sim >= 0.70f) {
                             output_logits[i] = -1e10f;   // hard: verbatim
                         } else {
@@ -4458,8 +4505,15 @@ int main(int argc, char ** argv) {
         if (!interactive) {
             break;
         }
+        // Reclaim active dense buffers memory when waiting for next input
+        for (int l = 0; l < n_layers; ++l) {
+            diffkv::AlignedFloatVector().swap(active_k_dense[l]);
+            diffkv::AlignedFloatVector().swap(active_k_dense_rotated[l]);
+            diffkv::AlignedFloatVector().swap(active_v_dense[l]);
+        }
+        active_positions_dense.clear();
+        active_positions_dense.shrink_to_fit();
 
-        // ── Update session KV prefix cache (ACTIVE_RUNTIME update_session_token_prefix) ──────
         // After this turn's generation, the KV pool contains all_tokens[0..L+gen-1].
         // On the next turn, the gateway will send __CACHED__:<N> with N = session_cached_len.
         // The binary will verify the first N tokens match and skip re-prefilling them.

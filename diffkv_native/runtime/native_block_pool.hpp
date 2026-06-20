@@ -141,7 +141,6 @@ private:
 
     // Host-side mirror buffers
     std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_f16_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;

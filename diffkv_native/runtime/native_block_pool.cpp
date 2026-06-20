@@ -138,7 +138,6 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     }
 
     host_U_.resize(ggml_nelements(U_), 0);
-    host_U_f16_.resize(ggml_nelements(U_f16_), ggml_fp32_to_fp16(0.0f));
     host_U_scale_.resize(ggml_nelements(U_scale_), ggml_fp32_to_fp16(0.0f));
     host_VK_.resize(ggml_nelements(VK_), ggml_fp32_to_fp16(0.0f));
     host_VV_.resize(ggml_nelements(VV_), ggml_fp32_to_fp16(0.0f));
@@ -231,7 +230,6 @@ void NativeBlockPool::zero_all_tensors() {
         ggml_backend_tensor_set(U_, zeros.data(), 0, zeros.size() * sizeof(int8_t));
     }
     if (U_f16_) {
-        std::fill(host_U_f16_.begin(), host_U_f16_.end(), ggml_fp32_to_fp16(0.0f));
         std::vector<ggml_fp16_t> zeros(ggml_nelements(U_f16_), ggml_fp32_to_fp16(0.0f));
         ggml_backend_tensor_set(U_f16_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
     }
@@ -302,11 +300,11 @@ void NativeBlockPool::upload_slot(int slot_id) {
     
     ggml_backend_tensor_set(U_, host_U_.data() + slot_id * rank_ * S_max_, slot_id * U_->nb[2], rank_ * S_max_ * sizeof(int8_t));
     // f16 mirror of U (native ggml gather): cast this slot's int8 values to f16.
-    {
+    if (U_f16_) {
         const int8_t* src = host_U_.data() + slot_id * rank_ * S_max_;
-        ggml_fp16_t* dst = host_U_f16_.data() + slot_id * rank_ * S_max_;
-        for (int i = 0; i < rank_ * S_max_; ++i) dst[i] = ggml_fp32_to_fp16((float)src[i]);
-        ggml_backend_tensor_set(U_f16_, dst, slot_id * U_f16_->nb[2], rank_ * S_max_ * sizeof(ggml_fp16_t));
+        std::vector<ggml_fp16_t> temp_U_f16(rank_ * S_max_);
+        for (int i = 0; i < rank_ * S_max_; ++i) temp_U_f16[i] = ggml_fp32_to_fp16((float)src[i]);
+        ggml_backend_tensor_set(U_f16_, temp_U_f16.data(), slot_id * U_f16_->nb[2], rank_ * S_max_ * sizeof(ggml_fp16_t));
     }
     ggml_backend_tensor_set(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
