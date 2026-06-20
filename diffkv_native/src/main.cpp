@@ -2000,29 +2000,13 @@ int main(int argc, char ** argv) {
 
         int L = prompt_tokens.size();
 
-        // ── Adaptive micro-block size (matches Python ACTIVE_RUNTIME logic) ──────
-        {
-            int raw_target;
-            if (L < 256) {
-                raw_target = 16;
-            } else if (L < 1024) {
-                raw_target = 32;
-            } else if (L < 4096) {
-                raw_target = 64;
-            } else if (L < 8192) {
-                raw_target = 128;
-            } else {
-                raw_target = 256;
-            }
-            int target = std::min(raw_target, micro_block_size);
-            int adaptive_mbs = std::max(16, ((target + 15) / 16) * 16);
-            if (adaptive_mbs != micro_block_size && !is_warmup_run) {
-                std::cerr << "[DiffKV Native] Adaptive micro_block_size: " << micro_block_size
-                          << " -> " << adaptive_mbs << " (L=" << L << ")" << std::endl;
-            }
-            micro_block_size = adaptive_mbs; // Update the local variable!
-            runtime_manager.set_micro_block_size(adaptive_mbs);
-        }
+        // ── micro_block_size is FIXED at the configured value (MLX/HF parity) ──────
+        // ACTIVE_RUNTIME sets micro_block_size = config.get("micro_block_size", 256) with NO
+        // length-based adaptation (mlx_diffkv_wrapper.py:1030, hf_diffkv_wrapper.py:378). The
+        // old L<256/1024/4096/8192 → 16/32/64/128 override was a divergence — it shrank the
+        // block size (4× more, finer blocks) for any prompt under 8192 tokens, changing the
+        // compression granularity vs the reference. Keep the configured value (default 256).
+        runtime_manager.set_micro_block_size(micro_block_size);
 
         // Reserve decode headroom: we must reserve enough free slots for max_generate tokens,
         // so that decode generation does not fail due to slot capacity exhaustion.
@@ -2437,7 +2421,12 @@ int main(int argc, char ** argv) {
             if (!interactive) break; else continue;
         }
 
+        const bool dbg_prefill_time = (std::getenv("DIFFKV_DBG_PREFILL_TIME") != nullptr);
+        double tp_upload = 0, tp_compute = 0, tp_capture = 0, tp_ingest = 0, tp_build = 0;
+        auto tp_start = std::chrono::high_resolution_clock::now();
+        int tp_chunks = 0;
         while (pos_start < L) {
+            auto tp_c0 = std::chrono::high_resolution_clock::now();
             int chunk_len = std::min(chunk_size, L - pos_start);
             int ctx_len   = pos_start + chunk_len;  // total KV context length
 
@@ -2521,6 +2510,8 @@ int main(int argc, char ** argv) {
             }
             ggml_backend_tensor_set(mask_prefill, mask_host.data(), 0, mask_host.size() * sizeof(ggml_fp16_t));
 
+            auto tp_b1 = std::chrono::high_resolution_clock::now();
+            tp_build += std::chrono::duration<double,std::milli>(tp_b1 - tp_c0).count();
             // Upload prior K/V context (from this turn's prior chunks)
             // k_activations[l][0..pos_start-1] stores raw K from this turn's prior chunks.
             if (has_prior) {
@@ -2535,12 +2526,16 @@ int main(int argc, char ** argv) {
                         0, intra_prior_len * F_test * sizeof(ggml_fp16_t));
                 }
             }
+            auto tp_u1 = std::chrono::high_resolution_clock::now();
+            tp_upload += std::chrono::duration<double,std::milli>(tp_u1 - tp_b1).count();
 
             // ── 6. Run the graph ──────────────────────────────────────────────
             if (ggml_backend_sched_graph_compute(sched, prefill_graph) != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Prefill graph compute failed at pos " << pos_start << "!" << std::endl;
                 break;
             }
+            auto tp_g1 = std::chrono::high_resolution_clock::now();
+            tp_compute += std::chrono::duration<double,std::milli>(tp_g1 - tp_u1).count();
 
             // ── 7. Capture raw K/V for decode attention and next chunk's prior context ──
             // build_prefill_ctx_graph exports raw K (before RoPE) matching ACTIVE_RUNTIME.
@@ -2590,14 +2585,24 @@ int main(int argc, char ** argv) {
                     );
                 }
             }
+            auto tp_cap1 = std::chrono::high_resolution_clock::now();
+            tp_capture += std::chrono::duration<double,std::milli>(tp_cap1 - tp_g1).count();
             // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
             runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+            tp_ingest += std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_cap1).count();
+            tp_chunks++;
 
             if (pos_start + chunk_len >= L && prefill_logits) {
                 ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
             }
 
             pos_start += chunk_len;
+        }
+        if (dbg_prefill_time && !is_warmup_run) {
+            double total = std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_start).count();
+            std::cerr << "[PREFILL_TIME] L=" << L << " chunks=" << tp_chunks << " TOTAL=" << total/1000.0 << "s"
+                      << " | graph_build=" << tp_build/1000.0 << "s prior_upload=" << tp_upload/1000.0 << "s"
+                      << " compute=" << tp_compute/1000.0 << "s capture=" << tp_capture/1000.0 << "s ingest=" << tp_ingest/1000.0 << "s\n";
         }
 
         if (prefill_ctx) {
