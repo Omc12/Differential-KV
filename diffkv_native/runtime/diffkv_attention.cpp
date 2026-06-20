@@ -684,9 +684,13 @@ void custom_attention_op_callback(
     }
 
     // Two-way LSE combine (sparse ⊕ dense)
+    static const bool dbg_sparseoff = (std::getenv("DIFFKV_DBG_SPARSEOFF") != nullptr);
+    static const bool dbg_denseoff  = (std::getenv("DIFFKV_DBG_DENSEOFF2") != nullptr);
     std::vector<float> final_out(n_q_heads * D);
     for (int h = 0; h < n_q_heads; ++h) {
         float ld = lse_dense[h], ls = lse_sparse[h];
+        if (dbg_sparseoff) ls = -1e30f;   // attend dense window only
+        if (dbg_denseoff)  ld = -1e30f;   // attend compressed blocks only
         float lse_max = std::max(ld, ls);
         if (lse_max <= -1e20f) {
             for (int d = 0; d < D; ++d) final_out[h * D + d] = 0.0f;
@@ -702,12 +706,15 @@ void custom_attention_op_callback(
     std::memcpy(dst->data, final_out.data(), n_q_heads * D * sizeof(float));
 
     if (std::getenv("DIFFKV_DBG_ATTN0") && data->layer_idx == 0) {
-        double nrm=0;
-        for (int i=0;i<n_q_heads*D;++i){ nrm += (double)final_out[i]*final_out[i]; }
-        std::cerr << "[DBG_ATTN0] CPU L0 norm=" << std::sqrt(nrm)
-                  << " head0[0..5]=";
-        for (int i=0;i<6;++i) std::cerr << final_out[i] << " ";
-        std::cerr << "\n";
+        static int dbg_step = 0;
+        if (dbg_step < 4) {
+            double ns=0, nd=0;
+            for (int i=0;i<D;++i){ ns += (double)out_sparse[i]*out_sparse[i]; nd += (double)out_dense[i]*out_dense[i]; }
+            std::cerr << "[DBG_ATTN0] step=" << dbg_step << " K=" << K << " T_dense=" << T_dense
+                      << " | h0 lse_sparse=" << lse_sparse[0] << " lse_dense=" << lse_dense[0]
+                      << " |out_sparse|=" << std::sqrt(ns) << " |out_dense|=" << std::sqrt(nd) << "\n";
+            dbg_step++;
+        }
     }
     if (cache_active)
         get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);

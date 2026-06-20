@@ -1,0 +1,411 @@
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.035 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M3)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  =  5726.63 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M3
+ggml_metal_init: picking default device: Apple M3
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[DiffKV Native] Initialized scheduler with backends: GPU=MTL0, CPU=CPU
+[DiffKV Model] Loading model from GGUF file: diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf ...
+llama_model_loader: loaded meta data with 26 key-value pairs and 339 tensors from diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen2
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = qwen2.5-1.5b-instruct
+llama_model_loader: - kv   3:                            general.version str              = v0.1
+llama_model_loader: - kv   4:                           general.finetune str              = qwen2.5-1.5b-instruct
+llama_model_loader: - kv   5:                         general.size_label str              = 1.8B
+llama_model_loader: - kv   6:                          qwen2.block_count u32              = 28
+llama_model_loader: - kv   7:                       qwen2.context_length u32              = 32768
+llama_model_loader: - kv   8:                     qwen2.embedding_length u32              = 1536
+llama_model_loader: - kv   9:                  qwen2.feed_forward_length u32              = 8960
+llama_model_loader: - kv  10:                 qwen2.attention.head_count u32              = 12
+llama_model_loader: - kv  11:              qwen2.attention.head_count_kv u32              = 2
+llama_model_loader: - kv  12:                       qwen2.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  13:     qwen2.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  14:                          general.file_type u32              = 15
+llama_model_loader: - kv  15:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  16:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  17:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  18:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  19:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  20:                tokenizer.ggml.eos_token_id u32              = 151645
+llama_model_loader: - kv  21:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  22:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  23:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  24:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - kv  25:               general.quantization_version u32              = 2
+llama_model_loader: - type  f32:  141 tensors
+llama_model_loader: - type q4_K:  169 tensors
+llama_model_loader: - type q6_K:   29 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = Q4_K - Medium
+print_info: file size   = 1.04 GiB (5.00 BPW) 
+llama_prepare_model_devices: using device MTL0 (Apple M3) (unknown id) - 5460 MiB free
+init_tokenizer: initializing tokenizer for type 2
+load: 0 unused tokens
+load: control token: 151659 '<|fim_prefix|>' is not marked as EOG
+load: control token: 151656 '<|video_pad|>' is not marked as EOG
+load: control token: 151655 '<|image_pad|>' is not marked as EOG
+load: control token: 151653 '<|vision_end|>' is not marked as EOG
+load: control token: 151652 '<|vision_start|>' is not marked as EOG
+load: control token: 151651 '<|quad_end|>' is not marked as EOG
+load: control token: 151649 '<|box_end|>' is not marked as EOG
+load: control token: 151648 '<|box_start|>' is not marked as EOG
+load: control token: 151646 '<|object_ref_start|>' is not marked as EOG
+load: control token: 151644 '<|im_start|>' is not marked as EOG
+load: control token: 151661 '<|fim_suffix|>' is not marked as EOG
+load: control token: 151647 '<|object_ref_end|>' is not marked as EOG
+load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+load: control token: 151660 '<|fim_middle|>' is not marked as EOG
+load: control token: 151654 '<|vision_pad|>' is not marked as EOG
+load: control token: 151650 '<|quad_start|>' is not marked as EOG
+load: printing all EOG tokens:
+load:   - 128247 ('</s>')
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 23
+load: token to piece cache size = 0.9310 MB
+print_info: arch                  = qwen2
+print_info: vocab_only            = 1
+print_info: no_alloc              = 0
+print_info: vocab type            = BPE
+print_info: n_vocab               = 151936
+print_info: n_merges              = 151387
+print_info: BOS token             = 151643 '<|endoftext|>'
+print_info: EOS token             = 151645 '<|im_end|>'
+print_info: EOT token             = 151645 '<|im_end|>'
+print_info: PAD token             = 151643 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token         = 151661 '<|fim_suffix|>'
+print_info: FIM MID token         = 151660 '<|fim_middle|>'
+print_info: FIM PAD token         = 151662 '<|fim_pad|>'
+print_info: FIM REP token         = 151663 '<|repo_name|>'
+print_info: FIM SEP token         = 151664 '<|file_sep|>'
+print_info: EOG token             = 128247 '</s>'
+print_info: EOG token             = 151643 '<|endoftext|>'
+print_info: EOG token             = 151645 '<|im_end|>'
+print_info: EOG token             = 151662 '<|fim_pad|>'
+print_info: EOG token             = 151663 '<|repo_name|>'
+print_info: EOG token             = 151664 '<|file_sep|>'
+print_info: max token length      = 256
+llama_model_load: vocab only - skipping tensors
+[DiffKV Model] Allocated weight buffer of size 1059 MB on backend: MTL0
+[DiffKV Model] Loaded successfully.
+── Model Config Info ──
+  n_vocab:        151936
+  n_embd:         1536
+  n_layer:        28
+  n_head:         12
+  n_head_kv:      2
+  n_ff:           8960
+  n_rot:          128 (head_dim: 128)
+  rms_norm_eps:   1.000000e-06
+  rope_freq_base: 1000000.000000
+  n_ctx:          32768
+───────────────────────
+[DiffKV] N4.2: srl_k_semantic raised from 32 → 48 (= 3 × srl_k_keep)
+[DiffKV Native] Preset 'mid' detected: capping context size to 8192 tokens (32 slots)
+[KVRuntimeManager] Initializing for 28 layers...
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_q4_K', name = 'kernel_get_rows_q4_K'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_q4_K                          0x101293890 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rms_norm_mul_f32_4', name = 'kernel_rms_norm_mul_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_rms_norm_mul_f32_4                     0x101294110 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q4_K_f32', name = 'kernel_mul_mm_q4_K_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q4_K_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1      0x101294990 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q6_K_f32', name = 'kernel_mul_mm_q6_K_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q6_K_f32_bci=0_bco=1_ne12=1_ne13=1_r2=1_r3=1      0x101295210 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0      0x101295a90 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rope_neox_f32', name = 'kernel_rope_neox_f32_imrope=0'
+ggml_metal_library_compile_pipeline: loaded kernel_rope_neox_f32_imrope=0                 0x101295e10 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f16', name = 'kernel_cpy_f32_f16'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f16                            0x101296190 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=64      0x101296510 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_blk', name = 'kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64      0x7d370c000 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f16_dk128_dv128', name = 'kernel_flash_attn_ext_f16_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=256_ns20=256_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f16_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=256_ns20=256_nsg=4      0x7d370c380 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0_cb=0      0x7d370c700 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=0'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=0           0x7d370ca80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0_cb=0      0x7d370ce00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_q6_K_f32', name = 'kernel_mul_mv_q6_K_f32_nsg=2_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_q6_K_f32_nsg=2_ne12=1_r2=1_r3=1      0x7d370d500 | th_max = 1024 | th_width =   32
+[DEBUG ACTIVATIONS] cached_len=0 L=21
+  k_activations[0] at 0 (first 5): 4.59766 -1.04297 -4.75391 -2.17188 5.92578
+  k_activations[0] at 21 (first 5): 0 0 0 0 -0.421875
+  k_activations[0] at 77 (first 5): 4.5 -1.68945 -2.37891 2.39453 0.825195
+  v_activations[0] at 0 (first 5): -0.136475 0.038147 -0.0509949 0.256104 0.179443
+  v_activations[0] at 21 (first 5): 0 0 0 0 0
+  v_activations[0] at 77 (first 5): -0.47583 -0.497803 -0.427246 0.953613 -0.237793
+[DiffKV] MLX parity active: srl_k_keep raised from 16 → 2 (attending all compressed blocks)
+[DiffKV Native] Building fresh decode graph... OK
+[DiffKV] block-state histogram (layer0, 2 blocks): Dense=2 Compressing=0 Compressed=0 PagingOut=0 CPU=0 Reloading=0 Invalid=0 Freed=0
+[DiffKV] dense-window scan: layer0 dense_blocks=2 dense_tokens=21 cap=593 total_blocks=2
+[DiffKV] SRL routing active from step 0
+[DiffKV] Prefill activations memory reclaimed early.
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_q4_K_f32', name = 'kernel_mul_mv_q4_K_f32_nsg=2_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_q4_K_f32_nsg=2_ne12=1_r2=1_r3=1      0x7d370dc00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f32', name = 'kernel_cpy_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f32                            0x7d370df80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_concat', name = 'kernel_concat'
+ggml_metal_library_compile_pipeline: loaded kernel_concat                                 0x7d370e300 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=32      0x7d370e680 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_f32_dk128_dv128', name = 'kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=1_sink=0_bias=0_scap=0_kvpad=1_ns10=256_ns20=256_nsg=4_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=1_sink=0_bias=0_scap=0_kvpad=1_ns10=256_ns20=256_nsg=4_nwg=32      0x7d370ea00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_reduce', name = 'kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32      0x7d370ed80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32_4', name = 'kernel_unary_f32_f32_4_op=106_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_4_op=106_cnt=1           0x7d370f100 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=1_cb=0      0x7d370f480 | th_max = 1024 | th_width =   32
+[DiffKV Native] Adaptive micro_block_size: 256 -> 128 (L=4361)
+[DiffKV Native] Auto-expanding pool: 32 → 36 slots to fit 4361-token prompt (Python parity: dynamic pool).
+[KVRuntimeManager] Initializing for 28 layers...
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 2 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 36 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q4_K_f32', name = 'kernel_mul_mm_q4_K_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q4_K_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1      0x7d370d180 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q6_K_f32', name = 'kernel_mul_mm_q6_K_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q6_K_f32_bci=0_bco=0_ne12=1_ne13=1_r2=1_r3=1      0x7d370fb80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f16_dk128_dv128', name = 'kernel_flash_attn_ext_f16_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=256_ns20=256_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f16_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=0_bcm=0_ns10=256_ns20=256_nsg=4      0x7d33dc000 | th_max = 1024 | th_width =   32
+[DEBUG ACTIVATIONS] cached_len=0 L=4361
+  k_activations[0] at 0 (first 5): 4.59766 -1.04297 -4.75391 -2.17188 5.92578
+  k_activations[0] at 21 (first 5): 6.40625 2.37891 -2.25586 -0.725098 4.51172
+  k_activations[0] at 77 (first 5): 9.46875 1.10742 -0.0610046 -0.446777 2.80859
+  v_activations[0] at 0 (first 5): -0.136475 0.038147 -0.0509949 0.256104 0.179443
+  v_activations[0] at 21 (first 5): 0.136719 -0.0298767 -0.384521 0.390381 -0.497314
+  v_activations[0] at 77 (first 5): 0.0934448 -0.4104 0.606445 0.154297 0.481934
+[DiffKV] MLX parity active: srl_k_keep raised from 16 → 34 (attending all compressed blocks)
+[DiffKV Native] Building fresh decode graph... OK
+[DiffKV] block-state histogram (layer0, 34 blocks): Dense=6 Compressing=2 Compressed=26 PagingOut=0 CPU=0 Reloading=0 Invalid=0 Freed=0
+[DiffKV] dense-window scan: layer0 dense_blocks=8 dense_tokens=1007 cap=4668 total_blocks=34
+
+[DiffKV DIAG] Decode step 0 retrieval:
+  active_slot=33 total_blocks=34
+  routed blocks (logical): 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 
+  physical pool slots: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 
+  srl_state.ordered_slot_ids size=0
+  srl_state.sink_blocks: 
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sum_rows_f32_f32_4', name = 'kernel_sum_rows_f32_f32_4_op=11'
+ggml_metal_library_compile_pipeline: loaded kernel_sum_rows_f32_f32_4_op=11               0x7d33dc700 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f32_f32_4', name = 'kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f32_f32_4_nsg=1_ne12=1_r2=1_r3=1      0x7d33dce00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_l2_norm_f32_f32_4', name = 'kernel_l2_norm_f32_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_l2_norm_f32_f32_4                      0x7d33dd180 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_f32_i32_desc', name = 'kernel_argsort_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_f32_i32_desc                   0x7d33dd500 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_argsort_merge_f32_i32_desc', name = 'kernel_argsort_merge_f32_i32_desc'
+ggml_metal_library_compile_pipeline: loaded kernel_argsort_merge_f32_i32_desc             0x7d33dd880 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f16_f32', name = 'kernel_cpy_f16_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f16_f32                            0x7d33ddc00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_f32', name = 'kernel_cpy_i32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_f32                            0x7d33ddf80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sum_rows_f32_f32', name = 'kernel_sum_rows_f32_f32_op=11'
+ggml_metal_library_compile_pipeline: loaded kernel_sum_rows_f32_f32_op=11                 0x7d33de300 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_f32', name = 'kernel_get_rows_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_f32                           0x7d33de680 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_unary_f32_f32', name = 'kernel_unary_f32_f32_op=10_cnt=1'
+ggml_metal_library_compile_pipeline: loaded kernel_unary_f32_f32_op=10_cnt=1              0x7d33dea00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_i32', name = 'kernel_cpy_f32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_i32                            0x7d33ded80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_i32_i32', name = 'kernel_cpy_i32_i32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_i32_i32                            0x7d33df100 | th_max = 1024 | th_width =   32
+[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).
+[DiffKV] SRL index ready: 28 blocks.
+[DiffKV] SRL routing active from step 3
+[DiffKV] Prefill activations memory reclaimed early.
+[DiffKV Native] Session prefix updated: 4413 tokens now resident in KV pool.
+[KVRuntimeManager] Initializing for 28 layers...
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 24 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 18 ...
+[NativeBlockPool] Allocated 1 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 0 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 0 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 0 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 0 MB on backend buffer type: MTL0
+[NativeBlockPool] Initializing Block Pool with 32 slots, SVD rank 12 ...
+[NativeBlockPool] Allocated 0 MB on backend buffer type: MTL0
+[DiffKV Native] Text generation completed successfully!

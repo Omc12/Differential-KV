@@ -36,7 +36,15 @@ static bool is_native_attn_enabled() {
     if (e) {
         return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
     }
-    return true; // ENABLED BY DEFAULT!
+    // DISABLED BY DEFAULT. The native ggml-fused sparse-attention subgraph
+    // (build_native_sparse_attn) is a known-broken experiment: it produces
+    // word-salad / inflated-logit output on real long prompts (the working
+    // custom-op path execute_*_attention is correct vs MLX). The native path
+    // also only engages when the factual store is empty at graph-build time —
+    // which on most long prompts means "the async factual build hasn't finished
+    // yet" — so it silently hijacked the live decode path and was THE cause of
+    // the long-prompt gibberish. Opt in with DIFFKV_NATIVE_ATTN=1 for kernel work.
+    return false;
 }
 
 struct ggml_backend_owner {
@@ -827,6 +835,11 @@ struct ggml_cgraph * build_decode_graph(
                                    userdata && userdata[l].kv_engine &&
                                    userdata[l].kv_engine->native_attn_enabled();
 
+            if (l == 0 && std::getenv("DIFFKV_DBG_ATTN0")) {
+                std::cerr << "[DBG_BRANCH] use_sparse=1 use_native=" << (int)use_native_attn
+                          << " selected_slots=" << (void*)selected_slots
+                          << " userdata=" << (void*)userdata << "\n";
+            }
             if (use_native_attn && selected_slots && native_dense_kr && native_dense_v && native_dense_mask) {
                 // Current-token key rotated at the current position (dense self-entry).
                 struct ggml_tensor * k_reshaped_n = ggml_reshape_3d(ctx, k, head_dim, config.n_head_kv, 1);
@@ -2928,7 +2941,21 @@ int main(int argc, char ** argv) {
                 // This background thread runs at QoS_BACKGROUND so decode preempts it naturally.
                 // The factual store is read by the decode loop only after srl_swapped=true AND
                 // factual_store.entries is non-empty — so partial builds are safe (empty = no bias).
+                // MLX PARITY: ACTIVE_RUNTIME/mlx_diffkv_wrapper.py builds NO factual store in
+                // turn 1 (finalize_srl_index is a no-op there) — so it applies NO +7.0 VSL/factual
+                // logit biasing during generation. Building it pre-decode here (150–700 prompt-derived
+                // entries) made the decode loop boost those tokens by +7.0 each step, forcing the model
+                // to REGURGITATE prompt phrases instead of answering. Default OFF to match MLX.
+                // Re-enable for the NIAH / exact-retrieval path with DIFFKV_ENABLE_FACTUAL=1.
+                bool disable_factual = true;
+                if (const char* ef = std::getenv("DIFFKV_ENABLE_FACTUAL")) {
+                    if (std::string(ef) == "1" || std::string(ef) == "true" || std::string(ef) == "on")
+                        disable_factual = false;
+                }
                 try {
+                  if (disable_factual) {
+                    std::cerr << "[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).\n";
+                  } else {
                     std::unordered_set<int32_t> prime_slots_thread(
                         srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
                         srl_state_pending.chunk_graph.cluster_centers_tensor.end()
@@ -2949,6 +2976,7 @@ int main(int argc, char ** argv) {
                     );
                     std::cerr << "[DiffKV] Factual store built (pre-decode): "
                               << srl_state_pending.factual_store.entries.size() << " entries.\n";
+                  }
                 } catch (const std::exception& fe) {
                     std::cerr << "[DiffKV] factual_store.build() in srl_build_thread failed: " << fe.what() << "\n";
                 }
@@ -3113,6 +3141,13 @@ int main(int argc, char ** argv) {
                 }
             }
             total_positions = curr_pos_idx;
+        }
+
+        if (std::getenv("DIFFKV_VERBOSE")) {
+            int lastp = total_positions > 0 ? active_positions_dense[total_positions-1] : -1;
+            std::cerr << "[DiffKV] dense-window positions: start=" << dense_start_positions[0]
+                      << " count=" << total_positions << " pos[0]=" << active_positions_dense[0]
+                      << " pos[last]=" << lastp << " (L=" << L << ", query@" << L << ")\n";
         }
 
         if (!decode_use_sparse) {
