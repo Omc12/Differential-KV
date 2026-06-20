@@ -870,8 +870,9 @@ def main():
                         help="Gateway API Base URL (e.g. http://localhost:8000/v1). If specified, runs in Client Mode.")
     
     # Model config
-    parser.add_argument('--model', type=str, default='0.5b',
-                        help="Model path or shortcut ('0.5b' or '1.5b') to locate local GGUF files.")
+    parser.add_argument('--model', type=str, default='1.5b',
+                        help="Model path or shortcut ('0.5b' or '1.5b') to locate local GGUF files. "
+                             "'1.5b' resolves to the q4_k_m GGUF (q8_0 fallback).")
     
     # Executable config
     parser.add_argument('--binary-path', type=str,
@@ -888,8 +889,8 @@ def main():
                              "Overrides the preset's default limit. Leave unset to use preset default.")
     
     # Generation parameters
-    parser.add_argument('--max-tokens', type=int, default=16384,
-                        help="Max tokens to generate.")
+    parser.add_argument('--max-tokens', type=int, default=4096,
+                        help="Max tokens to generate (pass a higher value for long-form output).")
     parser.add_argument('--temperature', type=float, default=0.7,
                         help="Sampling temperature.")
     parser.add_argument('--top-p', type=float, default=0.9,

@@ -4,6 +4,7 @@
 #endif
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 #include <iostream>
 
@@ -443,6 +444,46 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
     if (params.out_anchor_position) {
         *params.out_anchor_position = params.anchor_idx + landmark_idx;
+    }
+
+    // ── DBG: reconstruction-error decomposition (DIFFKV_DBG_COMPRESS_ERR=1) ─────
+    // Compares the block reconstruction vs the original delta three ways:
+    //   floor   = fp32 U · fp32 VT             (irreducible rank-k truncation loss)
+    //   fp16_U  = fp16 U · fp16 VT             (what MLX stores)
+    //   int8_U  = int8 U·scale_u · fp16 VT     (what C++ stores)
+    // The int8-vs-fp16 GAP tells us how much fixing U→fp16 would actually buy.
+    if (std::getenv("DIFFKV_DBG_COMPRESS_ERR")) {
+        static double e_floor=0, e_fp16=0, e_int8=0, nrm=0; static long nb=0, ntok=0;
+        for (int s = 0; s < S_deltas; ++s) {
+            for (int f = 0; f < joint_F; ++f) {
+                double rf=0, r16=0, r8=0;
+                for (int r = 0; r < k_dynamic && r < svd_dim; ++r) {
+                    double us = U_scaled[s * R + r];
+                    double vt = VT_joint[r * joint_F + f];
+                    double vt16 = ggml_fp16_to_fp32(ggml_fp32_to_fp16((float)vt));
+                    double us16 = ggml_fp16_to_fp32(ggml_fp32_to_fp16((float)us));
+                    int iv = (int)std::round(us / scale_u);
+                    iv = std::max(-127, std::min(127, iv));
+                    double us8 = (double)iv * scale_u;
+                    rf  += us  * vt;
+                    r16 += us16 * vt16;
+                    r8  += us8  * vt16;
+                }
+                rf *= scale; r16 *= scale; r8 *= scale;
+                double raw = raw_delta[s * joint_F + f];
+                e_floor += (raw-rf)*(raw-rf);
+                e_fp16  += (raw-r16)*(raw-r16);
+                e_int8  += (raw-r8)*(raw-r8);
+                nrm     += raw*raw;
+            }
+        }
+        nb++; ntok += S_deltas;
+        if (nb % 20 == 0 && nrm > 0) {
+            double rfl=100*std::sqrt(e_floor/nrm), rf16=100*std::sqrt(e_fp16/nrm), ri8=100*std::sqrt(e_int8/nrm);
+            std::cerr << "[COMPRESS_ERR] blocks=" << nb << " toks=" << ntok
+                      << " rel_recon_err: floor(rank" << R << ")=" << rfl << "%  fp16_U=" << rf16
+                      << "%  int8_U=" << ri8 << "%  | int8_penalty_over_fp16=" << (ri8-rf16) << "%\n";
+        }
     }
 
     // ── F9: Post-SVD sparse residual storage ──────────────────────────────────

@@ -2069,21 +2069,20 @@ int main(int argc, char ** argv) {
             engage_threshold = std::stoi(env_et);
         }
         bool decode_use_sparse = (L >= engage_threshold);
-        // RAM: size the fp32 dense buffers to the ACTUAL dense-window length.
-        //  • sparse path: MLX keeps only (recency_window + block_size) tokens dense
-        //    (mlx_diffkv_wrapper.py max_dense_len), plus the decode-generated tokens. The old
-        //    code used DENSE_WINDOW_CAP (≈engage_threshold 4096 + gen) here — 5-6× oversized,
-        //    wasting ~280MB of fp32 host KV. Right-size it (the MLX-parity fill at ~line 3325
-        //    overwrites the window with exactly these tokens, so the block-scan is redundant here).
-        //  • non-sparse (bypass) path: the window holds the whole prompt → keep the larger cap.
-        // Cap at L+gen: the dense window can never exceed the prompt length (guards against a
-        // huge DIFFKV_RECENCY_WINDOW blowing the allocation up).
-        int sparse_dense_cap = std::min(cfg_recency_window + micro_block_size + max_generate + 512,
-                                        L + max_generate + 512);
-        int required_dense_cap = is_warmup_run
-            ? (L + max_generate + 512)
-            : (decode_use_sparse ? sparse_dense_cap
-                                 : std::max(DENSE_WINDOW_CAP, L + max_generate + 512));
+        // RAM: bound the fp32 dense buffers by the DENSE-WINDOW length, NOT max_generate.
+        // Generated tokens are compressed into the pool by ingest_decode, so the dense window
+        // doesn't need to hold all of them — the decode loop SLIDES it (drops the oldest block
+        // once it exceeds recency_window+block_size, MLX-style). The old code sized to
+        // (engage_threshold + max_generate): with the CLI default --max-tokens 16384 that
+        // pre-allocated ~1.5 GB of fp32 KV even when generating 3 tokens.
+        //   • sparse path  : recency_window + 2·block_size (the slide keeps it here) + slack.
+        //   • bypass/dense : window can grow to engage_threshold before it flips to sparse, so
+        //     cap there (the slide takes over afterward); never needs max_generate.
+        int sparse_dense_cap = cfg_recency_window + 2 * micro_block_size + 512;
+        int dense_hard_cap   = engage_threshold + micro_block_size + 512;
+        int required_dense_cap = decode_use_sparse
+            ? sparse_dense_cap
+            : std::min(L + max_generate + 512, dense_hard_cap);
 
         for (int l = 0; l < n_layers; ++l) {
             if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
@@ -3954,6 +3953,34 @@ int main(int argc, char ** argv) {
             }
             if (total_positions < (int)active_positions_dense.size()) {
                 active_positions_dense[total_positions++] = current_pos;
+            }
+
+            // ── MLX-parity dense-window SLIDE (sparse path only) ──────────────────────
+            // Keep the dense window bounded at recency_window+block_size (MLX max_dense_len).
+            // Once it grows past that, drop the OLDEST block — those tokens are already
+            // compressed into the pool by ingest_decode (above), so they stay attendable via
+            // the compressed path. This bounds the fp32 dense buffers regardless of how many
+            // tokens are generated (otherwise the window grows ~1 token/step → unbounded RAM).
+            static const bool no_dense_slide = (std::getenv("DIFFKV_NO_DENSE_SLIDE") != nullptr);
+            if (decode_use_sparse && !no_dense_slide && total_dense_tokens[0] >= cfg_recency_window + micro_block_size) {
+                const int drop = micro_block_size;
+                const size_t rowf = (size_t)F_test;
+                for (int l = 0; l < n_layers; ++l) {
+                    int keep = total_dense_tokens[l] - drop;
+                    if (keep <= 0) { total_dense_tokens[l] = 0; continue; }
+                    std::memmove(active_k_dense[l].data(),         active_k_dense[l].data()         + (size_t)drop*rowf, (size_t)keep*rowf*sizeof(float));
+                    std::memmove(active_v_dense[l].data(),         active_v_dense[l].data()         + (size_t)drop*rowf, (size_t)keep*rowf*sizeof(float));
+                    std::memmove(active_k_dense_rotated[l].data(), active_k_dense_rotated[l].data() + (size_t)drop*rowf, (size_t)keep*rowf*sizeof(float));
+                    total_dense_tokens[l] = keep;
+                    dense_start_positions[l] += drop;
+                }
+                int keep_pos = total_positions - drop;
+                if (keep_pos > 0) {
+                    std::memmove(active_positions_dense.data(), active_positions_dense.data() + drop, (size_t)keep_pos*sizeof(int32_t));
+                    total_positions = keep_pos;
+                } else {
+                    total_positions = 0;
+                }
             }
             t_dense_append_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_dense_append_start).count();
             auto t_step_end = std::chrono::high_resolution_clock::now();
