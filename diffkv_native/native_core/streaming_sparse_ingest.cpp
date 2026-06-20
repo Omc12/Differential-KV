@@ -375,6 +375,18 @@ int StreamingSparseIngestManager::next_anchor_idx(int layer_idx) const {
     return last->anchor_idx + last->token_count();
 }
 
+// Content-based compression skip (long-digit / equation / acronym heuristic) is OFF
+// by default to match ACTIVE_RUNTIME (MLX), which compresses every block leaving the
+// recency window unconditionally. Set DIFFKV_SKIP_COMPRESSION_HEURISTIC=1 to restore
+// it (factual/NIAH exact-retrieval path).
+static bool skip_compression_heuristic_enabled() {
+    static const bool enabled = []() {
+        const char* e = std::getenv("DIFFKV_SKIP_COMPRESSION_HEURISTIC");
+        return e && (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "on");
+    }();
+    return enabled;
+}
+
 void StreamingSparseIngestManager::ingest_chunk(
     int layer_idx,
     const float* k_chunk,
@@ -499,7 +511,20 @@ void StreamingSparseIngestManager::ingest_chunk(
                 skip = true;
             } else if (b->anchor_idx + b->token_count() < short_context_threshold_) {
                 skip = true;
-            } else if (!b->skip_compression_evaluated) {
+            } else if (skip_compression_heuristic_enabled() && !b->skip_compression_evaluated) {
+                // CONTENT-SKIP HEURISTIC — DISABLED BY DEFAULT (MLX parity).
+                //
+                // ACTIVE_RUNTIME/mlx_diffkv_wrapper.py compresses every block that falls
+                // out of the recency window unconditionally (_compress_eligible_blocks →
+                // _flush_oldest_block, no content test). The old content heuristic below
+                // (long-digit / sci-notation / unicode-math / LaTeX / ascii-equation /
+                // definitions / claims / acronym-density) permanently pinned huge fractions
+                // of technical prose DENSE — on a 13k-token technical prompt it kept 31/51
+                // blocks uncompressed, which (a) bloats dense-KV RAM and (b) leaves empty
+                // pool slots that the MLX-parity "attend all blocks" decode then attends as
+                // garbage → gibberish output. Default off matches MLX; re-enable for the
+                // factual/NIAH exact-retrieval path via DIFFKV_SKIP_COMPRESSION_HEURISTIC=1.
+                //
                 // should_skip_compression runs 6 std::regex searches — expensive.
                 // Cache the result: once evaluated, never re-run (block text is immutable).
                 if (b->anchor_idx + b->token_count() <= (int)session_token_ids_.size()) {

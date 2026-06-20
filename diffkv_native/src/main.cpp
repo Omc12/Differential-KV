@@ -2994,21 +2994,50 @@ int main(int argc, char ** argv) {
         std::vector<int> dense_start_positions(n_layers, 0);
         std::vector<int> total_dense_tokens(n_layers, 0);
 
+        if (std::getenv("DIFFKV_VERBOSE")) {
+            auto & b0 = runtime_manager.get_ingest_manager().get_blocks(0);
+            int hist[8] = {0};
+            for (auto & b : b0) { int s = (int)b->state; if (s >= 0 && s < 8) hist[s]++; }
+            std::cerr << "[DiffKV] block-state histogram (layer0, " << b0.size() << " blocks): "
+                      << "Dense=" << hist[0] << " Compressing=" << hist[1]
+                      << " Compressed=" << hist[2] << " PagingOut=" << hist[3]
+                      << " CPU=" << hist[4] << " Reloading=" << hist[5]
+                      << " Invalid=" << hist[6] << " Freed=" << hist[7] << "\n";
+        }
+
         for (int l = 0; l < n_layers; ++l) {
             auto & b_list = runtime_manager.get_ingest_manager().get_blocks(l);
             int curr_token_idx = 0;
             bool found_first = false;
+
+            // Capacity of the dense window buffer (in tokens). The scan below MUST NOT
+            // write past this or it corrupts the heap (was the src/main.cpp:3026 SIGSEGV:
+            // an unbounded memcpy when more dense tokens existed than the lazily-sized
+            // buffer held, or a block with a corrupt active_k length).
+            const int cap_tokens = (int)(active_k_dense[l].size() / (size_t)F_test);
+            int dense_blocks_seen = 0;
 
             std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
             std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
 
             for (auto & block : b_list) {
                 if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                    dense_blocks_seen++;
                     if (!found_first) {
                         dense_start_positions[l] = block->anchor_idx;
                         found_first = true;
                     }
 
+                    // Anchor token (1 token). Stop if the buffer is full.
+                    if (curr_token_idx + 1 > cap_tokens) {
+                        static bool warned_anchor = false;
+                        if (!warned_anchor && l == 0) {
+                            warned_anchor = true;
+                            std::cerr << "[DiffKV] WARNING: dense-window scan hit capacity ("
+                                      << cap_tokens << " tok) at block anchor; truncating.\n";
+                        }
+                        break;
+                    }
                     std::memcpy(
                         active_k_dense[l].data() + curr_token_idx * F_test,
                         block->anchor_k.data(),
@@ -3022,7 +3051,31 @@ int main(int argc, char ** argv) {
                     curr_token_idx++;
 
                     if (!block->active_k.empty()) {
-                        int active_len = block->active_k.size() / F_test;
+                        int active_len = (int)(block->active_k.size() / (size_t)F_test);
+                        // Sanity: a healthy block has at most micro_block_size-1 non-anchor
+                        // tokens. A wild value means a corrupted/aliased block — skip it.
+                        if (active_len <= 0 || active_len > micro_block_size ||
+                            block->active_v.size() != block->active_k.size()) {
+                            static bool warned_bad = false;
+                            if (!warned_bad && l == 0) {
+                                warned_bad = true;
+                                std::cerr << "[DiffKV] WARNING: dense block with bad active_k len="
+                                          << active_len << " (k.size=" << block->active_k.size()
+                                          << " v.size=" << block->active_v.size()
+                                          << " F_test=" << F_test << "); skipping.\n";
+                            }
+                            continue;
+                        }
+                        // Clamp to remaining capacity.
+                        if (curr_token_idx + active_len > cap_tokens) {
+                            static bool warned_active = false;
+                            if (!warned_active && l == 0) {
+                                warned_active = true;
+                                std::cerr << "[DiffKV] WARNING: dense-window scan hit capacity ("
+                                          << cap_tokens << " tok); truncating active span.\n";
+                            }
+                            break;
+                        }
                         std::memcpy(
                             active_k_dense[l].data() + curr_token_idx * F_test,
                             block->active_k.data(),
@@ -3037,18 +3090,26 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
+            if (l == 0 && std::getenv("DIFFKV_VERBOSE")) {
+                std::cerr << "[DiffKV] dense-window scan: layer0 dense_blocks=" << dense_blocks_seen
+                          << " dense_tokens=" << curr_token_idx << " cap=" << cap_tokens
+                          << " total_blocks=" << b_list.size() << "\n";
+            }
             total_dense_tokens[l] = curr_token_idx;
         }
 
         {
             auto & b_list = runtime_manager.get_ingest_manager().get_blocks(0);
             int curr_pos_idx = 0;
+            const int pos_cap = (int)active_positions_dense.size();
             std::fill(active_positions_dense.begin(), active_positions_dense.end(), 0);
             for (auto & block : b_list) {
                 if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
                     for (int32_t t_pos : block->token_indices) {
+                        if (curr_pos_idx >= pos_cap) break;   // bounds guard (mirrors K/V scan)
                         active_positions_dense[curr_pos_idx++] = t_pos;
                     }
+                    if (curr_pos_idx >= pos_cap) break;
                 }
             }
             total_positions = curr_pos_idx;
