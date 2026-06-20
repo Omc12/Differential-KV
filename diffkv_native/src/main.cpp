@@ -2069,7 +2069,21 @@ int main(int argc, char ** argv) {
             engage_threshold = std::stoi(env_et);
         }
         bool decode_use_sparse = (L >= engage_threshold);
-        int required_dense_cap = is_warmup_run ? (L + max_generate + 512) : (decode_use_sparse ? DENSE_WINDOW_CAP : std::max(DENSE_WINDOW_CAP, L + max_generate + 512));
+        // RAM: size the fp32 dense buffers to the ACTUAL dense-window length.
+        //  • sparse path: MLX keeps only (recency_window + block_size) tokens dense
+        //    (mlx_diffkv_wrapper.py max_dense_len), plus the decode-generated tokens. The old
+        //    code used DENSE_WINDOW_CAP (≈engage_threshold 4096 + gen) here — 5-6× oversized,
+        //    wasting ~280MB of fp32 host KV. Right-size it (the MLX-parity fill at ~line 3325
+        //    overwrites the window with exactly these tokens, so the block-scan is redundant here).
+        //  • non-sparse (bypass) path: the window holds the whole prompt → keep the larger cap.
+        // Cap at L+gen: the dense window can never exceed the prompt length (guards against a
+        // huge DIFFKV_RECENCY_WINDOW blowing the allocation up).
+        int sparse_dense_cap = std::min(cfg_recency_window + micro_block_size + max_generate + 512,
+                                        L + max_generate + 512);
+        int required_dense_cap = is_warmup_run
+            ? (L + max_generate + 512)
+            : (decode_use_sparse ? sparse_dense_cap
+                                 : std::max(DENSE_WINDOW_CAP, L + max_generate + 512));
 
         for (int l = 0; l < n_layers; ++l) {
             if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
