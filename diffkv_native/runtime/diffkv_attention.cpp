@@ -427,6 +427,7 @@ void cpu_dense_attention(
             if (positions[t] != base_pos + t) { consecutive = false; break; }
         }
     }
+    if (std::getenv("DIFFKV_DENSE_DIRECT")) consecutive = false; // force per-token cos/sin (no recurrence)
 
     // Pre-rotate K for each KV head.
     std::vector<float> K_rot(T * n_kv_heads * D, 0.0f);
@@ -681,6 +682,22 @@ void custom_attention_op_callback(
             data->active_slot,
             out_dense.data(), lse_dense.data()
         );
+    }
+    if (std::getenv("DIFFKV_DBG_INPUTS") && data->layer_idx == 0) {
+        static int s = 0;
+        if (s < 2) { s++;
+            auto nrm = [&](const float* p, int n){ double a=0; for(int i=0;i<n;++i) a+=(double)p[i]*p[i]; return std::sqrt(a); };
+            fprintf(stderr, "[DBG_IN] L0 T_dense=%d has_rope=%d rope_base=%.1f scale=%.5f pos0=%d posLast=%d\n",
+                    T_dense, (int)has_rope, rope_freq_base, scale,
+                    data->active_positions_dense?data->active_positions_dense[0]:-1,
+                    data->active_positions_dense?data->active_positions_dense[T_dense-1]:-1);
+            fprintf(stderr, "[DBG_IN]  |Q|=%.3f Q[0..4]=%.3f %.3f %.3f %.3f\n", nrm(Q_cpu,n_q_heads*D), Q_cpu[0],Q_cpu[1],Q_cpu[2],Q_cpu[3]);
+            fprintf(stderr, "[DBG_IN]  |K0|=%.3f K0[0..4]=%.3f %.3f %.3f %.3f  |Klast|=%.3f\n",
+                    nrm(data->active_k_dense, D), data->active_k_dense[0],data->active_k_dense[1],data->active_k_dense[2],data->active_k_dense[3],
+                    nrm(data->active_k_dense+(size_t)(T_dense-1)*n_kv_heads*D, D));
+            fprintf(stderr, "[DBG_IN]  |out_dense|=%.3f out[0..4]=%.4f %.4f %.4f %.4f lse=%.2f\n",
+                    nrm(out_dense.data(),D), out_dense[0],out_dense[1],out_dense[2],out_dense[3], lse_dense[0]);
+        }
     }
 
     // Two-way LSE combine (sparse ⊕ dense)

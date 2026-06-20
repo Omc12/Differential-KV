@@ -1223,6 +1223,139 @@ void cpu_dense_attention(const float*, const float*, const float*, const int32_t
                          int,int,int,int,float,bool,float,int,float*,float*);
 }
 
+// DIFFKV_DENSE_CMP=1: standalone comparison of cpu_dense_attention vs ggml rope_ext + plain
+// attention on IDENTICAL data. Both use the SAME ggml-rotated Q. The reference rotates K via
+// ggml rope_ext (exactly the convention the live decode uses for Q); cpu_dense rotates raw K
+// internally. If they diverge, the custom-op dense-window attention has a real bug — localized
+// here with no pool/timing/24-layer noise. Mirrors Qwen2.5-1.5B dims (D=128, nq=12, nkv=2).
+static void run_dense_attn_cmp() {
+    using namespace diffkv;
+    int T = 8;                                    // T past tokens at positions 0..T-1
+    if (const char* e = std::getenv("DIFFKV_DENSE_CMP_T")) T = std::stoi(e);
+    const int D=128, nq=12, nkv=2;
+    const int g = nq / nkv;                       // GQA group = 6
+    const int query_pos = T;                      // query attends past 0..T-1
+    const float scale = 1.0f / std::sqrt((float)D);
+    const float freq = 1000000.0f;                // Qwen2.5 rope_theta
+    const int n_ctx = 32768;
+
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+
+    // Raw host data
+    std::vector<float> q_raw(D * nq), k_raw(T * nkv * D), v_raw(T * nkv * D);
+    for (auto& x : q_raw) x = dist(rng);
+    for (auto& x : k_raw) x = dist(rng);
+    for (auto& x : v_raw) x = dist(rng);
+    // Inject a MASSIVE activation (mimics |K|~820 Qwen layer-0): dim 50 huge for every token,
+    // and a huge Q component so scores reach the real ~500 regime where fp paths may diverge.
+    for (int t=0;t<T;++t) for (int kv=0;kv<nkv;++kv) { k_raw[(t*nkv+kv)*D + 50] = 600.0f + 5.0f*(t%7); }
+    for (int h=0;h<nq;++h) q_raw[h*D + 50] = 8.0f;
+
+    // ── ggml graph: rope_ext on Q (pos=query_pos) and K (pos=0..T-1) ──────────
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    size_t ctx_sz = 16*1024*1024;
+    ggml_init_params ip{ ctx_sz, nullptr, true };
+    ggml_context* ctx = ggml_init(ip);
+    ggml_tensor* qg = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nq, 1);
+    ggml_tensor* kg = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nkv, T);
+    ggml_tensor* pq = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    ggml_tensor* pk = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+    ggml_set_input(qg); ggml_set_input(kg); ggml_set_input(pq); ggml_set_input(pk);
+    ggml_tensor* q_rot = ggml_rope_ext(ctx, qg, pq, nullptr, D, GGML_ROPE_TYPE_NEOX, n_ctx, freq, 1.0f,0.0f,1.0f,0.0f,0.0f);
+    ggml_tensor* k_rot = ggml_rope_ext(ctx, kg, pk, nullptr, D, GGML_ROPE_TYPE_NEOX, n_ctx, freq, 1.0f,0.0f,1.0f,0.0f,0.0f);
+    ggml_set_output(q_rot); ggml_set_output(k_rot);
+    ggml_cgraph* gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, q_rot);
+    ggml_build_forward_expand(gf, k_rot);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    std::vector<int32_t> pqv(1, query_pos), pkv(T); for (int t=0;t<T;++t) pkv[t]=t;
+    ggml_backend_tensor_set(qg, q_raw.data(), 0, q_raw.size()*4);
+    ggml_backend_tensor_set(kg, k_raw.data(), 0, k_raw.size()*4);
+    ggml_backend_tensor_set(pq, pqv.data(), 0, 4);
+    ggml_backend_tensor_set(pk, pkv.data(), 0, T*4);
+    ggml_backend_graph_compute(backend, gf);
+    std::vector<float> q_rot_h(D*nq), k_rot_h(T*nkv*D);
+    ggml_backend_tensor_get(q_rot, q_rot_h.data(), 0, q_rot_h.size()*4);
+    ggml_backend_tensor_get(k_rot, k_rot_h.data(), 0, k_rot_h.size()*4);
+
+    // ── Reference: plain attention on ggml-rotated q_rot · k_rot ──────────────
+    std::vector<float> out_ref(nq*D, 0.0f);
+    for (int h=0; h<nq; ++h) {
+        int kv = h/g;
+        std::vector<float> sc(T); float mx=-1e30f;
+        for (int t=0;t<T;++t){ double d=0; for(int i=0;i<D;++i) d += (double)q_rot_h[h*D+i]*k_rot_h[(t*nkv+kv)*D+i]; sc[t]=(float)d*scale; mx=std::max(mx,sc[t]); }
+        double se=0; for (int t=0;t<T;++t) se+=std::exp(sc[t]-mx);
+        for (int t=0;t<T;++t){ double w=std::exp(sc[t]-mx)/se; for(int i=0;i<D;++i) out_ref[h*D+i]+=(float)(w*v_raw[(t*nkv+kv)*D+i]); }
+    }
+
+    // ── cpu_dense_attention: ggml-rotated Q, RAW K (rotates internally), positions 0..T-1 ──
+    std::vector<float> out_cpu(nq*D, 0.0f), lse(nq, -1e30f);
+    cpu_dense_attention(q_rot_h.data(), k_raw.data(), v_raw.data(), pkv.data(),
+                        T, nq, nkv, D, scale, /*has_rope=*/true, freq, /*anchor_pos=*/0,
+                        out_cpu.data(), lse.data());
+
+    double maxd=0, rn=0; int argmax=0;
+    for (int i=0;i<nq*D;++i){ double dd=std::abs((double)out_cpu[i]-out_ref[i]); if(dd>maxd){maxd=dd;argmax=i;} rn+=(double)out_ref[i]*out_ref[i]; }
+    std::cerr << "[DENSE_CMP] cpu_dense vs plain-ref: maxAbsDiff=" << maxd << " (idx " << argmax << ", head " << argmax/D << ")"
+              << " |ref|=" << std::sqrt(rn) << (maxd < 1e-3*std::sqrt(rn)+1e-4 ? "  PASS" : "  FAIL") << "\n";
+
+    // ── ggml flash_attn_ext on the SAME (q_rot, k_rot, v) — exposes any OUTPUT LAYOUT diff ──
+    {
+        ggml_context* fc = ggml_init(ip);
+        ggml_tensor* qf = ggml_new_tensor_3d(fc, GGML_TYPE_F32, D, nq, 1);
+        ggml_tensor* kf = ggml_new_tensor_3d(fc, GGML_TYPE_F32, D, nkv, T);
+        ggml_tensor* vf = ggml_new_tensor_3d(fc, GGML_TYPE_F32, D, nkv, T);
+        int Tpad = ((T + 31)/32)*32;  // GGML_KQ_MASK_PAD
+        ggml_tensor* mf = ggml_new_tensor_2d(fc, GGML_TYPE_F16, T, Tpad);
+        ggml_set_input(qf); ggml_set_input(kf); ggml_set_input(vf); ggml_set_input(mf);
+        ggml_tensor* qp = ggml_permute(fc, qf, 0,2,1,3);
+        ggml_tensor* kp = ggml_permute(fc, kf, 0,2,1,3);
+        ggml_tensor* vp = ggml_cont(fc, ggml_permute(fc, vf, 0,2,1,3));
+        ggml_tensor* fa = ggml_flash_attn_ext(fc, qp, kp, vp, mf, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_set_output(fa);
+        ggml_cgraph* fg = ggml_new_graph(fc);
+        ggml_build_forward_expand(fg, fa);
+        ggml_backend_buffer_t fb = ggml_backend_alloc_ctx_tensors(fc, backend);
+        ggml_backend_tensor_set(qf, q_rot_h.data(), 0, q_rot_h.size()*4);
+        ggml_backend_tensor_set(kf, k_rot_h.data(), 0, k_rot_h.size()*4);
+        ggml_backend_tensor_set(vf, v_raw.data(), 0, v_raw.size()*4);
+        std::vector<ggml_fp16_t> mz((size_t)T*Tpad, ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(mf, mz.data(), 0, mz.size()*sizeof(ggml_fp16_t));
+        if (ggml_backend_graph_compute(backend, fg) == GGML_STATUS_SUCCESS) {
+            std::vector<float> out_flash(ggml_nelements(fa));
+            ggml_backend_tensor_get(fa, out_flash.data(), 0, out_flash.size()*4);
+            double fd=0; int fi=0;
+            for (int i=0;i<nq*D && i<(int)out_flash.size();++i){ double dd=std::abs((double)out_cpu[i]-out_flash[i]); if(dd>fd){fd=dd;fi=i;} }
+            std::cerr << "[DENSE_CMP] cpu_dense vs FLASH: maxAbsDiff=" << fd << " (idx " << fi << ")"
+                      << (fd < 1e-3*std::sqrt(rn)+1e-3 ? "  PASS" : "  FAIL (layout/math differ!)") << "\n";
+            std::cerr << "[DENSE_CMP] flash[0..5]="; for(int i=0;i<6;++i) std::cerr<<out_flash[i]<<" "; std::cerr<<"\n";
+        } else {
+            std::cerr << "[DENSE_CMP] flash compute FAILED (mask/shape)\n";
+        }
+        ggml_backend_buffer_free(fb); ggml_free(fc);
+    }
+    std::cerr << "[DENSE_CMP] ref [h0 0..5]="; for(int i=0;i<6;++i) std::cerr<<out_ref[i]<<" ";
+    std::cerr << "\n[DENSE_CMP] cpu [h0 0..5]="; for(int i=0;i<6;++i) std::cerr<<out_cpu[i]<<" "; std::cerr<<"\n";
+    // Localize: compare ggml-rotated K to cpu_dense's internal rotation (Function B) for token T-1.
+    {
+        int t = T-1, kv = 0; const int half = D/2;
+        std::cerr << "[DENSE_CMP] K rot check token " << t << " kv0: ggml vs Function-B(manual)\n";
+        double rd=0;
+        for (int i=0;i<half;++i){
+            float inv = 1.0f/std::pow(freq, 2.0f*i/D);
+            float ang = (float)pkv[t]*inv, c=std::cos(ang), s=std::sin(ang);
+            float x=k_raw[(t*nkv+kv)*D+i], y=k_raw[(t*nkv+kv)*D+i+half];
+            float man_lo = x*c - y*s, man_hi = y*c + x*s;
+            rd = std::max(rd, std::max(std::abs((double)man_lo - k_rot_h[(t*nkv+kv)*D+i]),
+                                       std::abs((double)man_hi - k_rot_h[(t*nkv+kv)*D+i+half])));
+        }
+        std::cerr << "[DENSE_CMP]   maxRotDiff(ggml vs FunctionB)=" << rd << (rd<1e-2?"  (rotation matches)":"  (ROTATION DIFFERS!)") << "\n";
+    }
+    ggml_backend_buffer_free(buf); ggml_free(ctx); ggml_backend_free(backend);
+}
+
 // DIFFKV_SELFTEST=1: standalone unit test of build_native_sparse_attn vs execute_cpu_attention
 // with tiny KNOWN inputs on the CPU backend. Each graph tensor gets its OWN buffer (no sched
 // reuse), so a match ⇒ the subgraph MATH is correct (bug is sched buffer-reuse in the full model);
@@ -1350,6 +1483,7 @@ int main(int argc, char ** argv) {
     // token output. Keep them synced so ordering is guaranteed.
 
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
+    if (std::getenv("DIFFKV_DENSE_CMP")) { run_dense_attn_cmp(); return 0; }
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <gguf_model_path> [prompt]" << std::endl;
         return 1;
@@ -1584,7 +1718,16 @@ int main(int argc, char ** argv) {
     const int base_srl_k_keep = srl_k_keep;
     const int base_srl_k_host = srl_k_host;
 
-    diffkv::KVRuntimeManager runtime_manager(rank, micro_block_size, gpu_budget_bytes);
+    // MLX parity: recency_window (dense window size) is configurable; MLX sets it from the
+    // engage env (mlx:324) and keeps NO short-context/header dense. Default short_context=0
+    // (compress everything older than the recency window, like MLX). DIFFKV_RECENCY_WINDOW
+    // overrides the dense window for experiments / parity.
+    int cfg_recency_window = 512;
+    int cfg_short_context = 0;
+    if (const char* e = std::getenv("DIFFKV_RECENCY_WINDOW")) { try { cfg_recency_window = std::stoi(e); } catch (...) {} }
+    if (const char* e = std::getenv("DIFFKV_SHORT_CONTEXT")) { try { cfg_short_context = std::stoi(e); } catch (...) {} }
+    diffkv::KVRuntimeManager runtime_manager(rank, micro_block_size, gpu_budget_bytes,
+                                             cfg_recency_window, cfg_short_context);
     if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
         std::cerr << "Failed to initialize KVRuntimeManager!" << std::endl;
         return 1;
@@ -2662,7 +2805,7 @@ int main(int argc, char ** argv) {
             userdata[l].has_rope = true;
             userdata[l].rope_freq_base = model.get_config().rope_freq_base;
             userdata[l].approximate_attn = approx;
-            userdata[l].ignore_c = true;
+            userdata[l].ignore_c = false;  // attend the current/self token (MLX ingest_streaming + pure-dense both do)
             userdata[l].srl_state = &srl_state;
             userdata[l].W_proj = W_proj_host.data();
             userdata[l].desc_dim = desc_dim;
@@ -3164,44 +3307,30 @@ int main(int argc, char ** argv) {
             }
             total_positions = L;
         } else {
-            // ── Recency window supplement (matches ACTIVE_RUNTIME recency_window=512) ──
-            // After the DenseResident block scan above, total_dense_tokens[l] is often 0
-            // at long contexts because the async compressor has compressed all blocks.
-            // Python's assemble_dense_window_kv keeps `recency_window` exact tokens dense
-            // regardless of compression state (mlx_diffkv_wrapper.py).
-            // Fix: supplement the dense window with the last recency_window tokens from
-            // k_activations/v_activations, which hold all L prefill tokens' raw K/V.
-            const int recency_window = 512;
-            const int recency_start = std::max(0, L - recency_window);
-            const int recency_len   = L - recency_start;
-
+            // ── MLX-parity dense window ───────────────────────────────────────────
+            // MLX (mlx_diffkv_wrapper.py) keeps the most-recent (recency_window + block_size)
+            // tokens DENSE and CONTIGUOUS, sourced from the raw prefill K/V. The earlier
+            // block-scan filled active_k_dense from per-block storage (block->anchor_k/active_k),
+            // which diverged from the actual prefill activations — the dense window the sparse
+            // decode attends was WRONG → gibberish, even though the IDENTICAL tokens are coherent
+            // through the pure-dense path (which fills active_k_dense from k_activations). So:
+            // OVERWRITE the dense window with a contiguous slice of k_activations/v_activations,
+            // exactly like the dense path does (line ~3163), and use contiguous positions.
+            int dense_cap   = (int)(active_k_dense[0].size() / (size_t)F_test);
+            int mlx_dense   = std::min(L, cfg_recency_window + micro_block_size);  // MLX max_dense_len
+            int dense_win   = std::min(mlx_dense, dense_cap);
+            int dense_start = std::max(0, L - dense_win);
             for (int l = 0; l < n_layers; ++l) {
-                if (total_dense_tokens[l] < recency_len) {
-                    // How many recency tokens are NOT already covered by the block scan?
-                    // Block scan tokens start at dense_start_positions[l]; recency tokens
-                    // start at recency_start. Anything already covered, skip.
-                    // Simplest safe approach: overwrite dense window with recency tokens,
-                    // as the recency tokens are a strict superset of the DenseResident ones
-                    // (recent blocks are both DenseResident AND in the recency window).
-                    for (int i = 0; i < recency_len * F_test; ++i) {
-                        active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][recency_start * F_test + i]);
-                        active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][recency_start * F_test + i]);
-                    }
-                    total_dense_tokens[l] = recency_len;
-                    dense_start_positions[l] = recency_start;
+                for (int i = 0; i < dense_win * F_test; ++i) {
+                    active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][(size_t)dense_start * F_test + i]);
+                    active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][(size_t)dense_start * F_test + i]);
                 }
+                total_dense_tokens[l]    = dense_win;
+                dense_start_positions[l] = dense_start;
             }
-
-            // Update active_positions_dense to cover the recency window (layer-0 only,
-            // positions are shared across layers).
-            if (total_positions < recency_len) {
-                for (int i = 0; i < recency_len; ++i) {
-                    active_positions_dense[i] = recency_start + i;
-                }
-                total_positions = recency_len;
-            }
+            for (int i = 0; i < dense_win; ++i) active_positions_dense[i] = dense_start + i;
+            total_positions = dense_win;
         }
-
 
         const char* env_td = std::getenv("DIFFKV_TIME_DECODE");
         bool time_decode = (env_td && std::string(env_td) == "1");
