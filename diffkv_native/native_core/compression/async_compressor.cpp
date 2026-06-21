@@ -20,9 +20,11 @@ AsyncCompressor::~AsyncCompressor() {
 bool AsyncCompressor::start() {
     if (running_.load(std::memory_order_acquire)) return true;
     running_.store(true, std::memory_order_release);
-    // 1 worker thread for preset low — avoids two SVD threads competing with decode.
-    // ACTIVE_RUNTIME uses a ThreadPoolExecutor(max_workers=1) for the same reason.
-    int num_threads = 1;
+    // Default to a few workers: long-context prefill submits ~80 SVD jobs and the decode now
+    // DRAINS them (wait_until_idle) before generating, so a single background thread serialized
+    // them into a ~150s stall. A handful of UTILITY-QoS workers drains ~80 blocks in a few s
+    // without starving the decode. Override with DIFFKV_COMPRESSOR_THREADS.
+    int num_threads = std::max(2, std::min(6, (int)(std::thread::hardware_concurrency() / 2)));
     if (const char* env_nt = std::getenv("DIFFKV_COMPRESSOR_THREADS")) {
         num_threads = std::max(1, std::stoi(env_nt));
     }
@@ -91,12 +93,14 @@ void AsyncCompressor::worker_loop() {
     // the asyncio event loop. Here we achieve the same by setting the thread
     // to the lowest scheduler class the OS offers.
 #ifdef __APPLE__
-    // QOS_CLASS_BACKGROUND: only runs when no other thread needs the CPU.
-    // Decode thread (DEFAULT QoS) and Metal GPU drivers always preempt this.
-    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+    // QOS_CLASS_UTILITY: runs concurrently on performance cores but below the DEFAULT-QoS decode
+    // thread. BACKGROUND was effectively unschedulable while the decode loop waits to DRAIN the
+    // queue (the OS parks BACKGROUND on efficiency cores even when P-cores are idle) → ~150s
+    // stalls. UTILITY drains fast without preempting decode/Metal.
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #else
-    // Linux: set nice +19 (lowest priority) for this thread
-    setpriority(PRIO_PROCESS, 0, 19);
+    // Linux: set nice +10 (lower priority, but not the absolute floor) for this thread
+    setpriority(PRIO_PROCESS, 0, 10);
 #endif
 
     while (running_.load(std::memory_order_acquire)) {
