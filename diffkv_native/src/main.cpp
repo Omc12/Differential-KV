@@ -918,6 +918,32 @@ struct ggml_cgraph * build_decode_graph(
                 struct ggml_tensor * dkr_roped = ggml_rope_ext(ctx, dkr3, native_dense_pos, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
                 struct ggml_tensor * dkr_flat = ggml_reshape_2d(ctx, dkr_roped, head_dim * config.n_head_kv, native_maxd);
                 if (std::getenv("DIFFKV_DBG_NOROPE")) dkr_flat = native_dense_kr[l]; // DEBUG: bypass dense rope
+                // Flash-decoding in-graph fused op: faster than the subgraph at long context
+                // (24k: ~1.5x), coherent (== subgraph). DEFAULT ON; DIFFKV_NO_FUSED_OP to disable.
+                static const bool use_fused_op = (std::getenv("DIFFKV_NO_FUSED_OP") == nullptr);
+                if (use_fused_op) {
+                    // ── In-graph fused ggml-metal op (GGML_OP_DIFFKV_ATTN) ──
+                    // Reads RAW pool device tensors + rotates in-kernel (has_rope), like the custom
+                    // op. First-cut plumbing: dense = full native buffer (stale tail ≈0 after
+                    // softmax); current-token + exact dense-len are a follow-up refinement.
+                    diffkv::NativeBlockPool* pool = userdata[l].kv_engine;
+                    const int F_kv = head_dim * config.n_head_kv;
+                    struct ggml_diffkv_attn_params p = {
+                        config.n_head, config.n_head_kv, pool->get_rank(), pool->get_S_max(), head_dim,
+                        srl_k_keep, native_maxd, native_maxd,
+                        1.0f / std::sqrt((float)head_dim), userdata[l].has_rope ? 1 : 0,
+                        config.rope_freq_base, userdata[l].approximate_attn ? 1 : 0,
+                        (int) pool->get_seq_lens()->ne[0]
+                    };
+                    attn_out = ggml_diffkv_attn(ctx, q_rope_flat, selected_slots,
+                        pool->get_U(), pool->get_U_scale(), pool->get_VK(), pool->get_VV(),
+                        pool->get_anchors_K(), pool->get_anchors_V(), pool->get_seq_lens(),
+                        pool->get_scales(), pool->get_anchor_positions(),
+                        native_dense_kr[l], native_dense_v[l], native_dense_pos,
+                        native_dense_mask,
+                        ggml_reshape_1d(ctx, k, F_kv), ggml_reshape_1d(ctx, v, F_kv), position,
+                        p);
+                } else
                 attn_out = build_native_sparse_attn(
                     ctx, q_rope, k_rope_n, v, dkr_flat, native_dense_v[l], native_dense_mask, native_maxd,
                     selected_slots, native_dup_tri, native_half, userdata[l].kv_engine,
