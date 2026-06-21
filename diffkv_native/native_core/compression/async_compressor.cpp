@@ -59,12 +59,30 @@ bool AsyncCompressor::submit(const CompressJob& job) {
         return false;
     }
     queue_.push(job);
+    jobs_submitted_.fetch_add(1, std::memory_order_relaxed);
     queue_cv_.notify_one();
     return true;
 }
 
 void AsyncCompressor::compress_sync(const CompressJob& job) {
     process_job(job);
+}
+
+void AsyncCompressor::wait_until_idle(uint64_t timeout_ms) {
+    // Block until every job pushed so far has been dequeued + handled (worker increments
+    // jobs_processed_ after each process_job, including early-returns). The caller must have
+    // finished submitting before calling this. Sleeping yields CPU to the background-QoS
+    // workers so they actually run. The timeout is a safety net against a worker crash.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (jobs_processed_.load(std::memory_order_acquire) <
+           jobs_submitted_.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "[Compressor] wait_until_idle TIMEOUT: processed="
+                      << jobs_processed_.load() << " submitted=" << jobs_submitted_.load() << std::endl;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void AsyncCompressor::worker_loop() {

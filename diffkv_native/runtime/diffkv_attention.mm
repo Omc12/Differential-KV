@@ -736,6 +736,7 @@ void execute_metal_attention(
         MTLSize numThreadgroups = MTLSizeMake(n_q_heads, 1, 1);
         [encoder dispatchThreadgroups:numThreadgroups threadsPerThreadgroup:threadsPerTG];
         [encoder endEncoding];
+        auto t_k0 = std::chrono::high_resolution_clock::now();
         [commandBuffer commit];
 
         // ── Spin-wait: correct + fast for our tiny (~0.05ms) sparse kernel ────
@@ -747,7 +748,7 @@ void execute_metal_attention(
             // tiny spin — kernel finishes in microseconds
         }
         auto t_spin_end = std::chrono::high_resolution_clock::now();
-        g_accumulated_wait_ms += std::chrono::duration<double, std::milli>(t_spin_end - t_spin_end).count();
+        g_accumulated_wait_ms += std::chrono::duration<double, std::milli>(t_spin_end - t_k0).count();
 
         // Copy temp output back if dst wasn't page-aligned (rare path)
         if (temp_out_ptr != nullptr) {

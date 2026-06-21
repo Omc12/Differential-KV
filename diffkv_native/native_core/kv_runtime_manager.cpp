@@ -531,6 +531,14 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
 }
 
 void KVRuntimeManager::wait_for_compressor() {
+    // Deterministic drain FIRST: block until every submitted SVD job is fully processed
+    // (processed == submitted). This replaces the old per-slot snapshot+5s-deadline scheme that
+    // raced — under background-QoS workers + system load the SVDs sometimes weren't done, so the
+    // snapshot missed them / the deadline expired and half-compressed blocks were uploaded →
+    // non-deterministic long-context word-salad. After this returns, all blocks are
+    // CompressedResident, so the slot pass below just pushes them host→device.
+    if (compressor_) compressor_->wait_until_idle();
+
     // Gather all pool slots that are currently in Compressing state in any layer
     int n_slots = engines_[0]->get_U()->ne[2];
     std::vector<int> pending_slots;
@@ -547,9 +555,12 @@ void KVRuntimeManager::wait_for_compressor() {
         }
     }
 
-    // Second pass: wait for all pending slots with a global 5-second timeout
-    // (prevents hanging on pathological cases like SVD thread crash)
-    auto global_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    // Second pass: wait for all pending slots with a global 60-second timeout
+    // (prevents hanging on pathological cases like SVD thread crash). NOTE: the old 5s deadline
+    // was THE long-context race — at ~80 blocks under background-QoS compressor threads the SVDs
+    // sometimes outran 5s, so wait_for_compressor returned early and upload_slot pushed
+    // HALF-COMPRESSED blocks → non-deterministic word-salad (block count varied 76↔78 run-to-run).
+    auto global_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     for (int pool_idx : pending_slots) {
         for (int l = 0; l < n_layers_; ++l) {
             while (std::chrono::steady_clock::now() < global_deadline) {
@@ -703,7 +714,12 @@ void KVRuntimeManager::sync_device_for_native() {
             if (block->pool_idx != -1 && block->pool_idx < ns) {
                 slot_to_block[block->pool_idx] = block.get();
                 BlockState st = engines_[l]->get_state_table().get(block->pool_idx);
-                if (st == BlockState::CompressedResident || st == BlockState::DenseResident) {
+                // Any block holding valid KV data must have its DEVICE tensors (anchorK_rot/
+                // VK_rot/U_f16/valid_mask) uploaded for the native subgraph — not just
+                // CompressedResident/DenseResident. Routed slots in Compressing/CPUResident/
+                // Reloading were left with device=0 (host valid), so the native saw zero K for
+                // them → glitches that DIFFKV_SYNC_ALL masked. Include all non-empty states.
+                if (st != BlockState::Freed && st != BlockState::Invalid) {
                     active_slots[block->pool_idx] = true;
                 }
             }

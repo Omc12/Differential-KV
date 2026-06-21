@@ -64,6 +64,10 @@ public:
     uint64_t get_jobs_processed() const { return jobs_processed_.load(std::memory_order_relaxed); }
     uint64_t get_jobs_dropped() const { return jobs_dropped_.load(std::memory_order_relaxed); }
     uint64_t get_queue_overflows() const { return queue_overflows_.load(std::memory_order_relaxed); }
+    uint64_t get_jobs_submitted() const { return jobs_submitted_.load(std::memory_order_relaxed); }
+    // Block until every submitted job has been fully processed (processed+dropped == submitted).
+    // Deterministic drain (no snapshot/deadline race): the caller must have finished submitting.
+    void wait_until_idle(uint64_t timeout_ms = 120000);
 
 private:
     void worker_loop();
@@ -88,6 +92,7 @@ private:
     std::atomic<uint64_t> jobs_processed_{0};
     std::atomic<uint64_t> jobs_dropped_{0};
     std::atomic<uint64_t> queue_overflows_{0};
+    std::atomic<uint64_t> jobs_submitted_{0};
 };
 
 } // namespace diffkv

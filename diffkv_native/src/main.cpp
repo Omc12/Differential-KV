@@ -36,15 +36,16 @@ static bool is_native_attn_enabled() {
     if (e) {
         return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
     }
-    // DISABLED BY DEFAULT. The native ggml-fused sparse-attention subgraph
-    // (build_native_sparse_attn) is a known-broken experiment: it produces
-    // word-salad / inflated-logit output on real long prompts (the working
-    // custom-op path execute_*_attention is correct vs MLX). The native path
-    // also only engages when the factual store is empty at graph-build time —
-    // which on most long prompts means "the async factual build hasn't finished
-    // yet" — so it silently hijacked the live decode path and was THE cause of
-    // the long-prompt gibberish. Opt in with DIFFKV_NATIVE_ATTN=1 for kernel work.
-    return false;
+    // ENABLED BY DEFAULT (2026-06-21). The native ggml-fused sparse-attention subgraph
+    // (build_native_sparse_attn) now matches the CPU custom op byte-for-byte on the working
+    // context range — the prior word-salad was two integration bugs, both fixed: (1) the device
+    // tensor sync only covered CompressedResident/DenseResident slots (others had device K=0),
+    // and (2) the dense-window slide left the native dense buffer stale. Self-test passes exact
+    // (maxAbsDiff ~6e-8) and it decodes ~1.2-1.8x faster than the per-layer custom-op dispatch.
+    // Engages only when the factual store is empty (default) — factual/NIAH sessions fall back to
+    // the custom op. Opt OUT with DIFFKV_NATIVE_ATTN=0. NOTE: this does NOT fix the separate
+    // DiffKV-at-scale gibberish above ~13k tokens / ~50 blocks (custom op fails identically there).
+    return true;
 }
 
 struct ggml_backend_owner {
@@ -555,6 +556,74 @@ static struct ggml_tensor * build_native_sparse_attn(
     // (DIFFKV_SELFTEST, no buffer reuse) proves the MATH is exact, so this is the real fix.
     for (struct ggml_tensor* t : {aKr, VKr, VVs, aVs, Usel, Msel, USf, BSf, su, bs, su_bs, anc_mask, dup_add})
         ggml_set_output(t);
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // BATCHED PATH (DIFFKV_BATCHED_ATTN): MLX-style — process BOTH kv-heads at once via
+    // ggml batched mul_mat (batch dims = nkv, K) instead of the per-kv loop below. ~Halves
+    // the op count (fewer Metal dispatches). Validated vs the loop / CPU by DIFFKV_SELFTEST.
+    // Mirrors ACTIVE_RUNTIME compute_decode_attention_static (repeat KV→H_q, no per-head loop).
+    static const bool use_batched = (std::getenv("DIFFKV_BATCHED_ATTN") != nullptr);
+    if (use_batched) {
+        auto PC = [&](struct ggml_tensor* t, int a0,int a1,int a2,int a3){ return ggml_cont(ctx, ggml_permute(ctx, t, a0,a1,a2,a3)); };
+        struct ggml_tensor* Q3 = ggml_reshape_3d(ctx, Q2, D, group, nkv);                   // [D,group,nkv]
+
+        // ── Sparse-pool scores ──
+        struct ggml_tensor* aKr_b = PC(aKr, 0,2,1,3);                                         // [D,K,nkv]
+        struct ggml_tensor* anc_s = ggml_scale(ctx, ggml_mul_mat(ctx, aKr_b, Q3), scale);     // [K,group,nkv]
+        struct ggml_tensor* VKr_b = PC(VKr, 0,3,1,2);                                          // [D,R,K,nkv]
+        struct ggml_tensor* Qb    = ggml_reshape_4d(ctx, Q3, D, group, 1, nkv);               // [D,group,1,nkv]
+        struct ggml_tensor* qproj = PC(ggml_scale(ctx, ggml_mul_mat(ctx, Qb, VKr_b), scale), 1,0,2,3); // [R,group,K,nkv] (scale baked)
+        struct ggml_tensor* Usel4 = ggml_reshape_4d(ctx, Usel, R, S, K, 1);                   // [R,S,K,1]
+        struct ggml_tensor* delta = ggml_mul_mat(ctx, Usel4, qproj);                           // [S,group,K,nkv]
+        struct ggml_tensor* anc_b = ggml_reshape_4d(ctx, PC(anc_s,1,0,2,3), 1, group, K, nkv);// [1,group,K,nkv]
+        struct ggml_tensor* ts = ggml_add(ctx, ggml_mul(ctx, delta, ggml_reshape_4d(ctx, su_bs, 1,1,K,1)), anc_b); // [S,group,K,nkv]
+        ts = ggml_add(ctx, ts, ggml_reshape_4d(ctx, Msel, S, 1, K, 1));                        // + token validity mask
+        struct ggml_tensor* allsp = ggml_concat(ctx, ts, anc_b, 0);                            // [S+1,group,K,nkv] (anchor entry last)
+        allsp = ggml_add(ctx, allsp, ggml_reshape_4d(ctx, dup_add, 1,1,K,1));                  // -inf on duplicate slots
+        struct ggml_tensor* flat_sp = ggml_reshape_3d(ctx, PC(allsp, 0,2,1,3), (S+1)*K, group, nkv); // [(S+1)*K,group,nkv]
+
+        // ── Dense-window scores ──
+        struct ggml_tensor* dkr_b = PC(ggml_reshape_3d(ctx, dense_kr, D, nkv, MAXD), 0,2,1,3); // [D,MAXD,nkv]
+        struct ggml_tensor* ds = ggml_scale(ctx, ggml_mul_mat(ctx, dkr_b, Q3), scale);          // [MAXD,group,nkv]
+        ds = ggml_add(ctx, ds, ggml_reshape_3d(ctx, dense_mask, MAXD, 1, 1));
+
+        // ── Softmax over sparse ∪ dense (∪ current) ──
+        struct ggml_tensor *allsc, *w_cs = nullptr;
+        if (ignore_c) {
+            allsc = ggml_concat(ctx, flat_sp, ds, 0);                                          // [(S+1)*K+MAXD,group,nkv]
+        } else {
+            struct ggml_tensor* ck = ggml_reshape_3d(ctx, k_rope, D, 1, nkv);                  // [D,1,nkv] current K
+            struct ggml_tensor* cs = ggml_scale(ctx, ggml_mul_mat(ctx, ck, Q3), scale);         // [1,group,nkv]
+            allsc = ggml_concat(ctx, ggml_concat(ctx, flat_sp, ds, 0), cs, 0);                  // [..+1,group,nkv]
+        }
+        struct ggml_tensor* w = ggml_soft_max(ctx, allsc);                                      // [E,group,nkv]
+        const int spN = (S+1)*K;
+        struct ggml_tensor* w_sp = ggml_cont(ctx, ggml_view_3d(ctx, w, spN,  group, nkv, w->nb[1], w->nb[2], 0));
+        struct ggml_tensor* w_ds = ggml_cont(ctx, ggml_view_3d(ctx, w, MAXD, group, nkv, w->nb[1], w->nb[2], (size_t)spN*w->nb[0]));
+        if (!ignore_c)
+            w_cs = ggml_cont(ctx, ggml_view_3d(ctx, w, 1, group, nkv, w->nb[1], w->nb[2], (size_t)(spN+MAXD)*w->nb[0]));
+
+        // ── Sparse value (project-then-attend) ──
+        struct ggml_tensor* wsp4  = ggml_reshape_4d(ctx, w_sp, S+1, K, group, nkv);            // [S+1,K,group,nkv]
+        struct ggml_tensor* w_tok = PC(ggml_view_4d(ctx, wsp4, S, K, group, nkv, wsp4->nb[1], wsp4->nb[2], wsp4->nb[3], 0), 0,2,1,3); // [S,group,K,nkv]
+        struct ggml_tensor* w_anc = PC(ggml_view_4d(ctx, wsp4, 1, K, group, nkv, wsp4->nb[1], wsp4->nb[2], wsp4->nb[3], (size_t)S*wsp4->nb[0]), 0,2,1,3); // [1,group,K,nkv]
+        struct ggml_tensor* w_total = ggml_add(ctx, ggml_sum_rows(ctx, w_tok), w_anc);          // [1,group,K,nkv]
+        struct ggml_tensor* w_tot_K = PC(ggml_reshape_3d(ctx, w_total, group, K, nkv), 1,0,2,3);// [K,group,nkv]
+        struct ggml_tensor* term1 = ggml_mul_mat(ctx, PC(aVs, 1,2,0,3), w_tot_K);               // [D,group,nkv]
+        struct ggml_tensor* UselT = ggml_reshape_4d(ctx, PC(Usel,1,0,2,3), S, R, K, 1);         // [S,R,K,1]
+        struct ggml_tensor* wproj = ggml_mul(ctx, ggml_mul_mat(ctx, UselT, w_tok), ggml_reshape_4d(ctx, su, 1,1,K,1)); // [R,group,K,nkv]
+        struct ggml_tensor* t2 = ggml_mul(ctx, ggml_mul_mat(ctx, PC(VVs, 1,3,0,2), wproj), ggml_reshape_4d(ctx, bs, 1,1,K,1)); // [D,group,K,nkv]
+        struct ggml_tensor* term2 = ggml_reshape_3d(ctx, ggml_sum_rows(ctx, PC(t2,1,2,0,3)), D, group, nkv); // sum over K → [D,group,nkv]
+
+        // ── Dense value (+ current) ──
+        struct ggml_tensor* out_dense = ggml_mul_mat(ctx, PC(ggml_reshape_3d(ctx, dense_v, D, nkv, MAXD), 1,2,0,3), w_ds); // [D,group,nkv]
+        struct ggml_tensor* kv_out = ggml_add(ctx, ggml_add(ctx, term1, term2), out_dense);     // [D,group,nkv]
+        if (!ignore_c) {
+            struct ggml_tensor* cur_out = ggml_mul_mat(ctx, ggml_reshape_3d(ctx, v_cur, 1, D, nkv), w_cs); // [D,group,nkv]
+            kv_out = ggml_add(ctx, kv_out, cur_out);
+        }
+        return ggml_cont(ctx, ggml_reshape_2d(ctx, ggml_cont(ctx, kv_out), D*group*nkv, 1));     // [n_embd,1]
+    }
 
     std::vector<struct ggml_tensor*> kv_outs(nkv);
     for (int kv = 0; kv < nkv; ++kv) {
@@ -3367,6 +3436,80 @@ int main(int argc, char ** argv) {
         bool persistent_buffers_initialized = false;
         int persistent_buffer_base_pos = 0;  // Track ring buffer start position
 
+        // DIAGNOSTIC (DIFFKV_SCAN_POOL): after compression, scan every compressed slot for
+        // NaN/Inf/extreme values — a single poisoned block (e.g. degenerate SVD) NaNs the whole
+        // softmax → long-context word-salad. Drain the compressor first so the pool is final.
+        if (std::getenv("DIFFKV_SCAN_POOL")) {
+            runtime_manager.wait_for_compressor();
+            const int F = kv_heads * head_dim;
+            for (int l = 0; l < n_layers; ++l) {
+                auto* pool = kv_engines[l].get();
+                int ns = pool->get_seq_lens()->ne[0];
+                int rk = pool->get_rank();
+                const ggml_fp16_t* aK = pool->get_host_anchors_K();
+                const ggml_fp16_t* VK = pool->get_host_VK();
+                const ggml_fp16_t* VV = pool->get_host_VV();
+                const int32_t* sl = pool->get_host_seq_lens();
+                const int32_t* ap = pool->get_host_anchor_positions();
+                int nbad = 0, nactive = 0, gmax_slot = -1; double gmax = 0;
+                int ap_min = INT32_MAX, ap_max = INT32_MIN, ap_dups = 0;
+                std::vector<int> aps;
+                for (int s = 0; s < ns; ++s) {
+                    if (sl[s] <= 0) continue;
+                    nactive++;
+                    if (ap[s] < ap_min) ap_min = ap[s];
+                    if (ap[s] > ap_max) ap_max = ap[s];
+                    aps.push_back(ap[s]);
+                    auto chk = [&](float v){ if (!std::isfinite(v)) nbad++; else { float a = std::fabs(v); if (a > gmax) { gmax = a; gmax_slot = s; } } };
+                    for (int i = 0; i < F; ++i)               chk(ggml_fp16_to_fp32(aK[(size_t)s*F + i]));
+                    for (int i = 0; i < rk*F; ++i)            chk(ggml_fp16_to_fp32(VK[(size_t)s*(size_t)rk*F + i]));
+                    for (int i = 0; i < rk*F; ++i)            chk(ggml_fp16_to_fp32(VV[(size_t)s*(size_t)rk*F + i]));
+                }
+                std::sort(aps.begin(), aps.end());
+                for (size_t i = 1; i < aps.size(); ++i) if (aps[i] == aps[i-1]) ap_dups++;
+                if (l < 4 || nbad > 0 || gmax > 1e3)
+                    std::cerr << "[SCAN_POOL] L" << l << " active=" << nactive << " naninf=" << nbad
+                              << " max|x|=" << gmax << " ap_range=[" << ap_min << "," << ap_max << "] ap_dups=" << ap_dups << "\n";
+            }
+            // Layer-0 block census: where are blocks lost? (state + missing-slot)
+            {
+                auto & blks = runtime_manager.get_ingest_manager().get_blocks(0);
+                int nDense=0, nComp=0, nCompd=0, nOther=0, nNoSlot=0, total=0;
+                for (auto & b : blks) {
+                    total++;
+                    if (b->pool_idx == -1) nNoSlot++;
+                    BlockState st = (b->pool_idx>=0) ? kv_engines[0]->get_state_table().get(b->pool_idx) : b->state;
+                    if      (st == BlockState::DenseResident)      nDense++;
+                    else if (st == BlockState::Compressing)        nComp++;
+                    else if (st == BlockState::CompressedResident) nCompd++;
+                    else nOther++;
+                }
+                std::cerr << "[SCAN_CENSUS] L0 total_blocks=" << total << " dense=" << nDense
+                          << " compressing=" << nComp << " compressed=" << nCompd
+                          << " other=" << nOther << " no_slot=" << nNoSlot << "\n";
+            }
+        }
+
+        // ── CORRECTNESS FIX (long-context race): finish the SRL pipeline BEFORE decoding ──
+        // The background srl_build_thread (compressor drain → update_descriptors → GPU-sync signal
+        // → factual build) was overlapped with the decode loop and swapped in mid-generation (the
+        // per-step check below). At long context the build OUTLIVES a short generation, so every
+        // token routed over half-built block descriptors + unsynced device tensors → the routing
+        // (semantic_search/anchor_screen) selected garbage slots → non-deterministic word-salad
+        // (greedy output differed run-to-run; short prompts finished the build in time, so they
+        // were coherent). Wait synchronously here on the main thread: the lost prefill/decode
+        // overlap is cheap next to the correctness it buys. The per-step swap below is now a no-op.
+        if (!srl_swapped) {
+            if (srl_build_thread.joinable()) srl_build_thread.join();
+            if (srl_needs_gpu_sync.load(std::memory_order_acquire)) {
+                runtime_manager.sync_device_for_native();
+            }
+            srl_state = std::move(srl_state_pending);
+            srl_swapped = true;
+            for (auto & v : k_activations) std::vector<ggml_fp16_t>().swap(v);
+            for (auto & v : v_activations) std::vector<ggml_fp16_t>().swap(v);
+        }
+
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
 
@@ -3972,6 +4115,11 @@ int main(int argc, char ** argv) {
                 } else {
                     total_positions = 0;
                 }
+                // The native fused path keeps its OWN device dense buffer that's filled
+                // INCREMENTALLY (append new token). A slide shifts active_k_dense out from under
+                // it, so force a full re-fill next step (otherwise native_dense_kr goes stale →
+                // gradual degradation into repetition loops). No-op for the custom-op path.
+                full_upload_needed = true;
             }
             t_dense_append_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_dense_append_start).count();
             auto t_step_end = std::chrono::high_resolution_clock::now();
