@@ -41,6 +41,8 @@ public:
     bool native_attn_enabled() const { return native_attn_; }
     // Must be called once after initialize(), before any upload_slot(), to supply RoPE params.
     void set_rope_config(bool has_rope, float rope_freq_base) { has_rope_ = has_rope; rope_freq_base_ = rope_freq_base; }
+    float get_rope_freq_base() const { return rope_freq_base_; }
+    bool  get_has_rope() const { return has_rope_; }
     struct ggml_tensor * get_anchors_K() { return anchors_K_; }
     struct ggml_tensor * get_anchors_V() { return anchors_V_; }
     struct ggml_tensor * get_seq_lens() { return seq_lens_; }
