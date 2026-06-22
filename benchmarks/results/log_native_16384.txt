@@ -1,0 +1,2 @@
+
+__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 128, "prefill_s": 35.2386, "decode_s": 6.922424207965378, "decode_tps": 18.490632205509037, "ttft_s": 35.60126137500629, "mx_peak_gb": null, "output_preview": "### Secret Passcode: 123\n\nThe secret passcode hidden in the document is **123**.\n\n### Explanation of Consistency Models in Distributed Systems\n\n#### 1. Linearizability\nLinearizability is a property of", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 16384, "gen_target": 128, "worker_wall_s": 45.08760170801543}

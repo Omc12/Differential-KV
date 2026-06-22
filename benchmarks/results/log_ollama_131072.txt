@@ -1,0 +1,2 @@
+
+__BENCH_RESULT__ {"prompt_tokens": 32767, "gen_tokens": 1, "prefill_s": 86.688434, "decode_s": 1e-06, "decode_tps": 1000000.0, "ttft_s": null, "mx_peak_gb": null, "ollama_size_vram_gb": 2.109430824, "ollama_size_gb": 2.109430824, "output_preview": "###", "needle_found": false, "status": "ok", "engine": "ollama", "ctx_target": 131072, "gen_target": 128, "worker_wall_s": 88.64078429195797}

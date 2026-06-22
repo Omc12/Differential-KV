@@ -1,0 +1,7 @@
+[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
+[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 99864.38it/s]
+[DiffKV MLX] Loaded model in 1.17s
+
+__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 17.431072833016515, "decode_s": 3.133969291986432, "decode_tps": 40.842774154582926, "ttft_s": null, "mx_peak_gb": 1.632835144, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, consistency models define the contract between a data store ", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 24.722029833006673}

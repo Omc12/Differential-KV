@@ -1,0 +1,2 @@
+
+__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 60, "prefill_s": 13.8008, "decode_s": 2.5758725840132684, "decode_tps": 23.293077604994977, "ttft_s": 13.930522250011563, "mx_peak_gb": null, "output_preview": "### Secret Passcode: First, state the secret passcode hidden in the document above. Then write a thorough, multi-paragraph explanation of consistency models in distributed systems, covering linearizab", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 19.4849065830349}
