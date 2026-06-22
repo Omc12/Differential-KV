@@ -1696,12 +1696,17 @@ static void run_attn_cmp() {
     if (const char* e = std::getenv("DIFFKV_RANK")) rank = std::max(1, atoi(e));
     const bool HR = (std::getenv("DIFFKV_ATTN_CMP_ROPE") != nullptr);
     const bool approximate = (std::getenv("DIFFKV_ATTN_CMP_EXACT") == nullptr);
+    const bool use_resid = (std::getenv("DIFFKV_ATTN_CMP_RESID") != nullptr);
+    int NB = 1;  // number of blocks (DIFFKV_ATTN_CMP_BLOCKS): >1 probes the multi-block 8k+ bug
+    if (const char* e = std::getenv("DIFFKV_ATTN_CMP_BLOCKS")) NB = std::max(1, atoi(e));
     const float scale = 1.0f / std::sqrt((float)D), freq = 10000.0f;
-    const int needle = S / 2;         // 32
     const int NCOMP = 18;
+    const int T = NB * S;                       // total tokens across all blocks
+    const int needle_g = (NB / 2) * S + S / 2;  // a needle in the middle block
 
-    std::vector<float> K((size_t)S * F), V((size_t)S * F);
-    for (int s = 0; s < S; ++s)
+    // ── Deterministic high-rank K/V for T global tokens + a distinctive needle ──
+    std::vector<float> K((size_t)T * F), V((size_t)T * F);
+    for (int s = 0; s < T; ++s)
         for (int f = 0; f < F; ++f) {
             float ak = 0.0f, av = 0.0f;
             for (int k = 1; k <= NCOMP; ++k) {
@@ -1711,100 +1716,113 @@ static void run_attn_cmp() {
             }
             K[(size_t)s * F + f] = ak; V[(size_t)s * F + f] = av;
         }
-    for (int f = 0; f < F; ++f) {     // distinctive needle (well within captured subspace: low-k)
-        K[(size_t)needle * F + f] += 4.0f * std::cos(6.2831853f * 3 * f / F + 0.9f);
-        V[(size_t)needle * F + f] += 4.0f * std::sin(6.2831853f * 3 * f / F + 0.4f);
+    for (int f = 0; f < F; ++f) {
+        K[(size_t)needle_g * F + f] += 4.0f * std::cos(6.2831853f * 3 * f / F + 0.9f);
+        V[(size_t)needle_g * F + f] += 4.0f * std::sin(6.2831853f * 3 * f / F + 0.4f);
     }
 
     ggml_backend_t backend = ggml_backend_cpu_init();
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     NativeBlockPool pool;
-    pool.initialize(1, rank, D, nkv, desc_dim, buft, S);
+    pool.initialize(NB, rank, D, nkv, desc_dim, buft, S);
     pool.set_rope_config(HR, freq);
     pool.zero_all_tensors();
-
-    // ── Compress the block straight into the pool's slot-0 host buffers ──
-    LowRankCompressParams p{};
-    p.block_id = 0; p.block_size = S; p.feat_dim = F; p.rank = rank; p.pool_rank = rank;
-    p.pool_block_size = S; p.head_dim = D; p.anchor_idx = 0;
-    p.raw_k_ptr = K.data(); p.raw_v_ptr = V.data(); p.token_ids = nullptr; p.stop_token_ids = nullptr;
-    p.out_u_ptr = pool.get_host_U(); p.out_u_scale = pool.get_host_U_scale();
-    p.out_u_row_scale = pool.get_host_U_row_scale();
-    p.out_vk_ptr = pool.get_host_VK(); p.out_vv_ptr = pool.get_host_VV();
-    p.out_scale = pool.get_host_scales(); p.out_anchor_k = pool.get_host_anchors_K();
-    p.out_anchor_v = pool.get_host_anchors_V(); p.out_seq_len = pool.get_host_seq_lens();
-    p.out_anchor_position = pool.get_host_anchor_positions();
-    p.out_token_positions = pool.get_host_token_positions();
-    p.out_res_K_pos = pool.get_host_res_K_pos(); p.out_res_V_pos = pool.get_host_res_V_pos();
-    p.out_res_K_val = pool.get_host_res_K_val(); p.out_res_V_val = pool.get_host_res_V_val();
-    p.max_residual = NativeBlockPool::MAX_RESIDUAL;
-    if (!compress_lowrank_block(p)) { std::cerr << "[ATTN_CMP] compress failed\n"; return; }
-    pool.upload_slot(0);
-
-    int L = pool.get_host_anchor_positions()[0];   // landmark idx (anchor_idx=0)
-    int S_deltas = pool.get_host_seq_lens()[0];     // S-1
-    float blk_scale = ggml_fp16_to_fp32(pool.get_host_scales()[0]);
-    auto orig_of = [&](int sp) { return sp == 0 ? L : (sp == L ? 0 : sp); };
     const int MR = NativeBlockPool::MAX_RESIDUAL;
-    // The exact decode path applies NO residuals, so by default the reference reconstruction
-    // excludes them too (apples-to-apples for the rope test). DIFFKV_ATTN_CMP_RESID=1 includes them.
-    const bool use_resid = (std::getenv("DIFFKV_ATTN_CMP_RESID") != nullptr);
-    auto resid = [&](int32_t* pos, ggml_fp16_t* val, int t, int f) -> float {
-        if (!use_resid) return 0.0f;
-        for (int i = 0; i < MR; ++i) if (pos[i] == t) return ggml_fp16_to_fp32(val[(size_t)i * F + f]);
-        return 0.0f;
-    };
 
-    // ── Build dense K/V in native's slot token order (swapped: pos0=anchor, pos p=delta p-1) ──
-    std::vector<float> reconK((size_t)S * F), reconV((size_t)S * F);
-    std::vector<float> trueK((size_t)S * F), trueV((size_t)S * F);
-    const int8_t* U = pool.get_host_U(); const ggml_fp16_t* URS = pool.get_host_U_row_scale();
-    const ggml_fp16_t* VK = pool.get_host_VK(); const ggml_fp16_t* VVv = pool.get_host_VV();
-    const ggml_fp16_t* AK = pool.get_host_anchors_K(); const ggml_fp16_t* AV = pool.get_host_anchors_V();
-    for (int p_ = 0; p_ < S; ++p_) {
-        int oi = orig_of(p_);
-        for (int f = 0; f < F; ++f) { trueK[(size_t)p_*F+f] = K[(size_t)oi*F+f]; trueV[(size_t)p_*F+f] = V[(size_t)oi*F+f]; }
-        if (p_ == 0) {                          // anchor token (stored exact)
-            for (int f = 0; f < F; ++f) { reconK[f] = ggml_fp16_to_fp32(AK[f]); reconV[f] = ggml_fp16_to_fp32(AV[f]); }
-        } else {
-            int t = p_ - 1;
-            for (int f = 0; f < F; ++f) {
-                float dK = 0, dV = 0;
-                for (int r = 0; r < rank; ++r) {
-                    float u = (float)U[(size_t)t*rank+r] * ggml_fp16_to_fp32(URS[t]);
-                    dK += u * ggml_fp16_to_fp32(VK[(size_t)r*F+f]);
-                    dV += u * ggml_fp16_to_fp32(VVv[(size_t)r*F+f]);
+    // Dense reference laid out block-by-block, each block in native's swapped slot order.
+    std::vector<float> reconK((size_t)T * F), reconV((size_t)T * F);
+    std::vector<float> trueK((size_t)T * F), trueV((size_t)T * F);
+    std::vector<int32_t> pos(T);
+
+    for (int b = 0; b < NB; ++b) {
+        // ── Compress block b ([b*S .. b*S+S-1], global start anchor_idx=b*S) into slot b ──
+        LowRankCompressParams p{};
+        p.block_id = b; p.block_size = S; p.feat_dim = F; p.rank = rank; p.pool_rank = rank;
+        p.pool_block_size = S; p.head_dim = D; p.anchor_idx = b * S;
+        p.raw_k_ptr = K.data() + (size_t)b * S * F; p.raw_v_ptr = V.data() + (size_t)b * S * F;
+        p.token_ids = nullptr; p.stop_token_ids = nullptr;
+        p.out_u_ptr = pool.get_host_U() + (size_t)b * S * rank;
+        p.out_u_scale = pool.get_host_U_scale() + b;
+        p.out_u_row_scale = pool.get_host_U_row_scale() + (size_t)b * S;
+        p.out_vk_ptr = pool.get_host_VK() + (size_t)b * rank * F;
+        p.out_vv_ptr = pool.get_host_VV() + (size_t)b * rank * F;
+        p.out_scale = pool.get_host_scales() + b;
+        p.out_anchor_k = pool.get_host_anchors_K() + (size_t)b * F;
+        p.out_anchor_v = pool.get_host_anchors_V() + (size_t)b * F;
+        p.out_seq_len = pool.get_host_seq_lens() + b;
+        p.out_anchor_position = pool.get_host_anchor_positions() + b;
+        p.out_token_positions = pool.get_host_token_positions() + (size_t)b * S;
+        p.out_res_K_pos = pool.get_host_res_K_pos() + (size_t)b * MR;
+        p.out_res_V_pos = pool.get_host_res_V_pos() + (size_t)b * MR;
+        p.out_res_K_val = pool.get_host_res_K_val() + (size_t)b * MR * F;
+        p.out_res_V_val = pool.get_host_res_V_val() + (size_t)b * MR * F;
+        p.max_residual = MR;
+        if (!compress_lowrank_block(p)) { std::cerr << "[ATTN_CMP] compress failed\n"; return; }
+        pool.upload_slot(b);
+
+        int Lg = pool.get_host_anchor_positions()[b];   // global anchor position = b*S + landmark
+        int Lb = Lg - b * S;                            // within-block landmark index
+        float blk_scale = ggml_fp16_to_fp32(pool.get_host_scales()[b]);
+        auto orig_of = [&](int sp) { return sp == 0 ? Lb : (sp == Lb ? 0 : sp); };
+        const int8_t* U = pool.get_host_U() + (size_t)b * S * rank;
+        const ggml_fp16_t* URS = pool.get_host_U_row_scale() + (size_t)b * S;
+        const ggml_fp16_t* VK = pool.get_host_VK() + (size_t)b * rank * F;
+        const ggml_fp16_t* VVv = pool.get_host_VV() + (size_t)b * rank * F;
+        const ggml_fp16_t* AK = pool.get_host_anchors_K() + (size_t)b * F;
+        const ggml_fp16_t* AV = pool.get_host_anchors_V() + (size_t)b * F;
+        int32_t* rKp = pool.get_host_res_K_pos() + (size_t)b * MR;
+        int32_t* rVp = pool.get_host_res_V_pos() + (size_t)b * MR;
+        ggml_fp16_t* rKv = pool.get_host_res_K_val() + (size_t)b * MR * F;
+        ggml_fp16_t* rVv = pool.get_host_res_V_val() + (size_t)b * MR * F;
+        auto resid = [&](int32_t* rp, ggml_fp16_t* rv, int t, int f) -> float {
+            if (!use_resid) return 0.0f;
+            for (int i = 0; i < MR; ++i) if (rp[i] == t) return ggml_fp16_to_fp32(rv[(size_t)i * F + f]);
+            return 0.0f;
+        };
+        for (int p_ = 0; p_ < S; ++p_) {
+            int g = b * S + p_;                  // index in the dense reference layout
+            int oi = orig_of(p_);                // within-block original index
+            pos[g] = b * S + oi;                 // TRUE global position
+            for (int f = 0; f < F; ++f) { trueK[(size_t)g*F+f] = K[(size_t)(b*S+oi)*F+f]; trueV[(size_t)g*F+f] = V[(size_t)(b*S+oi)*F+f]; }
+            if (p_ == 0) {
+                for (int f = 0; f < F; ++f) { reconK[(size_t)g*F+f] = ggml_fp16_to_fp32(AK[f]); reconV[(size_t)g*F+f] = ggml_fp16_to_fp32(AV[f]); }
+            } else {
+                int t = p_ - 1;
+                for (int f = 0; f < F; ++f) {
+                    float dK = 0, dV = 0;
+                    for (int r = 0; r < rank; ++r) {
+                        float u = (float)U[(size_t)t*rank+r] * ggml_fp16_to_fp32(URS[t]);
+                        dK += u * ggml_fp16_to_fp32(VK[(size_t)r*F+f]);
+                        dV += u * ggml_fp16_to_fp32(VVv[(size_t)r*F+f]);
+                    }
+                    dK = dK*blk_scale + resid(rKp, rKv, t, f);
+                    dV = dV*blk_scale + resid(rVp, rVv, t, f);
+                    reconK[(size_t)g*F+f] = ggml_fp16_to_fp32(AK[f]) + dK;
+                    reconV[(size_t)g*F+f] = ggml_fp16_to_fp32(AV[f]) + dV;
                 }
-                dK = dK*blk_scale + resid(pool.get_host_res_K_pos(), pool.get_host_res_K_val(), t, f);
-                dV = dV*blk_scale + resid(pool.get_host_res_V_pos(), pool.get_host_res_V_val(), t, f);
-                reconK[(size_t)p_*F+f] = ggml_fp16_to_fp32(AK[f]) + dK;
-                reconV[(size_t)p_*F+f] = ggml_fp16_to_fp32(AV[f]) + dV;
             }
         }
     }
 
-    // ── Query aligned to the needle (so attention should focus there) ──
-    int needle_sp = (needle == L) ? 0 : needle;     // needle's swapped position
+    // ── Query aligned to the needle (true K direction) ──
     std::vector<float> Q((size_t)nq * D);
     for (int h = 0; h < nq; ++h) {
         int kv = h / (nq / nkv);
-        double nrm = 0; for (int d = 0; d < D; ++d) nrm += (double)trueK[(size_t)needle_sp*F + kv*D + d]*trueK[(size_t)needle_sp*F + kv*D + d];
+        double nrm = 0; for (int d = 0; d < D; ++d) { float x = K[(size_t)needle_g*F + kv*D + d]; nrm += (double)x*x; }
         nrm = std::sqrt(std::max(nrm, 1e-12));
-        for (int d = 0; d < D; ++d) Q[(size_t)h*D+d] = trueK[(size_t)needle_sp*F + kv*D + d] / nrm * 8.0f;
+        for (int d = 0; d < D; ++d) Q[(size_t)h*D+d] = K[(size_t)needle_g*F + kv*D + d] / nrm * 8.0f;
     }
 
-    std::vector<int32_t> slots = {0};
-    // Each swapped token's TRUE sequence position is its original index (block starts at 0).
-    // This is what the decode rope MUST rotate by; if native diverges from this, its rope is wrong.
-    std::vector<int32_t> pos(S); for (int t = 0; t < S; ++t) pos[t] = orig_of(t);
+    std::vector<int32_t> slots(NB); for (int b = 0; b < NB; ++b) slots[b] = b;
     std::vector<float> o_ns(nq*D,0), l_ns(nq,-1e30f), o_rd(nq*D,0), l_rd(nq,-1e30f), o_td(nq*D,0), l_td(nq,-1e30f);
-    execute_cpu_attention(Q.data(), slots.data(), o_ns.data(), l_ns.data(), &pool, nq, nkv, rank, S, 1, D, scale, HR, freq, approximate);
-    cpu_dense_attention(Q.data(), reconK.data(), reconV.data(), pos.data(), S, nq, nkv, D, scale, HR, freq, 0, o_rd.data(), l_rd.data());
-    cpu_dense_attention(Q.data(), trueK.data(),  trueV.data(),  pos.data(), S, nq, nkv, D, scale, HR, freq, 0, o_td.data(), l_td.data());
+    execute_cpu_attention(Q.data(), slots.data(), o_ns.data(), l_ns.data(), &pool, nq, nkv, rank, S, NB, D, scale, HR, freq, approximate);
+    cpu_dense_attention(Q.data(), reconK.data(), reconV.data(), pos.data(), T, nq, nkv, D, scale, HR, freq, 0, o_rd.data(), l_rd.data());
+    cpu_dense_attention(Q.data(), trueK.data(),  trueV.data(),  pos.data(), T, nq, nkv, D, scale, HR, freq, 0, o_td.data(), l_td.data());
 
     auto rel = [&](std::vector<float>&a, std::vector<float>&b){ double e=0,n=0; for(size_t i=0;i<a.size();++i){e+=(a[i]-b[i])*(a[i]-b[i]); n+=b[i]*b[i];} return 100.0*std::sqrt(e/std::max(n,1e-12)); };
-    std::cerr << "[ATTN_CMP] S=" << S << " rank=" << rank << " landmark=" << L << " rope=" << (HR?"ON":"OFF")
-              << " path=" << (approximate?"approx":"exact") << "\n";
+    std::cerr << "[ATTN_CMP] blocks=" << NB << " (tokens=" << T << ") S=" << S << " rank=" << rank
+              << " rope=" << (HR?"ON":"OFF") << " path=" << (approximate?"approx":"exact")
+              << " resid=" << (use_resid?"ON":"OFF") << "\n";
     std::cerr << "[ATTN_CMP] native_sparse vs recon_dense (DECODE faithfulness) = " << rel(o_ns, o_rd) << "%\n";
     std::cerr << "[ATTN_CMP] recon_dense  vs true_dense  (recon impact)         = " << rel(o_rd, o_td) << "%\n";
     std::cerr << "[ATTN_CMP] native_sparse vs true_dense  (combined)            = " << rel(o_ns, o_td) << "%\n";
