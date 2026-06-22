@@ -71,6 +71,24 @@ void execute_cpu_attention(
     const int32_t* active_slots = unique_slots.data();
     int active_K = (int)unique_slots.size();
 
+    // DIFFKV_DBG_POS=1: one-shot dump of the selected blocks' anchor/token positions, to verify
+    // the real prefill assigns GLOBAL sequence positions per block (a wrong/non-global anchor_idx
+    // would corrupt decode RoPE at scale regardless of version — suspected 8k+ echo cause).
+    if (std::getenv("DIFFKV_DBG_POS")) {
+        static int once = 0;
+        if (once++ == 0) {
+            std::cerr << "[DBG_POS] active_K=" << active_K << " S_max=" << S_max << "\n";
+            for (int k = 0; k < active_K && k < 8; ++k) {
+                int sid = active_slots[k];
+                std::cerr << "[DBG_POS] slot " << sid << " anchor_pos=" << anchor_positions[sid]
+                          << " seq_len=" << seq_lens[sid] << " tok_pos[0..4]=";
+                for (int t = 0; t < seq_lens[sid] && t < 5; ++t)
+                    std::cerr << token_positions[(size_t)sid * S_max + t] << " ";
+                std::cerr << "\n";
+            }
+        }
+    }
+
     const int half_d = D / 2;
     const int g = n_q_heads / n_kv_heads;   // GQA groups
 
@@ -560,6 +578,13 @@ void custom_attention_op_callback(
     void * userdata
 ) {
     if (ith != 0) return;
+
+    // DIFFKV_DBG_POS=1: one-shot proof that this callback is actually invoked at decode. As of
+    // 2026-06-22 it is NOT called in the live decode (the sparse-attention map_custom3 node appears
+    // pruned/uncomputed) — so the fixes inside (execute_cpu_attention rope) never run live. Keep
+    // this probe until the live sparse-attention path is identified.
+    if (std::getenv("DIFFKV_DBG_POS")) { static int cb_once = 0; if (cb_once++ == 0) {
+        std::cerr << "[CB_ENTRY] custom_attention_op_callback invoked ith=" << ith << " nth=" << nth << "\n"; } }
 
     const struct ggml_tensor* Q             = a;
     const struct ggml_tensor* slot_indices  = b;
