@@ -27,6 +27,7 @@
 #include "native_core/srl/query_router.hpp"
 #include "runtime/diffkv_attention.hpp"
 #include "native_core/compression/async_compressor.hpp"
+#include "native_core/compression/lowrank.hpp"
 #include "native_core/kv_runtime_manager.hpp"
 
 using namespace diffkv;
@@ -1571,6 +1572,114 @@ static void run_native_attn_selftest() {
     ggml_backend_buffer_free(buf); ggml_free(ctx); ggml_backend_free(backend);
 }
 
+// DIFFKV_RECON_CMP=1: standalone per-token K/V reconstruction-fidelity probe (no model load).
+// Plants a DETERMINISTIC synthetic block — smooth low-rank filler + a dominant landmark at
+// token 0 (so native picks it as the exact anchor, no swap) + a distinctive high-frequency
+// "needle" at token 128 — runs the real compress_lowrank_block, then reconstructs each token
+// from the STORED compressed rep (int8 U * per-row scale * fp16 VK/VV * block scale + anchor +
+// residuals) exactly as decode does. Prints per-token relative error, isolating compression/
+// reconstruction fidelity (esp. the needle) from the decode attention. The Python twin
+// (benchmarks/recon_cmp.py) runs the IDENTICAL synthetic block through active's compress path;
+// diff the NEEDLE error to localize the native-vs-active gap. Set DIFFKV_RECON_NORESID=1 to
+// also see native's pure-lowrank (no-residual) error, apples-to-apples with active (no residuals).
+static void run_recon_cmp() {
+    using diffkv::LowRankCompressParams;
+    const int S = 256, KVH = 2, D = 128;
+    const int F = KVH * D;            // 256
+    int R = 16;
+    if (const char* e = std::getenv("DIFFKV_RANK")) R = std::max(1, atoi(e));
+    const bool no_resid = (std::getenv("DIFFKV_RECON_NORESID") != nullptr);
+    const int needle = 128;
+
+    // ── Deterministic HIGH-RANK synthetic K/V (must match recon_cmp.py exactly) ──
+    // Sum of NCOMP orthogonal-ish cosine components → effective rank ≈ NCOMP, so a rank-16
+    // truncation leaves a realistic floor (~40%, like real attention deltas). A dominant
+    // smooth landmark @0 (native picks it as the exact anchor) and a distinctive token @128
+    // whose energy sits in the truncated tail (the "needle") let us read off the hardest case.
+    const int NCOMP = 28;
+    std::vector<float> K((size_t)S * F), V((size_t)S * F);
+    for (int s = 0; s < S; ++s)
+        for (int f = 0; f < F; ++f) {
+            float ak = 0.0f, av = 0.0f;
+            for (int k = 1; k <= NCOMP; ++k) {
+                float ph = 6.2831853f * k * (s + 1) / S;
+                ak += std::cos(ph + 1.7f * k * f / F + 0.3f * k);
+                av += std::sin(ph + 1.3f * k * f / F + 0.5f * k);
+            }
+            K[(size_t)s * F + f] = ak;
+            V[(size_t)s * F + f] = av;
+        }
+    // No dominant landmark: native picks its natural anchor (printed as landmark=L below);
+    // feed that index to recon_cmp.py via DIFFKV_RECON_ANCHOR=L so both use the same anchor
+    // and the deltas stay non-degenerate.
+    for (int f = 0; f < F; ++f) {                       // distinctive needle @128 (tail component k=45)
+        K[(size_t)needle * F + f] += 5.0f * std::cos(6.2831853f * 45 * f / F + 0.9f);
+        V[(size_t)needle * F + f] += 5.0f * std::sin(6.2831853f * 45 * f / F + 0.4f);
+    }
+
+    int pool_rank = R, S_max = S;
+    std::vector<int8_t>      out_u((size_t)S_max * pool_rank, 0);
+    std::vector<ggml_fp16_t> out_u_scale(1, 0), out_u_row(S_max, 0);
+    std::vector<ggml_fp16_t> out_vk((size_t)pool_rank * F, 0), out_vv((size_t)pool_rank * F, 0);
+    std::vector<ggml_fp16_t> out_ak(F, 0), out_av(F, 0), out_scale(1, 0);
+    int32_t out_seq = 0, out_anchor_pos = 0;
+    const int MR = diffkv::NativeBlockPool::MAX_RESIDUAL;
+    std::vector<int32_t>     rKpos(MR, -1), rVpos(MR, -1);
+    std::vector<ggml_fp16_t> rKval((size_t)MR * F, 0), rVval((size_t)MR * F, 0);
+
+    LowRankCompressParams p{};
+    p.block_id = 0; p.block_size = S; p.feat_dim = F; p.rank = R; p.pool_rank = pool_rank;
+    p.pool_block_size = S_max; p.head_dim = D; p.anchor_idx = 0;
+    p.raw_k_ptr = K.data(); p.raw_v_ptr = V.data(); p.token_ids = nullptr; p.stop_token_ids = nullptr;
+    p.out_u_ptr = out_u.data(); p.out_u_scale = out_u_scale.data(); p.out_u_row_scale = out_u_row.data();
+    p.out_vk_ptr = out_vk.data(); p.out_vv_ptr = out_vv.data();
+    p.out_scale = out_scale.data(); p.out_anchor_k = out_ak.data(); p.out_anchor_v = out_av.data();
+    p.out_seq_len = &out_seq; p.out_anchor_position = &out_anchor_pos;
+    p.out_res_K_pos = rKpos.data(); p.out_res_V_pos = rVpos.data();
+    p.out_res_K_val = rKval.data(); p.out_res_V_val = rVval.data(); p.max_residual = MR;
+
+    if (!diffkv::compress_lowrank_block(p)) { std::cerr << "[RECON_CMP] compress failed\n"; return; }
+
+    int L = out_anchor_pos;          // landmark index (anchor_idx=0 ⇒ == landmark_idx)
+    int S_deltas = out_seq;          // == S-1
+    float blk_scale = ggml_fp16_to_fp32(out_scale[0]);
+    auto resid = [&](std::vector<int32_t>& pos, std::vector<ggml_fp16_t>& val, int t, int f) -> float {
+        if (no_resid) return 0.0f;
+        for (int i = 0; i < MR; ++i) if (pos[i] == t) return ggml_fp16_to_fp32(val[(size_t)i * F + f]);
+        return 0.0f;
+    };
+    auto orig_of = [&](int sp) { return sp == 0 ? L : (sp == L ? 0 : sp); };  // swapped pos → original idx
+
+    double sumK = 0, sumV = 0; int cnt = 0; double nK_err = -1, nV_err = -1;
+    for (int t = 0; t < S_deltas; ++t) {
+        int oi = orig_of(t + 1);
+        double eK = 0, nrmK = 0, eV = 0, nrmV = 0;
+        for (int f = 0; f < F; ++f) {
+            float dK = 0, dV = 0;
+            for (int r = 0; r < R; ++r) {
+                float u = (float)out_u[(size_t)t * pool_rank + r] * ggml_fp16_to_fp32(out_u_row[t]);
+                dK += u * ggml_fp16_to_fp32(out_vk[(size_t)r * F + f]);
+                dV += u * ggml_fp16_to_fp32(out_vv[(size_t)r * F + f]);
+            }
+            dK = dK * blk_scale + resid(rKpos, rKval, t, f);
+            dV = dV * blk_scale + resid(rVpos, rVval, t, f);
+            float rK = ggml_fp16_to_fp32(out_ak[f]) + dK;
+            float rV = ggml_fp16_to_fp32(out_av[f]) + dV;
+            float tK = K[(size_t)oi * F + f], tV = V[(size_t)oi * F + f];
+            eK += (rK - tK) * (rK - tK); nrmK += tK * tK;
+            eV += (rV - tV) * (rV - tV); nrmV += tV * tV;
+        }
+        double relK = std::sqrt(eK / std::max(nrmK, 1e-12)), relV = std::sqrt(eV / std::max(nrmV, 1e-12));
+        sumK += relK; sumV += relV; ++cnt;
+        if (oi == needle) { nK_err = relK; nV_err = relV; }
+    }
+    std::cerr << "[RECON_CMP] native rank=" << R << " landmark=" << L << " S_deltas=" << S_deltas
+              << " residuals=" << (no_resid ? "OFF" : "ON") << "\n";
+    std::cerr << "[RECON_CMP] mean rel err   K=" << 100.0 * sumK / cnt << "%  V=" << 100.0 * sumV / cnt << "%\n";
+    std::cerr << "[RECON_CMP] NEEDLE(tok" << needle << ") rel err  K=" << 100.0 * nK_err
+              << "%  V=" << 100.0 * nV_err << "%\n";
+}
+
 int main(int argc, char ** argv) {
     // Eliminate streaming bursts: set stdout fully unbuffered so each token
     // reaches the pipe the instant it's written, regardless of OS buffering.
@@ -1582,6 +1691,7 @@ int main(int argc, char ** argv) {
 
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (std::getenv("DIFFKV_DENSE_CMP")) { run_dense_attn_cmp(); return 0; }
+    if (std::getenv("DIFFKV_RECON_CMP")) { run_recon_cmp(); return 0; }
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <gguf_model_path> [prompt]" << std::endl;
         return 1;
