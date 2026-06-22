@@ -28,6 +28,7 @@ public:
     struct ggml_tensor * get_U() { return U_; }
     struct ggml_tensor * get_U_f16() { return U_f16_; }   // f16 mirror of U (native ggml gather)
     struct ggml_tensor * get_U_scale() { return U_scale_; }
+    struct ggml_tensor * get_U_row_scale() { return U_row_scale_; }  // [S_max,n_slots] per-token int8 scale
     struct ggml_tensor * get_VK() { return VK_; }
     struct ggml_tensor * get_VV() { return VV_; }
     // Native-attn precomputed RoPE'd keys (rotated at each block's fixed anchor position).
@@ -76,6 +77,8 @@ public:
     int8_t* get_host_U() { return host_U_.data(); }
     const ggml_fp16_t* get_host_U_scale() const { return host_U_scale_.data(); }
     ggml_fp16_t* get_host_U_scale() { return host_U_scale_.data(); }
+    const ggml_fp16_t* get_host_U_row_scale() const { return host_U_row_scale_.data(); }
+    ggml_fp16_t* get_host_U_row_scale() { return host_U_row_scale_.data(); }
     const ggml_fp16_t* get_host_VK() const { return host_VK_.data(); }
     ggml_fp16_t* get_host_VK() { return host_VK_.data(); }
     const ggml_fp16_t* get_host_VV() const { return host_VV_.data(); }
@@ -104,7 +107,13 @@ public:
 
     // F9: per-block sparse residuals (exact corrections for the highest-error tokens
     // the low-rank SVD failed to capture — e.g. digits). MAX_RESIDUAL tokens per K/V.
-    static constexpr int MAX_RESIDUAL = 8;
+    // Was 8, but the selector keeps min(15% of block, MAX_RESIDUAL) and ACTIVE_RUNTIME
+    // keeps the full 15% (~38 of a 256-token block). Capping at 8 (3%) dropped most
+    // high-error tokens — a compressed needle whose rank-16 recon error is ~43% rarely
+    // made the top-8, so it was lost ("OMG" instead of "OMEGA-7741-DELTA"). 40 covers
+    // 15% of a 256-token block, matching the reference (DIFFKV_RESIDUAL_FRAC).
+    // (Raise for higher-fraction needle-recall experiments; costs residual-buffer RAM.)
+    static constexpr int MAX_RESIDUAL = 40;
     int32_t* get_host_res_K_pos() { return host_res_K_pos_.data(); }
     int32_t* get_host_res_V_pos() { return host_res_V_pos_.data(); }
     ggml_fp16_t* get_host_res_K_val() { return host_res_K_val_.data(); }
@@ -129,6 +138,7 @@ private:
     struct ggml_tensor * U_ = nullptr;
     struct ggml_tensor * U_f16_ = nullptr;   // f16 mirror of U (int8 values cast to f16) for native ggml-metal gather/matmul
     struct ggml_tensor * U_scale_ = nullptr;
+    struct ggml_tensor * U_row_scale_ = nullptr;  // [S_max, n_slots] f16 per-token int8 scale
     struct ggml_tensor * VK_ = nullptr;
     struct ggml_tensor * VV_ = nullptr;
     struct ggml_tensor * VK_rot_ = nullptr;       // [head_dim, kv_heads, rank, n_slots] FP32, RoPE'd at anchor pos (native attn only)
@@ -144,6 +154,7 @@ private:
     // Host-side mirror buffers
     std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_row_scale_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;
     std::vector<float, PageAlignedAllocator<float>> host_VK_rot_;       // fp32 (precision-match CPU)

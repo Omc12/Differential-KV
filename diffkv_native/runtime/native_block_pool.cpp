@@ -92,7 +92,11 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     U_           = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_I8,  rank, S_max_, n_slots);
     U_f16_       = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, rank, S_max_, n_slots);  // native-ggml mirror
     U_scale_     = ggml_new_tensor_1d(pool_ctx_, GGML_TYPE_F16, n_slots);
-    
+    // Per-token int8 scale (one scale per token row per slot). A single block-wide
+    // U_scale crushes low-norm token rows in int8; per-row scales preserve them so
+    // the compressed slot can reconstruct each token (needle-recall correctness fix).
+    U_row_scale_ = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F16, S_max_, n_slots);
+
     // VK and VV shape: [head_dim, kv_heads, rank, n_slots]
     VK_          = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, rank, n_slots);
     VV_          = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, rank, n_slots);
@@ -118,6 +122,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     // Assign names for debug visibility
     ggml_set_name(U_,           "pool.U");
     ggml_set_name(U_scale_,     "pool.U_scale");
+    ggml_set_name(U_row_scale_, "pool.U_row_scale");
     ggml_set_name(VK_,          "pool.V_K");
     ggml_set_name(VV_,          "pool.V_V");
     ggml_set_name(anchors_K_,   "pool.anchors_K");
@@ -139,6 +144,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
 
     host_U_.resize(ggml_nelements(U_), 0);
     host_U_scale_.resize(ggml_nelements(U_scale_), ggml_fp32_to_fp16(0.0f));
+    host_U_row_scale_.resize(ggml_nelements(U_row_scale_), ggml_fp32_to_fp16(0.0f));
     host_VK_.resize(ggml_nelements(VK_), ggml_fp32_to_fp16(0.0f));
     host_VV_.resize(ggml_nelements(VV_), ggml_fp32_to_fp16(0.0f));
     host_anchors_K_.resize(ggml_nelements(anchors_K_), ggml_fp32_to_fp16(0.0f));
@@ -216,6 +222,7 @@ int NativeBlockPool::get_free_slots_count() {
 void NativeBlockPool::zero_all_tensors() {
     std::fill(host_U_.begin(), host_U_.end(), 0);
     std::fill(host_U_scale_.begin(), host_U_scale_.end(), ggml_fp32_to_fp16(0.0f));
+    std::fill(host_U_row_scale_.begin(), host_U_row_scale_.end(), ggml_fp32_to_fp16(0.0f));
     std::fill(host_VK_.begin(), host_VK_.end(), ggml_fp32_to_fp16(0.0f));
     std::fill(host_VV_.begin(), host_VV_.end(), ggml_fp32_to_fp16(0.0f));
     std::fill(host_anchors_K_.begin(), host_anchors_K_.end(), ggml_fp32_to_fp16(0.0f));
@@ -236,6 +243,10 @@ void NativeBlockPool::zero_all_tensors() {
     if (U_scale_) {
         std::vector<ggml_fp16_t> zeros(ggml_nelements(U_scale_), ggml_fp32_to_fp16(0.0f));
         ggml_backend_tensor_set(U_scale_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+    }
+    if (U_row_scale_) {
+        std::vector<ggml_fp16_t> zeros(ggml_nelements(U_row_scale_), ggml_fp32_to_fp16(0.0f));
+        ggml_backend_tensor_set(U_row_scale_, zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
     }
     if (VK_) {
         std::vector<ggml_fp16_t> zeros(ggml_nelements(VK_), ggml_fp32_to_fp16(0.0f));
@@ -307,6 +318,8 @@ void NativeBlockPool::upload_slot(int slot_id) {
         ggml_backend_tensor_set(U_f16_, temp_U_f16.data(), slot_id * U_f16_->nb[2], rank_ * S_max_ * sizeof(ggml_fp16_t));
     }
     ggml_backend_tensor_set(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
+    if (U_row_scale_)
+        ggml_backend_tensor_set(U_row_scale_, host_U_row_scale_.data() + (size_t)slot_id * S_max_, slot_id * U_row_scale_->nb[1], (size_t)S_max_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(VV_, host_VV_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VV_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(anchors_K_, host_anchors_K_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
@@ -376,6 +389,8 @@ void NativeBlockPool::download_slot(int slot_id) {
     
     ggml_backend_tensor_get(U_, host_U_.data() + slot_id * rank_ * S_max_, slot_id * U_->nb[2], rank_ * S_max_ * sizeof(int8_t));
     ggml_backend_tensor_get(U_scale_, host_U_scale_.data() + slot_id, slot_id * U_scale_->nb[0], sizeof(ggml_fp16_t));
+    if (U_row_scale_)
+        ggml_backend_tensor_get(U_row_scale_, host_U_row_scale_.data() + (size_t)slot_id * S_max_, slot_id * U_row_scale_->nb[1], (size_t)S_max_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_get(VK_, host_VK_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VK_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_get(VV_, host_VV_.data() + slot_id * head_dim_ * kv_heads_ * rank_, slot_id * VV_->nb[3], head_dim_ * kv_heads_ * rank_ * sizeof(ggml_fp16_t));
     ggml_backend_tensor_get(anchors_K_, host_anchors_K_.data() + slot_id * head_dim_ * kv_heads_, slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));

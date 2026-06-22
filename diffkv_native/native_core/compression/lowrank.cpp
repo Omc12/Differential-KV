@@ -414,17 +414,45 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
 
     float scale_u = std::max(max_abs / 127.0f, 1e-5f);
-    int S_max = params.pool_block_size; 
+    int S_max = params.pool_block_size;
     int pool_rank = params.pool_rank > 0 ? params.pool_rank : R;
     std::memset(params.out_u_ptr, 0, S_max * pool_rank * sizeof(int8_t));
-    for (int s = 0; s < S_deltas; ++s) {
-        for (int r = 0; r < R; ++r) {
-            float val = U_scaled[s * R + r] / scale_u;
-            int8_t val_i8 = static_cast<int8_t>(std::max(-127.0f, std::min(127.0f, std::round(val))));
-            params.out_u_ptr[s * pool_rank + r] = val_i8;
+
+    // ── Per-token-row int8 quantization (needle-recall correctness fix) ──────────
+    // A single block-wide scale (max_abs/127) is set by the dominant token row, so a
+    // low-norm token (e.g. a planted needle whose energy is small vs the block max)
+    // has its U components rounded to ~0 in int8 and can no longer be reconstructed
+    // ("omega" instead of "OMEGA-7741-DELTA"). Give each token row its own scale so
+    // every token keeps full int8 resolution. When out_u_row_scale is present the
+    // sparse-attention reader dequantizes U[t,r] with scale_row[t] (not the block
+    // scalar). Falls back to the legacy single scale when the per-row buffer is null.
+    if (params.out_u_row_scale) {
+        for (int t = 0; t < S_max; ++t) params.out_u_row_scale[t] = ggml_fp32_to_fp16(0.0f);
+        for (int s = 0; s < S_deltas; ++s) {
+            float row_max = 0.0f;
+            for (int r = 0; r < R; ++r) {
+                float a = std::abs(U_scaled[s * R + r]);
+                if (a > row_max) row_max = a;
+            }
+            float scale_row = std::max(row_max / 127.0f, 1e-5f);
+            for (int r = 0; r < R; ++r) {
+                float val = U_scaled[s * R + r] / scale_row;
+                int8_t val_i8 = static_cast<int8_t>(std::max(-127.0f, std::min(127.0f, std::round(val))));
+                params.out_u_ptr[s * pool_rank + r] = val_i8;
+            }
+            params.out_u_row_scale[s] = ggml_fp32_to_fp16(scale_row);
+        }
+    } else {
+        for (int s = 0; s < S_deltas; ++s) {
+            for (int r = 0; r < R; ++r) {
+                float val = U_scaled[s * R + r] / scale_u;
+                int8_t val_i8 = static_cast<int8_t>(std::max(-127.0f, std::min(127.0f, std::round(val))));
+                params.out_u_ptr[s * pool_rank + r] = val_i8;
+            }
         }
     }
 
+    // Single block scale kept for descriptor computation + legacy fused paths.
     *params.out_u_scale = ggml_fp32_to_fp16(scale_u);
 
     std::memset(params.out_vk_ptr, 0, pool_rank * F * sizeof(ggml_fp16_t));
@@ -455,6 +483,10 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     if (std::getenv("DIFFKV_DBG_COMPRESS_ERR")) {
         static double e_floor=0, e_fp16=0, e_int8=0, nrm=0; static long nb=0, ntok=0;
         for (int s = 0; s < S_deltas; ++s) {
+            // Per-row int8 scale (matches what's actually stored after the fix).
+            double row_max = 0.0;
+            for (int r = 0; r < R; ++r) { double a = std::abs(U_scaled[s*R+r]); if (a>row_max) row_max=a; }
+            double scale_row = std::max(row_max/127.0, 1e-5);
             for (int f = 0; f < joint_F; ++f) {
                 double rf=0, r16=0, r8=0;
                 for (int r = 0; r < k_dynamic && r < svd_dim; ++r) {
@@ -462,9 +494,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     double vt = VT_joint[r * joint_F + f];
                     double vt16 = ggml_fp16_to_fp32(ggml_fp32_to_fp16((float)vt));
                     double us16 = ggml_fp16_to_fp32(ggml_fp32_to_fp16((float)us));
-                    int iv = (int)std::round(us / scale_u);
+                    int iv = (int)std::round(us / scale_row);
                     iv = std::max(-127, std::min(127, iv));
-                    double us8 = (double)iv * scale_u;
+                    double us8 = (double)iv * scale_row;
                     rf  += us  * vt;
                     r16 += us16 * vt16;
                     r8  += us8  * vt16;
@@ -478,11 +510,11 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             }
         }
         nb++; ntok += S_deltas;
-        if (nb % 20 == 0 && nrm > 0) {
+        if ((nb <= 3 || nb % 20 == 0) && nrm > 0) {
             double rfl=100*std::sqrt(e_floor/nrm), rf16=100*std::sqrt(e_fp16/nrm), ri8=100*std::sqrt(e_int8/nrm);
             std::cerr << "[COMPRESS_ERR] blocks=" << nb << " toks=" << ntok
                       << " rel_recon_err: floor(rank" << R << ")=" << rfl << "%  fp16_U=" << rf16
-                      << "%  int8_U=" << ri8 << "%  | int8_penalty_over_fp16=" << (ri8-rf16) << "%\n";
+                      << "%  int8_U=" << ri8 << "%  | int8_penalty_over_fp16=" << (ri8-rf16) << "%" << std::endl;
         }
     }
 
@@ -517,7 +549,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             rel_K[s] = aerr_K[s] / std::max(std::sqrt(nK), 1e-8f);
             rel_V[s] = aerr_V[s] / std::max(std::sqrt(nV), 1e-8f);
         }
-        int n_max = std::min((int)(S_deltas * 0.15f), MR);
+        float res_frac = 0.15f;  // ACTIVE_RUNTIME parity; tunable for needle-recall experiments
+        if (const char* e = std::getenv("DIFFKV_RESIDUAL_FRAC")) { try { res_frac = std::stof(e); } catch (...) {} }
+        int n_max = std::min((int)(S_deltas * res_frac), MR);
         auto select = [&](const std::vector<float>& rel, const std::vector<float>& aerr,
                           int32_t* pos_out, ggml_fp16_t* val_out, int half_off) {
             std::vector<int> idx(S_deltas);

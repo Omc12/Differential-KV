@@ -40,6 +40,9 @@ void execute_cpu_attention(
     const float* Q_ptr = Q;
     const int8_t* U = kv_engine->get_host_U();
     const ggml_fp16_t* U_scale_arr = kv_engine->get_host_U_scale();
+    // Per-token int8 scale: U[slot,t,r] dequantizes with U_row_scale[slot*S_max + t]
+    // (correctness fix — see lowrank.cpp). Indexed per token t at each use below.
+    const ggml_fp16_t* U_row_scale_arr = kv_engine->get_host_U_row_scale();
     const ggml_fp16_t* VK = kv_engine->get_host_VK();
     const ggml_fp16_t* VV = kv_engine->get_host_VV();
     const ggml_fp16_t* anchors_K = kv_engine->get_host_anchors_K();
@@ -197,7 +200,7 @@ void execute_cpu_attention(
         for (int k = 0; k < active_K; ++k) {
             int slot_id   = active_slots[k];
             int slen      = seq_lens[slot_id];
-            float scale_u = ggml_fp16_to_fp32(U_scale_arr[slot_id]);
+            const ggml_fp16_t* u_row_scale = U_row_scale_arr + (size_t)slot_id * S_max;
             float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
 
             const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
@@ -266,7 +269,7 @@ void execute_cpu_attention(
                         }
                         break;
                     }
-                    float t_score = (delta * scale_u * blk_sc + res_score + score_anc) * scale;
+                    float t_score = (delta * ggml_fp16_to_fp32(u_row_scale[t]) * blk_sc + res_score + score_anc) * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
@@ -310,8 +313,9 @@ void execute_cpu_attention(
                             dk1 += ur * vkl[r * D + d];
                             dk2 += ur * vkl[r * D + d2];
                         }
-                        float k1 = anc_k_f[d]  + dk1 * scale_u * blk_sc;
-                        float k2 = anc_k_f[d2] + dk2 * scale_u * blk_sc;
+                        float ku = ggml_fp16_to_fp32(u_row_scale[t]);
+                        float k1 = anc_k_f[d]  + dk1 * ku * blk_sc;
+                        float k2 = anc_k_f[d2] + dk2 * ku * blk_sc;
 
                         float kr1, kr2;
                         if (has_rope) {
@@ -355,7 +359,7 @@ void execute_cpu_attention(
             int slot_id   = active_slots[k];
             int slen      = seq_lens[slot_id];
             float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
-            float scale_u = ggml_fp16_to_fp32(U_scale_arr[slot_id]);
+            const ggml_fp16_t* u_row_scale = U_row_scale_arr + (size_t)slot_id * S_max;
             const float* vvl = blk_vv_local[k].data();  // [rank, D] contiguous
             const float* av  = blk_anc_v[k].data();     // [D]
 
@@ -369,8 +373,9 @@ void execute_cpu_attention(
                 double w_t = std::exp(slot_infos[k].token_scores[t] - max_score) / sum_exp;
                 sum_w += w_t;
                 const int8_t* u_row = U + u_base + t * rank;
+                float ku = ggml_fp16_to_fp32(u_row_scale[t]);
                 for (int r = 0; r < rank; ++r)
-                    w_proj[r] += w_t * (float)u_row[r] * scale_u;  // stride-1!
+                    w_proj[r] += w_t * (float)u_row[r] * ku;  // stride-1!
                 for (int ri = 0; ri < MR; ++ri) {
                     if (res_V_pos[(size_t)slot_id * MR + ri] != t) continue;
                     const ggml_fp16_t* rv = res_V_val +

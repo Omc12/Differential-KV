@@ -27,6 +27,7 @@ struct LowRankCompressParams {
     // Outputs in block pool
     int8_t* out_u_ptr;
     ggml_fp16_t* out_u_scale;
+    ggml_fp16_t* out_u_row_scale = nullptr; // [S_max] per-token int8 scale (nullptr = legacy single-scale)
     ggml_fp16_t* out_vk_ptr;
     ggml_fp16_t* out_vv_ptr;
     ggml_fp16_t* out_scale;

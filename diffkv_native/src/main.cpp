@@ -45,7 +45,15 @@ static bool is_native_attn_enabled() {
     // Engages only when the factual store is empty (default) — factual/NIAH sessions fall back to
     // the custom op. Opt OUT with DIFFKV_NATIVE_ATTN=0. NOTE: this does NOT fix the separate
     // DiffKV-at-scale gibberish above ~13k tokens / ~50 blocks (custom op fails identically there).
-    return true;
+    //
+    // DISABLED BY DEFAULT (2026-06-22): the int8-U compression was switched to PER-TOKEN-ROW
+    // scales (lowrank.cpp) to fix needle recall — the old single block scale crushed low-norm
+    // token rows. The CPU custom op reads the per-row scales (diffkv_attention.cpp); the fused
+    // paths here (build_native_sparse_attn + the ggml_diffkv_attn Metal op) still assume a single
+    // block scale and would misread per-row-quantized U, so they are opt-in until ported. Routing
+    // the default to the (correct) custom op trades some decode speed for correctness. Re-enable
+    // with DIFFKV_NATIVE_ATTN=1 only after the fused kernels learn the per-row scale.
+    return false;
 }
 
 struct ggml_backend_owner {
@@ -1470,8 +1478,12 @@ static void run_native_attn_selftest() {
         ggml_fp16_t* aK=pool.get_host_anchors_K(); ggml_fp16_t* aV=pool.get_host_anchors_V();
         int32_t* sl=pool.get_host_seq_lens(); ggml_fp16_t* sc=pool.get_host_scales();
         ggml_fp16_t* us=pool.get_host_U_scale(); int32_t* ap=pool.get_host_anchor_positions();
+        ggml_fp16_t* urs=pool.get_host_U_row_scale();
         int seqlen = 20 + s*10;  // longer blocks
         sl[s]=seqlen; sc[s]=H(0.3f+0.1f*s); us[s]=H(0.2f); ap[s]=10+s*7;
+        // Uniform per-row scale == the single block scale, so the per-row CPU path and
+        // the single-scale fused graph stay byte-identical (selftest still validates math).
+        for(int t=0;t<S_max;++t) urs[(size_t)s*S_max+t]=H(0.2f);
         // EXTREME data to reproduce the real failure: massive anchor-K (|aK|~per-elem 30, like
         // Qwen layer-0), and slots 1,2 NEAR-IDENTICAL to slot 0 (mimics repetitive-prompt blocks).
         int src = (s==0)?0:0; (void)src;
