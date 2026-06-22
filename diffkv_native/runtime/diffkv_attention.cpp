@@ -50,6 +50,7 @@ void execute_cpu_attention(
     const int32_t* seq_lens = kv_engine->get_host_seq_lens();
     const ggml_fp16_t* scales = kv_engine->get_host_scales();
     const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
+    const int32_t* token_positions = kv_engine->get_host_token_positions();  // true seq pos per delta token (RoPE fix)
     const int32_t* res_K_pos = kv_engine->get_host_res_K_pos();
     const int32_t* res_V_pos = kv_engine->get_host_res_V_pos();
     const ggml_fp16_t* res_K_val = kv_engine->get_host_res_K_val();
@@ -134,6 +135,30 @@ void execute_cpu_attention(
     };
     std::vector<SlotInfo> slot_infos(active_K);
 
+    // ── Per-token RoPE rotation from TRUE positions (decode rope correctness fix) ──
+    // The non-approximate path used to advance a recurrence from anchor_pos+1, rotating every
+    // delta token as if the block were consecutive starting at the anchor — wrong, because the
+    // landmark swap permutes order and the block doesn't start at the anchor. Each token must be
+    // rotated by its true stored position (token_positions). Precompute once per slot (position is
+    // head-independent) to avoid recomputing trig per q-head.
+    std::vector<std::vector<float>> tok_cos(active_K), tok_sin(active_K);
+    if (has_rope && !approximate_attn) {
+        for (int k = 0; k < active_K; ++k) {
+            int slot_id = active_slots[k];
+            int slen = seq_lens[slot_id];
+            tok_cos[k].resize((size_t)slen * half_d);
+            tok_sin[k].resize((size_t)slen * half_d);
+            for (int t = 0; t < slen; ++t) {
+                float tpos = (float)token_positions[(size_t)slot_id * S_max + t];
+                for (int d = 0; d < half_d; ++d) {
+                    float ang = tpos * theta_table[d];
+                    tok_cos[k][(size_t)t * half_d + d] = std::cos(ang);
+                    tok_sin[k][(size_t)t * half_d + d] = std::sin(ang);
+                }
+            }
+        }
+    }
+
     // ── Per-head attention loop ─────────────────────────────────────────────
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
@@ -154,15 +179,18 @@ void execute_cpu_attention(
                 blk_vv_local[k].resize(rank * D);
                 blk_anc_v[k].resize(D);
 
-                // VK local [rank, D] — extract + (optionally) rotate at anchor_pos
-                if (use_precomp_rot) {
+                // VK local [rank, D]. The approximate path bakes the anchor-position rotation in
+                // here (single rotation per block). The EXACT path needs RAW VK — it applies the
+                // correct per-token rotation (tok_cos/tok_sin) during reconstruction — so skip the
+                // anchor rotation for it (otherwise tokens get double-rotated → garbage at scale).
+                if (use_precomp_rot && approximate_attn) {
                     // host_VK_rot_ has RoPE already applied; just repack contiguously.
                     const float* base = vk_rot_buf +
                         (size_t)slot_id * rank * n_kv_heads * D + kv_head * D;
                     for (int r = 0; r < rank; ++r)
                         for (int d = 0; d < D; ++d)
                             blk_vk_local[k][r * D + d] = base[r * n_kv_heads * D + d];
-                } else if (has_rope) {
+                } else if (has_rope && approximate_attn) {
                     for (int r = 0; r < rank; ++r) {
                         int bvk = base_vk + r * n_kv_heads * D;
                         for (int d = 0; d < half_d; ++d) {
@@ -275,15 +303,9 @@ void execute_cpu_attention(
                 }
 
             } else {
-                // ── NON-APPROXIMATE path: full K reconstruction + angular recurrence ──
-                // Initialise cos_run at anchor_pos+1 by advancing blk_rope by one step.
-                std::vector<float> cos_run(half_d), sin_run(half_d);
-                if (has_rope) {
-                    for (int d = 0; d < half_d; ++d) {
-                        cos_run[d] = ca[d] * cos_step[d] - sa[d] * sin_step[d];
-                        sin_run[d] = sa[d] * cos_step[d] + ca[d] * sin_step[d];
-                    }
-                }
+                // ── NON-APPROXIMATE path: full K reconstruction + per-token TRUE-position RoPE ──
+                // Each token is rotated by its true stored position (tok_cos/tok_sin, precomputed
+                // above), not a consecutive recurrence from the anchor — that was the decode bug.
 
                 // Precompute anchor K float for this (slot, kv_head)
                 int ak_off = slot_id * n_kv_heads * D + kv_head * D;
@@ -296,31 +318,40 @@ void execute_cpu_attention(
                 const float* vkl = blk_vk_local[k].data();  // [rank, D] contiguous
 
                 for (int t = 0; t < slen; ++t) {
-                    // delta_K[d] = sum_r(U[t,r] * vkl[r,d])
-                    // Then rotate (anc_k + delta_K * scale_uv) with cos_run recurrence
+                    // K_raw[t] = anchor + lowrank delta (+ exact residual), then rotate by the
+                    // token's TRUE position. vkl is RAW VK here (anchor rotation skipped for the
+                    // exact path), so the only rotation applied is the correct per-token one.
                     float score_t = 0.0f;
                     const int8_t* u_row = U + u_base + t * rank;
+
+                    // Exact residual-K correction for high-error tokens (added in raw space).
+                    const ggml_fp16_t* rk_res = nullptr;
+                    for (int ri = 0; ri < MR; ++ri) {
+                        if (res_K_pos[(size_t)slot_id * MR + ri] == t) {
+                            rk_res = res_K_val + ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
+                            break;
+                        }
+                    }
 
                     for (int d = 0; d < half_d; ++d) {
                         int d2 = d + half_d;
                         float dk1 = 0.0f, dk2 = 0.0f;
                         for (int r = 0; r < rank; ++r) {
                             float ur = (float)u_row[r];
-                            // vkl already has RoPE at anchor_pos baked in,
-                            // BUT non-approx needs exact per-token rotation.
-                            // Fall back to raw VK (non-rotated) for accurate reconstruction.
-                            // [Note: vkl used here is NOT the rotated version for non-approx]
                             dk1 += ur * vkl[r * D + d];
                             dk2 += ur * vkl[r * D + d2];
                         }
                         float ku = ggml_fp16_to_fp32(u_row_scale[t]);
                         float k1 = anc_k_f[d]  + dk1 * ku * blk_sc;
                         float k2 = anc_k_f[d2] + dk2 * ku * blk_sc;
+                        if (rk_res) { k1 += ggml_fp16_to_fp32(rk_res[d]); k2 += ggml_fp16_to_fp32(rk_res[d2]); }
 
                         float kr1, kr2;
                         if (has_rope) {
-                            kr1 = k1 * cos_run[d] - k2 * sin_run[d];
-                            kr2 = k2 * cos_run[d] + k1 * sin_run[d];
+                            float cr = tok_cos[k][(size_t)t * half_d + d];
+                            float sr = tok_sin[k][(size_t)t * half_d + d];
+                            kr1 = k1 * cr - k2 * sr;
+                            kr2 = k2 * cr + k1 * sr;
                         } else { kr1 = k1; kr2 = k2; }
 
                         score_t += Q_ptr[h * D + d]  * kr1
@@ -330,15 +361,6 @@ void execute_cpu_attention(
                     float t_score = score_t * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
-
-                    // Advance recurrence
-                    if (has_rope && t + 1 < slen) {
-                        for (int d = 0; d < half_d; ++d) {
-                            float nc = cos_run[d] * cos_step[d] - sin_run[d] * sin_step[d];
-                            float ns = sin_run[d] * cos_step[d] + cos_run[d] * sin_step[d];
-                            cos_run[d] = nc; sin_run[d] = ns;
-                        }
-                    }
                 }
                 slot_infos[k].q_proj.clear();  // not used in non-approx value phase
             }

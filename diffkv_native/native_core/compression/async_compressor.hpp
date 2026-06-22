@@ -36,6 +36,7 @@ struct CompressJob {
     int8_t* out_u_ptr;         // [S_max, rank] destination in pool U
     ggml_fp16_t* out_u_scale;   // [1] destination in pool U_scale
     ggml_fp16_t* out_u_row_scale = nullptr; // [S_max] per-token int8 scale in pool U_row_scale
+    int32_t* out_token_positions = nullptr; // [S_max] true seq position per delta token (RoPE)
     ggml_fp16_t* out_vk_ptr;    // [rank, kv_heads * head_dim] destination in pool VK
     ggml_fp16_t* out_vv_ptr;    // [rank, kv_heads * head_dim] destination in pool VV
     ggml_fp16_t* out_scale;     // [1] destination in pool scales

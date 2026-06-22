@@ -1734,6 +1734,7 @@ static void run_attn_cmp() {
     p.out_scale = pool.get_host_scales(); p.out_anchor_k = pool.get_host_anchors_K();
     p.out_anchor_v = pool.get_host_anchors_V(); p.out_seq_len = pool.get_host_seq_lens();
     p.out_anchor_position = pool.get_host_anchor_positions();
+    p.out_token_positions = pool.get_host_token_positions();
     p.out_res_K_pos = pool.get_host_res_K_pos(); p.out_res_V_pos = pool.get_host_res_V_pos();
     p.out_res_K_val = pool.get_host_res_K_val(); p.out_res_V_val = pool.get_host_res_V_val();
     p.max_residual = NativeBlockPool::MAX_RESIDUAL;
@@ -1745,7 +1746,11 @@ static void run_attn_cmp() {
     float blk_scale = ggml_fp16_to_fp32(pool.get_host_scales()[0]);
     auto orig_of = [&](int sp) { return sp == 0 ? L : (sp == L ? 0 : sp); };
     const int MR = NativeBlockPool::MAX_RESIDUAL;
+    // The exact decode path applies NO residuals, so by default the reference reconstruction
+    // excludes them too (apples-to-apples for the rope test). DIFFKV_ATTN_CMP_RESID=1 includes them.
+    const bool use_resid = (std::getenv("DIFFKV_ATTN_CMP_RESID") != nullptr);
     auto resid = [&](int32_t* pos, ggml_fp16_t* val, int t, int f) -> float {
+        if (!use_resid) return 0.0f;
         for (int i = 0; i < MR; ++i) if (pos[i] == t) return ggml_fp16_to_fp32(val[(size_t)i * F + f]);
         return 0.0f;
     };
@@ -3133,11 +3138,11 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
         ggml_set_input(dense_attn_mask_decode);
 
-#ifdef __APPLE__
-        bool approx = true;
-#else
+        // Default to the EXACT (non-approximate) attention path: only it applies correct
+        // per-token RoPE (true positions). The approximate path bakes a single anchor-position
+        // rotation into the shared V-basis and cannot rotate per token, so it garbles compressed
+        // needles. Opt back into the (faster, inexact) path with DIFFKV_MPS_APPROXIMATE_ATTN=1.
         bool approx = false;
-#endif
         if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
             approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0 || std::strcmp(env_approx, "yes") == 0 || std::strcmp(env_approx, "on") == 0);
         }

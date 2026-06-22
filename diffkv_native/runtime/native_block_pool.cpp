@@ -118,6 +118,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     
     desc_matrix_     = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F32, desc_dim, n_slots);
     anchor_positions_ = ggml_new_tensor_1d(pool_ctx_, GGML_TYPE_I32, n_slots);
+    token_positions_  = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_I32, S_max_, n_slots);  // true seq pos per delta token (RoPE fix)
 
     // Assign names for debug visibility
     ggml_set_name(U_,           "pool.U");
@@ -131,6 +132,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     ggml_set_name(scales_,        "pool.scales");
     ggml_set_name(desc_matrix_,   "pool.desc_matrix");
     ggml_set_name(anchor_positions_, "pool.anchor_positions");
+    ggml_set_name(token_positions_,  "pool.token_positions");
     if (VK_rot_)      ggml_set_name(VK_rot_,      "pool.V_K_rot");
     if (anchorK_rot_) ggml_set_name(anchorK_rot_, "pool.anchors_K_rot");
     if (valid_mask_)  ggml_set_name(valid_mask_,  "pool.valid_mask");
@@ -152,6 +154,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     host_seq_lens_.resize(ggml_nelements(seq_lens_), 0);
     host_scales_.resize(ggml_nelements(scales_), ggml_fp32_to_fp16(0.0f));
     host_anchor_positions_.resize(ggml_nelements(anchor_positions_), 0);
+    host_token_positions_.resize(ggml_nelements(token_positions_), 0);
     host_desc_matrix_.resize(ggml_nelements(desc_matrix_), 0.0f);
     if (VK_rot_)      { /* host_VK_rot_ intentionally not allocated: CPU path uses on-the-fly vk_local
                            (cache-friendly). GPU tensor VK_rot_ is populated per upload_slot for Metal. */ }
@@ -230,6 +233,7 @@ void NativeBlockPool::zero_all_tensors() {
     std::fill(host_seq_lens_.begin(), host_seq_lens_.end(), 0);
     std::fill(host_scales_.begin(), host_scales_.end(), ggml_fp32_to_fp16(0.0f));
     std::fill(host_anchor_positions_.begin(), host_anchor_positions_.end(), 0);
+    std::fill(host_token_positions_.begin(), host_token_positions_.end(), 0);
     std::fill(host_desc_matrix_.begin(), host_desc_matrix_.end(), 0.0f);
 
     if (U_) {
@@ -296,6 +300,10 @@ void NativeBlockPool::zero_all_tensors() {
         std::vector<int32_t> zeros(ggml_nelements(anchor_positions_), 0);
         ggml_backend_tensor_set(anchor_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
     }
+    if (token_positions_) {
+        std::vector<int32_t> zeros(ggml_nelements(token_positions_), 0);
+        ggml_backend_tensor_set(token_positions_, zeros.data(), 0, zeros.size() * sizeof(int32_t));
+    }
     std::fill(slot_device_has_data_.begin(), slot_device_has_data_.end(), false);
     increment_pool_version();
 }
@@ -327,6 +335,8 @@ void NativeBlockPool::upload_slot(int slot_id) {
     ggml_backend_tensor_set(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
     ggml_backend_tensor_set(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(anchor_positions_, host_anchor_positions_.data() + slot_id, slot_id * anchor_positions_->nb[0], sizeof(int32_t));
+    if (token_positions_)
+        ggml_backend_tensor_set(token_positions_, host_token_positions_.data() + (size_t)slot_id * S_max_, slot_id * token_positions_->nb[1], (size_t)S_max_ * sizeof(int32_t));
 
     // Native attn: precompute this slot's RoPE'd keys at its (fixed) anchor position so the
     // in-graph subgraph can gather f16 and dot with the in-graph query — no in-graph rope.

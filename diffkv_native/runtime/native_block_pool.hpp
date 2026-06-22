@@ -50,6 +50,7 @@ public:
     struct ggml_tensor * get_scales() { return scales_; }
     struct ggml_tensor * get_desc_matrix() { return desc_matrix_; }
     struct ggml_tensor * get_anchor_positions() { return anchor_positions_; }
+    struct ggml_tensor * get_token_positions() { return token_positions_; }  // [S_max,n_slots] i32 true pos/token
 
     DiffKVBlockStateTable & get_state_table() { return state_table_; }
 
@@ -93,6 +94,8 @@ public:
     ggml_fp16_t* get_host_scales() { return host_scales_.data(); }
     const int32_t* get_host_anchor_positions() const { return host_anchor_positions_.data(); }
     int32_t* get_host_anchor_positions() { return host_anchor_positions_.data(); }
+    const int32_t* get_host_token_positions() const { return host_token_positions_.data(); }
+    int32_t* get_host_token_positions() { return host_token_positions_.data(); }
     const float* get_host_desc_matrix() const { return host_desc_matrix_.data(); }
     float* get_host_desc_matrix() { return host_desc_matrix_.data(); }
 
@@ -150,6 +153,7 @@ private:
     struct ggml_tensor * scales_ = nullptr;
     struct ggml_tensor * desc_matrix_ = nullptr;
     struct ggml_tensor * anchor_positions_ = nullptr;  // [n_slots] int32: actual sequence position of each block's anchor
+    struct ggml_tensor * token_positions_ = nullptr;   // [S_max, n_slots] int32: true seq position of each delta token (RoPE)
 
     // Host-side mirror buffers
     std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
@@ -165,6 +169,7 @@ private:
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_seq_lens_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_scales_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_anchor_positions_;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_token_positions_;
     std::vector<float, PageAlignedAllocator<float>> host_desc_matrix_;
 
     // F9 residual host buffers: positions [n_slots*MAX_RESIDUAL] int32 (-1 = unused),

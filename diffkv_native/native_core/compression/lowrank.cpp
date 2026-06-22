@@ -473,6 +473,18 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     if (params.out_anchor_position) {
         *params.out_anchor_position = params.anchor_idx + landmark_idx;
     }
+    // True global sequence position of each delta token, for correct decode RoPE. Deltas are
+    // swapped positions 1..S_total-1 (delta index t ↔ swapped pos t+1); the landmark swap put
+    // original token `landmark_idx` at swapped 0 and original 0 at swapped landmark_idx. So the
+    // within-block original index of delta t is (t+1==landmark_idx ? 0 : t+1); global pos adds
+    // the block start (anchor_idx). The decode rotates each token by THIS, not the block anchor.
+    if (params.out_token_positions) {
+        for (int t = 0; t < S_deltas; ++t) {
+            int sp = t + 1;                                  // swapped position
+            int within = (sp == landmark_idx) ? 0 : sp;      // original within-block index
+            params.out_token_positions[t] = params.anchor_idx + within;
+        }
+    }
 
     // ── DBG: reconstruction-error decomposition (DIFFKV_DBG_COMPRESS_ERR=1) ─────
     // Compares the block reconstruction vs the original delta three ways:

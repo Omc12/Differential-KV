@@ -35,6 +35,7 @@ struct LowRankCompressParams {
     ggml_fp16_t* out_anchor_v;
     int32_t* out_seq_len;
     int32_t* out_anchor_position;
+    int32_t* out_token_positions = nullptr;  // [S_max] true global seq position of each delta token (RoPE)
 
     // F9 sparse-residual outputs (optional; nullptr to skip). Sized [max_residual]
     // for positions and [max_residual * feat_dim] for values.

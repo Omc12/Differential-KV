@@ -719,6 +719,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;
     job.out_seq_len = engines[layer_idx]->get_host_seq_lens() + slot_id;
     job.out_anchor_position = engines[layer_idx]->get_host_anchor_positions() + slot_id;
+    job.out_token_positions = engines[layer_idx]->get_host_token_positions() + (size_t)slot_id * pool_s_max;
     // F9 sparse residuals → pool host buffers for this slot.
     {
         const int MR = NativeBlockPool::MAX_RESIDUAL;
