@@ -9,8 +9,13 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+#include <atomic>
 
 namespace diffkv {
+
+// Unconditional invocation counter for custom_attention_op_callback (diagnostic: is the live
+// sparse-attention custom op actually executed by the sched?). Read from main after decode.
+std::atomic<long> g_diffkv_cb_invocations{0};
 
 // ── CPU Project-Then-Attend (reference / non-Apple fallback) ──────────────────
 // On Apple, the Metal kernel handles the normal path; this function handles the
@@ -577,14 +582,8 @@ void custom_attention_op_callback(
     int ith, int nth,
     void * userdata
 ) {
+    g_diffkv_cb_invocations.fetch_add(1, std::memory_order_relaxed);  // unconditional: did the callback run?
     if (ith != 0) return;
-
-    // DIFFKV_DBG_POS=1: one-shot proof that this callback is actually invoked at decode. As of
-    // 2026-06-22 it is NOT called in the live decode (the sparse-attention map_custom3 node appears
-    // pruned/uncomputed) — so the fixes inside (execute_cpu_attention rope) never run live. Keep
-    // this probe until the live sparse-attention path is identified.
-    if (std::getenv("DIFFKV_DBG_POS")) { static int cb_once = 0; if (cb_once++ < 3) {
-        std::cerr << "[CB_ENTRY] custom_attention_op_callback invoked #" << cb_once << "\n"; } }
 
     const struct ggml_tensor* Q             = a;
     const struct ggml_tensor* slot_indices  = b;

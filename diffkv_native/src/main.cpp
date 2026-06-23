@@ -32,6 +32,9 @@
 
 using namespace diffkv;
 
+#include <atomic>
+namespace diffkv { extern std::atomic<long> g_diffkv_cb_invocations; }  // diagnostic counter (diffkv_attention.cpp)
+
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
     if (e) {
@@ -4207,9 +4210,25 @@ int main(int argc, char ** argv) {
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<8)
                 std::cerr << "[DBG_COMPUTE] step o=" << o << " decode_use_sparse=" << decode_use_sparse
                           << " current_pos=" << current_pos << " native_attn_on=" << native_attn_on << "\n"; }
+            if (std::getenv("DIFFKV_DBG_GRAPH") && decode_use_sparse) { static int o=0; if(o++==0) {
+                int N = ggml_graph_n_nodes(decode_graph), nc3=0, ndk=0, nflash=0;
+                struct ggml_tensor* attn_feed = nullptr;
+                for (int i=0;i<N;++i){ struct ggml_tensor* nd = ggml_graph_node(decode_graph,i);
+                    if (nd->op == GGML_OP_MAP_CUSTOM3) nc3++;
+                    if (nd->op == GGML_OP_DIFFKV_ATTN) ndk++;
+                    if (nd->op == GGML_OP_FLASH_ATTN_EXT) nflash++;
+                    if (nd->name && strstr(nd->name, "attn")) attn_feed = nd;
+                }
+                std::cerr << "[DBG_GRAPH] sparse decode graph: n_nodes=" << N
+                          << " MAP_CUSTOM3=" << nc3 << " DIFFKV_ATTN=" << ndk
+                          << " FLASH_ATTN=" << nflash << "\n";
+            }}
             ggml_status decode_st = native_attn_on
                 ? ggml_backend_graph_compute(backend, decode_graph)
                 : ggml_backend_sched_graph_compute(sched, decode_graph);
+            if (std::getenv("DIFFKV_DBG_GRAPH")) { static int o=0; if(o++<10)
+                std::cerr << "[DBG_CBCOUNT] step=" << o << " sparse=" << decode_use_sparse
+                          << " cb_invocations=" << diffkv::g_diffkv_cb_invocations.load() << "\n"; }
             if (decode_st != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
                 break;
@@ -5179,6 +5198,10 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
+        }
+        if (!is_warmup_run && std::getenv("DIFFKV_DBG_GRAPH")) {
+            std::cerr << "[DBG_CBTOTAL] custom_attention_op_callback total invocations this response = "
+                      << diffkv::g_diffkv_cb_invocations.load() << "\n";
         }
         if (!is_warmup_run) {
             std::cout << std::endl;
