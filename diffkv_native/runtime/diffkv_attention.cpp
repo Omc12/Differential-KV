@@ -583,8 +583,8 @@ void custom_attention_op_callback(
     // 2026-06-22 it is NOT called in the live decode (the sparse-attention map_custom3 node appears
     // pruned/uncomputed) — so the fixes inside (execute_cpu_attention rope) never run live. Keep
     // this probe until the live sparse-attention path is identified.
-    if (std::getenv("DIFFKV_DBG_POS")) { static int cb_once = 0; if (cb_once++ == 0) {
-        std::cerr << "[CB_ENTRY] custom_attention_op_callback invoked ith=" << ith << " nth=" << nth << "\n"; } }
+    if (std::getenv("DIFFKV_DBG_POS")) { static int cb_once = 0; if (cb_once++ < 3) {
+        std::cerr << "[CB_ENTRY] custom_attention_op_callback invoked #" << cb_once << "\n"; } }
 
     const struct ggml_tensor* Q             = a;
     const struct ggml_tensor* slot_indices  = b;

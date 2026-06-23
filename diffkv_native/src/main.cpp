@@ -3848,6 +3848,10 @@ int main(int argc, char ** argv) {
             srl_state.clear_step_cache();
 
             bool step_use_sparse = (current_pos >= engage_threshold);
+            if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<3)
+                std::cerr << "[DBG_ENGAGE] step current_pos=" << current_pos
+                          << " engage_threshold=" << engage_threshold
+                          << " step_use_sparse=" << step_use_sparse << "\n"; }
             bool rebuild_needed = (step_use_sparse != decode_use_sparse);
             if (rebuild_needed) {
                 decode_use_sparse = step_use_sparse;
@@ -4200,6 +4204,9 @@ int main(int argc, char ** argv) {
             }
 
             auto t_before_compute = std::chrono::high_resolution_clock::now();
+            if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<8)
+                std::cerr << "[DBG_COMPUTE] step o=" << o << " decode_use_sparse=" << decode_use_sparse
+                          << " current_pos=" << current_pos << " native_attn_on=" << native_attn_on << "\n"; }
             ggml_status decode_st = native_attn_on
                 ? ggml_backend_graph_compute(backend, decode_graph)
                 : ggml_backend_sched_graph_compute(sched, decode_graph);
