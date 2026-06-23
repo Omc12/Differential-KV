@@ -135,9 +135,9 @@ void execute_cpu_attention(
             blk_rope[k].ca.resize(half_d);
             blk_rope[k].sa.resize(half_d);
             for (int d = 0; d < half_d; ++d) {
-                float angle = (float)ap * theta_table[d];
-                blk_rope[k].ca[d] = std::cos(angle);
-                blk_rope[k].sa[d] = std::sin(angle);
+                double angle = std::fmod((double)ap * (double)theta_table[d], 2.0 * M_PI);
+                blk_rope[k].ca[d] = (float)std::cos(angle);
+                blk_rope[k].sa[d] = (float)std::sin(angle);
             }
         }
     }
@@ -176,11 +176,13 @@ void execute_cpu_attention(
             tok_cos[k].resize((size_t)slen * half_d);
             tok_sin[k].resize((size_t)slen * half_d);
             for (int t = 0; t < slen; ++t) {
-                float tpos = (float)token_positions[(size_t)slot_id * S_max + t];
+                double tpos = (double)token_positions[(size_t)slot_id * S_max + t];
                 for (int d = 0; d < half_d; ++d) {
-                    float ang = tpos * theta_table[d];
-                    tok_cos[k][(size_t)t * half_d + d] = std::cos(ang);
-                    tok_sin[k][(size_t)t * half_d + d] = std::sin(ang);
+                    // double-precision angle + mod-2π reduction (float32 pos*theta loses precision
+                    // at high positions → CPU rope diverges from ggml → at-scale garbage).
+                    double ang = std::fmod(tpos * (double)theta_table[d], 2.0 * M_PI);
+                    tok_cos[k][(size_t)t * half_d + d] = (float)std::cos(ang);
+                    tok_sin[k][(size_t)t * half_d + d] = (float)std::sin(ang);
                 }
             }
         }
@@ -503,9 +505,9 @@ void cpu_dense_attention(
             std::vector<float> cos_run(half_d), sin_run(half_d);
             std::vector<float> cos_stp(half_d), sin_stp(half_d);
             for (int d = 0; d < half_d; ++d) {
-                float angle0 = (float)pos0 * theta[d];
-                cos_run[d] = std::cos(angle0);
-                sin_run[d] = std::sin(angle0);
+                double angle0 = std::fmod((double)pos0 * (double)theta[d], 2.0 * M_PI);
+                cos_run[d] = (float)std::cos(angle0);
+                sin_run[d] = (float)std::sin(angle0);
                 cos_stp[d] = std::cos(theta[d]);
                 sin_stp[d] = std::sin(theta[d]);
             }
@@ -537,8 +539,8 @@ void cpu_dense_attention(
                     int d2 = d + half_d;
                     float x = active_k_dense[src + d];
                     float y = active_k_dense[src + d2];
-                    float angle = (float)pos * theta[d];
-                    float c = std::cos(angle), s = std::sin(angle);
+                    double angle = std::fmod((double)pos * (double)theta[d], 2.0 * M_PI);
+                    float c = (float)std::cos(angle), s = (float)std::sin(angle);
                     K_rot[dst + d]  = x * c - y * s;
                     K_rot[dst + d2] = y * c + x * s;
                 }
