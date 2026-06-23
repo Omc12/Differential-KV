@@ -16,6 +16,9 @@ namespace diffkv {
 // Unconditional invocation counter for custom_attention_op_callback (diagnostic: is the live
 // sparse-attention custom op actually executed by the sched?). Read from main after decode.
 std::atomic<long> g_diffkv_cb_invocations{0};
+std::atomic<int>  g_diffkv_dbg_pos{0};   // mirror of DIFFKV_DBG_POS, set from main (worker-thread getenv fails)
+std::atomic<long> g_cpu_attn_count{0};   // execute_cpu_attention entries (live path = CPU?)
+std::atomic<long> g_metal_attn_count{0}; // execute_metal_attention entries (live path = Metal?)
 
 // ── CPU Project-Then-Attend (reference / non-Apple fallback) ──────────────────
 // On Apple, the Metal kernel handles the normal path; this function handles the
@@ -76,10 +79,11 @@ void execute_cpu_attention(
     const int32_t* active_slots = unique_slots.data();
     int active_K = (int)unique_slots.size();
 
+    g_cpu_attn_count.fetch_add(1, std::memory_order_relaxed);  // unconditional: is the CPU path live?
     // DIFFKV_DBG_POS=1: one-shot dump of the selected blocks' anchor/token positions, to verify
     // the real prefill assigns GLOBAL sequence positions per block (a wrong/non-global anchor_idx
     // would corrupt decode RoPE at scale regardless of version — suspected 8k+ echo cause).
-    if (std::getenv("DIFFKV_DBG_POS")) {
+    if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {  // set from main (getenv fails on worker thread)
         static int once = 0;
         if (once++ == 0) {
             std::cerr << "[DBG_POS] active_K=" << active_K << " S_max=" << S_max << "\n";

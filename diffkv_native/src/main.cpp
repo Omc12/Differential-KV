@@ -34,6 +34,8 @@ using namespace diffkv;
 
 #include <atomic>
 namespace diffkv { extern std::atomic<long> g_diffkv_cb_invocations; }  // diagnostic counter (diffkv_attention.cpp)
+namespace diffkv { extern std::atomic<long> g_cpu_attn_count; extern std::atomic<long> g_metal_attn_count; }
+namespace diffkv { extern std::atomic<int> g_diffkv_dbg_pos; }
 
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
@@ -1841,6 +1843,7 @@ int main(int argc, char ** argv) {
     // std::cout sentinel writes (__RESPONSE__, __FINISH__) with raw ::write()
     // token output. Keep them synced so ordering is guaranteed.
 
+    if (std::getenv("DIFFKV_DBG_POS")) diffkv::g_diffkv_dbg_pos.store(1);  // mirror to a global (worker-thread getenv fails)
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (std::getenv("DIFFKV_DENSE_CMP")) { run_dense_attn_cmp(); return 0; }
     if (std::getenv("DIFFKV_RECON_CMP")) { run_recon_cmp(); return 0; }
@@ -4228,7 +4231,9 @@ int main(int argc, char ** argv) {
                 : ggml_backend_sched_graph_compute(sched, decode_graph);
             if (std::getenv("DIFFKV_DBG_GRAPH")) { static int o=0; if(o++<10)
                 std::cerr << "[DBG_CBCOUNT] step=" << o << " sparse=" << decode_use_sparse
-                          << " cb_invocations=" << diffkv::g_diffkv_cb_invocations.load() << "\n"; }
+                          << " cb=" << diffkv::g_diffkv_cb_invocations.load()
+                          << " cpu_attn=" << diffkv::g_cpu_attn_count.load()
+                          << " metal_attn=" << diffkv::g_metal_attn_count.load() << "\n"; }
             if (decode_st != GGML_STATUS_SUCCESS) {
                 std::cerr << "Error: Decode graph compute failed at step " << step << std::endl;
                 break;

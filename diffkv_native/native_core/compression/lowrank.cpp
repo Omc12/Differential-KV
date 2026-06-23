@@ -524,7 +524,10 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         nb++; ntok += S_deltas;
         if ((nb <= 3 || nb % 20 == 0) && nrm > 0) {
             double rfl=100*std::sqrt(e_floor/nrm), rf16=100*std::sqrt(e_fp16/nrm), ri8=100*std::sqrt(e_int8/nrm);
+            int tp0 = params.out_token_positions ? params.out_token_positions[0] : -1;
+            int tpl = (params.out_token_positions && S_deltas>0) ? params.out_token_positions[S_deltas-1] : -1;
             std::cerr << "[COMPRESS_ERR] blocks=" << nb << " toks=" << ntok
+                      << " anchor_idx=" << params.anchor_idx << " tok_pos[0]=" << tp0 << " tok_pos[last]=" << tpl
                       << " rel_recon_err: floor(rank" << R << ")=" << rfl << "%  fp16_U=" << rf16
                       << "%  int8_U=" << ri8 << "%  | int8_penalty_over_fp16=" << (ri8-rf16) << "%" << std::endl;
         }

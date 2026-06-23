@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #include "runtime/diffkv_attention.hpp"
 #include <iostream>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <mach-o/dyld.h>
@@ -484,6 +485,8 @@ void execute_metal_attention(
     const int32_t* dense_pos,
     int            T_dense
 ) {
+    extern std::atomic<long> g_metal_attn_count;
+    g_metal_attn_count.fetch_add(1, std::memory_order_relaxed);  // unconditional: is the Metal path live?
     init_metal_runtime();
     if (!g_pipeline) {
         std::cerr << "[Metal Attention] Error: Compute pipeline not initialized!" << std::endl;
