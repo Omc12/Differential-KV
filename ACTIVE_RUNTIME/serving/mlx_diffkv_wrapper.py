@@ -868,35 +868,163 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                             k_np = _np.array(keys[b_idx, :, 0, :])
                             k_torch = _torch.from_numpy(k_np).float()
 
-                            matching_entries = factual_store.query(
-                                Q=k_torch,
-                                W_proj=pool.W_proj,
-                                threshold=0.3,
-                                active_slots=None,
-                            )
-
+                            matching_entries = []
                             srl_state.current_step_factual_tokens = set()
                             srl_state.current_step_factual_sequences = []
                             srl_state.current_step_max_similarity = 0.0
+                            srl_state.current_step_sequence_entity_ids = []
+                            srl_state.current_step_sequence_is_prime = []
+                            srl_state.current_step_sequence_prefixes = []
+
+                            if srl_state.factual_anchor_q is None:
+                                srl_state.factual_anchor_q = k_torch.detach().clone()
+                                
+                                # ── Early Entity Binding ─────────────────────────────────────────
+                                try:
+                                    query_toks = set(getattr(srl_state, "current_query_tokens", []))
+                                    inv_index = getattr(srl_state, "inverted_index", None)
+                                    if query_toks and factual_store is not None and inv_index is not None:
+                                        important_query_toks = query_toks & inv_index.important_vocab
+                                        prime_matches = []
+                                        for fe in factual_store.entries:
+                                            if getattr(fe, "is_prime", False):
+                                                fe_important = set(fe.tokens) & inv_index.important_vocab
+                                                overlap = len(important_query_toks & fe_important)
+                                                if overlap >= 1:
+                                                    prime_matches.append((fe.start_idx, overlap))
+                                        if len(prime_matches) == 1:
+                                            srl_state.current_entity_id = prime_matches[0][0]
+                                            srl_state.dual_entity_mode = False
+                                        elif len(prime_matches) >= 2:
+                                            prime_matches.sort(key=lambda x: x[1], reverse=True)
+                                            srl_state.dual_entity_mode = True
+                                            srl_state.dual_entity_ids = [
+                                                prime_matches[0][0],
+                                                prime_matches[1][0],
+                                            ]
+                                            srl_state.comparison_entities = list(srl_state.dual_entity_ids)
+                                            srl_state.comparison_active_idx = 0
+                                            srl_state.comparison_covered = set()
+                                            srl_state.current_entity_id = srl_state.comparison_entities[0]
+                                except Exception:
+                                    pass
+
+                            q_for_factual = 0.20 * k_torch + 0.80 * srl_state.factual_anchor_q.to(k_torch.device)
+
+                            _qbias = None
+                            if getattr(srl_state, "dual_entity_mode", False) and getattr(srl_state, "dual_entity_ids", None):
+                                _qbias = set(srl_state.dual_entity_ids)
+                            elif getattr(srl_state, "current_entity_id", -1) != -1:
+                                _qbias = {srl_state.current_entity_id}
+
+                            matching_entries = factual_store.query(
+                                Q=q_for_factual,
+                                W_proj=pool.W_proj,
+                                threshold=0.3,
+                                active_slots=None,
+                                query_entity_bias=_qbias,
+                            )
 
                             if matching_entries:
                                 for entry in matching_entries:
                                     srl_state.current_step_factual_tokens.update(entry.tokens)
                                     if entry.tokens not in srl_state.current_step_factual_sequences:
                                         srl_state.current_step_factual_sequences.append(entry.tokens)
-                                    # 1-hop + 2-hop neighbor injection
+                                    
+                                    # RC1 — inject triple sequences from prime entries.
+                                    if getattr(entry, "is_prime", False):
+                                        for triple_seq in getattr(entry, "triple_sequences", []):
+                                            if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                srl_state.current_step_factual_sequences.append(triple_seq)
+                                                srl_state.current_step_factual_tokens.update(triple_seq)
+
+                                    # ── 1-hop neighbor injection ────────────────────────────
                                     for nb_idx, nb_weight in zip(entry.neighbors, entry.weights):
                                         if nb_weight >= 0.35 and nb_idx < len(factual_store.entries):
                                             nb_e = factual_store.entries[nb_idx]
                                             if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
                                                 srl_state.current_step_factual_tokens.update(nb_e.tokens)
                                                 srl_state.current_step_factual_sequences.append(nb_e.tokens)
+                                            if getattr(nb_e, "is_prime", False):
+                                                for triple_seq in getattr(nb_e, "triple_sequences", []):
+                                                    if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
+                                                        srl_state.current_step_factual_sequences.append(triple_seq)
+                                                        srl_state.current_step_factual_tokens.update(triple_seq)
+                                            
+                                            # ── 2-hop neighbor injection ────────────────
                                             for nb2_idx, nb2_weight in zip(nb_e.neighbors, nb_e.weights):
                                                 if nb2_weight >= 0.50 and nb2_idx < len(factual_store.entries):
                                                     nb2_e = factual_store.entries[nb2_idx]
                                                     if nb2_e.tokens and nb2_e.tokens not in srl_state.current_step_factual_sequences:
                                                         srl_state.current_step_factual_tokens.update(nb2_e.tokens)
                                                         srl_state.current_step_factual_sequences.append(nb2_e.tokens)
+
+                                # Coherence Cap sorting & truncation (Solution 6)
+                                session_config = getattr(manager, "session_configs", {}).get(sid, {})
+                                base_coherence = session_config.get("coherence_cap", 8)
+                                num_active = 1
+                                if getattr(srl_state, "dual_entity_mode", False):
+                                    num_active = 2
+                                coherence_cap = base_coherence + 4 * num_active
+
+                                seq_id_to_score = {}
+                                for fe_e in matching_entries:
+                                    f_sim = getattr(fe_e, "current_sim", 0.0)
+                                    if f_sim > 0:
+                                        seq_id_to_score[tuple(fe_e.tokens)] = f_sim
+                                        # 1-hop neighbors inherit score
+                                        for nb_idx, nb_w in zip(fe_e.neighbors, fe_e.weights):
+                                            if nb_w >= 0.35 and nb_idx < len(factual_store.entries):
+                                                nb_toks = tuple(factual_store.entries[nb_idx].tokens)
+                                                if nb_toks not in seq_id_to_score:
+                                                    seq_id_to_score[nb_toks] = f_sim * nb_w
+                                        # Triple sequences inherit prime's score
+                                        if getattr(fe_e, "is_prime", False):
+                                            for ts in getattr(fe_e, "triple_sequences", []):
+                                                seq_id_to_score[tuple(ts)] = f_sim
+
+                                srl_state.current_step_factual_sequences.sort(
+                                    key=lambda s: seq_id_to_score.get(tuple(s), 0.0), reverse=True
+                                )
+                                srl_state.current_step_factual_sequences = srl_state.current_step_factual_sequences[:coherence_cap]
+                                srl_state.current_step_factual_tokens = set()
+                                for s in srl_state.current_step_factual_sequences:
+                                    srl_state.current_step_factual_tokens.update(s)
+
+                                # ── Entity-Subgraph Tagging ───────────────────────────────────
+                                entry_meta = {}
+                                for fe in factual_store.entries:
+                                    tup = tuple(fe.tokens)
+                                    entry_meta[tup] = (
+                                        getattr(fe, "entity_id", -1),
+                                        getattr(fe, "is_prime", False),
+                                        getattr(fe, "prefix_tokens", []),
+                                    )
+                                triple_to_entity = {}
+                                for fe in factual_store.entries:
+                                    if getattr(fe, "is_prime", False):
+                                        p_entity = getattr(fe, "entity_id", -1)
+                                        for ts in getattr(fe, "triple_sequences", []):
+                                            triple_to_entity[tuple(ts)] = p_entity
+
+                                entity_ids = []
+                                is_prime_flags = []
+                                seq_prefixes = []
+                                for seq in srl_state.current_step_factual_sequences:
+                                    tup = tuple(seq)
+                                    if tup in entry_meta:
+                                        eid, isp, pref = entry_meta[tup]
+                                    elif tup in triple_to_entity:
+                                        eid, isp, pref = triple_to_entity[tup], False, []
+                                    else:
+                                        eid, isp, pref = -1, False, []
+                                    entity_ids.append(eid)
+                                    is_prime_flags.append(isp)
+                                    seq_prefixes.append(list(pref))
+                                srl_state.current_step_sequence_entity_ids = entity_ids
+                                srl_state.current_step_sequence_is_prime = is_prime_flags
+                                srl_state.current_step_sequence_prefixes = seq_prefixes
+
                                 sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
                                 if sims:
                                     srl_state.current_step_max_similarity = max(sims)

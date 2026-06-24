@@ -4798,7 +4798,13 @@ int main(int argc, char ** argv) {
                     // ── Early Entity Binding (Component 4) ────────────────────
                     // Analyze query tokens against prime entries at the very start.
                     if (!srl_state.current_query_tokens.empty()) {
-                        std::unordered_set<int32_t> query_toks(srl_state.current_query_tokens.begin(), srl_state.current_query_tokens.end());
+                        const auto& important = srl_state.inverted_index.important_vocab;
+                        std::unordered_set<int32_t> query_toks;
+                        for (int32_t t : srl_state.current_query_tokens) {
+                            if (important.empty() || important.count(t)) {
+                                query_toks.insert(t);
+                            }
+                        }
                         struct PrimeMatch {
                             int32_t start_idx;
                             int overlap;
@@ -4808,7 +4814,9 @@ int main(int argc, char ** argv) {
                             if (fe.is_prime) {
                                 int overlap = 0;
                                 for (int32_t t : fe.tokens) {
-                                    if (query_toks.count(t)) overlap++;
+                                    if ((important.empty() || important.count(t)) && query_toks.count(t)) {
+                                        overlap++;
+                                    }
                                 }
                                 if (overlap >= 1) {
                                     prime_matches.push_back({fe.start_idx, overlap});

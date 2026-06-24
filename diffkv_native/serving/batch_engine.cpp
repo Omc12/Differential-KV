@@ -1756,9 +1756,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
 
-        if (!session->srl_state.factual_store.entries.empty()) {
-            diffkv::process_and_tag_vsl_step(session->srl_state);
-        }
+        // process_and_tag_vsl_step is now called inside the factual store query block at the end of each step
 
         // SFA threshold raised to 0.55 to match main.cpp interactive path.
         if (session->srl_state.current_step_max_similarity >= 0.55f) {
@@ -1860,6 +1858,222 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         last_token = next_token;
         req->generated_tokens.push_back(next_token);
         all_tokens.push_back(next_token);
+
+        // ── Factual store query ──────────────────────────────────────────
+        // Use layer-0 decode K as a proxy Q vector to find matching factual
+        // spans. Results populate current_step_factual_tokens/sequences and
+        // current_step_max_similarity, which drive logit biasing (+3/+4),
+        // VSL masking, temperature reduction, and SFA on the NEXT decode step.
+        if (!session->srl_state.factual_store.entries.empty()) {
+            std::unordered_set<int32_t> active_slots_set(
+                cached_physical_candidates.begin(),
+                cached_physical_candidates.end()
+            );
+            const std::unordered_set<int32_t>* slot_filter =
+                active_slots_set.empty() ? nullptr : &active_slots_set;
+
+            // ── Query Anchor Blending ─────────────────────────────────────
+            // Store layer-0 decode-K from the first decode step as a stable
+            // anchor. On subsequent steps blend 20% current + 80% anchor so
+            // accumulated generated-token context cannot pull retrieval away
+            // from the original question topic (mirrors Python 0.20/0.80 blend).
+            std::vector<float> q_for_factual(F_test);
+            if (session->srl_state.factual_anchor_q.empty()) {
+                session->srl_state.factual_anchor_q = decode_k[0];
+                q_for_factual = decode_k[0];
+
+                // ── Early Entity Binding (Component 4) ────────────────────
+                // Analyze query tokens against prime entries at the very start.
+                if (!session->srl_state.current_query_tokens.empty()) {
+                    const auto& important = session->srl_state.inverted_index.important_vocab;
+                    std::unordered_set<int32_t> query_toks;
+                    for (int32_t t : session->srl_state.current_query_tokens) {
+                        if (important.empty() || important.count(t)) {
+                            query_toks.insert(t);
+                        }
+                    }
+                    struct PrimeMatch {
+                        int32_t start_idx;
+                        int overlap;
+                    };
+                    std::vector<PrimeMatch> prime_matches;
+                    for (const auto& fe : session->srl_state.factual_store.entries) {
+                        if (fe.is_prime) {
+                            int overlap = 0;
+                            for (int32_t t : fe.tokens) {
+                                if ((important.empty() || important.count(t)) && query_toks.count(t)) {
+                                    overlap++;
+                                }
+                            }
+                            if (overlap >= 1) {
+                                prime_matches.push_back({fe.start_idx, overlap});
+                            }
+                        }
+                    }
+                    if (prime_matches.size() == 1) {
+                        session->srl_state.current_entity_id = prime_matches[0].start_idx;
+                        session->srl_state.dual_entity_mode = false;
+                    } else if (prime_matches.size() >= 2) {
+                        std::sort(prime_matches.begin(), prime_matches.end(), [](const PrimeMatch& a, const PrimeMatch& b) {
+                            return a.overlap > b.overlap;
+                        });
+                        session->srl_state.dual_entity_mode = true;
+                        session->srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
+                        // RC5: sequence the comparison as per-entity blocks and
+                        // lock to the first entity now (instead of leaving entity
+                        // context open, which lets the two interleave).
+                        session->srl_state.comparison_entities = session->srl_state.dual_entity_ids;
+                        session->srl_state.comparison_active_idx = 0;
+                        session->srl_state.comparison_covered.clear();
+                        session->srl_state.current_entity_id = session->srl_state.comparison_entities[0];
+                    }
+                }
+            } else {
+                for (int qi = 0; qi < F_test; ++qi) {
+                    q_for_factual[qi] = 0.20f * decode_k[0][qi]
+                                      + 0.80f * session->srl_state.factual_anchor_q[qi];
+                }
+            }
+
+            // RC3 — tell the store which entities the query is about so it
+            // ranks their spans above shared-vocabulary spans of other entities.
+            std::unordered_set<int32_t> qbias;
+            if (session->srl_state.dual_entity_mode && !session->srl_state.dual_entity_ids.empty()) {
+                qbias.insert(session->srl_state.dual_entity_ids.begin(), session->srl_state.dual_entity_ids.end());
+            } else if (session->srl_state.current_entity_id != -1) {
+                qbias.insert(session->srl_state.current_entity_id);
+            }
+            const std::unordered_set<int32_t>* qbias_ptr = qbias.empty() ? nullptr : &qbias;
+
+            // §3.4 fix: Use 0.50 threshold and pass active_slots to match the HF reference.
+            auto fact_hits = session->srl_state.factual_store.query(
+                q_for_factual.data(),
+                kv_heads,
+                head_dim,
+                W_proj_host.data(),
+                desc_dim,
+                0.50f,        // §3.4: 0.30→0.50 per HF ref (diffkv_attention.py:774)
+                slot_filter,  // §3.4: pass routed slots as active_slots (diffkv_attention.py:775)
+                qbias_ptr
+            );
+
+            session->srl_state.current_step_factual_tokens.clear();
+            session->srl_state.current_step_factual_sequences.clear();
+            session->srl_state.current_step_max_similarity = 0.0f;
+            session->srl_state.current_step_sequence_entity_ids.clear();
+            session->srl_state.current_step_sequence_is_prime.clear();
+            session->srl_state.current_step_sequence_prefixes.clear();
+
+            // N3.1: Store fact_hits in step_cached_entries so the NEXT step's
+            // attention callback can use the K/V data for exact-attention blending
+            session->srl_state.step_cached_entries = fact_hits;
+
+            // Helper lambda to add a sequence if not already present
+            auto add_seq = [&](const std::vector<int32_t>& seq) {
+                if (seq.empty()) return;
+                for (const auto& s : session->srl_state.current_step_factual_sequences)
+                    if (s == seq) return;
+                for (int32_t t : seq) session->srl_state.current_step_factual_tokens.insert(t);
+                session->srl_state.current_step_factual_sequences.push_back(seq);
+            };
+
+            for (const auto& hit : fact_hits) {
+                for (int32_t tok_id : hit.tokens) {
+                    session->srl_state.current_step_factual_tokens.insert(tok_id);
+                }
+                if (!hit.tokens.empty()) {
+                    add_seq(hit.tokens);
+                }
+                if (hit.current_sim > session->srl_state.current_step_max_similarity) {
+                    session->srl_state.current_step_max_similarity = hit.current_sim;
+                }
+                // RC1 — inject triple sequences from prime entries so the VSL
+                // can lock onto the complete (bridge + value) ordering, preventing
+                // freely hallucinated relational connectives.
+                if (hit.is_prime) {
+                    for (const auto& triple_seq : hit.triple_sequences) {
+                        add_seq(triple_seq);
+                    }
+                }
+                // ── 1-hop neighbor injection ────────────────────────────────
+                for (size_t ni = 0; ni < hit.neighbors.size(); ++ni) {
+                    int nb_idx = hit.neighbors[ni];
+                    float nb_w  = hit.weights[ni];
+                    if (nb_w >= 0.35f && nb_idx < (int)session->srl_state.factual_store.entries.size()) {
+                        const auto& nb_e = session->srl_state.factual_store.entries[nb_idx];
+                        add_seq(nb_e.tokens);
+                        if (nb_e.is_prime) {
+                            for (const auto& ts : nb_e.triple_sequences) add_seq(ts);
+                        }
+                        // ── 2-hop neighbor injection ────────────────────
+                        for (size_t ni2 = 0; ni2 < nb_e.neighbors.size(); ++ni2) {
+                            int nb2_idx = nb_e.neighbors[ni2];
+                            float nb2_w  = nb_e.weights[ni2];
+                            if (nb2_w >= 0.50f && nb2_idx < (int)session->srl_state.factual_store.entries.size()) {
+                                const auto& nb2_e = session->srl_state.factual_store.entries[nb2_idx];
+                                add_seq(nb2_e.tokens);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Lexical Tripwire ──────────────────────────────────────────────
+            if (!session->srl_state.recent_generated_tokens.empty()) {
+                int32_t last_tok = session->srl_state.recent_generated_tokens.back();
+                auto idf_it = session->srl_state.inverted_index.idf.find(last_tok);
+                if (idf_it != session->srl_state.inverted_index.idf.end() && idf_it->second >= 2.5f) {
+                    auto occ_it = session->srl_state.inverted_index.occurrences.find(last_tok);
+                    if (occ_it != session->srl_state.inverted_index.occurrences.end()) {
+                        std::unordered_set<int32_t> occ_slots;
+                        for (const auto& occ : occ_it->second) {
+                            occ_slots.insert(std::get<0>(occ));
+                        }
+                        for (const auto& fe : session->srl_state.factual_store.entries) {
+                            bool has_tok = false;
+                            for (int32_t t : fe.tokens) {
+                                if (t == last_tok) { has_tok = true; break; }
+                            }
+                            bool has_slot = false;
+                            for (int32_t s : fe.slot_ids) {
+                                if (occ_slots.count(s)) { has_slot = true; break; }
+                            }
+                            if (has_tok && has_slot) {
+                                bool already = false;
+                                for (const auto& s : session->srl_state.current_step_factual_sequences) {
+                                    if (s == fe.tokens) { already = true; break; }
+                                }
+                                if (!already) {
+                                    for (int32_t t : fe.tokens) session->srl_state.current_step_factual_tokens.insert(t);
+                                    session->srl_state.current_step_factual_sequences.push_back(fe.tokens);
+                                }
+                                // 1-hop from tripwire entry
+                                for (size_t ni = 0; ni < fe.neighbors.size(); ++ni) {
+                                    int nb_idx = fe.neighbors[ni];
+                                    float nb_w  = (ni < fe.weights.size()) ? fe.weights[ni] : 0.0f;
+                                    if (nb_w >= 0.35f && nb_idx < (int)session->srl_state.factual_store.entries.size()) {
+                                        const auto& nb_e = session->srl_state.factual_store.entries[nb_idx];
+                                        if (!nb_e.tokens.empty()) {
+                                            bool alr = false;
+                                            for (const auto& s : session->srl_state.current_step_factual_sequences) {
+                                                if (s == nb_e.tokens) { alr = true; break; }
+                                            }
+                                            if (!alr) {
+                                                for (int32_t t : nb_e.tokens) session->srl_state.current_step_factual_tokens.insert(t);
+                                                session->srl_state.current_step_factual_sequences.push_back(nb_e.tokens);
+                                            }
+                                        }
+                                    }
+                                }
+                                break; // only inject from first matching entry
+                            }
+                        }
+                    }
+                }
+            }
+
+            diffkv::process_and_tag_vsl_step(session->srl_state);
+        }
 
         int old_active_slot = session->active_slot;
         session->active_slot = runtime_manager_->get_ingest_manager().get_blocks(0).size() - 1;
