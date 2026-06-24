@@ -11,16 +11,20 @@ import codecs
 import httpx
 
 # ---------------------------------------------------------------------------
-# ANSI Color Codes for Styling
+# ANSI Color Codes for Styling (Sky Blue and Dark Blue Theme)
 # ---------------------------------------------------------------------------
 COLOR_RESET = "\033[0m"
-COLOR_USER = "\033[92m"       # Green
-COLOR_AI = "\033[96m"         # Cyan
-COLOR_SYSTEM = "\033[95m"     # Magenta
-COLOR_WARNING = "\033[93m"    # Yellow
-COLOR_ERROR = "\033[91m"      # Red
-COLOR_DIM = "\033[90m"        # Dark Gray
-COLOR_BOLD = "\033[1m"        # Bold
+COLOR_SKY_BLUE = "\033[38;5;81m"     # Sky Blue (accent color)
+COLOR_DEEP_BLUE = "\033[38;5;27m"    # Deep/Dark Blue (theme accent)
+COLOR_STEEL_BLUE = "\033[38;5;75m"   # Steel Blue (subtle)
+
+COLOR_USER = COLOR_STEEL_BLUE        # Soft Steel Blue for User prompt
+COLOR_AI = COLOR_SKY_BLUE            # Sky Blue for Model prompt
+COLOR_SYSTEM = "\033[38;5;33m"       # Mid Blue for System messages
+COLOR_WARNING = "\033[38;5;214m"      # Warm Gold/Orange for warnings
+COLOR_ERROR = "\033[38;5;203m"        # Soft Red for errors
+COLOR_DIM = "\033[90m"              # Dark Gray
+COLOR_BOLD = "\033[1m"              # Bold
 
 def print_system(msg):
     print(f"{COLOR_SYSTEM}{COLOR_BOLD}[System]{COLOR_RESET} {COLOR_SYSTEM}{msg}{COLOR_RESET}")
@@ -33,6 +37,201 @@ def print_error(msg):
 
 def print_metrics(msg):
     print(f"{COLOR_DIM}{msg}{COLOR_RESET}")
+
+def get_display_model_name(model_path_or_name: str) -> str:
+    if not model_path_or_name:
+        return "AI"
+    if model_path_or_name == "0.5b":
+        return "Qwen2.5-0.5B"
+    if model_path_or_name == "1.5b":
+        return "Qwen2.5-1.5B"
+    
+    basename = os.path.basename(model_path_or_name)
+    if basename.endswith(".gguf"):
+        basename = basename[:-5]
+        
+    # Clean up Qwen naming or generic paths
+    name = basename
+    if name.lower().startswith("qwen"):
+        parts = name.split("-")
+        capitalized_parts = []
+        for p in parts:
+            if p.lower() == "qwen2.5":
+                capitalized_parts.append("Qwen2.5")
+            elif p.lower() == "qwen":
+                capitalized_parts.append("Qwen")
+            elif p.lower().endswith("b") and p[:-1].replace(".", "").isdigit():
+                capitalized_parts.append(p[:-1] + "B")
+            elif p.lower() == "instruct":
+                capitalized_parts.append("Instruct")
+            else:
+                capitalized_parts.append(p.capitalize())
+        name = "-".join(capitalized_parts)
+    
+    for suffix in ["-q4_k_m", "-q8_0", "_q4_k_m", "_q8_0"]:
+        if name.lower().endswith(suffix):
+            name = name[:-len(suffix)]
+            
+    return name
+
+def show_banner():
+    logo_lines = [
+        " ██████╗  ██╗ ██████╗ ██████╗  ██╗  ██╗ ██╗   ██╗",
+        " ██╔══██╗ ██║ ██╔═══╝ ██╔═══╝  ██║ ██╔╝ ██║   ██║",
+        " ██║  ██║ ██║ █████╗  █████╗   █████═╝  ╚██╗ ██╔╝",
+        " ██║  ██║ ██║ ██╔══╝  ██╔══╝   ██╔═██╗   ╚████╔╝ ",
+        " ██████╔╝ ██║ ██║     ██║      ██║  ██╗   ╚██╔╝  ",
+        " ╚══════╝  ╚═╝ ╚═╝     ╚═╝      ╚═╝  ╚═╝    ╚═╝   "
+    ]
+    # Color gradient from Sky Blue to Deep Blue
+    colors = [81, 75, 69, 39, 33, 27, 26, 20]
+    print()
+    for line in logo_lines:
+        colored_line = ""
+        n_chars = len(line)
+        for i, char in enumerate(line):
+            color_idx = min(len(colors) - 1, int((i / n_chars) * len(colors)))
+            color_code = colors[color_idx]
+            colored_line += f"\033[38;5;{color_code}m{char}"
+        print(colored_line + "\033[0m")
+    print(f"      {COLOR_SKY_BLUE}Differential KV Cache — High-Performance Inference{COLOR_RESET}")
+    print(f"      {COLOR_DEEP_BLUE}Serving Engine & Runtime Context CLI{COLOR_RESET}\n")
+
+class ThemedStdout:
+    def __init__(self, original, buffer_stderr=False):
+        self.original = original
+        self.buffer_stderr = buffer_stderr
+        self._buffer = []
+        self._buffering_enabled = False
+        self._skip_next_newline = False
+
+    def enable_buffering(self):
+        if self.buffer_stderr:
+            self._buffering_enabled = True
+
+    def disable_and_flush(self):
+        if self.buffer_stderr:
+            self._buffering_enabled = False
+            if self._buffer:
+                content = "".join(self._buffer)
+                self._buffer.clear()
+                self.original.write(content)
+                self.original.flush()
+
+    def write(self, data):
+        if not data:
+            return self.original.write(data)
+            
+        # Consume the trailing newline printed by Python's print() if previous message was filtered
+        if data == "\n" and self._skip_next_newline:
+            self._skip_next_newline = False
+            return len(data)
+            
+        if data != "\n":
+            self._skip_next_newline = False
+            
+        if self._buffering_enabled:
+            formatted_data = self._format_themed_output(data)
+            if formatted_data == "" and data.strip() != "":
+                self._skip_next_newline = True
+            self._buffer.append(formatted_data)
+            return len(data)
+            
+        formatted_data = self._format_themed_output(data)
+        if formatted_data == "" and data.strip() != "":
+            self._skip_next_newline = True
+        return self.original.write(formatted_data)
+
+    def _format_themed_output(self, data):
+        # Don't double color if escape sequences are already present in system messages
+        if "\033[" in data and not any(tag in data for tag in ["[System]", "[Warning]", "[Error]", "[DiffKV]"]):
+            return data
+            
+        lines = data.split("\n")
+        processed_lines = []
+        is_verbose = os.environ.get("DIFFKV_VERBOSE") == "1"
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                processed_lines.append(line)
+                continue
+                
+            # Filter developer telemetry logs if not in verbose mode
+            is_telemetry = any(tag in stripped for tag in [
+                "[DiffKV BatchEngine]", 
+                "[DiffKV Telemetry]", 
+                "[DiffKV VRAM]", 
+                "[DiffKV Step]"
+            ])
+            is_important = any(tag in stripped for tag in [
+                "WARNING:", "Warning:", "ERROR:", "Error:", "[Warning]", "[Error]"
+            ])
+            
+            if is_telemetry and not is_important and not is_verbose:
+                continue
+
+            # Check if this is a dashed separator line
+            if len(stripped) >= 40 and all(c == '-' for c in stripped):
+                processed_lines.append(f"\033[38;5;27m{line}\033[0m")
+                continue
+                
+            # Check if this is a bullet point line (starts with spaces and "- ")
+            # e.g. "  - DIFFKV_MPS_APPROXIMATE_ATTN = 1"
+            if line.startswith("  - ") or line.startswith("    - "):
+                idx = line.find("- ")
+                if idx != -1:
+                    indent = line[:idx]
+                    content = line[idx+2:]
+                    processed_lines.append(f"{indent}\033[38;5;33m-\033[0m \033[38;5;75m{content}\033[0m")
+                else:
+                    processed_lines.append(line)
+                continue
+                
+            replacements = [
+                ("[DiffKV MLX Wrapper]", "\033[38;5;27m\033[1m[DiffKV MLX Wrapper]\033[0m\033[38;5;27m"),
+                ("[DiffKV BatchEngine]", "\033[38;5;27m\033[1m[DiffKV BatchEngine]\033[0m\033[38;5;27m"),
+                ("[DiffKV Telemetry]", "\033[38;5;27m\033[1m[DiffKV Telemetry]\033[0m\033[38;5;27m"),
+                ("[DiffKV VRAM]", "\033[38;5;27m\033[1m[DiffKV VRAM]\033[0m\033[38;5;27m"),
+                ("[DiffKV Step]", "\033[38;5;27m\033[1m[DiffKV Step]\033[0m\033[38;5;27m"),
+                ("[DiffKV MLX]", "\033[38;5;81m\033[1m[DiffKV MLX]\033[0m\033[38;5;81m"),
+                ("[DiffKV]", "\033[38;5;81m\033[1m[DiffKV]\033[0m\033[38;5;81m"),
+                ("[System]", "\033[38;5;33m\033[1m[System]\033[0m\033[38;5;33m"),
+                ("[Warning]", "\033[38;5;214m\033[1m[Warning]\033[0m\033[38;5;214m"),
+                ("[Error]", "\033[38;5;203m\033[1m[Error]\033[0m\033[38;5;203m"),
+                ("WARNING:", "\033[38;5;214m\033[1mWARNING:\033[0m\033[38;5;214m"),
+                ("Warning:", "\033[38;5;214m\033[1mWarning:\033[0m\033[38;5;214m"),
+                ("ERROR:", "\033[38;5;203m\033[1mERROR:\033[0m\033[38;5;203m"),
+                ("Error:", "\033[38;5;203m\033[1mError:\033[0m\033[38;5;203m"),
+            ]
+            
+            modified_line = line
+            replaced = False
+            for target, replacement in replacements:
+                if target in modified_line:
+                    modified_line = modified_line.replace(target, replacement)
+                    replaced = True
+                    
+            if replaced:
+                modified_line = modified_line + "\033[0m"
+            processed_lines.append(modified_line)
+            
+        result = "\n".join(processed_lines)
+        if result.strip() == "" and data.strip() != "":
+            return ""
+        return result
+
+    def flush(self):
+        return self.original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def flush(self):
+        return self.original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
 
 # ---------------------------------------------------------------------------
 # Helper function for non-blocking input
@@ -493,6 +692,8 @@ async def run_client_mode(args):
     api_url = args.api_url.rstrip('/')
     messages = []
     
+    show_banner()
+    
     print_system(f"Connecting to Native DiffKV Gateway at {COLOR_BOLD}{api_url}{COLOR_RESET}...")
     print_system("Type /help to see all available commands.")
     print("-" * 80)
@@ -561,7 +762,11 @@ async def run_client_mode(args):
             "temperature": args.temperature
         }
         
-        print(f"\n{COLOR_AI}{COLOR_BOLD}AI >{COLOR_RESET} ", end="", flush=True)
+        if hasattr(sys.stderr, "enable_buffering"):
+            sys.stderr.enable_buffering()
+
+        model_display = get_display_model_name(args.model)
+        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
         
         start_time = time.time()
         first_token_time = None
@@ -621,11 +826,15 @@ async def run_client_mode(args):
             print()
             print_error(f"Request failed: {e}")
             messages.pop()
+        finally:
+            if hasattr(sys.stderr, "disable_and_flush"):
+                sys.stderr.disable_and_flush()
 
 # ---------------------------------------------------------------------------
 # Direct Mode Helper (spawns native C++ binary directly)
 # ---------------------------------------------------------------------------
 async def run_direct_mode(args):
+    show_banner()
     native_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     # Setup GGUF model path
     model_arg = args.model
@@ -791,70 +1000,78 @@ async def run_direct_mode(args):
             
         threading.Thread(target=producer, daemon=True).start()
 
-        print(f"\n{COLOR_AI}{COLOR_BOLD}AI >{COLOR_RESET} ", end="", flush=True)
+        if hasattr(sys.stderr, "enable_buffering"):
+            sys.stderr.enable_buffering()
+
+        model_display = get_display_model_name(args.model)
+        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
 
         start_time = time.time()
         first_token_time = None
         response_chunks = []
         new_cached_len = -1
         
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            
-            if isinstance(item, dict):
-                if "error" in item:
-                    print()
-                    print_error(f"C++ binary error: {item['error']}")
-                    messages.pop()
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
                     break
-                if "prefill_done" in item:
-                    # Prefill completed
-                    continue
-                if "cached_len" in item:
-                    new_cached_len = item["cached_len"]
-                    continue
-                text = item.get("text", "")
-                if text:
-                    if first_token_time is None:
-                        first_token_time = time.time()
-                    print(text, end="", flush=True)
-                    response_chunks.append(text)
-            else:
-                text = str(item)
-                if text:
-                    if first_token_time is None:
-                        first_token_time = time.time()
-                    print(text, end="", flush=True)
-                    response_chunks.append(text)
-
-        print() # end line
-
-        if response_chunks:
-            assistant_response = "".join(response_chunks)
-            normalized_response = _normalize_references(assistant_response)
-            
-            # If reference normalization made edits, print a note or update response
-            messages.append({"role": "assistant", "content": normalized_response})
-            
-            # Store prompt + normalized response as the new prev_prompt
-            wrapper.prev_prompt = format_messages_as_chat(messages, add_generation_prompt=False)
-            if new_cached_len >= 0:
-                wrapper.cached_len = new_cached_len
-
-            # Print metrics
-            end_time = time.time()
-            est_tokens = max(1, sum(len(c) for c in response_chunks) // 4) # rough estimate
-            total_duration = end_time - start_time
-            ttft_str = f"{(first_token_time - start_time) * 1000:.1f}ms" if first_token_time else "N/A"
-            if first_token_time and end_time > first_token_time:
-                speed = est_tokens / (end_time - first_token_time)
-                speed_str = f"{speed:.1f} tok/s"
-            else:
-                speed_str = "N/A"
                 
-            print_metrics(f"[Metrics] TTFT: {ttft_str} | Speed: {speed_str} | Generated: ~{est_tokens} tokens | Duration: {total_duration:.2f}s")
+                if isinstance(item, dict):
+                    if "error" in item:
+                        print()
+                        print_error(f"C++ binary error: {item['error']}")
+                        messages.pop()
+                        break
+                    if "prefill_done" in item:
+                        # Prefill completed
+                        continue
+                    if "cached_len" in item:
+                        new_cached_len = item["cached_len"]
+                        continue
+                    text = item.get("text", "")
+                    if text:
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                        print(text, end="", flush=True)
+                        response_chunks.append(text)
+                else:
+                    text = str(item)
+                    if text:
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                        print(text, end="", flush=True)
+                        response_chunks.append(text)
+
+            print() # end line
+
+            if response_chunks:
+                assistant_response = "".join(response_chunks)
+                normalized_response = _normalize_references(assistant_response)
+                
+                # If reference normalization made edits, print a note or update response
+                messages.append({"role": "assistant", "content": normalized_response})
+                
+                # Store prompt + normalized response as the new prev_prompt
+                wrapper.prev_prompt = format_messages_as_chat(messages, add_generation_prompt=False)
+                if new_cached_len >= 0:
+                    wrapper.cached_len = new_cached_len
+
+                # Print metrics
+                end_time = time.time()
+                est_tokens = max(1, sum(len(c) for c in response_chunks) // 4) # rough estimate
+                total_duration = end_time - start_time
+                ttft_str = f"{(first_token_time - start_time) * 1000:.1f}ms" if first_token_time else "N/A"
+                if first_token_time and end_time > first_token_time:
+                    speed = est_tokens / (end_time - first_token_time)
+                    speed_str = f"{speed:.1f} tok/s"
+                else:
+                    speed_str = "N/A"
+                    
+                print_metrics(f"[Metrics] TTFT: {ttft_str} | Speed: {speed_str} | Generated: ~{est_tokens} tokens | Duration: {total_duration:.2f}s")
+        finally:
+            if hasattr(sys.stderr, "disable_and_flush"):
+                sys.stderr.disable_and_flush()
 
     wrapper.stop()
     print_system("Engine stopped.")
@@ -863,6 +1080,8 @@ async def run_direct_mode(args):
 # Main Entry Point
 # ---------------------------------------------------------------------------
 def main():
+    sys.stdout = ThemedStdout(sys.stdout)
+    sys.stderr = ThemedStdout(sys.stderr, buffer_stderr=True)
     parser = argparse.ArgumentParser(description="diffkv_native CLI: Interactive terminal interface for native C++ DiffKV.")
     
     # Mode selection

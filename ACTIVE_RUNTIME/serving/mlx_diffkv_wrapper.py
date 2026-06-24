@@ -337,6 +337,7 @@ class MLXKVBlockManager:
         self.position_ids = None
         self._session_token_ids = {}
         self._session_checkpoints = {}
+        self._session_srl = {}
 
     def get_srl_state(self, session_id: str):
         return None

@@ -17,16 +17,20 @@ if _runtime_dir not in sys.path:
     sys.path.insert(0, _runtime_dir)
 
 # ---------------------------------------------------------------------------
-# ANSI Color Codes for Styling
+# ANSI Color Codes for Styling (Sky Blue and Dark Blue Theme)
 # ---------------------------------------------------------------------------
 COLOR_RESET = "\033[0m"
-COLOR_USER = "\033[92m"       # Green
-COLOR_AI = "\033[96m"         # Cyan
-COLOR_SYSTEM = "\033[95m"     # Magenta
-COLOR_WARNING = "\033[93m"    # Yellow
-COLOR_ERROR = "\033[91m"      # Red
-COLOR_DIM = "\033[90m"        # Dark Gray
-COLOR_BOLD = "\033[1m"        # Bold
+COLOR_SKY_BLUE = "\033[38;5;81m"     # Sky Blue (accent color)
+COLOR_DEEP_BLUE = "\033[38;5;27m"    # Deep/Dark Blue (theme accent)
+COLOR_STEEL_BLUE = "\033[38;5;75m"   # Steel Blue (subtle)
+
+COLOR_USER = COLOR_STEEL_BLUE        # Soft Steel Blue for User prompt
+COLOR_AI = COLOR_SKY_BLUE            # Sky Blue for Model prompt
+COLOR_SYSTEM = "\033[38;5;33m"       # Mid Blue for System messages
+COLOR_WARNING = "\033[38;5;214m"      # Warm Gold/Orange for warnings
+COLOR_ERROR = "\033[38;5;203m"        # Soft Red for errors
+COLOR_DIM = "\033[90m"              # Dark Gray
+COLOR_BOLD = "\033[1m"              # Bold
 
 def print_system(msg):
     print(f"{COLOR_SYSTEM}{COLOR_BOLD}[System]{COLOR_RESET} {COLOR_SYSTEM}{msg}{COLOR_RESET}")
@@ -39,6 +43,201 @@ def print_error(msg):
 
 def print_metrics(msg):
     print(f"{COLOR_DIM}{msg}{COLOR_RESET}")
+
+def get_display_model_name(model_path_or_name: str) -> str:
+    if not model_path_or_name:
+        return "AI"
+    if model_path_or_name == "0.5b":
+        return "Qwen2.5-0.5B"
+    if model_path_or_name == "1.5b":
+        return "Qwen2.5-1.5B"
+    
+    basename = os.path.basename(model_path_or_name)
+    if basename.endswith(".gguf"):
+        basename = basename[:-5]
+        
+    # Clean up Qwen naming or generic paths
+    name = basename
+    if name.lower().startswith("qwen"):
+        parts = name.split("-")
+        capitalized_parts = []
+        for p in parts:
+            if p.lower() == "qwen2.5":
+                capitalized_parts.append("Qwen2.5")
+            elif p.lower() == "qwen":
+                capitalized_parts.append("Qwen")
+            elif p.lower().endswith("b") and p[:-1].replace(".", "").isdigit():
+                capitalized_parts.append(p[:-1] + "B")
+            elif p.lower() == "instruct":
+                capitalized_parts.append("Instruct")
+            else:
+                capitalized_parts.append(p.capitalize())
+        name = "-".join(capitalized_parts)
+    
+    for suffix in ["-q4_k_m", "-q8_0", "_q4_k_m", "_q8_0"]:
+        if name.lower().endswith(suffix):
+            name = name[:-len(suffix)]
+            
+    return name
+
+def show_banner():
+    logo_lines = [
+        " ██████╗  ██╗ ██████╗ ██████╗  ██╗  ██╗ ██╗   ██╗",
+        " ██╔══██╗ ██║ ██╔═══╝ ██╔═══╝  ██║ ██╔╝ ██║   ██║",
+        " ██║  ██║ ██║ █████╗  █████╗   █████═╝  ╚██╗ ██╔╝",
+        " ██║  ██║ ██║ ██╔══╝  ██╔══╝   ██╔═██╗   ╚████╔╝ ",
+        " ██████╔╝ ██║ ██║     ██║      ██║  ██╗   ╚██╔╝  ",
+        " ╚══════╝  ╚═╝ ╚═╝     ╚═╝      ╚═╝  ╚═╝    ╚═╝   "
+    ]
+    # Color gradient from Sky Blue to Deep Blue
+    colors = [81, 75, 69, 39, 33, 27, 26, 20]
+    print()
+    for line in logo_lines:
+        colored_line = ""
+        n_chars = len(line)
+        for i, char in enumerate(line):
+            color_idx = min(len(colors) - 1, int((i / n_chars) * len(colors)))
+            color_code = colors[color_idx]
+            colored_line += f"\033[38;5;{color_code}m{char}"
+        print(colored_line + "\033[0m")
+    print(f"      {COLOR_SKY_BLUE}Differential KV Cache — High-Performance Inference{COLOR_RESET}")
+    print(f"      {COLOR_DEEP_BLUE}Serving Engine & Runtime Context CLI{COLOR_RESET}\n")
+
+class ThemedStdout:
+    def __init__(self, original, buffer_stderr=False):
+        self.original = original
+        self.buffer_stderr = buffer_stderr
+        self._buffer = []
+        self._buffering_enabled = False
+        self._skip_next_newline = False
+
+    def enable_buffering(self):
+        if self.buffer_stderr:
+            self._buffering_enabled = True
+
+    def disable_and_flush(self):
+        if self.buffer_stderr:
+            self._buffering_enabled = False
+            if self._buffer:
+                content = "".join(self._buffer)
+                self._buffer.clear()
+                self.original.write(content)
+                self.original.flush()
+
+    def write(self, data):
+        if not data:
+            return self.original.write(data)
+            
+        # Consume the trailing newline printed by Python's print() if previous message was filtered
+        if data == "\n" and self._skip_next_newline:
+            self._skip_next_newline = False
+            return len(data)
+            
+        if data != "\n":
+            self._skip_next_newline = False
+            
+        if self._buffering_enabled:
+            formatted_data = self._format_themed_output(data)
+            if formatted_data == "" and data.strip() != "":
+                self._skip_next_newline = True
+            self._buffer.append(formatted_data)
+            return len(data)
+            
+        formatted_data = self._format_themed_output(data)
+        if formatted_data == "" and data.strip() != "":
+            self._skip_next_newline = True
+        return self.original.write(formatted_data)
+
+    def _format_themed_output(self, data):
+        # Don't double color if escape sequences are already present in system messages
+        if "\033[" in data and not any(tag in data for tag in ["[System]", "[Warning]", "[Error]", "[DiffKV]"]):
+            return data
+            
+        lines = data.split("\n")
+        processed_lines = []
+        is_verbose = os.environ.get("DIFFKV_VERBOSE") == "1"
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                processed_lines.append(line)
+                continue
+                
+            # Filter developer telemetry logs if not in verbose mode
+            is_telemetry = any(tag in stripped for tag in [
+                "[DiffKV BatchEngine]", 
+                "[DiffKV Telemetry]", 
+                "[DiffKV VRAM]", 
+                "[DiffKV Step]"
+            ])
+            is_important = any(tag in stripped for tag in [
+                "WARNING:", "Warning:", "ERROR:", "Error:", "[Warning]", "[Error]"
+            ])
+            
+            if is_telemetry and not is_important and not is_verbose:
+                continue
+
+            # Check if this is a dashed separator line
+            if len(stripped) >= 40 and all(c == '-' for c in stripped):
+                processed_lines.append(f"\033[38;5;27m{line}\033[0m")
+                continue
+                
+            # Check if this is a bullet point line (starts with spaces and "- ")
+            # e.g. "  - DIFFKV_MPS_APPROXIMATE_ATTN = 1"
+            if line.startswith("  - ") or line.startswith("    - "):
+                idx = line.find("- ")
+                if idx != -1:
+                    indent = line[:idx]
+                    content = line[idx+2:]
+                    processed_lines.append(f"{indent}\033[38;5;33m-\033[0m \033[38;5;75m{content}\033[0m")
+                else:
+                    processed_lines.append(line)
+                continue
+                
+            replacements = [
+                ("[DiffKV MLX Wrapper]", "\033[38;5;27m\033[1m[DiffKV MLX Wrapper]\033[0m\033[38;5;27m"),
+                ("[DiffKV BatchEngine]", "\033[38;5;27m\033[1m[DiffKV BatchEngine]\033[0m\033[38;5;27m"),
+                ("[DiffKV Telemetry]", "\033[38;5;27m\033[1m[DiffKV Telemetry]\033[0m\033[38;5;27m"),
+                ("[DiffKV VRAM]", "\033[38;5;27m\033[1m[DiffKV VRAM]\033[0m\033[38;5;27m"),
+                ("[DiffKV Step]", "\033[38;5;27m\033[1m[DiffKV Step]\033[0m\033[38;5;27m"),
+                ("[DiffKV MLX]", "\033[38;5;81m\033[1m[DiffKV MLX]\033[0m\033[38;5;81m"),
+                ("[DiffKV]", "\033[38;5;81m\033[1m[DiffKV]\033[0m\033[38;5;81m"),
+                ("[System]", "\033[38;5;33m\033[1m[System]\033[0m\033[38;5;33m"),
+                ("[Warning]", "\033[38;5;214m\033[1m[Warning]\033[0m\033[38;5;214m"),
+                ("[Error]", "\033[38;5;203m\033[1m[Error]\033[0m\033[38;5;203m"),
+                ("WARNING:", "\033[38;5;214m\033[1mWARNING:\033[0m\033[38;5;214m"),
+                ("Warning:", "\033[38;5;214m\033[1mWarning:\033[0m\033[38;5;214m"),
+                ("ERROR:", "\033[38;5;203m\033[1mERROR:\033[0m\033[38;5;203m"),
+                ("Error:", "\033[38;5;203m\033[1mError:\033[0m\033[38;5;203m"),
+            ]
+            
+            modified_line = line
+            replaced = False
+            for target, replacement in replacements:
+                if target in modified_line:
+                    modified_line = modified_line.replace(target, replacement)
+                    replaced = True
+                    
+            if replaced:
+                modified_line = modified_line + "\033[0m"
+            processed_lines.append(modified_line)
+            
+        result = "\n".join(processed_lines)
+        if result.strip() == "" and data.strip() != "":
+            return ""
+        return result
+
+    def flush(self):
+        return self.original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def flush(self):
+        return self.original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
 
 # ---------------------------------------------------------------------------
 # Helper function for non-blocking input
@@ -197,6 +396,8 @@ async def run_client_mode(args):
     session_id = f"cli-session-{uuid.uuid4().hex[:8]}"
     messages = []
     
+    show_banner()
+    
     print_system(f"Connecting to DiffKV Gateway at {COLOR_BOLD}{api_url}{COLOR_RESET}...")
     print_system(f"Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
     print_system("Type /help to see all available commands.")
@@ -331,7 +532,11 @@ async def run_client_mode(args):
             "session_id": session_id
         }
         
-        print(f"\n{COLOR_AI}{COLOR_BOLD}AI >{COLOR_RESET} ", end="", flush=True)
+        if hasattr(sys.stderr, "enable_buffering"):
+            sys.stderr.enable_buffering()
+
+        model_display = get_display_model_name(args.model)
+        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
         
         start_time = time.time()
         first_token_time = None
@@ -348,23 +553,23 @@ async def run_client_mode(args):
                         continue
                         
                     async for line in r.aiter_lines():
-                        if not line.strip():
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[len("data: "):].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json_loads(data_str)
-                                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    if first_token_time is None:
-                                        first_token_time = time.time()
-                                    print(content, end="", flush=True)
-                                    response_chunks.append(content)
-                            except Exception:
-                                pass
-                                
+                         if not line.strip():
+                             continue
+                         if line.startswith("data: "):
+                             data_str = line[len("data: "):].strip()
+                             if data_str == "[DONE]":
+                                 break
+                             try:
+                                 chunk = json_loads(data_str)
+                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                 if content:
+                                     if first_token_time is None:
+                                         first_token_time = time.time()
+                                     print(content, end="", flush=True)
+                                     response_chunks.append(content)
+                             except Exception:
+                                 pass
+                                 
             print() # end line
             
             # Print performance metrics
@@ -391,6 +596,9 @@ async def run_client_mode(args):
             print()
             print_error(f"Request failed: {e}")
             messages.pop()
+        finally:
+            if hasattr(sys.stderr, "disable_and_flush"):
+                sys.stderr.disable_and_flush()
 
 def json_loads(s):
     import json
@@ -401,6 +609,7 @@ def json_loads(s):
 # Direct Mode Helper (runs batch engine directly in-process)
 # ---------------------------------------------------------------------------
 async def run_direct_mode(args):
+    show_banner()
     print_system("Starting DiffKV in Direct Mode. Loading wrappers and tokenizer...")
     
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
@@ -697,7 +906,11 @@ async def run_direct_mode(args):
                 "repetition_penalty": args.repetition_penalty,
             }
 
-            print(f"\n{COLOR_AI}{COLOR_BOLD}AI >{COLOR_RESET} ", end="", flush=True)
+            if hasattr(sys.stderr, "enable_buffering"):
+                sys.stderr.enable_buffering()
+
+            model_display = get_display_model_name(args.model)
+            print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
 
             start_time = time.time()
             first_token_time = None
@@ -771,6 +984,9 @@ async def run_direct_mode(args):
                 print()
                 print_error(f"Generation failed: {e}")
                 messages.pop()
+            finally:
+                if hasattr(sys.stderr, "disable_and_flush"):
+                    sys.stderr.disable_and_flush()
                 
     finally:
         # Stop continuous batching engine
@@ -781,6 +997,8 @@ async def run_direct_mode(args):
 # Main Entry Point
 # ---------------------------------------------------------------------------
 def main():
+    sys.stdout = ThemedStdout(sys.stdout)
+    sys.stderr = ThemedStdout(sys.stderr, buffer_stderr=True)
     parser = argparse.ArgumentParser(description="DiffKV CLI: Interactive terminal interface for testing models running with DiffKV.")
     
     # Mode selection
