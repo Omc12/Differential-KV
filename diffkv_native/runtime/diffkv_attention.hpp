@@ -46,6 +46,7 @@ struct CustomAttnUserData {
     // Consumed by batch_engine.cpp after graph compute to avoid a separate
     // blocking ggml_backend_tensor_get per layer per decode step.
     std::vector<float> captured_kv;
+    struct ggml_tensor * layer0_q_tensor = nullptr;
 
     // Cached Metal buffers to avoid per-token allocations
     void * mtl_dense_k = nullptr;

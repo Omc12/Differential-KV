@@ -253,6 +253,10 @@ static struct ggml_cgraph * build_decode_graph(
 
         // ── SRL Routing Pipeline at Layer 0 ──
         if (l == 0) {
+            if (userdata) {
+                userdata[0].layer0_q_tensor = q;
+                ggml_set_output(q);
+            }
             int head_dim = config.n_embd / config.n_head;
             // Reshape Q: [896, 1] -> [head_dim, n_head] = [64, 14]
             struct ggml_tensor * Q = ggml_reshape_2d(ctx, q, head_dim, config.n_head);
@@ -355,15 +359,22 @@ static int32_t sample_token(
     float temperature,
     float top_p,
     float repetition_penalty,
-    const std::vector<int32_t>& penalty_tokens
+    const std::vector<int32_t>& penalty_tokens,
+    DiffKVModel* model
 ) {
     int n_vocab = logits.size();
     
     // 1. Repetition penalty
-    if (repetition_penalty != 1.0f) {
+    if (repetition_penalty != 1.0f && model != nullptr) {
         std::unordered_set<int32_t> unique_penalized(penalty_tokens.begin(), penalty_tokens.end());
         for (int32_t tok : unique_penalized) {
             if (tok >= 0 && tok < n_vocab) {
+                std::string tok_str = model->token_to_piece(tok);
+                bool has_alnum = false;
+                for (char c : tok_str) {
+                    if (is_gpt2_alnum((unsigned char)c)) { has_alnum = true; break; }
+                }
+                if (!has_alnum) continue;
                 float& val = logits[tok];
                 val = (val > 0.0f) ? val / repetition_penalty : val * repetition_penalty;
             }
@@ -1278,6 +1289,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     all_tokens.push_back(last_token);
     
     // Rebuild initial SRL state for the session
+    session->srl_state.factual_store.clear();
     session->srl_state.vsl_active_candidates.clear();
     session->srl_state.vsl_consecutive_helpers = 0;
     // Reset entity context so each new response starts uncommitted.
@@ -1304,14 +1316,17 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     session->srl_state.k_multiplier = 1.0f;
     session->srl_state.call_count = 0;
     session->srl_state.factual_anchor_q.clear();
+    session->srl_state.factual_anchor_w = 0.80f;
 
     auto & blocks_layer0 = runtime_manager_->get_ingest_manager().get_blocks(0);
-    std::vector<int32_t> compressed_slots;
+    std::vector<int> compressed_slots;
     std::vector<int> compressed_anchors;
     for (int i = 0; i < (int)blocks_layer0.size(); ++i) {
         if (blocks_layer0[i]->pool_idx != -1 &&
             (blocks_layer0[i]->state == BlockState::CompressedResident ||
-             blocks_layer0[i]->state == BlockState::CPUResident)) {
+             blocks_layer0[i]->state == BlockState::CPUResident ||
+             blocks_layer0[i]->state == BlockState::DenseResident ||
+             blocks_layer0[i]->state == BlockState::Compressing)) {
             compressed_slots.push_back(blocks_layer0[i]->pool_idx); // Physical slot ID
             compressed_anchors.push_back(blocks_layer0[i]->anchor_idx);
         }
@@ -1346,6 +1361,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             cached_len
         );
         session->has_srl_state = true;
+
+        // Populate current_query_tokens (query tokens since cached_len)
+        session->srl_state.current_query_tokens.clear();
+        if (cached_len < L) {
+            session->srl_state.current_query_tokens.assign(prompt_tokens.begin() + cached_len, prompt_tokens.end());
+        }
 
         std::unordered_set<int32_t> prime_slots(
             session->srl_state.chunk_graph.cluster_centers_tensor.begin(),
@@ -1390,7 +1411,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 std::string text = model_->token_to_piece(tid);
                 std::string cleaned = "";
                 for (char c : text) {
-                    if (std::isalnum((unsigned char)c)) {
+                    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
                         cleaned += std::tolower((unsigned char)c);
                     }
                 }
@@ -1415,6 +1436,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             prime_slots,
             get_helper_token_ids_cpp(*model_),
             relational_token_ids,
+            [&](int32_t tid) { return model_->token_to_piece(tid); },
             true // use_salience_parser
         );
         session->srl_state.entries_map_built = false;
@@ -1565,6 +1587,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         // written by custom_attention_op_callback before the Metal/CPU attention branch.
         std::vector<std::vector<float>> decode_k(n_layers, std::vector<float>(F_test, 0.0f));
         std::vector<std::vector<float>> decode_v(n_layers, std::vector<float>(F_test, 0.0f));
+        std::vector<float> decode_q;
+        if (userdata[0].layer0_q_tensor) {
+            decode_q.resize(model_->get_config().n_embd, 0.0f);
+            ggml_backend_tensor_get(userdata[0].layer0_q_tensor, decode_q.data(), 0, model_->get_config().n_embd * sizeof(float));
+        }
         for (int l = 0; l < n_layers; ++l) {
             if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
                 // Fast path: K/V captured inside callback — zero extra GPU readback.
@@ -1724,7 +1751,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 }
                 for (int32_t tok_id : transition_candidates) {
                     if (tok_id >= 0 && tok_id < n_vocab) {
-                        output_logits[tok_id] += 10.0f;
+                        output_logits[tok_id] += 15.0f;
                     }
                 }
             }
@@ -1759,7 +1786,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         // process_and_tag_vsl_step is now called inside the factual store query block at the end of each step
 
         // SFA threshold raised to 0.55 to match main.cpp interactive path.
-        if (session->srl_state.current_step_max_similarity >= 0.55f) {
+        bool has_active_lock = false;
+        for (const auto& suffix : session->srl_state.vsl_active_candidates) {
+            if (!suffix.empty()) { has_active_lock = true; break; }
+        }
+        if (has_active_lock || session->srl_state.current_step_max_similarity >= 0.55f) {
             req->sfa_active = true;
         }
 
@@ -1780,7 +1811,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 if (tok_id >= 0 && tok_id < n_vocab) allowed_mask[tok_id] = true;
             }
             for (int i = 0; i < n_vocab; ++i) {
-                if (!allowed_mask[i]) {
+                bool is_allowed = allowed_mask[i] || (session->srl_state.current_step_factual_tokens.count(i) > 0);
+                if (!is_allowed) {
                     if (max_sim >= 0.70f) {
                         output_logits[i] = -1e10f;   // hard: verbatim
                     } else {
@@ -1800,7 +1832,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             effective_temperature,
             req->top_p,
             penalty_val,
-            penalty_tokens
+            penalty_tokens,
+            model_
         );
         
         if (model_->is_eog_token(next_token) || next_token == model_->token_eos()) {
@@ -1808,11 +1841,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
 
         // Strict Factual Alignment (SFA) State Update and Loop Check
-        if (req->sfa_active) {
+        {
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
             diffkv::update_vsl_state_cpp(next_token, session->srl_state, helper_ids);
             
-            if (session->srl_state.vsl_consecutive_helpers >= 16) {
+            if (req->sfa_active && session->srl_state.vsl_consecutive_helpers >= 16) {
                 std::string uncertainty_str = " [uncertain: details missing in source]";
                 std::vector<int32_t> uncertainty_toks = model_->tokenize(uncertainty_str, false);
                 for (int32_t t : uncertainty_toks) {
@@ -1877,61 +1910,129 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             // anchor. On subsequent steps blend 20% current + 80% anchor so
             // accumulated generated-token context cannot pull retrieval away
             // from the original question topic (mirrors Python 0.20/0.80 blend).
-            std::vector<float> q_for_factual(F_test);
-            if (session->srl_state.factual_anchor_q.empty()) {
-                session->srl_state.factual_anchor_q = decode_k[0];
-                q_for_factual = decode_k[0];
+            std::vector<float> q_for_factual;
+            int query_heads = kv_heads;
+            if (!decode_q.empty()) {
+                q_for_factual.resize(model_->get_config().n_embd);
+                query_heads = model_->get_config().n_head;
+                if (session->srl_state.factual_anchor_q.empty()) {
+                    session->srl_state.factual_anchor_q = decode_q;
+                    session->srl_state.factual_anchor_w = 0.80f;
+                    q_for_factual = decode_q;
 
-                // ── Early Entity Binding (Component 4) ────────────────────
-                // Analyze query tokens against prime entries at the very start.
-                if (!session->srl_state.current_query_tokens.empty()) {
-                    const auto& important = session->srl_state.inverted_index.important_vocab;
-                    std::unordered_set<int32_t> query_toks;
-                    for (int32_t t : session->srl_state.current_query_tokens) {
-                        if (important.empty() || important.count(t)) {
-                            query_toks.insert(t);
+                    // ── Early Entity Binding (Component 4) ────────────────────
+                    // Analyze query tokens against prime entries at the very start.
+                    if (!session->srl_state.current_query_tokens.empty()) {
+                        const auto& important = session->srl_state.inverted_index.important_vocab;
+                        std::unordered_set<int32_t> query_toks;
+                        for (int32_t t : session->srl_state.current_query_tokens) {
+                            if (important.empty() || important.count(t)) {
+                                query_toks.insert(t);
+                            }
                         }
-                    }
-                    struct PrimeMatch {
-                        int32_t start_idx;
-                        int overlap;
-                    };
-                    std::vector<PrimeMatch> prime_matches;
-                    for (const auto& fe : session->srl_state.factual_store.entries) {
-                        if (fe.is_prime) {
-                            int overlap = 0;
-                            for (int32_t t : fe.tokens) {
-                                if ((important.empty() || important.count(t)) && query_toks.count(t)) {
-                                    overlap++;
+                        struct PrimeMatch {
+                            int32_t start_idx;
+                            int overlap;
+                        };
+                        std::vector<PrimeMatch> prime_matches;
+                        for (const auto& fe : session->srl_state.factual_store.entries) {
+                            if (fe.is_prime) {
+                                int overlap = 0;
+                                for (int32_t t : fe.tokens) {
+                                    if ((important.empty() || important.count(t)) && query_toks.count(t)) {
+                                        overlap++;
+                                    }
+                                }
+                                if (overlap >= 1) {
+                                    prime_matches.push_back({fe.start_idx, overlap});
                                 }
                             }
-                            if (overlap >= 1) {
-                                prime_matches.push_back({fe.start_idx, overlap});
-                            }
+                        }
+                        if (prime_matches.size() == 1) {
+                            session->srl_state.current_entity_id = prime_matches[0].start_idx;
+                            session->srl_state.dual_entity_mode = false;
+                        } else if (prime_matches.size() >= 2) {
+                            std::sort(prime_matches.begin(), prime_matches.end(), [](const PrimeMatch& a, const PrimeMatch& b) {
+                                return a.overlap > b.overlap;
+                            });
+                            session->srl_state.dual_entity_mode = true;
+                            session->srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
+                            session->srl_state.comparison_entities = session->srl_state.dual_entity_ids;
+                            session->srl_state.comparison_active_idx = 0;
+                            session->srl_state.comparison_covered.clear();
+                            session->srl_state.current_entity_id = session->srl_state.comparison_entities[0];
                         }
                     }
-                    if (prime_matches.size() == 1) {
-                        session->srl_state.current_entity_id = prime_matches[0].start_idx;
-                        session->srl_state.dual_entity_mode = false;
-                    } else if (prime_matches.size() >= 2) {
-                        std::sort(prime_matches.begin(), prime_matches.end(), [](const PrimeMatch& a, const PrimeMatch& b) {
-                            return a.overlap > b.overlap;
-                        });
-                        session->srl_state.dual_entity_mode = true;
-                        session->srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
-                        // RC5: sequence the comparison as per-entity blocks and
-                        // lock to the first entity now (instead of leaving entity
-                        // context open, which lets the two interleave).
-                        session->srl_state.comparison_entities = session->srl_state.dual_entity_ids;
-                        session->srl_state.comparison_active_idx = 0;
-                        session->srl_state.comparison_covered.clear();
-                        session->srl_state.current_entity_id = session->srl_state.comparison_entities[0];
+                } else {
+                    for (int qi = 0; qi < (int)model_->get_config().n_embd; ++qi) {
+                        q_for_factual[qi] = 0.20f * decode_q[qi]
+                                          + 0.80f * session->srl_state.factual_anchor_q[qi];
                     }
                 }
             } else {
-                for (int qi = 0; qi < F_test; ++qi) {
-                    q_for_factual[qi] = 0.20f * decode_k[0][qi]
-                                      + 0.80f * session->srl_state.factual_anchor_q[qi];
+                q_for_factual.resize(F_test);
+                query_heads = kv_heads;
+                if (session->srl_state.factual_anchor_q.empty()) {
+                    session->srl_state.factual_anchor_q = decode_k[0];
+                    session->srl_state.factual_anchor_w = 0.80f;
+                    q_for_factual = decode_k[0];
+
+                    // ── Early Entity Binding (Component 4) ────────────────────
+                    // Analyze query tokens against prime entries at the very start.
+                    if (!session->srl_state.current_query_tokens.empty()) {
+                        const auto& important = session->srl_state.inverted_index.important_vocab;
+                        std::unordered_set<int32_t> query_toks;
+                        for (int32_t t : session->srl_state.current_query_tokens) {
+                            if (important.empty() || important.count(t)) {
+                                query_toks.insert(t);
+                            }
+                        }
+                        struct PrimeMatch {
+                            int32_t start_idx;
+                            int overlap;
+                        };
+                        std::vector<PrimeMatch> prime_matches;
+                        for (const auto& fe : session->srl_state.factual_store.entries) {
+                            if (fe.is_prime) {
+                                int overlap = 0;
+                                for (int32_t t : fe.tokens) {
+                                    if ((important.empty() || important.count(t)) && query_toks.count(t)) {
+                                        overlap++;
+                                    }
+                                }
+                                if (overlap >= 1) {
+                                    prime_matches.push_back({fe.start_idx, overlap});
+                                }
+                            }
+                        }
+                        if (prime_matches.size() == 1) {
+                            session->srl_state.current_entity_id = prime_matches[0].start_idx;
+                            session->srl_state.dual_entity_mode = false;
+                        } else if (prime_matches.size() >= 2) {
+                            std::sort(prime_matches.begin(), prime_matches.end(), [](const PrimeMatch& a, const PrimeMatch& b) {
+                                return a.overlap > b.overlap;
+                            });
+                            session->srl_state.dual_entity_mode = true;
+                            session->srl_state.dual_entity_ids = {prime_matches[0].start_idx, prime_matches[1].start_idx};
+                            session->srl_state.comparison_entities = session->srl_state.dual_entity_ids;
+                            session->srl_state.comparison_active_idx = 0;
+                            session->srl_state.comparison_covered.clear();
+                            session->srl_state.current_entity_id = session->srl_state.comparison_entities[0];
+                        }
+                    }
+                } else {
+                    int anchor_size = (int)session->srl_state.factual_anchor_q.size();
+                    q_for_factual.resize(anchor_size);
+                    const auto& current_source = (anchor_size == (int)model_->get_config().n_embd) ? decode_q : decode_k[0];
+                    query_heads = (anchor_size == (int)model_->get_config().n_embd) ? model_->get_config().n_head : kv_heads;
+                    if (!current_source.empty()) {
+                        for (int qi = 0; qi < anchor_size; ++qi) {
+                            q_for_factual[qi] = 0.20f * current_source[qi]
+                                              + 0.80f * session->srl_state.factual_anchor_q[qi];
+                        }
+                    } else {
+                        q_for_factual = session->srl_state.factual_anchor_q;
+                    }
                 }
             }
 
@@ -1945,15 +2046,14 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
             const std::unordered_set<int32_t>* qbias_ptr = qbias.empty() ? nullptr : &qbias;
 
-            // §3.4 fix: Use 0.50 threshold and pass active_slots to match the HF reference.
             auto fact_hits = session->srl_state.factual_store.query(
                 q_for_factual.data(),
-                kv_heads,
+                query_heads,
                 head_dim,
                 W_proj_host.data(),
                 desc_dim,
-                0.50f,        // §3.4: 0.30→0.50 per HF ref (diffkv_attention.py:774)
-                slot_filter,  // §3.4: pass routed slots as active_slots (diffkv_attention.py:775)
+                0.50f,        // aligned to HF threshold 0.50
+                slot_filter,  // pass active slots filter
                 qbias_ptr
             );
 
@@ -2128,7 +2228,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                         for (int i = 0; i < (int)all_blocks_r.size(); ++i) {
                             if (all_blocks_r[i]->pool_idx != -1 &&
                                 (all_blocks_r[i]->state == BlockState::CompressedResident ||
-                                 all_blocks_r[i]->state == BlockState::CPUResident)) {
+                                 all_blocks_r[i]->state == BlockState::CPUResident ||
+                                 all_blocks_r[i]->state == BlockState::DenseResident ||
+                                 all_blocks_r[i]->state == BlockState::Compressing)) {
                                 cur_slots.push_back(all_blocks_r[i]->pool_idx);
                                 cur_anchors.push_back(all_blocks_r[i]->anchor_idx);
                             }

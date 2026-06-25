@@ -390,6 +390,7 @@ def _attend_and_reconstruct_v_compiled(
 ) -> torch.Tensor:
     O_final = torch.zeros((H_q, D), device=P_anchor.device, dtype=P_anchor.dtype)
     if N > 0:
+        print(f"[DiffKV DEBUG_RECON] P_comp shape: {P_comp.shape}, U shape: {U.shape}, H_q parameter: {H_q}, N: {N}, block_capacity: {block_capacity}, R: {R}", flush=True)
         P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)
         P_U = torch.bmm(P_comp_reshaped.float(), U.float())
 
@@ -629,6 +630,8 @@ def fused_decode_mps(
     H_q, D   = Q.shape
     gpk      = num_key_value_groups
     scale    = D ** -0.5
+    if torch.isnan(Q).any():
+        print(f"[fused_decode_mps DEBUG] Q has NaN at start! shape={Q.shape}", flush=True)
     q        = Q.float()
 
     if block_indices is None or block_indices.numel() == 0:
@@ -638,6 +641,7 @@ def fused_decode_mps(
     idx = block_indices.long()
 
     U_a    = reconstruct_batch_U(pool, idx).float()
+    S_comp = U_a.shape[1]
     AncK_a = pool.anchors_K[idx].float()
     AncV_a = pool.anchors_V[idx].float()
     VK_a   = pool.V_K[idx].float()
@@ -652,30 +656,40 @@ def fused_decode_mps(
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
         sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
         
-        # Clamp anchor_indices to prevent GPU out of bounds
+        # 1. Exact RoPE for anchor key
         anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
-        cos_anc = cos_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
-        sin_anc = sin_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1).unsqueeze(2)
+        cos_anc = cos_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1)
+        sin_anc = sin_flat[anchor_indices_clamped].to(device=VK_a.device, dtype=VK_a.dtype).unsqueeze(1)
         
-        cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
-        sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=AncK_a.device, dtype=AncK_a.dtype).unsqueeze(1)
+        AncK_e = AncK_a.repeat_interleave(gpk, dim=1)
+        AncV_e = AncV_a.repeat_interleave(gpk, dim=1)
+        VK_e   = VK_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
+        VV_e   = VV_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
         
-        VK_a = VK_a * cos_anc + rotate_half(VK_a) * sin_anc
-        AncK_a = AncK_a * cos_anc_2d + rotate_half(AncK_a) * sin_anc_2d
+        AncK_e_rot = AncK_e * cos_anc + rotate_half(AncK_e) * sin_anc
+        s_anc = torch.einsum('hd,nhd->hn', q, AncK_e_rot) * scale
 
-    S_comp = U_a.shape[1]
-    R      = U_a.shape[2]
+        # Forwards rotation for VK_e using cos_anc and sin_anc (since keys are pre-rotated at ingest)
+        cos_anc_exp = cos_anc.unsqueeze(2) # [N, 1, 1, D]
+        sin_anc_exp = sin_anc.unsqueeze(2)
+        VK_e_rot = VK_e * cos_anc_exp + rotate_half(VK_e) * sin_anc_exp
+        
+        q_proj_n = torch.einsum('hd,nhrd->nhr', q, VK_e_rot) * scale
+        delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)
+        delta_s = delta_s * pool.scales[idx].float().view(1, N, 1)
+        delta_s = delta_s + s_anc.unsqueeze(-1)
+    else:
+        # No RoPE / approximate formulation fallback
+        AncK_e = AncK_a.repeat_interleave(gpk, dim=1)
+        AncV_e = AncV_a.repeat_interleave(gpk, dim=1)
+        VK_e   = VK_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
+        VV_e   = VV_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
 
-    AncK_e = AncK_a.repeat_interleave(gpk, dim=1)
-    AncV_e = AncV_a.repeat_interleave(gpk, dim=1)
-    VK_e   = VK_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
-    VV_e   = VV_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
-
-    s_anc = torch.einsum('hd,nhd->hn', q, AncK_e) * scale
-    q_proj_n = torch.einsum('hd,nhrd->nhr', q, VK_e) * scale
-    delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)
-    delta_s = delta_s * pool.scales[idx].float().view(1, N, 1)
-    delta_s = delta_s + s_anc.unsqueeze(-1)
+        s_anc = torch.einsum('hd,nhd->hn', q, AncK_e) * scale
+        q_proj_n = torch.einsum('hd,nhrd->nhr', q, VK_e) * scale
+        delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)
+        delta_s = delta_s * pool.scales[idx].float().view(1, N, 1)
+        delta_s = delta_s + s_anc.unsqueeze(-1)
 
     # ── Post-SVD Sparse Residual Correction for Key ──
     res_pos_K = getattr(pool, "residual_K_positions", None)
@@ -689,15 +703,13 @@ def fused_decode_mps(
             if has_rope:
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                res_pos_K_clamped = res_pos_K_idx.clamp(min=0)
-                abs_pos = anchor_indices.unsqueeze(1) + 1 + res_pos_K_clamped.long()
-                abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
-                
-                cos_res = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)
-                sin_res = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)
-                
-                q_res_rot = q.unsqueeze(0).unsqueeze(1) * cos_res - rotate_half(q.unsqueeze(0).unsqueeze(1)) * sin_res
-                corr_K = torch.sum(q_res_rot * res_val_K_e, dim=-1) * scale
+                anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
+                sin_anc_exp = sin_anc.unsqueeze(1)
+                res_val_K_rot = res_val_K_e * cos_anc_exp + rotate_half(res_val_K_e) * sin_anc_exp
+                corr_K = torch.sum(q.unsqueeze(0).unsqueeze(1) * res_val_K_rot, dim=-1) * scale
             else:
                 corr_K = torch.sum(q.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * scale
 
@@ -721,11 +733,12 @@ def fused_decode_mps(
             if has_rope:
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                abs_pos = anchor_indices.unsqueeze(1) + 1 + fact_pos_idx
-                abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1).long()  # [N, 3]
-                cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
-                sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
-                K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+                anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
+                cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
+                sin_anc_exp = sin_anc.unsqueeze(1)
+                K_exact = K_exact * cos_anc_exp + rotate_half(K_exact) * sin_anc_exp
             score_exact = torch.sum(q.view(1, 1, H_q, D) * K_exact, dim=-1) * scale
             score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
             fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
@@ -824,6 +837,17 @@ def fused_decode_mps(
         print(f"scores finite: {torch.isfinite(scores).all().item()}")
         print(f"lse finite: {torch.isfinite(lse).all().item()}")
         print(f"w finite: {torch.isfinite(w).all().item()}")
+
+    if lse.max().item() > 100.0:
+        print(f"[fused_decode_mps DIAG] lse has large value! max={lse.max().item():.2f}")
+        print(f"  q min/max: {q.min().item():.4f}/{q.max().item():.4f}")
+        print(f"  AncK_e min/max: {AncK_e.min().item():.4f}/{AncK_e.max().item():.4f}")
+        print(f"  VK_e min/max: {VK_e.min().item():.4f}/{VK_e.max().item():.4f}")
+        print(f"  U_a min/max: {U_a.min().item():.4f}/{U_a.max().item():.4f}")
+        print(f"  pool.scales[idx] min/max: {pool.scales[idx].min().item():.4f}/{pool.scales[idx].max().item():.4f}")
+        print(f"  s_anc min/max: {s_anc.min().item():.4f}/{s_anc.max().item():.4f}")
+        print(f"  delta_s min/max: {delta_s.min().item():.4f}/{delta_s.max().item():.4f}")
+        print(f"  scores min/max: {scores.min().item():.4f}/{scores.max().item():.4f}")
 
     return O.to(Q.dtype), lse.to(torch.float32)
 
@@ -927,7 +951,7 @@ def _pytorch_vectorized_sparse_attn_decode(
             if cached_val is not None and cached_val[0] == current_version:
                 cached_gathered = cached_val[1]
 
-        approximate_attn = os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN", "0") == "1"
+        approximate_attn = True
 
         if cached_gathered is not None:
             U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t = cached_gathered
@@ -966,6 +990,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 gathered_cache[layer_idx] = (current_version, (U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t))
         
         block_capacity = U.shape[1]
+        R = U.shape[2]
 
         if max_valid_len is None:
             max_valid_len = int(seq_lens_t.max().item())
@@ -1033,18 +1058,16 @@ def _pytorch_vectorized_sparse_attn_decode(
             res_val_K_idx = res_val_K[indices].float()
             if res_pos_K_idx.numel() > 0:
                 res_val_K_e = res_val_K_idx.repeat_interleave(num_key_value_groups, dim=2)
-                if not approximate_attn and has_rope:
-                    res_pos_K_clamped = res_pos_K_idx.clamp(min=0)
-                    abs_pos = anchor_indices.unsqueeze(1) + 1 + res_pos_K_clamped.long()
+                if has_rope:
                     cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                     sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                    abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
-                    
-                    cos_res = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
-                    sin_res = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
-                    
-                    q_res_rot = q_sq_fp32.unsqueeze(0).unsqueeze(1) * cos_res - rotate_half(q_sq_fp32.unsqueeze(0).unsqueeze(1)) * sin_res
-                    corr_K = torch.sum(q_res_rot * res_val_K_e, dim=-1) * inv_scale
+                    anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                    cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                    sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                    cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
+                    sin_anc_exp = sin_anc.unsqueeze(1)
+                    res_val_K_rot = res_val_K_e * cos_anc_exp + rotate_half(res_val_K_e) * sin_anc_exp
+                    corr_K = torch.sum(q_sq_fp32.unsqueeze(0).unsqueeze(1) * res_val_K_rot, dim=-1) * inv_scale
                 else:
                     corr_K = torch.sum(q_sq_fp32.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * inv_scale
 
@@ -1068,11 +1091,12 @@ def _pytorch_vectorized_sparse_attn_decode(
                 if has_rope:
                     cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                     sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                    abs_pos = anchor_indices.unsqueeze(1) + 1 + fact_pos_idx
-                    abs_pos_clamped = abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1).long()  # [N, 3]
-                    cos_val_rot = cos_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
-                    sin_val_rot = sin_flat[abs_pos_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(2)  # [N, 3, 1, D]
-                    K_exact = K_exact * cos_val_rot + rotate_half(K_exact) * sin_val_rot
+                    anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+                    cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                    sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                    cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
+                    sin_anc_exp = sin_anc.unsqueeze(1)
+                    K_exact = K_exact * cos_anc_exp + rotate_half(K_exact) * sin_anc_exp
                 score_exact = torch.sum(q_sq_fp32.view(1, 1, H_q, D) * K_exact, dim=-1) * inv_scale  # [N, 3, H_q]
                 score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
                 fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
@@ -1204,13 +1228,30 @@ def _pytorch_vectorized_sparse_attn_decode(
             v_svd = v_svd_sum * scales.view(N, 1, 1, 1) + anchors_V.unsqueeze(2)  # [N, H_q, 3, D]
             v_svd = v_svd.permute(0, 2, 1, 3)  # [N, 3, H_q, D]
             v_diff = V_exact - v_svd  # [N, 3, H_q, D]
-            w_pos = torch.gather(P_comp_reshaped.permute(1, 2, 0), dim=1, index=fact_pos_idx_clamped.unsqueeze(-1).expand(-1, -1, H_q))  # [N, 3, H_q]
+            fact_idx_expanded = fact_pos_idx_clamped.unsqueeze(1).expand(-1, H_q, -1)  # [N, H_q, 3]
+            w_pos = torch.gather(P_comp_reshaped, dim=2, index=fact_idx_expanded)  # [N, H_q, 3]
+            w_pos = w_pos.permute(0, 2, 1)  # [N, 3, H_q]
             w_pos = w_pos.unsqueeze(-1)  # [N, 3, H_q, 1]
             update_term = w_pos * v_diff  # [N, 3, H_q, D]
             mask_expanded = mask.unsqueeze(-1).unsqueeze(-1)  # [N, 3, 1, 1]
             update_term = update_term.masked_fill(~mask_expanded, 0.0)
             O_final = O_final + torch.sum(update_term, dim=(0, 1)).to(O_final.dtype)
 
+    if layer_idx == 0:
+        print(f"[DiffKV DEBUG] layer 0 check - q has nan: {torch.isnan(q).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - block_indices has nan: {torch.isnan(block_indices).any().item() if block_indices is not None else False}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - U has nan: {torch.isnan(U).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - V_K has nan: {torch.isnan(V_K).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - V_V has nan: {torch.isnan(V_V).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - anchors_K has nan: {torch.isnan(anchors_K).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - anchors_V has nan: {torch.isnan(anchors_V).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - scales has nan: {torch.isnan(scales).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - scores_anchor has nan: {torch.isnan(scores_anchor).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - scores_compressed has nan: {torch.isnan(scores_compressed).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - scores_dense has nan: {torch.isnan(scores_dense).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - scores_all has nan: {torch.isnan(scores_all).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - probs_all has nan: {torch.isnan(probs_all).any().item()}", flush=True)
+        print(f"[DiffKV DEBUG] layer 0 check - O_final has nan: {torch.isnan(O_final).any().item()}", flush=True)
 
     return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)
 

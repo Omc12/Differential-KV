@@ -1029,8 +1029,10 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                                 sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
                                 if sims:
                                     srl_state.current_step_max_similarity = max(sims)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                        print(f"[DiffKV MLX Exception] SRL update failed: {e}")
                 # ────────────────────────────────────────────────────────────
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
@@ -1469,6 +1471,10 @@ class MLXDiffKVWrapper:
                 )
                 mask = np.ones_like(logits, dtype=bool)
                 mask[list(allowed_ids)] = False
+                factual_toks = getattr(srl_state, "current_step_factual_tokens", None)
+                if factual_toks:
+                    valid_factual_toks = [t for t in factual_toks if 0 <= t < logits.shape[-1]]
+                    mask[valid_factual_toks] = False
                 
                 max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
                 if max_sim >= 0.70:
@@ -1478,13 +1484,16 @@ class MLXDiffKVWrapper:
 
             next_id = sample_logits(logits, effective_temperature, top_p)
 
+            if srl_state is not None:
+                print(f"[Python DEBUG] Step {_n_new} next_id_val={next_id} token={repr(self.tokenizer.decode([next_id]))} max_sim={getattr(srl_state, 'current_step_max_similarity', 0.0):.4f} sfa_active={sfa_active}", flush=True)
+
             # Strict Factual Alignment (SFA) State Update and Loop Check
-            if sfa_active and srl_state is not None:
+            if srl_state is not None:
                 from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
                 helper_ids = get_helper_token_ids(self.tokenizer)
                 update_vsl_state(next_id, srl_state, helper_ids)
                 
-                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
+                if sfa_active and getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                     uncertainty_suffix = " [uncertain: details missing in source]"
                     uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
                     for t_id in uncertainty_tokens:

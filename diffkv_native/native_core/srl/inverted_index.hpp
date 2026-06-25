@@ -73,7 +73,7 @@ struct InvertedTokenIndex {
             return {};
         }
 
-        float decay_factor = 0.999f;
+        float decay_factor = 1.0f;
         if (const char* env = std::getenv("DIFFKV_SRL_DECAY_FACTOR")) {
             decay_factor = std::stof(env);
         }

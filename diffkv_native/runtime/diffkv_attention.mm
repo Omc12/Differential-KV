@@ -662,7 +662,7 @@ void execute_metal_attention(
             };
 
             ensure(pb.u_pool,    engine->get_host_U(),                ggml_nbytes(engine->get_U()));
-            ensure(pb.u_scale,   engine->get_host_U_scale(),          ggml_nbytes(engine->get_U_scale()));
+            ensure(pb.u_scale,   engine->get_host_U_row_scale(),      ggml_nbytes(engine->get_U_row_scale()));
             ensure(pb.vk_pool,   engine->get_host_VK(),               ggml_nbytes(engine->get_VK()));
             ensure(pb.vv_pool,   engine->get_host_VV(),               ggml_nbytes(engine->get_VV()));
             ensure(pb.anchors_k, engine->get_host_anchors_K(),        ggml_nbytes(engine->get_anchors_K()));

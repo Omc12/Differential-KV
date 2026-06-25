@@ -2380,6 +2380,40 @@ class KVRuntimeManager:
         full_v = torch.cat([anchor_kv_local[:, 1].unsqueeze(2), v], dim=2)
         S_total = full_k.shape[2]
 
+        # ── PER-TOKEN ROTATION FIX (gated: DIFFKV_ROTATE_AT_INGEST) ────────────────────────────────
+        # Rotate each token t in full_k by its within-block offset t (K only)
+        has_rope = True
+        if has_rope:
+            device = full_k.device
+            dtype = full_k.dtype
+            D = full_k.shape[3]
+            half_d = D // 2
+            
+            rope_theta = 10000.0
+            if hasattr(self, "model") and self.model is not None:
+                rope_theta = getattr(self.model.config, "rope_theta", 10000.0)
+            if "qwen" in str(getattr(self, "model_id", "")).lower():
+                rope_theta = 1000000.0
+            
+            inv_freq = 1.0 / (rope_theta ** (torch.arange(0, D, 2, device=device, dtype=torch.float32) / D))
+            t_coords = torch.arange(S_total, device=device, dtype=torch.float32)
+            angles = t_coords.unsqueeze(1) * inv_freq.unsqueeze(0)
+            cos_a = torch.cos(angles).to(dtype).unsqueeze(0).unsqueeze(1)
+            sin_a = torch.sin(angles).to(dtype).unsqueeze(0).unsqueeze(1)
+            
+            k_half = torch.zeros_like(full_k)
+            k_half[..., :half_d] = -full_k[..., half_d:]
+            k_half[..., half_d:] = full_k[..., :half_d]
+            
+            cos_a_full = torch.cat([cos_a, cos_a], dim=-1)
+            sin_a_full = torch.cat([sin_a, sin_a], dim=-1)
+            
+            full_k = full_k * cos_a_full + k_half * sin_a_full
+
+        session_id = getattr(block, "session_id", None)
+        print(f"[DiffKV DEBUG] _compress_block_sync: session_id={session_id} token_indices_len={len(block.token_indices) if getattr(block, 'token_indices', None) is not None else 0}", flush=True)
+
+
         block_token_ids = []
         session_id = getattr(block, "session_id", None)
         if session_id is not None and session_id in self._session_token_ids:
@@ -2422,6 +2456,21 @@ class KVRuntimeManager:
             full_v[:, :, landmark_idx] = tmp_v
             
             # Update local anchor
+            anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
+            if input_device.type == "cpu":
+                block.anchor_kv_cpu = anchor_kv_local
+                is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+                if not is_background:
+                    gpu_dev = block.anchor_kv.device if block.anchor_kv is not None else self.device
+                    block.anchor_kv = anchor_kv_local.to(gpu_dev)
+            else:
+                block.anchor_kv = anchor_kv_local
+            
+            # Update active tokens for SVD
+            k = full_k[:, :, 1:]
+            v = full_v[:, :, 1:]
+        else:
+            # Update local anchor with the unrotated version of the original anchor
             anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
             if input_device.type == "cpu":
                 block.anchor_kv_cpu = anchor_kv_local
@@ -2649,8 +2698,8 @@ class KVRuntimeManager:
                             pool_idx=block.pool_idx,
                             U=block.U,
                             V=block.V,
-                            anchor_K=self._get_rotated_anchor_k(session_id, block.anchor_kv[0, 0], block.anchor_idx),
-                            anchor_V=block.anchor_kv[0, 1],
+                            anchor_K=self._get_rotated_anchor_k(session_id, anchor_kv_local[0, 0], block.anchor_idx),
+                            anchor_V=anchor_kv_local[0, 1],
                             scale=block.scale,
                             seq_len=block.U.shape[0],
                             residual_K_positions=block.residual_K_positions,

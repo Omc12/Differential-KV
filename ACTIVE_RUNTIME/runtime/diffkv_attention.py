@@ -1,3 +1,7 @@
+import sys
+import os
+if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1":
+    sys.modules["diffkv_core"] = None
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -279,8 +283,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     if cos_sliced is None or sin_sliced is None:
                         block_anchors   = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
-                        positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
-                        positions_flat  = positions.view(-1)
+                        positions       = block_anchors.view(N_blocks, 1).expand(N_blocks, 1 + max_seq_len)
+                        positions_flat  = positions.reshape(-1)
                         cos_ref = cos_all if cos_all is not None else cos
                         sin_ref = sin_all if sin_all is not None else sin
                         # Clamp positions to actual sequence length of cos_ref to prevent indexing out of bounds
@@ -355,9 +359,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     return out_combined.to(valid_list[0][0].dtype)
 
                 # --- Projection ---
+                if is_decode and captured_layer_idx == 0:
+                    print(f"[DiffKV DEBUG] layer 0 hidden_states has nan: {torch.isnan(hidden_states).any().item()}", flush=True)
                 query_states = self.q_proj(hidden_states)
                 key_states   = self.k_proj(hidden_states)
                 value_states = self.v_proj(hidden_states)
+
+                if is_decode and captured_layer_idx == 0:
+                    print(f"[DiffKV DEBUG] layer 0 query_states (proj) has nan: {torch.isnan(query_states).any().item()}", flush=True)
 
                 query_states = query_states.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
                 key_states   = key_states.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
@@ -368,11 +377,36 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     cos, sin = self.rotary_emb(value_states, position_ids)
                 else:
                     cos, sin = position_embeddings
+                if is_decode and captured_layer_idx == 0:
+                    print(f"[DiffKV DEBUG] layer 0 cos has nan: {torch.isnan(cos).any().item()}, sin has nan: {torch.isnan(sin).any().item()}", flush=True)
                 unrot_key_states = key_states.clone()
                 unrot_query_states = query_states.clone()
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+                if is_decode and captured_layer_idx == 0:
+                    print(f"[DiffKV DEBUG] layer 0 query_states (after RoPE) has nan: {torch.isnan(query_states).any().item()}", flush=True)
 
                 session_ids = getattr(model, "_diffkv_session_ids", ["default"] * bsz)
+                if captured_layer_idx == 0:
+                    for b_idx, sid in enumerate(session_ids):
+                        if sid and sid != "dummy_session":
+                            session_dict = kv_manager.decode_workspace.setdefault(sid, {})
+                            cos_dict = session_dict.setdefault("rope_cos_dict", {})
+                            sin_dict = session_dict.setdefault("rope_sin_dict", {})
+                            
+                            c_item = cos[b_idx].squeeze()
+                            s_item = sin[b_idx].squeeze()
+                            p_item = position_ids[b_idx]
+                            
+                            if p_item.dim() == 0 or p_item.numel() == 1:
+                                p_val = int(p_item.item())
+                                cos_dict[p_val] = c_item
+                                sin_dict[p_val] = s_item
+                            else:
+                                for idx in range(p_item.shape[0]):
+                                    p_val = int(p_item[idx].item())
+                                    cos_dict[p_val] = c_item[idx]
+                                    sin_dict[p_val] = s_item[idx]
+                            print(f"[DiffKV DEBUG] diffkv_attention: layer 0, sid={sid}, positions min/max={p_item.min().item()}/{p_item.max().item()}, cos_dict len={len(cos_dict)}", flush=True)
 
                 # Fix 3: Gate finalize_compressed_blocks to layer 0 only.
                 # The function is idempotent and protected by _pending_lock internally.
@@ -1062,6 +1096,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             has_comp = (block_indices is not None and block_indices.numel() > 0)
                             if has_comp:
                                 _Q_sq = query_states[b_idx, :, 0, :]
+                                if captured_layer_idx == 0:
+                                    print(f"[DiffKV DEBUG] layer 0 _Q_sq tensor:\n{_Q_sq}", flush=True)
                                 _bsizes = pool.seq_lens[block_indices]
                                 out_sparse, lse_sparse = fused_decode_mps(
                                     Q                    = _Q_sq,
@@ -1115,7 +1151,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             k_rep_fact = repeat_kv(fact_k_rot, num_key_value_groups)
                             v_rep_fact = repeat_kv(fact_v, num_key_value_groups)
                             
-                            _scale = (D ** -0.5) / 0.12
+                            _scale = D ** -0.5
                             out_facts = F.scaled_dot_product_attention(
                                 query_states[b_idx:b_idx+1], k_rep_fact, v_rep_fact,
                                 is_causal=False,
@@ -1135,7 +1171,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 boost = 8.0 * (max_sim - 0.4) / 0.6
                                 lse_facts = lse_facts + boost
 
-                            # 4. Three-way LSE combination
+                            # 4. Three-way LSE combination (unclamped to preserve true log-sum-exp combination math)
                             lse_max = torch.maximum(torch.maximum(lse_dense, lse_sparse), lse_facts)
                             lse_max_masked = lse_max.clone()
                             lse_max_masked[torch.isinf(lse_max)] = 0.0
@@ -1154,7 +1190,15 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
                                          out_sparse_fp32 * w_sparse.unsqueeze(-1) +
                                          out_facts_hd * w_facts.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
-                                         
+                            if captured_layer_idx == 0:
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 lse_dense min: {lse_dense.min().item()} max: {lse_dense.max().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 lse_sparse min: {lse_sparse.min().item()} max: {lse_sparse.max().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 lse_facts min: {lse_facts.min().item()} max: {lse_facts.max().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 w_dense min: {w_dense.min().item()} max: {w_dense.max().item()} inf: {torch.isinf(w_dense).any().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 w_sparse min: {w_sparse.min().item()} max: {w_sparse.max().item()} inf: {torch.isinf(w_sparse).any().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 w_facts min: {w_facts.min().item()} max: {w_facts.max().item()} inf: {torch.isinf(w_facts).any().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 denom_safe min: {denom_safe.min().item()} max: {denom_safe.max().item()}", flush=True)
+                                print(f"[DiffKV DEBUG matching_entries] layer 0 out_final nan: {torch.isnan(out_final).any().item()}", flush=True)
                             attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)
                             attn_outputs.append(attn_out_b)
                             continue
@@ -1170,6 +1214,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         # Dense window tokens still receive exact pre-rotated attention.
                         _is_mps_decode = (query_states.device.type == "mps" and pool is not None and os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN", "0") == "1")
                         if _is_mps_decode:
+                            if captured_layer_idx == 0:
+                                print(f"[DiffKV DEBUG] layer 0 - _is_mps_decode={_is_mps_decode} _DIFFKV_CORE_AVAILABLE={_DIFFKV_CORE_AVAILABLE} has_dense={dense_k_assembled is not None and dense_k_assembled.shape[2] > 0 if dense_k_assembled is not None else False} has_comp={block_indices is not None and block_indices.numel() > 0 if block_indices is not None else False}", flush=True)
                             if _DIFFKV_CORE_AVAILABLE and hasattr(_dkv_core, "fused_decode_attention_combined"):
                                 _scale = 1.0 / math.sqrt(head_dim)
                                 _q_val = query_states[b_idx, :, 0, :]
@@ -1426,27 +1472,31 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             sin                  = sin_all,
                                         )  # [H_q, D], [H_q]
 
-                                    # 4. Combine outputs via LSE safely to prevent NaNs when both are -inf
-                                    out_dense_hd = out_dense[0, :, 0, :].float()
-                                    out_sparse_fp32 = out_sparse.float()
-                                    lse_dense = lse_dense.to(torch.float32)
-                                    lse_sparse = lse_sparse.to(torch.float32)
+                                        # 4. Combine outputs via LSE safely (unclamped to preserve true log-sum-exp combination math)
+                                        lse_max = torch.maximum(lse_dense, lse_sparse)
+                                        lse_max_masked = lse_max.clone()
+                                        lse_max_masked[torch.isinf(lse_max)] = 0.0
 
-                                    lse_max = torch.maximum(lse_dense, lse_sparse)
-                                    lse_max_masked = lse_max.clone()
-                                    lse_max_masked[torch.isinf(lse_max)] = 0.0
+                                        w_dense = torch.exp(lse_dense - lse_max_masked)
+                                        w_sparse = torch.exp(lse_sparse - lse_max_masked)
 
-                                    w_dense = torch.exp(lse_dense - lse_max_masked)
-                                    w_sparse = torch.exp(lse_sparse - lse_max_masked)
+                                        w_dense[torch.isinf(lse_dense)] = 0.0
+                                        w_sparse[torch.isinf(lse_sparse)] = 0.0
 
-                                    w_dense[torch.isinf(lse_dense)] = 0.0
-                                    w_sparse[torch.isinf(lse_sparse)] = 0.0
-
-                                    denom = w_dense + w_sparse
-                                    denom_safe = torch.clamp(denom, min=1e-9)
+                                        denom = w_dense + w_sparse
+                                        denom_safe = torch.clamp(denom, min=1e-9)
 
                                     out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
                                                  out_sparse_fp32 * w_sparse.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
+                                    if captured_layer_idx == 0:
+                                        print(f"[DiffKV DEBUG] layer 0 out_dense_hd nan: {torch.isnan(out_dense_hd).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 out_sparse_fp32 nan: {torch.isnan(out_sparse_fp32).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 lse_dense nan: {torch.isnan(lse_dense).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 lse_sparse nan: {torch.isnan(lse_sparse).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 w_dense nan: {torch.isnan(w_dense).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 w_sparse nan: {torch.isnan(w_sparse).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 denom_safe nan: {torch.isnan(denom_safe).any().item()}", flush=True)
+                                        print(f"[DiffKV DEBUG] layer 0 out_final nan: {torch.isnan(out_final).any().item()}", flush=True)
                                     attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
                         else:
                             attn_out_b = native_triton_sparse_attn_decode(
@@ -1773,7 +1823,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         else:
                             cfg = getattr(kv_manager, "config", None)
                             _chunk_size = cfg.prefill_chunk_size if cfg is not None else 512
-                        if q_len <= _chunk_size:
+                        _global_offset = position_ids[0, 0].item() if position_ids is not None else 0
+                        if q_len <= _chunk_size and _global_offset == 0:
                             # Standard single-pass prefill for small/medium inputs
                             attn_outputs = []
                             for b_idx in range(bsz):
@@ -1789,7 +1840,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     
                                 k_rep = repeat_kv(full_k, num_key_value_groups)
                                 v_rep = repeat_kv(full_v, num_key_value_groups)
-                                with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=False, enable_mem_efficient=True):
+                                with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=True, enable_mem_efficient=True):
                                     out_b = F.scaled_dot_product_attention(
                                         curr_q.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
                                         attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag

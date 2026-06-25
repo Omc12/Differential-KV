@@ -26,6 +26,7 @@ void FactualExactStore::build(
     const std::unordered_set<int32_t>& semantic_prime_slots,
     const std::unordered_set<int32_t>& helper_token_ids,
     const std::unordered_set<int32_t>& relational_token_ids,
+    std::function<std::string(int32_t)> token_to_piece_fn,
     bool use_salience_parser
 ) {
     clear();
@@ -186,6 +187,13 @@ void FactualExactStore::build(
             for (int t = 0; t < L; ++t) {
                 factual_mask[t] = (total_salience[t] >= threshold_val) || (idf_vals[t] >= 3.0f);
             }
+            std::cerr << "[DiffKV DIAG] Threshold val: " << threshold_val << "\n";
+            for (int t = std::max(0, 2040); t < std::min(L, 2070); ++t) {
+                std::cerr << "[DiffKV DIAG] Pos " << t << " token_id=" << token_ids[t]
+                          << " idf=" << idf_vals[t] << " norm=" << key_norms[t]
+                          << " R=" << R[t] << " salience=" << total_salience[t]
+                          << " mask=" << factual_mask[t] << "\n";
+            }
         }
 
         // 5b. Relational Context Window Expansion — each salient seed token
@@ -269,6 +277,36 @@ void FactualExactStore::build(
     bool in_span = false;
     int start = -1;
     for (int t = 0; t < L; ++t) {
+        if (!factual_mask[t]) {
+            // Check if this token is a BPE word fragment continuation.
+            // If so, force it into the same span as the previous token!
+            if (in_span && token_to_piece_fn && t > 0) {
+                int32_t tid = token_ids[t];
+                std::string piece = token_to_piece_fn(tid);
+                if (!piece.empty() && piece != "<|im_start|>" && piece != "<|im_end|>" && piece != "<|endoftext|>") {
+                    bool starts_with_space = (piece[0] == ' ' || piece[0] == '\n' || piece[0] == '\r' || piece[0] == '\t');
+                    if (piece.size() >= 3 && piece.substr(0, 3) == "\xe2\x96\x81") {
+                        starts_with_space = true;
+                    }
+                    if (piece.size() >= 2 && piece.substr(0, 2) == "\xc4\xa0") {
+                        starts_with_space = true;
+                    }
+                    
+                    bool has_alnum = false;
+                    for (char c : piece) {
+                        if (is_gpt2_alnum((unsigned char)c)) {
+                            has_alnum = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!starts_with_space && has_alnum) {
+                        factual_mask[t] = true;
+                    }
+                }
+            }
+        }
+
         if (factual_mask[t]) {
             if (!in_span) {
                 start = t;
@@ -798,6 +836,10 @@ std::vector<FactEntry> FactualExactStore::query(
 ) const {
     if (entries.empty() || !W_proj) return {};
 
+    for (auto& entry : entries) {
+        entry.current_sim = 0.0f;
+    }
+
 
 
     // RC3 — build the entity-bias signature from the queried entities'
@@ -860,6 +902,7 @@ std::vector<FactEntry> FactualExactStore::query(
             auto it = slot_to_entry_indices.find(slot);
             if (it != slot_to_entry_indices.end()) {
                 for (int entry_idx : it->second) {
+                    if (entries[entry_idx].recalled) continue;
                     candidate_indices.insert(entry_idx);
                     entry_has_active_slot[entry_idx] = true;
                 }
@@ -867,6 +910,7 @@ std::vector<FactEntry> FactualExactStore::query(
         }
     } else {
         for (size_t idx = 0; idx < entries.size(); ++idx) {
+            if (entries[idx].recalled) continue;
             candidate_indices.insert(idx);
         }
     }
@@ -877,6 +921,7 @@ std::vector<FactEntry> FactualExactStore::query(
     std::vector<std::pair<int, float>> prime_seeds;
     for (size_t idx = 0; idx < entries.size(); ++idx) {
         const auto& entry = entries[idx];
+        if (entry.recalled) continue;
         if (entry.is_prime) {
             float sim = 0.0f;
             for (int r = 0; r < desc_dim; ++r) {
@@ -899,6 +944,7 @@ std::vector<FactEntry> FactualExactStore::query(
         const auto& entry = entries[seed_idx];
         for (size_t nb_i = 0; nb_i < entry.neighbors.size(); ++nb_i) {
             int nb_idx = entry.neighbors[nb_i];
+            if (entries[nb_idx].recalled) continue;
             float weight = entry.weights[nb_i];
             float prop_sim = seed_sim * weight;
             auto it = walk_candidates.find(nb_idx);
@@ -975,6 +1021,7 @@ std::vector<FactEntry> FactualExactStore::query(
         std::vector<std::pair<int, float>> fallback_matches;
         for (int idx : candidate_indices) {
             const auto& entry = entries[idx];
+            if (entry.recalled) continue;
             float sim = 0.0f;
             for (int r = 0; r < desc_dim; ++r) {
                 sim += q_desc[r] * entry.descriptor[r];

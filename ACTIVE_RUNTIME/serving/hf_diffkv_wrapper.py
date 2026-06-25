@@ -1,4 +1,7 @@
 import os
+import sys
+if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1":
+    sys.modules["diffkv_core"] = None
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 """
 runtime/hf_diffkv_wrapper.py
@@ -584,6 +587,7 @@ class PyTorchDiffKVHFWrapper:
             config=self.config,
         )
         self.manager.model_id = self.model_id
+        self.manager.model = self.model
         
         # Load stop token IDs from model config if present
         if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
@@ -1019,6 +1023,10 @@ class PyTorchDiffKVHFWrapper:
                 )
                 mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
                 mask[list(allowed_ids)] = False
+                factual_toks = getattr(srl_state, "current_step_factual_tokens", None)
+                if factual_toks:
+                    valid_factual_toks = [t for t in factual_toks if 0 <= t < logits.shape[-1]]
+                    mask[valid_factual_toks] = False
                 
                 max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
                 if max_sim >= 0.70:
@@ -1037,12 +1045,12 @@ class PyTorchDiffKVHFWrapper:
                 srl_state.update_query_segment(next_id_val)
                 srl_state.update_dynamic_anchors(self.stop_token_ids)
 
-            if sfa_active and srl_state is not None:
+            if srl_state is not None:
                 from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
                 helper_ids = get_helper_token_ids(self.tokenizer)
                 update_vsl_state(next_id_val, srl_state, helper_ids)
                 
-                if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
+                if sfa_active and getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                     uncertainty_suffix = " [uncertain: details missing in source]"
                     uncertainty_tokens = self.tokenizer.encode(uncertainty_suffix, add_special_tokens=False)
                     for t_id in uncertainty_tokens:

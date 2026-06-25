@@ -167,6 +167,7 @@ struct SessionSRLState {
     // Blended with current decode-K (65%/35%) on subsequent steps to prevent
     // semantic drift from pulling factual retrieval off the original topic.
     std::vector<float> factual_anchor_q;
+    float factual_anchor_w = 0.80f;
 
     // Entity-subgraph tracking for relationship binding.
     // current_entity_id: document position (start_idx) of the active prime.

@@ -783,6 +783,9 @@ class FactualExactStore:
         if not self.entries or W_proj is None:
             return []
             
+        for entry in self.entries:
+            entry.current_sim = 0.0
+            
         avg_q = Q.mean(dim=0).float()
         q_desc = avg_q @ W_proj.T # [DESC_DIM]
         q_desc = q_desc / (q_desc.norm() + 1e-8)

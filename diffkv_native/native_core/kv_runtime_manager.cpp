@@ -321,7 +321,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
 
     // 0. Always include sink blocks (first/last blocks, critical for attention sinks)
     for (int32_t sink : srl_state.sink_blocks) {
-        if (sink >= 0 && sink < active_slot) {
+        if (sink >= 0) {
             host_candidates.push_back(sink);
             seen.insert(sink);
         }
@@ -339,7 +339,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     int take_r = std::min(eff_recency, n_ord);
     for (int i = n_ord - take_r; i < n_ord; ++i) {
         int32_t slot = ord[i];
-        if (slot >= 0 && slot < active_slot) {
+        if (slot >= 0) {
             if (!seen.count(slot)) {
                 host_candidates.push_back(slot);
                 seen.insert(slot);
@@ -356,12 +356,15 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             query_tokens.push_back(token_ids[i]);
         }
     }
-
-    auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, 0.999f);
+    float decay_factor = 1.0f;
+    if (const char* env = std::getenv("DIFFKV_SRL_DECAY_FACTOR")) {
+        decay_factor = std::stof(env);
+    }
+    auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, decay_factor);
     std::vector<int32_t> lexical_slots;
     for (int i = 0; i < std::min(eff_lexical, (int)lex_scored.size()); ++i) {
         int32_t slot = lex_scored[i].first;
-        if (slot >= 0 && slot < active_slot) {
+        if (slot >= 0) {
             lexical_slots.push_back(slot);
             if (!seen.count(slot)) {
                 host_candidates.push_back(slot);
@@ -403,7 +406,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             int32_t slot = ord[i];
             if (seed_set.count(slot)) continue;
             float gs = A1[i] + A2[i];
-            if (gs > 0.0f && slot >= 0 && slot < active_slot) {
+            if (gs > 0.0f && slot >= 0) {
                 gscore_slots.push_back({gs, slot});
             }
         }
@@ -427,7 +430,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         std::unordered_set<int32_t> da_set(srl_state.dynamic_anchors.begin(), srl_state.dynamic_anchors.end());
         std::vector<int32_t> expanded_da = srl_state.expand_neighborhood(da_set);
         for (int32_t slot : expanded_da) {
-            if (slot >= 0 && slot < active_slot) {
+            if (slot >= 0) {
                 if (!seen.count(slot)) {
                     host_candidates.push_back(slot);
                     seen.insert(slot);
@@ -449,7 +452,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         if (!pa_slots.empty()) {
             std::vector<int32_t> expanded_pa = srl_state.expand_neighborhood(pa_slots);
             for (int32_t slot : expanded_pa) {
-                if (slot >= 0 && slot < active_slot) {
+                if (slot >= 0) {
                     if (!seen.count(slot)) {
                         host_candidates.push_back(slot);
                         seen.insert(slot);
@@ -827,7 +830,18 @@ void KVRuntimeManager::commit_turn(SessionSRLState& srl_state) {
     std::unordered_map<int32_t, float> strengths = srl_state.slot_activation_strength;
     
     // Update cached_len to current sequence length
-    srl_state.cached_len = static_cast<int>(ingest_manager_->get_session_token_ids().size());
+    int prior_cached_len = srl_state.cached_len;
+    const auto& all_tokens = ingest_manager_->get_session_token_ids();
+    srl_state.cached_len = static_cast<int>(all_tokens.size());
+
+    // Populate current_query_tokens (query tokens since last prefill)
+    srl_state.current_query_tokens.clear();
+    if (prior_cached_len == 0) {
+        int query_start = std::max(0, (int)all_tokens.size() - 128);
+        srl_state.current_query_tokens.assign(all_tokens.begin() + query_start, all_tokens.end());
+    } else if (prior_cached_len < (int)all_tokens.size()) {
+        srl_state.current_query_tokens.assign(all_tokens.begin() + prior_cached_len, all_tokens.end());
+    }
     
     // Rebuild the index
     auto & blocks_l0 = ingest_manager_->get_blocks(0);
@@ -837,7 +851,8 @@ void KVRuntimeManager::commit_turn(SessionSRLState& srl_state) {
         if (block->pool_idx != -1 &&
             (block->state == BlockState::CompressedResident ||
              block->state == BlockState::CPUResident ||
-             block->state == BlockState::Compressing)) {
+             block->state == BlockState::Compressing ||
+             block->state == BlockState::DenseResident)) {
             compressed_slots.push_back(block->pool_idx);
             compressed_anchors.push_back(block->anchor_idx);
         }

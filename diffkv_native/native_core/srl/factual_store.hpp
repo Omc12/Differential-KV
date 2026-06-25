@@ -10,6 +10,8 @@
 #include <cmath>
 #include <ggml.h>
 
+#include <functional>
+
 #include "native_core/srl/inverted_index.hpp"
 
 namespace diffkv {
@@ -33,6 +35,22 @@ inline std::vector<float> entity_signature(int32_t token_id, int dim = ENTITY_SI
     if (nrm > 1e-8) for (int i = 0; i < dim; ++i) v[i] = (float)(v[i] / nrm);
     return v;
 }
+
+inline bool is_gpt2_alnum(unsigned char b) {
+    if (b <= 0x1f) return true;
+    if (b >= 0x30 && b <= 0x39) return true;
+    if (b >= 0x41 && b <= 0x5a) return true;
+    if (b >= 0x61 && b <= 0x7a) return true;
+    if (b >= 0x7f && b <= 0xa0) return true;
+    if (b == 0xaa || b == 0xad) return true;
+    if (b == 0xb2 || b == 0xb3 || b == 0xb5 || b == 0xb9 || b == 0xba) return true;
+    if (b >= 0xbc && b <= 0xbe) return true;
+    if (b >= 0xc0 && b <= 0xff) {
+        return (b != 0xd7 && b != 0xf7);
+    }
+    return false;
+}
+
 
 struct FactEntry {
     int start_idx;
@@ -79,6 +97,7 @@ struct FactEntry {
     // DX1: true when this span sits immediately after its prime via a definitional
     // bridge (copula IDF < 1.0 — "is", "are", "means", "refers to").
     bool is_definition = false;
+    bool recalled = false;
 };
 
 class FactualExactStore {
@@ -120,6 +139,7 @@ public:
         const std::unordered_set<int32_t>& semantic_prime_slots,
         const std::unordered_set<int32_t>& helper_token_ids,
         const std::unordered_set<int32_t>& relational_token_ids,
+        std::function<std::string(int32_t)> token_to_piece_fn = nullptr,
         bool use_salience_parser = true
     );
 

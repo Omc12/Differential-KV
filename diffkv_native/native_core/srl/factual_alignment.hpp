@@ -10,6 +10,7 @@
 #include <cctype>
 #include <numeric>
 #include <cmath>
+#include <iostream>
 
 namespace diffkv {
 
@@ -77,13 +78,40 @@ inline void compute_entity_token_license(
 
 inline std::string clean_token_text(const std::string& text) {
     std::string cleaned = "";
-    for (char c : text) {
-        if (std::isalnum(static_cast<unsigned char>(c))) {
-            cleaned += std::tolower(static_cast<unsigned char>(c));
+    std::string text_copy = text;
+    size_t pos = 0;
+    while ((pos = text_copy.find("</w>")) != std::string::npos) {
+        text_copy.erase(pos, 4);
+    }
+    
+    for (char c : text_copy) {
+        unsigned char b = static_cast<unsigned char>(c);
+        if (b == 0x20) continue;
+        
+        bool is_alnum = false;
+        if (b <= 0x1f) is_alnum = true;
+        else if (b >= 0x30 && b <= 0x39) is_alnum = true;
+        else if (b >= 0x41 && b <= 0x5a) is_alnum = true;
+        else if (b >= 0x61 && b <= 0x7a) is_alnum = true;
+        else if (b >= 0x7f && b <= 0xa0) is_alnum = true;
+        else if (b == 0xaa || b == 0xad) is_alnum = true;
+        else if (b == 0xb2 || b == 0xb3 || b == 0xb5 || b == 0xb9 || b == 0xba) is_alnum = true;
+        else if (b >= 0xbc && b <= 0xbe) is_alnum = true;
+        else if (b >= 0xc0 && b <= 0xff) {
+            is_alnum = (b != 0xd7 && b != 0xf7);
+        }
+        
+        if (is_alnum) {
+            if (b >= 'A' && b <= 'Z') {
+                cleaned += static_cast<char>(b + 32);
+            } else {
+                cleaned += c;
+            }
         }
     }
     return cleaned;
 }
+
 
 template <typename ModelType>
 inline const std::unordered_set<int32_t>& get_helper_token_ids_cpp(ModelType& model) {
@@ -564,36 +592,154 @@ inline void update_vsl_state_cpp(
         if (!suffix.empty()) { has_active_lock = true; break; }
     }
 
+    if (std::getenv("DIFFKV_VERBOSE")) {
+        std::cerr << "[DiffKV VSL] Token: " << token_id 
+                  << " | Candidates before: " << srl_state.vsl_active_candidates.size()
+                  << " | Has active lock: " << has_active_lock
+                  << "\n";
+    }
+
     // 2. If nothing advanced and we are unlocked, try to START a new lock.
+    // We allow starting a lock on any token inside a sequence if a suffix/substring
+    // match is detected (meaning the generated history matches the prefix of that suffix).
     bool did_start_new = false;
     if (!did_match_existing && !has_active_lock) {
         for (size_t i = 0; i < seqs.size(); ++i) {
-            if (!seqs[i].empty() && seqs[i][0] == token_id) {
-                new_candidates.emplace_back(seqs[i].begin() + 1, seqs[i].end());
-                did_start_new = true;
-                int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                if (seq_entity != -1) srl_state.current_entity_id = seq_entity;
+            const auto& seq = seqs[i];
+            if (seq.empty()) continue;
+            
+            for (size_t j = 0; j < seq.size(); ++j) {
+                if (seq[j] == token_id) {
+                    // Compute match length of the prefix of seq[0..j] with recent_generated_tokens
+                    int match_len = 1;
+                    int recent_idx = (int)srl_state.recent_generated_tokens.size() - 1;
+                    while (j >= (size_t)match_len && recent_idx >= 0) {
+                        if (seq[j - match_len] == srl_state.recent_generated_tokens[recent_idx]) {
+                            match_len++;
+                            recent_idx--;
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    // Standard lock starts at seq[0] with match_len=1.
+                    // (Mid-sequence lock starting disabled to match Python's update_vsl_state logic).
+                    bool can_lock = (j == 0);
+                    if (can_lock) {
+                        std::vector<int32_t> suffix(seq.begin() + j + 1, seq.end());
+                        bool duplicate = false;
+                        for (const auto& cand : new_candidates) {
+                            if (cand == suffix) {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (!duplicate) {
+                            new_candidates.push_back(std::move(suffix));
+                            did_start_new = true;
+                            int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                            if (seq_entity != -1) srl_state.current_entity_id = seq_entity;
+                        }
+                    }
+                }
             }
         }
     }
 
     // 3. Matched an existing candidate or started a new lock → commit.
     if (did_match_existing || did_start_new) {
+        bool completed = false;
+        for (const auto& cand : new_candidates) {
+            if (cand.empty()) {
+                completed = true;
+                break;
+            }
+        }
+        if (completed) {
+            for (auto& entry : srl_state.factual_store.entries) {
+                if (entry.recalled) continue;
+                int L = (int)entry.tokens.size();
+                if (L >= 1 && entry.tokens[L - 1] == token_id) {
+                    bool match = true;
+                    int recent_size = (int)srl_state.recent_generated_tokens.size();
+                    if (recent_size >= L - 1) {
+                        for (int i = 0; i < L - 1; ++i) {
+                            if (srl_state.recent_generated_tokens[recent_size - (L - 1) + i] != entry.tokens[i]) {
+                                match = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        match = false;
+                    }
+                    if (match) {
+                        entry.recalled = true;
+                        if (std::getenv("DIFFKV_VERBOSE")) {
+                            std::cerr << "[DiffKV VSL] Completed lock and marked entry as recalled: token_id=" << token_id << ", length=" << L << "\n";
+                        }
+                        // Propagate recall to larger/overlapping entries containing this sequence if it is long enough
+                        if (L >= 5) {
+                            for (auto& other : srl_state.factual_store.entries) {
+                                if (other.recalled) continue;
+                                if (other.tokens.size() > entry.tokens.size()) {
+                                    bool found = false;
+                                    for (size_t start = 0; start <= other.tokens.size() - entry.tokens.size(); ++start) {
+                                        bool sub_match = true;
+                                        for (size_t k = 0; k < entry.tokens.size(); ++k) {
+                                            if (other.tokens[start + k] != entry.tokens[k]) {
+                                                sub_match = false;
+                                                break;
+                                            }
+                                        }
+                                        if (sub_match) {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if (found) {
+                                        other.recalled = true;
+                                        if (std::getenv("DIFFKV_VERBOSE")) {
+                                            std::cerr << "[DiffKV VSL] Propagated recall to overlapping entry: length=" << other.tokens.size() << "\n";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         srl_state.vsl_active_candidates = new_candidates;
         srl_state.vsl_consecutive_helpers = 0;
+        if (std::getenv("DIFFKV_VERBOSE")) {
+            std::cerr << "[DiffKV VSL] Committed lock: did_match_existing=" << did_match_existing 
+                      << " did_start_new=" << did_start_new 
+                      << " | Candidates after: " << srl_state.vsl_active_candidates.size() 
+                      << "\n";
+        }
         return;
     }
 
     // 4. Otherwise, a helper token passes through WITHOUT breaking the lock.
     if (helper_ids.count(token_id) > 0) {
         srl_state.vsl_consecutive_helpers++;
+        if (std::getenv("DIFFKV_VERBOSE")) {
+            std::cerr << "[DiffKV VSL] Helper passthrough: consecutive=" << srl_state.vsl_consecutive_helpers << "\n";
+        }
         if (srl_state.vsl_consecutive_helpers >= 12) {
             srl_state.vsl_active_candidates.clear();
+            if (std::getenv("DIFFKV_VERBOSE")) {
+                std::cerr << "[DiffKV VSL] Helper threshold reached. Lock cleared.\n";
+            }
         }
         return;
     }
 
     // 5. Non-helper token that matched nothing → the lock is broken.
+    if (std::getenv("DIFFKV_VERBOSE")) {
+        std::cerr << "[DiffKV VSL] Lock broken!\n";
+    }
     srl_state.vsl_active_candidates.clear();
     srl_state.vsl_consecutive_helpers = 0;
 }

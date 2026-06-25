@@ -1480,6 +1480,10 @@ class ContinuousBatchEngine:
             )
             mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
             mask[list(allowed_ids)] = False
+            factual_toks = getattr(srl_state, "current_step_factual_tokens", None)
+            if factual_toks:
+                valid_factual_toks = [t for t in factual_toks if 0 <= t < logits.shape[-1]]
+                mask[valid_factual_toks] = False
             max_sim = getattr(srl_state, "current_step_max_similarity", 0.0)
             if max_sim >= 0.70:
                 logits[0, mask] = -1e10   # hard: verbatim extraction mode
@@ -1504,12 +1508,12 @@ class ContinuousBatchEngine:
 
         # Strict Factual Alignment (SFA) State Update and Loop Check
         srl_state = self.wrapper.manager.get_srl_state(req.session_id)
-        if getattr(req, "sfa_active", False) and srl_state is not None:
+        if srl_state is not None:
             from native_core.srl.factual_alignment import update_vsl_state, get_helper_token_ids
             helper_ids = get_helper_token_ids(self.tokenizer)
             update_vsl_state(token_id, srl_state, helper_ids)
             
-            if getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
+            if getattr(req, "sfa_active", False) and getattr(srl_state, "vsl_consecutive_helpers", 0) >= 16:
                 if req.generated_ids:
                     req.generated_ids.pop()
                 uncertainty_suffix = " [uncertain: details missing in source]"

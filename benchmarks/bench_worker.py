@@ -93,6 +93,7 @@ def run_native(args, prompt_text):
         "DIFFKV_TIME_DECODE": "1",
         "DIFFKV_MPS_APPROXIMATE_ATTN": "1",
         "DIFFKV_COMPRESSOR_THREADS": "4",
+        "DIFFKV_ENABLE_FACTUAL": "1",
     })
 
     proc = subprocess.Popen(

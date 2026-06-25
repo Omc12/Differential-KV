@@ -41,7 +41,7 @@ kernel void decode_attention_metal_kernel(
     // ── Sparse pool buffers (unchanged from original) ─────────────────────────
     device const float*   Q             [[buffer(0)]],   // [H_q, D] F32
     device const int8_t*  U_pool        [[buffer(1)]],   // [N_pool, S_max, R] int8
-    device const half*    U_scale_pool  [[buffer(2)]],   // [N_pool] f16
+    device const half*    U_row_scale_pool [[buffer(2)]], // [N_pool, S_max] f16
     device const half*    VK_pool       [[buffer(3)]],   // [N_pool, R, n_kv, D] f16
     device const half*    VV_pool       [[buffer(4)]],   // [N_pool, R, n_kv, D] f16
     device const half*    anchors_K     [[buffer(5)]],   // [N_pool, n_kv, D] f16
@@ -137,11 +137,11 @@ kernel void decode_attention_metal_kernel(
         float score_anc = red_m[0];
         if (tid == 0 && k < 64) scores_cached[k * 32] = score_anc * scale;
         
-        float scale_u    = (float)U_scale_pool[slot_id];
         float block_scale= (float)scales[slot_id];
 
         if (!approximate_attn) {
             for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
+                float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];
                 float delta_score = 0.0f;
                 int u_off_base = slot_id * S_max * rank + t * rank;
                 int pos = anchor_pos + t + 1;
@@ -233,6 +233,7 @@ kernel void decode_attention_metal_kernel(
                 //   delta_scores = U @ q_proj * block_scale  (q_proj has scale baked in)
                 //   s = s_anchor + delta_scores
                 // s_anchor = score_anc * scale (anchor dot scaled)
+                float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];
                 float t_score = score_anc * scale + delta * scale_u * block_scale;
                 sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
             }
@@ -295,7 +296,6 @@ kernel void decode_attention_metal_kernel(
     for (int k = 0; k < K; ++k) {
         int slot_id    = slot_indices[k];
         int slen       = seq_lens[slot_id];
-        float scale_u  = (float)U_scale_pool[slot_id];
         float block_scale = (float)scales[slot_id];
 
         float score_anc_scaled = 0.0f;
@@ -372,6 +372,7 @@ kernel void decode_attention_metal_kernel(
         float local_w_proj[32] = { 0.0f };
 
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
+            float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];
             float t_score = 0.0f;
             if (!approximate_attn) {
                 if (use_cache) {
