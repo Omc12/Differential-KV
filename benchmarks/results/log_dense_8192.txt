@@ -1,3 +1,0 @@
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 89240.51it/s]
-
-__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 11.463786833977792, "decode_s": 2.261760165973101, "decode_tps": 56.59309148940167, "ttft_s": null, "mx_peak_gb": 1.787885744, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, consistency models define the contract between a data store ", "needle_found": true, "status": "ok", "engine": "dense", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 17.562145875010174}

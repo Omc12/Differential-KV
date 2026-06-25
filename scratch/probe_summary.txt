@@ -1,2 +1,0 @@
-=== TAG=default srl_k_keep=16 wall=36.7s peak_rss=2376MB rc=139 ===
-=== TAG=nat srl_k_keep=16 wall=14.3s peak_rss=2134MB rc=0 ===

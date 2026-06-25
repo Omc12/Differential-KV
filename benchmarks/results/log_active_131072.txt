@@ -1,5 +1,0 @@
-[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
-[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 131072.00it/s]
-[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (131115 > 131072). Running this sequence through the model will result in indexing errors

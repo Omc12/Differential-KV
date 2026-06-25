@@ -1,7 +1,0 @@
-[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
-[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 109734.70it/s]
-[DiffKV MLX] Loaded model in 1.20s
-
-__BENCH_RESULT__ {"prompt_tokens": 65615, "gen_tokens": 128, "prefill_s": 295.94361554202624, "decode_s": 7.654108583985362, "decode_tps": 16.72304470148405, "ttft_s": null, "mx_peak_gb": 3.277052488, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\n#### Linearizability\nLinearizability is a property that ensures that the behavior of", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 65536, "gen_target": 128, "worker_wall_s": 307.9980822500074}
