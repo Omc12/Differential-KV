@@ -44,6 +44,11 @@ struct LowRankCompressParams {
     ggml_fp16_t* out_res_K_val = nullptr;
     ggml_fp16_t* out_res_V_val = nullptr;
     int max_residual = 8;
+
+    // Optional descriptor computation inside SVD compressor
+    const float* W_proj = nullptr;
+    int desc_dim = 0;
+    float* out_desc = nullptr;
 };
 
 // Perform low-rank SVD compression on a block

@@ -168,6 +168,9 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     params.out_res_K_val = job.out_res_K_val;
     params.out_res_V_val = job.out_res_V_val;
     params.max_residual = job.max_residual;
+    params.W_proj = job.W_proj;
+    params.desc_dim = job.desc_dim;
+    params.out_desc = job.out_desc;
 
     bool ok = compress_lowrank_block(params);
 

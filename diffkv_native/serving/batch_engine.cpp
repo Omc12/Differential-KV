@@ -700,6 +700,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
     }
+    runtime_manager_->set_projection_matrix(W_proj_host.data(), desc_dim);
     
     // Initialize session-specific lists if empty
     int engage_threshold = 4096;
@@ -717,25 +718,22 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         max_dense_cap = std::stoi(env_mdc);
     }
     
-    // Pre-calculate the maximum possible number of dense tokens we will copy from the blocks
-    int required_dense_cap = engage_threshold + 512;
-    {
-        auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(0);
-        int possible_dense_tokens = 0;
-        for (auto & block : b_list) {
-            if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
-                possible_dense_tokens += 1;
-                possible_dense_tokens += block->active_k.size() / F_test;
-            }
-        }
-        required_dense_cap = std::max(required_dense_cap, possible_dense_tokens + 512);
+    // Format full prompt and tokenize early so we can size the dense buffers accurately
+    std::vector<int32_t> prompt_tokens = model_->tokenize(req->prompt, true);
+    if (prompt_tokens.empty()) {
+        req->set_error("Empty tokenized prompt");
+        return;
     }
+    int L = prompt_tokens.size();
+    if (L > n_slots * micro_block_size) {
+        L = n_slots * micro_block_size;
+        prompt_tokens.resize(L);
+    }
+    int required_dense_cap = L + req->max_tokens + 512;
 
-    int max_active_dense_tokens = std::min(
-        std::max(n_slots * micro_block_size, engage_threshold),
-        max_dense_cap
-    );
-    max_active_dense_tokens = std::max(max_active_dense_tokens, required_dense_cap);
+    // Memory optimization: size the dense buffers to the actual required capacity
+    // rather than eagerly allocating model_->get_config().n_ctx (32k/128k).
+    int max_active_dense_tokens = required_dense_cap;
 
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
@@ -818,18 +816,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
     };
     
-    // Format full prompt and tokenize
-    std::vector<int32_t> prompt_tokens = model_->tokenize(req->prompt, true);
-    if (prompt_tokens.empty()) {
-        req->set_error("Empty tokenized prompt");
-        return;
-    }
-    
-    int L = prompt_tokens.size();
-    if (L > n_slots * micro_block_size) {
-        L = n_slots * micro_block_size;
-        prompt_tokens.resize(L);
-    }
+    // Prompt has been tokenized and sized early in process_request
     
     // Check if we can reuse the KV cache prefix from the previous turn
     int prefill_offset = 0;
@@ -938,6 +925,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     float scale_u = ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]);
                     float block_scale = ggml_fp16_to_fp32(engine->get_host_scales()[slot_id]);
                     
+                    const int8_t* slot_U = engine->get_host_U(slot_id);
+                    const ggml_fp16_t* slot_VK = engine->get_host_VK(slot_id);
+                    const ggml_fp16_t* slot_VV = engine->get_host_VV(slot_id);
+                    const ggml_fp16_t* slot_anchors_K = engine->get_host_anchors_K(slot_id);
+                    const ggml_fp16_t* slot_anchors_V = engine->get_host_anchors_V(slot_id);
+                    
                     int landmark_idx = engine->get_host_anchor_positions()[slot_id] - block->anchor_idx;
                     for (int t = 0; t < block_len; ++t) {
                         int global_pos = block->anchor_idx + t;
@@ -945,8 +938,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                         
                         if (t == landmark_idx) {
                             for (int f = 0; f < F_test; ++f) {
-                                k_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                v_activations[l][global_pos * F_test + f] = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                k_activations[l][global_pos * F_test + f] = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[f]) : 0.0f;
+                                v_activations[l][global_pos * F_test + f] = slot_anchors_V ? ggml_fp16_to_fp32(slot_anchors_V[f]) : 0.0f;
                             }
                         } else {
                             int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
@@ -954,14 +947,14 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                                 float sum_k = 0.0f;
                                 float sum_v = 0.0f;
                                 for (int r = 0; r < rank; ++r) {
-                                    float u_val = (float)engine->get_host_U()[slot_id * engine->get_S_max() * rank + s * rank + r];
-                                    float vk_val = ggml_fp16_to_fp32(engine->get_host_VK()[slot_id * rank * F_test + r * F_test + f]);
-                                    float vv_val = ggml_fp16_to_fp32(engine->get_host_VV()[slot_id * rank * F_test + r * F_test + f]);
+                                    float u_val = slot_U ? (float)slot_U[s * rank + r] : 0.0f;
+                                    float vk_val = slot_VK ? ggml_fp16_to_fp32(slot_VK[r * F_test + f]) : 0.0f;
+                                    float vv_val = slot_VV ? ggml_fp16_to_fp32(slot_VV[r * F_test + f]) : 0.0f;
                                     sum_k += (u_val * scale_u) * vk_val;
                                     sum_v += (u_val * scale_u) * vv_val;
                                 }
-                                float anchor_k = ggml_fp16_to_fp32(engine->get_host_anchors_K()[slot_id * F_test + f]);
-                                float anchor_v = ggml_fp16_to_fp32(engine->get_host_anchors_V()[slot_id * F_test + f]);
+                                float anchor_k = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[f]) : 0.0f;
+                                float anchor_v = slot_anchors_V ? ggml_fp16_to_fp32(slot_anchors_V[f]) : 0.0f;
                                 k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale;
                                 v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale;
                             }
@@ -1445,6 +1438,16 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         });
     }
     
+    // Populate session active dense buffers with the full prefill context before they are freed (Phase 1 Option A)
+    for (int l = 0; l < n_layers; ++l) {
+        std::memcpy(session->active_k_dense[l].data(), k_activations[l].data(), L * F_test * sizeof(float));
+        std::memcpy(session->active_v_dense[l].data(), v_activations[l].data(), L * F_test * sizeof(float));
+    }
+    for (int i = 0; i < L; ++i) {
+        session->active_positions_dense[i] = i;
+    }
+    total_positions = L;
+
     // Reclaim prefill activations memory early before decode loop starts
     for (int l = 0; l < n_layers; ++l) {
         std::vector<float>().swap(k_activations[l]);
@@ -1468,8 +1471,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     }
     
     std::vector<int> dense_start_positions(n_layers, 0);
-    std::vector<int> total_dense_tokens(n_layers, 0);
-    sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
+    std::vector<int> total_dense_tokens(n_layers, L); // Sized to full prefill context L
     
     // Decode generation loop
     // Matches ACTIVE_RUNTIME: CPU lexical+graph routing is expensive (~815K ops
@@ -1485,6 +1487,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     int last_retrieval_step = -retrieval_interval; // force on first step
     int last_retrieval_active_slot = -1;
 
+    int last_pool_version = kv_engines[0]->get_pool_version();
+
     for (int step = 1; step < req->max_tokens; ++step) {
         if (req->cancelled) {
             break;
@@ -1493,6 +1497,51 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             break;
         }
         int current_pos = L + step - 1;
+
+        // If the block pool grew (allocated more slots on GPU), we must rebuild the decode graph
+        // to pick up the new tensor pointers (since they were recreated in grow_gpu_pool).
+        if (kv_engines[0]->get_pool_version() != last_pool_version) {
+            last_pool_version = kv_engines[0]->get_pool_version();
+            ggml_free(decode_ctx);
+            
+            decode_ctx = ggml_init(decode_params);
+            if (!decode_ctx) {
+                req->set_error("Failed to re-initialize decode context on grow");
+                return;
+            }
+            
+            input_token_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, 1);
+            ggml_set_input(input_token_decode);
+            position_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, 1);
+            ggml_set_input(position_decode);
+            W_proj_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F32, head_dim, desc_dim);
+            ggml_set_input(W_proj_decode);
+            slots_mask_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_F32, n_slots);
+            ggml_set_input(slots_mask_decode);
+            host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
+            ggml_set_input(host_slots_decode);
+            
+            decode_graph = build_decode_graph(
+                decode_ctx, *model_, input_token_decode, position_decode, W_proj_decode,
+                kv_engines[0]->get_desc_matrix(), kv_engines[0]->get_anchors_K(),
+                slots_mask_decode, host_slots_decode,
+                srl_k_semantic, srl_k_keep,
+                userdata.data(), &decode_logits, &decode_selected_slots,
+                &decode_concat_k, &decode_concat_v
+            );
+            ggml_set_output(decode_logits);
+            if (decode_selected_slots) ggml_set_output(decode_selected_slots);
+            if (decode_concat_k) ggml_set_output(decode_concat_k);
+            if (decode_concat_v) ggml_set_output(decode_concat_v);
+            
+            ggml_backend_sched_reset(sched_);
+            if (!ggml_backend_sched_alloc_graph(sched_, decode_graph)) {
+                ggml_free(decode_ctx);
+                req->set_error("Failed to re-allocate memory for decode graph on grow");
+                return;
+            }
+            ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
+        }
 
         // Mirrors ACTIVE_RUNTIME: invalidate per-step routing cache at the top
         // of each decode step before layer-0 re-routes via GPU semantic search.
@@ -1556,7 +1605,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
         ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
         
-        int current_k = std::max(0, std::min(srl_k_keep, session->active_slot));
+        int current_k = 0; // Always 0 to force dense attention in the custom op!
         int physical_active_slot = 0;
         auto & b_list = runtime_manager_->get_ingest_manager().get_blocks(0);
         if (session->active_slot >= 0 && session->active_slot < (int)b_list.size()) {
@@ -2261,8 +2310,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     }
                 }
             }
-            // Sync dense buffers only when block finishes
-            sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
+            // Sync dense buffers only when block finishes (disabled for Phase 1 Option A full dense attention)
+            // sync_active_dense_buffers(dense_start_positions, total_dense_tokens);
         }
 
         // ── Repetition-loop detection (Fix 2) ────────────────────────────────

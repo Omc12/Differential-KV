@@ -116,6 +116,11 @@ public:
         active_session_id_ = session_id;
     }
 
+    void set_projection_matrix(const float* W_proj, int desc_dim) {
+        W_proj_ = W_proj;
+        desc_dim_ = desc_dim;
+    }
+
     const std::vector<int32_t>& get_session_token_ids() const { return session_token_ids_; }
     const std::unordered_set<int32_t>* get_stop_token_ids() const { return stop_token_ids_; }
 
@@ -128,6 +133,9 @@ private:
         AsyncCompressor& compressor,
         int rank
     );
+
+    const float* W_proj_ = nullptr;
+    int desc_dim_ = 0;
 
     int micro_block_size_;
     int recency_window_;

@@ -643,35 +643,24 @@ void execute_metal_attention(
                                         options:MTLResourceStorageModeShared];
         }
 
-        // ── Shared pool Metal buffers (1 copy per pool version, shared across all 28 layers) ─
-        int cur_pool_ver = engine->get_pool_version();
+        // ── Shared pool Metal buffers (zero-copy wrapping of GGML backend tensors) ───────────
         id<MTLBuffer> u_pool_buf, u_scale_buf, vk_pool_buf, vv_pool_buf;
         id<MTLBuffer> anchors_k_buf, anchors_v_buf, seq_lens_buf, scales_buf, anc_pos_buf;
         {
             std::lock_guard<std::mutex> lk(g_pool_buf_mutex);
             GlobalPoolMtlBufs& pb = g_pool_buf_cache[(void*)engine];
-            bool dirty = (pb.pool_ver != cur_pool_ver);
 
-            auto ensure = [&](__strong id<MTLBuffer>& buf, const void* src, size_t bytes) {
-                if (!buf) {
-                    buf = [g_device newBufferWithLength:(bytes + 4095) & ~4095
-                                               options:MTLResourceStorageModeShared];
-                    dirty = true; // force copy on first allocation
-                }
-                if (dirty) std::memcpy(buf.contents, src, bytes);
-            };
-
-            ensure(pb.u_pool,    engine->get_host_U(),                ggml_nbytes(engine->get_U()));
-            ensure(pb.u_scale,   engine->get_host_U_row_scale(),      ggml_nbytes(engine->get_U_row_scale()));
-            ensure(pb.vk_pool,   engine->get_host_VK(),               ggml_nbytes(engine->get_VK()));
-            ensure(pb.vv_pool,   engine->get_host_VV(),               ggml_nbytes(engine->get_VV()));
-            ensure(pb.anchors_k, engine->get_host_anchors_K(),        ggml_nbytes(engine->get_anchors_K()));
-            ensure(pb.anchors_v, engine->get_host_anchors_V(),        ggml_nbytes(engine->get_anchors_V()));
-            ensure(pb.seq_lens,  engine->get_host_seq_lens(),         ggml_nbytes(engine->get_seq_lens()));
-            ensure(pb.scales,    engine->get_host_scales(),           ggml_nbytes(engine->get_scales()));
-            ensure(pb.anc_pos,   engine->get_host_anchor_positions(), ggml_nbytes(engine->get_anchor_positions()));
-
-            pb.pool_ver = cur_pool_ver;
+            if (!pb.u_pool) {
+                pb.u_pool    = wrap_tensor(engine->get_U());
+                pb.u_scale   = wrap_tensor(engine->get_U_row_scale());
+                pb.vk_pool   = wrap_tensor(engine->get_VK());
+                pb.vv_pool   = wrap_tensor(engine->get_VV());
+                pb.anchors_k = wrap_tensor(engine->get_anchors_K());
+                pb.anchors_v = wrap_tensor(engine->get_anchors_V());
+                pb.seq_lens  = wrap_tensor(engine->get_seq_lens());
+                pb.scales    = wrap_tensor(engine->get_scales());
+                pb.anc_pos   = wrap_tensor(engine->get_anchor_positions());
+            }
 
             u_pool_buf    = pb.u_pool;
             u_scale_buf   = pb.u_scale;

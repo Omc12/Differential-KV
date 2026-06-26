@@ -14,6 +14,21 @@
 
 namespace diffkv {
 
+struct SlotHostBuffer {
+    std::vector<int8_t, PageAlignedAllocator<int8_t>> U;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> U_row_scale;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> VK;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> VV;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> anchors_K;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> anchors_V;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> token_positions;
+    std::vector<float, PageAlignedAllocator<float>> desc_matrix;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> res_K_pos;
+    std::vector<int32_t, PageAlignedAllocator<int32_t>> res_V_pos;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> res_K_val;
+    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> res_V_val;
+};
+
 class NativeBlockPool {
 public:
     NativeBlockPool();
@@ -23,6 +38,10 @@ public:
 
     int get_rank() const { return rank_; }
     int get_S_max() const { return S_max_; }
+    int get_head_dim() const { return head_dim_; }
+    int get_kv_heads() const { return kv_heads_; }
+    int get_desc_dim() const { return desc_dim_; }
+    int get_n_slots() const { return n_slots_; }
 
     // Getters for GGML tensors
     struct ggml_tensor * get_U() { return U_; }
@@ -73,60 +92,66 @@ public:
         return slot_device_has_data_[slot_id];
     }
 
-    // Host mirror getters
-    const int8_t* get_host_U() const { return host_U_.data(); }
-    int8_t* get_host_U() { return host_U_.data(); }
+    // Host mirror lazy allocation helpers
+    SlotHostBuffer* ensure_slot_buffer(int slot_id);
+    void free_slot_buffer(int slot_id);
+
+    // Host mirror getters (per slot)
+    const int8_t* get_host_U(int slot_id) const;
+    int8_t* get_host_U(int slot_id);
+    const ggml_fp16_t* get_host_U_row_scale(int slot_id) const;
+    ggml_fp16_t* get_host_U_row_scale(int slot_id);
+    const ggml_fp16_t* get_host_VK(int slot_id) const;
+    ggml_fp16_t* get_host_VK(int slot_id);
+    const ggml_fp16_t* get_host_VV(int slot_id) const;
+    ggml_fp16_t* get_host_VV(int slot_id);
+    const ggml_fp16_t* get_host_anchors_K(int slot_id) const;
+    ggml_fp16_t* get_host_anchors_K(int slot_id);
+    const ggml_fp16_t* get_host_anchors_V(int slot_id) const;
+    ggml_fp16_t* get_host_anchors_V(int slot_id);
+    const int32_t* get_host_token_positions(int slot_id) const;
+    int32_t* get_host_token_positions(int slot_id);
+    const float* get_host_desc_matrix(int slot_id) const;
+    float* get_host_desc_matrix(int slot_id);
+
+    // Flat tiny host getters
     const ggml_fp16_t* get_host_U_scale() const { return host_U_scale_.data(); }
     ggml_fp16_t* get_host_U_scale() { return host_U_scale_.data(); }
-    const ggml_fp16_t* get_host_U_row_scale() const { return host_U_row_scale_.data(); }
-    ggml_fp16_t* get_host_U_row_scale() { return host_U_row_scale_.data(); }
-    const ggml_fp16_t* get_host_VK() const { return host_VK_.data(); }
-    ggml_fp16_t* get_host_VK() { return host_VK_.data(); }
-    const ggml_fp16_t* get_host_VV() const { return host_VV_.data(); }
-    ggml_fp16_t* get_host_VV() { return host_VV_.data(); }
-    const ggml_fp16_t* get_host_anchors_K() const { return host_anchors_K_.data(); }
-    ggml_fp16_t* get_host_anchors_K() { return host_anchors_K_.data(); }
-    const ggml_fp16_t* get_host_anchors_V() const { return host_anchors_V_.data(); }
-    ggml_fp16_t* get_host_anchors_V() { return host_anchors_V_.data(); }
     const int32_t* get_host_seq_lens() const { return host_seq_lens_.data(); }
     int32_t* get_host_seq_lens() { return host_seq_lens_.data(); }
     const ggml_fp16_t* get_host_scales() const { return host_scales_.data(); }
     ggml_fp16_t* get_host_scales() { return host_scales_.data(); }
     const int32_t* get_host_anchor_positions() const { return host_anchor_positions_.data(); }
     int32_t* get_host_anchor_positions() { return host_anchor_positions_.data(); }
-    const int32_t* get_host_token_positions() const { return host_token_positions_.data(); }
-    int32_t* get_host_token_positions() { return host_token_positions_.data(); }
-    const float* get_host_desc_matrix() const { return host_desc_matrix_.data(); }
-    float* get_host_desc_matrix() { return host_desc_matrix_.data(); }
 
     // Precomputed RoPE-rotated key buffers (fp32); filled by upload_slot when
     // native_attn_ is enabled. Returns nullptr when disabled or not yet allocated.
     // Layout: host_VK_rot_     [slot * rank * kv_heads * D + r * kv_heads * D + kv * D + d]
     //         host_anchorK_rot_[slot * kv_heads * D + kv * D + d]
-    const float* get_host_VK_rot() const      { return host_VK_rot_.empty()      ? nullptr : host_VK_rot_.data(); }
-    float*       get_host_VK_rot()            { return host_VK_rot_.empty()      ? nullptr : host_VK_rot_.data(); }
-    const float* get_host_anchorK_rot() const { return host_anchorK_rot_.empty() ? nullptr : host_anchorK_rot_.data(); }
-    float*       get_host_anchorK_rot()       { return host_anchorK_rot_.empty() ? nullptr : host_anchorK_rot_.data(); }
+    const float* get_host_VK_rot() const      { return nullptr; }
+    float*       get_host_VK_rot()            { return nullptr; }
+    const float* get_host_anchorK_rot() const { return nullptr; }
+    float*       get_host_anchorK_rot()       { return nullptr; }
 
     // F9: per-block sparse residuals (exact corrections for the highest-error tokens
     // the low-rank SVD failed to capture — e.g. digits). MAX_RESIDUAL tokens per K/V.
-    // Was 8, but the selector keeps min(15% of block, MAX_RESIDUAL) and ACTIVE_RUNTIME
-    // keeps the full 15% (~38 of a 256-token block). Capping at 8 (3%) dropped most
-    // high-error tokens — a compressed needle whose rank-16 recon error is ~43% rarely
-    // made the top-8, so it was lost ("OMG" instead of "OMEGA-7741-DELTA"). 40 covers
-    // 15% of a 256-token block, matching the reference (DIFFKV_RESIDUAL_FRAC).
-    // (Raise for higher-fraction needle-recall experiments; costs residual-buffer RAM.)
     static constexpr int MAX_RESIDUAL = 40;
-    int32_t* get_host_res_K_pos() { return host_res_K_pos_.data(); }
-    int32_t* get_host_res_V_pos() { return host_res_V_pos_.data(); }
-    ggml_fp16_t* get_host_res_K_val() { return host_res_K_val_.data(); }
-    ggml_fp16_t* get_host_res_V_val() { return host_res_V_val_.data(); }
-    const int32_t* get_host_res_K_pos() const { return host_res_K_pos_.data(); }
-    const int32_t* get_host_res_V_pos() const { return host_res_V_pos_.data(); }
-    const ggml_fp16_t* get_host_res_K_val() const { return host_res_K_val_.data(); }
-    const ggml_fp16_t* get_host_res_V_val() const { return host_res_V_val_.data(); }
+    int32_t* get_host_res_K_pos(int slot_id);
+    int32_t* get_host_res_V_pos(int slot_id);
+    ggml_fp16_t* get_host_res_K_val(int slot_id);
+    ggml_fp16_t* get_host_res_V_val(int slot_id);
+    const int32_t* get_host_res_K_pos(int slot_id) const;
+    const int32_t* get_host_res_V_pos(int slot_id) const;
+    const ggml_fp16_t* get_host_res_K_val(int slot_id) const;
+    const ggml_fp16_t* get_host_res_V_val(int slot_id) const;
 
 private:
+    ggml_backend_buffer_type_t buft_ = nullptr;
+    int n_allocated_slots_ = 0;
+    bool grow_gpu_pool_impl(int min_slots_needed);
+    bool grow_gpu_pool(int min_slots_needed);
+    void upload_slot_impl(int slot_id);
+
     int n_slots_ = 0;
     int rank_ = 0;
     int head_dim_ = 0;
@@ -155,29 +180,14 @@ private:
     struct ggml_tensor * anchor_positions_ = nullptr;  // [n_slots] int32: actual sequence position of each block's anchor
     struct ggml_tensor * token_positions_ = nullptr;   // [S_max, n_slots] int32: true seq position of each delta token (RoPE)
 
-    // Host-side mirror buffers
-    std::vector<int8_t, PageAlignedAllocator<int8_t>> host_U_;
+    // Flat tiny host-side buffers
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_row_scale_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VK_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_VV_;
-    std::vector<float, PageAlignedAllocator<float>> host_VK_rot_;       // fp32 (precision-match CPU)
-    std::vector<float, PageAlignedAllocator<float>> host_anchorK_rot_;  // fp32 (precision-match CPU)
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_valid_mask_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_K_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_anchors_V_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_seq_lens_;
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_scales_;
     std::vector<int32_t, PageAlignedAllocator<int32_t>> host_anchor_positions_;
-    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_token_positions_;
-    std::vector<float, PageAlignedAllocator<float>> host_desc_matrix_;
 
-    // F9 residual host buffers: positions [n_slots*MAX_RESIDUAL] int32 (-1 = unused),
-    // values [n_slots*MAX_RESIDUAL*kv_heads*head_dim] fp16 (exact delta residual).
-    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_res_K_pos_;
-    std::vector<int32_t, PageAlignedAllocator<int32_t>> host_res_V_pos_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_res_K_val_;
-    std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_res_V_val_;
+    // Per-slot lazy allocated host-side buffers
+    std::vector<std::unique_ptr<SlotHostBuffer>> slot_host_buffers_;
 
     DiffKVBlockStateTable state_table_;
 

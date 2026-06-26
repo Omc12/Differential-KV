@@ -29,13 +29,6 @@ std::atomic<long> g_metal_attn_count{0}; // execute_metal_attention entries (liv
 //   'r' values for a fixed (slot, kv_head) jumps n_kv_heads×D×2 = 2048 bytes —
 //   a cache miss per r iteration. Fix: precompute vk_local[rank, D] per
 //   (block, kv_head transition) into a contiguous fp32 buffer (8 KB → fits L1).
-//   The inner q_proj loop then strides sequentially. VV uses the same trick for
-//   the value accumulation.
-//
-//   vk_local is rebuilt only when kv_head changes (once per g=4 Q-heads per
-//   block), saving (g-1)/g ≈ 75% of the extraction work.
-//
-//   Angular recurrence replaces per-token cos/sin with 4 multiplies per dim-pair.
 void execute_cpu_attention(
     const float* Q,
     const int32_t* slots,
@@ -46,26 +39,12 @@ void execute_cpu_attention(
     bool has_rope, float rope_freq_base, bool approximate_attn
 ) {
     const float* Q_ptr = Q;
-    const int8_t* U = kv_engine->get_host_U();
     const ggml_fp16_t* U_scale_arr = kv_engine->get_host_U_scale();
-    // Per-token int8 scale: U[slot,t,r] dequantizes with U_row_scale[slot*S_max + t]
-    // (correctness fix — see lowrank.cpp). Indexed per token t at each use below.
-    const ggml_fp16_t* U_row_scale_arr = kv_engine->get_host_U_row_scale();
-    const ggml_fp16_t* VK = kv_engine->get_host_VK();
-    const ggml_fp16_t* VV = kv_engine->get_host_VV();
-    const ggml_fp16_t* anchors_K = kv_engine->get_host_anchors_K();
-    const ggml_fp16_t* anchors_V = kv_engine->get_host_anchors_V();
     const int32_t* seq_lens = kv_engine->get_host_seq_lens();
     const ggml_fp16_t* scales = kv_engine->get_host_scales();
     const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
-    const int32_t* token_positions = kv_engine->get_host_token_positions();  // true seq pos per delta token (RoPE fix)
-    const int32_t* res_K_pos = kv_engine->get_host_res_K_pos();
-    const int32_t* res_V_pos = kv_engine->get_host_res_V_pos();
-    const ggml_fp16_t* res_K_val = kv_engine->get_host_res_K_val();
-    const ggml_fp16_t* res_V_val = kv_engine->get_host_res_V_val();
     const int MR = NativeBlockPool::MAX_RESIDUAL;
 
-    // Bug 2 fix: O(1) dedup.
     int n_slots = kv_engine->get_seq_lens()->ne[0];
     std::unordered_set<int32_t> seen_set;
     seen_set.reserve(K);
@@ -79,35 +58,29 @@ void execute_cpu_attention(
     const int32_t* active_slots = unique_slots.data();
     int active_K = (int)unique_slots.size();
 
-    g_cpu_attn_count.fetch_add(1, std::memory_order_relaxed);  // unconditional: is the CPU path live?
-    // DIFFKV_DBG_POS=1: one-shot dump of the selected blocks' anchor/token positions, to verify
-    // the real prefill assigns GLOBAL sequence positions per block (a wrong/non-global anchor_idx
-    // would corrupt decode RoPE at scale regardless of version — suspected 8k+ echo cause).
-    if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {  // set from main (getenv fails on worker thread)
+    g_cpu_attn_count.fetch_add(1, std::memory_order_relaxed);
+    if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
         static int once = 0;
         if (once++ == 0) {
             std::cerr << "[DBG_POS] active_K=" << active_K << " S_max=" << S_max << "\n";
             for (int k = 0; k < active_K && k < 8; ++k) {
                 int sid = active_slots[k];
+                const int32_t* slot_token_positions = kv_engine->get_host_token_positions(sid);
                 std::cerr << "[DBG_POS] slot " << sid << " anchor_pos=" << anchor_positions[sid]
                           << " seq_len=" << seq_lens[sid] << " tok_pos[0..4]=";
                 for (int t = 0; t < seq_lens[sid] && t < 5; ++t)
-                    std::cerr << token_positions[(size_t)sid * S_max + t] << " ";
+                    std::cerr << (slot_token_positions ? slot_token_positions[t] : 0) << " ";
                 std::cerr << "\n";
             }
         }
     }
 
     const int half_d = D / 2;
-    const int g = n_q_heads / n_kv_heads;   // GQA groups
+    const int g = n_q_heads / n_kv_heads;
 
-    // Bug 9/1 fix: use precomputed VK_rot if available (set by upload_slot).
-    // NOTE: for the CPU q_proj path, even if vk_rot_buf != nullptr, we still
-    // extract into vk_local for cache efficiency (contiguous access).
     const float* vk_rot_buf  = kv_engine->get_host_VK_rot();
     const bool use_precomp_rot = (has_rope && vk_rot_buf != nullptr);
 
-    // ── theta_table: half_d pow calls, once per call ───────────────────────
     std::vector<float> theta_table;
     if (has_rope) {
         theta_table.resize(half_d);
@@ -115,8 +88,6 @@ void execute_cpu_attention(
             theta_table[i] = 1.0f / std::pow(rope_freq_base, (2.0f * i) / D);
     }
 
-    // ── cos_step / sin_step: half_d cos+sin, computed ONCE per call ───────
-    // Used by angular recurrence in non-approx token loop.
     std::vector<float> cos_step(half_d, 1.0f), sin_step(half_d, 0.0f);
     if (has_rope && !approximate_attn) {
         for (int d = 0; d < half_d; ++d) {
@@ -125,8 +96,6 @@ void execute_cpu_attention(
         }
     }
 
-    // ── Per-block anchor cos/sin: computed ONCE per block, reused by all heads.
-    // anchor_pos is block-specific but head-independent (GQA/MHA doesn't matter).
     struct BlockRope { std::vector<float> ca, sa; };
     std::vector<BlockRope> blk_rope(active_K);
     if (has_rope) {
@@ -142,19 +111,11 @@ void execute_cpu_attention(
         }
     }
 
-    // ── Contiguous VK/VV local buffers — built once per (kv_head, block).  ──
-    // ACTIVE_RUNTIME uses batched einsum 'hd,nhrd->nhr' which is cache-friendly.
-    // Here we match that by extracting VK[slot, kv_head, :] into vk_local[rank, D]
-    // (stride-1 sequential floats) before the Q·VK inner product.
-    // Rebuilt only when kv_head changes — amortised over g=4 Q-heads sharing kv_head.
     int prev_kv_head = -1;
-    std::vector<std::vector<float>> blk_vk_local(active_K);  // [rank, D] per block
-    std::vector<std::vector<float>> blk_vv_local(active_K);  // [rank, D] per block
+    std::vector<std::vector<float>> blk_vk_local(active_K);
+    std::vector<std::vector<float>> blk_vv_local(active_K);
+    std::vector<std::vector<float>> blk_anc_v(active_K);
 
-    // Scratch space per block for value accumulation (avoids re-allocation per head)
-    std::vector<std::vector<float>> blk_anc_v(active_K);     // [D] anchors_V, fp32
-
-    // ── Slot information (scores) per head per block ────────────────────────
     struct SlotInfo {
         float anchor_score;
         std::vector<float> q_proj;
@@ -162,12 +123,6 @@ void execute_cpu_attention(
     };
     std::vector<SlotInfo> slot_infos(active_K);
 
-    // ── Per-token RoPE rotation from TRUE positions (decode rope correctness fix) ──
-    // The non-approximate path used to advance a recurrence from anchor_pos+1, rotating every
-    // delta token as if the block were consecutive starting at the anchor — wrong, because the
-    // landmark swap permutes order and the block doesn't start at the anchor. Each token must be
-    // rotated by its true stored position (token_positions). Precompute once per slot (position is
-    // head-independent) to avoid recomputing trig per q-head.
     std::vector<std::vector<float>> tok_cos(active_K), tok_sin(active_K);
     if (has_rope && !approximate_attn) {
         for (int k = 0; k < active_K; ++k) {
@@ -175,11 +130,10 @@ void execute_cpu_attention(
             int slen = seq_lens[slot_id];
             tok_cos[k].resize((size_t)slen * half_d);
             tok_sin[k].resize((size_t)slen * half_d);
+            const int32_t* slot_token_positions = kv_engine->get_host_token_positions(slot_id);
             for (int t = 0; t < slen; ++t) {
-                double tpos = (double)token_positions[(size_t)slot_id * S_max + t];
+                double tpos = slot_token_positions ? (double)slot_token_positions[t] : 0.0;
                 for (int d = 0; d < half_d; ++d) {
-                    // double-precision angle + mod-2π reduction (float32 pos*theta loses precision
-                    // at high positions → CPU rope diverges from ggml → at-scale garbage).
                     double ang = std::fmod(tpos * (double)theta_table[d], 2.0 * M_PI);
                     tok_cos[k][(size_t)t * half_d + d] = (float)std::cos(ang);
                     tok_sin[k][(size_t)t * half_d + d] = (float)std::sin(ang);
@@ -188,19 +142,18 @@ void execute_cpu_attention(
         }
     }
 
-    // ── Per-head attention loop ─────────────────────────────────────────────
     for (int h = 0; h < n_q_heads; ++h) {
         int kv_head = h / g;
 
-        // ── Precompute vk_local / vv_local / anc_v on kv_head transition ──
-        // This runs once per g=4 Q-heads and eliminates the stride-1024 VK/VV
-        // cache miss that is the primary bottleneck in the CPU approximate path.
         if (kv_head != prev_kv_head) {
             prev_kv_head = kv_head;
             for (int k = 0; k < active_K; ++k) {
                 int slot_id = active_slots[k];
-                int base_vk = slot_id * rank * n_kv_heads * D + kv_head * D;
-                int base_vv = slot_id * rank * n_kv_heads * D + kv_head * D;
+                const ggml_fp16_t* slot_VK = kv_engine->get_host_VK(slot_id);
+                const ggml_fp16_t* slot_VV = kv_engine->get_host_VV(slot_id);
+                const ggml_fp16_t* slot_anchors_V = kv_engine->get_host_anchors_V(slot_id);
+                int base_vk = kv_head * D;
+                int base_vv = kv_head * D;
                 const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
                 const float* sa = has_rope ? blk_rope[k].sa.data() : nullptr;
 
@@ -208,12 +161,7 @@ void execute_cpu_attention(
                 blk_vv_local[k].resize(rank * D);
                 blk_anc_v[k].resize(D);
 
-                // VK local [rank, D]. The approximate path bakes the anchor-position rotation in
-                // here (single rotation per block). The EXACT path needs RAW VK — it applies the
-                // correct per-token rotation (tok_cos/tok_sin) during reconstruction — so skip the
-                // anchor rotation for it (otherwise tokens get double-rotated → garbage at scale).
                 if (use_precomp_rot && approximate_attn) {
-                    // host_VK_rot_ has RoPE already applied; just repack contiguously.
                     const float* base = vk_rot_buf +
                         (size_t)slot_id * rank * n_kv_heads * D + kv_head * D;
                     for (int r = 0; r < rank; ++r)
@@ -223,9 +171,8 @@ void execute_cpu_attention(
                     for (int r = 0; r < rank; ++r) {
                         int bvk = base_vk + r * n_kv_heads * D;
                         for (int d = 0; d < half_d; ++d) {
-                            float x = ggml_fp16_to_fp32(VK[bvk + d]);
-                            float y = ggml_fp16_to_fp32(VK[bvk + d + half_d]);
-                            // Rotate at anchor_pos using precomputed ca/sa
+                            float x = slot_VK ? ggml_fp16_to_fp32(slot_VK[bvk + d]) : 0.0f;
+                            float y = slot_VK ? ggml_fp16_to_fp32(slot_VK[bvk + d + half_d]) : 0.0f;
                             blk_vk_local[k][r * D + d]          = x * ca[d] - y * sa[d];
                             blk_vk_local[k][r * D + d + half_d] = y * ca[d] + x * sa[d];
                         }
@@ -234,21 +181,19 @@ void execute_cpu_attention(
                     for (int r = 0; r < rank; ++r) {
                         int bvk = base_vk + r * n_kv_heads * D;
                         for (int d = 0; d < D; ++d)
-                            blk_vk_local[k][r * D + d] = ggml_fp16_to_fp32(VK[bvk + d]);
+                            blk_vk_local[k][r * D + d] = slot_VK ? ggml_fp16_to_fp32(slot_VK[bvk + d]) : 0.0f;
                     }
                 }
 
-                // VV local [rank, D] — no rotation needed for values
                 for (int r = 0; r < rank; ++r) {
                     int bvv = base_vv + r * n_kv_heads * D;
                     for (int d = 0; d < D; ++d)
-                        blk_vv_local[k][r * D + d] = ggml_fp16_to_fp32(VV[bvv + d]);
+                        blk_vv_local[k][r * D + d] = slot_VV ? ggml_fp16_to_fp32(slot_VV[bvv + d]) : 0.0f;
                 }
 
-                // Anchor V [D] in fp32 (same for all Q heads sharing this kv_head)
-                int av_base = slot_id * n_kv_heads * D + kv_head * D;
+                int av_base = kv_head * D;
                 for (int d = 0; d < D; ++d)
-                    blk_anc_v[k][d] = ggml_fp16_to_fp32(anchors_V[av_base + d]);
+                    blk_anc_v[k][d] = slot_anchors_V ? ggml_fp16_to_fp32(slot_anchors_V[av_base + d]) : 0.0f;
             }
         }
 
@@ -257,124 +202,119 @@ void execute_cpu_attention(
         for (int k = 0; k < active_K; ++k) {
             int slot_id   = active_slots[k];
             int slen      = seq_lens[slot_id];
-            const ggml_fp16_t* u_row_scale = U_row_scale_arr + (size_t)slot_id * S_max;
+            const ggml_fp16_t* u_row_scale = kv_engine->get_host_U_row_scale(slot_id);
             float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
 
             const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
             const float* sa = has_rope ? blk_rope[k].sa.data() : nullptr;
 
-            // ── 1. Anchor score ─────────────────────────────────────────────
             float score_anc = 0.0f;
             {
-                int ak_off = slot_id * n_kv_heads * D + kv_head * D;
+                const ggml_fp16_t* slot_anchors_K = kv_engine->get_host_anchors_K(slot_id);
+                int ak_off = kv_head * D;
                 if (has_rope) {
                     for (int d = 0; d < half_d; ++d) {
-                        float x = ggml_fp16_to_fp32(anchors_K[ak_off + d]);
-                        float y = ggml_fp16_to_fp32(anchors_K[ak_off + d + half_d]);
+                        float x = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f;
+                        float y = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d + half_d]) : 0.0f;
                         score_anc += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
                         score_anc += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
                     }
                 } else {
                     for (int d = 0; d < D; ++d)
                         score_anc += Q_ptr[h * D + d] *
-                                     ggml_fp16_to_fp32(anchors_K[ak_off + d]);
+                                     (slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f);
                 }
             }
             slot_infos[k].anchor_score = score_anc;
             { float s = score_anc * scale; if (s > max_score) max_score = s; }
 
             if (approximate_attn) {
-                // ── APPROXIMATE path — matches ACTIVE_RUNTIME fused_decode_mps ──
-                // Step A: q_proj[r] = Q[h,:] · vk_local[k][r,:]  (cache-friendly GEMV)
-                // vk_local already has RoPE baked in at anchor_pos.
                 slot_infos[k].q_proj.assign(rank, 0.0f);
                 const float* vkl = blk_vk_local[k].data();
                 for (int r = 0; r < rank; ++r) {
                     float proj = 0.0f;
-                    const float* vkr = vkl + r * D;   // stride-1 sequential!
+                    const float* vkr = vkl + r * D;
                     for (int d = 0; d < D; ++d)
                         proj += Q_ptr[h * D + d] * vkr[d];
                     slot_infos[k].q_proj[r] = proj;
                 }
 
-                // Step B: delta_s[t] = q_proj · U[t,:] * scale_u * blk_sc
-                // U layout: [slot, S_max, rank] → U[u_base + t*rank + r] — stride-1 in r
                 slot_infos[k].token_scores.resize(slen);
-                int u_base = slot_id * S_max * rank;
+                const int8_t* slot_U = kv_engine->get_host_U(slot_id);
+                const int32_t* slot_res_K_pos = kv_engine->get_host_res_K_pos(slot_id);
+                const ggml_fp16_t* slot_res_K_val = kv_engine->get_host_res_K_val(slot_id);
+
                 for (int t = 0; t < slen; ++t) {
                     float delta = 0.0f;
-                    const int8_t* u_row = U + u_base + t * rank;
-                    for (int r = 0; r < rank; ++r)
-                        delta += slot_infos[k].q_proj[r] * (float)u_row[r];  // stride-1!
+                    const int8_t* u_row = slot_U ? (slot_U + t * rank) : nullptr;
+                    if (u_row) {
+                        for (int r = 0; r < rank; ++r)
+                            delta += slot_infos[k].q_proj[r] * (float)u_row[r];
+                    }
 
-                    // F9: residual-K correction — reuse ca/sa, zero new trig.
                     float res_score = 0.0f;
-                    for (int ri = 0; ri < MR; ++ri) {
-                        if (res_K_pos[(size_t)slot_id * MR + ri] != t) continue;
-                        const ggml_fp16_t* rk = res_K_val +
-                            ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
-                        if (has_rope) {
-                            for (int d = 0; d < half_d; ++d) {
-                                float x = ggml_fp16_to_fp32(rk[d]);
-                                float y = ggml_fp16_to_fp32(rk[d + half_d]);
-                                res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
-                                res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
+                    if (slot_res_K_pos && slot_res_K_val) {
+                        for (int ri = 0; ri < MR; ++ri) {
+                            if (slot_res_K_pos[ri] != t) continue;
+                            const ggml_fp16_t* rk = slot_res_K_val +
+                                ri * n_kv_heads * D + kv_head * D;
+                            if (has_rope) {
+                                for (int d = 0; d < half_d; ++d) {
+                                    float x = ggml_fp16_to_fp32(rk[d]);
+                                    float y = ggml_fp16_to_fp32(rk[d + half_d]);
+                                    res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
+                                    res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
+                                }
+                            } else {
+                                for (int d = 0; d < D; ++d)
+                                    res_score += Q_ptr[h * D + d] * ggml_fp16_to_fp32(rk[d]);
                             }
-                        } else {
-                            for (int d = 0; d < D; ++d)
-                                res_score += Q_ptr[h * D + d] * ggml_fp16_to_fp32(rk[d]);
+                            break;
                         }
-                        break;
                     }
                     float t_score = (delta * ggml_fp16_to_fp32(u_row_scale[t]) * blk_sc + res_score + score_anc) * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
-
             } else {
-                // ── NON-APPROXIMATE path: full K reconstruction + per-token TRUE-position RoPE ──
-                // Each token is rotated by its true stored position (tok_cos/tok_sin, precomputed
-                // above), not a consecutive recurrence from the anchor — that was the decode bug.
-
-                // Precompute anchor K float for this (slot, kv_head)
-                int ak_off = slot_id * n_kv_heads * D + kv_head * D;
+                const ggml_fp16_t* slot_anchors_K = kv_engine->get_host_anchors_K(slot_id);
+                int ak_off = kv_head * D;
                 std::vector<float> anc_k_f(D);
                 for (int d = 0; d < D; ++d)
-                    anc_k_f[d] = ggml_fp16_to_fp32(anchors_K[ak_off + d]);
+                    anc_k_f[d] = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f;
 
                 slot_infos[k].token_scores.resize(slen);
-                int u_base = slot_id * S_max * rank;
-                const float* vkl = blk_vk_local[k].data();  // [rank, D] contiguous
+                const int8_t* slot_U = kv_engine->get_host_U(slot_id);
+                const int32_t* slot_res_K_pos = kv_engine->get_host_res_K_pos(slot_id);
+                const ggml_fp16_t* slot_res_K_val = kv_engine->get_host_res_K_val(slot_id);
+                const float* vkl = blk_vk_local[k].data();
 
                 for (int t = 0; t < slen; ++t) {
-                    // K_raw[t] = anchor + lowrank delta (+ exact residual), then rotate by the
-                    // token's TRUE position. vkl is RAW VK here (anchor rotation skipped for the
-                    // exact path), so the only rotation applied is the correct per-token one.
                     float score_t = 0.0f;
-                    const int8_t* u_row = U + u_base + t * rank;
-
-                    // Exact residual-K correction for high-error tokens (added in raw space).
+                    const int8_t* u_row = slot_U ? (slot_U + t * rank) : nullptr;
                     const ggml_fp16_t* rk_res = nullptr;
-                    for (int ri = 0; ri < MR; ++ri) {
-                        if (res_K_pos[(size_t)slot_id * MR + ri] == t) {
-                            rk_res = res_K_val + ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
-                            break;
+                    if (slot_res_K_pos && slot_res_K_val) {
+                        for (int ri = 0; ri < MR; ++ri) {
+                            if (slot_res_K_pos[ri] == t) {
+                                rk_res = slot_res_K_val + ri * n_kv_heads * D + kv_head * D;
+                                break;
+                            }
                         }
                     }
-
                     for (int d = 0; d < half_d; ++d) {
                         int d2 = d + half_d;
                         float dk1 = 0.0f, dk2 = 0.0f;
-                        for (int r = 0; r < rank; ++r) {
-                            float ur = (float)u_row[r];
-                            dk1 += ur * vkl[r * D + d];
-                            dk2 += ur * vkl[r * D + d2];
+                        if (u_row) {
+                            for (int r = 0; r < rank; ++r) {
+                                float ur = (float)u_row[r];
+                                dk1 += ur * vkl[r * D + d];
+                                dk2 += ur * vkl[r * D + d2];
+                            }
                         }
                         float ku = ggml_fp16_to_fp32(u_row_scale[t]);
                         float k1 = anc_k_f[d]  + dk1 * ku * blk_sc;
                         float k2 = anc_k_f[d2] + dk2 * ku * blk_sc;
                         if (rk_res) { k1 += ggml_fp16_to_fp32(rk_res[d]); k2 += ggml_fp16_to_fp32(rk_res[d2]); }
-
                         float kr1, kr2;
                         if (has_rope) {
                             float cr = tok_cos[k][(size_t)t * half_d + d];
@@ -382,68 +322,69 @@ void execute_cpu_attention(
                             kr1 = k1 * cr - k2 * sr;
                             kr2 = k2 * cr + k1 * sr;
                         } else { kr1 = k1; kr2 = k2; }
-
-                        score_t += Q_ptr[h * D + d]  * kr1
-                                 + Q_ptr[h * D + d2] * kr2;
+                        score_t += Q_ptr[h * D + d]  * kr1 + Q_ptr[h * D + d2] * kr2;
                     }
-
                     float t_score = score_t * scale;
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
-                slot_infos[k].q_proj.clear();  // not used in non-approx value phase
+                slot_infos[k].q_proj.clear();
             }
         }
 
-        // ── Softmax denominator ─────────────────────────────────────────────
         double sum_exp = 0.0;
         for (int k = 0; k < active_K; ++k) {
+            int slot_id = active_slots[k];
+            int slen = seq_lens[slot_id];
             sum_exp += std::exp(slot_infos[k].anchor_score * scale - max_score);
-            for (float s : slot_infos[k].token_scores)
-                sum_exp += std::exp(s - max_score);
+            for (int t = 0; t < slen; ++t)
+                sum_exp += std::exp(slot_infos[k].token_scores[t] - max_score);
         }
         lse_sparse[h] = max_score + std::log(std::max(sum_exp, 1e-9));
 
-        // ── Value accumulation ──────────────────────────────────────────────
         std::vector<double> accum(D, 0.0);
         for (int k = 0; k < active_K; ++k) {
             int slot_id   = active_slots[k];
             int slen      = seq_lens[slot_id];
             float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
-            const ggml_fp16_t* u_row_scale = U_row_scale_arr + (size_t)slot_id * S_max;
-            const float* vvl = blk_vv_local[k].data();  // [rank, D] contiguous
-            const float* av  = blk_anc_v[k].data();     // [D]
+            const ggml_fp16_t* u_row_scale = kv_engine->get_host_U_row_scale(slot_id);
+            const float* vvl = blk_vv_local[k].data();
+            const float* av  = blk_anc_v[k].data();
 
             double w_anc = std::exp(slot_infos[k].anchor_score * scale - max_score) / sum_exp;
             double sum_w = 0.0;
             std::vector<double> w_proj(rank, 0.0);
             std::vector<double> res_v_accum(D, 0.0);
-            int u_base = slot_id * S_max * rank;
+            const int8_t* slot_U = kv_engine->get_host_U(slot_id);
+            const int32_t* slot_res_V_pos = kv_engine->get_host_res_V_pos(slot_id);
+            const ggml_fp16_t* slot_res_V_val = kv_engine->get_host_res_V_val(slot_id);
 
             for (int t = 0; t < slen; ++t) {
                 double w_t = std::exp(slot_infos[k].token_scores[t] - max_score) / sum_exp;
                 sum_w += w_t;
-                const int8_t* u_row = U + u_base + t * rank;
+                const int8_t* u_row = slot_U ? (slot_U + t * rank) : nullptr;
                 float ku = ggml_fp16_to_fp32(u_row_scale[t]);
-                for (int r = 0; r < rank; ++r)
-                    w_proj[r] += w_t * (float)u_row[r] * ku;  // stride-1!
-                for (int ri = 0; ri < MR; ++ri) {
-                    if (res_V_pos[(size_t)slot_id * MR + ri] != t) continue;
-                    const ggml_fp16_t* rv = res_V_val +
-                        ((size_t)slot_id * MR + ri) * n_kv_heads * D + kv_head * D;
-                    for (int d = 0; d < D; ++d)
-                        res_v_accum[d] += w_t * ggml_fp16_to_fp32(rv[d]);
-                    break;
+                if (u_row) {
+                    for (int r = 0; r < rank; ++r)
+                        w_proj[r] += w_t * (float)u_row[r] * ku;
+                }
+                if (slot_res_V_pos && slot_res_V_val) {
+                    for (int ri = 0; ri < MR; ++ri) {
+                        if (slot_res_V_pos[ri] != t) continue;
+                        const ggml_fp16_t* rv = slot_res_V_val +
+                            ri * n_kv_heads * D + kv_head * D;
+                        for (int d = 0; d < D; ++d)
+                            res_v_accum[d] += w_t * ggml_fp16_to_fp32(rv[d]);
+                        break;
+                    }
                 }
             }
 
             double w_total = w_anc + sum_w;
-            // svd_v[d] = sum_r(w_proj[r] * vvl[r*D+d]) — computed as r-outer GEMV
-            // (stride-1 on d for each r → cache-friendly)
             std::vector<double> svd_v(D, 0.0);
             for (int r = 0; r < rank; ++r) {
                 double wr = w_proj[r] * blk_sc;
-                const float* vvr = vvl + r * D;   // stride-1 sequential!
+                const float* vvr = vvl + r * D;
                 for (int d = 0; d < D; ++d)
                     svd_v[d] += wr * vvr[d];
             }
@@ -671,15 +612,18 @@ void custom_attention_op_callback(
     int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
     if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && actual_K > 0) {
         NativeBlockPool* pool = data->kv_engine;
-        const int32_t* rkp = pool->get_host_res_K_pos();
-        const int32_t* rvp = pool->get_host_res_V_pos();
-        const int MR = NativeBlockPool::MAX_RESIDUAL;
         int n_slots = pool->get_seq_lens()->ne[0];
         const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
         for (int k = 0; k < actual_K && !force_cpu; ++k) {
             int s = slots_ptr[k];
             if (s < 0 || s >= n_slots) continue;
-            if (rkp[(size_t)s * MR] != -1 || rvp[(size_t)s * MR] != -1) force_cpu = true;
+            const int32_t* rkp_s = pool->get_host_res_K_pos(s);
+            const int32_t* rvp_s = pool->get_host_res_V_pos(s);
+            if (rkp_s && rvp_s) {
+                if (rkp_s[0] != -1 || rvp_s[0] != -1) {
+                    force_cpu = true;
+                }
+            }
         }
     }
 

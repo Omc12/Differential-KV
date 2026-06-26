@@ -74,6 +74,9 @@ public:
     // Update semantic descriptor matrix
     void update_descriptors(const std::vector<float>& W_proj_host, int desc_dim, int head_dim);
 
+    // Set projection matrix for SVD jobs
+    void set_projection_matrix(const float* W_proj, int desc_dim);
+
     // Wait for all submitted SVD jobs to complete
     void wait_for_compressor();
 

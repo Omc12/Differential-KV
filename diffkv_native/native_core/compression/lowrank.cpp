@@ -1,4 +1,5 @@
 #include "native_core/compression/lowrank.hpp"
+#include "native_core/srl/chunk_descriptor.hpp"
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #endif
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <iostream>
+#include <random>
 
 namespace diffkv {
 
@@ -146,7 +148,7 @@ static bool run_cpu_jacobi_svd(
 }
 #endif
 
-bool run_svd_driver(
+static bool run_lapack_svd(
     const float* A_input,
     int S, int F, int R,
     float* U_out,
@@ -221,20 +223,214 @@ bool run_svd_driver(
         }
     }
 
-    std::memcpy(S_out, s_temp.data(), R * sizeof(float));
+    int r_to_copy = std::min(R, min_dim);
+    std::memset(S_out, 0, R * sizeof(float));
+    std::memcpy(S_out, s_temp.data(), r_to_copy * sizeof(float));
 
+    std::memset(U_out, 0, S * R * sizeof(float));
     for (int s = 0; s < S; ++s) {
-        for (int r = 0; r < R; ++r) {
+        for (int r = 0; r < r_to_copy; ++r) {
             U_out[s * R + r] = vt_temp[s * min_dim + r];
         }
     }
 
-    std::memcpy(VT_out, u_temp.data(), R * F * sizeof(float));
+    std::memset(VT_out, 0, R * F * sizeof(float));
+    for (int r = 0; r < r_to_copy; ++r) {
+        std::memcpy(VT_out + r * F, u_temp.data() + r * m, F * sizeof(float));
+    }
 
     return true;
 #else
     return run_cpu_jacobi_svd(A_input, S, F, R, U_out, S_out, VT_out);
 #endif
+}
+
+static bool run_randomized_svd(
+    const float* A_input,
+    int S, int F, int R,
+    float* U_out,
+    float* S_out,
+    float* VT_out
+) {
+    int n_oversamples = 5;
+    int r_proj = std::min({R + n_oversamples, S, F});
+    if (r_proj < 1) {
+        return false;
+    }
+
+    // Generate random matrix Omega of shape F x r_proj
+    std::vector<float> Omega(F * r_proj);
+    std::mt19937 gen(42); // fixed seed
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    for (int i = 0; i < F * r_proj; ++i) {
+        Omega[i] = dist(gen);
+    }
+
+    // Compute Y = A_input * Omega (shape S x r_proj)
+    std::vector<float> Y(S * r_proj, 0.0f);
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                S, r_proj, F,
+                1.0f, A_input, F,
+                Omega.data(), r_proj,
+                0.0f, Y.data(), r_proj);
+#else
+    for (int i = 0; i < S; ++i) {
+        for (int j = 0; j < r_proj; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < F; ++k) {
+                sum += A_input[i * F + k] * Omega[k * r_proj + j];
+            }
+            Y[i * r_proj + j] = sum;
+        }
+    }
+#endif
+
+    // One power iteration:
+    // Z = A_input^T * Y (shape F x r_proj)
+    std::vector<float> Z(F * r_proj, 0.0f);
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                F, r_proj, S,
+                1.0f, A_input, F,
+                Y.data(), r_proj,
+                0.0f, Z.data(), r_proj);
+#else
+    for (int i = 0; i < F; ++i) {
+        for (int j = 0; j < r_proj; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < S; ++k) {
+                sum += A_input[k * F + i] * Y[k * r_proj + j];
+            }
+            Z[i * r_proj + j] = sum;
+        }
+    }
+#endif
+
+    // Y = A_input * Z (shape S x r_proj)
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                S, r_proj, F,
+                1.0f, A_input, F,
+                Z.data(), r_proj,
+                0.0f, Y.data(), r_proj);
+#else
+    for (int i = 0; i < S; ++i) {
+        for (int j = 0; j < r_proj; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < F; ++k) {
+                sum += A_input[i * F + k] * Z[k * r_proj + j];
+            }
+            Y[i * r_proj + j] = sum;
+        }
+    }
+#endif
+
+    // QR decomposition of Y (shape S x r_proj) using Modified Gram-Schmidt
+    std::vector<float> Q(S * r_proj);
+    std::memcpy(Q.data(), Y.data(), S * r_proj * sizeof(float));
+    for (int k = 0; k < r_proj; ++k) {
+        double norm = 0.0;
+        for (int i = 0; i < S; ++i) {
+            float val = Q[i * r_proj + k];
+            norm += val * val;
+        }
+        norm = std::sqrt(norm);
+        if (norm < 1e-4f) {
+            for (int i = 0; i < S; ++i) {
+                Q[i * r_proj + k] = 0.0f;
+            }
+        } else {
+            float inv_norm = 1.0f / norm;
+            for (int i = 0; i < S; ++i) {
+                Q[i * r_proj + k] *= inv_norm;
+            }
+            for (int j = k + 1; j < r_proj; ++j) {
+                double dot = 0.0;
+                for (int i = 0; i < S; ++i) {
+                    dot += Q[i * r_proj + k] * Q[i * r_proj + j];
+                }
+                for (int i = 0; i < S; ++i) {
+                    Q[i * r_proj + j] -= dot * Q[i * r_proj + k];
+                }
+            }
+        }
+    }
+
+    // Compute B = Q^T * A_input (shape r_proj x F)
+    std::vector<float> B(r_proj * F, 0.0f);
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                r_proj, F, S,
+                1.0f, Q.data(), r_proj,
+                A_input, F,
+                0.0f, B.data(), F);
+#else
+    for (int i = 0; i < r_proj; ++i) {
+        for (int j = 0; j < F; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < S; ++k) {
+                sum += Q[k * r_proj + i] * A_input[k * F + j];
+            }
+            B[i * F + j] = sum;
+        }
+    }
+#endif
+
+    // Compute SVD of the tiny matrix B (shape r_proj x F)
+    std::vector<float> U_b(r_proj * R, 0.0f);
+    std::vector<float> S_joint(R, 0.0f);
+    std::vector<float> VT_joint(R * F, 0.0f);
+    if (!run_lapack_svd(B.data(), r_proj, F, R, U_b.data(), S_joint.data(), VT_joint.data())) {
+        return false;
+    }
+
+    // Compute U_out = Q * U_b (shape S x R)
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                S, R, r_proj,
+                1.0f, Q.data(), r_proj,
+                U_b.data(), R,
+                0.0f, U_out, R);
+#else
+    for (int i = 0; i < S; ++i) {
+        for (int j = 0; j < R; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < r_proj; ++k) {
+                sum += Q[i * r_proj + k] * U_b[k * R + j];
+            }
+            U_out[i * R + j] = sum;
+        }
+    }
+#endif
+
+    // Copy singular values and right singular vectors
+    std::memcpy(S_out, S_joint.data(), R * sizeof(float));
+    std::memcpy(VT_out, VT_joint.data(), R * F * sizeof(float));
+
+    return true;
+}
+
+bool run_svd_driver(
+    const float* A_input,
+    int S, int F, int R,
+    float* U_out,
+    float* S_out,
+    float* VT_out
+) {
+    static const bool use_rand_svd = []() {
+        if (const char* env = std::getenv("DIFFKV_RAND_SVD")) {
+            std::string s(env);
+            return s != "0" && s != "false" && s != "off";
+        }
+        return true;
+    }();
+
+    if (use_rand_svd) {
+        return run_randomized_svd(A_input, S, F, R, U_out, S_out, VT_out);
+    } else {
+        return run_lapack_svd(A_input, S, F, R, U_out, S_out, VT_out);
+    }
 }
 
 bool compress_lowrank_block(const LowRankCompressParams& params) {
@@ -586,6 +782,25 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         if (n_max > 0) {
             select(rel_K, aerr_K, params.out_res_K_pos, params.out_res_K_val, 0);
             select(rel_V, aerr_V, params.out_res_V_pos, params.out_res_V_val, F);
+        }
+    }
+
+    if (params.out_desc && params.W_proj && params.desc_dim > 0) {
+        std::vector<ggml_fp16_t> desc_f16(params.desc_dim);
+        compute_descriptor(
+            (const uint16_t*)params.out_anchor_k,
+            params.out_u_ptr,
+            ggml_fp16_to_fp32(*params.out_u_scale),
+            (const uint16_t*)params.out_vk_ptr,
+            params.W_proj,
+            kv_heads,
+            D,
+            S_deltas,
+            R,
+            (uint16_t*)desc_f16.data()
+        );
+        for (int r = 0; r < params.desc_dim; ++r) {
+            params.out_desc[r] = ggml_fp16_to_fp32(desc_f16[r]);
         }
     }
 

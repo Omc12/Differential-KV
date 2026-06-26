@@ -225,7 +225,7 @@ void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::uni
                 block->token_indices.resize(keep);
                 int keep_active = keep - 1;
                 
-                int F_test = engines[l]->get_VK()->ne[0] * engines[l]->get_VK()->ne[1];
+                int F_test = engines[l]->get_head_dim() * engines[l]->get_kv_heads();
                 if (keep_active > 0) {
                     block->active_k.resize(keep_active * F_test);
                     block->active_v.resize(keep_active * F_test);
@@ -412,7 +412,7 @@ void StreamingSparseIngestManager::ingest_chunk(
     }
 
     auto & blocks = layers_blocks_[layer_idx];
-    int F_test = engines[layer_idx]->get_VK()->ne[0] * engines[layer_idx]->get_VK()->ne[1];
+    int F_test = engines[layer_idx]->get_head_dim() * engines[layer_idx]->get_kv_heads();
     
     int min_slot = -1;
     int max_slot = -1;
@@ -450,8 +450,8 @@ void StreamingSparseIngestManager::ingest_chunk(
                 }
                 
                 // Keep host-side mirrors in sync
-                std::copy(k_fp16.begin(), k_fp16.end(), engines[layer_idx]->get_host_anchors_K() + slot_id * F_test);
-                std::copy(v_fp16.begin(), v_fp16.end(), engines[layer_idx]->get_host_anchors_V() + slot_id * F_test);
+                std::copy(k_fp16.begin(), k_fp16.end(), engines[layer_idx]->get_host_anchors_K(slot_id));
+                std::copy(v_fp16.begin(), v_fp16.end(), engines[layer_idx]->get_host_anchors_V(slot_id));
                 int32_t anchor_pos = new_block->anchor_idx;
                 engines[layer_idx]->get_host_anchor_positions()[slot_id] = anchor_pos;
 
@@ -581,22 +581,29 @@ void StreamingSparseIngestManager::ingest_chunk(
     stats_.peak_dense_tokens = std::max(stats_.peak_dense_tokens, current_dense);
 
     if (min_slot != -1 && max_slot != -1) {
+        // Upload anchors K and V slot-by-slot (since dynamic host pools are non-contiguous)
+        for (int slot_id = min_slot; slot_id <= max_slot; ++slot_id) {
+            const ggml_fp16_t* slot_ak = engines[layer_idx]->get_host_anchors_K(slot_id);
+            const ggml_fp16_t* slot_av = engines[layer_idx]->get_host_anchors_V(slot_id);
+            if (slot_ak) {
+                ggml_backend_tensor_set(
+                    engines[layer_idx]->get_anchors_K(),
+                    slot_ak,
+                    slot_id * F_test * sizeof(ggml_fp16_t),
+                    F_test * sizeof(ggml_fp16_t)
+                );
+            }
+            if (slot_av) {
+                ggml_backend_tensor_set(
+                    engines[layer_idx]->get_anchors_V(),
+                    slot_av,
+                    slot_id * F_test * sizeof(ggml_fp16_t),
+                    F_test * sizeof(ggml_fp16_t)
+                );
+            }
+        }
+        // Batch upload anchor positions to GPU (this is still flat/contiguous on host)
         int count = max_slot - min_slot + 1;
-        // Batch upload anchors K to GPU
-        ggml_backend_tensor_set(
-            engines[layer_idx]->get_anchors_K(),
-            engines[layer_idx]->get_host_anchors_K() + min_slot * F_test,
-            min_slot * F_test * sizeof(ggml_fp16_t),
-            count * F_test * sizeof(ggml_fp16_t)
-        );
-        // Batch upload anchors V to GPU
-        ggml_backend_tensor_set(
-            engines[layer_idx]->get_anchors_V(),
-            engines[layer_idx]->get_host_anchors_V() + min_slot * F_test,
-            min_slot * F_test * sizeof(ggml_fp16_t),
-            count * F_test * sizeof(ggml_fp16_t)
-        );
-        // Batch upload anchor positions to GPU
         ggml_backend_tensor_set(
             engines[layer_idx]->get_anchor_positions(),
             engines[layer_idx]->get_host_anchor_positions() + min_slot,
@@ -618,8 +625,8 @@ void StreamingSparseIngestManager::submit_block_for_compression(
         return;
     }
     
-    int F_test = engines[layer_idx]->get_VK()->ne[0] * engines[layer_idx]->get_VK()->ne[1];
-    int head_dim = engines[layer_idx]->get_VK()->ne[0];
+    int F_test = engines[layer_idx]->get_head_dim() * engines[layer_idx]->get_kv_heads();
+    int head_dim = engines[layer_idx]->get_head_dim();
     int slot_id = block->pool_idx;
     
     // Construct contiguous svd_k and svd_v
@@ -702,33 +709,62 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     // pool tensor layout, corrupting every subsequent U read from execute_cpu_attention.
     const int pool_s_max = engines[layer_idx]->get_S_max();
     job.pool_block_size = pool_s_max;
-    job.out_u_ptr = engines[layer_idx]->get_host_U() + slot_id * pool_s_max * pool_rank;
     job.head_dim = head_dim;
     job.anchor_idx = block->anchor_idx;
     job.raw_k_ptr = block->svd_k.data();
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
+
+    if (engines[layer_idx]->get_host_U(slot_id) == nullptr) {
+        // Skip low-rank path: allocate temporary local buffers for this job
+        job.u_buf.resize(pool_s_max * pool_rank, 0);
+        job.u_scale_buf.resize(1, ggml_fp32_to_fp16(0.0f));
+        job.u_row_scale_buf.resize(pool_s_max, ggml_fp32_to_fp16(0.0f));
+        job.vk_buf.resize(pool_rank * F_test, ggml_fp32_to_fp16(0.0f));
+        job.vv_buf.resize(pool_rank * F_test, ggml_fp32_to_fp16(0.0f));
+        
+        job.out_u_ptr = job.u_buf.data();
+        job.out_u_scale = job.u_scale_buf.data();
+        job.out_u_row_scale = job.u_row_scale_buf.data();
+        job.out_vk_ptr = job.vk_buf.data();
+        job.out_vv_ptr = job.vv_buf.data();
+        
+        const int MR = NativeBlockPool::MAX_RESIDUAL;
+        job.res_K_pos_buf.resize(MR, -1);
+        job.res_V_pos_buf.resize(MR, -1);
+        job.res_K_val_buf.resize(MR * F_test, ggml_fp32_to_fp16(0.0f));
+        job.res_V_val_buf.resize(MR * F_test, ggml_fp32_to_fp16(0.0f));
+        
+        job.out_res_K_pos = job.res_K_pos_buf.data();
+        job.out_res_V_pos = job.res_V_pos_buf.data();
+        job.out_res_K_val = job.res_K_val_buf.data();
+        job.out_res_V_val = job.res_V_val_buf.data();
+    } else {
+        job.out_u_ptr = engines[layer_idx]->get_host_U(slot_id);
+        job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
+        job.out_u_row_scale = engines[layer_idx]->get_host_U_row_scale(slot_id);
+        job.out_vk_ptr = engines[layer_idx]->get_host_VK(slot_id);
+        job.out_vv_ptr = engines[layer_idx]->get_host_VV(slot_id);
+        
+        job.out_res_K_pos = engines[layer_idx]->get_host_res_K_pos(slot_id);
+        job.out_res_V_pos = engines[layer_idx]->get_host_res_V_pos(slot_id);
+        job.out_res_K_val = engines[layer_idx]->get_host_res_K_val(slot_id);
+        job.out_res_V_val = engines[layer_idx]->get_host_res_V_val(slot_id);
+    }
+    
     // Outputs in block pool host mirrors (CUDA compatible)
-    job.out_u_scale = engines[layer_idx]->get_host_U_scale() + slot_id;
-    job.out_u_row_scale = engines[layer_idx]->get_host_U_row_scale() + (size_t)slot_id * pool_s_max;
-    job.out_vk_ptr = engines[layer_idx]->get_host_VK() + slot_id * pool_rank * F_test;
-    job.out_vv_ptr = engines[layer_idx]->get_host_VV() + slot_id * pool_rank * F_test;
     job.out_scale = engines[layer_idx]->get_host_scales() + slot_id;
-    job.out_anchor_k = engines[layer_idx]->get_host_anchors_K() + slot_id * F_test;
-    job.out_anchor_v = engines[layer_idx]->get_host_anchors_V() + slot_id * F_test;
+    job.out_anchor_k = engines[layer_idx]->get_host_anchors_K(slot_id);
+    job.out_anchor_v = engines[layer_idx]->get_host_anchors_V(slot_id);
     job.out_seq_len = engines[layer_idx]->get_host_seq_lens() + slot_id;
     job.out_anchor_position = engines[layer_idx]->get_host_anchor_positions() + slot_id;
-    job.out_token_positions = engines[layer_idx]->get_host_token_positions() + (size_t)slot_id * pool_s_max;
-    // F9 sparse residuals → pool host buffers for this slot.
-    {
-        const int MR = NativeBlockPool::MAX_RESIDUAL;
-        job.out_res_K_pos = engines[layer_idx]->get_host_res_K_pos() + (size_t)slot_id * MR;
-        job.out_res_V_pos = engines[layer_idx]->get_host_res_V_pos() + (size_t)slot_id * MR;
-        job.out_res_K_val = engines[layer_idx]->get_host_res_K_val() + (size_t)slot_id * MR * F_test;
-        job.out_res_V_val = engines[layer_idx]->get_host_res_V_val() + (size_t)slot_id * MR * F_test;
-        job.max_residual  = MR;
-    }
+    job.out_token_positions = engines[layer_idx]->get_host_token_positions(slot_id);
+    
+    job.max_residual = NativeBlockPool::MAX_RESIDUAL;
+    job.W_proj = W_proj_;
+    job.desc_dim = desc_dim_;
+    job.out_desc = engines[layer_idx]->get_host_desc_matrix(slot_id);
     job.state_table = &engines[layer_idx]->get_state_table();
     
     bool async_svd = true;

@@ -234,6 +234,16 @@ void KVRuntimeManager::ingest_prefill(
                     if (l == 0 && current_state == BlockState::CompressedResident) {
                         pager_->register_block(block.get(), engines_);
                     }
+                    if (current_state == BlockState::CompressedResident) {
+                        block->active_k.clear();
+                        block->active_k.shrink_to_fit();
+                        block->active_v.clear();
+                        block->active_v.shrink_to_fit();
+                        block->svd_k.clear();
+                        block->svd_k.shrink_to_fit();
+                        block->svd_v.clear();
+                        block->svd_v.shrink_to_fit();
+                    }
                 }
             }
         }
@@ -543,7 +553,7 @@ void KVRuntimeManager::wait_for_compressor() {
     if (compressor_) compressor_->wait_until_idle();
 
     // Gather all pool slots that are currently in Compressing state in any layer
-    int n_slots = engines_[0]->get_U()->ne[2];
+    int n_slots = engines_[0]->get_n_slots();
     std::vector<int> pending_slots;
     for (int pool_idx = 0; pool_idx < n_slots; ++pool_idx) {
         bool compressing = false;
@@ -611,9 +621,10 @@ void KVRuntimeManager::touch_active_slots(const std::vector<int32_t>& active_slo
 }
 
 void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host, int desc_dim, int head_dim) {
+    set_projection_matrix(W_proj_host.data(), desc_dim);
     auto & blocks = ingest_manager_->get_blocks(0);
-    int F_test = engines_[0]->get_VK()->ne[0] * engines_[0]->get_VK()->ne[1];
-    int kv_heads = engines_[0]->get_VK()->ne[1];
+    int F_test = engines_[0]->get_head_dim() * engines_[0]->get_kv_heads();
+    int kv_heads = engines_[0]->get_kv_heads();
     
     for (size_t b = 0; b < blocks.size(); ++b) {
         auto & block = blocks[b];
@@ -623,15 +634,19 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
         
         if (block->state == BlockState::CompressedResident || block->state == BlockState::CPUResident) {
             auto & engine = engines_[0];
-            int rank = engine->get_U()->ne[0];
-            int S_max = engine->get_S_max(); // Pool stride size
+            if (engine->get_host_U(slot_id) == nullptr) {
+                // If skip_lowrank is true, the descriptor is already computed by the SVD compressor
+                // and stored in host_desc_matrix_. No need to re-compute.
+                continue;
+            }
+            int rank = engine->get_rank();
             
             std::vector<ggml_fp16_t> desc_f16(desc_dim);
             compute_descriptor(
-                (const uint16_t*)engine->get_host_anchors_K() + slot_id * F_test,
-                engine->get_host_U() + slot_id * S_max * rank,
+                (const uint16_t*)engine->get_host_anchors_K(slot_id),
+                engine->get_host_U(slot_id),
                 ggml_fp16_to_fp32(engine->get_host_U_scale()[slot_id]),
-                (const uint16_t*)engine->get_host_VK() + slot_id * rank * F_test,
+                (const uint16_t*)engine->get_host_VK(slot_id),
                 W_proj_host.data(),
                 kv_heads,
                 head_dim,
@@ -644,7 +659,7 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
             for (int r = 0; r < desc_dim; ++r) {
                 desc[r] = ggml_fp16_to_fp32(desc_f16[r]);
             }
-            std::copy(desc.begin(), desc.end(), engine->get_host_desc_matrix() + slot_id * desc_dim);
+            std::copy(desc.begin(), desc.end(), engine->get_host_desc_matrix(slot_id));
             ggml_backend_tensor_set(engine->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         } else {
             std::vector<float> avg_k(F_test, 0.0f);
@@ -679,9 +694,15 @@ void KVRuntimeManager::update_descriptors(const std::vector<float>& W_proj_host,
             float norm = std::sqrt(sum_sq) + 1e-8f;
             for (float & val : desc) val /= norm;
             
-            std::copy(desc.begin(), desc.end(), engines_[0]->get_host_desc_matrix() + slot_id * desc_dim);
+            std::copy(desc.begin(), desc.end(), engines_[0]->get_host_desc_matrix(slot_id));
             ggml_backend_tensor_set(engines_[0]->get_desc_matrix(), desc.data(), slot_id * desc_dim * sizeof(float), desc_dim * sizeof(float));
         }
+    }
+}
+
+void KVRuntimeManager::set_projection_matrix(const float* W_proj, int desc_dim) {
+    if (ingest_manager_) {
+        ingest_manager_->set_projection_matrix(W_proj, desc_dim);
     }
 }
 

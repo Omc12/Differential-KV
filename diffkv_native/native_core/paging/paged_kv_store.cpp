@@ -43,10 +43,10 @@ void PagedKVStore::register_block(StreamingKVBlock* block, const std::vector<std
     std::string key = std::to_string(block->anchor_idx);
     
     // Query parameters from first layer engine
-    int rank = engines[0]->get_U()->ne[0];
-    int head_dim = engines[0]->get_VK()->ne[0];
-    int kv_heads = engines[0]->get_VK()->ne[1];
-    int desc_dim = engines[0]->get_desc_matrix()->ne[0];
+    int rank = engines[0]->get_rank();
+    int head_dim = engines[0]->get_head_dim();
+    int kv_heads = engines[0]->get_kv_heads();
+    int desc_dim = engines[0]->get_desc_dim();
 
     // Total VRAM across all layers
     size_t single_layer_vram = estimate_slot_vram(rank, head_dim, kv_heads, desc_dim);
@@ -133,10 +133,10 @@ void PagedKVStore::evict_block(PageEntry& entry, const std::vector<std::unique_p
     if (!block || block->pool_idx == -1 || engines.empty()) return;
     int slot_id = block->pool_idx;
 
-    int rank = engines[0]->get_U()->ne[0];
-    int head_dim = engines[0]->get_VK()->ne[0];
-    int kv_heads = engines[0]->get_VK()->ne[1];
-    int desc_dim = engines[0]->get_desc_matrix()->ne[0];
+    int rank = engines[0]->get_rank();
+    int head_dim = engines[0]->get_head_dim();
+    int kv_heads = engines[0]->get_kv_heads();
+    int desc_dim = engines[0]->get_desc_dim();
 
     // Transition and copy all layers
     for (int l = 0; l < (int)engines.size(); ++l) {
@@ -151,10 +151,18 @@ void PagedKVStore::evict_block(PageEntry& entry, const std::vector<std::unique_p
         cpu.anchors_V.resize(head_dim * kv_heads);
         cpu.desc_matrix.resize(desc_dim);
 
-        ggml_backend_tensor_get(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
-        ggml_backend_tensor_get(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
-        ggml_backend_tensor_get(engine->get_VK(), cpu.VK.data(), slot_id * engine->get_VK()->nb[3], cpu.VK.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_get(engine->get_VV(), cpu.VV.data(), slot_id * engine->get_VV()->nb[3], cpu.VV.size() * sizeof(ggml_fp16_t));
+        if (engine->get_U()) {
+            ggml_backend_tensor_get(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
+        }
+        if (engine->get_U_scale()) {
+            ggml_backend_tensor_get(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
+        }
+        if (engine->get_VK()) {
+            ggml_backend_tensor_get(engine->get_VK(), cpu.VK.data(), slot_id * engine->get_VK()->nb[3], cpu.VK.size() * sizeof(ggml_fp16_t));
+        }
+        if (engine->get_VV()) {
+            ggml_backend_tensor_get(engine->get_VV(), cpu.VV.data(), slot_id * engine->get_VV()->nb[3], cpu.VV.size() * sizeof(ggml_fp16_t));
+        }
         ggml_backend_tensor_get(engine->get_anchors_K(), cpu.anchors_K.data(), slot_id * engine->get_anchors_K()->nb[2], cpu.anchors_K.size() * sizeof(ggml_fp16_t));
         ggml_backend_tensor_get(engine->get_anchors_V(), cpu.anchors_V.data(), slot_id * engine->get_anchors_V()->nb[2], cpu.anchors_V.size() * sizeof(ggml_fp16_t));
         ggml_backend_tensor_get(engine->get_seq_lens(), &cpu.seq_len, slot_id * engine->get_seq_lens()->nb[0], sizeof(int32_t));
@@ -204,25 +212,45 @@ void PagedKVStore::reload_block(PageEntry& entry, const std::vector<std::unique_
         engine->get_state_table().transition(slot_id, BlockState::CPUResident, BlockState::Reloading);
 
         PagedSlotData & cpu = entry.layers_cpu_data[l];
-        int rank = engine->get_U()->ne[0];
-        int head_dim = engine->get_VK()->ne[0];
-        int kv_heads = engine->get_VK()->ne[1];
+        int rank = engine->get_rank();
+        int head_dim = engine->get_head_dim();
+        int kv_heads = engine->get_kv_heads();
 
         // Update host mirrors (CUDA compatible)
-        std::memcpy(engine->get_host_U() + slot_id * rank * engine->get_S_max(), cpu.U.data(), cpu.U.size() * sizeof(int8_t));
-        *(engine->get_host_U_scale() + slot_id) = cpu.U_scale;
-        std::memcpy(engine->get_host_VK() + slot_id * head_dim * kv_heads * rank, cpu.VK.data(), cpu.VK.size() * sizeof(ggml_fp16_t));
-        std::memcpy(engine->get_host_VV() + slot_id * head_dim * kv_heads * rank, cpu.VV.data(), cpu.VV.size() * sizeof(ggml_fp16_t));
-        std::memcpy(engine->get_host_anchors_K() + slot_id * head_dim * kv_heads, cpu.anchors_K.data(), cpu.anchors_K.size() * sizeof(ggml_fp16_t));
-        std::memcpy(engine->get_host_anchors_V() + slot_id * head_dim * kv_heads, cpu.anchors_V.data(), cpu.anchors_V.size() * sizeof(ggml_fp16_t));
+        if (engine->get_host_U(slot_id)) {
+            std::memcpy(engine->get_host_U(slot_id), cpu.U.data(), cpu.U.size() * sizeof(int8_t));
+        }
+        if (engine->get_host_U_scale()) {
+            *(engine->get_host_U_scale() + slot_id) = cpu.U_scale;
+        }
+        if (engine->get_host_VK(slot_id)) {
+            std::memcpy(engine->get_host_VK(slot_id), cpu.VK.data(), cpu.VK.size() * sizeof(ggml_fp16_t));
+        }
+        if (engine->get_host_VV(slot_id)) {
+            std::memcpy(engine->get_host_VV(slot_id), cpu.VV.data(), cpu.VV.size() * sizeof(ggml_fp16_t));
+        }
+        if (engine->get_host_anchors_K(slot_id)) {
+            std::memcpy(engine->get_host_anchors_K(slot_id), cpu.anchors_K.data(), cpu.anchors_K.size() * sizeof(ggml_fp16_t));
+        }
+        if (engine->get_host_anchors_V(slot_id)) {
+            std::memcpy(engine->get_host_anchors_V(slot_id), cpu.anchors_V.data(), cpu.anchors_V.size() * sizeof(ggml_fp16_t));
+        }
         *(engine->get_host_seq_lens() + slot_id) = cpu.seq_len;
         *(engine->get_host_scales() + slot_id) = cpu.scale;
         *(engine->get_host_anchor_positions() + slot_id) = cpu.anchor_position;
 
-        ggml_backend_tensor_set(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
-        ggml_backend_tensor_set(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine->get_VK(), cpu.VK.data(), slot_id * engine->get_VK()->nb[3], cpu.VK.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine->get_VV(), cpu.VV.data(), slot_id * engine->get_VV()->nb[3], cpu.VV.size() * sizeof(ggml_fp16_t));
+        if (engine->get_U()) {
+            ggml_backend_tensor_set(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
+        }
+        if (engine->get_U_scale()) {
+            ggml_backend_tensor_set(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
+        }
+        if (engine->get_VK()) {
+            ggml_backend_tensor_set(engine->get_VK(), cpu.VK.data(), slot_id * engine->get_VK()->nb[3], cpu.VK.size() * sizeof(ggml_fp16_t));
+        }
+        if (engine->get_VV()) {
+            ggml_backend_tensor_set(engine->get_VV(), cpu.VV.data(), slot_id * engine->get_VV()->nb[3], cpu.VV.size() * sizeof(ggml_fp16_t));
+        }
         ggml_backend_tensor_set(engine->get_anchors_K(), cpu.anchors_K.data(), slot_id * engine->get_anchors_K()->nb[2], cpu.anchors_K.size() * sizeof(ggml_fp16_t));
         ggml_backend_tensor_set(engine->get_anchors_V(), cpu.anchors_V.data(), slot_id * engine->get_anchors_V()->nb[2], cpu.anchors_V.size() * sizeof(ggml_fp16_t));
         ggml_backend_tensor_set(engine->get_seq_lens(), &cpu.seq_len, slot_id * engine->get_seq_lens()->nb[0], sizeof(int32_t));

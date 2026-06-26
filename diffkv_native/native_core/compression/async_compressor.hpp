@@ -51,6 +51,162 @@ struct CompressJob {
     ggml_fp16_t* out_res_V_val = nullptr;
     int max_residual = 8;
     DiffKVBlockStateTable* state_table = nullptr;
+
+    // Optional descriptor computation
+    const float* W_proj = nullptr;
+    int desc_dim = 0;
+    float* out_desc = nullptr;
+
+    // Default constructor
+    CompressJob() = default;
+
+    // Custom copy constructor to correctly re-target raw pointers to copied internal buffers
+    CompressJob(const CompressJob& other) {
+        session_id = other.session_id;
+        block_id = other.block_id;
+        block_size = other.block_size;
+        feat_dim = other.feat_dim;
+        rank = other.rank;
+        pool_rank = other.pool_rank;
+        pool_block_size = other.pool_block_size;
+        head_dim = other.head_dim;
+        anchor_idx = other.anchor_idx;
+        raw_k_ptr = other.raw_k_ptr;
+        raw_v_ptr = other.raw_v_ptr;
+        token_ids = other.token_ids;
+        stop_token_ids = other.stop_token_ids;
+        max_residual = other.max_residual;
+        state_table = other.state_table;
+        W_proj = other.W_proj;
+        desc_dim = other.desc_dim;
+        out_desc = other.out_desc;
+        out_scale = other.out_scale;
+        out_anchor_k = other.out_anchor_k;
+        out_anchor_v = other.out_anchor_v;
+        out_seq_len = other.out_seq_len;
+        out_anchor_position = other.out_anchor_position;
+        out_token_positions = other.out_token_positions;
+
+        // Copy vectors
+        u_buf = other.u_buf;
+        u_scale_buf = other.u_scale_buf;
+        u_row_scale_buf = other.u_row_scale_buf;
+        vk_buf = other.vk_buf;
+        vv_buf = other.vv_buf;
+        res_K_pos_buf = other.res_K_pos_buf;
+        res_V_pos_buf = other.res_V_pos_buf;
+        res_K_val_buf = other.res_K_val_buf;
+        res_V_val_buf = other.res_V_val_buf;
+
+        // Re-target pointers if they pointed to the source's internal buffers
+        if (other.out_u_ptr == other.u_buf.data()) out_u_ptr = u_buf.data();
+        else out_u_ptr = other.out_u_ptr;
+
+        if (other.out_u_scale == other.u_scale_buf.data()) out_u_scale = u_scale_buf.data();
+        else out_u_scale = other.out_u_scale;
+
+        if (other.out_u_row_scale == other.u_row_scale_buf.data()) out_u_row_scale = u_row_scale_buf.data();
+        else out_u_row_scale = other.out_u_row_scale;
+
+        if (other.out_vk_ptr == other.vk_buf.data()) out_vk_ptr = vk_buf.data();
+        else out_vk_ptr = other.out_vk_ptr;
+
+        if (other.out_vv_ptr == other.vv_buf.data()) out_vv_ptr = vv_buf.data();
+        else out_vv_ptr = other.out_vv_ptr;
+
+        if (other.out_res_K_pos == other.res_K_pos_buf.data()) out_res_K_pos = res_K_pos_buf.data();
+        else out_res_K_pos = other.out_res_K_pos;
+
+        if (other.out_res_V_pos == other.res_V_pos_buf.data()) out_res_V_pos = res_V_pos_buf.data();
+        else out_res_V_pos = other.out_res_V_pos;
+
+        if (other.out_res_K_val == other.res_K_val_buf.data()) out_res_K_val = res_K_val_buf.data();
+        else out_res_K_val = other.out_res_K_val;
+
+        if (other.out_res_V_val == other.res_V_val_buf.data()) out_res_V_val = res_V_val_buf.data();
+        else out_res_V_val = other.out_res_V_val;
+    }
+
+    // Custom copy assignment operator to correctly re-target raw pointers
+    CompressJob& operator=(const CompressJob& other) {
+        if (this != &other) {
+            session_id = other.session_id;
+            block_id = other.block_id;
+            block_size = other.block_size;
+            feat_dim = other.feat_dim;
+            rank = other.rank;
+            pool_rank = other.pool_rank;
+            pool_block_size = other.pool_block_size;
+            head_dim = other.head_dim;
+            anchor_idx = other.anchor_idx;
+            raw_k_ptr = other.raw_k_ptr;
+            raw_v_ptr = other.raw_v_ptr;
+            token_ids = other.token_ids;
+            stop_token_ids = other.stop_token_ids;
+            max_residual = other.max_residual;
+            state_table = other.state_table;
+            W_proj = other.W_proj;
+            desc_dim = other.desc_dim;
+            out_desc = other.out_desc;
+            out_scale = other.out_scale;
+            out_anchor_k = other.out_anchor_k;
+            out_anchor_v = other.out_anchor_v;
+            out_seq_len = other.out_seq_len;
+            out_anchor_position = other.out_anchor_position;
+            out_token_positions = other.out_token_positions;
+
+            // Copy vectors
+            u_buf = other.u_buf;
+            u_scale_buf = other.u_scale_buf;
+            u_row_scale_buf = other.u_row_scale_buf;
+            vk_buf = other.vk_buf;
+            vv_buf = other.vv_buf;
+            res_K_pos_buf = other.res_K_pos_buf;
+            res_V_pos_buf = other.res_V_pos_buf;
+            res_K_val_buf = other.res_K_val_buf;
+            res_V_val_buf = other.res_V_val_buf;
+
+            // Re-target pointers if they pointed to the source's internal buffers
+            if (other.out_u_ptr == other.u_buf.data()) out_u_ptr = u_buf.data();
+            else out_u_ptr = other.out_u_ptr;
+
+            if (other.out_u_scale == other.u_scale_buf.data()) out_u_scale = u_scale_buf.data();
+            else out_u_scale = other.out_u_scale;
+
+            if (other.out_u_row_scale == other.u_row_scale_buf.data()) out_u_row_scale = u_row_scale_buf.data();
+            else out_u_row_scale = other.out_u_row_scale;
+
+            if (other.out_vk_ptr == other.vk_buf.data()) out_vk_ptr = vk_buf.data();
+            else out_vk_ptr = other.out_vk_ptr;
+
+            if (other.out_vv_ptr == other.vv_buf.data()) out_vv_ptr = vv_buf.data();
+            else out_vv_ptr = other.out_vv_ptr;
+
+            if (other.out_res_K_pos == other.res_K_pos_buf.data()) out_res_K_pos = res_K_pos_buf.data();
+            else out_res_K_pos = other.out_res_K_pos;
+
+            if (other.out_res_V_pos == other.res_V_pos_buf.data()) out_res_V_pos = res_V_pos_buf.data();
+            else out_res_V_pos = other.out_res_V_pos;
+
+            if (other.out_res_K_val == other.res_K_val_buf.data()) out_res_K_val = res_K_val_buf.data();
+            else out_res_K_val = other.out_res_K_val;
+
+            if (other.out_res_V_val == other.res_V_val_buf.data()) out_res_V_val = res_V_val_buf.data();
+            else out_res_V_val = other.out_res_V_val;
+        }
+        return *this;
+    }
+
+    // Owned temporary buffers used when pool host mirrors are skipped (dense mode / skip_lowrank)
+    std::vector<int8_t> u_buf;
+    std::vector<ggml_fp16_t> u_scale_buf;
+    std::vector<ggml_fp16_t> u_row_scale_buf;
+    std::vector<ggml_fp16_t> vk_buf;
+    std::vector<ggml_fp16_t> vv_buf;
+    std::vector<int32_t> res_K_pos_buf;
+    std::vector<int32_t> res_V_pos_buf;
+    std::vector<ggml_fp16_t> res_K_val_buf;
+    std::vector<ggml_fp16_t> res_V_val_buf;
 };
 
 class AsyncCompressor {

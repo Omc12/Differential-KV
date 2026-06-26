@@ -549,13 +549,13 @@ static struct ggml_tensor * build_native_sparse_attn(
     struct ggml_tensor* aVs  = ggml_reshape_3d(ctx, gather(pool->get_anchors_V(),   D*nkv),     D, nkv, K);       // [D,nkv,K]
     struct ggml_tensor* Usel = ggml_reshape_3d(ctx, gather(pool->get_U_f16(),       R*S),       R, S, K);         // [R,S,K]
     struct ggml_tensor* Msel = gather(pool->get_valid_mask(), S);                                                 // [S,K] additive -inf
-    struct ggml_tensor* USf  = ggml_cast(ctx, gather(pool->get_U_scale(), 1), GGML_TYPE_F32);                     // [1,K]
+    struct ggml_tensor* USf  = ggml_cast(ctx, gather(pool->get_U_row_scale(), S), GGML_TYPE_F32);                 // [S,K]
     struct ggml_tensor* BSf  = ggml_cast(ctx, gather(pool->get_scales(),  1), GGML_TYPE_F32);                     // [1,K]
 
-    // Per-slot scalars as [1,1,K] for broadcasting.
-    struct ggml_tensor* su    = ggml_reshape_3d(ctx, USf, 1, 1, K);
+    // Per-slot scalars/vectors for broadcasting.
+    struct ggml_tensor* su    = ggml_reshape_3d(ctx, USf, S, 1, K);
     struct ggml_tensor* bs    = ggml_reshape_3d(ctx, BSf, 1, 1, K);
-    struct ggml_tensor* su_bs = ggml_mul(ctx, su, bs); // [1,1,K]
+    struct ggml_tensor* su_bs = ggml_mul(ctx, su, bs); // [S,1,K]
 
     // anchor-entry mask = valid_mask row 0 (0 if slot non-empty, -inf if empty) → [1,1,K]
     struct ggml_tensor* anc_mask = ggml_reshape_3d(ctx,
@@ -625,7 +625,8 @@ static struct ggml_tensor * build_native_sparse_attn(
         struct ggml_tensor* w_tot_K = PC(ggml_reshape_3d(ctx, w_total, group, K, nkv), 1,0,2,3);// [K,group,nkv]
         struct ggml_tensor* term1 = ggml_mul_mat(ctx, PC(aVs, 1,2,0,3), w_tot_K);               // [D,group,nkv]
         struct ggml_tensor* UselT = ggml_reshape_4d(ctx, PC(Usel,1,0,2,3), S, R, K, 1);         // [S,R,K,1]
-        struct ggml_tensor* wproj = ggml_mul(ctx, ggml_mul_mat(ctx, UselT, w_tok), ggml_reshape_4d(ctx, su, 1,1,K,1)); // [R,group,K,nkv]
+        struct ggml_tensor* w_tok_scaled = ggml_mul(ctx, w_tok, ggml_reshape_4d(ctx, su, S, 1, K, 1));
+        struct ggml_tensor* wproj = ggml_mul_mat(ctx, UselT, w_tok_scaled); // [R,group,K,nkv]
         struct ggml_tensor* t2 = ggml_mul(ctx, ggml_mul_mat(ctx, PC(VVs, 1,3,0,2), wproj), ggml_reshape_4d(ctx, bs, 1,1,K,1)); // [D,group,K,nkv]
         struct ggml_tensor* term2 = ggml_reshape_3d(ctx, ggml_sum_rows(ctx, PC(t2,1,2,0,3)), D, group, nkv); // sum over K → [D,group,nkv]
 
@@ -737,7 +738,8 @@ static struct ggml_tensor * build_native_sparse_attn(
         struct ggml_tensor* aVsT = ggml_cont(ctx, ggml_transpose(ctx, aVsk));          // [K,D]
         struct ggml_tensor* term1 = ggml_mul_mat(ctx, aVsT, wt2);                       // [D,group]
         struct ggml_tensor* UselT = ggml_cont(ctx, ggml_transpose(ctx, Usel));          // [S,R,K]
-        struct ggml_tensor* wproj = ggml_mul(ctx, ggml_mul_mat(ctx, UselT, w_tok), su); // [R,group,K]
+        struct ggml_tensor* w_tok_scaled = ggml_mul(ctx, w_tok, su);
+        struct ggml_tensor* wproj = ggml_mul_mat(ctx, UselT, w_tok_scaled);             // [R,group,K]
         struct ggml_tensor* VVsT = ggml_cont(ctx, ggml_transpose(ctx, VVsk));           // [R,D,K]
         struct ggml_tensor* t2pre = ggml_mul(ctx, ggml_mul_mat(ctx, VVsT, wproj), bs);  // [D,group,K]
         struct ggml_tensor* t2p = ggml_cont(ctx, ggml_permute(ctx, t2pre, 1, 2, 0, 3)); // [K,D,group]
@@ -954,7 +956,7 @@ struct ggml_cgraph * build_decode_graph(
                         (int) pool->get_seq_lens()->ne[0]
                     };
                     attn_out = ggml_diffkv_attn(ctx, q_rope_flat, selected_slots,
-                        pool->get_U(), pool->get_U_scale(), pool->get_VK(), pool->get_VV(),
+                        pool->get_U(), pool->get_U_row_scale(), pool->get_VK(), pool->get_VV(),
                         pool->get_anchors_K(), pool->get_anchors_V(), pool->get_seq_lens(),
                         pool->get_scales(), pool->get_anchor_positions(),
                         native_dense_kr[l], native_dense_v[l], native_dense_pos,
@@ -1008,11 +1010,11 @@ struct ggml_cgraph * build_decode_graph(
             // Create the large past input tensors in the graph context
             if (dense_k_past_inputs && dense_v_past_inputs) {
                 if (dense_k_past_inputs[l] == nullptr) {
-                    dense_k_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim_val, config.n_head_kv, engage_threshold);
+                    dense_k_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, head_dim_val, config.n_head_kv, engage_threshold);
                     ggml_set_input(dense_k_past_inputs[l]);
                 }
                 if (dense_v_past_inputs[l] == nullptr) {
-                    dense_v_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim_val, config.n_head_kv, engage_threshold);
+                    dense_v_past_inputs[l] = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, head_dim_val, config.n_head_kv, engage_threshold);
                     ggml_set_input(dense_v_past_inputs[l]);
                 }
             }
@@ -1030,8 +1032,10 @@ struct ggml_cgraph * build_decode_graph(
             struct ggml_tensor * k_rope = ggml_rope_ext(ctx, k_reshaped, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
             // Concat past with current along dim 2 (the sequence length dimension)
-            struct ggml_tensor * k_ctx = ggml_concat(ctx, k_past, k_rope, 2);
-            struct ggml_tensor * v_ctx = ggml_concat(ctx, v_past, v_reshaped, 2);
+            struct ggml_tensor * k_rope_f16 = ggml_cast(ctx, k_rope, GGML_TYPE_F16);
+            struct ggml_tensor * v_reshaped_f16 = ggml_cast(ctx, v_reshaped, GGML_TYPE_F16);
+            struct ggml_tensor * k_ctx = ggml_concat(ctx, k_past, k_rope_f16, 2);
+            struct ggml_tensor * v_ctx = ggml_concat(ctx, v_past, v_reshaped_f16, 2);
 
             // Permute to [head_dim, seq_len, kv_heads] layout expected by flash attention
             struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
@@ -1491,27 +1495,27 @@ static void run_native_attn_selftest() {
     std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
     auto H=[&](float f){return ggml_fp32_to_fp16(f);};
     for (int s=0;s<K;++s){
-        int8_t* U=pool.get_host_U(); ggml_fp16_t* VK=pool.get_host_VK(); ggml_fp16_t* VV=pool.get_host_VV();
-        ggml_fp16_t* aK=pool.get_host_anchors_K(); ggml_fp16_t* aV=pool.get_host_anchors_V();
+        int8_t* U=pool.get_host_U(s); ggml_fp16_t* VK=pool.get_host_VK(s); ggml_fp16_t* VV=pool.get_host_VV(s);
+        ggml_fp16_t* aK=pool.get_host_anchors_K(s); ggml_fp16_t* aV=pool.get_host_anchors_V(s);
         int32_t* sl=pool.get_host_seq_lens(); ggml_fp16_t* sc=pool.get_host_scales();
         ggml_fp16_t* us=pool.get_host_U_scale(); int32_t* ap=pool.get_host_anchor_positions();
-        ggml_fp16_t* urs=pool.get_host_U_row_scale();
+        ggml_fp16_t* urs=pool.get_host_U_row_scale(s);
         int seqlen = 20 + s*10;  // longer blocks
         sl[s]=seqlen; sc[s]=H(0.3f+0.1f*s); us[s]=H(0.2f); ap[s]=10+s*7;
         // Uniform per-row scale == the single block scale, so the per-row CPU path and
         // the single-scale fused graph stay byte-identical (selftest still validates math).
-        for(int t=0;t<S_max;++t) urs[(size_t)s*S_max+t]=H(0.2f);
+        for(int t=0;t<S_max;++t) urs[t]=H(0.2f);
         // EXTREME data to reproduce the real failure: massive anchor-K (|aK|~per-elem 30, like
         // Qwen layer-0), and slots 1,2 NEAR-IDENTICAL to slot 0 (mimics repetitive-prompt blocks).
         int src = (s==0)?0:0; (void)src;
-        for(int t=0;t<seqlen;++t) for(int r=0;r<rank;++r) U[(size_t)s*S_max*rank + t*rank + r]=(int8_t)((int)((g()+s*7)%21)-10);
+        for(int t=0;t<seqlen;++t) for(int r=0;r<rank;++r) U[t*rank + r]=(int8_t)((int)((g()+s*7)%21)-10);
         for(int r=0;r<rank;++r) for(int kv=0;kv<nkv;++kv) for(int d=0;d<D;++d){
-            VK[(size_t)s*rank*nkv*D + r*nkv*D + kv*D + d]=H(dist(g)*0.5f + (s>0?0.02f*s:0.0f));
-            VV[(size_t)s*rank*nkv*D + r*nkv*D + kv*D + d]=H(dist(g)*0.5f);
+            VK[r*nkv*D + kv*D + d]=H(dist(g)*0.5f + (s>0?0.02f*s:0.0f));
+            VV[r*nkv*D + kv*D + d]=H(dist(g)*0.5f);
         }
         for(int kv=0;kv<nkv;++kv) for(int d=0;d<D;++d){
-            aK[(size_t)s*nkv*D + kv*D + d]=H(dist(g)*64.0f + (s>0?0.5f*s:0.0f));  // massive K + near-dup
-            aV[(size_t)s*nkv*D + kv*D + d]=H(dist(g));
+            aK[kv*D + d]=H(dist(g)*64.0f + (s>0?0.5f*s:0.0f));  // massive K + near-dup
+            aV[kv*D + d]=H(dist(g));
         }
         pool.upload_slot(s);
     }
@@ -1654,7 +1658,14 @@ static void run_recon_cmp() {
     p.out_res_K_pos = rKpos.data(); p.out_res_V_pos = rVpos.data();
     p.out_res_K_val = rKval.data(); p.out_res_V_val = rVval.data(); p.max_residual = MR;
 
-    if (!diffkv::compress_lowrank_block(p)) { std::cerr << "[RECON_CMP] compress failed\n"; return; }
+    auto t_start = std::chrono::high_resolution_clock::now();
+    int num_loops = 200;
+    for (int i = 0; i < num_loops; ++i) {
+        if (!diffkv::compress_lowrank_block(p)) { std::cerr << "[RECON_CMP] compress failed\n"; return; }
+    }
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    std::cerr << "[RECON_CMP] 200 compressions took: " << ms << " ms (" << (ms / num_loops) << " ms per block)\n";
 
     int L = out_anchor_pos;          // landmark index (anchor_idx=0 ⇒ == landmark_idx)
     int S_deltas = out_seq;          // == S-1
@@ -1757,21 +1768,21 @@ static void run_attn_cmp() {
         p.pool_block_size = S; p.head_dim = D; p.anchor_idx = b * S;
         p.raw_k_ptr = K.data() + (size_t)b * S * F; p.raw_v_ptr = V.data() + (size_t)b * S * F;
         p.token_ids = nullptr; p.stop_token_ids = nullptr;
-        p.out_u_ptr = pool.get_host_U() + (size_t)b * S * rank;
+        p.out_u_ptr = pool.get_host_U(b);
         p.out_u_scale = pool.get_host_U_scale() + b;
-        p.out_u_row_scale = pool.get_host_U_row_scale() + (size_t)b * S;
-        p.out_vk_ptr = pool.get_host_VK() + (size_t)b * rank * F;
-        p.out_vv_ptr = pool.get_host_VV() + (size_t)b * rank * F;
+        p.out_u_row_scale = pool.get_host_U_row_scale(b);
+        p.out_vk_ptr = pool.get_host_VK(b);
+        p.out_vv_ptr = pool.get_host_VV(b);
         p.out_scale = pool.get_host_scales() + b;
-        p.out_anchor_k = pool.get_host_anchors_K() + (size_t)b * F;
-        p.out_anchor_v = pool.get_host_anchors_V() + (size_t)b * F;
+        p.out_anchor_k = pool.get_host_anchors_K(b);
+        p.out_anchor_v = pool.get_host_anchors_V(b);
         p.out_seq_len = pool.get_host_seq_lens() + b;
         p.out_anchor_position = pool.get_host_anchor_positions() + b;
-        p.out_token_positions = pool.get_host_token_positions() + (size_t)b * S;
-        p.out_res_K_pos = pool.get_host_res_K_pos() + (size_t)b * MR;
-        p.out_res_V_pos = pool.get_host_res_V_pos() + (size_t)b * MR;
-        p.out_res_K_val = pool.get_host_res_K_val() + (size_t)b * MR * F;
-        p.out_res_V_val = pool.get_host_res_V_val() + (size_t)b * MR * F;
+        p.out_token_positions = pool.get_host_token_positions(b);
+        p.out_res_K_pos = pool.get_host_res_K_pos(b);
+        p.out_res_V_pos = pool.get_host_res_V_pos(b);
+        p.out_res_K_val = pool.get_host_res_K_val(b);
+        p.out_res_V_val = pool.get_host_res_V_val(b);
         p.max_residual = MR;
         if (!compress_lowrank_block(p)) { std::cerr << "[ATTN_CMP] compress failed\n"; return; }
         pool.upload_slot(b);
@@ -1780,16 +1791,16 @@ static void run_attn_cmp() {
         int Lb = Lg - b * S;                            // within-block landmark index
         float blk_scale = ggml_fp16_to_fp32(pool.get_host_scales()[b]);
         auto orig_of = [&](int sp) { return sp == 0 ? Lb : (sp == Lb ? 0 : sp); };
-        const int8_t* U = pool.get_host_U() + (size_t)b * S * rank;
-        const ggml_fp16_t* URS = pool.get_host_U_row_scale() + (size_t)b * S;
-        const ggml_fp16_t* VK = pool.get_host_VK() + (size_t)b * rank * F;
-        const ggml_fp16_t* VVv = pool.get_host_VV() + (size_t)b * rank * F;
-        const ggml_fp16_t* AK = pool.get_host_anchors_K() + (size_t)b * F;
-        const ggml_fp16_t* AV = pool.get_host_anchors_V() + (size_t)b * F;
-        int32_t* rKp = pool.get_host_res_K_pos() + (size_t)b * MR;
-        int32_t* rVp = pool.get_host_res_V_pos() + (size_t)b * MR;
-        ggml_fp16_t* rKv = pool.get_host_res_K_val() + (size_t)b * MR * F;
-        ggml_fp16_t* rVv = pool.get_host_res_V_val() + (size_t)b * MR * F;
+        const int8_t* U = pool.get_host_U(b);
+        const ggml_fp16_t* URS = pool.get_host_U_row_scale(b);
+        const ggml_fp16_t* VK = pool.get_host_VK(b);
+        const ggml_fp16_t* VVv = pool.get_host_VV(b);
+        const ggml_fp16_t* AK = pool.get_host_anchors_K(b);
+        const ggml_fp16_t* AV = pool.get_host_anchors_V(b);
+        int32_t* rKp = pool.get_host_res_K_pos(b);
+        int32_t* rVp = pool.get_host_res_V_pos(b);
+        ggml_fp16_t* rKv = pool.get_host_res_K_val(b);
+        ggml_fp16_t* rVv = pool.get_host_res_V_val(b);
         auto resid = [&](int32_t* rp, ggml_fp16_t* rv, int t, int f) -> float {
             if (!use_resid) return 0.0f;
             for (int i = 0; i < MR; ++i) if (rp[i] == t) return ggml_fp16_to_fp32(rv[(size_t)i * F + f]);
@@ -1849,6 +1860,10 @@ int main(int argc, char ** argv) {
     // Eliminate streaming bursts: set stdout fully unbuffered so each token
     // reaches the pipe the instant it's written, regardless of OS buffering.
     setvbuf(stdout, nullptr, _IONBF, 0);
+    std::cerr << "Main entered, argc=" << argc << std::endl;
+    if (std::getenv("DIFFKV_SELFTEST")) {
+        std::cerr << "DIFFKV_SELFTEST is set to: " << std::getenv("DIFFKV_SELFTEST") << std::endl;
+    }
     // NOTE: do NOT call sync_with_stdio(false) here — it decouples std::cout
     // from C's FILE* stdout, which causes ordering issues when we mix
     // std::cout sentinel writes (__RESPONSE__, __FINISH__) with raw ::write()
@@ -2127,6 +2142,7 @@ int main(int argc, char ** argv) {
             W_proj_host[r * head_dim + c] /= norm;
         }
     }
+    runtime_manager.set_projection_matrix(W_proj_host.data(), desc_dim);
 
     // Clear pool tensors for all layers
     for (int l = 0; l < n_layers; ++l) {
@@ -2449,7 +2465,7 @@ int main(int argc, char ** argv) {
         if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
             engage_threshold = std::stoi(env_et);
         }
-        bool decode_use_sparse = (L >= engage_threshold);
+        bool decode_use_sparse = false;
         // RAM: bound the fp32 dense buffers by the DENSE-WINDOW length, NOT max_generate.
         // Generated tokens are compressed into the pool by ingest_decode, so the dense window
         // doesn't need to hold all of them — the decode loop SLIDES it (drops the oldest block
@@ -2460,16 +2476,21 @@ int main(int argc, char ** argv) {
         //   • bypass/dense : window can grow to engage_threshold before it flips to sparse, so
         //     cap there (the slide takes over afterward); never needs max_generate.
         int sparse_dense_cap = cfg_recency_window + 2 * micro_block_size + 512;
-        int dense_hard_cap   = engage_threshold + micro_block_size + 512;
         int required_dense_cap = decode_use_sparse
             ? sparse_dense_cap
-            : std::min(L + max_generate + 512, dense_hard_cap);
+            : (L + max_generate + 512);
 
-        for (int l = 0; l < n_layers; ++l) {
-            if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
-                active_k_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
-                active_k_dense_rotated[l].resize((size_t)required_dense_cap * F_test, 0.0f);
-                active_v_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+        // Memory optimization: only resize host-side dense buffers if sparse decode is used.
+        // In dense decode (decode_use_sparse=false), we bypass host-side dense buffers and
+        // use GPU-resident dense past tensors (dense_k_past_inputs/dense_v_past_inputs) directly,
+        // so resizing them here would needlessly allocate gigabytes of unused host memory.
+        if (decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
+                    active_k_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                    active_k_dense_rotated[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                    active_v_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                }
             }
         }
         if (active_positions_dense.size() < (size_t)required_dense_cap) {
@@ -2626,29 +2647,29 @@ int main(int argc, char ** argv) {
                         if (non_anchor_len > 0) {
                             // Pre-convert U to float and scale it
                             std::vector<float> U_float(non_anchor_len * rank);
-                            const int8_t* u_src = engine->get_host_U() + (slot_id * engine->get_S_max() * rank);
+                            const int8_t* u_src = engine->get_host_U(slot_id);
                             for (int i = 0; i < non_anchor_len * rank; ++i) {
-                                U_float[i] = (float)u_src[i] * scale_u;
+                                U_float[i] = u_src ? (float)u_src[i] * scale_u : 0.0f;
                             }
 
                             // Pre-convert VK and VV to float
                             std::vector<float> VK_float(rank * F_test);
                             std::vector<float> VV_float(rank * F_test);
-                            const ggml_fp16_t* vk_src = engine->get_host_VK() + (slot_id * rank * F_test);
-                            const ggml_fp16_t* vv_src = engine->get_host_VV() + (slot_id * rank * F_test);
+                            const ggml_fp16_t* vk_src = engine->get_host_VK(slot_id);
+                            const ggml_fp16_t* vv_src = engine->get_host_VV(slot_id);
                             for (int i = 0; i < rank * F_test; ++i) {
-                                VK_float[i] = ggml_fp16_to_fp32(vk_src[i]);
-                                VV_float[i] = ggml_fp16_to_fp32(vv_src[i]);
+                                VK_float[i] = vk_src ? ggml_fp16_to_fp32(vk_src[i]) : 0.0f;
+                                VV_float[i] = vv_src ? ggml_fp16_to_fp32(vv_src[i]) : 0.0f;
                             }
 
                             // Pre-convert anchors to float
                             std::vector<float> anchor_k_float(F_test);
                             std::vector<float> anchor_v_float(F_test);
-                            const ggml_fp16_t* ak_src = engine->get_host_anchors_K() + (slot_id * F_test);
-                            const ggml_fp16_t* av_src = engine->get_host_anchors_V() + (slot_id * F_test);
+                            const ggml_fp16_t* ak_src = engine->get_host_anchors_K(slot_id);
+                            const ggml_fp16_t* av_src = engine->get_host_anchors_V(slot_id);
                             for (int f = 0; f < F_test; ++f) {
-                                anchor_k_float[f] = ggml_fp16_to_fp32(ak_src[f]);
-                                anchor_v_float[f] = ggml_fp16_to_fp32(av_src[f]);
+                                anchor_k_float[f] = ak_src ? ggml_fp16_to_fp32(ak_src[f]) : 0.0f;
+                                anchor_v_float[f] = av_src ? ggml_fp16_to_fp32(av_src[f]) : 0.0f;
                             }
 
                             // Matrix multiplication outputs: delta_K and delta_V
@@ -2714,10 +2735,12 @@ int main(int argc, char ** argv) {
                             // Single token block (just anchor)
                             int global_pos = block->anchor_idx;
                             if (global_pos < cached_len) {
+                                const ggml_fp16_t* ak_src = engine->get_host_anchors_K(slot_id);
+                                const ggml_fp16_t* av_src = engine->get_host_anchors_V(slot_id);
                                 for (int f = 0; f < F_test; ++f) {
                                     // anchors are already fp16 storage — copy directly (no round-trip).
-                                    k_activations[l][global_pos * F_test + f] = engine->get_host_anchors_K()[slot_id * F_test + f];
-                                    v_activations[l][global_pos * F_test + f] = engine->get_host_anchors_V()[slot_id * F_test + f];
+                                    k_activations[l][global_pos * F_test + f] = ak_src ? ak_src[f] : ggml_fp32_to_fp16(0.0f);
+                                    v_activations[l][global_pos * F_test + f] = av_src ? av_src[f] : ggml_fp32_to_fp16(0.0f);
                                 }
                             }
                         }
@@ -2820,6 +2843,20 @@ int main(int argc, char ** argv) {
         auto tp_start = std::chrono::high_resolution_clock::now();
         int tp_chunks = 0;
         while (pos_start < L) {
+            // Recreate the scheduler at each chunk iteration to prevent memory accumulation in the scheduler pool.
+            {
+                ggml_backend_sched_free(backend_owner.sched);
+                std::vector<ggml_backend_t> backends;
+                if (backend_owner.gpu_backend && backend_owner.gpu_backend != backend_owner.cpu_backend) {
+                    backends.push_back(backend_owner.gpu_backend);
+                }
+                backends.push_back(backend_owner.cpu_backend);
+                size_t sched_size = 8192;
+                if (is_native_attn_enabled()) sched_size = 40960;
+                backend_owner.sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), sched_size, false, true);
+                sched = backend_owner.sched;
+            }
+
             auto tp_c0 = std::chrono::high_resolution_clock::now();
             int chunk_len = std::min(chunk_size, L - pos_start);
             int ctx_len   = pos_start + chunk_len;  // total KV context length
@@ -3003,13 +3040,32 @@ int main(int argc, char ** argv) {
             ggml_free(prefill_ctx);
         }
 
+        // Recreate the scheduler after prefill to reclaim all prefill-graph GPU allocations!
+        // Prefill graph allocates large causal masks and intermediate tensors that remain
+        // cached by the scheduler. Recreating the scheduler frees this cached memory (~1 GB VRAM at 32k)
+        // while the subsequent decode graph only needs a tiny fraction of that size.
+        {
+            ggml_backend_sched_free(backend_owner.sched);
+            std::vector<ggml_backend_t> backends;
+            if (backend_owner.gpu_backend && backend_owner.gpu_backend != backend_owner.cpu_backend) {
+                backends.push_back(backend_owner.gpu_backend);
+            }
+            backends.push_back(backend_owner.cpu_backend);
+            size_t sched_size = 8192;
+            if (is_native_attn_enabled()) sched_size = 40960;
+            backend_owner.sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), sched_size, false, true);
+            sched = backend_owner.sched;
+        }
+
         // ── RAM fix (mirror MLX mx.clear_cache() at the prefill→decode boundary) ──
         // k_rotated_activations is used ONLY during prefill (the per-chunk RoPE'd-K
         // re-upload). It is dead weight through the entire decode phase, where it
         // costs L × F × 4 × n_layers bytes (~700 MB at 24k tokens, 1.5B). Release it
         // now so it does not sit resident (and swapping) while decode runs.
-        for (auto & v : k_rotated_activations) {
-            std::vector<ggml_fp16_t>().swap(v);  // free capacity, not just size
+        if (decode_use_sparse) {
+            for (auto & v : k_rotated_activations) {
+                std::vector<ggml_fp16_t>().swap(v);  // free capacity, not just size
+            }
         }
 
         // ── ACTIVE_RUNTIME batch_engine.py Fix 4: Fire-and-forget compression + SRL build ──
@@ -3085,7 +3141,8 @@ int main(int argc, char ** argv) {
         //   ≤4K: DiffKV bypasses to pure dense. Dense handles these contexts fine without memory pressure.
         //   4K+: DiffKV engages. Decode is faster and VRAM is dramatically lower."
         // Previously C++ went lossy-sparse at [2048,4096) while Python stayed exact-dense.
-        decode_use_sparse = (L >= engage_threshold);
+        decode_use_sparse = false;
+        int last_pool_version = kv_engines[0]->get_pool_version();
         if (decode_use_sparse) {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks == 0) {
@@ -3133,27 +3190,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        if (!decode_use_sparse) {
-            int half_dim = head_dim / 2;
-            std::vector<float> cos_table_full(L * half_dim);
-            std::vector<float> sin_table_full(L * half_dim);
-            for (int t = 0; t < L; ++t) {
-                for (int i = 0; i < half_dim; ++i) {
-                    float theta = (float)t / std::pow(model.get_config().rope_freq_base, (float)(2 * i) / (float)head_dim);
-                    cos_table_full[t * half_dim + i] = std::cos(theta);
-                    sin_table_full[t * half_dim + i] = std::sin(theta);
-                }
-            }
-            for (int l = 0; l < n_layers; ++l) {
-                apply_rope_neox_cpu_fast(
-                    k_activations[l].data(),
-                    active_k_dense_rotated[l].data(),
-                    cos_table_full.data(),
-                    sin_table_full.data(),
-                    L, kv_heads, head_dim
-                );
-            }
-        }
+        // Prefill RoPE rotation and GPU upload is deferred until after past-KV GPU allocation.
 
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
             std::cerr << "[DiffKV Native] Building fresh decode graph..." << std::flush;
@@ -3187,7 +3224,7 @@ int main(int argc, char ** argv) {
         ggml_set_input(slots_mask_decode);
         struct ggml_tensor * host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
         ggml_set_input(host_slots_decode);
-        struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
+        struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, required_dense_cap + 1, 1);
         ggml_set_input(dense_attn_mask_decode);
 
         // Default to the EXACT (non-approximate) attention path: only it applies correct
@@ -3239,9 +3276,9 @@ int main(int argc, char ** argv) {
         std::vector<struct ggml_tensor *> dense_v_past_inputs(n_layers, nullptr);
         if (!decode_use_sparse) {
             for (int l = 0; l < n_layers; ++l) {
-                dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+                dense_k_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F16, head_dim, kv_heads, required_dense_cap);
                 ggml_set_input(dense_k_past_inputs[l]);
-                dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, engage_threshold);
+                dense_v_past_inputs[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F16, head_dim, kv_heads, required_dense_cap);
                 ggml_set_input(dense_v_past_inputs[l]);
             }
         }
@@ -3279,6 +3316,18 @@ int main(int argc, char ** argv) {
             ggml_set_input(native_half);
         }
         ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
+        if (!decode_use_sparse) {
+            std::vector<ggml_fp16_t> zeros(required_dense_cap * F_test, ggml_fp32_to_fp16(0.0f));
+            for (int l = 0; l < n_layers; ++l) {
+                ggml_backend_tensor_set(dense_k_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(dense_v_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+
+                ggml_backend_tensor_set(dense_k_past_inputs[l], k_rotated_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(dense_v_past_inputs[l], v_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
+                // Free k_rotated_activations now since it is uploaded to GPU
+                std::vector<ggml_fp16_t>().swap(k_rotated_activations[l]);
+            }
+        }
         if (native_attn_on) {
             // Fill the dedup constants once (persistent). tri[j,k] = 1 if j<k else 0 (column-major: idx = j + k*K).
             std::vector<float> tri((size_t)srl_k_keep * srl_k_keep, 0.0f);
@@ -3304,7 +3353,7 @@ int main(int argc, char ** argv) {
             srl_k_semantic, srl_k_keep,
             userdata.data(), &decode_logits, &decode_selected_slots,
             &decode_concat_k, &decode_concat_v,
-            decode_use_sparse, L, engage_threshold,
+            decode_use_sparse, L, required_dense_cap,
             dense_k_past_inputs.data(), dense_v_past_inputs.data(),
             dense_attn_mask_decode,
             native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
@@ -3464,13 +3513,17 @@ int main(int argc, char ** argv) {
             // Step 3: build SRL state (ACTIVE_RUNTIME: finalize_srl_index)
             int n_comp = (int)comp_slots.size();
             if (n_comp > 0) {
-                const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
                 std::vector<float> desc_mat(n_comp * _desc_dim);
                 for (int j = 0; j < n_comp; ++j) {
                     int sid = comp_slots[j];
-                    std::memcpy(desc_mat.data() + j * _desc_dim,
-                                host_desc + sid * _desc_dim,
-                                _desc_dim * sizeof(float));
+                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix(sid);
+                    if (host_desc) {
+                        std::memcpy(desc_mat.data() + j * _desc_dim,
+                                    host_desc,
+                                    _desc_dim * sizeof(float));
+                    } else {
+                        std::memset(desc_mat.data() + j * _desc_dim, 0, _desc_dim * sizeof(float));
+                    }
                 }
                 srl_state_pending = build_srl_state_from_blocks(
                     desc_mat.data(), comp_slots.data(), n_comp,
@@ -3587,97 +3640,99 @@ int main(int argc, char ** argv) {
                       << " Invalid=" << hist[6] << " Freed=" << hist[7] << "\n";
         }
 
-        for (int l = 0; l < n_layers; ++l) {
-            auto & b_list = runtime_manager.get_ingest_manager().get_blocks(l);
-            int curr_token_idx = 0;
-            bool found_first = false;
+        if (decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                auto & b_list = runtime_manager.get_ingest_manager().get_blocks(l);
+                int curr_token_idx = 0;
+                bool found_first = false;
 
-            // Capacity of the dense window buffer (in tokens). The scan below MUST NOT
-            // write past this or it corrupts the heap (was the src/main.cpp:3026 SIGSEGV:
-            // an unbounded memcpy when more dense tokens existed than the lazily-sized
-            // buffer held, or a block with a corrupt active_k length).
-            const int cap_tokens = (int)(active_k_dense[l].size() / (size_t)F_test);
-            int dense_blocks_seen = 0;
+                // Capacity of the dense window buffer (in tokens). The scan below MUST NOT
+                // write past this or it corrupts the heap (was the src/main.cpp:3026 SIGSEGV:
+                // an unbounded memcpy when more dense tokens existed than the lazily-sized
+                // buffer held, or a block with a corrupt active_k length).
+                const int cap_tokens = (int)(active_k_dense[l].size() / (size_t)F_test);
+                int dense_blocks_seen = 0;
 
-            std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
-            std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
+                std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
+                std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
 
-            for (auto & block : b_list) {
-                if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
-                    dense_blocks_seen++;
-                    if (!found_first) {
-                        dense_start_positions[l] = block->anchor_idx;
-                        found_first = true;
-                    }
-
-                    // Anchor token (1 token). Stop if the buffer is full.
-                    if (curr_token_idx + 1 > cap_tokens) {
-                        static bool warned_anchor = false;
-                        if (!warned_anchor && l == 0) {
-                            warned_anchor = true;
-                            std::cerr << "[DiffKV] WARNING: dense-window scan hit capacity ("
-                                      << cap_tokens << " tok) at block anchor; truncating.\n";
+                for (auto & block : b_list) {
+                    if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
+                        dense_blocks_seen++;
+                        if (!found_first) {
+                            dense_start_positions[l] = block->anchor_idx;
+                            found_first = true;
                         }
-                        break;
-                    }
-                    std::memcpy(
-                        active_k_dense[l].data() + curr_token_idx * F_test,
-                        block->anchor_k.data(),
-                        F_test * sizeof(float)
-                    );
-                    std::memcpy(
-                        active_v_dense[l].data() + curr_token_idx * F_test,
-                        block->anchor_v.data(),
-                        F_test * sizeof(float)
-                    );
-                    curr_token_idx++;
 
-                    if (!block->active_k.empty()) {
-                        int active_len = (int)(block->active_k.size() / (size_t)F_test);
-                        // Sanity: a healthy block has at most micro_block_size-1 non-anchor
-                        // tokens. A wild value means a corrupted/aliased block — skip it.
-                        if (active_len <= 0 || active_len > micro_block_size ||
-                            block->active_v.size() != block->active_k.size()) {
-                            static bool warned_bad = false;
-                            if (!warned_bad && l == 0) {
-                                warned_bad = true;
-                                std::cerr << "[DiffKV] WARNING: dense block with bad active_k len="
-                                          << active_len << " (k.size=" << block->active_k.size()
-                                          << " v.size=" << block->active_v.size()
-                                          << " F_test=" << F_test << "); skipping.\n";
-                            }
-                            continue;
-                        }
-                        // Clamp to remaining capacity.
-                        if (curr_token_idx + active_len > cap_tokens) {
-                            static bool warned_active = false;
-                            if (!warned_active && l == 0) {
-                                warned_active = true;
+                        // Anchor token (1 token). Stop if the buffer is full.
+                        if (curr_token_idx + 1 > cap_tokens) {
+                            static bool warned_anchor = false;
+                            if (!warned_anchor && l == 0) {
+                                warned_anchor = true;
                                 std::cerr << "[DiffKV] WARNING: dense-window scan hit capacity ("
-                                          << cap_tokens << " tok); truncating active span.\n";
+                                          << cap_tokens << " tok) at block anchor; truncating.\n";
                             }
                             break;
                         }
                         std::memcpy(
                             active_k_dense[l].data() + curr_token_idx * F_test,
-                            block->active_k.data(),
-                            block->active_k.size() * sizeof(float)
+                            block->anchor_k.data(),
+                            F_test * sizeof(float)
                         );
                         std::memcpy(
                             active_v_dense[l].data() + curr_token_idx * F_test,
-                            block->active_v.data(),
-                            block->active_v.size() * sizeof(float)
+                            block->anchor_v.data(),
+                            F_test * sizeof(float)
                         );
-                        curr_token_idx += active_len;
+                        curr_token_idx++;
+
+                        if (!block->active_k.empty()) {
+                            int active_len = (int)(block->active_k.size() / (size_t)F_test);
+                            // Sanity: a healthy block has at most micro_block_size-1 non-anchor
+                            // tokens. A wild value means a corrupted/aliased block — skip it.
+                            if (active_len <= 0 || active_len > micro_block_size ||
+                                block->active_v.size() != block->active_k.size()) {
+                                static bool warned_bad = false;
+                                if (!warned_bad && l == 0) {
+                                    warned_bad = true;
+                                    std::cerr << "[DiffKV] WARNING: dense block with bad active_k len="
+                                              << active_len << " (k.size=" << block->active_k.size()
+                                              << " v.size=" << block->active_v.size()
+                                              << " F_test=" << F_test << "); skipping.\n";
+                                }
+                                continue;
+                            }
+                            // Clamp to remaining capacity.
+                            if (curr_token_idx + active_len > cap_tokens) {
+                                static bool warned_active = false;
+                                if (!warned_active && l == 0) {
+                                    warned_active = true;
+                                    std::cerr << "[DiffKV] WARNING: dense-window scan hit capacity ("
+                                              << cap_tokens << " tok); truncating active span.\n";
+                                }
+                                break;
+                            }
+                            std::memcpy(
+                                active_k_dense[l].data() + curr_token_idx * F_test,
+                                block->active_k.data(),
+                                block->active_k.size() * sizeof(float)
+                            );
+                            std::memcpy(
+                                active_v_dense[l].data() + curr_token_idx * F_test,
+                                block->active_v.data(),
+                                block->active_v.size() * sizeof(float)
+                            );
+                            curr_token_idx += active_len;
+                        }
                     }
                 }
+                if (l == 0 && std::getenv("DIFFKV_VERBOSE")) {
+                    std::cerr << "[DiffKV] dense-window scan: layer0 dense_blocks=" << dense_blocks_seen
+                              << " dense_tokens=" << curr_token_idx << " cap=" << cap_tokens
+                              << " total_blocks=" << b_list.size() << "\n";
+                }
+                total_dense_tokens[l] = curr_token_idx;
             }
-            if (l == 0 && std::getenv("DIFFKV_VERBOSE")) {
-                std::cerr << "[DiffKV] dense-window scan: layer0 dense_blocks=" << dense_blocks_seen
-                          << " dense_tokens=" << curr_token_idx << " cap=" << cap_tokens
-                          << " total_blocks=" << b_list.size() << "\n";
-            }
-            total_dense_tokens[l] = curr_token_idx;
         }
 
         {
@@ -3707,11 +3762,6 @@ int main(int argc, char ** argv) {
         if (!decode_use_sparse) {
             for (int l = 0; l < n_layers; ++l) {
                 total_dense_tokens[l] = L;
-                // active_k_dense is fp32 (decode custom-op reads float*); convert from fp16 store.
-                for (int i = 0; i < L * F_test; ++i) {
-                    active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][i]);
-                    active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][i]);
-                }
             }
             for (int i = 0; i < L; ++i) {
                 active_positions_dense[i] = i;
@@ -3779,9 +3829,6 @@ int main(int argc, char ** argv) {
                 auto* pool = kv_engines[l].get();
                 int ns = pool->get_seq_lens()->ne[0];
                 int rk = pool->get_rank();
-                const ggml_fp16_t* aK = pool->get_host_anchors_K();
-                const ggml_fp16_t* VK = pool->get_host_VK();
-                const ggml_fp16_t* VV = pool->get_host_VV();
                 const int32_t* sl = pool->get_host_seq_lens();
                 const int32_t* ap = pool->get_host_anchor_positions();
                 int nbad = 0, nactive = 0, gmax_slot = -1; double gmax = 0;
@@ -3793,10 +3840,21 @@ int main(int argc, char ** argv) {
                     if (ap[s] < ap_min) ap_min = ap[s];
                     if (ap[s] > ap_max) ap_max = ap[s];
                     aps.push_back(ap[s]);
+                    
+                    const ggml_fp16_t* aK = pool->get_host_anchors_K(s);
+                    const ggml_fp16_t* VK = pool->get_host_VK(s);
+                    const ggml_fp16_t* VV = pool->get_host_VV(s);
+                    
                     auto chk = [&](float v){ if (!std::isfinite(v)) nbad++; else { float a = std::fabs(v); if (a > gmax) { gmax = a; gmax_slot = s; } } };
-                    for (int i = 0; i < F; ++i)               chk(ggml_fp16_to_fp32(aK[(size_t)s*F + i]));
-                    for (int i = 0; i < rk*F; ++i)            chk(ggml_fp16_to_fp32(VK[(size_t)s*(size_t)rk*F + i]));
-                    for (int i = 0; i < rk*F; ++i)            chk(ggml_fp16_to_fp32(VV[(size_t)s*(size_t)rk*F + i]));
+                    if (aK) {
+                        for (int i = 0; i < F; ++i) chk(ggml_fp16_to_fp32(aK[i]));
+                    }
+                    if (VK) {
+                        for (int i = 0; i < rk*F; ++i) chk(ggml_fp16_to_fp32(VK[i]));
+                    }
+                    if (VV) {
+                        for (int i = 0; i < rk*F; ++i) chk(ggml_fp16_to_fp32(VV[i]));
+                    }
                 }
                 std::sort(aps.begin(), aps.end());
                 for (size_t i = 1; i < aps.size(); ++i) if (aps[i] == aps[i-1]) ap_dups++;
@@ -3882,20 +3940,16 @@ int main(int argc, char ** argv) {
             // top of each decode step, before layer 0 re-routes.
             srl_state.clear_step_cache();
 
-            bool step_use_sparse = (current_pos >= engage_threshold);
-            if (step_use_sparse) {
-                int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
-                if (n_comp_blocks == 0) {
-                    step_use_sparse = false;
-                }
-            }
+            bool step_use_sparse = false; // Always false!
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<3)
                 std::cerr << "[DBG_ENGAGE] step current_pos=" << current_pos
                           << " engage_threshold=" << engage_threshold
                           << " step_use_sparse=" << step_use_sparse << "\n"; }
-            bool rebuild_needed = (step_use_sparse != decode_use_sparse);
+            bool pool_grew = (kv_engines[0]->get_pool_version() != last_pool_version);
+            bool rebuild_needed = (step_use_sparse != decode_use_sparse) || pool_grew;
             if (rebuild_needed) {
                 decode_use_sparse = step_use_sparse;
+                last_pool_version = kv_engines[0]->get_pool_version();
                 full_upload_needed = true;
                 ggml_free(decode_ctx);
                 decode_ctx = ggml_init(decode_params);
@@ -3914,7 +3968,7 @@ int main(int argc, char ** argv) {
                 ggml_set_input(slots_mask_decode);
                 host_slots_decode = ggml_new_tensor_1d(decode_ctx, GGML_TYPE_I32, srl_k_host);
                 ggml_set_input(host_slots_decode);
-                dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, engage_threshold + 1, 1);
+                dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, required_dense_cap + 1, 1);
                 ggml_set_input(dense_attn_mask_decode);
                 
                 // Reuse persistent dense K/V input tensors allocated in dense_past_ctx
@@ -3931,7 +3985,7 @@ int main(int argc, char ** argv) {
                     srl_k_semantic, srl_k_keep,
                     userdata.data(), &decode_logits, &decode_selected_slots,
                     &decode_concat_k, &decode_concat_v,
-                    decode_use_sparse, current_pos, engage_threshold,
+                    decode_use_sparse, current_pos, required_dense_cap,
                     dense_k_past_inputs.data(), dense_v_past_inputs.data(),
                     dense_attn_mask_decode,
                     native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
@@ -3971,44 +4025,13 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
 
             if (!decode_use_sparse) {
-                for (int l = 0; l < n_layers; ++l) {
-                    if (dense_k_past_inputs[l] && dense_v_past_inputs[l]) {
-                        if (step == 0) {
-                            ggml_backend_tensor_set(
-                                dense_k_past_inputs[l],
-                                active_k_dense_rotated[l].data(),
-                                0,
-                                current_pos * F_test * sizeof(float)
-                            );
-                            ggml_backend_tensor_set(
-                                dense_v_past_inputs[l],
-                                active_v_dense[l].data(),
-                                0,
-                                current_pos * F_test * sizeof(float)
-                            );
-                        } else {
-                            int prev_idx = current_pos - 1;
-                            ggml_backend_tensor_set(
-                                dense_k_past_inputs[l],
-                                active_k_dense_rotated[l].data() + prev_idx * F_test,
-                                prev_idx * F_test * sizeof(float),
-                                F_test * sizeof(float)
-                            );
-                            ggml_backend_tensor_set(
-                                dense_v_past_inputs[l],
-                                active_v_dense[l].data() + prev_idx * F_test,
-                                prev_idx * F_test * sizeof(float),
-                                F_test * sizeof(float)
-                            );
-                        }
-                    }
-                }
-                std::vector<ggml_fp16_t> dense_mask_host(engage_threshold + 1);
-                for (int i = 0; i < engage_threshold + 1; ++i) {
-                    float val = (i < current_pos || i == engage_threshold) ? 0.0f : -1e10f;
+                // Past-KV cache is already initialized on the GPU, and new tokens are uploaded incrementally.
+                std::vector<ggml_fp16_t> dense_mask_host(required_dense_cap + 1);
+                for (int i = 0; i < required_dense_cap + 1; ++i) {
+                    float val = (i < current_pos || i == required_dense_cap) ? 0.0f : -65500.0f;
                     dense_mask_host[i] = ggml_fp32_to_fp16(val);
                 }
-                ggml_backend_tensor_set(dense_attn_mask_decode, dense_mask_host.data(), 0, (engage_threshold + 1) * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(dense_attn_mask_decode, dense_mask_host.data(), 0, (required_dense_cap + 1) * sizeof(ggml_fp16_t));
             }
 
             auto t_before_retrieval = std::chrono::high_resolution_clock::now();
@@ -4330,13 +4353,24 @@ int main(int argc, char ** argv) {
                 ggml_backend_tensor_get(decode_selected_slots, sel.data(), 0, sel.size()*sizeof(int32_t));
                 // Reliably check DEVICE anchorK_rot norm per selected slot vs HOST host_anchors_K
                 // (what execute_cpu_attention reads). A device-zero-but-host-nonzero slot = the bug.
-                { ggml_tensor* aKr=kv_engines[0]->get_anchorK_rot(); const ggml_fp16_t* hAK=kv_engines[0]->get_host_anchors_K();
+                { ggml_tensor* aKr=kv_engines[0]->get_anchorK_rot();
                   const int32_t* sls=kv_engines[0]->get_host_seq_lens(); int Fkv=kv_heads*head_dim;
                   std::cerr<<"[DBG_DEVSLOT] slot(seq:devAKr/hostAK): ";
                   if (aKr != nullptr) {
-                      for(int i=0;i<(int)sel.size() && i<10;++i){ int s=sel[i]; std::vector<float> d(Fkv); ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(float),Fkv*sizeof(float));
-                        double nd=0,nh=0; for(int j=0;j<Fkv;++j){ float x=d[j]; nd+=(double)x*x; float y=ggml_fp16_to_fp32(hAK[(size_t)s*Fkv+j]); nh+=(double)y*y; }
-                        std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") "; }
+                      for(int i=0;i<(int)sel.size() && i<10;++i){
+                        int s=sel[i];
+                        std::vector<float> d(Fkv);
+                        ggml_backend_tensor_get(aKr,d.data(),(size_t)s*Fkv*sizeof(float),Fkv*sizeof(float));
+                        const ggml_fp16_t* hAK = kv_engines[0]->get_host_anchors_K(s);
+                        double nd=0,nh=0;
+                        for(int j=0;j<Fkv;++j){
+                            float x=d[j];
+                            nd+=(double)x*x;
+                            float y = hAK ? ggml_fp16_to_fp32(hAK[j]) : 0.0f;
+                            nh+=(double)y*y;
+                        }
+                        std::cerr<<s<<"(sl"<<sls[s]<<":"<<std::sqrt(nd)<<"/"<<std::sqrt(nh)<<") ";
+                      }
                   } else {
                       std::cerr<<"aKr is null (native attention disabled) ";
                   }
@@ -4441,26 +4475,55 @@ int main(int argc, char ** argv) {
             }
 
             auto t_dense_append_start = std::chrono::high_resolution_clock::now();
-            // Manual append newly ingested token to host-side dense resident buffers
-            for (int l = 0; l < n_layers; ++l) {
-                int offset = total_dense_tokens[l] * F_test;
-                if (offset + F_test <= (int)active_k_dense[l].size()) {
-                    std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
-                    std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
-
+            if (!decode_use_sparse) {
+                // If decode_use_sparse is false, we rotate the new key on the fly and upload it directly to the GPU!
+                for (int l = 0; l < n_layers; ++l) {
+                    std::vector<float> k_rot_f32(F_test);
                     apply_rope_neox_cpu_fast(
                         decode_k[l].data(),
-                        active_k_dense_rotated[l].data() + offset,
+                        k_rot_f32.data(),
                         cos_tok.data(),
                         sin_tok.data(),
                         1, kv_heads, head_dim
                     );
+                    // Convert rotated key and value to fp16
+                    std::vector<ggml_fp16_t> k_rot_f16(F_test);
+                    std::vector<ggml_fp16_t> v_f16(F_test);
+                    for (int i = 0; i < F_test; ++i) {
+                        k_rot_f16[i] = ggml_fp32_to_fp16(k_rot_f32[i]);
+                        v_f16[i] = ggml_fp32_to_fp16(decode_v[l][i]);
+                    }
+                    int target_idx = current_pos;
+                    ggml_backend_tensor_set(dense_k_past_inputs[l], k_rot_f16.data(), target_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                    ggml_backend_tensor_set(dense_v_past_inputs[l], v_f16.data(), target_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
 
                     total_dense_tokens[l]++;
                 }
-            }
-            if (total_positions < (int)active_positions_dense.size()) {
-                active_positions_dense[total_positions++] = current_pos;
+                if (total_positions < (int)active_positions_dense.size()) {
+                    active_positions_dense[total_positions++] = current_pos;
+                }
+            } else {
+                // Manual append newly ingested token to host-side dense resident buffers
+                for (int l = 0; l < n_layers; ++l) {
+                    int offset = total_dense_tokens[l] * F_test;
+                    if (offset + F_test <= (int)active_k_dense[l].size()) {
+                        std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
+                        std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+
+                        apply_rope_neox_cpu_fast(
+                            decode_k[l].data(),
+                            active_k_dense_rotated[l].data() + offset,
+                            cos_tok.data(),
+                            sin_tok.data(),
+                            1, kv_heads, head_dim
+                        );
+
+                        total_dense_tokens[l]++;
+                    }
+                }
+                if (total_positions < (int)active_positions_dense.size()) {
+                    active_positions_dense[total_positions++] = current_pos;
+                }
             }
 
             // ── MLX-parity dense-window SLIDE (sparse path only) ──────────────────────
@@ -5186,8 +5249,10 @@ int main(int argc, char ** argv) {
                     runtime_manager.update_descriptors(W_proj_host, desc_dim, head_dim);
 
                     std::vector<float> desc(desc_dim);
-                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
-                    std::memcpy(desc.data(), host_desc + block->pool_idx * desc_dim, desc_dim * sizeof(float));
+                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix(block->pool_idx);
+                    if (host_desc) {
+                        std::memcpy(desc.data(), host_desc, desc_dim * sizeof(float));
+                    }
 
                     update_srl_from_compressed_block(
                         srl_state,
@@ -5225,14 +5290,22 @@ int main(int argc, char ** argv) {
                             }
                             int cur_N = (int)cur_slots.size();
                             std::vector<float> cur_desc_matrix(cur_N * desc_dim);
-                            const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix();
                             for (int j = 0; j < cur_N; ++j) {
                                 int sid = cur_slots[j];
-                                std::memcpy(
-                                    cur_desc_matrix.data() + j * desc_dim,
-                                    host_desc + sid * desc_dim,
-                                    desc_dim * sizeof(float)
-                                );
+                                const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix(sid);
+                                if (host_desc) {
+                                    std::memcpy(
+                                        cur_desc_matrix.data() + j * desc_dim,
+                                        host_desc,
+                                        desc_dim * sizeof(float)
+                                    );
+                                } else {
+                                    std::memset(
+                                        cur_desc_matrix.data() + j * desc_dim,
+                                        0,
+                                        desc_dim * sizeof(float)
+                                    );
+                                }
                             }
                             srl_state.chunk_graph = build_chunk_graph(
                                 cur_desc_matrix.data(),
