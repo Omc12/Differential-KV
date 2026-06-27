@@ -12,6 +12,7 @@
 #include <random>
 #include <map>
 #include <unistd.h>
+#include <thread>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #include <pthread.h>
@@ -4048,6 +4049,14 @@ int main(int argc, char ** argv) {
         double sum_other_ms = 0.0;
         int profile_steps = 0;
 
+        std::thread svd_thread;
+        bool svd_thread_active = false;
+        std::vector<std::vector<float>> prev_decode_k;
+        std::vector<std::vector<float>> prev_decode_v;
+        std::vector<int32_t> prev_all_tokens;
+        int prev_pos = 0;
+        bool has_prev_svd = false;
+
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
 
@@ -4469,9 +4478,22 @@ int main(int argc, char ** argv) {
                           << " MAP_CUSTOM3=" << nc3 << " DIFFKV_ATTN=" << ndk
                           << " FLASH_ATTN=" << nflash << "\n";
             }}
+            if (has_prev_svd) {
+                svd_thread = std::thread([&runtime_manager, prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state]() {
+                    runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state);
+                });
+                svd_thread_active = true;
+            }
+
             ggml_status decode_st = native_attn_on
                 ? ggml_backend_graph_compute(backend, decode_graph)
                 : ggml_backend_sched_graph_compute(sched, decode_graph);
+
+            if (svd_thread_active) {
+                svd_thread.join();
+                svd_thread_active = false;
+            }
+
             if (std::getenv("DIFFKV_DBG_GRAPH")) { static int o=0; if(o++<10)
                 std::cerr << "[DBG_CBCOUNT] step=" << o << " sparse=" << decode_use_sparse
                           << " cb=" << diffkv::g_diffkv_cb_invocations.load()
@@ -4631,9 +4653,12 @@ int main(int argc, char ** argv) {
             double t_vsl_query_ms = 0;
             double t_vsl_process_ms = 0;
 
-            auto t_ingest_dec_start = std::chrono::high_resolution_clock::now();
-            runtime_manager.ingest_decode(decode_k, decode_v, current_pos, all_tokens, &srl_state);
-            t_ingest_dec_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_ingest_dec_start).count();
+            prev_decode_k = decode_k;
+            prev_decode_v = decode_v;
+            prev_all_tokens = all_tokens;
+            prev_pos = current_pos;
+            has_prev_svd = true;
+
 
             {
                 std::vector<float> k_avg(head_dim, 0.0f);
@@ -5688,6 +5713,16 @@ int main(int argc, char ** argv) {
             sum_sampling_ms += step_sample_ms;
             sum_other_ms += step_other_ms;
             profile_steps++;
+        }
+
+        // Join any running background thread after the loop
+        if (svd_thread_active) {
+            svd_thread.join();
+            svd_thread_active = false;
+        }
+        // Run SVD for the final token synchronously
+        if (has_prev_svd) {
+            runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state);
         }
 
         if (profile_steps > 0 && std::getenv("DIFFKV_PROFILE") && std::string(std::getenv("DIFFKV_PROFILE")) == "1") {
