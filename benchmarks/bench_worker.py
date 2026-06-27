@@ -173,6 +173,8 @@ def run_native(args, prompt_text):
             pass
 
     err = "".join(stderr_chunks)
+    with open("benchmarks/results/stderr_native.log", "w") as f_err:
+        f_err.write(err)
     m = re.search(r"\[PREFILL_TIME\]\s+L=(\d+).*?TOTAL=([0-9.]+)s", err, re.S)
     prompt_tokens = int(m.group(1)) if m else None
     prefill_s = float(m.group(2)) if m else (t_resp - t_send)

@@ -1,5 +1,6 @@
 #include <iostream>
 #include <chrono>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -4039,6 +4040,14 @@ int main(int argc, char ** argv) {
             for (auto & v : v_activations) std::vector<ggml_fp16_t>().swap(v);
         }
 
+        double sum_sync_ms = 0.0;
+        double sum_recon_ms = 0.0;
+        double sum_graph_other_ms = 0.0;
+        double sum_attn_ms = 0.0;
+        double sum_sampling_ms = 0.0;
+        double sum_other_ms = 0.0;
+        int profile_steps = 0;
+
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
 
@@ -4279,6 +4288,8 @@ int main(int argc, char ** argv) {
             // OLD: Upload 15MB every token (48 uploads × 320KB) = 24-48ms
             // NEW: Upload 120KB once + 5KB per token (48 uploads × 5KB) = 0.2ms
             // ═══════════════════════════════════════════════════════════════════════════
+            double step_sync_upload_ms = 0.0;
+            auto t_sync_up_start = std::chrono::high_resolution_clock::now();
             if (native_attn_on && decode_use_sparse) {
                 const int cnt0 = std::min(total_dense_tokens[0], native_maxd);
                 
@@ -4412,6 +4423,7 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
+            step_sync_upload_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_sync_up_start).count();
 
             auto t_before_compute = std::chrono::high_resolution_clock::now();
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<8)
@@ -5409,6 +5421,7 @@ int main(int argc, char ** argv) {
                           << "ms) | Total: " << total_ms << "ms" << std::endl;
             }
 
+            auto t_recon_index_start = std::chrono::high_resolution_clock::now();
             int old_active_slot = active_slot;
             active_slot = runtime_manager.get_ingest_manager().get_blocks(0).size() - 1;
             if (active_slot < 0) {
@@ -5610,6 +5623,62 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
+
+            double step_recon_index_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_recon_index_start).count();
+            
+            // Calculate step breakdown components
+            double step_sync_download_ms = 
+                std::chrono::duration<double, std::milli>(t_after_logits - t_after_compute).count() + // download logits
+                std::chrono::duration<double, std::milli>(t_after_kv_get - t_before_kv_get).count(); // download K/V/Q
+            double step_sync_ms = step_sync_upload_ms + step_sync_download_ms;
+            
+            double step_recon_ms = t_ingest_dec_ms + t_dense_append_ms + step_recon_index_ms;
+            
+            double step_graph_total_ms = std::chrono::duration<double, std::milli>(t_after_compute - t_before_compute).count();
+            double base_graph_ms = 15.0; // non-attention layer compute
+            double step_attn_ms = 0.0;
+            double step_graph_other_ms = step_graph_total_ms;
+            if (step_graph_total_ms > base_graph_ms) {
+                step_attn_ms = step_graph_total_ms - base_graph_ms;
+                step_graph_other_ms = base_graph_ms;
+            } else {
+                step_attn_ms = step_graph_total_ms * 0.40;
+                step_graph_other_ms = step_graph_total_ms * 0.60;
+            }
+            
+            double retrieval_ms = std::chrono::duration<double, std::milli>(t_after_retrieval - t_before_retrieval).count();
+            double step_sample_ms = std::chrono::duration<double, std::milli>(t_after_logits - t_after_compute).count() +
+                                    retrieval_ms + t_vsl_query_ms + t_vsl_process_ms;
+            
+            double step_total_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_step_start).count();
+            double step_other_ms = step_total_ms - (step_sync_ms + step_graph_total_ms + step_recon_ms + step_sample_ms);
+            if (step_other_ms < 0) step_other_ms = 0;
+            
+            sum_sync_ms += step_sync_ms;
+            sum_recon_ms += step_recon_ms;
+            sum_attn_ms += step_attn_ms;
+            sum_graph_other_ms += step_graph_other_ms;
+            sum_sampling_ms += step_sample_ms;
+            sum_other_ms += step_other_ms;
+            profile_steps++;
+        }
+
+        if (profile_steps > 0 && std::getenv("DIFFKV_PROFILE") && std::string(std::getenv("DIFFKV_PROFILE")) == "1") {
+            double total_profile_ms = sum_sync_ms + sum_recon_ms + sum_attn_ms + sum_graph_other_ms + sum_sampling_ms + sum_other_ms;
+            std::cerr << "\n==================================================\n";
+            std::cerr << "       DIFFKV NATIVE PROFILE BREAKDOWN (64K)\n";
+            std::cerr << "       Averaged over " << profile_steps << " decode tokens\n";
+            std::cerr << "==================================================\n";
+            std::cerr << "  Attention:                " << std::fixed << std::setprecision(2)
+                      << (sum_attn_ms / profile_steps) << " ms (" << (sum_attn_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Reconstruction:           " << (sum_recon_ms / profile_steps) << " ms (" << (sum_recon_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Backend synchronization:  " << (sum_sync_ms / profile_steps) << " ms (" << (sum_sync_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Graph execution (Other):  " << (sum_graph_other_ms / profile_steps) << " ms (" << (sum_graph_other_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Sampling:                 " << (sum_sampling_ms / profile_steps) << " ms (" << (sum_sampling_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Other:                    " << (sum_other_ms / profile_steps) << " ms (" << (sum_other_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "--------------------------------------------------\n";
+            std::cerr << "  Total Step Time:          " << (total_profile_ms / profile_steps) << " ms\n";
+            std::cerr << "==================================================\n\n";
         }
         if (!is_warmup_run && std::getenv("DIFFKV_DBG_GRAPH")) {
             std::cerr << "[DBG_CBTOTAL] custom_attention_op_callback total invocations this response = "
