@@ -1,2 +1,2 @@
 
-__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 15, "prefill_s": 5.81576, "decode_s": 0.7216051670257002, "decode_tps": 20.78699084407439, "ttft_s": 5.914250291069038, "mx_peak_gb": null, "output_preview": "### Secret Passcode and A", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 4096, "gen_target": 50, "worker_wall_s": 9.560116124921478}
+__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 15, "prefill_s": 5.88037, "decode_s": 0.7332762500736862, "decode_tps": 20.456137776851037, "ttft_s": 5.962235749932006, "mx_peak_gb": null, "output_preview": "### Secret Passcode and A", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 4096, "gen_target": 50, "worker_wall_s": 10.357447874965146}

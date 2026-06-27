@@ -2749,8 +2749,11 @@ int main(int argc, char ** argv) {
                             }
 #endif
 
-                            // Add anchor K/V and multiply by block_scale, then store in activations.
-                            // Copy anchor to landmark position, and delta tokens to their original positions.
+                            const int32_t* slot_res_K_pos = engine->get_host_res_K_pos(slot_id);
+                            const ggml_fp16_t* slot_res_K_val = engine->get_host_res_K_val(slot_id);
+                            const int32_t* slot_res_V_pos = engine->get_host_res_V_pos(slot_id);
+                            const ggml_fp16_t* slot_res_V_val = engine->get_host_res_V_val(slot_id);
+
                             for (int t = 0; t < block_len; ++t) {
                                 int global_pos = block->anchor_idx + t;
                                 if (global_pos >= cached_len) break;
@@ -2764,13 +2767,40 @@ int main(int argc, char ** argv) {
                                 } else {
                                     // Reconstructed from SVD delta
                                     int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
+
+                                    // Look up residual for delta index s
+                                    float res_k_val[F_test];
+                                    float res_v_val[F_test];
+                                    std::memset(res_k_val, 0, sizeof(res_k_val));
+                                    std::memset(res_v_val, 0, sizeof(res_v_val));
+                                    if (slot_res_K_pos && slot_res_K_val) {
+                                        for (int ri = 0; ri < NativeBlockPool::MAX_RESIDUAL; ++ri) {
+                                            if (slot_res_K_pos[ri] == s) {
+                                                for (int f = 0; f < F_test; ++f) {
+                                                    res_k_val[f] = ggml_fp16_to_fp32(slot_res_K_val[ri * F_test + f]);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (slot_res_V_pos && slot_res_V_val) {
+                                        for (int ri = 0; ri < NativeBlockPool::MAX_RESIDUAL; ++ri) {
+                                            if (slot_res_V_pos[ri] == s) {
+                                                for (int f = 0; f < F_test; ++f) {
+                                                    res_v_val[f] = ggml_fp16_to_fp32(slot_res_V_val[ri * F_test + f]);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+
                                     ggml_fp16_t* k_act_row = &k_activations[l][global_pos * F_test];
                                     ggml_fp16_t* v_act_row = &v_activations[l][global_pos * F_test];
                                     const float* k_del_row = &K_delta[s * F_test];
                                     const float* v_del_row = &V_delta[s * F_test];
                                     for (int f = 0; f < F_test; ++f) {
-                                        k_act_row[f] = ggml_fp32_to_fp16(anchor_k_float[f] + k_del_row[f] * block_scale);
-                                        v_act_row[f] = ggml_fp32_to_fp16(anchor_v_float[f] + v_del_row[f] * block_scale);
+                                        k_act_row[f] = ggml_fp32_to_fp16(anchor_k_float[f] + k_del_row[f] * block_scale + res_k_val[f]);
+                                        v_act_row[f] = ggml_fp32_to_fp16(anchor_v_float[f] + v_del_row[f] * block_scale + res_v_val[f]);
                                     }
                                 }
                             }

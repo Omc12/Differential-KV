@@ -931,6 +931,11 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     const ggml_fp16_t* slot_anchors_K = engine->get_host_anchors_K(slot_id);
                     const ggml_fp16_t* slot_anchors_V = engine->get_host_anchors_V(slot_id);
                     
+                    const int32_t* slot_res_K_pos = engine->get_host_res_K_pos(slot_id);
+                    const ggml_fp16_t* slot_res_K_val = engine->get_host_res_K_val(slot_id);
+                    const int32_t* slot_res_V_pos = engine->get_host_res_V_pos(slot_id);
+                    const ggml_fp16_t* slot_res_V_val = engine->get_host_res_V_val(slot_id);
+
                     int landmark_idx = engine->get_host_anchor_positions()[slot_id] - block->anchor_idx;
                     for (int t = 0; t < block_len; ++t) {
                         int global_pos = block->anchor_idx + t;
@@ -943,6 +948,33 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                             }
                         } else {
                             int s = (t == 0) ? (landmark_idx - 1) : (t - 1);
+                            
+                            // Look up residual for delta index s
+                            float res_k_val[F_test];
+                            float res_v_val[F_test];
+                            std::memset(res_k_val, 0, sizeof(res_k_val));
+                            std::memset(res_v_val, 0, sizeof(res_v_val));
+                            if (slot_res_K_pos && slot_res_K_val) {
+                                for (int ri = 0; ri < NativeBlockPool::MAX_RESIDUAL; ++ri) {
+                                    if (slot_res_K_pos[ri] == s) {
+                                        for (int f = 0; f < F_test; ++f) {
+                                            res_k_val[f] = ggml_fp16_to_fp32(slot_res_K_val[ri * F_test + f]);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            if (slot_res_V_pos && slot_res_V_val) {
+                                for (int ri = 0; ri < NativeBlockPool::MAX_RESIDUAL; ++ri) {
+                                    if (slot_res_V_pos[ri] == s) {
+                                        for (int f = 0; f < F_test; ++f) {
+                                            res_v_val[f] = ggml_fp16_to_fp32(slot_res_V_val[ri * F_test + f]);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
                             for (int f = 0; f < F_test; ++f) {
                                 float sum_k = 0.0f;
                                 float sum_v = 0.0f;
@@ -955,8 +987,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                                 }
                                 float anchor_k = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[f]) : 0.0f;
                                 float anchor_v = slot_anchors_V ? ggml_fp16_to_fp32(slot_anchors_V[f]) : 0.0f;
-                                k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale;
-                                v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale;
+                                k_activations[l][global_pos * F_test + f] = anchor_k + sum_k * block_scale + res_k_val[f];
+                                v_activations[l][global_pos * F_test + f] = anchor_v + sum_v * block_scale + res_v_val[f];
                             }
                         }
                     }
