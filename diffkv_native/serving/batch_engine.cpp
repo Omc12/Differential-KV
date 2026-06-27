@@ -729,11 +729,12 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         L = n_slots * micro_block_size;
         prompt_tokens.resize(L);
     }
+    int native_maxd = 2048;
+    if (const char* env_maxd = std::getenv("DIFFKV_MAX_ACTIVE_DENSE_TOKENS")) {
+        native_maxd = std::stoi(env_maxd);
+    }
     int required_dense_cap = L + req->max_tokens + 512;
-
-    // Memory optimization: size the dense buffers to the actual required capacity
-    // rather than eagerly allocating model_->get_config().n_ctx (32k/128k).
-    int max_active_dense_tokens = required_dense_cap;
+    int max_active_dense_tokens = std::min(required_dense_cap, native_maxd + 512);
 
     if (session->active_k_dense.empty()) {
         session->active_k_dense.assign(n_layers, AlignedFloatVector(max_active_dense_tokens * F_test, 0.0f));
@@ -1531,15 +1532,26 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         });
     }
     
-    // Populate session active dense buffers with the full prefill context before they are freed (Phase 1 Option A)
+    // Populate session active dense buffers with the active dense window before they are freed (Phase 1 Option A)
+    int dense_win = std::min(L, native_maxd);
+    int dense_start = std::max(0, L - dense_win);
+
     for (int l = 0; l < n_layers; ++l) {
-        std::memcpy(session->active_k_dense[l].data(), k_activations[l].data(), L * F_test * sizeof(float));
-        std::memcpy(session->active_v_dense[l].data(), v_activations[l].data(), L * F_test * sizeof(float));
+        std::memcpy(
+            session->active_k_dense[l].data(),
+            k_activations[l].data() + (size_t)dense_start * F_test,
+            dense_win * F_test * sizeof(float)
+        );
+        std::memcpy(
+            session->active_v_dense[l].data(),
+            v_activations[l].data() + (size_t)dense_start * F_test,
+            dense_win * F_test * sizeof(float)
+        );
     }
-    for (int i = 0; i < L; ++i) {
-        session->active_positions_dense[i] = i;
+    for (int i = 0; i < dense_win; ++i) {
+        session->active_positions_dense[i] = dense_start + i;
     }
-    total_positions = L;
+    total_positions = dense_win;
 
     // Reclaim prefill activations memory early before decode loop starts
     for (int l = 0; l < n_layers; ++l) {
@@ -1563,8 +1575,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
     }
     
-    std::vector<int> dense_start_positions(n_layers, 0);
-    std::vector<int> total_dense_tokens(n_layers, L); // Sized to full prefill context L
+    std::vector<int> dense_start_positions(n_layers, dense_start);
+    std::vector<int> total_dense_tokens(n_layers, dense_win);
     
     // Decode generation loop
     // Matches ACTIVE_RUNTIME: CPU lexical+graph routing is expensive (~815K ops

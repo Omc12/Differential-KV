@@ -970,10 +970,10 @@ struct ggml_cgraph * build_decode_graph(
                 struct ggml_tensor * k_reshaped_n = ggml_reshape_3d(ctx, k, head_dim, config.n_head_kv, 1);
                 struct ggml_tensor * k_rope_n = ggml_rope_ext(ctx, k_reshaped_n, position, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
                 // Past-dense keys are uploaded RAW; RoPE them in-graph at their actual positions.
-                struct ggml_tensor * dkr3 = ggml_reshape_3d(ctx, native_dense_kr[l], head_dim, config.n_head_kv, native_maxd);
+                struct ggml_tensor * dkr3 = native_dense_kr[l];
                 struct ggml_tensor * dkr_roped = ggml_rope_ext(ctx, dkr3, native_dense_pos, nullptr, config.n_rot, GGML_ROPE_TYPE_NEOX, config.n_ctx, config.rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
                 struct ggml_tensor * dkr_flat = ggml_reshape_2d(ctx, dkr_roped, head_dim * config.n_head_kv, native_maxd);
-                if (std::getenv("DIFFKV_DBG_NOROPE")) dkr_flat = native_dense_kr[l]; // DEBUG: bypass dense rope
+                if (std::getenv("DIFFKV_DBG_NOROPE")) dkr_flat = ggml_reshape_2d(ctx, native_dense_kr[l], head_dim * config.n_head_kv, native_maxd); // DEBUG: bypass dense rope
                 // Flash-decoding in-graph fused op: faster than the subgraph at long context
                 // (24k: ~1.5x), coherent (== subgraph). DEFAULT ON; DIFFKV_NO_FUSED_OP to disable.
                 static const bool use_fused_op = (std::getenv("DIFFKV_NO_FUSED_OP") == nullptr);
@@ -2518,10 +2518,14 @@ int main(int argc, char ** argv) {
         //   • sparse path  : recency_window + 2·block_size (the slide keeps it here) + slack.
         //   • bypass/dense : window can grow to engage_threshold before it flips to sparse, so
         //     cap there (the slide takes over afterward); never needs max_generate.
+        int native_maxd = 2048;
+        if (const char* env_maxd = std::getenv("DIFFKV_MAX_ACTIVE_DENSE_TOKENS")) {
+            native_maxd = std::stoi(env_maxd);
+        }
         int sparse_dense_cap = cfg_recency_window + 2 * micro_block_size + 512;
         int required_dense_cap = decode_use_sparse
             ? sparse_dense_cap
-            : (L + max_generate + 512);
+            : std::min(L + max_generate + 512, native_maxd + 512);
 
         // Memory optimization: only resize host-side dense buffers if sparse decode is used.
         // In dense decode (decode_use_sparse=false), we bypass host-side dense buffers and
@@ -2643,7 +2647,12 @@ int main(int argc, char ** argv) {
         // on read, ggml_fp32_to_fp16 on write). The fp32 MATH is unchanged — only storage
         // halves. The GPU prior tensors + prefill flash-attn are F16 to match (no fp32 temp).
         std::vector<std::vector<ggml_fp16_t>> k_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
-        std::vector<std::vector<ggml_fp16_t>> k_rotated_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
+        std::vector<std::vector<ggml_fp16_t>> k_rotated_activations(n_layers);
+        if (!decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                k_rotated_activations[l].resize((size_t)L * F_test, ggml_fp32_to_fp16(0.0f));
+            }
+        }
         std::vector<std::vector<ggml_fp16_t>> v_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
         std::vector<float> prefill_output_logits(n_vocab);
 
@@ -2847,7 +2856,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        if (cached_len > 0) {
+        if (cached_len > 0 && !decode_use_sparse) {
             std::vector<int32_t> prior_positions(cached_len);
             for (int t = 0; t < cached_len; ++t) prior_positions[t] = t;
             
@@ -3053,7 +3062,7 @@ int main(int argc, char ** argv) {
             }
 
             // RoPE-rotate only the current chunk and store it in k_rotated_activations
-            {
+            if (!decode_use_sparse) {
                 std::vector<int32_t> chunk_positions(chunk_len);
                 for (int i = 0; i < chunk_len; ++i) chunk_positions[i] = pos_start + i;
 
@@ -3389,17 +3398,25 @@ int main(int argc, char ** argv) {
 
         // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
         // persistent (survive graph rebuilds), filled each decode step. Gated.
-        const int native_maxd = 2048;
         const bool native_attn_on = is_native_attn_enabled();
         std::vector<struct ggml_tensor *> native_dense_kr(n_layers, nullptr);
         std::vector<struct ggml_tensor *> native_dense_v(n_layers, nullptr);
+        struct ggml_tensor * native_dense_kr_concat = nullptr;
+        struct ggml_tensor * native_dense_v_concat = nullptr;
         struct ggml_tensor * native_dense_mask = nullptr;
         if (native_attn_on) {
+            native_dense_kr_concat = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, n_layers, native_maxd);
+            ggml_set_input(native_dense_kr_concat);
+            native_dense_v_concat = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, n_layers, native_maxd);
+            ggml_set_input(native_dense_v_concat);
             for (int l = 0; l < n_layers; ++l) {
-                native_dense_kr[l] = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, native_maxd);
-                ggml_set_input(native_dense_kr[l]);
-                native_dense_v[l]  = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, native_maxd);
-                ggml_set_input(native_dense_v[l]);
+                native_dense_kr[l] = ggml_view_3d(dense_past_ctx, native_dense_kr_concat, head_dim, kv_heads, native_maxd,
+                                                  head_dim * sizeof(float),
+                                                  (size_t)n_layers * head_dim * kv_heads * sizeof(float),
+                                                  (size_t)l * head_dim * kv_heads * sizeof(float));
+                native_dense_v[l]  = ggml_view_2d(dense_past_ctx, native_dense_v_concat, head_dim * kv_heads, native_maxd,
+                                                  (size_t)n_layers * head_dim * kv_heads * sizeof(float),
+                                                  (size_t)l * head_dim * kv_heads * sizeof(float));
             }
             native_dense_mask = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_F32, native_maxd);
             ggml_set_input(native_dense_mask);
@@ -4299,19 +4316,28 @@ int main(int argc, char ** argv) {
                     for (int t = 0; t < cnt0; ++t) pbuf[t] = active_positions_dense[t];
                     ggml_backend_tensor_set(native_dense_pos, pbuf.data(), 0, (size_t)native_maxd * sizeof(int32_t));
                     
-                    // Upload K/V for all layers (full buffers)
-                    std::vector<float> kbuf((size_t)native_maxd * F_test), vbuf((size_t)native_maxd * F_test);
-                    for (int l = 0; l < n_layers; ++l) {
-                        const int c2 = std::min(total_dense_tokens[l], native_maxd);
-                        std::fill(kbuf.begin(), kbuf.end(), 0.0f);
-                        std::fill(vbuf.begin(), vbuf.end(), 0.0f);
-                        if (c2 > 0) {
-                            std::memcpy(kbuf.data(), active_k_dense[l].data(), (size_t)c2 * F_test * sizeof(float));
-                            std::memcpy(vbuf.data(), active_v_dense[l].data(), (size_t)c2 * F_test * sizeof(float));
+                    // Upload K/V for all layers (full buffers in bulk)
+                    std::vector<float> flat_k_all((size_t)native_maxd * n_layers * F_test, 0.0f);
+                    std::vector<float> flat_v_all((size_t)native_maxd * n_layers * F_test, 0.0f);
+                    for (int t = 0; t < native_maxd; ++t) {
+                        for (int l = 0; l < n_layers; ++l) {
+                            const int c2 = std::min(total_dense_tokens[l], native_maxd);
+                            if (t < c2) {
+                                std::memcpy(
+                                    flat_k_all.data() + ((size_t)t * n_layers * F_test + (size_t)l * F_test),
+                                    active_k_dense[l].data() + (size_t)t * F_test,
+                                    F_test * sizeof(float)
+                                );
+                                std::memcpy(
+                                    flat_v_all.data() + ((size_t)t * n_layers * F_test + (size_t)l * F_test),
+                                    active_v_dense[l].data() + (size_t)t * F_test,
+                                    F_test * sizeof(float)
+                                );
+                            }
                         }
-                        ggml_backend_tensor_set(native_dense_kr[l], kbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
-                        ggml_backend_tensor_set(native_dense_v[l],  vbuf.data(), 0, (size_t)native_maxd * F_test * sizeof(float));
                     }
+                    ggml_backend_tensor_set(native_dense_kr_concat, flat_k_all.data(), 0, flat_k_all.size() * sizeof(float));
+                    ggml_backend_tensor_set(native_dense_v_concat, flat_v_all.data(), 0, flat_v_all.size() * sizeof(float));
                     
                     if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
                         std::vector<float> rb(F_test), rv(F_test);
@@ -4344,25 +4370,25 @@ int main(int argc, char ** argv) {
                     // Expected: 24-48ms → 0.3-0.5ms per token
                     // ─────────────────────────────────────────────────────────────────────
                     
+                    // INCREMENTAL UPDATE: Upload ONLY the new token (99.7% bandwidth reduction, in bulk)
+                    std::vector<float> flat_new_k((size_t)n_layers * F_test, 0.0f);
+                    std::vector<float> flat_new_v((size_t)n_layers * F_test, 0.0f);
                     for (int l = 0; l < n_layers; ++l) {
                         const int local_idx = total_dense_tokens[l] - 1;  // Index in active_k_dense
-                        if (local_idx < 0) continue;
-                        
-                        // Ring buffer position: wrap at native_maxd
-                        const int ring_pos = (persistent_buffer_base_pos + local_idx) % native_maxd;
-                        
-                        // Get pointer to the new token in host buffer
-                        const float* new_k = active_k_dense[l].data() + (size_t)local_idx * F_test;
-                        const float* new_v = active_v_dense[l].data() + (size_t)local_idx * F_test;
-                        
-                        // Upload ONLY the new token to its ring buffer position
-                        ggml_backend_tensor_set(native_dense_kr[l], new_k, 
-                            (size_t)ring_pos * F_test * sizeof(float), 
-                            F_test * sizeof(float));
-                        ggml_backend_tensor_set(native_dense_v[l], new_v,
-                            (size_t)ring_pos * F_test * sizeof(float),
-                            F_test * sizeof(float));
+                        if (local_idx >= 0) {
+                            const float* new_k = active_k_dense[l].data() + (size_t)local_idx * F_test;
+                            const float* new_v = active_v_dense[l].data() + (size_t)local_idx * F_test;
+                            std::memcpy(flat_new_k.data() + (size_t)l * F_test, new_k, F_test * sizeof(float));
+                            std::memcpy(flat_new_v.data() + (size_t)l * F_test, new_v, F_test * sizeof(float));
+                        }
                     }
+                    const int ring_pos = (persistent_buffer_base_pos + (total_dense_tokens[0] - 1)) % native_maxd;
+                    ggml_backend_tensor_set(native_dense_kr_concat, flat_new_k.data(), 
+                        (size_t)ring_pos * n_layers * F_test * sizeof(float), 
+                        n_layers * F_test * sizeof(float));
+                    ggml_backend_tensor_set(native_dense_v_concat, flat_new_v.data(), 
+                        (size_t)ring_pos * n_layers * F_test * sizeof(float), 
+                        n_layers * F_test * sizeof(float));
                     
                     // Update mask and position for the new token
                     const int idx0 = total_dense_tokens[0] - 1;
@@ -5502,6 +5528,7 @@ int main(int argc, char ** argv) {
                     auto & b_list_l = runtime_manager.get_ingest_manager().get_blocks(l);
                     int curr_token_idx = 0;
                     bool found_first = false;
+                    const int cap_tokens = (int)(active_k_dense[l].size() / (size_t)F_test);
 
                     std::fill(active_k_dense[l].begin(), active_k_dense[l].end(), 0.0f);
                     std::fill(active_v_dense[l].begin(), active_v_dense[l].end(), 0.0f);
@@ -5512,6 +5539,7 @@ int main(int argc, char ** argv) {
                                 dense_start_positions[l] = block->anchor_idx;
                                 found_first = true;
                             }
+                            if (curr_token_idx + 1 > cap_tokens) break;
                             std::memcpy(active_k_dense[l].data() + curr_token_idx * F_test,
                                         block->anchor_k.data(), F_test * sizeof(float));
                             std::memcpy(active_v_dense[l].data() + curr_token_idx * F_test,
@@ -5519,11 +5547,16 @@ int main(int argc, char ** argv) {
                             curr_token_idx++;
                             if (!block->active_k.empty()) {
                                 int active_len = block->active_k.size() / F_test;
-                                std::memcpy(active_k_dense[l].data() + curr_token_idx * F_test,
-                                            block->active_k.data(), block->active_k.size() * sizeof(float));
-                                std::memcpy(active_v_dense[l].data() + curr_token_idx * F_test,
-                                            block->active_v.data(), block->active_v.size() * sizeof(float));
-                                curr_token_idx += active_len;
+                                if (curr_token_idx + active_len > cap_tokens) {
+                                    active_len = cap_tokens - curr_token_idx;
+                                }
+                                if (active_len > 0) {
+                                    std::memcpy(active_k_dense[l].data() + curr_token_idx * F_test,
+                                                block->active_k.data(), active_len * F_test * sizeof(float));
+                                    std::memcpy(active_v_dense[l].data() + curr_token_idx * F_test,
+                                                block->active_v.data(), active_len * F_test * sizeof(float));
+                                    curr_token_idx += active_len;
+                                }
                             }
                         }
                     }
@@ -5533,11 +5566,14 @@ int main(int argc, char ** argv) {
                 {
                     auto & b_list = runtime_manager.get_ingest_manager().get_blocks(0);
                     int curr_pos_idx = 0;
+                    const int cap_pos = (int)active_positions_dense.size();
                     std::fill(active_positions_dense.begin(), active_positions_dense.end(), 0);
                     for (auto & block : b_list) {
                         if (block->state == BlockState::DenseResident || block->state == BlockState::Compressing) {
                             for (int32_t t_pos : block->token_indices) {
-                                active_positions_dense[curr_pos_idx++] = t_pos;
+                                if (curr_pos_idx < cap_pos) {
+                                    active_positions_dense[curr_pos_idx++] = t_pos;
+                                }
                             }
                         }
                     }
