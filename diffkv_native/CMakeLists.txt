@@ -71,7 +71,10 @@ if (APPLE)
 endif()
 
 if (GGML_CUDA)
-    list(APPEND SOURCES native_core/diffkv_core/src/paging_stream.cu)
+    list(APPEND SOURCES
+        native_core/diffkv_core/src/paging_stream.cu
+        native_core/diffkv_core/src/diffkv_decode.cu
+    )
     find_package(CUDAToolkit REQUIRED)
 endif()
 

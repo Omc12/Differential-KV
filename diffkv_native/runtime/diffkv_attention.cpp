@@ -21,6 +21,20 @@ std::atomic<int>  g_diffkv_dbg_pos{0};   // mirror of DIFFKV_DBG_POS, set from m
 std::atomic<long> g_cpu_attn_count{0};   // execute_cpu_attention entries (live path = CPU?)
 std::atomic<long> g_metal_attn_count{0}; // execute_metal_attention entries (live path = Metal?)
 
+#if defined(GGML_USE_CUDA) || defined(USE_CUDA)
+void execute_cuda_attention(
+    struct ggml_tensor * dst,
+    const struct ggml_tensor * Q,
+    const struct ggml_tensor * slot_indices,
+    void * userdata,
+    float * lse_out,
+    const float * dense_k,
+    const float * dense_v,
+    const int32_t * dense_pos,
+    int T_dense
+);
+#endif
+
 // ── CPU Project-Then-Attend (reference / non-Apple fallback) ──────────────────
 // On Apple, the Metal kernel handles the normal path; this function handles the
 // CPU-forced fallback (factual_store non-empty, residuals present, etc.).
@@ -736,6 +750,22 @@ void custom_attention_op_callback(
     if (!force_cpu) {
         std::vector<float> lse_dummy(n_q_heads, -1e30f);
         execute_metal_attention(
+            dst, Q, (struct ggml_tensor*)slot_indices, data,
+            lse_dummy.data(),
+            data->active_k_dense, data->active_v_dense,
+            data->active_positions_dense, T_dense
+        );
+        if (cache_active)
+            get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+        return;
+    }
+#elif defined(GGML_USE_CUDA) || defined(USE_CUDA)
+    const char* env_cpu = std::getenv("DIFFKV_FORCE_CPU_ATTN");
+    bool force_cpu = (env_cpu && std::string(env_cpu) == "1");
+
+    if (!force_cpu) {
+        std::vector<float> lse_dummy(n_q_heads, -1e30f);
+        execute_cuda_attention(
             dst, Q, (struct ggml_tensor*)slot_indices, data,
             lse_dummy.data(),
             data->active_k_dense, data->active_v_dense,
