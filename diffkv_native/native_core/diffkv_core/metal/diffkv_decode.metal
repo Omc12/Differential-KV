@@ -1,6 +1,24 @@
 #include <metal_stdlib>
 using namespace metal;
 
+inline float reduce_sum_tg64(float val, threadgroup float* red_shared, uint tid) {
+    float simd_s = simd_sum(val);
+    if ((tid & 31) == 0) {
+        red_shared[tid >> 5] = simd_s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return red_shared[0] + red_shared[1];
+}
+
+inline float reduce_max_tg64(float val, threadgroup float* red_shared, uint tid) {
+    float simd_m = simd_max(val);
+    if ((tid & 31) == 0) {
+        red_shared[tid >> 5] = simd_m;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return max(red_shared[0], red_shared[1]);
+}
+
 // Helper struct to merge two online softmax states
 struct SoftmaxState {
     float m; // max score
@@ -128,13 +146,7 @@ kernel void decode_attention_metal_kernel(
         for (int d = (int)tid; d < D; d += (int)t_per_tg) {
             thread_anc += q_shared[d] * ak_rot_shared[d];
         }
-        red_m[tid] = thread_anc;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint stride = t_per_tg / 2; stride > 0; stride /= 2) {
-            if (tid < stride) red_m[tid] += red_m[tid + stride];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-        }
-        float score_anc = red_m[0];
+        float score_anc = reduce_sum_tg64(thread_anc, red_m, tid);
         if (tid == 0 && k < 64) scores_cached[k * 32] = score_anc * scale;
         
         float block_scale= (float)scales[slot_id];
@@ -265,24 +277,9 @@ kernel void decode_attention_metal_kernel(
         }
         sm_state = merge_softmax_states(sm_state, { score * scale, 1.0f });
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Reduce softmax states across all threads in threadgroup
-    red_m[tid] = sm_state.m;
-    red_d[tid] = sm_state.d;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint stride = t_per_tg / 2; stride > 0; stride /= 2) {
-        if (tid < stride) {
-            SoftmaxState s1 = { red_m[tid], red_d[tid] };
-            SoftmaxState s2 = { red_m[tid + stride], red_d[tid + stride] };
-            SoftmaxState merged = merge_softmax_states(s1, s2);
-            red_m[tid] = merged.m;
-            red_d[tid] = merged.d;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    float global_m = red_m[0];
-    float global_d = red_d[0];
+    float global_m = reduce_max_tg64(sm_state.m, red_m, tid);
+    float adjusted_d = sm_state.d * exp(sm_state.m - global_m);
+    float global_d = reduce_sum_tg64(adjusted_d, red_d, tid);
 
     if (tid == 0) {
         lse_buf[tg_idx] = global_m + log(max(global_d, 1e-9f));
@@ -328,13 +325,7 @@ kernel void decode_attention_metal_kernel(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             float thread_anc = 0.0f;
             for (int d = (int)tid; d < D; d += (int)t_per_tg) thread_anc += q_shared[d] * ak_rot_shared[d];
-            red_m[tid] = thread_anc;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = t_per_tg / 2; stride > 0; stride /= 2) {
-                if (tid < stride) red_m[tid] += red_m[tid + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            score_anc_scaled = red_m[0] * scale;
+            score_anc_scaled = reduce_sum_tg64(thread_anc, red_m, tid) * scale;
 
             if (approximate_attn) {
                 if (tid < (uint)rank) {
@@ -432,14 +423,10 @@ kernel void decode_attention_metal_kernel(
             }
         }
 
-        // Reduce sum_w
-        red_m[tid] = local_sum_w;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint stride = t_per_tg / 2; stride > 0; stride /= 2) {
-            if (tid < stride) red_m[tid] += red_m[tid + stride];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        float total_sum_w = reduce_sum_tg64(local_sum_w, red_m, tid);
+        if (tid == 0) {
+            red_sum_w = total_sum_w;
         }
-        if (tid == 0) red_sum_w = red_m[0];
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // Reduce w_proj[r]
