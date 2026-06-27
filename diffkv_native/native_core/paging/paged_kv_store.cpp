@@ -239,24 +239,10 @@ void PagedKVStore::reload_block(PageEntry& entry, const std::vector<std::unique_
         *(engine->get_host_scales() + slot_id) = cpu.scale;
         *(engine->get_host_anchor_positions() + slot_id) = cpu.anchor_position;
 
-        if (engine->get_U()) {
-            ggml_backend_tensor_set(engine->get_U(), cpu.U.data(), slot_id * engine->get_U()->nb[2], cpu.U.size() * sizeof(int8_t));
+        if (engine->ensure_slot_buffer(slot_id)) {
+            std::memcpy(engine->ensure_slot_buffer(slot_id)->desc_matrix.data(), cpu.desc_matrix.data(), cpu.desc_matrix.size() * sizeof(float));
         }
-        if (engine->get_U_scale()) {
-            ggml_backend_tensor_set(engine->get_U_scale(), &cpu.U_scale, slot_id * engine->get_U_scale()->nb[0], sizeof(ggml_fp16_t));
-        }
-        if (engine->get_VK()) {
-            ggml_backend_tensor_set(engine->get_VK(), cpu.VK.data(), slot_id * engine->get_VK()->nb[3], cpu.VK.size() * sizeof(ggml_fp16_t));
-        }
-        if (engine->get_VV()) {
-            ggml_backend_tensor_set(engine->get_VV(), cpu.VV.data(), slot_id * engine->get_VV()->nb[3], cpu.VV.size() * sizeof(ggml_fp16_t));
-        }
-        ggml_backend_tensor_set(engine->get_anchors_K(), cpu.anchors_K.data(), slot_id * engine->get_anchors_K()->nb[2], cpu.anchors_K.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine->get_anchors_V(), cpu.anchors_V.data(), slot_id * engine->get_anchors_V()->nb[2], cpu.anchors_V.size() * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine->get_seq_lens(), &cpu.seq_len, slot_id * engine->get_seq_lens()->nb[0], sizeof(int32_t));
-        ggml_backend_tensor_set(engine->get_scales(), &cpu.scale, slot_id * engine->get_scales()->nb[0], sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(engine->get_desc_matrix(), cpu.desc_matrix.data(), slot_id * engine->get_desc_matrix()->nb[1], cpu.desc_matrix.size() * sizeof(float));
-        ggml_backend_tensor_set(engine->get_anchor_positions(), &cpu.anchor_position, slot_id * engine->get_anchor_positions()->nb[0], sizeof(int32_t));
+        engine->upload_slot(slot_id);
 
         engine->get_state_table().transition(slot_id, BlockState::Reloading, BlockState::CompressedResident);
     }

@@ -2138,6 +2138,45 @@ int main(int argc, char ** argv) {
     int n_vocab = model.get_config().n_vocab;
     int n_layers = model.get_config().n_layer;
 
+    // Preset configuration for KV Cache Quantization and Max Active Dense Tokens
+    std::string preset_str = "mid";
+    if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
+        preset_str = env_preset;
+    }
+    
+    std::string default_maxd = "2048";
+    std::string default_quant = "q8_0";
+    
+    if (preset_str == "low") {
+        default_maxd = "1024";
+        default_quant = "q4_0";
+    } else if (preset_str == "mid") {
+        default_maxd = "2048";
+        default_quant = "q8_0";
+    } else if (preset_str == "high") {
+        default_maxd = "4096";
+        default_quant = "f16";
+    }
+    
+    setenv("DIFFKV_MAX_ACTIVE_DENSE_TOKENS", default_maxd.c_str(), 0);
+    setenv("DIFFKV_KV_QUANT", default_quant.c_str(), 0);
+
+    ggml_type kv_quant_type = GGML_TYPE_Q8_0;
+    if (const char* env_quant = std::getenv("DIFFKV_KV_QUANT")) {
+        std::string q(env_quant);
+        if (q == "f16" || q == "F16" || q == "none") {
+            kv_quant_type = GGML_TYPE_F16;
+        } else if (q == "f32" || q == "F32") {
+            kv_quant_type = GGML_TYPE_F32;
+        } else if (q == "q8_0" || q == "Q8_0" || q == "8bit") {
+            kv_quant_type = GGML_TYPE_Q8_0;
+        } else if (q == "q4_0" || q == "Q4_0" || q == "4bit") {
+            kv_quant_type = GGML_TYPE_Q4_0;
+        } else if (q == "q5_0" || q == "Q5_0" || q == "5bit") {
+            kv_quant_type = GGML_TYPE_Q5_0;
+        }
+    }
+
     float gpu_budget_gb = 2.0f;
     if (const char* env_budget = std::getenv("DIFFKV_GPU_BUDGET_GB")) {
         gpu_budget_gb = std::stof(env_budget);
@@ -2163,7 +2202,7 @@ int main(int argc, char ** argv) {
     if (const char* e = std::getenv("DIFFKV_SHORT_CONTEXT")) { try { cfg_short_context = std::stoi(e); } catch (...) {} }
     diffkv::KVRuntimeManager runtime_manager(rank, micro_block_size, gpu_budget_bytes,
                                              cfg_recency_window, cfg_short_context);
-    if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
+    if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft, kv_quant_type)) {
         std::cerr << "Failed to initialize KVRuntimeManager!" << std::endl;
         return 1;
     }
@@ -2290,7 +2329,7 @@ int main(int argc, char ** argv) {
         if (n_slots != base_n_slots) {
             n_slots = base_n_slots;
             runtime_manager.reset();
-            if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
+            if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft, kv_quant_type)) {
                 std::cerr << "Failed to re-initialize KVRuntimeManager during config restore!" << std::endl;
                 return 1;
             }
@@ -2474,7 +2513,7 @@ int main(int argc, char ** argv) {
                     n_slots = new_n_slots;
                     // Re-initialize the pool since we need more slots!
                     runtime_manager.reset();
-                    if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft)) {
+                    if (!runtime_manager.initialize(n_slots, head_dim, kv_heads, desc_dim, n_layers, &model, buft, kv_quant_type)) {
                         std::cerr << "Failed to re-initialize KVRuntimeManager during auto-expansion!" << std::endl;
                         return 1;
                     }

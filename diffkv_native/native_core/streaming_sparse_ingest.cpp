@@ -581,35 +581,9 @@ void StreamingSparseIngestManager::ingest_chunk(
     stats_.peak_dense_tokens = std::max(stats_.peak_dense_tokens, current_dense);
 
     if (min_slot != -1 && max_slot != -1) {
-        // Upload anchors K and V slot-by-slot (since dynamic host pools are non-contiguous)
         for (int slot_id = min_slot; slot_id <= max_slot; ++slot_id) {
-            const ggml_fp16_t* slot_ak = engines[layer_idx]->get_host_anchors_K(slot_id);
-            const ggml_fp16_t* slot_av = engines[layer_idx]->get_host_anchors_V(slot_id);
-            if (slot_ak) {
-                ggml_backend_tensor_set(
-                    engines[layer_idx]->get_anchors_K(),
-                    slot_ak,
-                    slot_id * F_test * sizeof(ggml_fp16_t),
-                    F_test * sizeof(ggml_fp16_t)
-                );
-            }
-            if (slot_av) {
-                ggml_backend_tensor_set(
-                    engines[layer_idx]->get_anchors_V(),
-                    slot_av,
-                    slot_id * F_test * sizeof(ggml_fp16_t),
-                    F_test * sizeof(ggml_fp16_t)
-                );
-            }
+            engines[layer_idx]->upload_slot(slot_id);
         }
-        // Batch upload anchor positions to GPU (this is still flat/contiguous on host)
-        int count = max_slot - min_slot + 1;
-        ggml_backend_tensor_set(
-            engines[layer_idx]->get_anchor_positions(),
-            engines[layer_idx]->get_host_anchor_positions() + min_slot,
-            min_slot * sizeof(int32_t),
-            count * sizeof(int32_t)
-        );
     }
 }
 

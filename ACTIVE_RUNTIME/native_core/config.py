@@ -27,6 +27,8 @@ class DiffKVConfig:
             self.torch_compile = False
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
+            self.kv_quant = "q4_0"
+            self.max_active_dense_tokens = 1024
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -37,6 +39,8 @@ class DiffKVConfig:
             self.torch_compile = False if is_macos else True
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
+            self.kv_quant = "f16"
+            self.max_active_dense_tokens = 4096
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
@@ -47,6 +51,8 @@ class DiffKVConfig:
             self.torch_compile = False
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
+            self.kv_quant = "q8_0"
+            self.max_active_dense_tokens = 2048
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -75,6 +81,12 @@ class DiffKVConfig:
         )
         self.srl_age_penalty = self._get_float(
             "srl_age_penalty", "DIFFKV_SRL_AGE_PENALTY", self.srl_age_penalty, config_dict
+        )
+        self.kv_quant = self._get_str(
+            "kv_quant", "DIFFKV_KV_QUANT", self.kv_quant, config_dict
+        )
+        self.max_active_dense_tokens = self._get_int(
+            "max_active_dense_tokens", "DIFFKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
         )
 
         # 3. Per-layer rank options
@@ -105,6 +117,8 @@ class DiffKVConfig:
             print(f"  approximate_attn          = {self.approximate_attn}")
             print(f"  srl_age_penalty           = {self.srl_age_penalty}")
             print(f"  early_layer_rank_boost    = {self.early_layer_rank_boost}")
+            print(f"  kv_quant                  = {self.kv_quant}")
+            print(f"  max_active_dense_tokens   = {self.max_active_dense_tokens}")
             if self.early_layer_rank_boost:
                 print(f"  max_rank_early            = {self.max_rank_early} (0=auto 2×base)")
 
@@ -145,4 +159,12 @@ class DiffKVConfig:
                 return float(env_val)
             except (ValueError, TypeError):
                 pass
+        return default
+
+    def _get_str(self, key: str, env_name: str, default: str, config_dict: dict) -> str:
+        if key in config_dict:
+            return str(config_dict[key])
+        env_val = os.environ.get(env_name)
+        if env_val is not None:
+            return env_val
         return default

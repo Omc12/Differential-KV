@@ -31,7 +31,8 @@ public:
         int desc_dim,
         int n_layers,
         const DiffKVModel* model,
-        ggml_backend_buffer_type_t buft
+        ggml_backend_buffer_type_t buft,
+        ggml_type kv_quant_type = GGML_TYPE_F16
     );
 
     void reset();

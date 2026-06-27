@@ -79,7 +79,8 @@ bool KVRuntimeManager::initialize(
     int desc_dim,
     int n_layers,
     const DiffKVModel* model,
-    ggml_backend_buffer_type_t buft
+    ggml_backend_buffer_type_t buft,
+    ggml_type kv_quant_type
 ) {
     n_layers_ = n_layers;
     model_ = model;
@@ -93,7 +94,7 @@ bool KVRuntimeManager::initialize(
         engines_[l] = std::make_unique<NativeBlockPool>();
         int layer_rank = get_layer_rank(l);
         int pool_rank = layer_rank * 2; // 2x layer_rank for precision boost headroom
-        if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft, micro_block_size_)) {
+        if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft, micro_block_size_, kv_quant_type)) {
             std::cerr << "[KVRuntimeManager] Error: Failed to initialize KVEngine for layer " << l << std::endl;
             return false;
         }
