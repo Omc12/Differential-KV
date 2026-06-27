@@ -1,0 +1,2 @@
+
+__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 18, "prefill_s": 33.3572, "decode_s": 1.608412417001091, "decode_tps": 11.19115956189972, "ttft_s": 33.70137495803647, "mx_peak_gb": null, "output_preview": "### Secret Passcode and a              [uncertain: details missing in source]", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 16384, "gen_target": 50, "worker_wall_s": 37.699702666956}

@@ -1,0 +1,2 @@
+
+__BENCH_RESULT__ {"prompt_tokens": 32865, "gen_tokens": 27, "prefill_s": 98.7331, "decode_s": 4.27770945802331, "decode_tps": 6.311789116336212, "ttft_s": 100.40224399999715, "mx_peak_gb": null, "output_preview": "### Secret Passcode and In-Text hidden in this document is the document. In this document, the document, the document, the document [uncertain: details missing in source]", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 32768, "gen_target": 50, "worker_wall_s": 107.01715287507977}
