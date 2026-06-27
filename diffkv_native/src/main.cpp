@@ -36,7 +36,7 @@ using namespace diffkv;
 namespace diffkv { extern std::atomic<long> g_diffkv_cb_invocations; }  // diagnostic counter (diffkv_attention.cpp)
 namespace diffkv { extern std::atomic<long> g_cpu_attn_count; extern std::atomic<long> g_metal_attn_count; }
 namespace diffkv { extern std::atomic<int> g_diffkv_dbg_pos; }
-static std::atomic<bool> g_diffkv_enable_factual{false};
+static std::atomic<bool> g_diffkv_enable_factual{true};
 
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
@@ -1907,7 +1907,9 @@ int main(int argc, char ** argv) {
 
     if (std::getenv("DIFFKV_DBG_POS")) diffkv::g_diffkv_dbg_pos.store(1);  // mirror to a global (worker-thread getenv fails)
     if (const char* ef = std::getenv("DIFFKV_ENABLE_FACTUAL")) {
-        if (std::string(ef) == "1" || std::string(ef) == "true" || std::string(ef) == "on") {
+        if (std::string(ef) == "0" || std::string(ef) == "false" || std::string(ef) == "off") {
+            g_diffkv_enable_factual.store(false);
+        } else if (std::string(ef) == "1" || std::string(ef) == "true" || std::string(ef) == "on") {
             g_diffkv_enable_factual.store(true);
         }
     }
