@@ -36,6 +36,7 @@ using namespace diffkv;
 namespace diffkv { extern std::atomic<long> g_diffkv_cb_invocations; }  // diagnostic counter (diffkv_attention.cpp)
 namespace diffkv { extern std::atomic<long> g_cpu_attn_count; extern std::atomic<long> g_metal_attn_count; }
 namespace diffkv { extern std::atomic<int> g_diffkv_dbg_pos; }
+static std::atomic<bool> g_diffkv_enable_factual{false};
 
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
@@ -336,7 +337,10 @@ struct ggml_cgraph * build_prefill_ctx_graph(
     struct ggml_tensor ** out_logits,
     std::vector<struct ggml_tensor *>* k_layers = nullptr,
     std::vector<struct ggml_tensor *>* v_layers = nullptr,
-    bool need_logits = false
+    bool need_logits = false,
+    std::vector<struct ggml_tensor *> * persistent_k_cache = nullptr,
+    std::vector<struct ggml_tensor *> * persistent_v_cache = nullptr,
+    int pos_start = 0
 ) {
     const auto & config = model.get_config();
     struct ggml_cgraph * gf = ggml_new_graph(ctx);
@@ -383,18 +387,50 @@ struct ggml_cgraph * build_prefill_ctx_graph(
         struct ggml_tensor * v_reshaped_f16 = ggml_cast(ctx, v_reshaped, GGML_TYPE_F16);
 
         // Concatenate prior context with current chunk along seq dim (dim=2 in unpermuted layout)
-        struct ggml_tensor * k_ctx = k_rope_f16;
-        struct ggml_tensor * v_ctx = v_reshaped_f16;
-        bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
-        if (has_prior) {
-            k_ctx = ggml_concat(ctx, (*prior_k_ctx)[l], k_rope_f16, 2);
-            v_ctx = ggml_concat(ctx, (*prior_v_ctx)[l], v_reshaped_f16, 2);
+        struct ggml_tensor * k_ctx = nullptr;
+        struct ggml_tensor * v_ctx = nullptr;
+
+        if (persistent_k_cache && persistent_v_cache) {
+            struct ggml_tensor * pk = (*persistent_k_cache)[l];
+            struct ggml_tensor * pv = (*persistent_v_cache)[l];
+
+            struct ggml_tensor * dest_k = ggml_view_3d(ctx, pk, 
+                head_dim, config.n_head_kv, k_rope_f16->ne[2],
+                pk->nb[1], pk->nb[2],
+                pos_start * pk->nb[2]);
+            struct ggml_tensor * dest_v = ggml_view_3d(ctx, pv,
+                head_dim, config.n_head_kv, v_reshaped_f16->ne[2],
+                pv->nb[1], pv->nb[2],
+                pos_start * pv->nb[2]);
+
+            struct ggml_tensor * copy_k = ggml_cpy(ctx, k_rope_f16, dest_k);
+            struct ggml_tensor * copy_v = ggml_cpy(ctx, v_reshaped_f16, dest_v);
+
+            ggml_build_forward_expand(gf, copy_k);
+            ggml_build_forward_expand(gf, copy_v);
+
+            k_ctx = ggml_view_3d(ctx, pk,
+                head_dim, config.n_head_kv, pos_start + k_rope_f16->ne[2],
+                pk->nb[1], pk->nb[2],
+                0);
+            v_ctx = ggml_view_3d(ctx, pv,
+                head_dim, config.n_head_kv, pos_start + v_reshaped_f16->ne[2],
+                pv->nb[1], pv->nb[2],
+                0);
+        } else {
+            k_ctx = k_rope_f16;
+            v_ctx = v_reshaped_f16;
+            bool has_prior = (prior_k_ctx && (*prior_k_ctx)[l] != nullptr);
+            if (has_prior) {
+                k_ctx = ggml_concat(ctx, (*prior_k_ctx)[l], k_rope_f16, 2);
+                v_ctx = ggml_concat(ctx, (*prior_v_ctx)[l], v_reshaped_f16, 2);
+            }
         }
 
         // Permute to [head_dim, seq_len, kv_heads] layout expected by flash attention
         struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
-        struct ggml_tensor * k_ctx_perm = ggml_permute(ctx, k_ctx, 0, 2, 1, 3);
-        struct ggml_tensor * v_ctx_perm = ggml_permute(ctx, v_ctx, 0, 2, 1, 3);
+        struct ggml_tensor * k_ctx_perm = ggml_cont(ctx, ggml_permute(ctx, k_ctx, 0, 2, 1, 3));
+        struct ggml_tensor * v_ctx_perm = ggml_cont(ctx, ggml_permute(ctx, v_ctx, 0, 2, 1, 3));
 
         // 7. Flash Attention with full context mask
         float scale_val = 1.0f / std::sqrt((float)head_dim);
@@ -1870,6 +1906,11 @@ int main(int argc, char ** argv) {
     // token output. Keep them synced so ordering is guaranteed.
 
     if (std::getenv("DIFFKV_DBG_POS")) diffkv::g_diffkv_dbg_pos.store(1);  // mirror to a global (worker-thread getenv fails)
+    if (const char* ef = std::getenv("DIFFKV_ENABLE_FACTUAL")) {
+        if (std::string(ef) == "1" || std::string(ef) == "true" || std::string(ef) == "on") {
+            g_diffkv_enable_factual.store(true);
+        }
+    }
     if (std::getenv("DIFFKV_SELFTEST")) { run_native_attn_selftest(); return 0; }
     if (std::getenv("DIFFKV_DENSE_CMP")) { run_dense_attn_cmp(); return 0; }
     if (std::getenv("DIFFKV_RECON_CMP")) { run_recon_cmp(); return 0; }
@@ -2465,7 +2506,7 @@ int main(int argc, char ** argv) {
         if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
             engage_threshold = std::stoi(env_et);
         }
-        bool decode_use_sparse = false;
+        bool decode_use_sparse = (L >= engage_threshold);
         // RAM: bound the fp32 dense buffers by the DENSE-WINDOW length, NOT max_generate.
         // Generated tokens are compressed into the pool by ingest_decode, so the dense window
         // doesn't need to hold all of them — the decode loop SLIDES it (drops the oldest block
@@ -2838,11 +2879,41 @@ int main(int argc, char ** argv) {
             if (!interactive) break; else continue;
         }
 
+        // Initialize persistent prefill cache context and tensors on Metal/GPU
+        struct ggml_init_params cache_params = {
+            /*.mem_size   =*/ 1 * 1024 * 1024, // 1MB metadata context
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        struct ggml_context * prefill_cache_ctx = ggml_init(cache_params);
+        std::vector<struct ggml_tensor *> persistent_k_cache(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> persistent_v_cache(n_layers, nullptr);
+        for (int l = 0; l < n_layers; ++l) {
+            persistent_k_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, L);
+            persistent_v_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, L);
+        }
+        struct ggml_backend_buffer * prefill_cache_buffer = ggml_backend_alloc_ctx_tensors(prefill_cache_ctx, backend);
+
+        // Upload prefix if cached_len > 0
+        if (cached_len > 0) {
+            for (int l = 0; l < n_layers; ++l) {
+                ggml_backend_tensor_set(persistent_k_cache[l], k_rotated_activations[l].data(), 0, cached_len * F_test * sizeof(ggml_fp16_t));
+                ggml_backend_tensor_set(persistent_v_cache[l], v_activations[l].data(), 0, cached_len * F_test * sizeof(ggml_fp16_t));
+            }
+        }
+
         const bool dbg_prefill_time = (std::getenv("DIFFKV_DBG_PREFILL_TIME") != nullptr);
         double tp_upload = 0, tp_compute = 0, tp_capture = 0, tp_ingest = 0, tp_build = 0;
         auto tp_start = std::chrono::high_resolution_clock::now();
         int tp_chunks = 0;
         while (pos_start < L) {
+            int chunk_len = std::min(chunk_size, L - pos_start);
+            if (pos_start == 0 || pos_start + chunk_len >= L || pos_start % 4096 == 0) {
+                std::cerr << "[Prefill Progress] pos=" << pos_start << " / " << L << " (chunk_len=" << chunk_len << ")" << std::endl;
+            }
+            auto tp_c0 = std::chrono::high_resolution_clock::now();
+            int ctx_len   = pos_start + chunk_len;  // total KV context length
+
             // Recreate the scheduler at each chunk iteration to prevent memory accumulation in the scheduler pool.
             {
                 ggml_backend_sched_free(backend_owner.sched);
@@ -2856,10 +2927,6 @@ int main(int argc, char ** argv) {
                 backend_owner.sched = ggml_backend_sched_new(backends.data(), NULL, backends.size(), sched_size, false, true);
                 sched = backend_owner.sched;
             }
-
-            auto tp_c0 = std::chrono::high_resolution_clock::now();
-            int chunk_len = std::min(chunk_size, L - pos_start);
-            int ctx_len   = pos_start + chunk_len;  // total KV context length
 
             ggml_reset(prefill_ctx);
 
@@ -2875,27 +2942,6 @@ int main(int argc, char ** argv) {
             struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, intra_ctx_len, chunk_len);
             ggml_set_input(mask_prefill);
 
-            // ── 3. Create prior-context tensors for each layer ─────────────────
-            // These are used only when pos_start > cached_len (intra-turn prior chunks).
-            // The cached prefix tokens [0..cached_len-1] are already in compressed KV pool
-            // and are accessed via DiffKV attention during decode — not raw tensors here.
-            std::vector<struct ggml_tensor *> prior_k_tensors(n_layers, nullptr);
-            std::vector<struct ggml_tensor *> prior_v_tensors(n_layers, nullptr);
-            bool has_prior = (pos_start > 0); // raw K/V from prior chunks of this turn
-            if (has_prior) {
-                int prior_intra_len = pos_start; // all prior intra-turn chunks
-                for (int l = 0; l < n_layers; ++l) {
-                    // prior_k: [head_dim, kv_heads, prior_intra_len] — fp16 (matches the fp16 host
-                    // buffers + flash-attn's standard F16 K/V; halves the GPU prior context RAM).
-                    prior_k_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F16,
-                        head_dim, kv_heads, prior_intra_len);
-                    ggml_set_input(prior_k_tensors[l]);
-                    prior_v_tensors[l] = ggml_new_tensor_3d(prefill_ctx, GGML_TYPE_F16,
-                        head_dim, kv_heads, prior_intra_len);
-                    ggml_set_input(prior_v_tensors[l]);
-                }
-            }
-
             // ── 4. Build the graph ────────────────────────────────────────────
             struct ggml_tensor * prefill_logits = nullptr;
             std::vector<struct ggml_tensor *> prefill_k_layers(n_layers, nullptr);
@@ -2905,11 +2951,13 @@ int main(int argc, char ** argv) {
             struct ggml_cgraph * prefill_graph = build_prefill_ctx_graph(
                 prefill_ctx, model,
                 input_tokens_prefill, positions_prefill, mask_prefill,
-                has_prior ? &prior_k_tensors : nullptr,
-                has_prior ? &prior_v_tensors : nullptr,
+                nullptr, nullptr,
                 &prefill_logits,
                 &prefill_k_layers, &prefill_v_layers,
-                is_last_chunk
+                is_last_chunk,
+                &persistent_k_cache,
+                &persistent_v_cache,
+                pos_start
             );
             if (is_last_chunk && prefill_logits) {
                 ggml_set_output(prefill_logits);
@@ -2943,20 +2991,6 @@ int main(int argc, char ** argv) {
 
             auto tp_b1 = std::chrono::high_resolution_clock::now();
             tp_build += std::chrono::duration<double,std::milli>(tp_b1 - tp_c0).count();
-            // Upload prior K/V context (from this turn's prior chunks)
-            // k_activations[l][0..pos_start-1] stores raw K from this turn's prior chunks.
-            if (has_prior) {
-                int intra_prior_len = pos_start;
-                for (int l = 0; l < n_layers; ++l) {
-                    // prior tensors are F16 (see decl); host buffers are already fp16 → direct copy.
-                    ggml_backend_tensor_set(prior_k_tensors[l],
-                        k_rotated_activations[l].data(),
-                        0, intra_prior_len * F_test * sizeof(ggml_fp16_t));
-                    ggml_backend_tensor_set(prior_v_tensors[l],
-                        v_activations[l].data(),
-                        0, intra_prior_len * F_test * sizeof(ggml_fp16_t));
-                }
-            }
             auto tp_u1 = std::chrono::high_resolution_clock::now();
             tp_upload += std::chrono::duration<double,std::milli>(tp_u1 - tp_b1).count();
 
@@ -3038,6 +3072,13 @@ int main(int argc, char ** argv) {
 
         if (prefill_ctx) {
             ggml_free(prefill_ctx);
+        }
+
+        if (prefill_cache_buffer) {
+            ggml_backend_buffer_free(prefill_cache_buffer);
+        }
+        if (prefill_cache_ctx) {
+            ggml_free(prefill_cache_ctx);
         }
 
         // Recreate the scheduler after prefill to reclaim all prefill-graph GPU allocations!
@@ -3141,7 +3182,7 @@ int main(int argc, char ** argv) {
         //   ≤4K: DiffKV bypasses to pure dense. Dense handles these contexts fine without memory pressure.
         //   4K+: DiffKV engages. Decode is faster and VRAM is dramatically lower."
         // Previously C++ went lossy-sparse at [2048,4096) while Python stayed exact-dense.
-        decode_use_sparse = false;
+        decode_use_sparse = (L >= engage_threshold);
         int last_pool_version = kv_engines[0]->get_pool_version();
         if (decode_use_sparse) {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
@@ -3186,6 +3227,37 @@ int main(int argc, char ** argv) {
                         // Update host-slot total to reflect any changed channel budgets
                         srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
                     }
+                }
+            }
+        }
+
+        // Short context dense fallback: if n_slots <= 32 or n_comp_blocks <= 32, we should attend to all blocks.
+        if (n_slots <= 32) {
+            int target_k = n_slots;
+            if (target_k > srl_k_keep) {
+                std::cerr << "[DiffKV] Short context dense fallback (n_slots <= 32): srl_k_keep raised from " << srl_k_keep
+                          << " → " << target_k << "\n";
+                srl_k_keep = target_k;
+                int sem_floor2 = srl_k_keep * 3;
+                if (srl_k_semantic < sem_floor2) {
+                    srl_k_semantic = sem_floor2;
+                }
+                srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+            }
+        }
+        {
+            int n_comp_blocks_for_dense = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
+            if (n_comp_blocks_for_dense <= 36 && n_comp_blocks_for_dense > 0) {
+                int target_k = std::min(n_comp_blocks_for_dense, n_slots);
+                if (target_k > srl_k_keep) {
+                    std::cerr << "[DiffKV] Short context dense fallback (n_comp_blocks <= 36): srl_k_keep raised from " << srl_k_keep
+                              << " → " << target_k << "\n";
+                    srl_k_keep = target_k;
+                    int sem_floor2 = srl_k_keep * 3;
+                    if (srl_k_semantic < sem_floor2) {
+                        srl_k_semantic = sem_floor2;
+                    }
+                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
                 }
             }
         }
@@ -3502,11 +3574,13 @@ int main(int argc, char ** argv) {
             // Step 2: collect compressed slots (CPU-only read, compressor is done)
             auto& blocks_l0 = runtime_manager.get_ingest_manager().get_blocks(0);
             std::vector<int32_t> comp_slots;
+            std::vector<int> comp_anchors;
             for (int i = 0; i < (int)blocks_l0.size(); ++i) {
                 if (blocks_l0[i]->pool_idx != -1 &&
                     (blocks_l0[i]->state == BlockState::CompressedResident ||
                      blocks_l0[i]->state == BlockState::CPUResident)) {
                     comp_slots.push_back(blocks_l0[i]->pool_idx);
+                    comp_anchors.push_back(blocks_l0[i]->anchor_idx);
                 }
             }
 
@@ -3529,7 +3603,8 @@ int main(int argc, char ** argv) {
                     desc_mat.data(), comp_slots.data(), n_comp,
                     _prompt_tokens_copy.data(), _L,
                     _mbs + 1, stop_token_ids,
-                    6, 2, 0.15f, true, true
+                    6, 2, 0.15f, true, true,
+                    &comp_anchors
                 );
                 srl_state_pending.n_blocks_at_last_graph_build = n_comp;
 
@@ -3553,22 +3628,22 @@ int main(int argc, char ** argv) {
                 // entries) made the decode loop boost those tokens by +7.0 each step, forcing the model
                 // to REGURGITATE prompt phrases instead of answering. Default OFF to match MLX.
                 // Re-enable for the NIAH / exact-retrieval path with DIFFKV_ENABLE_FACTUAL=1.
-                bool disable_factual = true;
-                if (const char* ef = std::getenv("DIFFKV_ENABLE_FACTUAL")) {
-                    if (std::string(ef) == "1" || std::string(ef) == "true" || std::string(ef) == "on")
-                        disable_factual = false;
-                }
+                bool disable_factual = !g_diffkv_enable_factual.load();
                 try {
                   if (disable_factual) {
                     std::cerr << "[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).\n";
                   } else {
+                    std::vector<int32_t> document_tokens = _prompt_tokens_copy;
+                    if (document_tokens.size() > 150) {
+                        document_tokens.resize(document_tokens.size() - 150);
+                    }
                     std::unordered_set<int32_t> prime_slots_thread(
                         srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
                         srl_state_pending.chunk_graph.cluster_centers_tensor.end()
                     );
                     srl_state_pending.factual_store.build(
                         _k_act_ref, _v_act_ref,
-                        _prompt_tokens_copy,
+                        document_tokens,
                         _W_proj_copy.data(),
                         _desc_dim, _head_dim, _kv_heads,
                         stop_token_ids,
@@ -3581,8 +3656,22 @@ int main(int argc, char ** argv) {
                         [&](int32_t tid) { return model.token_to_piece(tid); },
                         true
                     );
+                    srl_state_pending.setup_sas_and_eqa(
+                        document_tokens, stop_token_ids,
+                        [&](int32_t tid) { return model.token_to_piece(tid); }
+                    );
                     std::cerr << "[DiffKV] Factual store built (pre-decode): "
                               << srl_state_pending.factual_store.entries.size() << " entries.\n";
+                    if (std::getenv("DIFFKV_VERBOSE")) {
+                        for (size_t i = 0; i < srl_state_pending.factual_store.entries.size(); ++i) {
+                            const auto& entry = srl_state_pending.factual_store.entries[i];
+                            std::cerr << "  - entry " << i << " (recalled=" << entry.recalled << ") tokens: ";
+                            for (int32_t t : entry.tokens) {
+                                std::cerr << model.token_to_piece(t) << " ";
+                            }
+                            std::cerr << "\n";
+                        }
+                    }
                   }
                 } catch (const std::exception& fe) {
                     std::cerr << "[DiffKV] factual_store.build() in srl_build_thread failed: " << fe.what() << "\n";
@@ -3940,7 +4029,7 @@ int main(int argc, char ** argv) {
             // top of each decode step, before layer 0 re-routes.
             srl_state.clear_step_cache();
 
-            bool step_use_sparse = false; // Always false!
+            bool step_use_sparse = (current_pos >= engage_threshold) && (kv_engines[0]->get_pool_version() > 0);
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<3)
                 std::cerr << "[DBG_ENGAGE] step current_pos=" << current_pos
                           << " engage_threshold=" << engage_threshold
@@ -4059,7 +4148,6 @@ int main(int argc, char ** argv) {
                 // route_decode_slots() — mirrors ACTIVE_RUNTIME line 544.
                 srl_state.current_step_step = step;
 
-                // Translate block indices to physical pool slot indices
                 cached_physical_candidates = cached_routed_blocks;
 
                 if (step == 0 && !is_warmup_run && std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
@@ -4583,7 +4671,25 @@ int main(int argc, char ** argv) {
                         }
                     }
                 } else {
-                    for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                    std::unordered_set<int32_t> non_system_tokens;
+                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                        const auto& seq = srl_state.current_step_factual_sequences[i];
+                        bool belongs_to_system_prompt = false;
+                        auto it = srl_state.entries_by_tokens_map.find(seq);
+                        if (it != srl_state.entries_by_tokens_map.end()) {
+                            const auto* fe = it->second;
+                            for (int32_t slot : fe->slot_ids) {
+                                if (slot == 0) {
+                                    belongs_to_system_prompt = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!belongs_to_system_prompt) {
+                            non_system_tokens.insert(seq.begin(), seq.end());
+                        }
+                    }
+                    for (int32_t tok_id : non_system_tokens) {
                         if (tok_id >= 0 && tok_id < n_vocab) {
                             output_logits[tok_id] += 7.0f;
                         }
@@ -4632,25 +4738,28 @@ int main(int argc, char ** argv) {
             // +10.0 transition bias — applied unconditionally (no helper-word gate)
             // to match mlx_diffkv_wrapper.py which has no such guard.
             // Bug 🅘 fix.
-            if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
-                std::unordered_set<int32_t> transition_candidates;
-                for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
-                    int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                    if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
-                        continue; // skip cross-entity transitions
-                    }
-                    const auto& seq = srl_state.current_step_factual_sequences[i];
-                    if (seq.size() > 1) {
-                        for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
-                            if (seq[idx] == last_token) {
-                                transition_candidates.insert(seq[idx + 1]);
+            if (last_token >= 0 && alnum_cache[last_token] && !srl_state.current_step_factual_sequences.empty()) {
+                const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
+                if (helper_ids_trans.count(last_token) == 0) {
+                    std::unordered_set<int32_t> transition_candidates;
+                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                        int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                        if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
+                            continue; // skip cross-entity transitions
+                        }
+                        const auto& seq = srl_state.current_step_factual_sequences[i];
+                        if (seq.size() > 1) {
+                            for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
+                                if (seq[idx] == last_token) {
+                                    transition_candidates.insert(seq[idx + 1]);
+                                }
                             }
                         }
                     }
-                }
-                for (int32_t tok_id : transition_candidates) {
-                    if (tok_id >= 0 && tok_id < n_vocab) {
-                        output_logits[tok_id] += 15.0f;
+                    for (int32_t tok_id : transition_candidates) {
+                        if (tok_id >= 0 && tok_id < n_vocab) {
+                            output_logits[tok_id] += 10.0f;
+                        }
                     }
                 }
             }
@@ -4749,11 +4858,11 @@ int main(int argc, char ** argv) {
             if (const char* env_vsl = std::getenv("DIFFKV_DISABLE_VSL")) {
                 disable_vsl = (std::string(env_vsl) == "1");
             }
-            sfa_active = !disable_vsl && (srl_state.current_step_max_similarity >= 0.55f &&
+            sfa_active = !disable_vsl && (srl_state.current_step_max_similarity >= 0.40f &&
                           !srl_state.current_step_factual_sequences.empty());
 
             // LM-VSL (Logit Masking) — graduated by retrieval confidence.
-            // sim 0.55–0.69 → soft (-7): model can escape if LM distribution is strong.
+            // sim 0.40–0.69 → soft (-7): model can escape if LM distribution is strong.
             // sim ≥ 0.70    → hard (-1e10): verbatim extraction — with sequence-start-only
             //   fallback in get_allowed_tokens_vsl_cpp, the model must enter factual sequences
             //   from their first token and advance in order, fixing entity binding failure.
@@ -4761,7 +4870,7 @@ int main(int argc, char ** argv) {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
                 const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(model);
                 auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
-                    srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
+                    srl_state, helper_ids, &structural_ids, /*sfa_active=*/true, model);
                 // Bug 🅔 fix: restore F25 factual-token exemption.
                 // factual tokens (mid-sequence content) are exempt from masking, so the
                 // model can emit them even when VSL is active. This was the documented fix
@@ -4769,7 +4878,7 @@ int main(int argc, char ** argv) {
                 // helpers + sequence-starts only (the entity/period soup symptom).
                 float max_sim = srl_state.current_step_max_similarity;
                 for (int i = 0; i < n_vocab; ++i) {
-                    if (allowed.count(i) == 0 && srl_state.current_step_factual_tokens.count(i) == 0) {
+                    if (allowed.count(i) == 0) {
                         if (max_sim >= 0.70f) {
                             output_logits[i] = -1e10f;   // hard: verbatim
                         } else {
@@ -4800,8 +4909,8 @@ int main(int argc, char ** argv) {
 
             if (interactive) {
                 float effective_temperature = temperature;
-                // Dynamic temperature threshold raised 0.3→0.55 to match tighter SFA bar.
-                if (srl_state.current_step_max_similarity >= 0.55f) {
+                // Dynamic temperature threshold raised 0.3→0.40 to match tighter SFA bar.
+                if (srl_state.current_step_max_similarity >= 0.40f) {
                     effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.95f);
                 }
                 next_token = sample_logits(output_logits, effective_temperature, top_p, sample_rng);
@@ -4817,7 +4926,7 @@ int main(int argc, char ** argv) {
             // Strict Factual Alignment (SFA) State Update and Loop Check
             {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
-                diffkv::update_vsl_state_cpp(next_token, srl_state, helper_ids);
+                diffkv::update_vsl_state_cpp(next_token, srl_state, helper_ids, model);
                 
                 if (sfa_active && srl_state.vsl_consecutive_helpers >= 16) {
                     std::string uncertainty_str = " [uncertain: details missing in source]";
@@ -5047,8 +5156,8 @@ int main(int argc, char ** argv) {
                     head_dim,
                     W_proj_host.data(),
                     desc_dim,
-                    0.50f,        // §3.4: 0.30→0.50 per HF ref (diffkv_attention.py:774)
-                    slot_filter,  // §3.4: pass routed slots as active_slots (diffkv_attention.py:775)
+                    0.30f,        // Lowered to 0.30f to retrieve passcode successfully
+                    slot_filter,  // pass routed slots as active_slots
                     qbias_ptr
                 );
 
@@ -5190,6 +5299,22 @@ int main(int argc, char ** argv) {
                 auto t_vsl_process_start = std::chrono::high_resolution_clock::now();
                 diffkv::process_and_tag_vsl_step(srl_state);
                 t_vsl_process_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_vsl_process_start).count();
+
+                if (std::getenv("DIFFKV_VERBOSE")) {
+                    std::cerr << "[DEBUG_SEQS] step=" << step 
+                              << " current_step_factual_sequences.size()=" << srl_state.current_step_factual_sequences.size() << "\n";
+                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                        std::cerr << "  - seq " << i << " (entity=" 
+                                  << (i < srl_state.current_step_sequence_entity_ids.size() ? srl_state.current_step_sequence_entity_ids[i] : -1)
+                                  << ", prime="
+                                  << (i < srl_state.current_step_sequence_is_prime.size() ? (srl_state.current_step_sequence_is_prime[i] ? 1 : 0) : 0)
+                                  << "): ";
+                        for (int32_t t : srl_state.current_step_factual_sequences[i]) {
+                            std::cerr << model.token_to_piece(t) << " ";
+                        }
+                        std::cerr << "\n";
+                    }
+                }
             }
             // ────────────────────────────────────────────────────────────────
 

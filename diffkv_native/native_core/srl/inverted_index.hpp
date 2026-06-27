@@ -157,7 +157,8 @@ inline InvertedTokenIndex build_inverted_index(
     const std::vector<int32_t>&     slot_ids,      // [N] in chronological order
     int                             block_size,
     const std::unordered_set<int>&  stop_token_ids,
-    int                             top_n_per_block = 50  // raised from 20; ensures dense technical vocab is indexed
+    int                             top_n_per_block = 50,  // raised from 20; ensures dense technical vocab is indexed
+    const std::vector<int>*         block_anchor_idxs = nullptr
 ) {
     InvertedTokenIndex inv;
     inv.block_size = block_size;
@@ -167,7 +168,7 @@ inline InvertedTokenIndex build_inverted_index(
 
     for (int i = 0; i < N; ++i) {
         int32_t slot = slot_ids[i];
-        int tok_start = i * block_size;
+        int tok_start = (block_anchor_idxs && (int)block_anchor_idxs->size() == N) ? (*block_anchor_idxs)[i] : i * block_size;
         int tok_end   = std::min(tok_start + block_size, seq_len);
         if (tok_start >= seq_len) break;
 

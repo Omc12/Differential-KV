@@ -686,13 +686,16 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     int pool_rank = engines[layer_idx]->get_rank();
     int svd_rank = rank;
     if (boost) {
-        svd_rank = (int)std::ceil(rank * 1.5f);
+        svd_rank = rank * 2;
         int seq_len = S_total - 1;
         if (svd_rank > seq_len) {
             svd_rank = seq_len;
         }
         if (svd_rank > pool_rank) {
             svd_rank = pool_rank;
+        }
+        if (layer_idx == 0) {
+            std::cerr << "[DiffKV SVD Boost] Layer " << layer_idx << " Slot " << slot_id << " boosted to svd_rank=" << svd_rank << " (pool_rank=" << pool_rank << ")\n";
         }
     }
     
@@ -715,6 +718,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
+    job.force_lapack = boost;
 
     if (engines[layer_idx]->get_host_U(slot_id) == nullptr) {
         // Skip low-rank path: allocate temporary local buffers for this job

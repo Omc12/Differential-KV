@@ -416,7 +416,8 @@ bool run_svd_driver(
     int S, int F, int R,
     float* U_out,
     float* S_out,
-    float* VT_out
+    float* VT_out,
+    bool force_lapack
 ) {
     static const bool use_rand_svd = []() {
         if (const char* env = std::getenv("DIFFKV_RAND_SVD")) {
@@ -426,7 +427,7 @@ bool run_svd_driver(
         return true;
     }();
 
-    if (use_rand_svd) {
+    if (use_rand_svd && !force_lapack) {
         return run_randomized_svd(A_input, S, F, R, U_out, S_out, VT_out);
     } else {
         return run_lapack_svd(A_input, S, F, R, U_out, S_out, VT_out);
@@ -570,7 +571,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     std::vector<float> S_joint(svd_dim);
     std::vector<float> VT_joint(svd_dim * joint_F);
 
-    bool ok = run_svd_driver(K_V_joint.data(), S_deltas, joint_F, svd_dim, U_joint.data(), S_joint.data(), VT_joint.data());
+    bool ok = run_svd_driver(K_V_joint.data(), S_deltas, joint_F, svd_dim, U_joint.data(), S_joint.data(), VT_joint.data(), params.force_lapack);
     if (!ok) {
         return false;
     }

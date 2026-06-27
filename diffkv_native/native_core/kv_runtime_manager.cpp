@@ -92,7 +92,7 @@ bool KVRuntimeManager::initialize(
     for (int l = 0; l < n_layers; ++l) {
         engines_[l] = std::make_unique<NativeBlockPool>();
         int layer_rank = get_layer_rank(l);
-        int pool_rank = (layer_rank * 3 + 1) / 2; // ceiling of 1.5 * layer_rank
+        int pool_rank = layer_rank * 2; // 2x layer_rank for precision boost headroom
         if (!engines_[l]->initialize(n_slots, pool_rank, head_dim, kv_heads, desc_dim, buft, micro_block_size_)) {
             std::cerr << "[KVRuntimeManager] Error: Failed to initialize KVEngine for layer " << l << std::endl;
             return false;
@@ -340,106 +340,24 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     const auto& ord = srl_state.ordered_slot_ids;
     int n_ord = static_cast<int>(ord.size());
 
-    // N4.3 fix: scale channel budgets with context length like Python's adaptive_k.
-    int eff_recency = std::max(srl_k_recency, std::min(n_ord / 10, srl_k_recency * 4));
-    int eff_lexical = std::max(srl_k_lexical, std::min(n_ord / 8,  srl_k_lexical * 4));
-    int eff_graph   = std::max(srl_k_graph,   std::min(n_ord / 8,  srl_k_graph * 4));
-
-    // 1. Recency window: latest eff_recency slots from ordered slot list
-    int take_r = std::min(eff_recency, n_ord);
-    for (int i = n_ord - take_r; i < n_ord; ++i) {
-        int32_t slot = ord[i];
-        if (slot >= 0) {
-            if (!seen.count(slot)) {
-                host_candidates.push_back(slot);
-                seen.insert(slot);
-            }
-        }
-    }
-
-    // 2. Lexical search slots
-    // Search a wider window of recent history (up to last 128 tokens) for keywords
-    int query_start = std::max(0, current_pos - 128);
-    std::vector<int> query_tokens;
-    for (int i = query_start; i < current_pos; ++i) {
-        if (i < (int)token_ids.size()) {
-            query_tokens.push_back(token_ids[i]);
-        }
-    }
-    float decay_factor = 1.0f;
-    if (const char* env = std::getenv("DIFFKV_SRL_DECAY_FACTOR")) {
-        decay_factor = std::stof(env);
-    }
-    auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, decay_factor);
-    std::vector<int32_t> lexical_slots;
-    for (int i = 0; i < std::min(eff_lexical, (int)lex_scored.size()); ++i) {
-        int32_t slot = lex_scored[i].first;
-        if (slot >= 0) {
-            lexical_slots.push_back(slot);
-            if (!seen.count(slot)) {
-                host_candidates.push_back(slot);
-                seen.insert(slot);
-            }
-        }
-    }
-
-    // 3. Chunk Graph Adjacency / 2-hop neighborhood expansion
-    const ChunkGraph& g = srl_state.chunk_graph;
-    int N = g.N;
-    if (N > 0 && N == srl_state.n_active_blocks()) {
-        std::vector<float> seed_scores(N, 0.0f);
-        std::unordered_set<int32_t> seed_set;
-
-        // Populate seed activations from lexical match scores
-        for (const auto& pair : lex_scored) {
-            int32_t slot = pair.first;
-            auto it = std::find(ord.begin(), ord.end(), slot);
-            if (it != ord.end()) {
-                int idx = std::distance(ord.begin(), it);
-                if (idx >= 0 && idx < N) {
-                    seed_scores[idx] = pair.second;
-                    seed_set.insert(slot);
-                }
-            }
-        }
-
-        // pointwise decay/retention
-        std::vector<float> retention(N, srl_state.graph_hop_decay);
-
-        // 1-hop propagation
-        std::vector<float> A1 = graph_propagate(g, seed_scores, retention, srl_state.graph_hop_decay);
-        // 2-hop propagation
-        std::vector<float> A2 = graph_propagate(g, A1, retention, srl_state.graph_hop_decay);
-
-        std::vector<std::pair<float, int32_t>> gscore_slots;
-        for (int i = 0; i < N; ++i) {
+    if (n_ord <= 36) {
+        for (int i = 0; i < n_ord; ++i) {
             int32_t slot = ord[i];
-            if (seed_set.count(slot)) continue;
-            float gs = A1[i] + A2[i];
-            if (gs > 0.0f && slot >= 0) {
-                gscore_slots.push_back({gs, slot});
+            if (slot >= 0 && !seen.count(slot)) {
+                host_candidates.push_back(slot);
+                seen.insert(slot);
             }
         }
+    } else {
+        // N4.3 fix: scale channel budgets with context length like Python's adaptive_k.
+        int eff_recency = std::max(srl_k_recency, std::min(n_ord / 10, srl_k_recency * 4));
+        int eff_lexical = std::max(srl_k_lexical, std::min(n_ord / 8,  srl_k_lexical * 4));
+        int eff_graph   = std::max(srl_k_graph,   std::min(n_ord / 8,  srl_k_graph * 4));
 
-        int take_g = std::min(eff_graph, (int)gscore_slots.size());
-        if (take_g > 0) {
-            std::partial_sort(gscore_slots.begin(), gscore_slots.begin() + take_g, gscore_slots.end(),
-                              [](const auto& a, const auto& b) { return a.first > b.first; });
-            for (int i = 0; i < take_g; ++i) {
-                int32_t slot = gscore_slots[i].second;
-                if (!seen.count(slot)) {
-                    host_candidates.push_back(slot);
-                    seen.insert(slot);
-                }
-            }
-        }
-    }
-
-    // 4. Dynamic routing anchors expansion
-    if (!srl_state.dynamic_anchors.empty()) {
-        std::unordered_set<int32_t> da_set(srl_state.dynamic_anchors.begin(), srl_state.dynamic_anchors.end());
-        std::vector<int32_t> expanded_da = srl_state.expand_neighborhood(da_set);
-        for (int32_t slot : expanded_da) {
+        // 1. Recency window: latest eff_recency slots from ordered slot list
+        int take_r = std::min(eff_recency, n_ord);
+        for (int i = n_ord - take_r; i < n_ord; ++i) {
+            int32_t slot = ord[i];
             if (slot >= 0) {
                 if (!seen.count(slot)) {
                     host_candidates.push_back(slot);
@@ -447,25 +365,125 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
                 }
             }
         }
-    }
 
-    // 4.5 Prompt routing anchors expansion
-    if (!srl_state.prompt_anchors.empty()) {
-        int b_size = srl_state.inverted_index.block_size;
-        std::unordered_set<int32_t> pa_slots;
-        for (int idx : srl_state.prompt_anchors) {
-            int block_idx = idx / b_size;
-            if (block_idx >= 0 && block_idx < static_cast<int>(srl_state.ordered_slot_ids.size())) {
-                pa_slots.insert(srl_state.ordered_slot_ids[block_idx]);
+        // 2. Lexical search slots
+        // Search a wider window of recent history (up to last 128 tokens) for keywords
+        int query_start = std::max(0, current_pos - 128);
+        std::vector<int> query_tokens;
+        for (int i = query_start; i < current_pos; ++i) {
+            if (i < (int)token_ids.size()) {
+                query_tokens.push_back(token_ids[i]);
             }
         }
-        if (!pa_slots.empty()) {
-            std::vector<int32_t> expanded_pa = srl_state.expand_neighborhood(pa_slots);
-            for (int32_t slot : expanded_pa) {
+        float decay_factor = 1.0f;
+        if (const char* env = std::getenv("DIFFKV_SRL_DECAY_FACTOR")) {
+            decay_factor = std::stof(env);
+        }
+        auto lex_scored = score_lexical_slots(srl_state.inverted_index, query_tokens, decay_factor);
+        if (current_pos == 8192) {
+            std::cerr << "[DEBUG_LEX] occurrences.size()=" << srl_state.inverted_index.occurrences.size() << "\n";
+            std::cerr << "[DEBUG_LEX] query_tokens.size()=" << query_tokens.size() << "\n";
+            std::cerr << "[DEBUG_LEX] Lexical scored blocks count=" << lex_scored.size() << "\n";
+            for (size_t i = 0; i < std::min((size_t)15, lex_scored.size()); ++i) {
+                std::cerr << "  slot=" << lex_scored[i].first << " score=" << lex_scored[i].second << "\n";
+            }
+        }
+        std::vector<int32_t> lexical_slots;
+        for (int i = 0; i < std::min(eff_lexical, (int)lex_scored.size()); ++i) {
+            int32_t slot = lex_scored[i].first;
+            if (slot >= 0) {
+                lexical_slots.push_back(slot);
+                if (!seen.count(slot)) {
+                    host_candidates.push_back(slot);
+                    seen.insert(slot);
+                }
+            }
+        }
+
+        // 3. Chunk Graph Adjacency / 2-hop neighborhood expansion
+        const ChunkGraph& g = srl_state.chunk_graph;
+        int N = g.N;
+        if (N > 0 && N == srl_state.n_active_blocks()) {
+            std::vector<float> seed_scores(N, 0.0f);
+            std::unordered_set<int32_t> seed_set;
+
+            // Populate seed activations from lexical match scores
+            for (const auto& pair : lex_scored) {
+                int32_t slot = pair.first;
+                auto it = std::find(ord.begin(), ord.end(), slot);
+                if (it != ord.end()) {
+                    int idx = std::distance(ord.begin(), it);
+                    if (idx >= 0 && idx < N) {
+                        seed_scores[idx] = pair.second;
+                        seed_set.insert(slot);
+                    }
+                }
+            }
+
+            // pointwise decay/retention
+            std::vector<float> retention(N, srl_state.graph_hop_decay);
+
+            // 1-hop propagation
+            std::vector<float> A1 = graph_propagate(g, seed_scores, retention, srl_state.graph_hop_decay);
+            // 2-hop propagation
+            std::vector<float> A2 = graph_propagate(g, A1, retention, srl_state.graph_hop_decay);
+
+            std::vector<std::pair<float, int32_t>> gscore_slots;
+            for (int i = 0; i < N; ++i) {
+                int32_t slot = ord[i];
+                if (seed_set.count(slot)) continue;
+                float gs = A1[i] + A2[i];
+                if (gs > 0.0f && slot >= 0) {
+                    gscore_slots.push_back({gs, slot});
+                }
+            }
+
+            int take_g = std::min(eff_graph, (int)gscore_slots.size());
+            if (take_g > 0) {
+                std::partial_sort(gscore_slots.begin(), gscore_slots.begin() + take_g, gscore_slots.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (int i = 0; i < take_g; ++i) {
+                    int32_t slot = gscore_slots[i].second;
+                    if (!seen.count(slot)) {
+                        host_candidates.push_back(slot);
+                        seen.insert(slot);
+                    }
+                }
+            }
+        }
+
+        // 4. Dynamic routing anchors expansion
+        if (!srl_state.dynamic_anchors.empty()) {
+            std::unordered_set<int32_t> da_set(srl_state.dynamic_anchors.begin(), srl_state.dynamic_anchors.end());
+            std::vector<int32_t> expanded_da = srl_state.expand_neighborhood(da_set);
+            for (int32_t slot : expanded_da) {
                 if (slot >= 0) {
                     if (!seen.count(slot)) {
                         host_candidates.push_back(slot);
                         seen.insert(slot);
+                    }
+                }
+            }
+        }
+
+        // 4.5 Prompt routing anchors expansion
+        if (!srl_state.prompt_anchors.empty()) {
+            int b_size = srl_state.inverted_index.block_size;
+            std::unordered_set<int32_t> pa_slots;
+            for (int idx : srl_state.prompt_anchors) {
+                int block_idx = idx / b_size;
+                if (block_idx >= 0 && block_idx < static_cast<int>(srl_state.ordered_slot_ids.size())) {
+                    pa_slots.insert(srl_state.ordered_slot_ids[block_idx]);
+                }
+            }
+            if (!pa_slots.empty()) {
+                std::vector<int32_t> expanded_pa = srl_state.expand_neighborhood(pa_slots);
+                for (int32_t slot : expanded_pa) {
+                    if (slot >= 0) {
+                        if (!seen.count(slot)) {
+                            host_candidates.push_back(slot);
+                            seen.insert(slot);
+                        }
                     }
                 }
             }

@@ -333,7 +333,7 @@ void FactualExactStore::build(
     // but it merely shifts the straddle/fragment edge from the end of context to the
     // start and breaks the standard NIAH depth 0.1 — 20 is the better operating point:
     // standard depths 0.1/0.5/0.9 pass; only the non-standard last-5% depth fragments.)
-    const int CHUNK_LEN = 20;
+    const int CHUNK_LEN = 32;
     std::vector<std::array<int, 3>> chunked_spans;
     for (const auto& span : spans) {
         for (int sub_s = span.first; sub_s < span.second; sub_s += CHUNK_LEN) {
@@ -834,9 +834,12 @@ std::vector<FactEntry> FactualExactStore::query(
     const std::unordered_set<int32_t>* active_slots,
     const std::unordered_set<int32_t>* query_entity_bias
 ) const {
+    std::cerr << "[DiffKV Query DIAG] entries.size()=" << entries.size() 
+              << " active_slots=" << (active_slots ? active_slots->size() : 0)
+              << "\n";
     if (entries.empty() || !W_proj) return {};
 
-    for (auto& entry : entries) {
+    for (auto& entry : const_cast<FactualExactStore*>(this)->entries) {
         entry.current_sim = 0.0f;
     }
 
@@ -890,6 +893,19 @@ std::vector<FactEntry> FactualExactStore::query(
     float norm = std::sqrt(norm_sq) + 1e-8f;
     for (int r = 0; r < desc_dim; ++r) {
         q_desc[r] /= norm;
+    }
+
+    for (size_t idx = 0; idx < entries.size(); ++idx) {
+        if (idx == 122 || idx == 123) {
+            const auto& entry = entries[idx];
+            float sim = 0.0f;
+            for (int r = 0; r < desc_dim; ++r) {
+                sim += q_desc[r] * entry.descriptor[r];
+            }
+            std::cerr << "[DiffKV Query DIAG] Entry " << idx << " | sim=" << sim << " | slots: ";
+            for (int s : entry.slot_ids) std::cerr << s << " ";
+            std::cerr << "\n";
+        }
     }
 
 
@@ -992,6 +1008,16 @@ std::vector<FactEntry> FactualExactStore::query(
             passes_walk = (ws >= WALK_THRESHOLD && (sim >= WALK_MIN_SIM || ws >= WALK_STRONG));
         }
 
+        if (idx == 122 || idx == 123) {
+            std::cerr << "[DiffKV Query DIAG] Entry " << idx << " | sim=" << sim 
+                      << " | passes_main=" << (passes_main ? 1 : 0)
+                      << " | passes_relaxed=" << (passes_relaxed ? 1 : 0)
+                      << " | passes_walk=" << (passes_walk ? 1 : 0)
+                      << " | active_slots=" << (active_slots ? 1 : 0)
+                      << " | entry_has_active_slot=" << (entry_has_active_slot[idx] ? 1 : 0)
+                      << "\n";
+        }
+
         if (passes_main || passes_relaxed || passes_walk) {
             float final_score = sim;
             if (walk_it != walk_candidates.end() && walk_it->second > final_score) {
@@ -1057,6 +1083,19 @@ std::vector<FactEntry> FactualExactStore::query(
 
     std::sort(merged_entries.begin(), merged_entries.end(),
               [](const FactEntry& a, const FactEntry& b) { return a.current_sim > b.current_sim; });
+
+    if (std::getenv("DIFFKV_VERBOSE")) {
+        std::cerr << "[DiffKV Query DIAG] merged_entries size=" << merged_entries.size() << "\n";
+        for (size_t i = 0; i < merged_entries.size(); ++i) {
+            std::cerr << "  - merged " << i << " sim=" << merged_entries[i].current_sim 
+                      << " start=" << merged_entries[i].start_idx 
+                      << " tokens: ";
+            for (int32_t t : merged_entries[i].tokens) {
+                std::cerr << t << " ";
+            }
+            std::cerr << "\n";
+        }
+    }
 
     // RC6 — entity-proportional budget: scale K with matched prime count so each
     // entity gets coverage in comparison answers (fixed top-5 drops one entity).

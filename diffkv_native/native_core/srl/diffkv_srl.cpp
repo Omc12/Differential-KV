@@ -32,7 +32,9 @@ struct ggml_tensor * semantic_search_topk(
     struct ggml_tensor * scores = ggml_mul_mat(ctx, desc_matrix, q_desc); // [n_slots, 1]
 
     // Add mask to scores
-    scores = ggml_add(ctx, scores, slots_mask);
+    int n_allocated = desc_matrix->ne[1];
+    struct ggml_tensor * slots_mask_view = ggml_view_1d(ctx, slots_mask, n_allocated, 0);
+    scores = ggml_add(ctx, scores, slots_mask_view);
 
     // Cast scores to F32 to ensure compatibility with ggml_argsort_top_k
     struct ggml_tensor * scores_f32 = ggml_cast(ctx, scores, GGML_TYPE_F32);

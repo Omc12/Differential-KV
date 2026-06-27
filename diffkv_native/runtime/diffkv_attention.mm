@@ -511,10 +511,11 @@ void execute_metal_attention(
 
     std::vector<int32_t> unique_slots;
     unique_slots.reserve(raw_K);
-    if (raw_K > 0 && slot_indices && slot_indices->data) {
-        const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
+    if (raw_K > 0 && slot_indices) {
+        std::vector<int32_t> slot_ids_cpu(raw_K);
+        ggml_backend_tensor_get(slot_indices, slot_ids_cpu.data(), 0, raw_K * sizeof(int32_t));
         for (int k = 0; k < raw_K; ++k) {
-            int32_t sid = slots_ptr[k];
+            int32_t sid = slot_ids_cpu[k];
             if (sid >= 0 && sid < n_slots) {
                 if (std::find(unique_slots.begin(), unique_slots.end(), sid) == unique_slots.end()) {
                     unique_slots.push_back(sid);
@@ -537,12 +538,22 @@ void execute_metal_attention(
         // ── Build sparse slot-indices Metal buffer ─────────────────────────────
         id<MTLBuffer> slot_indices_buf = nil;
         if (active_K > 0) {
+            id<MTLBuffer> old_buf = nil;
             if (data->mtl_slot_indices) {
-                slot_indices_buf = (__bridge id<MTLBuffer>)data->mtl_slot_indices;
-            } else {
-                slot_indices_buf = [g_device newBufferWithLength:128 * sizeof(int32_t)
+                old_buf = (__bridge id<MTLBuffer>)data->mtl_slot_indices;
+            }
+            size_t required_len = active_K * sizeof(int32_t);
+            size_t alloc_len = ((active_K + 127) / 128) * 128 * sizeof(int32_t);
+            if (old_buf == nil || old_buf.length < required_len) {
+                if (old_buf != nil) {
+                    id<MTLBuffer> release_me = (__bridge_transfer id<MTLBuffer>)data->mtl_slot_indices;
+                    release_me = nil;
+                }
+                slot_indices_buf = [g_device newBufferWithLength:alloc_len
                                                          options:MTLResourceStorageModeShared];
                 data->mtl_slot_indices = (__bridge_retained void*)slot_indices_buf;
+            } else {
+                slot_indices_buf = old_buf;
             }
             std::memcpy(slot_indices_buf.contents, unique_slots.data(), active_K * sizeof(int32_t));
         } else {
@@ -650,7 +661,8 @@ void execute_metal_attention(
             std::lock_guard<std::mutex> lk(g_pool_buf_mutex);
             GlobalPoolMtlBufs& pb = g_pool_buf_cache[(void*)engine];
 
-            if (!pb.u_pool) {
+            int current_ver = engine->get_pool_version();
+            if (!pb.u_pool || pb.pool_ver != current_ver) {
                 pb.u_pool    = wrap_tensor(engine->get_U());
                 pb.u_scale   = wrap_tensor(engine->get_U_row_scale());
                 pb.vk_pool   = wrap_tensor(engine->get_VK());
@@ -660,6 +672,7 @@ void execute_metal_attention(
                 pb.seq_lens  = wrap_tensor(engine->get_seq_lens());
                 pb.scales    = wrap_tensor(engine->get_scales());
                 pb.anc_pos   = wrap_tensor(engine->get_anchor_positions());
+                pb.pool_ver  = current_ver;
             }
 
             u_pool_buf    = pb.u_pool;

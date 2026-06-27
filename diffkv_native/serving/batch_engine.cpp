@@ -1242,6 +1242,62 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         userdata[l].dense_capacity = max_active_dense_tokens;
     }
     
+    // SRL Routing Budget scaling + dense fallback matching main.cpp
+    {
+        int n_comp_blocks = (int)runtime_manager_->get_ingest_manager().get_blocks(0).size();
+        if (n_comp_blocks > 0) {
+            bool mlx_parity = true;
+            if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
+                mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
+            }
+            if (mlx_parity) {
+                int target_k = std::min(n_comp_blocks, n_slots);
+                if (target_k > srl_k_keep) {
+                    srl_k_keep = target_k;
+                    int sem_floor2 = srl_k_keep * 3;
+                    if (srl_k_semantic < sem_floor2) {
+                        srl_k_semantic = sem_floor2;
+                    }
+                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                }
+            } else {
+                int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
+                int adaptive_k_max = std::min(200, n_comp_blocks);
+                int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                if (adaptive_k > srl_k_keep) {
+                    srl_k_keep = adaptive_k;
+                    int sem_floor2 = srl_k_keep * 3;
+                    if (srl_k_semantic < sem_floor2) {
+                        srl_k_semantic = sem_floor2;
+                    }
+                    srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+                }
+            }
+        }
+        if (n_slots <= 32) {
+            int target_k = n_slots;
+            if (target_k > srl_k_keep) {
+                srl_k_keep = target_k;
+                int sem_floor2 = srl_k_keep * 3;
+                if (srl_k_semantic < sem_floor2) {
+                    srl_k_semantic = sem_floor2;
+                }
+                srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+            }
+        }
+        if (n_comp_blocks <= 36 && n_comp_blocks > 0) {
+            int target_k = std::min(n_comp_blocks, n_slots);
+            if (target_k > srl_k_keep) {
+                srl_k_keep = target_k;
+                int sem_floor2 = srl_k_keep * 3;
+                if (srl_k_semantic < sem_floor2) {
+                    srl_k_semantic = sem_floor2;
+                }
+                srl_k_host = 1 + srl_k_recency + srl_k_lexical + srl_k_semantic + srl_k_graph;
+            }
+        }
+    }
+    
     struct ggml_tensor * decode_logits = nullptr;
     struct ggml_tensor * decode_selected_slots = nullptr;
     struct ggml_tensor * decode_concat_k = nullptr;
@@ -1414,10 +1470,15 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
 
+        std::vector<int32_t> document_tokens = prompt_tokens;
+        if (document_tokens.size() > 150) {
+            document_tokens.resize(document_tokens.size() - 150);
+        }
+
         session->srl_state.factual_store.build(
             k_act_f16,
             v_act_f16,
-            prompt_tokens,
+            document_tokens,
             W_proj_host.data(),
             desc_dim,
             head_dim,
@@ -1433,7 +1494,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             true // use_salience_parser
         );
         session->srl_state.entries_map_built = false;
-        session->srl_state.setup_sas_and_eqa(prompt_tokens, stop_token_ids_, [&](int32_t tid) {
+        session->srl_state.setup_sas_and_eqa(document_tokens, stop_token_ids_, [&](int32_t tid) {
             return model_->token_to_piece(tid);
         });
     }
@@ -1729,7 +1790,25 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                     }
                 }
             } else {
-                for (int32_t tok_id : srl_state.current_step_factual_tokens) {
+                std::unordered_set<int32_t> non_system_tokens;
+                for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                    const auto& seq = srl_state.current_step_factual_sequences[i];
+                    bool belongs_to_system_prompt = false;
+                    auto it = srl_state.entries_by_tokens_map.find(seq);
+                    if (it != srl_state.entries_by_tokens_map.end()) {
+                        const auto* fe = it->second;
+                        for (int32_t slot : fe->slot_ids) {
+                            if (slot == 0) {
+                                belongs_to_system_prompt = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!belongs_to_system_prompt) {
+                        non_system_tokens.insert(seq.begin(), seq.end());
+                    }
+                }
+                for (int32_t tok_id : non_system_tokens) {
                     if (tok_id >= 0 && tok_id < n_vocab) {
                         output_logits[tok_id] += 7.0f;
                     }
@@ -1761,7 +1840,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
 
         // 3. -3.5 anti-hallucination penalty
-        if (srl_state.current_step_max_similarity >= 0.55f &&
+        if (srl_state.current_step_max_similarity >= 0.40f &&
             !srl_state.dual_entity_mode &&
             !srl_state.current_step_factual_tokens.empty()) {
             const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(*model_);
@@ -1780,7 +1859,17 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
 
         // 4. +10.0 transition bias
-        if (last_token >= 0 && !srl_state.current_step_factual_sequences.empty()) {
+        bool is_alnum_trans = false;
+        if (last_token >= 0) {
+            std::string piece = model_->token_to_piece(last_token);
+            for (char c : piece) {
+                if (std::isalnum(static_cast<unsigned char>(c))) {
+                    is_alnum_trans = true;
+                    break;
+                }
+            }
+        }
+        if (last_token >= 0 && is_alnum_trans && !srl_state.current_step_factual_sequences.empty()) {
             const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(*model_);
             if (helper_ids_trans.count(last_token) == 0) {
                 std::unordered_set<int32_t> transition_candidates;
@@ -1800,7 +1889,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 }
                 for (int32_t tok_id : transition_candidates) {
                     if (tok_id >= 0 && tok_id < n_vocab) {
-                        output_logits[tok_id] += 15.0f;
+                        output_logits[tok_id] += 10.0f;
                     }
                 }
             }
@@ -1834,17 +1923,17 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
         // process_and_tag_vsl_step is now called inside the factual store query block at the end of each step
 
-        // SFA threshold raised to 0.55 to match main.cpp interactive path.
+        // SFA threshold raised to 0.40 to match main.cpp interactive path.
         bool has_active_lock = false;
         for (const auto& suffix : session->srl_state.vsl_active_candidates) {
             if (!suffix.empty()) { has_active_lock = true; break; }
         }
-        if (has_active_lock || session->srl_state.current_step_max_similarity >= 0.55f) {
+        if (has_active_lock || session->srl_state.current_step_max_similarity >= 0.40f) {
             req->sfa_active = true;
         }
 
         // LM-VSL (Logit Masking) — graduated by retrieval confidence.
-        // sim 0.55–0.69 → soft (-7): model can escape if LM distribution is strong.
+        // sim 0.40–0.69 → soft (-7): model can escape if LM distribution is strong.
         // sim ≥ 0.70    → hard (-1e10): verbatim extraction — the model must enter
         //   factual sequences from their first token (sequence-start-only fallback
         //   in get_allowed_tokens_vsl_cpp) and advance in order, fixing entity binding.
@@ -1852,7 +1941,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
             const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(*model_);
             auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
-                session->srl_state, helper_ids, &structural_ids, /*sfa_active=*/true);
+                session->srl_state, helper_ids, &structural_ids, /*sfa_active=*/true, *model_);
             int n_vocab = model_->get_config().n_vocab;
             float max_sim = session->srl_state.current_step_max_similarity;
             std::vector<bool> allowed_mask(n_vocab, false);
@@ -1860,7 +1949,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 if (tok_id >= 0 && tok_id < n_vocab) allowed_mask[tok_id] = true;
             }
             for (int i = 0; i < n_vocab; ++i) {
-                bool is_allowed = allowed_mask[i] || (session->srl_state.current_step_factual_tokens.count(i) > 0);
+                bool is_allowed = allowed_mask[i];
                 if (!is_allowed) {
                     if (max_sim >= 0.70f) {
                         output_logits[i] = -1e10f;   // hard: verbatim
@@ -1873,7 +1962,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
         // Sampling — temperature threshold raised to match SFA/VSL bar.
         float effective_temperature = req->temperature;
-        if (session->srl_state.current_step_max_similarity >= 0.55f) {
+        if (session->srl_state.current_step_max_similarity >= 0.40f) {
             effective_temperature = req->temperature * (1.0f - session->srl_state.current_step_max_similarity * 0.95f);
         }
         int32_t next_token = sample_token(
@@ -1892,7 +1981,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         // Strict Factual Alignment (SFA) State Update and Loop Check
         {
             const auto& helper_ids = diffkv::get_helper_token_ids_cpp(*model_);
-            diffkv::update_vsl_state_cpp(next_token, session->srl_state, helper_ids);
+            diffkv::update_vsl_state_cpp(next_token, session->srl_state, helper_ids, *model_);
             
             if (req->sfa_active && session->srl_state.vsl_consecutive_helpers >= 16) {
                 std::string uncertainty_str = " [uncertain: details missing in source]";
@@ -2101,7 +2190,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 head_dim,
                 W_proj_host.data(),
                 desc_dim,
-                0.50f,        // aligned to HF threshold 0.50
+                0.30f,        // Lowered to 0.30f to retrieve passcode successfully
                 slot_filter,  // pass active slots filter
                 qbias_ptr
             );

@@ -51,6 +51,7 @@ def build_inverted_index(
     block_size:       int,              # tokens per block (including anchor)
     stop_token_ids:   Set[int],         # precomputed stop word token IDs
     top_n_per_block:  int = 50,         # most important tokens to index per block; raised from 20
+    block_anchor_idxs: Optional[List[int]] = None,
 ) -> InvertedTokenIndex:
     """
     Build a lexical inverted index from prompt token IDs with exact position tracking.
@@ -66,8 +67,11 @@ def build_inverted_index(
     chunk_vocabularies: Dict[int, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(list))
 
     for i, slot in enumerate(slot_ids):
-        # Block i covers tokens [i*block_size, (i+1)*block_size)
-        start = i * block_size
+        # Block i covers tokens [start, end)
+        if block_anchor_idxs is not None and len(block_anchor_idxs) == len(slot_ids):
+            start = block_anchor_idxs[i]
+        else:
+            start = i * block_size
         end   = min(start + block_size, seq_len)
         if start >= seq_len:
             break

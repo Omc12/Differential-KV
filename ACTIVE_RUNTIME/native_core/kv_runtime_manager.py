@@ -793,13 +793,14 @@ class KVRuntimeManager:
         if pool is None or pool.W_proj is None:
             return  # SRL not available (W_proj not initialized)
 
-        # Gather all COMPRESSED pool slot IDs for this session (from layer 0)
+        # Gather all COMPRESSED pool slot IDs and anchor indexes for this session (from layer 0)
         blocks_layer0 = self.get_streaming_blocks(session_id, 0)
-        slot_ids = [
-            b.pool_idx for b in blocks_layer0
-            if getattr(b, "pool_idx", None) is not None
-            and getattr(b, "state", "") == "COMPRESSED"
-        ]
+        slot_ids = []
+        anchor_idxs = []
+        for b in blocks_layer0:
+            if getattr(b, "pool_idx", None) is not None and getattr(b, "state", "") == "COMPRESSED":
+                slot_ids.append(b.pool_idx)
+                anchor_idxs.append(b.anchor_idx)
 
         if not slot_ids:
             return  # No compressed blocks yet — skip
@@ -853,6 +854,7 @@ class KVRuntimeManager:
                     block_size     = index_block_size,
                     stop_token_ids = self._stop_token_ids,
                     top_n_per_block = 20,
+                    block_anchor_idxs = anchor_idxs,
                 )
                 inv_index._tokenizer_ref = self.tokenizer
             else:

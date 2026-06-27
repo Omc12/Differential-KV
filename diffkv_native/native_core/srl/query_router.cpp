@@ -211,7 +211,8 @@ SessionSRLState build_srl_state_from_blocks(
             state.ordered_slot_ids,
             block_size,
             stop_tokens,
-            /*top_n_per_block=*/50);
+            /*top_n_per_block=*/50,
+            &state.ordered_anchor_idxs);
     }
 
     // --- Chunk graph ---

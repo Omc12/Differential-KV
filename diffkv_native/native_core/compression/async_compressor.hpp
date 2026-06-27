@@ -57,11 +57,14 @@ struct CompressJob {
     int desc_dim = 0;
     float* out_desc = nullptr;
 
+    bool force_lapack = false;
+
     // Default constructor
     CompressJob() = default;
 
     // Custom copy constructor to correctly re-target raw pointers to copied internal buffers
     CompressJob(const CompressJob& other) {
+        force_lapack = other.force_lapack;
         session_id = other.session_id;
         block_id = other.block_id;
         block_size = other.block_size;
@@ -130,6 +133,7 @@ struct CompressJob {
     // Custom copy assignment operator to correctly re-target raw pointers
     CompressJob& operator=(const CompressJob& other) {
         if (this != &other) {
+            force_lapack = other.force_lapack;
             session_id = other.session_id;
             block_id = other.block_id;
             block_size = other.block_size;

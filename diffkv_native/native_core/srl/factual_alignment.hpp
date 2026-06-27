@@ -464,15 +464,41 @@ inline void process_and_tag_vsl_step(SessionSRLState& srl_state) {
     }
 }
 
+template <typename ModelType>
+inline bool is_relational_connector_token(int32_t token_id, const ModelType& model) {
+    static const std::unordered_set<std::string> RELATIONAL_WORDS = {
+        "is", "are", "was", "were", "has", "have", "had",
+        "exhibits", "possesses", "contains", "involves", "requires", "lacks", "features",
+        "whereas", "while", "although", "but", "however", "yet", "though",
+        "notwithstanding", "nevertheless", "nonetheless", "conversely",
+        "unlike", "contrast", "instead", "rather",
+        "because", "since", "therefore", "hence", "thus", "consequently",
+        "accordingly", "than"
+    };
+    std::string piece = model.token_to_piece(token_id);
+    std::string cleaned = clean_token_text(piece);
+    if (cleaned.empty()) {
+        for (char c : piece) {
+            if (c == ':' || c == ';' || c == ',' || c == '.' || c == '=') {
+                return true;
+            }
+        }
+        return false;
+    }
+    return RELATIONAL_WORDS.count(cleaned) > 0;
+}
+
 // Returns the set of allowed token IDs for the current decode step.
 // RC2: When SFA+lock active, relational binding words are stripped from helpers
 // so they cannot leak between entity spans.  Pass structural_helper_ids (full
 // helpers minus RELATIONAL_BINDING_WORDS) and sfa_active=true to activate this.
+template <typename ModelType>
 inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
     const SessionSRLState& srl_state,
     const std::unordered_set<int32_t>& helper_ids,
-    const std::unordered_set<int32_t>* structural_helper_ids = nullptr,
-    bool sfa_active = false
+    const std::unordered_set<int32_t>* structural_helper_ids,
+    bool sfa_active,
+    const ModelType& model
 ) {
     // Determine whether any lock is currently active.
     bool has_active_lock = false;
@@ -503,6 +529,12 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
         const auto& seq_prefixes  = srl_state.current_step_sequence_prefixes;
         const auto& seqs          = srl_state.current_step_factual_sequences;
 
+        int32_t last_gen = -1;
+        if (!srl_state.recent_generated_tokens.empty()) {
+            last_gen = srl_state.recent_generated_tokens.back();
+        }
+        bool history_ends_in_connector = (last_gen >= 0 && is_relational_connector_token(last_gen, model));
+
         // Single pass: decide which sequence starts we may enter (entity-filtered)
         // and collect the source-adjacent connectives that bridge into them.
         std::unordered_set<int32_t> enterable_starts;
@@ -528,6 +560,18 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
             if (enter) {
                 allowed.insert(seqs[i][0]);
                 enterable_starts.insert(seqs[i][0]);
+
+                // Also allow mid-sequence content tokens if they are valid entry points!
+                for (size_t j = 1; j < seqs[i].size(); ++j) {
+                    bool is_content = (helper_ids.count(seqs[i][j]) == 0);
+                    if (is_content) {
+                        bool prev_is_connector = is_relational_connector_token(seqs[i][j - 1], model);
+                        if (prev_is_connector && history_ends_in_connector) {
+                            allowed.insert(seqs[i][j]);
+                        }
+                    }
+                }
+
                 // The tokens that preceded this span in the source are the only
                 // connectives allowed to bridge into it (RC2 quote-grounding).
                 if (i < seq_prefixes.size()) {
@@ -562,10 +606,52 @@ inline std::unordered_set<int32_t> get_allowed_tokens_vsl_cpp(
 // Helpers pass through; threshold 4→12 so normal bridge phrases don't drop the lock.
 // When starting a new lock from a sequence-start token, update current_entity_id
 // from that sequence's entity tag so subsequent fallback steps are entity-consistent.
+inline std::string normalize_token_text(const std::string& text) {
+    std::string cleaned;
+    cleaned.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = text[i];
+        if (c == 0xC4 && i + 1 < text.size() && (unsigned char)text[i + 1] == 0x80) {
+            i++; // skip 0x80
+            continue;
+        }
+        if (c == '<' && i + 3 < text.size() && text.substr(i, 4) == "</w>") {
+            i += 3;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '_') {
+            continue;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            cleaned.push_back(c + ('a' - 'A'));
+        } else {
+            cleaned.push_back(c);
+        }
+    }
+    return cleaned;
+}
+
+template <typename ModelType>
+inline bool tokens_match_normalized(int32_t tok_a, int32_t tok_b, const ModelType& model) {
+    if (tok_a == tok_b) return true;
+    std::string str_a = normalize_token_text(model.token_to_piece(tok_a));
+    std::string str_b = normalize_token_text(model.token_to_piece(tok_b));
+    if (str_a.empty() || str_b.empty()) {
+        return tok_a == tok_b;
+    }
+    return str_a == str_b;
+}
+
+// Advance the VSL lock state after a token is generated.
+// Helpers pass through; threshold 4→12 so normal bridge phrases don't drop the lock.
+// When starting a new lock from a sequence-start token, update current_entity_id
+// from that sequence's entity tag so subsequent fallback steps are entity-consistent.
+template <typename ModelType>
 inline void update_vsl_state_cpp(
     int32_t token_id,
     SessionSRLState& srl_state,
-    const std::unordered_set<int32_t>& helper_ids
+    const std::unordered_set<int32_t>& helper_ids,
+    const ModelType& model
 ) {
     // RECONSTRUCTION FIX (F24): mirror ACTIVE_RUNTIME update_vsl_state ordering
     // (factual_alignment.py:302-352). A token that matches the next expected token
@@ -581,7 +667,7 @@ inline void update_vsl_state_cpp(
 
     // 1. Try to advance existing active locks.
     for (const auto& suffix : srl_state.vsl_active_candidates) {
-        if (!suffix.empty() && suffix[0] == token_id) {
+        if (!suffix.empty() && tokens_match_normalized(suffix[0], token_id, model)) {
             new_candidates.emplace_back(suffix.begin() + 1, suffix.end());
         }
     }
@@ -609,12 +695,12 @@ inline void update_vsl_state_cpp(
             if (seq.empty()) continue;
             
             for (size_t j = 0; j < seq.size(); ++j) {
-                if (seq[j] == token_id) {
+                if (tokens_match_normalized(seq[j], token_id, model)) {
                     // Compute match length of the prefix of seq[0..j] with recent_generated_tokens
                     int match_len = 1;
                     int recent_idx = (int)srl_state.recent_generated_tokens.size() - 1;
                     while (j >= (size_t)match_len && recent_idx >= 0) {
-                        if (seq[j - match_len] == srl_state.recent_generated_tokens[recent_idx]) {
+                        if (tokens_match_normalized(seq[j - match_len], srl_state.recent_generated_tokens[recent_idx], model)) {
                             match_len++;
                             recent_idx--;
                         } else {
@@ -623,8 +709,12 @@ inline void update_vsl_state_cpp(
                     }
                     
                     // Standard lock starts at seq[0] with match_len=1.
-                    // (Mid-sequence lock starting disabled to match Python's update_vsl_state logic).
-                    bool can_lock = (j == 0);
+                    // Enable mid-sequence lock starting when history match >= 5.
+                    // Prevent locks starting on helper words at j = 0.
+                    bool is_content_token = (helper_ids.count(token_id) == 0);
+                    bool can_lock = (j == 0 && is_content_token) || 
+                                    (j > 0 && is_content_token && match_len >= 2) || 
+                                    (j > 0 && match_len >= 5);
                     if (can_lock) {
                         std::vector<int32_t> suffix(seq.begin() + j + 1, seq.end());
                         bool duplicate = false;
@@ -659,12 +749,12 @@ inline void update_vsl_state_cpp(
             for (auto& entry : srl_state.factual_store.entries) {
                 if (entry.recalled) continue;
                 int L = (int)entry.tokens.size();
-                if (L >= 1 && entry.tokens[L - 1] == token_id) {
+                if (L >= 1 && tokens_match_normalized(entry.tokens[L - 1], token_id, model)) {
                     bool match = true;
                     int recent_size = (int)srl_state.recent_generated_tokens.size();
                     if (recent_size >= L - 1) {
                         for (int i = 0; i < L - 1; ++i) {
-                            if (srl_state.recent_generated_tokens[recent_size - (L - 1) + i] != entry.tokens[i]) {
+                            if (!tokens_match_normalized(srl_state.recent_generated_tokens[recent_size - (L - 1) + i], entry.tokens[i], model)) {
                                 match = false;
                                 break;
                             }
@@ -686,7 +776,7 @@ inline void update_vsl_state_cpp(
                                     for (size_t start = 0; start <= other.tokens.size() - entry.tokens.size(); ++start) {
                                         bool sub_match = true;
                                         for (size_t k = 0; k < entry.tokens.size(); ++k) {
-                                            if (other.tokens[start + k] != entry.tokens[k]) {
+                                            if (!tokens_match_normalized(other.tokens[start + k], entry.tokens[k], model)) {
                                                 sub_match = false;
                                                 break;
                                             }
@@ -753,9 +843,9 @@ inline bool is_token_id_allowed_cpp(
 ) {
     const auto& helper_ids = get_helper_token_ids_cpp(model);
     const auto& structural_ids = get_structural_helper_token_ids_cpp(model);
-    bool sfa_active = srl_state.current_step_max_similarity >= 0.55f &&
+    bool sfa_active = srl_state.current_step_max_similarity >= 0.40f &&
                       !srl_state.current_step_factual_sequences.empty();
-    auto allowed = get_allowed_tokens_vsl_cpp(srl_state, helper_ids, &structural_ids, sfa_active);
+    auto allowed = get_allowed_tokens_vsl_cpp(srl_state, helper_ids, &structural_ids, sfa_active, model);
     return allowed.count(token_id) > 0;
 }
 

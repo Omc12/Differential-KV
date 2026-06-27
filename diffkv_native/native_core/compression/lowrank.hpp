@@ -49,6 +49,8 @@ struct LowRankCompressParams {
     const float* W_proj = nullptr;
     int desc_dim = 0;
     float* out_desc = nullptr;
+
+    bool force_lapack = false;
 };
 
 // Perform low-rank SVD compression on a block

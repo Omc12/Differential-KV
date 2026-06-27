@@ -10,6 +10,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <atomic>
+#include <mutex>
 
 namespace diffkv {
 
@@ -81,62 +82,158 @@ void execute_cpu_attention(
     const float* vk_rot_buf  = kv_engine->get_host_VK_rot();
     const bool use_precomp_rot = (has_rope && vk_rot_buf != nullptr);
 
-    std::vector<float> theta_table;
+    static std::vector<float> theta_table;
+    static std::vector<float> cos_step;
+    static std::vector<float> sin_step;
+    static std::once_flag theta_once;
+    static std::once_flag step_once;
+
     if (has_rope) {
-        theta_table.resize(half_d);
-        for (int i = 0; i < half_d; ++i)
-            theta_table[i] = 1.0f / std::pow(rope_freq_base, (2.0f * i) / D);
+        std::call_once(theta_once, [&]() {
+            theta_table.resize(half_d);
+            for (int i = 0; i < half_d; ++i)
+                theta_table[i] = 1.0f / std::pow(rope_freq_base, (2.0f * i) / D);
+        });
     }
 
-    std::vector<float> cos_step(half_d, 1.0f), sin_step(half_d, 0.0f);
     if (has_rope && !approximate_attn) {
-        for (int d = 0; d < half_d; ++d) {
-            cos_step[d] = std::cos(theta_table[d]);
-            sin_step[d] = std::sin(theta_table[d]);
+        std::call_once(step_once, [&]() {
+            cos_step.assign(half_d, 1.0f);
+            sin_step.assign(half_d, 0.0f);
+            for (int d = 0; d < half_d; ++d) {
+                cos_step[d] = std::cos(theta_table[d]);
+                sin_step[d] = std::sin(theta_table[d]);
+            }
+        });
+    }
+
+    struct CachedSlotRope {
+        std::vector<float> ca;
+        std::vector<float> sa;
+        std::vector<float> tok_cos;
+        std::vector<float> tok_sin;
+        bool initialized = false;
+        bool exact_initialized = false;
+    };
+    static std::vector<CachedSlotRope> global_rope_cache;
+    static std::mutex rope_cache_mutex;
+
+    {
+        std::lock_guard<std::mutex> lock(rope_cache_mutex);
+        if (global_rope_cache.size() < (size_t)n_slots) {
+            global_rope_cache.resize(n_slots);
         }
     }
 
-    struct BlockRope { std::vector<float> ca, sa; };
+    struct BlockRope { const float* ca; const float* sa; };
     std::vector<BlockRope> blk_rope(active_K);
+
     if (has_rope) {
         for (int k = 0; k < active_K; ++k) {
-            int ap = anchor_positions[active_slots[k]];
-            blk_rope[k].ca.resize(half_d);
-            blk_rope[k].sa.resize(half_d);
-            for (int d = 0; d < half_d; ++d) {
-                double angle = std::fmod((double)ap * (double)theta_table[d], 2.0 * M_PI);
-                blk_rope[k].ca[d] = (float)std::cos(angle);
-                blk_rope[k].sa[d] = (float)std::sin(angle);
+            int slot_id = active_slots[k];
+            bool needs_init = false;
+            {
+                std::lock_guard<std::mutex> lock(rope_cache_mutex);
+                if (!global_rope_cache[slot_id].initialized) {
+                    needs_init = true;
+                }
             }
+            if (needs_init) {
+                int ap = anchor_positions[slot_id];
+                std::vector<float> ca(half_d), sa(half_d);
+                for (int d = 0; d < half_d; ++d) {
+                    double angle = std::fmod((double)ap * (double)theta_table[d], 2.0 * M_PI);
+                    ca[d] = (float)std::cos(angle);
+                    sa[d] = (float)std::sin(angle);
+                }
+                std::lock_guard<std::mutex> lock(rope_cache_mutex);
+                global_rope_cache[slot_id].ca = std::move(ca);
+                global_rope_cache[slot_id].sa = std::move(sa);
+                global_rope_cache[slot_id].initialized = true;
+            }
+            std::lock_guard<std::mutex> lock(rope_cache_mutex);
+            blk_rope[k].ca = global_rope_cache[slot_id].ca.data();
+            blk_rope[k].sa = global_rope_cache[slot_id].sa.data();
         }
     }
 
     int prev_kv_head = -1;
-    std::vector<std::vector<float>> blk_vk_local(active_K);
-    std::vector<std::vector<float>> blk_vv_local(active_K);
-    std::vector<std::vector<float>> blk_anc_v(active_K);
+    thread_local static std::vector<std::vector<float>> blk_vk_local;
+    thread_local static std::vector<std::vector<float>> blk_vv_local;
+    thread_local static std::vector<std::vector<float>> blk_anc_v;
+    thread_local static std::vector<std::vector<float>> block_reconstructed_K;
 
     struct SlotInfo {
         float anchor_score;
         std::vector<float> q_proj;
         std::vector<float> token_scores;
     };
-    std::vector<SlotInfo> slot_infos(active_K);
+    thread_local static std::vector<SlotInfo> slot_infos;
 
-    std::vector<std::vector<float>> tok_cos(active_K), tok_sin(active_K);
+    blk_vk_local.resize(active_K);
+    blk_vv_local.resize(active_K);
+    blk_anc_v.resize(active_K);
+    slot_infos.resize(active_K);
+    block_reconstructed_K.resize(active_K);
+
+    std::vector<const float*> tok_cos(active_K, nullptr);
+    std::vector<const float*> tok_sin(active_K, nullptr);
     if (has_rope && !approximate_attn) {
         for (int k = 0; k < active_K; ++k) {
             int slot_id = active_slots[k];
             int slen = seq_lens[slot_id];
-            tok_cos[k].resize((size_t)slen * half_d);
-            tok_sin[k].resize((size_t)slen * half_d);
-            const int32_t* slot_token_positions = kv_engine->get_host_token_positions(slot_id);
-            for (int t = 0; t < slen; ++t) {
-                double tpos = slot_token_positions ? (double)slot_token_positions[t] : 0.0;
-                for (int d = 0; d < half_d; ++d) {
-                    double ang = std::fmod(tpos * (double)theta_table[d], 2.0 * M_PI);
-                    tok_cos[k][(size_t)t * half_d + d] = (float)std::cos(ang);
-                    tok_sin[k][(size_t)t * half_d + d] = (float)std::sin(ang);
+            bool needs_init = false;
+            {
+                std::lock_guard<std::mutex> lock(rope_cache_mutex);
+                if (!global_rope_cache[slot_id].exact_initialized) {
+                    needs_init = true;
+                }
+            }
+            if (needs_init) {
+                std::vector<float> tc((size_t)slen * half_d);
+                std::vector<float> ts((size_t)slen * half_d);
+                const int32_t* slot_token_positions = kv_engine->get_host_token_positions(slot_id);
+                for (int t = 0; t < slen; ++t) {
+                    double tpos = slot_token_positions ? (double)slot_token_positions[t] : 0.0;
+                    for (int d = 0; d < half_d; ++d) {
+                        double ang = std::fmod(tpos * (double)theta_table[d], 2.0 * M_PI);
+                        tc[(size_t)t * half_d + d] = (float)std::cos(ang);
+                        ts[(size_t)t * half_d + d] = (float)std::sin(ang);
+                    }
+                }
+                std::lock_guard<std::mutex> lock(rope_cache_mutex);
+                global_rope_cache[slot_id].tok_cos = std::move(tc);
+                global_rope_cache[slot_id].tok_sin = std::move(ts);
+                global_rope_cache[slot_id].exact_initialized = true;
+            }
+            std::lock_guard<std::mutex> lock(rope_cache_mutex);
+            tok_cos[k] = global_rope_cache[slot_id].tok_cos.data();
+            tok_sin[k] = global_rope_cache[slot_id].tok_sin.data();
+        }
+    }
+
+    std::vector<std::vector<int>> slot_res_index_by_token(active_K);
+    std::vector<std::vector<int>> slot_res_V_index_by_token(active_K);
+    for (int k = 0; k < active_K; ++k) {
+        int slot_id = active_slots[k];
+        int slen = seq_lens[slot_id];
+        slot_res_index_by_token[k].assign(slen, -1);
+        const int32_t* slot_res_K_pos = kv_engine->get_host_res_K_pos(slot_id);
+        if (slot_res_K_pos) {
+            for (int ri = 0; ri < MR; ++ri) {
+                int t = slot_res_K_pos[ri];
+                if (t >= 0 && t < slen) {
+                    slot_res_index_by_token[k][t] = ri;
+                }
+            }
+        }
+        slot_res_V_index_by_token[k].assign(slen, -1);
+        const int32_t* slot_res_V_pos = kv_engine->get_host_res_V_pos(slot_id);
+        if (slot_res_V_pos) {
+            for (int ri = 0; ri < MR; ++ri) {
+                int t = slot_res_V_pos[ri];
+                if (t >= 0 && t < slen) {
+                    slot_res_V_index_by_token[k][t] = ri;
                 }
             }
         }
@@ -154,8 +251,8 @@ void execute_cpu_attention(
                 const ggml_fp16_t* slot_anchors_V = kv_engine->get_host_anchors_V(slot_id);
                 int base_vk = kv_head * D;
                 int base_vv = kv_head * D;
-                const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
-                const float* sa = has_rope ? blk_rope[k].sa.data() : nullptr;
+                const float* ca = has_rope ? blk_rope[k].ca : nullptr;
+                const float* sa = has_rope ? blk_rope[k].sa : nullptr;
 
                 blk_vk_local[k].resize(rank * D);
                 blk_vv_local[k].resize(rank * D);
@@ -195,6 +292,49 @@ void execute_cpu_attention(
                 for (int d = 0; d < D; ++d)
                     blk_anc_v[k][d] = slot_anchors_V ? ggml_fp16_to_fp32(slot_anchors_V[av_base + d]) : 0.0f;
             }
+
+            // Precompute reconstructed Keys once per kv_head transition (only in exact attention mode)
+            if (!approximate_attn) {
+                for (int k = 0; k < active_K; ++k) {
+                    int slot_id = active_slots[k];
+                    int slen = seq_lens[slot_id];
+                    block_reconstructed_K[k].resize((size_t)slen * D);
+
+                    const int8_t* slot_U = kv_engine->get_host_U(slot_id);
+                    const float* vkl = blk_vk_local[k].data();
+                    const ggml_fp16_t* u_row_scale = kv_engine->get_host_U_row_scale(slot_id);
+                    float blk_sc = ggml_fp16_to_fp32(scales[slot_id]);
+                    const ggml_fp16_t* slot_anchors_K = kv_engine->get_host_anchors_K(slot_id);
+                    int ak_off = kv_head * D;
+                    const ggml_fp16_t* slot_res_K_val = kv_engine->get_host_res_K_val(slot_id);
+
+                    for (int t = 0; t < slen; ++t) {
+                        const int8_t* u_row = slot_U ? (slot_U + t * rank) : nullptr;
+                        float ku = ggml_fp16_to_fp32(u_row_scale[t]);
+                        
+                        const ggml_fp16_t* rk_res = nullptr;
+                        int ri = slot_res_index_by_token[k][t];
+                        if (ri != -1 && slot_res_K_val) {
+                            rk_res = slot_res_K_val + ri * n_kv_heads * D + kv_head * D;
+                        }
+
+                        for (int d = 0; d < D; ++d) {
+                            float dk = 0.0f;
+                            if (u_row) {
+                                for (int r = 0; r < rank; ++r) {
+                                    dk += (float)u_row[r] * vkl[r * D + d];
+                                }
+                            }
+                            float anc = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f;
+                            float val = anc + dk * ku * blk_sc;
+                            if (rk_res) {
+                                val += ggml_fp16_to_fp32(rk_res[d]);
+                            }
+                            block_reconstructed_K[k][t * D + d] = val;
+                        }
+                    }
+                }
+            }
         }
 
         float max_score = -1e30f;
@@ -205,8 +345,8 @@ void execute_cpu_attention(
             const ggml_fp16_t* u_row_scale = kv_engine->get_host_U_row_scale(slot_id);
             float blk_sc  = ggml_fp16_to_fp32(scales[slot_id]);
 
-            const float* ca = has_rope ? blk_rope[k].ca.data() : nullptr;
-            const float* sa = has_rope ? blk_rope[k].sa.data() : nullptr;
+            const float* ca = has_rope ? blk_rope[k].ca : nullptr;
+            const float* sa = has_rope ? blk_rope[k].sa : nullptr;
 
             float score_anc = 0.0f;
             {
@@ -253,23 +393,20 @@ void execute_cpu_attention(
                     }
 
                     float res_score = 0.0f;
-                    if (slot_res_K_pos && slot_res_K_val) {
-                        for (int ri = 0; ri < MR; ++ri) {
-                            if (slot_res_K_pos[ri] != t) continue;
-                            const ggml_fp16_t* rk = slot_res_K_val +
-                                ri * n_kv_heads * D + kv_head * D;
-                            if (has_rope) {
-                                for (int d = 0; d < half_d; ++d) {
-                                    float x = ggml_fp16_to_fp32(rk[d]);
-                                    float y = ggml_fp16_to_fp32(rk[d + half_d]);
-                                    res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
-                                    res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
-                                }
-                            } else {
-                                for (int d = 0; d < D; ++d)
-                                    res_score += Q_ptr[h * D + d] * ggml_fp16_to_fp32(rk[d]);
+                    int ri = slot_res_index_by_token[k][t];
+                    if (ri != -1 && slot_res_K_val) {
+                        const ggml_fp16_t* rk = slot_res_K_val +
+                            ri * n_kv_heads * D + kv_head * D;
+                        if (has_rope) {
+                            for (int d = 0; d < half_d; ++d) {
+                                float x = ggml_fp16_to_fp32(rk[d]);
+                                float y = ggml_fp16_to_fp32(rk[d + half_d]);
+                                res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
+                                res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
                             }
-                            break;
+                        } else {
+                            for (int d = 0; d < D; ++d)
+                                res_score += Q_ptr[h * D + d] * ggml_fp16_to_fp32(rk[d]);
                         }
                     }
                     float t_score = (delta * ggml_fp16_to_fp32(u_row_scale[t]) * blk_sc + res_score + score_anc) * scale;
@@ -277,44 +414,16 @@ void execute_cpu_attention(
                     if (t_score > max_score) max_score = t_score;
                 }
             } else {
-                const ggml_fp16_t* slot_anchors_K = kv_engine->get_host_anchors_K(slot_id);
-                int ak_off = kv_head * D;
-                std::vector<float> anc_k_f(D);
-                for (int d = 0; d < D; ++d)
-                    anc_k_f[d] = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f;
-
                 slot_infos[k].token_scores.resize(slen);
-                const int8_t* slot_U = kv_engine->get_host_U(slot_id);
-                const int32_t* slot_res_K_pos = kv_engine->get_host_res_K_pos(slot_id);
-                const ggml_fp16_t* slot_res_K_val = kv_engine->get_host_res_K_val(slot_id);
-                const float* vkl = blk_vk_local[k].data();
+                const float* rec_K = block_reconstructed_K[k].data();
 
                 for (int t = 0; t < slen; ++t) {
                     float score_t = 0.0f;
-                    const int8_t* u_row = slot_U ? (slot_U + t * rank) : nullptr;
-                    const ggml_fp16_t* rk_res = nullptr;
-                    if (slot_res_K_pos && slot_res_K_val) {
-                        for (int ri = 0; ri < MR; ++ri) {
-                            if (slot_res_K_pos[ri] == t) {
-                                rk_res = slot_res_K_val + ri * n_kv_heads * D + kv_head * D;
-                                break;
-                            }
-                        }
-                    }
+                    const float* K_t = rec_K + t * D;
                     for (int d = 0; d < half_d; ++d) {
                         int d2 = d + half_d;
-                        float dk1 = 0.0f, dk2 = 0.0f;
-                        if (u_row) {
-                            for (int r = 0; r < rank; ++r) {
-                                float ur = (float)u_row[r];
-                                dk1 += ur * vkl[r * D + d];
-                                dk2 += ur * vkl[r * D + d2];
-                            }
-                        }
-                        float ku = ggml_fp16_to_fp32(u_row_scale[t]);
-                        float k1 = anc_k_f[d]  + dk1 * ku * blk_sc;
-                        float k2 = anc_k_f[d2] + dk2 * ku * blk_sc;
-                        if (rk_res) { k1 += ggml_fp16_to_fp32(rk_res[d]); k2 += ggml_fp16_to_fp32(rk_res[d2]); }
+                        float k1 = K_t[d];
+                        float k2 = K_t[d2];
                         float kr1, kr2;
                         if (has_rope) {
                             float cr = tok_cos[k][(size_t)t * half_d + d];
@@ -368,15 +477,12 @@ void execute_cpu_attention(
                     for (int r = 0; r < rank; ++r)
                         w_proj[r] += w_t * (float)u_row[r] * ku;
                 }
-                if (slot_res_V_pos && slot_res_V_val) {
-                    for (int ri = 0; ri < MR; ++ri) {
-                        if (slot_res_V_pos[ri] != t) continue;
-                        const ggml_fp16_t* rv = slot_res_V_val +
-                            ri * n_kv_heads * D + kv_head * D;
-                        for (int d = 0; d < D; ++d)
-                            res_v_accum[d] += w_t * ggml_fp16_to_fp32(rv[d]);
-                        break;
-                    }
+                int ri = slot_res_V_index_by_token[k][t];
+                if (ri != -1 && slot_res_V_val) {
+                    const ggml_fp16_t* rv = slot_res_V_val +
+                        ri * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d)
+                        res_v_accum[d] += w_t * ggml_fp16_to_fp32(rv[d]);
                 }
             }
 
