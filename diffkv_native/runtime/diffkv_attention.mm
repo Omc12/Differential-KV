@@ -13,7 +13,11 @@
 static id<MTLDevice> g_device = nil;
 static id<MTLCommandQueue> g_queue = nil;
 static id<MTLComputePipelineState> g_pipeline = nil;
+static id<MTLComputePipelineState> g_merge_pipeline = nil;
 static id<MTLBuffer> g_dummy_rope_buf = nil;
+static id<MTLBuffer> g_split_out_buf = nil;
+static id<MTLBuffer> g_split_m_buf = nil;
+static id<MTLBuffer> g_split_d_buf = nil;
 static double g_accumulated_wait_ms = 0.0;
 
 // ── Pipelined per-layer semaphores ─────────────────────────────────────────────
@@ -73,6 +77,9 @@ static void init_metal_runtime() {
     // slot_indices, or dense buffers when T_dense == 0).  Must be non-nil to avoid
     // GPU command-encoder exceptions.
     g_dummy_rope_buf = [g_device newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+    g_split_out_buf = [g_device newBufferWithLength:64 * 8 * 128 * sizeof(float) options:MTLResourceStorageModePrivate];
+    g_split_m_buf = [g_device newBufferWithLength:64 * 8 * sizeof(float) options:MTLResourceStorageModePrivate];
+    g_split_d_buf = [g_device newBufferWithLength:64 * 8 * sizeof(float) options:MTLResourceStorageModePrivate];
 
     NSError* error = nil;
     NSString* source = nil;
@@ -127,8 +134,14 @@ static void init_metal_runtime() {
     if (!g_pipeline) {
         std::cerr << "[Metal Attention] Error creating Compute Pipeline State: "
                   << [[error localizedDescription] UTF8String] << std::endl;
+    }
+    id<MTLFunction> merge_function = [library newFunctionWithName:@"merge_split_k_kernel"];
+    g_merge_pipeline = [g_device newComputePipelineStateWithFunction:merge_function error:&error];
+    if (!g_merge_pipeline) {
+        std::cerr << "[Metal Attention] Error creating Merge Pipeline State: "
+                  << [[error localizedDescription] UTF8String] << std::endl;
     } else {
-        std::cerr << "[Metal Attention] Successfully initialized Metal runtime and compiled shader library." << std::endl;
+        std::cerr << "[Metal Attention] Successfully initialized Metal runtime and compiled shader library with Split-K." << std::endl;
     }
 }
 
@@ -737,9 +750,30 @@ void execute_metal_attention(
         int32_t approx_attn_i32 = data->approximate_attn ? 1 : 0;
         [encoder setBytes:&approx_attn_i32 length:sizeof(approx_attn_i32) atIndex:26];
 
+        // Bind Split-K buffers and parameters (indices 27-30)
+        int32_t S_split_i32 = (K_i32 >= 64) ? 4 : 1;
+        [encoder setBuffer:g_split_out_buf offset:0 atIndex:27];
+        [encoder setBuffer:g_split_m_buf   offset:0 atIndex:28];
+        [encoder setBuffer:g_split_d_buf   offset:0 atIndex:29];
+        [encoder setBytes:&S_split_i32     length:sizeof(S_split_i32) atIndex:30];
+
         MTLSize threadsPerTG    = MTLSizeMake(64, 1, 1);
-        MTLSize numThreadgroups = MTLSizeMake(n_q_heads, 1, 1);
+        MTLSize numThreadgroups = MTLSizeMake(n_q_heads, S_split_i32, 1);
         [encoder dispatchThreadgroups:numThreadgroups threadsPerThreadgroup:threadsPerTG];
+
+        if (S_split_i32 > 1) {
+            [encoder setComputePipelineState:g_merge_pipeline];
+            [encoder setBuffer:g_split_out_buf offset:0 atIndex:0];
+            [encoder setBuffer:g_split_m_buf   offset:0 atIndex:1];
+            [encoder setBuffer:g_split_d_buf   offset:0 atIndex:2];
+            [encoder setBuffer:out_buf         offset:0 atIndex:3];
+            [encoder setBuffer:lse_buf         offset:0 atIndex:4];
+            [encoder setBytes:&S_split_i32     length:sizeof(S_split_i32) atIndex:5];
+            [encoder setBytes:&D_i32           length:sizeof(D_i32)       atIndex:6];
+
+            MTLSize numThreadgroupsMerge = MTLSizeMake(n_q_heads, 1, 1);
+            [encoder dispatchThreadgroups:numThreadgroupsMerge threadsPerThreadgroup:threadsPerTG];
+        }
         [encoder endEncoding];
         auto t_k0 = std::chrono::high_resolution_clock::now();
         [commandBuffer commit];
@@ -769,7 +803,11 @@ void execute_metal_attention(
 void cleanup_metal_attention() {
 
     g_dummy_rope_buf = nil;
+    g_split_out_buf = nil;
+    g_split_m_buf = nil;
+    g_split_d_buf = nil;
     g_pipeline = nil;
+    g_merge_pipeline = nil;
     g_queue = nil;
     g_device = nil;
 }

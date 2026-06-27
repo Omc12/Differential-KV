@@ -85,15 +85,19 @@ kernel void decode_attention_metal_kernel(
     device const int32_t* dense_positions[[buffer(24)]], // [T_dense] sequence positions
     device const int32_t& T_dense       [[buffer(25)]],  // #dense window tokens
     device const int32_t& approximate_attn [[buffer(26)]],
+    device float*         split_out     [[buffer(27)]],
+    device float*         split_m       [[buffer(28)]],
+    device float*         split_d       [[buffer(29)]],
+    device const int32_t& S_split       [[buffer(30)]],
 
-    uint tg_idx    [[threadgroup_position_in_grid]],  // query head index 0..H_q-1
+    uint2 tg_idx   [[threadgroup_position_in_grid]], // tg_idx.x is head, tg_idx.y is split index
     uint tid       [[thread_position_in_threadgroup]],
     uint t_per_tg  [[threads_per_threadgroup]]
 ) {
-    if (tg_idx >= (uint)n_q_heads) return;
+    if (tg_idx.x >= (uint)n_q_heads) return;
 
     const int g        = n_q_heads / n_kv_heads;
-    const int kv_head  = (int)tg_idx / g;
+    const int kv_head  = (int)tg_idx.x / g;
     const int half_d   = D / 2;
 
     // ── Shared memory ─────────────────────────────────────────────────────────
@@ -110,15 +114,20 @@ kernel void decode_attention_metal_kernel(
 
     // 1. Cache the query into shared memory
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {
-        q_shared[d] = Q[tg_idx * D + d];
+        q_shared[d] = Q[tg_idx.x * D + d];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ── PASS 1: Online softmax over ALL tokens (sparse + dense) ──────────────
     SoftmaxState sm_state = { -1e30f, 0.0f };
 
+    // Calculate Split-K partition slice
+    const int blocks_per_split = (K + S_split - 1) / S_split;
+    const int k_start = (int)tg_idx.y * blocks_per_split;
+    const int k_end   = min(k_start + blocks_per_split, K);
+
     // 1a. Sparse compressed blocks — Project-Then-Attend with anchor-RoPE on VK
-    for (int k = 0; k < K; ++k) {
+    for (int k = k_start; k < k_end; ++k) {
         int slot_id   = slot_indices[k];
         int slen      = seq_lens[slot_id];
         int anchor_pos = anchor_positions[slot_id];
@@ -254,7 +263,8 @@ kernel void decode_attention_metal_kernel(
     }
 
     // 1b. Dense window tokens — exact per-token RoPE
-    for (int t = (int)tid; t < T_dense; t += (int)t_per_tg) {
+    if (tg_idx.y == 0) {
+        for (int t = (int)tid; t < T_dense; t += (int)t_per_tg) {
         int pos    = dense_positions[t];
         int base_k = t * n_kv_heads * D + kv_head * D;
         float score = 0.0f;
@@ -277,20 +287,22 @@ kernel void decode_attention_metal_kernel(
         }
         sm_state = merge_softmax_states(sm_state, { score * scale, 1.0f });
     }
+    }
     float global_m = reduce_max_tg64(sm_state.m, red_m, tid);
     float adjusted_d = sm_state.d * exp(sm_state.m - global_m);
     float global_d = reduce_sum_tg64(adjusted_d, red_d, tid);
 
-    if (tid == 0) {
-        lse_buf[tg_idx] = global_m + log(max(global_d, 1e-9f));
+    if (S_split == 1 && tid == 0) {
+        lse_buf[tg_idx.x] = global_m + log(max(global_d, 1e-9f));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ── PASS 2: Accumulate values ─────────────────────────────────────────────
     thread float thread_val[128] = { 0.0f };  // thread-local accumulator [D ≤ 128]
+    float norm_factor = (S_split == 1) ? max(global_d, 1e-9f) : 1.0f;
 
     // 2a. Sparse blocks
-    for (int k = 0; k < K; ++k) {
+    for (int k = k_start; k < k_end; ++k) {
         int slot_id    = slot_indices[k];
         int slen       = seq_lens[slot_id];
         float block_scale = (float)scales[slot_id];
@@ -356,7 +368,7 @@ kernel void decode_attention_metal_kernel(
         }
 
         // Anchor weight
-        float w_anc = exp(score_anc_scaled - global_m) / max(global_d, 1e-9f);
+        float w_anc = exp(score_anc_scaled - global_m) / norm_factor;
 
         // Token weights + w_proj accumulation
         float local_sum_w = 0.0f;
@@ -415,7 +427,7 @@ kernel void decode_attention_metal_kernel(
                 t_score = score_anc_scaled + delta * scale_u * block_scale;
             }
 
-            float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
+            float w_t = exp(t_score - global_m) / norm_factor;
             local_sum_w += w_t;
             int u_off = slot_id * S_max * rank + t * rank;
             for (int r = 0; r < rank; ++r) {
@@ -463,7 +475,7 @@ kernel void decode_attention_metal_kernel(
     }
 
     // 2b. Dense window tokens
-    if (T_dense > 0) {
+    if (T_dense > 0 && tg_idx.y == 0) {
         const int CHUNK_SIZE = 1024;
         for (int chunk_start = 0; chunk_start < T_dense; chunk_start += CHUNK_SIZE) {
             int chunk_end = min(chunk_start + CHUNK_SIZE, T_dense);
@@ -492,7 +504,7 @@ kernel void decode_attention_metal_kernel(
                     }
                     score += q_shared[d] * k_rot;
                 }
-                dense_weights[t] = exp(score * scale - global_m) / max(global_d, 1e-9f);
+                dense_weights[t] = exp(score * scale - global_m) / norm_factor;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -510,7 +522,63 @@ kernel void decode_attention_metal_kernel(
     }
 
     // Write fully combined (sparse + dense) output
+    if (S_split == 1) {
+        for (int d = (int)tid; d < D; d += (int)t_per_tg) {
+            out_buf[tg_idx.x * D + d] = thread_val[d];
+        }
+    } else {
+        for (int d = (int)tid; d < D; d += (int)t_per_tg) {
+            split_out[tg_idx.x * S_split * D + tg_idx.y * D + d] = thread_val[d];
+        }
+        if (tid == 0) {
+            split_m[tg_idx.x * S_split + tg_idx.y] = global_m;
+            split_d[tg_idx.x * S_split + tg_idx.y] = global_d;
+        }
+    }
+}
+
+kernel void merge_split_k_kernel(
+    device const float*  split_out    [[buffer(0)]], // [H_q, S_split, D] f32
+    device const float*  split_m      [[buffer(1)]], // [H_q, S_split] f32
+    device const float*  split_d      [[buffer(2)]], // [H_q, S_split] f32
+    device float*        out_buf      [[buffer(3)]], // [H_q, D] f32 final
+    device float*        lse_buf      [[buffer(4)]], // [H_q] f32 final
+    device const int32_t& S_split     [[buffer(5)]],
+    device const int32_t& D           [[buffer(6)]],
+    uint tg_idx    [[threadgroup_position_in_grid]],  // query head index 0..H_q-1
+    uint tid       [[thread_position_in_threadgroup]],
+    uint t_per_tg  [[threads_per_threadgroup]]
+) {
+    // 1. Find global maximum across splits
+    float global_m = -1e30f;
+    for (int s = 0; s < S_split; ++s) {
+        float m_val = split_m[tg_idx * S_split + s];
+        if (m_val > global_m) {
+            global_m = m_val;
+        }
+    }
+    
+    // 2. Compute global denominator
+    float global_d = 0.0f;
+    for (int s = 0; s < S_split; ++s) {
+        float m_val = split_m[tg_idx * S_split + s];
+        float d_val = split_d[tg_idx * S_split + s];
+        global_d += d_val * exp(m_val - global_m);
+    }
+    
+    // 3. Merge outputs
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {
-        out_buf[tg_idx * D + d] = thread_val[d];
+        float val_accum = 0.0f;
+        for (int s = 0; s < S_split; ++s) {
+            float m_val = split_m[tg_idx * S_split + s];
+            float local_out = split_out[tg_idx * S_split * D + s * D + d];
+            val_accum += local_out * exp(m_val - global_m);
+        }
+        out_buf[tg_idx * D + d] = val_accum / max(global_d, 1e-9f);
+    }
+    
+    // 4. Write LSE
+    if (tid == 0) {
+        lse_buf[tg_idx] = global_m + log(max(global_d, 1e-9f));
     }
 }
