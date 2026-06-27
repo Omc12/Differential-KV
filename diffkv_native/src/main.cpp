@@ -4382,24 +4382,51 @@ int main(int argc, char ** argv) {
                     // ─────────────────────────────────────────────────────────────────────
                     
                     // INCREMENTAL UPDATE: Upload ONLY the new token (99.7% bandwidth reduction, in bulk)
-                    std::vector<float> flat_new_k((size_t)n_layers * F_test, 0.0f);
-                    std::vector<float> flat_new_v((size_t)n_layers * F_test, 0.0f);
-                    for (int l = 0; l < n_layers; ++l) {
-                        const int local_idx = total_dense_tokens[l] - 1;  // Index in active_k_dense
-                        if (local_idx >= 0) {
-                            const float* new_k = active_k_dense[l].data() + (size_t)local_idx * F_test;
-                            const float* new_v = active_v_dense[l].data() + (size_t)local_idx * F_test;
-                            std::memcpy(flat_new_k.data() + (size_t)l * F_test, new_k, F_test * sizeof(float));
-                            std::memcpy(flat_new_v.data() + (size_t)l * F_test, new_v, F_test * sizeof(float));
-                        }
-                    }
                     const int ring_pos = (persistent_buffer_base_pos + (total_dense_tokens[0] - 1)) % native_maxd;
-                    ggml_backend_tensor_set(native_dense_kr_concat, flat_new_k.data(), 
-                        (size_t)ring_pos * n_layers * F_test * sizeof(float), 
-                        n_layers * F_test * sizeof(float));
-                    ggml_backend_tensor_set(native_dense_v_concat, flat_new_v.data(), 
-                        (size_t)ring_pos * n_layers * F_test * sizeof(float), 
-                        n_layers * F_test * sizeof(float));
+                    if (decode_concat_k && decode_concat_v && step > 0) {
+                        // GPU-Direct Incremental Copy: copy directly on the GPU
+                        struct ggml_init_params params = {
+                            /*.mem_size   =*/ 1024 * 16,
+                            /*.mem_buffer =*/ nullptr,
+                            /*.no_alloc   =*/ true,
+                        };
+                        struct ggml_context * temp_ctx = ggml_init(params);
+                        if (temp_ctx) {
+                            struct ggml_tensor * dst_view_k = ggml_view_2d(temp_ctx, native_dense_kr_concat, F_test, n_layers,
+                                F_test * sizeof(float),
+                                (size_t)ring_pos * n_layers * F_test * sizeof(float));
+                            dst_view_k->buffer = native_dense_kr_concat->buffer;
+
+                            struct ggml_tensor * dst_view_v = ggml_view_2d(temp_ctx, native_dense_v_concat, F_test, n_layers,
+                                F_test * sizeof(float),
+                                (size_t)ring_pos * n_layers * F_test * sizeof(float));
+                            dst_view_v->buffer = native_dense_v_concat->buffer;
+                            
+                            ggml_backend_tensor_copy(decode_concat_k, dst_view_k);
+                            ggml_backend_tensor_copy(decode_concat_v, dst_view_v);
+                            
+                            ggml_free(temp_ctx);
+                        }
+                    } else {
+                        // Fallback to CPU-to-GPU set
+                        std::vector<float> flat_new_k((size_t)n_layers * F_test, 0.0f);
+                        std::vector<float> flat_new_v((size_t)n_layers * F_test, 0.0f);
+                        for (int l = 0; l < n_layers; ++l) {
+                            const int local_idx = total_dense_tokens[l] - 1;  // Index in active_k_dense
+                            if (local_idx >= 0) {
+                                const float* new_k = active_k_dense[l].data() + (size_t)local_idx * F_test;
+                                const float* new_v = active_v_dense[l].data() + (size_t)local_idx * F_test;
+                                std::memcpy(flat_new_k.data() + (size_t)l * F_test, new_k, F_test * sizeof(float));
+                                std::memcpy(flat_new_v.data() + (size_t)l * F_test, new_v, F_test * sizeof(float));
+                            }
+                        }
+                        ggml_backend_tensor_set(native_dense_kr_concat, flat_new_k.data(), 
+                            (size_t)ring_pos * n_layers * F_test * sizeof(float), 
+                            n_layers * F_test * sizeof(float));
+                        ggml_backend_tensor_set(native_dense_v_concat, flat_new_v.data(), 
+                            (size_t)ring_pos * n_layers * F_test * sizeof(float), 
+                            n_layers * F_test * sizeof(float));
+                    }
                     
                     // Update mask and position for the new token
                     const int idx0 = total_dense_tokens[0] - 1;
