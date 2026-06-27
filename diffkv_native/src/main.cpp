@@ -4500,20 +4500,29 @@ int main(int argc, char ** argv) {
                 std::cerr << std::endl;
             }
             bool any_from_gpu = false;
+            bool all_captured = true;
             for (int l = 0; l < n_layers; ++l) {
-                if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
-                    // Callback captured K/V on the CPU side — no GPU transfer needed.
+                if ((int)userdata[l].captured_kv.size() < 2 * F_test) {
+                    all_captured = false;
+                    break;
+                }
+            }
+            if (all_captured) {
+                for (int l = 0; l < n_layers; ++l) {
                     std::memcpy(decode_k[l].data(), userdata[l].captured_kv.data(),          F_test * sizeof(float));
                     std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
-                } else if (decode_concat_k && decode_concat_v) {
-                    // Fallback: per-layer individual read (smaller Metal→CPU transfer per layer
-                    // vs the old two 28KB bulk reads that stall the full pipeline).
-                    ggml_backend_tensor_get(decode_concat_k,
-                        decode_k[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
-                    ggml_backend_tensor_get(decode_concat_v,
-                        decode_v[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
-                    any_from_gpu = true;
                 }
+            } else if (decode_concat_k && decode_concat_v) {
+                // Bulk read: read all layers contiguously in one go to avoid driver sync latency
+                std::vector<float> flat_k(n_layers * F_test);
+                std::vector<float> flat_v(n_layers * F_test);
+                ggml_backend_tensor_get(decode_concat_k, flat_k.data(), 0, n_layers * F_test * sizeof(float));
+                ggml_backend_tensor_get(decode_concat_v, flat_v.data(), 0, n_layers * F_test * sizeof(float));
+                for (int l = 0; l < n_layers; ++l) {
+                    std::memcpy(decode_k[l].data(), flat_k.data() + (size_t)l * F_test, F_test * sizeof(float));
+                    std::memcpy(decode_v[l].data(), flat_v.data() + (size_t)l * F_test, F_test * sizeof(float));
+                }
+                any_from_gpu = true;
             }
             (void)any_from_gpu; // suppress unused warning
             auto t_after_kv_get = std::chrono::high_resolution_clock::now();

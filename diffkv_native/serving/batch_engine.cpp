@@ -1702,20 +1702,27 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             decode_q.resize(model_->get_config().n_embd, 0.0f);
             ggml_backend_tensor_get(userdata[0].layer0_q_tensor, decode_q.data(), 0, model_->get_config().n_embd * sizeof(float));
         }
+        bool all_captured = true;
         for (int l = 0; l < n_layers; ++l) {
-            if ((int)userdata[l].captured_kv.size() >= 2 * F_test) {
-                // Fast path: K/V captured inside callback — zero extra GPU readback.
+            if ((int)userdata[l].captured_kv.size() < 2 * F_test) {
+                all_captured = false;
+                break;
+            }
+        }
+        if (all_captured) {
+            for (int l = 0; l < n_layers; ++l) {
                 std::memcpy(decode_k[l].data(), userdata[l].captured_kv.data(),          F_test * sizeof(float));
                 std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
-            } else if (decode_concat_k && decode_concat_v) {
-                // Fallback: captured_kv wasn't populated (e.g. c==nullptr in graph).
-                // Fall back to the original GPU readback for this layer so decode_k[l]
-                // is never all-zeros. Zeros corrupt the dense window from step 2 onwards,
-                // causing wrong output ("starts from between" symptom).
-                ggml_backend_tensor_get(decode_concat_k,
-                    decode_k[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
-                ggml_backend_tensor_get(decode_concat_v,
-                    decode_v[l].data(), (size_t)l * F_test * sizeof(float), F_test * sizeof(float));
+            }
+        } else if (decode_concat_k && decode_concat_v) {
+            // Bulk read: read all layers contiguously in one go to avoid driver sync latency
+            std::vector<float> flat_k(n_layers * F_test);
+            std::vector<float> flat_v(n_layers * F_test);
+            ggml_backend_tensor_get(decode_concat_k, flat_k.data(), 0, n_layers * F_test * sizeof(float));
+            ggml_backend_tensor_get(decode_concat_v, flat_v.data(), 0, n_layers * F_test * sizeof(float));
+            for (int l = 0; l < n_layers; ++l) {
+                std::memcpy(decode_k[l].data(), flat_k.data() + (size_t)l * F_test, F_test * sizeof(float));
+                std::memcpy(decode_v[l].data(), flat_v.data() + (size_t)l * F_test, F_test * sizeof(float));
             }
         }
         
