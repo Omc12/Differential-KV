@@ -1,0 +1,79 @@
+% ============================================================================
+% DiffKV — Technical Report (extended).
+% Build:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+% ============================================================================
+\documentclass[11pt]{article}
+\usepackage[letterpaper,margin=1in]{geometry}
+\newif\ifext \exttrue           % extended (technical-report) mode ON
+\input{preamble}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+
+\title{\textbf{\diffkv{}: Anchor + Low-Rank Differential KV-Cache Compression\\
+for Long-Context Inference on Commodity Unified-Memory Hardware}}
+\author{}
+\date{Technical Report --- generated \today}
+
+\begin{document}
+
+% ── cover ──
+\begin{titlepage}
+\centering
+\vspace*{1.2cm}
+{\color{ink}\rule{\textwidth}{1.4pt}}\\[0.5cm]
+{\Huge\bfseries\color{ink} \diffkv{}\par}
+\vspace{0.4cm}
+{\LARGE Anchor + Low-Rank Differential KV-Cache Compression\\[0.2cm]
+for Long-Context Inference on Commodity Unified-Memory Hardware\par}
+\vspace{0.5cm}
+{\color{accent}\rule{\textwidth}{1.0pt}}\\[0.8cm]
+{\large Technical Report\par}
+\vspace{0.2cm}
+{\large Generated \today\par}
+\vfill
+\begin{minipage}{0.86\textwidth}\small\color{muted}\centering
+A sparse KV-cache inference runtime that compresses each transformer KV block to an
+\emph{anchor token} plus a rank-$16$ joint SVD \emph{delta}, paired with a bounded dense
+recency window and a fused decode kernel that scores queries in low-rank space without
+ever decompressing the cache. Evaluated on Qwen2.5-1.5B (int4) on an 8.6\,GB Apple~M3.
+All numbers in this report are measured; no value is fabricated.
+\end{minipage}
+\vspace{1.2cm}
+{\color{ink}\rule{\textwidth}{1.4pt}}
+\end{titlepage}
+
+% ── front matter ──
+\input{sections/00_abstract}
+\clearpage
+{\hypersetup{linkcolor=ink}
+\tableofcontents
+\clearpage
+\listoffigures
+\listoftables
+}
+\clearpage
+
+% ── body ──
+\input{sections/01_intro}
+\input{sections/02_background}
+\input{sections/03_overview}
+\input{sections/04_compression}
+\input{sections/05_runtime}
+\input{sections/06_decode}
+\input{sections/07_implementation}
+\input{sections/08_evaluation}
+\input{sections/09_analysis}
+\input{sections/10_limitations}
+\input{sections/11_conclusion}
+
+% ── references ──
+\bibliographystyle{plain}
+\bibliography{bibliography/references}
+
+% ── appendices ──
+\appendix
+\input{appendix/A_repro}
+\input{appendix/B_tables}
+\input{appendix/C_notation}
+
+\end{document}

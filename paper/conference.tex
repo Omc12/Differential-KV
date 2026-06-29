@@ -1,0 +1,40 @@
+% ============================================================================
+% DiffKV — Conference version (condensed). Same section sources as main.tex;
+% TOC/LoF/LoT and long appendices removed, verbose blocks suppressed via \ifext.
+% Build:  pdflatex conference && bibtex conference && pdflatex conference x2
+% ============================================================================
+\documentclass[10pt,twocolumn]{article}
+\usepackage[letterpaper,margin=0.75in]{geometry}
+\newif\ifext \extfalse          % extended mode OFF -> conference
+\input{preamble}
+\setlength{\parindent}{1em}
+
+\title{\textbf{\diffkv{}: Anchor + Low-Rank Differential KV-Cache Compression\\
+for Long-Context Inference on Commodity Unified-Memory Hardware}}
+\author{Anonymous Submission}
+\date{}
+
+\begin{document}
+\twocolumn[
+\begin{@twocolumnfalse}
+\maketitle
+\input{sections/00_abstract}
+\vspace{0.8em}
+\end{@twocolumnfalse}
+]
+
+\input{sections/01_intro}
+\input{sections/02_background}
+\input{sections/03_overview}
+\input{sections/04_compression}
+\input{sections/05_runtime}
+\input{sections/06_decode}
+\input{sections/07_implementation}
+\input{sections/08_evaluation}
+\input{sections/09_analysis}
+\input{sections/10_limitations}
+\input{sections/11_conclusion}
+
+\bibliographystyle{plain}
+\bibliography{bibliography/references}
+\end{document}

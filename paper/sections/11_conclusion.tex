@@ -1,0 +1,20 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+\diffkv{} treats the KV cache as a structured object rather than an opaque tensor: each block is
+a representative anchor plus a low-rank correction, and attention is computed directly from that
+factorization without ever rebuilding the dense cache. The payoff is a KV state that is bounded
+and context-independent---a fixed pool an order of magnitude smaller per block than the dense
+cache---which lets a small model address contexts that exhaust a full-KV baseline on the same
+$8$\,GB device. We have been explicit about the costs measured on the way there: the compressed
+decode is slower than dense decode on current hardware, and at rank $16$ it does not yet recover a
+single compressed needle, a fidelity limit we localize precisely with an exact-decode ablation on
+the identical store. We report the compressed path as the primary result and the exact path only
+as an upper bound, attributing every number to the code that produced it.
+
+The most valuable next steps are sharp and already scoped: a rank/residual study to close the
+fidelity gap, a hand-written fused decode kernel to close the throughput gap, and a CUDA/Triton
+implementation whose results can drop into the existing figures unchanged. The design---anchor
+plus differential low-rank, attention in low-rank space, a bounded pool with a recency
+window---stands independent of those refinements, and the runtime that realizes it is small,
+composes with stock quantized models, and runs on the hardware people already have.

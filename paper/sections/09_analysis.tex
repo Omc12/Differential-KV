@@ -1,0 +1,59 @@
+\section{Analysis and Discussion}
+\label{sec:analysis}
+
+\subsection{What the compression actually buys}
+The cleanest statement of \diffkv{}'s benefit is at the level of KV state, not allocator peak.
+The compressed store is a \emph{pre-allocated, fixed} pool: its footprint is a constant of the
+configuration ($\approx\!0.2$\,GB across $28$ layers) regardless of context, whereas the dense
+full-KV cache grows linearly and crosses the store's size early and keeps going
+(Fig.~\ref{fig:g1}, Table~\ref{tab:main}). This is the $\rank$-vs-$\Hkv\dhead$ gap of
+\S\ref{sec:compression} made concrete: each compressed token carries $O(\rank)$ scalars
+instead of $O(\Hkv\dhead)$. Because the store never grows, the runtime addresses contexts the
+dense cache cannot fit, which is the qualitative capability the dense baseline lacks at the top
+of our range.
+
+\subsection{Why the allocator peak tells a different story}
+The MLX allocator peak is nearly identical for the compressed runtime, the exact-decode
+ablation, and the dense baseline at matched context, because the peak is set during
+\emph{prefill}---a full attention over the growing native cache that all three perform---and is
+dominated by weights and transient activations rather than by the retained KV state
+(Fig.~\ref{fig:g2}). Compression reduces the \emph{steady-state} decode footprint, not the
+prefill peak. We make this explicit rather than reporting only a process-level memory number
+that would credit compression with a peak reduction it does not deliver. The practical
+implication is that on a memory-constrained device the binding event is whichever is larger of
+(a) the prefill peak and (b) the decode-time resident set; \diffkv{} lowers (b) decisively but
+leaves (a) to be addressed by prefill-side techniques (chunking, activation release), which the
+runtime already applies.
+
+\subsection{The throughput cost}
+The compressed decode is several times slower than dense decode and roughly flat across context
+(Fig.~\ref{fig:g3}). The flatness is consistent with the compute profile of
+\S\ref{sec:decode}: work is linear in the number of \emph{blocks} with a small $\rank$-weighted
+constant, so per-token cost rises slowly. The absolute gap is an implementation property, not an
+algorithmic necessity: the kernel expresses many small tensor contractions inside one compiled
+graph, and on this hardware that does not reach the throughput of MLX's native fused attention
+over a contiguous cache. The exact-decode ablation---identical store, but attention computed
+over the retained native cache---recovers dense-like throughput, which localizes the gap to the
+compressed-kernel dispatch rather than to anything the compression precludes.
+
+\subsection{The fidelity cost}
+\label{sec:fidelity}
+Under the needle-in-a-haystack probe, the compressed decode does \emph{not} reliably reproduce
+the buried passcode once it has left the recency window, whereas the exact-decode ablation on the
+same store recovers it at every context (Table~\ref{tab:main}). The exact ablation isolates the
+cause: the information needed is present in the recency window when the needle is recent, but
+once a needle-bearing block is compressed at rank $16$, the truncated SVD does not preserve the
+single-token detail well enough for the query to recover the exact string. This is a property of
+rank-$16$ truncation, not of the runtime plumbing---the ablation proves the rest of the path is
+correct. We also observe that the compressed output is \emph{non-deterministic} across runs: the
+range finder uses an unseeded Gaussian, so different runs produce different (and differently
+wrong) reconstructions of a compressed needle. Both are addressable (higher or
+adaptive rank, an exact-token residual path, a fixed seed) and are stated as open problems rather
+than worked around.
+
+\begin{observation}
+\diffkv{} trades \emph{memory and context reach} for \emph{decode throughput and single-token
+recall fidelity}. The trade is favorable exactly when the cache is the binding constraint and the
+task tolerates approximate long-range recall; it is unfavorable when the device has memory to
+spare or the task demands verbatim recall of compressed detail.
+\end{observation}

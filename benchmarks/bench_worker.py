@@ -317,6 +317,14 @@ def run_dense(args, prompt_text):
     prefill_s = time.perf_counter() - t0
 
     generated = []
+    # ── Prefill → Decode boundary: release peak activation memory ──────────────
+    # Mirrors what the active runtime already does at this boundary.
+    # Without this, dense peak memory is artificially inflated in benchmarks.
+    import gc as _gc
+    mx.eval()
+    mx.clear_cache()
+    _gc.collect()
+    # ──────────────────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
     for _ in range(args.gen):
         generated.append(int(y.item()))

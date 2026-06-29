@@ -822,6 +822,14 @@ static struct ggml_tensor* g_dbg_sel0  = nullptr;
 static struct ggml_tensor* g_dbg_curk  = nullptr;
 static struct ggml_tensor* g_dbg_curv  = nullptr;
 
+// DIFFKV_BLOCK_CMP: per-layer tensor captures for full block-wise comparison across all layers.
+static constexpr int BLOCK_CMP_MAX_LAYERS = 32;
+static struct ggml_tensor* g_bcmp_qrope[BLOCK_CMP_MAX_LAYERS]  = {};
+static struct ggml_tensor* g_bcmp_attn [BLOCK_CMP_MAX_LAYERS]  = {};
+static struct ggml_tensor* g_bcmp_slots[BLOCK_CMP_MAX_LAYERS]  = {};
+static struct ggml_tensor* g_bcmp_curk [BLOCK_CMP_MAX_LAYERS]  = {};
+static struct ggml_tensor* g_bcmp_curv [BLOCK_CMP_MAX_LAYERS]  = {};
+
 // Helper to build the Qwen 2.5 sparse decode forward pass graph with SRL routing and custom Metal attention
 struct ggml_cgraph * build_decode_graph(
     struct ggml_context * ctx,
@@ -853,6 +861,7 @@ struct ggml_cgraph * build_decode_graph(
     struct ggml_tensor * native_dup_tri = nullptr,     // [srl_k_keep,srl_k_keep] strict-lower ones
     struct ggml_tensor * native_half = nullptr,        // [1] = 0.5
     struct ggml_tensor * native_dense_pos = nullptr,   // [native_maxd] i32 past-dense positions
+    struct ggml_tensor * native_attn_slots = nullptr,  // [srl_k_keep] host-controlled CompressedResident-filtered slots
     struct ggml_tensor ** out_dbg_anc = nullptr        // DEBUG: layer-0 anchor scores [K,group]
 ) {
     const auto & config = model.get_config();
@@ -1004,7 +1013,8 @@ struct ggml_cgraph * build_decode_graph(
                 } else
                 attn_out = build_native_sparse_attn(
                     ctx, q_rope, k_rope_n, v, dkr_flat, native_dense_v[l], native_dense_mask, native_maxd,
-                    selected_slots, native_dup_tri, native_half, userdata[l].kv_engine,
+                    selected_slots,
+                    native_dup_tri, native_half, userdata[l].kv_engine,
                     config.n_head, config.n_head_kv, head_dim,
                     userdata[l].kv_engine->get_rank(), userdata[l].kv_engine->get_S_max(), srl_k_keep,
                     1.0f / std::sqrt((float)head_dim),
@@ -1018,6 +1028,13 @@ struct ggml_cgraph * build_decode_graph(
                     ggml_set_output(q_rope); ggml_set_output(attn_out); ggml_set_output(selected_slots);
                     ggml_set_output(k); ggml_set_output(v);
                 } }
+                // DIFFKV_BLOCK_CMP: capture every layer for full multi-layer comparison
+                if (std::getenv("DIFFKV_BLOCK_CMP") && l < BLOCK_CMP_MAX_LAYERS) {
+                    g_bcmp_qrope[l] = q_rope;  g_bcmp_attn[l]  = attn_out;
+                    g_bcmp_slots[l] = selected_slots; g_bcmp_curk[l] = k; g_bcmp_curv[l] = v;
+                    ggml_set_output(q_rope); ggml_set_output(attn_out); ggml_set_output(selected_slots);
+                    ggml_set_output(k); ggml_set_output(v);
+                }
             } else if (userdata && selected_slots) {
                 struct ggml_tensor * kv_concat = ggml_concat(ctx, k, v, 0);
                 // Reconstruct attention output using the custom Metal kernel!
@@ -1556,6 +1573,9 @@ static void run_native_attn_selftest() {
             aV[kv*D + d]=H(dist(g));
         }
         pool.upload_slot(s);
+        pool.get_state_table().transition(s, BlockState::Freed, BlockState::DenseResident);
+        pool.get_state_table().transition(s, BlockState::DenseResident, BlockState::Compressing);
+        pool.get_state_table().transition(s, BlockState::Compressing, BlockState::CompressedResident);
     }
 
     std::vector<float> Q(nq*D); for(auto&x:Q)x=dist(g);
@@ -3439,25 +3459,20 @@ int main(int argc, char ** argv) {
 
         // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
         // persistent (survive graph rebuilds), filled each decode step. Gated.
-        const bool native_attn_on = is_native_attn_enabled();
+        // DIFFKV_CPU_EXACT_ATTN=1 forces the CPU callback path (execute_cpu_attention,
+        // approximate_attn=false) which applies per-token RoPE + SVD residual correction.
+        // Requires sched backend (not Metal-only), so native_attn_on must be false.
+        static const bool cpu_exact_attn_env = (std::getenv("DIFFKV_CPU_EXACT_ATTN") != nullptr);
+        bool native_attn_on = is_native_attn_enabled() && !cpu_exact_attn_env;
         std::vector<struct ggml_tensor *> native_dense_kr(n_layers, nullptr);
         std::vector<struct ggml_tensor *> native_dense_v(n_layers, nullptr);
-        struct ggml_tensor * native_dense_kr_concat = nullptr;
-        struct ggml_tensor * native_dense_v_concat = nullptr;
         struct ggml_tensor * native_dense_mask = nullptr;
         if (native_attn_on) {
-            native_dense_kr_concat = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, n_layers, native_maxd);
-            ggml_set_input(native_dense_kr_concat);
-            native_dense_v_concat = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim * kv_heads, n_layers, native_maxd);
-            ggml_set_input(native_dense_v_concat);
             for (int l = 0; l < n_layers; ++l) {
-                native_dense_kr[l] = ggml_view_3d(dense_past_ctx, native_dense_kr_concat, head_dim, kv_heads, native_maxd,
-                                                  head_dim * sizeof(float),
-                                                  (size_t)n_layers * head_dim * kv_heads * sizeof(float),
-                                                  (size_t)l * head_dim * kv_heads * sizeof(float));
-                native_dense_v[l]  = ggml_view_2d(dense_past_ctx, native_dense_v_concat, head_dim * kv_heads, native_maxd,
-                                                  (size_t)n_layers * head_dim * kv_heads * sizeof(float),
-                                                  (size_t)l * head_dim * kv_heads * sizeof(float));
+                native_dense_kr[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, native_maxd);
+                ggml_set_input(native_dense_kr[l]);
+                native_dense_v[l]  = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F32, head_dim, kv_heads, native_maxd);
+                ggml_set_input(native_dense_v[l]);
             }
             native_dense_mask = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_F32, native_maxd);
             ggml_set_input(native_dense_mask);
@@ -3476,6 +3491,15 @@ int main(int argc, char ** argv) {
             ggml_set_input(native_dup_tri);
             native_half = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_F32, 1);
             ggml_set_input(native_half);
+        }
+        // Host-controlled slot list for native attention: bypasses in-graph SRL router.
+        // Populated each step with CompressedResident-filtered candidates (or all-(-1) if none ready).
+        // This prevents the graph's top-K op (which always selects K IDs regardless of slots_mask)
+        // from routing to Freed-state pool garbage.
+        struct ggml_tensor * native_attn_slots = nullptr;
+        if (native_attn_on) {
+            native_attn_slots = ggml_new_tensor_1d(dense_past_ctx, GGML_TYPE_I32, srl_k_keep);
+            ggml_set_input(native_attn_slots);
         }
         ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
         if (!decode_use_sparse) {
@@ -3499,6 +3523,11 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_set(native_dup_tri, tri.data(), 0, tri.size() * sizeof(float));
             float halfv = 0.5f;
             ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
+            // Initialize native_attn_slots to all-invalid; filled each decode step.
+            if (native_attn_slots) {
+                std::vector<int32_t> invalid(srl_k_keep, -1);
+                ggml_backend_tensor_set(native_attn_slots, invalid.data(), 0, (size_t)srl_k_keep * sizeof(int32_t));
+            }
         }
 
         if (native_decode_buf) {
@@ -3519,7 +3548,7 @@ int main(int argc, char ** argv) {
             dense_k_past_inputs.data(), dense_v_past_inputs.data(),
             dense_attn_mask_decode,
             native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
-            native_dup_tri, native_half, native_dense_pos, &dbg_anc
+            native_dup_tri, native_half, native_dense_pos, native_attn_slots, &dbg_anc
         );
         if (dbg_anc) ggml_set_output(dbg_anc);
         ggml_set_output(decode_logits);
@@ -4140,11 +4169,28 @@ int main(int argc, char ** argv) {
                 std::cerr << "[DBG_ENGAGE] step current_pos=" << current_pos
                           << " engage_threshold=" << engage_threshold
                           << " step_use_sparse=" << step_use_sparse << "\n"; }
-            bool pool_grew = (kv_engines[0]->get_pool_version() != last_pool_version);
+            bool pool_grew = (kv_engines[0]->get_n_slots() != n_slots);
+            bool pool_version_changed = (kv_engines[0]->get_pool_version() != last_pool_version);
             bool rebuild_needed = (step_use_sparse != decode_use_sparse) || pool_grew;
             if (rebuild_needed) {
                 decode_use_sparse = step_use_sparse;
+                if (pool_grew) {
+                    n_slots = kv_engines[0]->get_n_slots();
+                }
                 last_pool_version = kv_engines[0]->get_pool_version();
+                if (decode_use_sparse) {
+                    std::cerr << "[DEBUG_RESIZE] required_dense_cap=" << required_dense_cap 
+                              << " F_test=" << F_test 
+                              << " active_k_dense[0].size()=" << active_k_dense[0].size() << std::endl;
+                    for (int l = 0; l < n_layers; ++l) {
+                        if (active_k_dense[l].size() < (size_t)required_dense_cap * F_test) {
+                            active_k_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                            active_k_dense_rotated[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                            active_v_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                        }
+                    }
+                    std::cerr << "[DEBUG_RESIZE_AFTER] active_k_dense[0].size()=" << active_k_dense[0].size() << std::endl;
+                }
                 full_upload_needed = true;
                 ggml_free(decode_ctx);
                 decode_ctx = ggml_init(decode_params);
@@ -4184,7 +4230,7 @@ int main(int argc, char ** argv) {
                     dense_k_past_inputs.data(), dense_v_past_inputs.data(),
                     dense_attn_mask_decode,
                     native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
-                    native_dup_tri, native_half, native_dense_pos
+                    native_dup_tri, native_half, native_dense_pos, native_attn_slots
                 );
                 ggml_set_output(decode_logits);
                 if (decode_selected_slots) ggml_set_output(decode_selected_slots);
@@ -4287,8 +4333,44 @@ int main(int argc, char ** argv) {
             // Touch blocks to ensure CPU Resident blocks are reloaded to GPU
             runtime_manager.touch_active_slots(routed_blocks);
 
+            // Count and filter CompressedResident slots; track availability for native attn
+            int n_valid_compressed = 0;
+            std::vector<int32_t> filtered_candidates;
             if (decode_use_sparse) {
-                ggml_backend_tensor_set(host_slots_decode, physical_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+                // Filter: replace slot IDs that are not CompressedResident with -1.
+                // The native graph's is_neg path already masks negative IDs to -inf in
+                // softmax, matching execute_cpu_attention which skips non-CompressedResident
+                // slots. Without this filter, the native graph attends garbage pool data
+                // for slots that haven't been compressed yet → wrong outputs.
+                filtered_candidates = physical_candidates;
+                const auto& state_table = kv_engines[0]->get_state_table();
+                int n_pool_slots = (int)kv_engines[0]->get_seq_lens()->ne[0];
+                for (auto& sid : filtered_candidates) {
+                    if (sid < 0 || sid >= n_pool_slots ||
+                        state_table.get(sid) != diffkv::BlockState::CompressedResident) {
+                        sid = -1;
+                    } else {
+                        n_valid_compressed++;
+                    }
+                }
+                // If no CompressedResident blocks are available (e.g. decode step 0 before
+                // compression completes), fill all host slots with -1 so the native graph
+                // attends nothing in the sparse pool — only the dense window contributes.
+                // This prevents the in-graph SRL router (which operates on relative scores and
+                // always selects K slot IDs regardless of mask) from routing to Freed-state slots.
+                if (n_valid_compressed == 0) {
+                    std::fill(filtered_candidates.begin(), filtered_candidates.end(), -1);
+                }
+                ggml_backend_tensor_set(host_slots_decode, filtered_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+                // Also upload to native_attn_slots (host-controlled, srl_k_keep wide).
+                // Pad filtered_candidates to srl_k_keep with -1 if needed.
+                if (native_attn_on && native_attn_slots) {
+                    std::vector<int32_t> nat_slots(srl_k_keep, -1);
+                    int copy_n = std::min((int)filtered_candidates.size(), srl_k_keep);
+                    for (int i = 0; i < copy_n; ++i) nat_slots[i] = filtered_candidates[i];
+                    ggml_backend_tensor_set(native_attn_slots, nat_slots.data(), 0, (size_t)srl_k_keep * sizeof(int32_t));
+                }
+
             }
 
             std::vector<float> slots_mask_host(n_slots, -1e10f);
@@ -4298,7 +4380,7 @@ int main(int argc, char ** argv) {
                 if (i >= 0 && i < (int)blocks.size()) {
                     int slot_id = blocks[i]->pool_idx;
                     if (slot_id >= 0 && slot_id < n_slots) {
-                        if (blocks[i]->state != BlockState::DenseResident && blocks[i]->state != BlockState::Compressing) {
+                        if (blocks[i]->state == BlockState::CompressedResident) {
                             slots_mask_host[slot_id] = 0.0f;
                         }
                     }
@@ -4375,28 +4457,51 @@ int main(int argc, char ** argv) {
                     for (int t = 0; t < cnt0; ++t) pbuf[t] = active_positions_dense[t];
                     ggml_backend_tensor_set(native_dense_pos, pbuf.data(), 0, (size_t)native_maxd * sizeof(int32_t));
                     
-                    // Upload K/V for all layers (full buffers in bulk)
-                    std::vector<float> flat_k_all((size_t)native_maxd * n_layers * F_test, 0.0f);
-                    std::vector<float> flat_v_all((size_t)native_maxd * n_layers * F_test, 0.0f);
-                    for (int t = 0; t < native_maxd; ++t) {
-                        for (int l = 0; l < n_layers; ++l) {
-                            const int c2 = std::min(total_dense_tokens[l], native_maxd);
-                            if (t < c2) {
-                                std::memcpy(
-                                    flat_k_all.data() + ((size_t)t * n_layers * F_test + (size_t)l * F_test),
-                                    active_k_dense[l].data() + (size_t)t * F_test,
-                                    F_test * sizeof(float)
-                                );
-                                std::memcpy(
-                                    flat_v_all.data() + ((size_t)t * n_layers * F_test + (size_t)l * F_test),
-                                    active_v_dense[l].data() + (size_t)t * F_test,
-                                    F_test * sizeof(float)
-                                );
+                    for (int l = 0; l < n_layers; ++l) {
+                        int kn = 0, vn = 0;
+                        for (int i = 0; i < (int)active_k_dense[l].size(); ++i) {
+                            if (std::isnan(active_k_dense[l][i])) {
+                                kn++;
+                                if (kn <= 2) {
+                                    std::cerr << "[DBG_ACTIVE_NAN_DETAIL] layer=" << l 
+                                              << " K_NaN at tok=" << i / F_test 
+                                              << " f=" << i % F_test << std::endl;
+                                }
+                            }
+                            if (std::isnan(active_v_dense[l][i])) {
+                                vn++;
+                                if (vn <= 2) {
+                                    std::cerr << "[DBG_ACTIVE_NAN_DETAIL] layer=" << l 
+                                              << " V_NaN at tok=" << i / F_test 
+                                              << " f=" << i % F_test << std::endl;
+                                }
                             }
                         }
+                        if (kn > 0 || vn > 0) {
+                            std::cerr << "[DBG_ACTIVE_NAN] layer=" << l << " active_k_nans=" << kn << " active_v_nans=" << vn << std::endl;
+                        }
                     }
-                    ggml_backend_tensor_set(native_dense_kr_concat, flat_k_all.data(), 0, flat_k_all.size() * sizeof(float));
-                    ggml_backend_tensor_set(native_dense_v_concat, flat_v_all.data(), 0, flat_v_all.size() * sizeof(float));
+
+                    // Upload K/V for all layers (contiguous per-layer buffers)
+                    for (int l = 0; l < n_layers; ++l) {
+                        const int c2 = std::min(total_dense_tokens[l], native_maxd);
+                        std::vector<float> flat_k((size_t)native_maxd * F_test, 0.0f);
+                        std::vector<float> flat_v((size_t)native_maxd * F_test, 0.0f);
+                        for (int t = 0; t < c2; ++t) {
+                            std::memcpy(
+                                flat_k.data() + (size_t)t * F_test,
+                                active_k_dense[l].data() + (size_t)t * F_test,
+                                F_test * sizeof(float)
+                            );
+                            std::memcpy(
+                                flat_v.data() + (size_t)t * F_test,
+                                active_v_dense[l].data() + (size_t)t * F_test,
+                                F_test * sizeof(float)
+                            );
+                        }
+                        ggml_backend_tensor_set(native_dense_kr[l], flat_k.data(), 0, flat_k.size() * sizeof(float));
+                        ggml_backend_tensor_set(native_dense_v[l], flat_v.data(), 0, flat_v.size() * sizeof(float));
+                    }
                     
                     if (std::getenv("DIFFKV_DBG_SEL") && step == 0) {
                         std::vector<float> rb(F_test), rv(F_test);
@@ -4434,46 +4539,41 @@ int main(int argc, char ** argv) {
                     if (decode_concat_k && decode_concat_v && step > 0) {
                         // GPU-Direct Incremental Copy: copy directly on the GPU
                         struct ggml_init_params params = {
-                            /*.mem_size   =*/ 1024 * 16,
+                            /*.mem_size   =*/ 1024 * 64,
                             /*.mem_buffer =*/ nullptr,
                             /*.no_alloc   =*/ true,
                         };
                         struct ggml_context * temp_ctx = ggml_init(params);
                         if (temp_ctx) {
-                            struct ggml_tensor * dst_view_k = ggml_view_2d(temp_ctx, native_dense_kr_concat, F_test, n_layers,
-                                F_test * sizeof(float),
-                                (size_t)ring_pos * n_layers * F_test * sizeof(float));
-                            dst_view_k->buffer = native_dense_kr_concat->buffer;
+                            for (int l = 0; l < n_layers; ++l) {
+                                struct ggml_tensor * src_view_k = ggml_view_1d(temp_ctx, decode_concat_k, F_test, (size_t)l * F_test * sizeof(float));
+                                src_view_k->buffer = decode_concat_k->buffer;
 
-                            struct ggml_tensor * dst_view_v = ggml_view_2d(temp_ctx, native_dense_v_concat, F_test, n_layers,
-                                F_test * sizeof(float),
-                                (size_t)ring_pos * n_layers * F_test * sizeof(float));
-                            dst_view_v->buffer = native_dense_v_concat->buffer;
-                            
-                            ggml_backend_tensor_copy(decode_concat_k, dst_view_k);
-                            ggml_backend_tensor_copy(decode_concat_v, dst_view_v);
-                            
+                                struct ggml_tensor * dst_view_k = ggml_view_1d(temp_ctx, native_dense_kr[l], F_test, (size_t)ring_pos * F_test * sizeof(float));
+                                dst_view_k->buffer = native_dense_kr[l]->buffer;
+
+                                struct ggml_tensor * src_view_v = ggml_view_1d(temp_ctx, decode_concat_v, F_test, (size_t)l * F_test * sizeof(float));
+                                src_view_v->buffer = decode_concat_v->buffer;
+
+                                struct ggml_tensor * dst_view_v = ggml_view_1d(temp_ctx, native_dense_v[l], F_test, (size_t)ring_pos * F_test * sizeof(float));
+                                dst_view_v->buffer = native_dense_v[l]->buffer;
+
+                                ggml_backend_tensor_copy(src_view_k, dst_view_k);
+                                ggml_backend_tensor_copy(src_view_v, dst_view_v);
+                            }
                             ggml_free(temp_ctx);
                         }
                     } else {
                         // Fallback to CPU-to-GPU set
-                        std::vector<float> flat_new_k((size_t)n_layers * F_test, 0.0f);
-                        std::vector<float> flat_new_v((size_t)n_layers * F_test, 0.0f);
                         for (int l = 0; l < n_layers; ++l) {
                             const int local_idx = total_dense_tokens[l] - 1;  // Index in active_k_dense
                             if (local_idx >= 0) {
                                 const float* new_k = active_k_dense[l].data() + (size_t)local_idx * F_test;
                                 const float* new_v = active_v_dense[l].data() + (size_t)local_idx * F_test;
-                                std::memcpy(flat_new_k.data() + (size_t)l * F_test, new_k, F_test * sizeof(float));
-                                std::memcpy(flat_new_v.data() + (size_t)l * F_test, new_v, F_test * sizeof(float));
+                                ggml_backend_tensor_set(native_dense_kr[l], new_k, (size_t)ring_pos * F_test * sizeof(float), F_test * sizeof(float));
+                                ggml_backend_tensor_set(native_dense_v[l], new_v, (size_t)ring_pos * F_test * sizeof(float), F_test * sizeof(float));
                             }
                         }
-                        ggml_backend_tensor_set(native_dense_kr_concat, flat_new_k.data(), 
-                            (size_t)ring_pos * n_layers * F_test * sizeof(float), 
-                            n_layers * F_test * sizeof(float));
-                        ggml_backend_tensor_set(native_dense_v_concat, flat_new_v.data(), 
-                            (size_t)ring_pos * n_layers * F_test * sizeof(float), 
-                            n_layers * F_test * sizeof(float));
                     }
                     
                     // Update mask and position for the new token
@@ -4533,6 +4633,28 @@ int main(int argc, char ** argv) {
                 svd_thread_active = false;
             }
 
+            if (native_attn_on && std::getenv("DIFFKV_DBG_NAN")) {
+                int count = 0;
+                for (int i = 0; i < decode_graph->n_nodes; ++i) {
+                    struct ggml_tensor * node = decode_graph->nodes[i];
+                    if (node->op == GGML_OP_DIFFKV_ATTN) {
+                        std::vector<float> res_data(ggml_nelements(node));
+                        ggml_backend_tensor_get(node, res_data.data(), 0, res_data.size() * sizeof(float));
+                        double norm = 0;
+                        int nans = 0;
+                        for (float val : res_data) {
+                            if (std::isnan(val)) nans++;
+                            else norm += (double)val * val;
+                        }
+                        std::cerr << "[DBG_NAN] step=" << step << " node_idx=" << i 
+                                  << " layer=" << count++
+                                  << " shape=[" << node->ne[0] << "," << node->ne[1] << "]"
+                                  << " norm=" << std::sqrt(norm) 
+                                  << " nans=" << nans << std::endl;
+                    }
+                }
+            }
+
             if (std::getenv("DIFFKV_DBG_GRAPH")) { static int o=0; if(o++<10)
                 std::cerr << "[DBG_CBCOUNT] step=" << o << " sparse=" << decode_use_sparse
                           << " cb=" << diffkv::g_diffkv_cb_invocations.load()
@@ -4584,6 +4706,90 @@ int main(int argc, char ** argv) {
                 for(int h=0;h<nq;++h){ double lmax=std::max(lseS[h],lseD[h]); double ws=(lseS[h]<=-1e20?0.0:std::exp(lseS[h]-lmax)), wd=(lseD[h]<=-1e20?0.0:std::exp(lseD[h]-lmax)); double den=std::max(ws+wd,1e-9); for(int d=0;d<D;++d) cpuv[h*D+d]=(float)((outS[h*D+d]*ws+outD[h*D+d]*wd)/den); }
                 double md=0,nn=0,cn=0; int worst=0; for(int i=0;i<nq*D;++i){ double d=std::fabs((double)natv[i]-cpuv[i]); if(d>md){md=d;worst=i;} nn+=(double)natv[i]*natv[i]; cn+=(double)cpuv[i]*cpuv[i]; }
                 std::cerr<<"[DBG_CMP] step="<<step<<" FULL L"<<cmpL<<" (K="<<K<<" Td="<<Td<<"): |native|="<<std::sqrt(nn)<<" |cpu|="<<std::sqrt(cn)<<" maxAbsDiff="<<md<<" @"<<worst<<" head"<<worst/D<<std::endl;
+            }
+
+            // DIFFKV_BLOCK_CMP: per-layer comparison table vs CPU reference
+            if (std::getenv("DIFFKV_BLOCK_CMP")) {
+                const auto & cfg = model.get_config();
+                int nq=cfg.n_head, nkv=cfg.n_head_kv, D=cfg.n_embd/cfg.n_head;
+                float freq=cfg.rope_freq_base;
+                float scale=1.0f/std::sqrt((float)D);
+                int F=nkv*D;
+                const char* slimit = std::getenv("DIFFKV_BLOCK_CMP_STEPS");
+                int max_steps = slimit ? atoi(slimit) : 3;
+                if (step < max_steps) {
+                    std::cerr << "\n[BLOCK_CMP] ===== step=" << step << " =====\n";
+                    for (int l = 0; l < (int)kv_engines.size() && l < BLOCK_CMP_MAX_LAYERS; ++l) {
+                        if (!g_bcmp_attn[l] || !g_bcmp_qrope[l] || !g_bcmp_slots[l]) continue;
+                        int K = (int)g_bcmp_slots[l]->ne[0];
+                        int rank = kv_engines[l]->get_rank();
+                        // Read native output
+                        std::vector<float> natv((size_t)nq*D);
+                        ggml_backend_tensor_get(g_bcmp_attn[l],  natv.data(), 0, natv.size()*sizeof(float));
+                        // Read q, slots
+                        std::vector<float>   qh((size_t)nq*D);
+                        std::vector<int32_t> sl(K);
+                        ggml_backend_tensor_get(g_bcmp_qrope[l], qh.data(),   0, qh.size()*sizeof(float));
+                        ggml_backend_tensor_get(g_bcmp_slots[l], sl.data(),   0, (size_t)K*sizeof(int32_t));
+                        // CPU sparse reference
+                        std::vector<float> outS((size_t)nq*D,0.f), lseS(nq,-1e30f);
+                        diffkv::execute_cpu_attention(qh.data(), sl.data(), outS.data(), lseS.data(),
+                            kv_engines[l].get(), nq, nkv, rank, kv_engines[l]->get_S_max(), K, D, scale, true, freq, true);
+                        // CPU dense reference (include current token if ignore_c=false)
+                        int Td = total_dense_tokens[l];
+                        bool cur_included = (l < (int)userdata.size() && !userdata[l].ignore_c);
+                        int Tc = Td + (cur_included ? 1 : 0);
+                        std::vector<float> dk((size_t)Tc*F,0.f), dv((size_t)Tc*F,0.f); std::vector<int32_t> dp(Tc,0);
+                        std::memcpy(dk.data(), active_k_dense[l].data(), (size_t)Td*F*sizeof(float));
+                        std::memcpy(dv.data(), active_v_dense[l].data(), (size_t)Td*F*sizeof(float));
+                        for(int t=0;t<Td;++t) dp[t]=active_positions_dense[t];
+                        if (cur_included && g_bcmp_curk[l] && g_bcmp_curv[l]) {
+                            std::vector<float> ck((size_t)F), cv((size_t)F);
+                            ggml_backend_tensor_get(g_bcmp_curk[l], ck.data(), 0, ck.size()*sizeof(float));
+                            ggml_backend_tensor_get(g_bcmp_curv[l], cv.data(), 0, cv.size()*sizeof(float));
+                            std::memcpy(dk.data()+(size_t)Td*F, ck.data(), (size_t)F*sizeof(float));
+                            std::memcpy(dv.data()+(size_t)Td*F, cv.data(), (size_t)F*sizeof(float));
+                            dp[Td] = current_pos;
+                        }
+                        std::vector<float> outD((size_t)nq*D,0.f), lseD(nq,-1e30f);
+                        diffkv::cpu_dense_attention(qh.data(), dk.data(), dv.data(), dp.data(), Tc,
+                            nq, nkv, D, scale, true, freq, 0, outD.data(), lseD.data());
+                        // 3-way LSE merge → CPU combined (sparse ⊕ dense+cur)
+                        std::vector<float> cpuv((size_t)nq*D);
+                        for(int h=0;h<nq;++h){
+                            double lmax=std::max(lseS[h],lseD[h]);
+                            double ws=(lseS[h]<=-1e20?0.0:std::exp(lseS[h]-lmax));
+                            double wd=(lseD[h]<=-1e20?0.0:std::exp(lseD[h]-lmax));
+                            double den=std::max(ws+wd,1e-9);
+                            for(int d=0;d<D;++d) cpuv[h*D+d]=(float)((outS[h*D+d]*ws+outD[h*D+d]*wd)/den);
+                        }
+
+                        // Compute stats
+                        double md=0, nn=0, cn=0; int worst=0;
+                        int nanN=0, nanC=0;
+                        for(int i=0;i<nq*D;++i){
+                            if(std::isnan(natv[i])) nanN++;
+                            if(std::isnan(cpuv[i])) nanC++;
+                            double diff=std::fabs((double)natv[i]-cpuv[i]);
+                            if(diff>md){md=diff;worst=i;}
+                            nn+=(double)natv[i]*natv[i]; cn+=(double)cpuv[i]*cpuv[i];
+                        }
+                        // Print report line
+                        std::cerr << "[BLOCK_CMP] L" << l
+                            << " K=" << K << " Td=" << Td
+                            << " |nat|=" << std::sqrt(nn)
+                            << " |cpu|=" << std::sqrt(cn)
+                            << " maxDiff=" << md
+                            << " @h" << worst/D
+                            << " nanNat=" << nanN << " nanCpu=" << nanC
+                            << "\n  nat[0..4]:";
+                        for(int i=0;i<5&&i<nq*D;++i) std::cerr<<" "<<natv[i];
+                        std::cerr << "\n  cpu[0..4]:";
+                        for(int i=0;i<5&&i<nq*D;++i) std::cerr<<" "<<cpuv[i];
+                        std::cerr << "\n";
+                    }
+                    std::cerr << "[BLOCK_CMP] ===== end step=" << step << " =====\n\n";
+                }
             }
 
             if (std::getenv("DIFFKV_DBG_SEL") && step == 0 && dbg_anc) {
@@ -5626,6 +5832,10 @@ int main(int argc, char ** argv) {
                     }
                 } // if (prev_slot >= 0)
 
+            } // if (rebuild_needed)
+
+            if (decode_use_sparse && (pool_version_changed || rebuild_needed)) {
+                last_pool_version = kv_engines[0]->get_pool_version();
                 // When a block completes, also sync the dense buffer for ALL layers
                 // (this is the correct place — before this guard it ran every token)
                 for (int l = 0; l < n_layers; ++l) {
@@ -5651,6 +5861,13 @@ int main(int argc, char ** argv) {
                             curr_token_idx++;
                             if (!block->active_k.empty()) {
                                 int active_len = block->active_k.size() / F_test;
+                                int kn = 0, vn = 0;
+                                for (float val : block->active_k) if (std::isnan(val)) kn++;
+                                for (float val : block->active_v) if (std::isnan(val)) vn++;
+                                if (kn > 0 || vn > 0) {
+                                    std::cerr << "[DBG_REBUILD_NAN] layer=" << l << " block=" << block->anchor_idx 
+                                              << " active_k_nans=" << kn << " active_v_nans=" << vn << std::endl;
+                                }
                                 if (curr_token_idx + active_len > cap_tokens) {
                                     active_len = cap_tokens - curr_token_idx;
                                 }
@@ -5698,6 +5915,11 @@ int main(int argc, char ** argv) {
                             sin_table_rebuild[t * half_dim + i] = std::sin(theta);
                         }
                     }
+                    std::cerr << "[DEBUG_ROPE] num_dense=" << num_dense 
+                              << " active_k_dense[0].size()=" << active_k_dense[0].size() 
+                              << " active_k_dense_rotated[0].size()=" << active_k_dense_rotated[0].size() 
+                              << " cos=" << (const void*)cos_table_rebuild.data() 
+                              << " sin=" << (const void*)sin_table_rebuild.data() << std::endl;
                     for (int l = 0; l < n_layers; ++l) {
                         std::fill(active_k_dense_rotated[l].begin(), active_k_dense_rotated[l].end(), 0.0f);
                         apply_rope_neox_cpu_fast(

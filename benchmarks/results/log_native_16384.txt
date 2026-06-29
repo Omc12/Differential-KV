@@ -1,2 +1,2 @@
 
-__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 18, "prefill_s": 33.2783, "decode_s": 11.299651125096716, "decode_tps": 1.5929695351409299, "ttft_s": 33.454472833895124, "mx_peak_gb": null, "output_preview": "### ### 1-               [uncertain: details missing in source]", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 16384, "gen_target": 50, "worker_wall_s": 47.67121091694571}
+__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 2, "prefill_s": 32.758, "decode_s": 0.7351535829948261, "decode_tps": 2.7205199651649874, "ttft_s": 32.89681004197337, "mx_peak_gb": null, "output_preview": "###", "needle_found": false, "status": "ok", "engine": "native", "ctx_target": 16384, "gen_target": 128, "worker_wall_s": 37.87576120800804}

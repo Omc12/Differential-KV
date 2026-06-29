@@ -738,7 +738,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     if (params.out_res_K_pos && params.out_res_V_pos &&
         params.out_res_K_val && params.out_res_V_val && S_deltas > 0) {
         const int MR = params.max_residual;
-        const float ERR_THRESH = 0.08f;
+        const float ERR_THRESH = 0.001f;
         for (int i = 0; i < MR; ++i) { params.out_res_K_pos[i] = -1; params.out_res_V_pos[i] = -1; }
         std::memset(params.out_res_K_val, 0, (size_t)MR * F * sizeof(ggml_fp16_t));
         std::memset(params.out_res_V_val, 0, (size_t)MR * F * sizeof(ggml_fp16_t));
@@ -772,7 +772,6 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             int written = 0;
             for (int ii = 0; ii < S_deltas && written < n_max; ++ii) {
                 int s = idx[ii];
-                if (rel[s] <= ERR_THRESH) break;      // sorted desc → rest are smaller
                 if (aerr[s] <= 1e-4f) continue;
                 pos_out[written] = s;                  // block-local delta index = decode token index
                 for (int f = 0; f < F; ++f)
@@ -783,6 +782,19 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         if (n_max > 0) {
             select(rel_K, aerr_K, params.out_res_K_pos, params.out_res_K_val, 0);
             select(rel_V, aerr_V, params.out_res_V_pos, params.out_res_V_val, F);
+            
+            // Print residuals debug info
+            int written_k = 0;
+            while (written_k < MR && params.out_res_K_pos[written_k] != -1) written_k++;
+            if (written_k > 0 && params.token_ids) {
+                std::cerr << "[DEBUG_RESIDUALS] block_id=" << params.block_id 
+                          << " S_deltas=" << S_deltas << " n_max=" << n_max << " written=" << written_k << " top5_pos_err: ";
+                for (int i = 0; i < std::min(written_k, 5); ++i) {
+                    int s = params.out_res_K_pos[i];
+                    std::cerr << s << "(" << aerr_K[s] << ", tok=" << params.token_ids[s + 1] << ") ";
+                }
+                std::cerr << std::endl;
+            }
         }
     }
 

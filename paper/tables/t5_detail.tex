@@ -1,0 +1,22 @@
+\begin{tabular}{llrrrrrrl}
+\toprule
+Config & Ctx & Prefill (s) & Decode tok/s & MLX peak (GB) & Dec.\ peak (GB) & Store (GB) & Full KV (GB) & Needle \\
+\midrule
+compressed & 4k & 8.1 & 8.0 & 1.68 & 1.70 & 0.028 & 0.117 & \xmark \\
+compressed & 8k & 17.9 & 8.1 & 1.79 & 1.70 & 0.040 & 0.235 & \xmark \\
+compressed & 16k & 40.3 & 8.2 & 2.03 & 1.70 & 0.066 & 0.473 & \xmark \\
+compressed & 32k & 104.0 & 8.0 & 2.51 & 2.03 & 0.111 & 0.942 & \xmark \\
+compressed & 64k & 312.9 & 6.8 & 3.44 & 2.97 & 0.203 & 1.881 & \xmark \\
+\midrule
+exact & 4k & 8.4 & 42.8 & 1.68 & 1.28 & 0.028 & 0.117 & \cmark \\
+exact & 8k & 17.6 & 40.3 & 1.79 & 1.46 & 0.040 & 0.235 & \cmark \\
+exact & 16k & 40.5 & 35.2 & 2.03 & 1.57 & 0.066 & 0.473 & \cmark \\
+exact & 32k & 104.2 & 24.2 & 2.52 & 2.04 & 0.111 & 0.942 & \cmark \\
+exact & 64k & 317.6 & 17.6 & 3.44 & 2.97 & 0.203 & 1.881 & \cmark \\
+\midrule
+dense & 4k & 5.1 & 66.9 & 1.68 & -- & -- & -- & \cmark \\
+dense & 8k & 11.1 & 61.7 & 1.79 & -- & -- & -- & \cmark \\
+dense & 16k & 27.4 & 47.3 & 2.03 & -- & -- & -- & \cmark \\
+dense & 32k & 92.3 & 30.1 & 2.43 & -- & -- & -- & \cmark \\
+\bottomrule
+\end{tabular}

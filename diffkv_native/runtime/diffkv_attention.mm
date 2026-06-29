@@ -523,15 +523,16 @@ void execute_metal_attention(
     const int n_slots = engine->get_seq_lens()->ne[0];
 
     std::vector<int32_t> unique_slots;
-    unique_slots.reserve(raw_K);
-    if (raw_K > 0 && slot_indices) {
+    if (slot_indices) {
         std::vector<int32_t> slot_ids_cpu(raw_K);
         ggml_backend_tensor_get(slot_indices, slot_ids_cpu.data(), 0, raw_K * sizeof(int32_t));
         for (int k = 0; k < raw_K; ++k) {
             int32_t sid = slot_ids_cpu[k];
             if (sid >= 0 && sid < n_slots) {
-                if (std::find(unique_slots.begin(), unique_slots.end(), sid) == unique_slots.end()) {
-                    unique_slots.push_back(sid);
+                if (engine->get_state_table().get(sid) == BlockState::CompressedResident) {
+                    if (std::find(unique_slots.begin(), unique_slots.end(), sid) == unique_slots.end()) {
+                        unique_slots.push_back(sid);
+                    }
                 }
             }
         }

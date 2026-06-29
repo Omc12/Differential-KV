@@ -1,0 +1,35 @@
+\begin{abstract}
+\noindent
+The key--value (KV) cache is the dominant memory cost of long-context transformer
+inference: it grows linearly with sequence length and, on a single commodity device,
+becomes the binding constraint long before compute does. We present \diffkv{}, a
+KV-cache inference runtime that attacks this cost structurally rather than by eviction
+or quantization alone. \diffkv{} partitions the cache into fixed-size blocks and
+represents each block as an \emph{anchor} token plus a \emph{differential} low-rank term:
+the per-token deviations from the anchor are jointly factorized for keys and values by a
+randomized truncated SVD at rank~$16$, so a $256$-token block of full-precision KV
+($256$\,KiB per layer) is stored in $\approx\!25$\,KiB --- a $\approx\!10\times$ reduction
+in KV state. A bounded dense \emph{recency window} retains the most recent tokens
+uncompressed, and a single fused, compiled decode kernel scores the query against every
+compressed block \emph{directly in low-rank space}---never reconstructing dense
+keys or values---then merges the compressed and dense branches with a numerically
+stable log-sum-exp. The result is a KV-state footprint that is \emph{bounded and
+context-independent} (a pre-allocated pool of $\approx\!0.2$\,GB across $28$ layers)
+while a dense full-KV cache grows without bound.
+
+We implement \diffkv{} on Apple's MLX framework and evaluate it on
+Qwen2.5-1.5B-Instruct (int4) on an $8.6$\,GB Apple~M3, using a needle-in-a-haystack
+protocol from $4$k to $64$k tokens. We report results honestly and separate two decode
+paths: the compressed sparse decode---the runtime's actual contribution---and an
+exact full-KV decode used as an upper-bound ablation on the same compressed store.
+\diffkv{}'s compressed KV state is up to an order of magnitude smaller than the dense
+cache and remains bounded as context grows, letting the model reach contexts at which
+the dense baseline exhausts memory. These benefits come at a measured cost: the
+compressed decode is markedly slower than dense decode, and at rank~$16$ the
+SVD-reconstructed blocks do not yet reliably recover a single buried passcode once it
+leaves the recency window---a fidelity limitation we characterize rather than hide.
+We provide a full reproducibility appendix and design every figure and table so that a
+future CUDA/Triton fused-decode implementation can be inserted without restructuring the
+evaluation. All reported numbers are measured on the same machine; no value is averaged
+across conflicting runs or fabricated.
+\end{abstract}

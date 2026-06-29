@@ -1,0 +1,56 @@
+\section{Reproducibility}
+\label{app:repro}
+
+All results were produced on a single machine, one engine per isolated subprocess, with every
+number measured (failed cells are reported as failures, never filled with estimates).
+
+\paragraph{Hardware.}
+Apple~M3, $8.59$\,GB unified memory (host \texttt{Oms-MacBook-Pro-2.local}), macOS (Darwin
+25.x). The device is shared with the OS and other applications, so absolute memory thresholds
+shift with machine load; the scaling slopes and engine ordering are the stable results.
+
+\paragraph{Software.}
+Python (\texttt{diffkv\_venv}), MLX $0.31.2$, \texttt{mlx\_lm}, NumPy, PyTorch (used only for
+tensor plumbing in the wrapper, not for compute), \texttt{psutil}. Model:
+\texttt{mlx-community/Qwen2.5-1.5B-Instruct-4bit} (group size $64$, $4$-bit), $28$ layers,
+$12$ query heads, $2$ KV heads, head dim $128$, vocab $151{,}936$, trained context $32{,}768$,
+RoPE $\theta=10^6$.
+
+\paragraph{Configuration.}
+\texttt{rank=16}, \texttt{block\_size=256}, \texttt{recency\_window=512} (dense buffer $768$),
+\texttt{max\_blocks=256}, preset ``mid''. Decode mode is selected by
+\texttt{DIFFKV\_COMPRESSED\_DECODE} ($1$ = compressed, primary; $0$ = exact, ablation).
+
+\paragraph{Protocol.}
+A needle-in-a-haystack chat prompt is built once per context length from the Qwen2.5 tokenizer
+and fed verbatim (raw mode, no double chat-templating) to every configuration. The needle is a
+planted passcode (\texttt{OMEGA-7741-DELTA}); ``needle recovered'' means the generation
+reproduced it---a free correctness signal. Engines are warmed once (a $1$-token forward to
+compile kernels) before timing. Prefill is timed with \texttt{perf\_counter} around the chunked
+forward after \texttt{mx.eval}; decode is fixed-length greedy ($128$ tokens, EOS ignored) so
+throughput is directly comparable. Memory is read from MLX's allocator
+(\texttt{get\_peak\_memory}/\texttt{get\_active\_memory}); the decode-phase peak resets the peak
+counter at the prefill$\to$decode boundary to isolate steady-state decode memory. Analytic
+KV-state bytes are computed from the live store occupancy.
+
+\paragraph{Commands.}
+\begin{quote}\small\ttfamily
+\# instrumented active sweep (compressed + exact ablation)\\
+diffkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
+\ \ --ctx 4096 8192 16384 32768 65536 --modes compressed exact \textbackslash\\
+\ \ --gen 128 --out paper/generated/active\_modes\_sweep.json\\[4pt]
+\# dense full-KV baseline (same prompts, same memory metric)\\
+diffkv\_venv/bin/python3 benchmarks/run\_bench.py --engines dense \textbackslash\\
+\ \ --contexts 4096 8192 16384 32768 --gen 128 --ram-cap-gb 7.5\\[4pt]
+\# figures + tables from the measured JSON\\
+diffkv\_venv/bin/python3 paper/scripts/make\_diagrams.py\\
+diffkv\_venv/bin/python3 paper/scripts/make\_graphs.py\\
+diffkv\_venv/bin/python3 paper/scripts/make\_tables.py
+\end{quote}
+
+\paragraph{Artifacts.}
+Measured JSON: \texttt{paper/generated/active\_modes\_sweep.json} (active, both modes) and
+\texttt{benchmarks/results/PAPER\_dense\_sweep.json} (dense). Figures are regenerated from these
+by the scripts above; tables are emitted to \texttt{paper/tables/}. The provenance and the
+decode-path conflict that motivated this measurement design are documented in
+\texttt{paper/notes/}.

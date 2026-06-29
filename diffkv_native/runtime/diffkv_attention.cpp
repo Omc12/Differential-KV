@@ -65,10 +65,29 @@ void execute_cpu_attention(
     seen_set.reserve(K);
     std::vector<int32_t> unique_slots;
     unique_slots.reserve(K);
+    static int print_once = 0;
+    if (print_once < 2 && K > 0) {
+        print_once++;
+        std::cerr << "[DBG_STATES] n_slots=" << n_slots << " slots: ";
+        for (int k = 0; k < std::min(K, 15); ++k) {
+            int32_t sid = slots[k];
+            if (sid >= 0 && sid < n_slots) {
+                std::cerr << sid << "(" << (int)kv_engine->get_state_table().get(sid) << ") ";
+            } else {
+                std::cerr << sid << "(OOB) ";
+            }
+        }
+        std::cerr << "\n";
+    }
     for (int k = 0; k < K; ++k) {
         int32_t sid = slots[k];
-        if (sid >= 0 && sid < n_slots && seen_set.insert(sid).second)
-            unique_slots.push_back(sid);
+        if (sid >= 0 && sid < n_slots) {
+            if (kv_engine->get_state_table().get(sid) == BlockState::CompressedResident) {
+                if (seen_set.insert(sid).second) {
+                    unique_slots.push_back(sid);
+                }
+            }
+        }
     }
     const int32_t* active_slots = unique_slots.data();
     int active_K = (int)unique_slots.size();
@@ -192,7 +211,7 @@ void execute_cpu_attention(
 
     std::vector<const float*> tok_cos(active_K, nullptr);
     std::vector<const float*> tok_sin(active_K, nullptr);
-    if (has_rope && !approximate_attn) {
+    if (has_rope) {
         for (int k = 0; k < active_K; ++k) {
             int slot_id = active_slots[k];
             int slen = seq_lens[slot_id];
@@ -412,11 +431,13 @@ void execute_cpu_attention(
                         const ggml_fp16_t* rk = slot_res_K_val +
                             ri * n_kv_heads * D + kv_head * D;
                         if (has_rope) {
+                            const float* tr_cos = tok_cos[k] + (size_t)t * half_d;
+                            const float* tr_sin = tok_sin[k] + (size_t)t * half_d;
                             for (int d = 0; d < half_d; ++d) {
                                 float x = ggml_fp16_to_fp32(rk[d]);
                                 float y = ggml_fp16_to_fp32(rk[d + half_d]);
-                                res_score += Q_ptr[h * D + d]          * (x * ca[d] - y * sa[d]);
-                                res_score += Q_ptr[h * D + d + half_d] * (y * ca[d] + x * sa[d]);
+                                res_score += Q_ptr[h * D + d]          * (x * tr_cos[d] - y * tr_sin[d]);
+                                res_score += Q_ptr[h * D + d + half_d] * (y * tr_cos[d] + x * tr_sin[d]);
                             }
                         } else {
                             for (int d = 0; d < D; ++d)
@@ -451,7 +472,21 @@ void execute_cpu_attention(
                     slot_infos[k].token_scores[t] = t_score;
                     if (t_score > max_score) max_score = t_score;
                 }
-                slot_infos[k].q_proj.clear();
+                }
+        }
+
+        if (std::isnan(max_score)) {
+            static int max_s_prints = 0;
+            if (max_s_prints++ < 5) {
+                std::cerr << "[NaN_MaxScore_Diag] h=" << h << " max_score is NaN!\n";
+                for (int k = 0; k < active_K && k < 3; ++k) {
+                    int slot_id = active_slots[k];
+                    std::cerr << "  slot=" << slot_id << " anchor_score=" << slot_infos[k].anchor_score;
+                    if (!slot_infos[k].token_scores.empty()) {
+                        std::cerr << " token_scores[0]=" << slot_infos[k].token_scores[0];
+                    }
+                    std::cerr << "\n";
+                }
             }
         }
 
@@ -509,8 +544,20 @@ void execute_cpu_attention(
                     svd_v[d] += wr * vvr[d];
             }
 
-            for (int d = 0; d < D; ++d)
-                accum[d] += w_total * av[d] + svd_v[d] + res_v_accum[d];
+            for (int d = 0; d < D; ++d) {
+                double val = w_total * av[d] + svd_v[d] + res_v_accum[d];
+                if (std::isnan(val)) {
+                    static int prints = 0;
+                    if (prints++ < 5) {
+                        std::cerr << "[NaN_Sparse_Diag] h=" << h << " slot_id=" << slot_id
+                                  << " w_total=" << w_total << " w_anc=" << w_anc
+                                  << " sum_w=" << sum_w << " max_score=" << max_score
+                                  << " sum_exp=" << sum_exp << " av[0]=" << av[0]
+                                  << " svd_v[0]=" << svd_v[0] << " res_v_accum[0]=" << res_v_accum[0] << "\n";
+                    }
+                }
+                accum[d] += val;
+            }
         }
         for (int d = 0; d < D; ++d) cpu_output[h * D + d] = (float)accum[d];
     }
@@ -661,6 +708,12 @@ void custom_attention_op_callback(
     const int D = data->D;
     const int F_kv = n_kv_heads * D;
 
+    int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
+    std::vector<int32_t> slot_indices_cpu(actual_K, 0);
+    if (actual_K > 0 && slot_indices) {
+        ggml_backend_tensor_get(slot_indices, slot_indices_cpu.data(), 0, actual_K * sizeof(int32_t));
+    }
+
     bool all_reused = false;
     bool cache_active = (get_global_attn_cache().threshold <= 1.0f);
     std::vector<float> q_host;
@@ -729,11 +782,10 @@ void custom_attention_op_callback(
     // as factual K/V attention injection has been removed (matching HF reference).
 
     // F9: force CPU if any selected block has residuals (Metal doesn't handle them).
-    int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
-    if (!force_cpu && data->kv_engine != nullptr && slot_indices && slot_indices->data && actual_K > 0) {
+    if (!force_cpu && data->kv_engine != nullptr && slot_indices && actual_K > 0) {
         NativeBlockPool* pool = data->kv_engine;
         int n_slots = pool->get_seq_lens()->ne[0];
-        const int32_t* slots_ptr = (const int32_t*)slot_indices->data;
+        const int32_t* slots_ptr = slot_indices_cpu.data();
         for (int k = 0; k < actual_K && !force_cpu; ++k) {
             int s = slots_ptr[k];
             if (s < 0 || s >= n_slots) continue;
@@ -755,6 +807,7 @@ void custom_attention_op_callback(
             data->active_k_dense, data->active_v_dense,
             data->active_positions_dense, T_dense
         );
+
         if (cache_active)
             get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
         return;
@@ -795,13 +848,13 @@ void custom_attention_op_callback(
 
     std::vector<float> out_sparse(n_q_heads * D, 0.0f);
     std::vector<float> lse_sparse(n_q_heads, -1e30f);
-    if (K > 0 && slot_indices && slot_indices->data) {
+    if (actual_K > 0 && slot_indices) {
         execute_cpu_attention(
             Q_cpu,
-            (const int32_t*)slot_indices->data,
+            slot_indices_cpu.data(),
             out_sparse.data(), lse_sparse.data(),
             kv_engine,
-            n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
+            n_q_heads, n_kv_heads, rank, S_max, actual_K, D, scale,
             has_rope, rope_freq_base, data->approximate_attn
         );
     }

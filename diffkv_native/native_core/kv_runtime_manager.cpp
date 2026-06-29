@@ -563,48 +563,36 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
 }
 
 void KVRuntimeManager::wait_for_compressor() {
-    // Deterministic drain FIRST: block until every submitted SVD job is fully processed
-    // (processed == submitted). This replaces the old per-slot snapshot+5s-deadline scheme that
-    // raced — under background-QoS workers + system load the SVDs sometimes weren't done, so the
-    // snapshot missed them / the deadline expired and half-compressed blocks were uploaded →
-    // non-deterministic long-context word-salad. After this returns, all blocks are
-    // CompressedResident, so the slot pass below just pushes them host→device.
+    // Block until every submitted SVD job is fully processed.
+    // After this returns, ALL blocks are CompressedResident in the state_table —
+    // so the old pending_slots loop was dead code (pending_slots was always empty
+    // because get_state_table().get() was no longer Compressing for any slot).
+    // The real upload was accidentally skipped: device_synced=true was set without
+    // calling upload_slot → GPU pool tensors remained uninitialized → sparse Metal op
+    // read zeros → word-salad output at contexts where compression finishes early (e.g. 4k).
     if (compressor_) compressor_->wait_until_idle();
 
-    // Gather all pool slots that are currently in Compressing state in any layer
+    // Upload ALL valid slots to GPU now that the compressor is idle.
+    // (Removed the old pending_slots filter — every block needs to be pushed.)
     int n_slots = engines_[0]->get_n_slots();
-    std::vector<int> pending_slots;
     for (int pool_idx = 0; pool_idx < n_slots; ++pool_idx) {
-        bool compressing = false;
+        // Upload if ANY layer's state is non-freed/non-invalid (has compressed data)
+        bool needs_upload = false;
         for (int l = 0; l < n_layers_; ++l) {
-            if (engines_[l]->get_state_table().get(pool_idx) == BlockState::Compressing) {
-                compressing = true;
+            BlockState st = engines_[l]->get_state_table().get(pool_idx);
+            if (st != BlockState::Freed && st != BlockState::Invalid) {
+                needs_upload = true;
                 break;
             }
         }
-        if (compressing) {
-            pending_slots.push_back(pool_idx);
-        }
-    }
-
-    // Second pass: wait for all pending slots with a global 60-second timeout
-    // (prevents hanging on pathological cases like SVD thread crash). NOTE: the old 5s deadline
-    // was THE long-context race — at ~80 blocks under background-QoS compressor threads the SVDs
-    // sometimes outran 5s, so wait_for_compressor returned early and upload_slot pushed
-    // HALF-COMPRESSED blocks → non-deterministic word-salad (block count varied 76↔78 run-to-run).
-    auto global_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    for (int pool_idx : pending_slots) {
-        for (int l = 0; l < n_layers_; ++l) {
-            while (std::chrono::steady_clock::now() < global_deadline) {
-                BlockState st = engines_[l]->get_state_table().get(pool_idx);
-                if (st != BlockState::Compressing) break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (needs_upload) {
+            for (int l = 0; l < n_layers_; ++l) {
+                engines_[l]->upload_slot(pool_idx);
             }
-            engines_[l]->upload_slot(pool_idx);
         }
     }
 
-    // Sync block states across all layers
+    // Sync block->state from state_table and mark as device_synced.
     for (int l = 0; l < n_layers_; ++l) {
         auto & blocks = ingest_manager_->get_blocks(l);
         for (auto & block : blocks) {
@@ -624,6 +612,7 @@ void KVRuntimeManager::wait_for_compressor() {
     }
     deallocate_synced_raw_activations(*ingest_manager_, engines_, n_layers_);
 }
+
 
 
 void KVRuntimeManager::touch_active_slots(const std::vector<int32_t>& active_slots) {

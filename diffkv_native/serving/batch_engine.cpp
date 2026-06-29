@@ -268,8 +268,11 @@ static struct ggml_cgraph * build_decode_graph(
             struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
             struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, sem_slots->ne[0]);
 
-            // Concatenate semantic and host slots
-            struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
+            // Concatenate semantic and host slots (cast to F32 first to prevent Metal subnormal flush-to-zero)
+            struct ggml_tensor * sem_slots_f32 = ggml_cast(ctx, sem_slots_1d, GGML_TYPE_F32);
+            struct ggml_tensor * host_slots_f32 = ggml_cast(ctx, host_slots, GGML_TYPE_F32);
+            struct ggml_tensor * candidate_slots_f32 = ggml_concat(ctx, sem_slots_f32, host_slots_f32, 0);
+            struct ggml_tensor * candidate_slots = ggml_cast(ctx, candidate_slots_f32, GGML_TYPE_I32);
 
             // Anchor screening: [srl_k_keep]
             float scale = 1.0f / std::sqrt((float)head_dim);
@@ -1605,7 +1608,8 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
 
         // If the block pool grew (allocated more slots on GPU), we must rebuild the decode graph
         // to pick up the new tensor pointers (since they were recreated in grow_gpu_pool).
-        if (kv_engines[0]->get_pool_version() != last_pool_version) {
+        if (kv_engines[0]->get_n_slots() != n_slots) {
+            n_slots = kv_engines[0]->get_n_slots();
             last_pool_version = kv_engines[0]->get_pool_version();
             ggml_free(decode_ctx);
             

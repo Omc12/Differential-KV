@@ -1,0 +1,64 @@
+% ============================================================================
+% Shared preamble for the DiffKV technical report and conference paper.
+% Visual identity: white background, dark-blue (#1F3A5F) accents,
+% light-blue (#4F8FD0) highlights. Compiles with pdflatex (or xelatex).
+% ============================================================================
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsthm}
+\usepackage{pifont}
+\usepackage{tcolorbox}
+\usepackage[hidelinks,colorlinks=true]{hyperref}
+
+% ── palette ────────────────────────────────────────────────────────────────
+\definecolor{ink}{HTML}{1F3A5F}
+\definecolor{accent}{HTML}{4F8FD0}
+\definecolor{amber}{HTML}{E1A140}
+\definecolor{good}{HTML}{2E8B57}
+\definecolor{bad}{HTML}{C0392B}
+\definecolor{panel}{HTML}{F4F7FB}
+\definecolor{muted}{HTML}{6B7785}
+
+\hypersetup{linkcolor=ink, citecolor=accent, urlcolor=accent}
+\captionsetup{labelfont={bf,color=ink}, font=small}
+
+\newcommand{\cmark}{\textcolor{good}{\ding{51}}}
+\newcommand{\xmark}{\textcolor{bad}{\ding{55}}}
+
+% notation shortcuts
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\KV}{\mathrm{KV}}
+\newcommand{\dhead}{d}
+\newcommand{\Hkv}{H_{\mathrm{kv}}}
+\newcommand{\bs}{B}
+\newcommand{\rank}{r}
+\newcommand{\dwin}{W}
+\newcommand{\anchork}{a_k}
+\newcommand{\anchorv}{a_v}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\lse}{\operatorname{lse}}
+\newcommand{\diffkv}{\textsc{DiffKV}}
+
+% callout box for "measured fact"
+\newtcolorbox{measbox}{colback=panel, colframe=ink, boxrule=0.6pt, arc=2pt,
+  left=6pt,right=6pt,top=4pt,bottom=4pt, fonttitle=\bfseries}
+
+\theoremstyle{definition}
+\newtheorem{observation}{Observation}
+
+% toggle: extended (technical report) vs conference
+\providecommand{\ifextended}{}

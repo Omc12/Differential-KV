@@ -1,0 +1,19 @@
+\section{Full Measured Results}
+\label{app:tables}
+
+Table~\ref{tab:detail} lists every measured cell from the instrumented sweep
+(\texttt{paper/scripts/measure\_active.py}) and the dense baseline
+(\texttt{benchmarks/run\_bench.py}). \emph{Decode-phase peak} resets the MLX peak counter at
+the prefill$\to$decode boundary to isolate steady-state decode memory; \emph{Store} is the
+analytic occupied KV-state footprint of the compressed pool plus recency window; \emph{Full KV}
+is the analytic dense-cache size for the same sequence length (all $28$ layers, fp16). Empty
+cells are measurements that do not apply to that configuration; failed cells (e.g.\ a dense
+out-of-memory at $64$k) are stated in the text, never given an invented value.
+
+\begin{table}[h]
+\centering
+\caption{Per-run detail: compressed decode (primary), exact decode (ablation), dense baseline.}
+\label{tab:detail}
+\small
+\input{tables/t5_detail}
+\end{table}

@@ -1,0 +1,54 @@
+\section{System Overview}
+\label{sec:overview}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f1_architecture.png}
+  \caption{\diffkv{} active-runtime architecture. A serving layer drives the
+  \texttt{MLXDiffKVWrapper}, whose patched attention routes \emph{prefill} (exact attention
+  over a native cache, with streaming capture and compression) and \emph{decode} (ingest,
+  flush, and fused compressed+dense attention). Both phases read and write a single
+  per-session KV store: a bounded dense recency window plus a fixed compressed pool.}
+  \label{fig:arch}
+\end{figure}
+
+\diffkv{} is structured as a thin orchestration layer over a stock quantized model whose
+attention has been replaced. Figure~\ref{fig:arch} shows the components and how data moves
+between them.
+
+\paragraph{Provenance.}
+The runtime evaluated here is the MLX implementation
+(\texttt{serving/mlx\_diffkv\_wrapper.py}). On Apple Silicon the wrapper factory binds to it
+automatically; every run in this report emits the line \emph{``macOS + MLX detected: using
+native MLX DiffKV wrapper.''} A portable PyTorch/Triton backend exists in the same tree and
+shares the design, but it is not the engine behind these numbers and we do not report it.
+
+\paragraph{Components.}
+\begin{description}[leftmargin=1.2em,style=nextline,itemsep=2pt]
+  \item[Serving layer] An OpenAI-compatible FastAPI gateway, a continuous-batching decode
+  engine, and a session manager (LRU residency, clone/snapshot/restore/rollback). These
+  provide multi-session lifecycle around the core; the experiments here exercise a single
+  session.
+  \item[\texttt{MLXDiffKVWrapper}] Loads the int4 model through \texttt{mlx\_lm}, patches the
+  attention, and runs chunked prefill followed by the decode loop.
+  \item[Patched attention (\texttt{attention\_forward})] The router. It applies RoPE, then
+  branches on sequence length: $L{>}1$ is prefill, $L{=}1$ is decode.
+  \item[\texttt{MLXKVBlockManager}] Owns the per-session KV store and implements
+  compression, the recency-window slide, and the fused decode attention dispatch.
+\end{description}
+
+\paragraph{Two phases, one store.}
+The store (\S\ref{sec:runtime}) has two regions per layer: a \emph{dense recency window}
+holding the most recent tokens uncompressed, and a \emph{compressed pool} of up to $M{=}256$
+blocks. Prefill fills the window and, whenever it overflows, compresses the oldest block into
+the pool. Decode ingests the new token into the window, compresses any block that overflows,
+and computes attention from the pool (in low-rank space) plus the window. Because the pool is
+pre-allocated at a fixed size, the store's footprint does not depend on context length---the
+property the rest of the system is built to exploit.
+
+\paragraph{An optional grounding module.}
+The codebase also contains a ``semantic retrieval layer'' (a factual store, query router, and
+logit-biasing machinery) intended to improve grounded factual generation. In the
+configuration benchmarked here it is inert---the manager returns no SRL state, so every
+factual-bias branch is skipped---so we describe it only briefly in \S\ref{sec:impl} and
+exclude it from all measured claims.

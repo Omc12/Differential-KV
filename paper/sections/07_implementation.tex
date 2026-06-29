@@ -1,0 +1,57 @@
+\section{Implementation}
+\label{sec:impl}
+
+\diffkv{} is $\approx\!1.6$k lines of Python over MLX, plus the surrounding runtime and
+serving code. We highlight the decisions that affect the measured behavior.
+
+\paragraph{Attention patching.}
+The wrapper rebinds \texttt{qwen2.Attention.\_\_call\_\_} to \texttt{attention\_forward} and
+attaches the manager and a layer index to each attention module. This keeps the rest of the
+\texttt{mlx\_lm} model---embeddings, MLP, norms, the LM head---untouched, so \diffkv{} composes
+with the stock int4 model and its tokenizer without retraining or reconfiguration.
+
+\paragraph{Why the SVD runs in NumPy.}
+\texttt{mx.linalg.qr} is GPU-only in current MLX and the nonzero form of \texttt{mx.where}
+does not accept the streaming kwargs the compressor needs, so the factorization is done in
+NumPy on the CPU. On unified memory this is nearly free of data-movement cost: the MLX array
+is materialized in place (\texttt{mx.eval}) and viewed as a NumPy array over the same bytes.
+The factorization fires at most once per $256$ tokens, so its few-millisecond cost is
+amortized.
+
+\paragraph{Dtypes and precision.}
+KV state, factors, and anchors are fp16; the SVD normalization scale is fp32. This halves the
+store relative to fp32 defaults and matches the precision the model already runs at. The
+randomized SVD itself is computed in fp32 and the factors cast to fp16 on storage.
+
+\paragraph{Memory hygiene.}
+Lazy evaluation is forced (\texttt{mx.eval}) at block boundaries to keep the graph bounded,
+and \texttt{mx.clear\_cache} is called at the prefill$\to$decode transition and after block
+flushes. Without these, MLX retains the peak GQA-expanded activations and the apparent
+footprint balloons; with them, decode memory tracks the store.
+
+\paragraph{Configuration and presets.}
+The benchmarked configuration is \texttt{rank=16}, \texttt{block\_size=256},
+\texttt{recency\_window=512} (so the dense buffer is $768$), \texttt{max\_blocks=256}, int4
+weights, ``mid'' preset. Most knobs are exposed as both config keys and environment variables;
+notably \texttt{DIFFKV\_COMPRESSED\_DECODE} selects the compressed kernel (default) versus
+exact full-KV decode, \texttt{DIFFKV\_MAX\_BLOCKS} caps the pool, and
+\texttt{DIFFKV\_ENGAGE\_THRESHOLD} sets the recency window. Three presets (low/mid/high) trade
+chunk size, dense budget, and cache policy.
+
+\ifext
+\paragraph{Generation loop.}
+The wrapper's generation loop supports greedy and temperature/top-$p$ sampling with a
+repetition penalty and an n-gram loop detector (on a repeat ratio $\ge 0.35$ it widens the
+penalty window and, if unrecovered after $40$ tokens, forces a stop). For the benchmarks we
+use pure greedy decoding (\texttt{argmax}) for a fixed $128$ tokens with EOS ignored, so
+throughput is directly comparable across engines.
+\fi
+
+\paragraph{The (inactive) grounding module.}
+The repository includes a semantic-retrieval layer---a factual store with entity binding, a
+graph query router, and logit-biasing/masking for grounded generation. In the MLX runtime as
+benchmarked, the manager's \texttt{get\_srl\_state} returns \texttt{None} and the per-session
+SRL map is never populated, so every factual-bias, transition-bias, and constrained-decoding
+branch is skipped. We mention it because it is prominent in the code, but it contributes
+nothing to the results in this report; evaluating it is future work
+(\S\ref{sec:limitations}).

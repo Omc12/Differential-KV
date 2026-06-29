@@ -151,8 +151,11 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     }
     
     // anchors shape: [head_dim, kv_heads, n_allocated_slots_]
-    anchors_K_   = ggml_new_tensor_3d(pool_ctx_, kv_type_, head_dim, kv_heads, n_allocated_slots_);
-    anchors_V_   = ggml_new_tensor_3d(pool_ctx_, kv_type_, head_dim, kv_heads, n_allocated_slots_);
+    // Always F16 regardless of kv_type_: all Metal shaders (diffkv_decode.metal,
+    // ggml-metal.metal) declare anchors_K/V as `half*`. Quantizing them would corrupt
+    // both the CPU custom op and the fused kernel. Only VK_/VV_ are quantized.
+    anchors_K_   = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, n_allocated_slots_);
+    anchors_V_   = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, n_allocated_slots_);
 
     // Native-attn precomputed RoPE'd keys (same shapes as VK_ / anchors_K_). Only allocated
     // when native attn is enabled, to keep the default path RAM-conservative.
@@ -408,8 +411,8 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
         new_VV          = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, rank_, new_allocated_slots);
     }
     
-    struct ggml_tensor * new_anchors_K   = ggml_new_tensor_3d(new_ctx, kv_type_, head_dim_, kv_heads_, new_allocated_slots);
-    struct ggml_tensor * new_anchors_V   = ggml_new_tensor_3d(new_ctx, kv_type_, head_dim_, kv_heads_, new_allocated_slots);
+    struct ggml_tensor * new_anchors_K   = ggml_new_tensor_3d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, new_allocated_slots);
+    struct ggml_tensor * new_anchors_V   = ggml_new_tensor_3d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, new_allocated_slots);
 
     if (native_attn_ && !skip_lowrank) {
         new_VK_rot      = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F32, head_dim_, kv_heads_, rank_, new_allocated_slots);
@@ -535,18 +538,10 @@ void NativeBlockPool::upload_slot_impl(int slot_id) {
         }
     }
     if (slot_buf) {
-        if (ggml_is_quantized(kv_type_)) {
-            int n = kv_heads_ * head_dim_;
-            std::vector<char> qbuf_k(ggml_row_size(kv_type_, n));
-            std::vector<char> qbuf_v(ggml_row_size(kv_type_, n));
-            quantize_row(kv_type_, slot_buf->anchors_K.data(), qbuf_k.data(), n);
-            quantize_row(kv_type_, slot_buf->anchors_V.data(), qbuf_v.data(), n);
-            ggml_backend_tensor_set(anchors_K_, qbuf_k.data(), slot_id * anchors_K_->nb[2], qbuf_k.size());
-            ggml_backend_tensor_set(anchors_V_, qbuf_v.data(), slot_id * anchors_V_->nb[2], qbuf_v.size());
-        } else {
-            ggml_backend_tensor_set(anchors_K_, slot_buf->anchors_K.data(), slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
-            ggml_backend_tensor_set(anchors_V_, slot_buf->anchors_V.data(), slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
-        }
+        // anchors_K_ / anchors_V_ are ALWAYS F16 (see allocation above). Never quantize them:
+        // every Metal shader reads these as `half*`. Upload raw f16 unconditionally.
+        ggml_backend_tensor_set(anchors_K_, slot_buf->anchors_K.data(), slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(anchors_V_, slot_buf->anchors_V.data(), slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
     }
     ggml_backend_tensor_set(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
     ggml_backend_tensor_set(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));

@@ -26,6 +26,8 @@ struct SoftmaxState {
 };
 
 inline SoftmaxState merge_softmax_states(SoftmaxState a, SoftmaxState b) {
+    if (a.d == 0.0f) return b;
+    if (b.d == 0.0f) return a;
     if (a.m > b.m) {
         return { a.m, a.d + b.d * exp(b.m - a.m) };
     } else {
@@ -90,10 +92,12 @@ kernel void decode_attention_metal_kernel(
     device float*         split_d       [[buffer(29)]],
     device const int32_t& S_split       [[buffer(30)]],
 
-    uint2 tg_idx   [[threadgroup_position_in_grid]], // tg_idx.x is head, tg_idx.y is split index
-    uint tid       [[thread_position_in_threadgroup]],
-    uint t_per_tg  [[threads_per_threadgroup]]
+    uint3 tg_idx   [[threadgroup_position_in_grid]], // tg_idx.x is head, tg_idx.y is split index
+    uint3 tid_vec  [[thread_position_in_threadgroup]],
+    uint3 t_per_tg_vec [[threads_per_threadgroup]]
 ) {
+    const uint tid = tid_vec.x;
+    const uint t_per_tg = t_per_tg_vec.x;
     if (tg_idx.x >= (uint)n_q_heads) return;
 
     const int g        = n_q_heads / n_kv_heads;
@@ -102,12 +106,12 @@ kernel void decode_attention_metal_kernel(
 
     // ── Shared memory ─────────────────────────────────────────────────────────
     threadgroup float q_shared[128];          // Query cache [D ≤ 128]
-    threadgroup float q_proj_shared[32];      // Q · VK_rot projection [rank ≤ 32]
+    threadgroup float q_proj_shared[64];      // Q · VK_rot projection [rank ≤ 64]
     threadgroup float red_m[64];              // General-purpose reduction buffer
     threadgroup float red_d[64];              // Softmax-d reduction buffer
-    threadgroup float red_w_proj[32];         // Reduced w_proj[r]
+    threadgroup float red_w_proj[64];         // Reduced w_proj[r]
     threadgroup float red_sum_w;              // Sum of token delta weights
-    threadgroup float red_proj_temp[64 * 32]; // [threads × rank] temp for w_proj reduce
+    threadgroup float red_proj_temp[64 * 64]; // [threads × rank] temp for w_proj reduce
     threadgroup float scores_cached[64 * 32]; // Unified token scores cache (≤ 64 blocks × max 32 tokens/block)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
     threadgroup float dense_weights[1024];    // Dense window weights — chunked 1024 at a time, so 1024 suffices for any T_dense
@@ -289,12 +293,9 @@ kernel void decode_attention_metal_kernel(
     }
     }
     float global_m = reduce_max_tg64(sm_state.m, red_m, tid);
-    float adjusted_d = sm_state.d * exp(sm_state.m - global_m);
+    float adjusted_d = (sm_state.d == 0.0f) ? 0.0f : (sm_state.d * exp(sm_state.m - global_m));
     float global_d = reduce_sum_tg64(adjusted_d, red_d, tid);
 
-    if (S_split == 1 && tid == 0) {
-        lse_buf[tg_idx.x] = global_m + log(max(global_d, 1e-9f));
-    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ── PASS 2: Accumulate values ─────────────────────────────────────────────
@@ -372,7 +373,7 @@ kernel void decode_attention_metal_kernel(
 
         // Token weights + w_proj accumulation
         float local_sum_w = 0.0f;
-        float local_w_proj[32] = { 0.0f };
+        float local_w_proj[64] = { 0.0f };
 
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
             float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];

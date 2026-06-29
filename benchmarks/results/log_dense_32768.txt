@@ -1,0 +1,3 @@
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 136277.03it/s]
+
+__BENCH_RESULT__ {"prompt_tokens": 32865, "gen_tokens": 128, "prefill_s": 92.30192383402027, "decode_s": 4.245913792052306, "decode_tps": 30.14663186040098, "ttft_s": null, "mx_peak_gb": 2.430400604, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, the **consistency** model defines how data is shared among m", "needle_found": true, "status": "ok", "engine": "dense", "ctx_target": 32768, "gen_target": 128, "worker_wall_s": 102.57139991701115}
