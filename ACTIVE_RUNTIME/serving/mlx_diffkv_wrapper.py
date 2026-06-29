@@ -362,6 +362,43 @@ def _block_relevance_minmax(
     return mx.max(bound, axis=0)                    # [nb]
 
 
+@mx.compile
+def _block_relevance_residual(
+    q: mx.array,              # [H_q, D]
+    comp_anc_k: mx.array,     # [nb, kv_heads, D]            exact anchor key
+    comp_res_k: mx.array,     # [nb, R, kv_heads, D]         top-R exact residual keys
+    res_valid: mx.array,      # [nb, R] bool
+    scale: float,
+    gpk: int,
+):
+    """Exact-key relevance router: rank blocks by the largest TRUE q·k over each
+    block's anchor + its top-R most-distinctive (highest-error) residual tokens.
+
+    Unlike a min/max box or an SVD low-rank score — both cheap *summaries* that by
+    construction miss low-energy outliers — the residuals ARE the block's outlier
+    tokens (a buried passcode is exactly such a token). Scoring them directly gives
+    a TIGHT, exact relevance signal that reliably keeps the needle's block in the
+    top-K even at very large block counts. Cost is O(nb·R·D); R≪block_size keeps it
+    cheap enough for 1M-token contexts. Model-agnostic: no tuning to head count,
+    RoPE, or content — it scores whatever each block's distinctive keys are.
+    """
+    ANC = comp_anc_k
+    RK  = comp_res_k
+    if gpk > 1:
+        ANC = mx.repeat(ANC, gpk, axis=1)
+        RK  = mx.repeat(RK,  gpk, axis=2)
+    ANC_p = ANC.transpose(1, 0, 2)                          # [H, nb, D]
+    s_anc = mx.sum(mx.expand_dims(q, 1) * ANC_p, axis=-1) * scale  # [H, nb]
+
+    RK_p  = RK.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
+    q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
+    s_res = mx.sum(q_e2 * RK_p, axis=-1) * scale            # [H, nb, R]
+    s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
+    res_max = mx.max(s_res, axis=-1)                        # [H, nb]
+
+    return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
+
+
 class DummyMLXPool:
     def __init__(self, manager):
         self.manager = manager
@@ -427,6 +464,19 @@ class MLXKVBlockManager:
         # topk_blocks=0 disables routing entirely (attend every block).
         self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
         self.topk_frac   = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
+        # Router for top-K selection:
+        #   "residual" (default) — rank blocks by exact q·k over each block's anchor
+        #     + its R most-distinctive residual keys. Tight and content/model-agnostic;
+        #     reliably retains a buried-needle block even at 256+ blocks (64k+) where
+        #     summary routers fail. DIFFKV_ROUTE_RESIDUALS = R; 0 (default) means use
+        #     ALL residuals (= max_residual), which is what robustly recalls at 64k
+        #     (a needle token can be a mid-rank residual). Lower R is faster but may
+        #     drop deep needles; R=16 is enough through ~32k.
+        #   "minmax" — cheaper Quest key min/max bound; faster but loose, drops the
+        #     needle block past ~32k. Good when context stays small.
+        self.router = os.environ.get("DIFFKV_ROUTER", "residual").lower()
+        _rr = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
+        self.route_residuals = _rr if _rr > 0 else self.max_residual
         self.max_dense_len = self.recency_window + self.block_size
         
         self.sessions = {}
@@ -855,9 +905,11 @@ class MLXKVBlockManager:
         # filler has a broad error spread, so the threshold rose above the needle
         # tokens and dropped them. Plain top-by-error is both simpler and correct.)
         # NB: `errors[-0:]` is the WHOLE array, not empty — guard max_res==0 explicitly.
+        # Stored HIGHEST-error first so res buffers[:, :R] are the R most
+        # distinctive tokens — the top-K router scores only those (cheap at 1M).
         max_res = self.max_residual
         if max_res > 0:
-            top_k = np.argsort(errors)[-max_res:]
+            top_k = np.argsort(errors)[-max_res:][::-1]
         else:
             top_k = np.array([], dtype=np.int64)
 
@@ -955,12 +1007,24 @@ class MLXKVBlockManager:
             k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
         use_topk = (self.topk_blocks > 0 and nb > k_eff)
         if nb > 0 and use_topk:
-            relevance = _block_relevance_minmax(
-                q,
-                session["comp_min_k"][layer_idx][:nb],
-                session["comp_max_k"][layer_idx][:nb],
-                scale, gpk,
-            )
+            if self.router == "residual" and self.max_residual > 0:
+                R = min(self.route_residuals, self.max_residual)
+                res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)  # [nb]
+                res_valid = mx.arange(R).reshape(1, -1) < mx.minimum(res_n, R).reshape(-1, 1)
+                relevance = _block_relevance_residual(
+                    q,
+                    session["comp_anc_k"][layer_idx][:nb],
+                    session["comp_res_k"][layer_idx][:nb, :R],
+                    res_valid,
+                    scale, gpk,
+                )
+            else:
+                relevance = _block_relevance_minmax(
+                    q,
+                    session["comp_min_k"][layer_idx][:nb],
+                    session["comp_max_k"][layer_idx][:nb],
+                    scale, gpk,
+                )
             sel = mx.argsort(relevance)[-k_eff:]               # [k_eff] selected block ids
             mx.eval(sel)
             res_blocks   = [int(i) for i in sel.tolist()]

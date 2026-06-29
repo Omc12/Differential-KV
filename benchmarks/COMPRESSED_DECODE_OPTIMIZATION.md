@@ -49,14 +49,33 @@ at 64k on this host anyway (faster + fits).
 - **Recommendation:** use dense for ≤~32–64k (faster, fits, exact). Use compressed top-K for
   memory-bound / very-long contexts. `DIFFKV_COMPRESSED_MIN_CTX` governs the auto switch.
 
-## Open: 64k routing
-At 64k (256 blocks) the min/max upper bound is too loose — dozens of blocks over-estimate
-above the needle's block, so a fixed/fractional K=16–30 drops it (partial output
-"OMEGA-77-ALPHA"). all-blocks recalls, so it is purely routing, not capture. A residual-aware
-router (scoring exact residual keys) was tried and both slowed decode ~2× and did not fix it.
-Larger K recovers recall but erodes the speed benefit. A tighter, cheap router (or always
-attending the most-recent + score-selected blocks) is the path to reliable >32k routing —
-left as follow-up since dense is preferable at 64k on this hardware.
+## 64k+ routing — solved with a residual-key router
+The min/max bound (and any *summary* router — SVD low-rank score, mean key) averages away
+the single outlier token you're searching for, so at 256+ blocks (64k+) it drops the needle's
+block: K=8→"OMEGA-DELTA-ALPHA", K=64→"OMEGA-77-DELTA" (better-with-K but never exact, and
+all-blocks recalls → purely routing).
+
+Fix: rank blocks by **exact q·k over each block's anchor + its R most-distinctive residual
+keys** (`_block_relevance_residual`, `DIFFKV_ROUTER=residual`, default). The residuals ARE the
+block's reconstruction-error outliers — a buried passcode is exactly such a token — so scoring
+them is a tight, model/content-agnostic relevance signal (no tuning to heads, RoPE, or
+context). Result @ 64k (K=16): R=16 → "OMEGA-7741-Delta" (only the final token's case wrong),
+**R=full → exact "OMEGA-7741-DELTA"** ✓. A needle token can be a mid-rank residual, so the
+default scores ALL residuals (`DIFFKV_ROUTE_RESIDUALS=0`). Cost is O(nb·R·D) — linear in
+context, fine at 1M on datacenter RAM; lower R (e.g. 16) is faster and still exact through ~32k.
+
+(An earlier "residual-aware" attempt that combined the exact score with the min/max bound via
+`max(bound, score)` was a no-op — the upper bound always dominates — which is why it appeared
+to fail. Ranking by the exact scores directly is the fix.)
+
+## Tried and rejected: fused-SDPA reconstruction
+Reconstructing the selected blocks' full K/V and running one fused
+`scaled_dot_product_attention` (instead of the hand-rolled sparse kernel) was **slower**
+(12.3 vs 14.1 tok/s @32k) **and less accurate** (32k regressed). Lesson: the sparse kernel is
+already `@mx.compile`d, so it's not the bottleneck — the decode is **overhead-bound** (uncompiled
+per-layer routing/sync/gather), not FLOP-bound, at ≤32k. Materializing reconstructed tokens just
+moves the cost. Real moderate-context speed needs a fully vectorized/compiled decode or a native
+fused kernel; the MLX path's structural win remains long-context memory/reach.
 
 ## Repro
 ```
