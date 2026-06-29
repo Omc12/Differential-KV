@@ -329,6 +329,39 @@ def _dense_only_attention_static(
     out     = mx.sum(mx.expand_dims(weights, -1) * dv, axis=1)
     return mx.where(mx.isnan(out), 0.0, out)
 
+
+@mx.compile
+def _block_relevance_minmax(
+    q: mx.array,              # [H_q, D]
+    comp_min_k: mx.array,     # [nb, kv_heads, D]  element-wise key min over block
+    comp_max_k: mx.array,     # [nb, kv_heads, D]  element-wise key max over block
+    scale: float,
+    gpk: int,
+):
+    """Quest-style per-block relevance router for top-K block selection.
+
+    For each block, returns an upper bound on its max attention score q·k:
+
+        bound(block) = sum_d max(q_d * min_d, q_d * max_d)   (then * scale, max over heads)
+
+    computed from the element-wise key min/max over the block's real keys. Cheap
+    (O(nb·D)). The bound is loose, so the caller keeps a generous K (a fraction of
+    the block count at very large contexts). The expensive value reconstruction +
+    exact-residual attention then run only for the top-K blocks, so decode cost
+    scales with K, not total context.
+    """
+    MIN = comp_min_k
+    MAX = comp_max_k
+    if gpk > 1:
+        MIN = mx.repeat(MIN, gpk, axis=1)
+        MAX = mx.repeat(MAX, gpk, axis=1)
+    MIN_p = MIN.transpose(1, 0, 2)                  # [H, nb, D]
+    MAX_p = MAX.transpose(1, 0, 2)
+    q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
+    bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
+    return mx.max(bound, axis=0)                    # [nb]
+
+
 class DummyMLXPool:
     def __init__(self, manager):
         self.manager = manager
@@ -374,7 +407,26 @@ class MLXKVBlockManager:
         # 256 blocks × 256 tokens = 65536 compressed tokens — enough for 64k context.
         # Configurable via DIFFKV_MAX_BLOCKS env var (lower = less VRAM).
         self.max_blocks = int(os.environ.get("DIFFKV_MAX_BLOCKS", "256"))
-        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "32"))
+        # Exact residual tokens kept per block (top-by-reconstruction-error).
+        # 64 (was 32) lets a content-dense block — e.g. one holding a buried
+        # passcode — retain ALL its distinctive tokens; at 32 the passcode's later
+        # tokens were truncated and their values corrupted to garbage. Most filler
+        # blocks still store 64 too, but Phase-2 top-K routing only GATHERS
+        # residuals from the few selected blocks at decode, so the decode-time cost
+        # is bounded by K, not by this cap.
+        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "64"))
+        # Top-K block routing: when >0 and the live block count exceeds it, decode
+        # scores all blocks cheaply (Quest-style key min/max upper bound) but runs
+        # the expensive value reconstruction + exact-residual attention only for the
+        # K most relevant blocks — so decode cost scales with K, not total context.
+        # K = max(topk_blocks, topk_frac*nb). Default is fixed K=16 (topk_frac=0):
+        # validated EXACT recall + ~14 tps flat to 32k. topk_frac>0 grows K with the
+        # block count for >32k experiments — note the loose min/max bound means even
+        # a fraction does not reliably retain the needle block at 64k+ (256+ blocks),
+        # so dense/all-blocks is preferred there; see COMPRESSED_DECODE_OPTIMIZATION.md.
+        # topk_blocks=0 disables routing entirely (attend every block).
+        self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
+        self.topk_frac   = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
         self.max_dense_len = self.recency_window + self.block_size
         
         self.sessions = {}
@@ -401,6 +453,12 @@ class MLXKVBlockManager:
             "comp_VV":    [mx.zeros((self.max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_anc_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_anc_v": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            # Per-block element-wise key min/max — one of two signals the top-K
+            # router uses: a Quest-style upper bound on the block's max q·k. It is
+            # cheap but LOOSE (over-estimates at large block counts), so the router
+            # also scores the exact residual keys to reliably rank needle blocks.
+            "comp_min_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_max_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_scale":    [mx.zeros((self.max_blocks,)) for _ in range(self.num_layers)],
             "comp_seq_len": [mx.zeros((self.max_blocks,), dtype=mx.int32) for _ in range(self.num_layers)],
             
@@ -425,6 +483,7 @@ class MLXKVBlockManager:
                 del self.patched_model._prefill_caches[cache_key]
             if cache_key in self.patched_model._prev_was_prefill:
                 del self.patched_model._prev_was_prefill[cache_key]
+            self.patched_model._decode_compressed.pop(cache_key, None)
 
     def snapshot_session(self, session_id: str, checkpoint_id: str):
         if session_id not in self.sessions:
@@ -440,6 +499,8 @@ class MLXKVBlockManager:
             "comp_VV": [mx.array(vv) for vv in src["comp_VV"]],
             "comp_anc_k": [mx.array(ak) for ak in src["comp_anc_k"]],
             "comp_anc_v": [mx.array(av) for av in src["comp_anc_v"]],
+            "comp_min_k": [mx.array(a) for a in src["comp_min_k"]],
+            "comp_max_k": [mx.array(a) for a in src["comp_max_k"]],
             "comp_scale": [mx.array(s) for s in src["comp_scale"]],
             "comp_seq_len": [mx.array(sl) for src_sl, sl in zip(src["comp_seq_len"], src["comp_seq_len"])], # copy mx arrays properly
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
@@ -482,6 +543,8 @@ class MLXKVBlockManager:
             "comp_VV": [mx.array(vv) for vv in ckpt["comp_VV"]],
             "comp_anc_k": [mx.array(ak) for ak in ckpt["comp_anc_k"]],
             "comp_anc_v": [mx.array(av) for av in ckpt["comp_anc_v"]],
+            "comp_min_k": [mx.array(a) for a in ckpt["comp_min_k"]],
+            "comp_max_k": [mx.array(a) for a in ckpt["comp_max_k"]],
             "comp_scale": [mx.array(s) for s in ckpt["comp_scale"]],
             "comp_seq_len": [mx.array(sl) for sl in ckpt["comp_seq_len"]],
             "comp_res_k": [mx.array(rk) for rk in ckpt["comp_res_k"]],
@@ -566,6 +629,8 @@ class MLXKVBlockManager:
                 session["comp_VV"][layer_idx][keep_blocks:] = 0.0
                 session["comp_anc_k"][layer_idx][keep_blocks:] = 0.0
                 session["comp_anc_v"][layer_idx][keep_blocks:] = 0.0
+                session["comp_min_k"][layer_idx][keep_blocks:] = 0.0
+                session["comp_max_k"][layer_idx][keep_blocks:] = 0.0
                 session["comp_scale"][layer_idx][keep_blocks:] = 0.0
                 session["comp_seq_len"][layer_idx][keep_blocks:] = 0
                 session["comp_res_k"][layer_idx][keep_blocks:] = 0.0
@@ -587,6 +652,8 @@ class MLXKVBlockManager:
                 session["comp_VV"][layer_idx],
                 session["comp_anc_k"][layer_idx],
                 session["comp_anc_v"][layer_idx],
+                session["comp_min_k"][layer_idx],
+                session["comp_max_k"][layer_idx],
                 session["comp_res_k"][layer_idx],
                 session["comp_res_v"][layer_idx]
             )
@@ -617,6 +684,8 @@ class MLXKVBlockManager:
             "comp_VV": [mx.array(vv) for vv in src["comp_VV"]],
             "comp_anc_k": [mx.array(ak) for ak in src["comp_anc_k"]],
             "comp_anc_v": [mx.array(av) for av in src["comp_anc_v"]],
+            "comp_min_k": [mx.array(a) for a in src["comp_min_k"]],
+            "comp_max_k": [mx.array(a) for a in src["comp_max_k"]],
             "comp_scale": [mx.array(s) for s in src["comp_scale"]],
             "comp_seq_len": [mx.array(sl) for sl in src["comp_seq_len"]],
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
@@ -726,6 +795,8 @@ class MLXKVBlockManager:
             session["comp_VV"][layer_idx][:-1]    = session["comp_VV"][layer_idx][1:]
             session["comp_anc_k"][layer_idx][:-1] = session["comp_anc_k"][layer_idx][1:]
             session["comp_anc_v"][layer_idx][:-1] = session["comp_anc_v"][layer_idx][1:]
+            session["comp_min_k"][layer_idx][:-1] = session["comp_min_k"][layer_idx][1:]
+            session["comp_max_k"][layer_idx][:-1] = session["comp_max_k"][layer_idx][1:]
             session["comp_res_k"][layer_idx][:-1] = session["comp_res_k"][layer_idx][1:]
             session["comp_res_v"][layer_idx][:-1] = session["comp_res_v"][layer_idx][1:]
             session["comp_res_n"][layer_idx][:-1] = session["comp_res_n"][layer_idx][1:]
@@ -774,7 +845,15 @@ class MLXKVBlockManager:
         # Measure reconstruction error for each token in the block
         errors = np.linalg.norm(actual_delta - recon_delta, axis=-1)  # [S_comp]
         
-        # Select the top-K highest-error outlier tokens (residuals).
+        # Keep the top-`max_res` highest-reconstruction-error tokens as EXACT
+        # residuals. The needle's distinctive tokens (e.g. a buried passcode) are
+        # precisely the highest-error ones — SVD truncates such low-energy outliers
+        # — so top-by-error reliably captures them. max_res=64 (vs the old 32) is
+        # what lets a content-dense block retain ALL its distinctive tokens; at 32
+        # the passcode's later tokens were truncated and their values corrupted.
+        # (A median+MAD outlier threshold was tried and REGRESSED: on-topic prose
+        # filler has a broad error spread, so the threshold rose above the needle
+        # tokens and dropped them. Plain top-by-error is both simpler and correct.)
         # NB: `errors[-0:]` is the WHOLE array, not empty — guard max_res==0 explicitly.
         max_res = self.max_residual
         if max_res > 0:
@@ -799,6 +878,9 @@ class MLXKVBlockManager:
         session["comp_VV"][layer_idx][num_blocks]    = VV
         session["comp_anc_k"][layer_idx][num_blocks] = anchor_k
         session["comp_anc_v"][layer_idx][num_blocks] = anchor_v
+        # Element-wise key min/max over the block's tokens — for top-K routing.
+        session["comp_min_k"][layer_idx][num_blocks] = mx.min(block_k, axis=1)
+        session["comp_max_k"][layer_idx][num_blocks] = mx.max(block_k, axis=1)
         session["comp_scale"][layer_idx][num_blocks]   = svd_scale
         session["comp_seq_len"][layer_idx][num_blocks] = self.block_size
         
@@ -818,6 +900,8 @@ class MLXKVBlockManager:
             session["comp_VV"][layer_idx],
             session["comp_anc_k"][layer_idx],
             session["comp_anc_v"][layer_idx],
+            session["comp_min_k"][layer_idx],
+            session["comp_max_k"][layer_idx],
             session["comp_res_k"][layer_idx],
             session["comp_res_v"][layer_idx],
         )
@@ -859,33 +943,82 @@ class MLXKVBlockManager:
         dense_v   = session["dense_values"][layer_idx][0]
         dense_len = mx.array(session["dense_lens"][layer_idx])
 
-        # ── Residual gather (cached across decode steps) ──────────────────────
-        # Exact-token residuals only change when the compressed-block set changes
-        # (a block is flushed in / shifted out). Rebuilding the concatenated
-        # residual tensor every decode token — and, worse, padding it to the
-        # max_blocks*max_residual worst case — was the dominant decode cost.
-        # Cache the concatenated residuals keyed on nb; invalidated in
-        # _compress_block / rollback when the block set actually changes.
+        # ── Top-K block routing ───────────────────────────────────────────────
+        # When enabled and there are more compressed blocks than K, score every
+        # block cheaply (Quest key min/max bound, no value reconstruction) and keep
+        # only the K most relevant. Decode then runs the expensive value
+        # reconstruction + exact-residual attention for K blocks instead of all nb,
+        # so cost scales with K rather than total context. `res_blocks` carries the
+        # selected block indices to the residual gather below; None = attend all.
+        k_eff = self.topk_blocks
+        if self.topk_blocks > 0 and self.topk_frac > 0.0:
+            k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+        use_topk = (self.topk_blocks > 0 and nb > k_eff)
+        if nb > 0 and use_topk:
+            relevance = _block_relevance_minmax(
+                q,
+                session["comp_min_k"][layer_idx][:nb],
+                session["comp_max_k"][layer_idx][:nb],
+                scale, gpk,
+            )
+            sel = mx.argsort(relevance)[-k_eff:]               # [k_eff] selected block ids
+            mx.eval(sel)
+            res_blocks   = [int(i) for i in sel.tolist()]
+            comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
+            comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
+            comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
+            comp_anc_k   = mx.take(session["comp_anc_k"][layer_idx][:nb],   sel, axis=0)
+            comp_anc_v   = mx.take(session["comp_anc_v"][layer_idx][:nb],   sel, axis=0)
+            comp_scale   = mx.take(session["comp_scale"][layer_idx][:nb],   sel, axis=0)
+            comp_seq_len = mx.take(session["comp_seq_len"][layer_idx][:nb], sel, axis=0)
+        elif nb > 0:
+            res_blocks   = None  # attend all blocks (use the nb-keyed residual cache)
+            comp_U       = session["comp_U"][layer_idx][:nb]
+            comp_VK      = session["comp_VK"][layer_idx][:nb]
+            comp_VV      = session["comp_VV"][layer_idx][:nb]
+            comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
+            comp_anc_v   = session["comp_anc_v"][layer_idx][:nb]
+            comp_scale   = session["comp_scale"][layer_idx][:nb]
+            comp_seq_len = session["comp_seq_len"][layer_idx][:nb]
+        else:
+            res_blocks = None
+
+        # ── Residual gather ───────────────────────────────────────────────────
+        # Exact-token residuals only change when the block set changes, so the
+        # all-blocks gather is cached keyed on nb. Under top-K routing the selected
+        # set changes every step, so the (few) selected blocks are gathered fresh.
         res_k_all = res_v_all = None
         total_res = 0
         if self.max_residual > 0 and nb > 0:
-            rc = session.setdefault("_res_cache", {})
-            ent = rc.get(layer_idx)
-            if ent is not None and ent[0] == nb:
-                res_k_all, res_v_all, total_res = ent[1], ent[2], ent[3]
-            else:
+            if res_blocks is not None:
                 res_k_parts, res_v_parts = [], []
-                for bi in range(nb):
+                for bi in res_blocks:
                     n_res = session["comp_res_n"][layer_idx][bi]
                     if n_res > 0:
                         res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
                         res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
                 if res_k_parts:
-                    res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
+                    res_k_all = mx.concatenate(res_k_parts, axis=1)
                     res_v_all = mx.concatenate(res_v_parts, axis=1)
                     total_res = res_k_all.shape[1]
-                    mx.eval(res_k_all, res_v_all)
-                rc[layer_idx] = (nb, res_k_all, res_v_all, total_res)
+            else:
+                rc = session.setdefault("_res_cache", {})
+                ent = rc.get(layer_idx)
+                if ent is not None and ent[0] == nb:
+                    res_k_all, res_v_all, total_res = ent[1], ent[2], ent[3]
+                else:
+                    res_k_parts, res_v_parts = [], []
+                    for bi in range(nb):
+                        n_res = session["comp_res_n"][layer_idx][bi]
+                        if n_res > 0:
+                            res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                            res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                    if res_k_parts:
+                        res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
+                        res_v_all = mx.concatenate(res_v_parts, axis=1)
+                        total_res = res_k_all.shape[1]
+                        mx.eval(res_k_all, res_v_all)
+                    rc[layer_idx] = (nb, res_k_all, res_v_all, total_res)
 
         if total_res > 0:
             dl = session["dense_lens"][layer_idx]
@@ -927,18 +1060,9 @@ class MLXKVBlockManager:
             )
         else:
             # ── Compressed + dense path ───────────────────────────────────────
-            # Slice all block tensors to the *active* block count so @mx.compile
-            # caches a graph sized [nb, ...] instead of [max_blocks=256, ...].
-            # Recompiles only when nb increases (monotonic), at most ~250 times
-            # across a 64k session — far cheaper than 20× wasted compute per step.
-            comp_U       = session["comp_U"][layer_idx][:nb]
-            comp_VK      = session["comp_VK"][layer_idx][:nb]
-            comp_VV      = session["comp_VV"][layer_idx][:nb]
-            comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
-            comp_anc_v   = session["comp_anc_v"][layer_idx][:nb]
-            comp_scale   = session["comp_scale"][layer_idx][:nb]
-            comp_seq_len = session["comp_seq_len"][layer_idx][:nb]
-
+            # comp_* were sliced/gathered above: [:nb] when attending all blocks
+            # (graph keyed on nb, recompiles only as nb grows), or [K] under top-K
+            # routing (graph keyed on the constant K — compiles once).
             out_combined = compute_decode_attention_static(
                 q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
                 comp_scale, comp_seq_len,
@@ -974,6 +1098,32 @@ def scaled_dot_product_attention_mlx_basic(q: mx.array, k: mx.array, v: mx.array
             scores = scores + mask
     weights = mx.softmax(scores, axis=-1)
     return weights @ v
+
+def _resolve_compressed_decode(seq_len: int) -> bool:
+    """Decide whether decode should use the DiffKV compressed sparse kernel.
+
+    DIFFKV_COMPRESSED_DECODE:
+      "1"/"on"/"true"   → always compressed (force the sparse path)
+      "0"/"off"/"false" → always dense (force exact full-KV attention)
+      "auto" (default)  → compressed only once the context is long enough that
+                          retaining the full KV cache through decode is the
+                          costly choice. Short/medium contexts use the faster,
+                          numerically-exact dense path, so decode never regresses
+                          vs the dense baseline for normal-length requests.
+
+    The auto threshold is DIFFKV_COMPRESSED_MIN_CTX (default 16384 tokens).
+    Below it the fused full-KV attention is both faster and memory-safe, so we
+    stay dense; at/above it we accept the slower sparse kernel in exchange for a
+    bounded decode-time KV footprint (the regime where retaining the full cache
+    through a long generation risks OOM).
+    """
+    mode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "auto").strip().lower()
+    if mode in ("1", "on", "true", "yes"):
+        return True
+    if mode in ("0", "off", "false", "no"):
+        return False
+    threshold = int(os.environ.get("DIFFKV_COMPRESSED_MIN_CTX", "16384"))
+    return seq_len >= threshold
 
 def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Optional[Any] = None) -> mx.array:
     """Patched Qwen2 attention that:
@@ -1026,9 +1176,20 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         #         numerically-exact baseline). out_b is computed AFTER the ingest
         #         loop in both modes; the compressed path requires the current
         #         token to be ingested first so the query attends to history+self.
-        # Route decode through the real DiffKV compressed+dense sparse attention by default.
-        # Set DIFFKV_COMPRESSED_DECODE=0 to fall back to full dense MLX attention (debug mode).
-        _use_compressed_decode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "1") == "1"
+        # Route decode through the real DiffKV compressed+dense sparse attention
+        # or exact full-KV MLX attention. The decision is resolved ONCE at the
+        # prefill→decode boundary (MLXQwenModel.__call__) and stored per cache_key
+        # so that this attention path and the cache-retention decision agree.
+        # Fallback (direct attention use without the patched model): resolve from
+        # the current sequence length.
+        cache_key = tuple(session_ids)
+        pm = getattr(manager, "patched_model", None)
+        _decode_map = getattr(pm, "_decode_compressed", None) if pm is not None else None
+        if _decode_map is not None and cache_key in _decode_map:
+            _use_compressed_decode = _decode_map[cache_key]
+        else:
+            _seq_len = int(position_ids[0, 0]) if position_ids is not None else 0
+            _use_compressed_decode = _resolve_compressed_decode(_seq_len)
 
         # Ingest the current token into the DiffKV store (architecture intact, and
         # required first for the compressed path so it can attend to itself).
@@ -1306,6 +1467,9 @@ class MLXQwenModel:
         # Tracks whether the previous call was a prefill, per cache_key.
         # Used to fire mx.clear_cache() exactly once at the prefill→decode boundary.
         self._prev_was_prefill: dict = {}
+        # Decode path decision (compressed sparse vs exact dense) resolved once at
+        # the prefill→decode boundary, per cache_key. Read by attention_forward.
+        self._decode_compressed: dict = {}
 
     def _get_or_create_prefill_cache(self, cache_key: tuple):
         if cache_key not in self._prefill_caches:
@@ -1335,10 +1499,17 @@ class MLXQwenModel:
             # ≈ 1.4 GB). These are no longer needed once decode begins.
             # mx.clear_cache() releases them back to the OS immediately.
             if self._prev_was_prefill.get(cache_key, True):
+                # Resolve the decode path ONCE here, at the prefill→decode
+                # boundary, from the prompt length. Storing it per cache_key keeps
+                # the attention layers and the cache-retention choice consistent.
+                seq_len = int(position_ids[0, 0].item()) if position_ids is not None else 0
+                use_compressed = _resolve_compressed_decode(seq_len)
+                self._decode_compressed[cache_key] = use_compressed
+
                 mx.eval()          # flush any pending lazy ops first
                 mx.clear_cache()   # return peak activation memory to OS
                 import gc; gc.collect()
-                if os.environ.get("DIFFKV_COMPRESSED_DECODE", "1") == "1":
+                if use_compressed:
                     # Compressed decode runs entirely on the DiffKV store
                     # (compressed blocks + dense recency window), so the full
                     # native prefill KV cache is no longer needed. Drop it so
