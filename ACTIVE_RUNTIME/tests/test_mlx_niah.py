@@ -84,12 +84,21 @@ def run_niah(ctx_len: int, depth: float, model_id: str) -> bool:
         top_p=1.0,
         repetition_penalty=1.0,
     )
+
+    # IMPORTANT: wrapper.generate() returns prompt + generation decoded together,
+    # so the planted needle is always present in `response`. Checking the needle
+    # against the full string is a false positive — extract ONLY the newly
+    # generated tokens and check those.
+    sid = wrapper.active_session or "default"
+    all_ids = wrapper._session_token_ids.get(sid, [])
+    gen_ids = all_ids[prompt_toks:]
+    gen_text = wrapper.tokenizer.decode(gen_ids, skip_special_tokens=True)
     wrapper.close()
 
-    needle_recovered = "OMEGA-7741-DELTA" in response
+    needle_recovered = "OMEGA-7741-DELTA" in gen_text
     status = "PASS ✓" if needle_recovered else "FAIL ✗"
-    print(f"\nResponse: {response!r}")
-    print(f"Needle in response: {needle_recovered}")
+    print(f"\nGenerated (new tokens only): {gen_text!r}")
+    print(f"Needle in generation: {needle_recovered}")
     print(f"Result: {status}")
     return needle_recovered
 

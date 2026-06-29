@@ -125,9 +125,12 @@ def compress_mlx_block(deltas: mx.array, rank: int, n_oversamples: int = 5, n_it
 
     x_np = x_np / scale
 
-    # Randomised range finder
+    # Randomised range finder.
+    # Seed deterministically (env-overridable) so block compression is
+    # reproducible: an unseeded RNG made the SVD basis — and therefore decode
+    # output / needle recovery — vary run-to-run for the same prompt.
     r_proj = min(rank + n_oversamples, n, d)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(int(os.environ.get("DIFFKV_SVD_SEED", "1234")))
     Omega = rng.standard_normal((d, r_proj)).astype(np.float32)
     Y = x_np @ Omega
     for _ in range(n_iter):
@@ -538,7 +541,11 @@ class MLXKVBlockManager:
         session = self.sessions.get(session_id)
         if session is None:
             return
-            
+
+        # Block set is about to change — drop the cached residual gather.
+        if "_res_cache" in session:
+            session["_res_cache"].clear()
+
         for layer_idx in range(self.num_layers):
             num_blocks = session["num_blocks"][layer_idx]
             comp_len = num_blocks * self.block_size
@@ -767,16 +774,20 @@ class MLXKVBlockManager:
         # Measure reconstruction error for each token in the block
         errors = np.linalg.norm(actual_delta - recon_delta, axis=-1)  # [S_comp]
         
-        # Select the top-K highest-error outlier tokens (residuals)
+        # Select the top-K highest-error outlier tokens (residuals).
+        # NB: `errors[-0:]` is the WHOLE array, not empty — guard max_res==0 explicitly.
         max_res = self.max_residual
-        top_k = np.argsort(errors)[-max_res:]
-        
+        if max_res > 0:
+            top_k = np.argsort(errors)[-max_res:]
+        else:
+            top_k = np.array([], dtype=np.int64)
+
         # Extract their exact K/V vectors (transposing block keys/values)
         block_k_t = np.array(block_k.astype(mx.float32)).transpose(1, 0, 2)
         block_v_t = np.array(block_v.astype(mx.float32)).transpose(1, 0, 2)
         res_k_np = block_k_t[top_k + 1]  # skip anchor (index 0)
         res_v_np = block_v_t[top_k + 1]
-        
+
         n_res = len(top_k)
         res_k_padded = np.zeros((max_res, self.kv_heads, self.head_dim), dtype=np.float16)
         res_v_padded = np.zeros((max_res, self.kv_heads, self.head_dim), dtype=np.float16)
@@ -796,6 +807,11 @@ class MLXKVBlockManager:
         session["comp_res_n"][layer_idx][num_blocks] = n_res
         
         session["num_blocks"][layer_idx] = num_blocks + 1
+        # Invalidate the cached residual gather for this layer: the block set
+        # (and, at max_blocks, the block ordering via the shift above) changed.
+        rc = session.get("_res_cache")
+        if rc is not None:
+            rc.pop(layer_idx, None)
         mx.eval(
             session["comp_U"][layer_idx],
             session["comp_VK"][layer_idx],
@@ -843,38 +859,58 @@ class MLXKVBlockManager:
         dense_v   = session["dense_values"][layer_idx][0]
         dense_len = mx.array(session["dense_lens"][layer_idx])
 
-        # Collect residuals from all active compressed blocks (Phase 2c)
-        res_k_parts, res_v_parts = [], []
-        for bi in range(nb):
-            n_res = session["comp_res_n"][layer_idx][bi]
-            if n_res > 0:
-                rk = session["comp_res_k"][layer_idx][bi, :n_res]  # [n_res, kv_heads, D]
-                rv = session["comp_res_v"][layer_idx][bi, :n_res]
-                res_k_parts.append(rk.transpose(1, 0, 2))  # [kv_heads, n_res, D]
-                res_v_parts.append(rv.transpose(1, 0, 2))
+        # ── Residual gather (cached across decode steps) ──────────────────────
+        # Exact-token residuals only change when the compressed-block set changes
+        # (a block is flushed in / shifted out). Rebuilding the concatenated
+        # residual tensor every decode token — and, worse, padding it to the
+        # max_blocks*max_residual worst case — was the dominant decode cost.
+        # Cache the concatenated residuals keyed on nb; invalidated in
+        # _compress_block / rollback when the block set actually changes.
+        res_k_all = res_v_all = None
+        total_res = 0
+        if self.max_residual > 0 and nb > 0:
+            rc = session.setdefault("_res_cache", {})
+            ent = rc.get(layer_idx)
+            if ent is not None and ent[0] == nb:
+                res_k_all, res_v_all, total_res = ent[1], ent[2], ent[3]
+            else:
+                res_k_parts, res_v_parts = [], []
+                for bi in range(nb):
+                    n_res = session["comp_res_n"][layer_idx][bi]
+                    if n_res > 0:
+                        res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                        res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                if res_k_parts:
+                    res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
+                    res_v_all = mx.concatenate(res_v_parts, axis=1)
+                    total_res = res_k_all.shape[1]
+                    mx.eval(res_k_all, res_v_all)
+                rc[layer_idx] = (nb, res_k_all, res_v_all, total_res)
 
-        max_res_cap = self.max_blocks * self.max_residual
-        max_dense_cap = self.max_dense_len + max_res_cap
-
-        if res_k_parts:
-            res_k = mx.concatenate(res_k_parts, axis=1)    # [kv_heads, total_res, D]
-            res_v = mx.concatenate(res_v_parts, axis=1)
+        if total_res > 0:
             dl = session["dense_lens"][layer_idx]
-            dense_k_slice = dense_k[:, :dl]    # [kv_heads, dl, D]
-            dense_v_slice = dense_v[:, :dl]
-            
-            # Combine residuals + dense window
-            augmented_k = mx.concatenate([res_k, dense_k_slice], axis=1)  # [kv_heads, res+dl, D]
-            augmented_v = mx.concatenate([res_v, dense_v_slice], axis=1)
-            
-            total_active_dense = res_k.shape[1] + dl
-            # Pad to max_dense_cap to ensure static compiled shape without discarding tokens
-            pad_len = max_dense_cap - total_active_dense
-            padding = mx.zeros((self.kv_heads, pad_len, self.head_dim), dtype=dense_k.dtype)
-            dense_k_for_attn = mx.concatenate([augmented_k, padding], axis=1)
-            dense_v_for_attn = mx.concatenate([augmented_v, padding], axis=1)
+            augmented_k = mx.concatenate([res_k_all, dense_k[:, :dl]], axis=1)  # [kv_heads, total_res+dl, D]
+            augmented_v = mx.concatenate([res_v_all, dense_v[:, :dl]], axis=1)
+            total_active_dense = total_res + dl
+
+            # Pad up to a *bucketed* capacity that tracks actual content, not the
+            # max_blocks*max_residual worst case (8960 @ defaults). @mx.compile
+            # caches one graph per distinct capacity, so bucketing to 256 means a
+            # recompile only when crossing a bucket boundary — while the dense
+            # attention width stays ~proportional to the real token count.
+            BUCKET = 256
+            hard_cap = self.max_dense_len + self.max_blocks * self.max_residual
+            capacity = min(((total_active_dense + BUCKET - 1) // BUCKET) * BUCKET, hard_cap)
+            pad_len = capacity - total_active_dense
+            if pad_len > 0:
+                padding = mx.zeros((self.kv_heads, pad_len, self.head_dim), dtype=dense_k.dtype)
+                dense_k_for_attn = mx.concatenate([augmented_k, padding], axis=1)
+                dense_v_for_attn = mx.concatenate([augmented_v, padding], axis=1)
+            else:
+                dense_k_for_attn = augmented_k
+                dense_v_for_attn = augmented_v
             dense_len_for_attn = mx.array(total_active_dense)
-            current_max_dense_len = max_dense_cap
+            current_max_dense_len = capacity
         else:
             dense_k_for_attn = dense_k
             dense_v_for_attn = dense_v
