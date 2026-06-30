@@ -86,6 +86,7 @@ def run_native(args, prompt_text):
         "DIFFKV_PREFILL_CHUNK_SIZE": "512",
         "DIFFKV_MAX_TOKENS": str(args.gen),
         "DIFFKV_USE_GPU": "1",
+        "DIFFKV_NATIVE_ATTN": "1",
         "DIFFKV_TEMPERATURE": "0.0",
         "DIFFKV_TOP_P": "1.0",
         "DIFFKV_REPETITION_PENALTY": "1.0",

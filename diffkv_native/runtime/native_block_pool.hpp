@@ -71,6 +71,11 @@ public:
     struct ggml_tensor * get_desc_matrix() { return desc_matrix_; }
     struct ggml_tensor * get_anchor_positions() { return anchor_positions_; }
     struct ggml_tensor * get_token_positions() { return token_positions_; }  // [S_max,n_slots] i32 true pos/token
+    struct ggml_tensor * get_res_K_pos() { return res_K_pos_; }
+    struct ggml_tensor * get_res_V_pos() { return res_V_pos_; }
+    struct ggml_tensor * get_res_K_val() { return res_K_val_; }
+    struct ggml_tensor * get_res_V_val() { return res_V_val_; }
+
 
     DiffKVBlockStateTable & get_state_table() { return state_table_; }
 
@@ -136,7 +141,7 @@ public:
 
     // F9: per-block sparse residuals (exact corrections for the highest-error tokens
     // the low-rank SVD failed to capture — e.g. digits). MAX_RESIDUAL tokens per K/V.
-    static constexpr int MAX_RESIDUAL = 40;
+    static int MAX_RESIDUAL;
     int32_t* get_host_res_K_pos(int slot_id);
     int32_t* get_host_res_V_pos(int slot_id);
     ggml_fp16_t* get_host_res_K_val(int slot_id);
@@ -181,6 +186,11 @@ private:
     struct ggml_tensor * desc_matrix_ = nullptr;
     struct ggml_tensor * anchor_positions_ = nullptr;  // [n_slots] int32: actual sequence position of each block's anchor
     struct ggml_tensor * token_positions_ = nullptr;   // [S_max, n_slots] int32: true seq position of each delta token (RoPE)
+    struct ggml_tensor * res_K_pos_ = nullptr;
+    struct ggml_tensor * res_V_pos_ = nullptr;
+    struct ggml_tensor * res_K_val_ = nullptr;
+    struct ggml_tensor * res_V_val_ = nullptr;
+
 
     // Flat tiny host-side buffers
     std::vector<ggml_fp16_t, PageAlignedAllocator<ggml_fp16_t>> host_U_scale_;

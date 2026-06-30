@@ -59,6 +59,10 @@ struct GlobalPoolMtlBufs {
     id<MTLBuffer> seq_lens  = nil;
     id<MTLBuffer> scales    = nil;
     id<MTLBuffer> anc_pos   = nil;
+    id<MTLBuffer> res_k_pos = nil;
+    id<MTLBuffer> res_v_pos = nil;
+    id<MTLBuffer> res_k_val = nil;
+    id<MTLBuffer> res_v_val = nil;
     int           pool_ver  = -1;
 };
 static std::unordered_map<void*, GlobalPoolMtlBufs> g_pool_buf_cache;
@@ -490,7 +494,8 @@ CustomAttnUserData& CustomAttnUserData::operator=(CustomAttnUserData&& other) no
 void execute_metal_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
-    struct ggml_tensor * slot_indices,
+    const int32_t * slot_indices,
+    int            raw_K,
     CustomAttnUserData * data,
     float* lse_out,
     const float*   dense_K,
@@ -519,15 +524,12 @@ void execute_metal_attention(
     NativeBlockPool* engine = data->kv_engine;
 
     // ── Deduplicate and validate slot indices ──────────────────────────────────
-    const int raw_K   = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
     const int n_slots = engine->get_seq_lens()->ne[0];
 
     std::vector<int32_t> unique_slots;
-    if (slot_indices) {
-        std::vector<int32_t> slot_ids_cpu(raw_K);
-        ggml_backend_tensor_get(slot_indices, slot_ids_cpu.data(), 0, raw_K * sizeof(int32_t));
+    if (slot_indices && raw_K > 0) {
         for (int k = 0; k < raw_K; ++k) {
-            int32_t sid = slot_ids_cpu[k];
+            int32_t sid = slot_indices[k];
             if (sid >= 0 && sid < n_slots) {
                 if (engine->get_state_table().get(sid) == BlockState::CompressedResident) {
                     if (std::find(unique_slots.begin(), unique_slots.end(), sid) == unique_slots.end()) {
@@ -671,6 +673,7 @@ void execute_metal_attention(
         // ── Shared pool Metal buffers (zero-copy wrapping of GGML backend tensors) ───────────
         id<MTLBuffer> u_pool_buf, u_scale_buf, vk_pool_buf, vv_pool_buf;
         id<MTLBuffer> anchors_k_buf, anchors_v_buf, seq_lens_buf, scales_buf, anc_pos_buf;
+        id<MTLBuffer> res_k_pos_buf, res_v_pos_buf, res_k_val_buf, res_v_val_buf;
         {
             std::lock_guard<std::mutex> lk(g_pool_buf_mutex);
             GlobalPoolMtlBufs& pb = g_pool_buf_cache[(void*)engine];
@@ -686,6 +689,10 @@ void execute_metal_attention(
                 pb.seq_lens  = wrap_tensor(engine->get_seq_lens());
                 pb.scales    = wrap_tensor(engine->get_scales());
                 pb.anc_pos   = wrap_tensor(engine->get_anchor_positions());
+                pb.res_k_pos = wrap_tensor(engine->get_res_K_pos());
+                pb.res_v_pos = wrap_tensor(engine->get_res_V_pos());
+                pb.res_k_val = wrap_tensor(engine->get_res_K_val());
+                pb.res_v_val = wrap_tensor(engine->get_res_V_val());
                 pb.pool_ver  = current_ver;
             }
 
@@ -698,6 +705,10 @@ void execute_metal_attention(
             seq_lens_buf  = pb.seq_lens;
             scales_buf    = pb.scales;
             anc_pos_buf   = pb.anc_pos;
+            res_k_pos_buf = pb.res_k_pos;
+            res_v_pos_buf = pb.res_v_pos;
+            res_k_val_buf = pb.res_k_val;
+            res_v_val_buf = pb.res_v_val;
         }
 
         // ── Encode and dispatch ───────────────────────────────────────────────
@@ -757,6 +768,15 @@ void execute_metal_attention(
         [encoder setBuffer:g_split_m_buf   offset:0 atIndex:28];
         [encoder setBuffer:g_split_d_buf   offset:0 atIndex:29];
         [encoder setBytes:&S_split_i32     length:sizeof(S_split_i32) atIndex:30];
+
+        // Bind residual buffers (indices 31-35)
+        [encoder setBuffer:res_k_pos_buf offset:0 atIndex:31];
+        [encoder setBuffer:res_v_pos_buf offset:0 atIndex:32];
+        [encoder setBuffer:res_k_val_buf offset:0 atIndex:33];
+        [encoder setBuffer:res_v_val_buf offset:0 atIndex:34];
+        int32_t max_res_i32 = engine->MAX_RESIDUAL;
+        [encoder setBytes:&max_res_i32     length:sizeof(max_res_i32) atIndex:35];
+
 
         MTLSize threadsPerTG    = MTLSizeMake(64, 1, 1);
         MTLSize numThreadgroups = MTLSizeMake(n_q_heads, S_split_i32, 1);

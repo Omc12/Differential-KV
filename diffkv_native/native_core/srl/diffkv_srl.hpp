@@ -34,6 +34,7 @@ struct ggml_tensor * anchor_screen(
     struct ggml_tensor * Q,
     struct ggml_tensor * anchors_K,
     struct ggml_tensor * candidate_slots,
+    struct ggml_tensor * slots_mask,
     float scale,
     int k_keep
 );

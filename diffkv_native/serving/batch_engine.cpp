@@ -276,7 +276,7 @@ static struct ggml_cgraph * build_decode_graph(
 
             // Anchor screening: [srl_k_keep]
             float scale = 1.0f / std::sqrt((float)head_dim);
-            selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, srl_k_keep));
+            selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, slots_mask, scale, srl_k_keep));
 
             // Save selected slots to out parameter
             if (out_selected_slots) {

@@ -91,6 +91,11 @@ kernel void decode_attention_metal_kernel(
     device float*         split_m       [[buffer(28)]],
     device float*         split_d       [[buffer(29)]],
     device const int32_t& S_split       [[buffer(30)]],
+    device const int32_t* res_K_pos     [[buffer(31)]],
+    device const int32_t* res_V_pos     [[buffer(32)]],
+    device const half*    res_K_val     [[buffer(33)]],
+    device const half*    res_V_val     [[buffer(34)]],
+    device const int32_t& max_residual  [[buffer(35)]],
 
     uint3 tg_idx   [[threadgroup_position_in_grid]], // tg_idx.x is head, tg_idx.y is split index
     uint3 tid_vec  [[thread_position_in_threadgroup]],
@@ -115,6 +120,7 @@ kernel void decode_attention_metal_kernel(
     threadgroup float scores_cached[64 * 32]; // Unified token scores cache (≤ 64 blocks × max 32 tokens/block)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
     threadgroup float dense_weights[1024];    // Dense window weights — chunked 1024 at a time, so 1024 suffices for any T_dense
+    threadgroup float w_shared[64];           // Softmax weights for residual value accumulation
 
     // 1. Cache the query into shared memory
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {
@@ -171,6 +177,14 @@ kernel void decode_attention_metal_kernel(
                 int u_off_base = slot_id * S_max * rank + t * rank;
                 int pos = anchor_pos + t + 1;
 
+                int ri = -1;
+                for (int r = 0; r < max_residual; ++r) {
+                    if (res_K_pos[slot_id * max_residual + r] == t) {
+                        ri = r;
+                        break;
+                    }
+                }
+
                 for (int d = 0; d < half_d; ++d) {
                     float raw_k1 = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
                     float delta_k1 = 0.0f;
@@ -188,6 +202,12 @@ kernel void decode_attention_metal_kernel(
                         delta_k2 += (float)U_pool[u_off_base + r] * (float)VK_pool[vk_base2 + r * n_kv_heads * D];
                     }
                     float k_raw2 = raw_k2 + delta_k2 * scale_u * block_scale;
+
+                    if (ri != -1) {
+                        int base_res = slot_id * max_residual * n_kv_heads * D + ri * n_kv_heads * D + kv_head * D;
+                        k_raw1 += (float)res_K_val[base_res + d];
+                        k_raw2 += (float)res_K_val[base_res + d2];
+                    }
 
                     float k_rot1 = k_raw1;
                     float k_rot2 = k_raw2;
@@ -260,6 +280,39 @@ kernel void decode_attention_metal_kernel(
                 // s_anchor = score_anc * scale (anchor dot scaled)
                 float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];
                 float t_score = score_anc * scale + delta * scale_u * block_scale;
+
+                // Add residual score
+                int ri = -1;
+                for (int r = 0; r < max_residual; ++r) {
+                    if (res_K_pos[slot_id * max_residual + r] == t) {
+                        ri = r;
+                        break;
+                    }
+                }
+                if (ri != -1) {
+                    float res_score = 0.0f;
+                    int base_res = slot_id * max_residual * n_kv_heads * D + ri * n_kv_heads * D + kv_head * D;
+                    int pos = anchor_pos + t + 1;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_rk = (float)res_K_val[base_res + d];
+                        float rk_rot;
+                        if (has_rope) {
+                            int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            int   idx     = (d < half_d) ? d : (d - half_d);
+                            float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                            float angle   = pos * theta;
+                            float c = cos(angle), s = sin(angle);
+                            float raw_p = (float)res_K_val[base_res + partner];
+                            float rot_c = (d < half_d) ? -raw_p : raw_p;
+                            rk_rot = raw_rk * c + rot_c * s;
+                        } else {
+                            rk_rot = raw_rk;
+                        }
+                        res_score += q_shared[d] * rk_rot;
+                    }
+                    t_score += res_score * scale;
+                }
+
                 sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
             }
         }
@@ -378,6 +431,37 @@ kernel void decode_attention_metal_kernel(
         for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
             float scale_u = (float)U_row_scale_pool[slot_id * S_max + t];
             float t_score = 0.0f;
+
+            int ri = -1;
+            for (int r = 0; r < max_residual; ++r) {
+                if (res_K_pos[slot_id * max_residual + r] == t) {
+                    ri = r;
+                    break;
+                }
+            }
+            float res_score_val = 0.0f;
+            if (ri != -1) {
+                int base_res = slot_id * max_residual * n_kv_heads * D + ri * n_kv_heads * D + kv_head * D;
+                int pos = anchor_positions[slot_id] + t + 1;
+                for (int d = 0; d < D; ++d) {
+                    float raw_rk = (float)res_K_val[base_res + d];
+                    float rk_rot;
+                    if (has_rope) {
+                        int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                        int   idx     = (d < half_d) ? d : (d - half_d);
+                        float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
+                        float angle   = pos * theta;
+                        float c = cos(angle), s = sin(angle);
+                        float raw_p = (float)res_K_val[base_res + partner];
+                        float rot_c = (d < half_d) ? -raw_p : raw_p;
+                        rk_rot = raw_rk * c + rot_c * s;
+                    } else {
+                        rk_rot = raw_rk;
+                    }
+                    res_score_val += q_shared[d] * rk_rot;
+                }
+            }
+
             if (!approximate_attn) {
                 if (use_cache) {
                     t_score = scores_cached[k * 32 + 1 + t];
@@ -404,6 +488,12 @@ kernel void decode_attention_metal_kernel(
                         }
                         float k_raw2 = raw_k2 + delta_k2 * scale_u * block_scale;
 
+                        if (ri != -1) {
+                            int base_res = slot_id * max_residual * n_kv_heads * D + ri * n_kv_heads * D + kv_head * D;
+                            k_raw1 += (float)res_K_val[base_res + d];
+                            k_raw2 += (float)res_K_val[base_res + d2];
+                        }
+
                         float k_rot1 = k_raw1;
                         float k_rot2 = k_raw2;
                         if (has_rope) {
@@ -422,14 +512,12 @@ kernel void decode_attention_metal_kernel(
                 float delta = 0.0f;
                 int u_off = slot_id * S_max * rank + t * rank;
                 for (int r = 0; r < rank; ++r) delta += q_proj_shared[r] * (float)U_pool[u_off + r];
-                // q_proj_shared already has scale baked in (set in PASS 1 or recomputed in non-cache path).
-                // ACTIVE_RUNTIME: s = s_anchor + U @ q_proj * block_scale
-                // score_anc_scaled = score_anc * scale.
-                t_score = score_anc_scaled + delta * scale_u * block_scale;
+                t_score = score_anc_scaled + delta * scale_u * block_scale + res_score_val * scale;
             }
 
             float w_t = exp(t_score - global_m) / norm_factor;
             local_sum_w += w_t;
+            w_shared[t] = w_t;
             int u_off = slot_id * S_max * rank + t * rank;
             for (int r = 0; r < rank; ++r) {
                 local_w_proj[r] += w_t * (float)U_pool[u_off + r] * scale_u;
@@ -452,14 +540,7 @@ kernel void decode_attention_metal_kernel(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Accumulate anchor + SVD value contributions.
-        // ACTIVE_RUNTIME _fused_sparse_decode_kernel line 242:
-        //   O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta
-        // i.e. w_total = w_anc + red_sum_w is applied to anchors_V (the base/anchor value),
-        // then SVD delta o_delta = w_proj @ VV is added on top.
-        // This is correct because every token in the block reconstructs as:
-        //   V_t = anchors_V + U[t] @ VV * block_scale
-        // so anchors_V acts as the shared base for ALL tokens.
+        // Accumulate anchor + SVD value contributions + residual value contributions.
         float w_total = w_anc + red_sum_w;
         for (int d = (int)tid; d < D; d += (int)t_per_tg) {
             // Shared anchor base: all tokens (anchor + deltas) contribute through anchors_V
@@ -471,6 +552,17 @@ kernel void decode_attention_metal_kernel(
                 svd_v += red_w_proj[r] * (float)VV_pool[base_vv + r * n_kv_heads * D];
             }
             thread_val[d] += svd_v * block_scale;
+
+            // Add residual value contribution!
+            float res_v_sum = 0.0f;
+            for (int r = 0; r < max_residual; ++r) {
+                int t = res_V_pos[slot_id * max_residual + r];
+                if (t >= 0 && t < slen) {
+                    int base_res_v = slot_id * max_residual * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    res_v_sum += w_shared[t] * (float)res_V_val[base_res_v + d];
+                }
+            }
+            thread_val[d] += res_v_sum;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }

@@ -761,37 +761,38 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             rel_K[s] = aerr_K[s] / std::max(std::sqrt(nK), 1e-8f);
             rel_V[s] = aerr_V[s] / std::max(std::sqrt(nV), 1e-8f);
         }
-        float res_frac = 0.15f;  // ACTIVE_RUNTIME parity; tunable for needle-recall experiments
-        if (const char* e = std::getenv("DIFFKV_RESIDUAL_FRAC")) { try { res_frac = std::stof(e); } catch (...) {} }
-        int n_max = std::min((int)(S_deltas * res_frac), MR);
-        auto select = [&](const std::vector<float>& rel, const std::vector<float>& aerr,
-                          int32_t* pos_out, ggml_fp16_t* val_out, int half_off) {
-            std::vector<int> idx(S_deltas);
-            for (int i = 0; i < S_deltas; ++i) idx[i] = i;
-            std::sort(idx.begin(), idx.end(), [&](int a, int b) { return rel[a] > rel[b]; });
-            int written = 0;
-            for (int ii = 0; ii < S_deltas && written < n_max; ++ii) {
-                int s = idx[ii];
-                if (aerr[s] <= 1e-4f) continue;
-                pos_out[written] = s;                  // block-local delta index = decode token index
-                for (int f = 0; f < F; ++f)
-                    val_out[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + half_off + f]);
-                written++;
+
+        std::vector<float> joint_err(S_deltas);
+        for (int s = 0; s < S_deltas; ++s) {
+            joint_err[s] = std::sqrt(aerr_K[s] * aerr_K[s] + aerr_V[s] * aerr_V[s]);
+        }
+
+        int n_max = std::min(S_deltas, MR);
+        std::vector<int> idx(S_deltas);
+        for (int i = 0; i < S_deltas; ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return joint_err[a] > joint_err[b]; });
+
+        int written = 0;
+        for (int ii = 0; ii < S_deltas && written < n_max; ++ii) {
+            int s = idx[ii];
+            if (joint_err[s] <= 1e-4f) continue;
+            params.out_res_K_pos[written] = s;
+            params.out_res_V_pos[written] = s;
+            for (int f = 0; f < F; ++f) {
+                params.out_res_K_val[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + f]);
+                params.out_res_V_val[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + F + f]);
             }
-        };
-        if (n_max > 0) {
-            select(rel_K, aerr_K, params.out_res_K_pos, params.out_res_K_val, 0);
-            select(rel_V, aerr_V, params.out_res_V_pos, params.out_res_V_val, F);
-            
+            written++;
+        }
+
+        if (written > 0) {
             // Print residuals debug info
-            int written_k = 0;
-            while (written_k < MR && params.out_res_K_pos[written_k] != -1) written_k++;
-            if (written_k > 0 && params.token_ids) {
+            if (params.token_ids) {
                 std::cerr << "[DEBUG_RESIDUALS] block_id=" << params.block_id 
-                          << " S_deltas=" << S_deltas << " n_max=" << n_max << " written=" << written_k << " top5_pos_err: ";
-                for (int i = 0; i < std::min(written_k, 5); ++i) {
+                          << " S_deltas=" << S_deltas << " n_max=" << n_max << " written=" << written << " top5_pos_err: ";
+                for (int i = 0; i < std::min(written, 5); ++i) {
                     int s = params.out_res_K_pos[i];
-                    std::cerr << s << "(" << aerr_K[s] << ", tok=" << params.token_ids[s + 1] << ") ";
+                    std::cerr << s << "(" << joint_err[s] << ", tok=" << params.token_ids[s + 1] << ") ";
                 }
                 std::cerr << std::endl;
             }

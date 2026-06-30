@@ -7,6 +7,16 @@
 
 namespace diffkv {
 
+int NativeBlockPool::MAX_RESIDUAL = []() {
+    const char* env = std::getenv("DIFFKV_MAX_RESIDUAL");
+    if (env) {
+        try {
+            return std::stoi(env);
+        } catch (...) {}
+    }
+    return 64;
+}();
+
 namespace {
 // Rotate a single head_dim vector by NeoX RoPE at absolute position `pos`.
 // Processes (d, d+half_d) pairs together: one std::pow + one cos/sin per pair
@@ -112,7 +122,7 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     S_max_ = S_max;
     buft_ = buft;
     kv_type_ = kv_type;
-    n_allocated_slots_ = std::min(16, n_slots);
+    n_allocated_slots_ = n_slots;
 
     // Native ggml-metal attention path (gated). When enabled, we allocate + fill the
     // precomputed RoPE'd key tensors so the in-graph subgraph never has to rope/gather i32.
@@ -148,6 +158,10 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         U_row_scale_ = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_F16, S_max_, n_allocated_slots_);
         VK_          = ggml_new_tensor_4d(pool_ctx_, kv_type_, head_dim, kv_heads, rank, n_allocated_slots_);
         VV_          = ggml_new_tensor_4d(pool_ctx_, kv_type_, head_dim, kv_heads, rank, n_allocated_slots_);
+        res_K_pos_   = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_I32, MAX_RESIDUAL, n_allocated_slots_);
+        res_V_pos_   = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_I32, MAX_RESIDUAL, n_allocated_slots_);
+        res_K_val_   = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
+        res_V_val_   = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
     }
     
     // anchors shape: [head_dim, kv_heads, n_allocated_slots_]
@@ -178,6 +192,10 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     if (U_row_scale_) ggml_set_name(U_row_scale_, "pool.U_row_scale");
     if (VK_)          ggml_set_name(VK_,          "pool.V_K");
     if (VV_)          ggml_set_name(VV_,          "pool.V_V");
+    if (res_K_pos_)   ggml_set_name(res_K_pos_,   "pool.res_K_pos");
+    if (res_V_pos_)   ggml_set_name(res_V_pos_,   "pool.res_V_pos");
+    if (res_K_val_)   ggml_set_name(res_K_val_,   "pool.res_K_val");
+    if (res_V_val_)   ggml_set_name(res_V_val_,   "pool.res_V_val");
     ggml_set_name(anchors_K_,   "pool.anchors_K");
     ggml_set_name(anchors_V_,   "pool.anchors_V");
     ggml_set_name(seq_lens_,      "pool.seq_lens");
@@ -220,6 +238,22 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
     if (valid_mask_) {
         std::vector<ggml_fp16_t> neg(ggml_nelements(valid_mask_), ggml_fp32_to_fp16(-INFINITY));
         ggml_backend_tensor_set(valid_mask_, neg.data(), 0, neg.size() * sizeof(ggml_fp16_t));
+    }
+    if (res_K_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_K_pos_), -1);
+        ggml_backend_tensor_set(res_K_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_V_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_V_pos_), -1);
+        ggml_backend_tensor_set(res_V_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_K_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_K_val_), 0);
+        ggml_backend_tensor_set(res_K_val_, zeros.data(), 0, zeros.size());
+    }
+    if (res_V_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_V_val_), 0);
+        ggml_backend_tensor_set(res_V_val_, zeros.data(), 0, zeros.size());
     }
 
     slot_device_has_data_.resize(n_slots, false);
@@ -347,6 +381,22 @@ void NativeBlockPool::zero_all_tensors() {
         std::vector<char> zeros(ggml_nbytes(token_positions_), 0);
         ggml_backend_tensor_set(token_positions_, zeros.data(), 0, zeros.size());
     }
+    if (res_K_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_K_pos_), -1);
+        ggml_backend_tensor_set(res_K_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_V_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_V_pos_), -1);
+        ggml_backend_tensor_set(res_V_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_K_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_K_val_), 0);
+        ggml_backend_tensor_set(res_K_val_, zeros.data(), 0, zeros.size());
+    }
+    if (res_V_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_V_val_), 0);
+        ggml_backend_tensor_set(res_V_val_, zeros.data(), 0, zeros.size());
+    }
     std::fill(slot_device_has_data_.begin(), slot_device_has_data_.end(), false);
     increment_pool_version();
 }
@@ -401,6 +451,11 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
     struct ggml_tensor * new_VK_rot = nullptr;
     struct ggml_tensor * new_anchorK_rot = nullptr;
     struct ggml_tensor * new_valid_mask = nullptr;
+    struct ggml_tensor * new_res_K_pos = nullptr;
+    struct ggml_tensor * new_res_V_pos = nullptr;
+    struct ggml_tensor * new_res_K_val = nullptr;
+    struct ggml_tensor * new_res_V_val = nullptr;
+
 
     if (!skip_lowrank) {
         new_U           = ggml_new_tensor_3d(new_ctx, GGML_TYPE_I8,  rank_, S_max_, new_allocated_slots);
@@ -409,6 +464,11 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
         new_U_row_scale = ggml_new_tensor_2d(new_ctx, GGML_TYPE_F16, S_max_, new_allocated_slots);
         new_VK          = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, rank_, new_allocated_slots);
         new_VV          = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, rank_, new_allocated_slots);
+        new_res_K_pos   = ggml_new_tensor_2d(new_ctx, GGML_TYPE_I32, MAX_RESIDUAL, new_allocated_slots);
+        new_res_V_pos   = ggml_new_tensor_2d(new_ctx, GGML_TYPE_I32, MAX_RESIDUAL, new_allocated_slots);
+        new_res_K_val   = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
+        new_res_V_val   = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
+
     }
     
     struct ggml_tensor * new_anchors_K   = ggml_new_tensor_3d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, new_allocated_slots);
@@ -442,6 +502,11 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
     if (new_VK_rot)      ggml_set_name(new_VK_rot,      "pool.V_K_rot");
     if (new_anchorK_rot) ggml_set_name(new_anchorK_rot, "pool.anchors_K_rot");
     if (new_valid_mask)  ggml_set_name(new_valid_mask,  "pool.valid_mask");
+    if (new_res_K_pos)   ggml_set_name(new_res_K_pos,   "pool.res_K_pos");
+    if (new_res_V_pos)   ggml_set_name(new_res_V_pos,   "pool.res_V_pos");
+    if (new_res_K_val)   ggml_set_name(new_res_K_val,   "pool.res_K_val");
+    if (new_res_V_val)   ggml_set_name(new_res_V_val,   "pool.res_V_val");
+
 
     struct ggml_backend_buffer * new_buffer = ggml_backend_alloc_ctx_tensors_from_buft(new_ctx, buft_);
     if (!new_buffer) {
@@ -460,8 +525,13 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
     U_row_scale_ = new_U_row_scale;
     VK_ = new_VK;
     VV_ = new_VV;
+    res_K_pos_ = new_res_K_pos;
+    res_V_pos_ = new_res_V_pos;
+    res_K_val_ = new_res_K_val;
+    res_V_val_ = new_res_V_val;
     anchors_K_ = new_anchors_K;
     anchors_V_ = new_anchors_V;
+
     seq_lens_ = new_seq_lens;
     scales_ = new_scales;
     desc_matrix_ = new_desc_matrix;
@@ -474,6 +544,22 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
     if (valid_mask_) {
         std::vector<ggml_fp16_t> neg(ggml_nelements(valid_mask_), ggml_fp32_to_fp16(-INFINITY));
         ggml_backend_tensor_set(valid_mask_, neg.data(), 0, neg.size() * sizeof(ggml_fp16_t));
+    }
+    if (res_K_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_K_pos_), -1);
+        ggml_backend_tensor_set(res_K_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_V_pos_) {
+        std::vector<int32_t> neg(ggml_nelements(res_V_pos_), -1);
+        ggml_backend_tensor_set(res_V_pos_, neg.data(), 0, neg.size() * sizeof(int32_t));
+    }
+    if (res_K_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_K_val_), 0);
+        ggml_backend_tensor_set(res_K_val_, zeros.data(), 0, zeros.size());
+    }
+    if (res_V_val_) {
+        std::vector<char> zeros(ggml_nbytes(res_V_val_), 0);
+        ggml_backend_tensor_set(res_V_val_, zeros.data(), 0, zeros.size());
     }
 
     for (int s = 0; s < n_slots_; ++s) {
@@ -551,6 +637,19 @@ void NativeBlockPool::upload_slot_impl(int slot_id) {
     }
     if (token_positions_ && slot_buf)
         ggml_backend_tensor_set(token_positions_, slot_buf->token_positions.data(), slot_id * token_positions_->nb[1], (size_t)S_max_ * sizeof(int32_t));
+    if (res_K_pos_ && slot_buf) {
+        ggml_backend_tensor_set(res_K_pos_, slot_buf->res_K_pos.data(), slot_id * res_K_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
+    }
+    if (res_V_pos_ && slot_buf) {
+        ggml_backend_tensor_set(res_V_pos_, slot_buf->res_V_pos.data(), slot_id * res_V_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
+    }
+    if (res_K_val_ && slot_buf) {
+        ggml_backend_tensor_set(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+    }
+    if (res_V_val_ && slot_buf) {
+        ggml_backend_tensor_set(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+    }
+
 
     // Native attn: precompute this slot's RoPE'd keys at its (fixed) anchor position so the
     // in-graph subgraph can gather f16 and dot with the in-graph query — no in-graph rope.
@@ -669,7 +768,20 @@ void NativeBlockPool::download_slot(int slot_id) {
     if (anchor_positions_ && slot_id < n_allocated_slots_) {
         ggml_backend_tensor_get(anchor_positions_, host_anchor_positions_.data() + slot_id, slot_id * anchor_positions_->nb[0], sizeof(int32_t));
     }
+    if (res_K_pos_ && slot_id < n_allocated_slots_) {
+        ggml_backend_tensor_get(res_K_pos_, slot_buf->res_K_pos.data(), slot_id * res_K_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
+    }
+    if (res_V_pos_ && slot_id < n_allocated_slots_) {
+        ggml_backend_tensor_get(res_V_pos_, slot_buf->res_V_pos.data(), slot_id * res_V_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
+    }
+    if (res_K_val_ && slot_id < n_allocated_slots_) {
+        ggml_backend_tensor_get(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+    }
+    if (res_V_val_ && slot_id < n_allocated_slots_) {
+        ggml_backend_tensor_get(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+    }
 }
+
 
 SlotHostBuffer* NativeBlockPool::ensure_slot_buffer(int slot_id) {
     if (slot_id < 0 || slot_id >= n_slots_) return nullptr;

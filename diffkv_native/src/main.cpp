@@ -941,7 +941,7 @@ struct ggml_cgraph * build_decode_graph(
 
                 // Anchor screening: [srl_k_keep]
                 float scale = 1.0f / std::sqrt((float)head_dim);
-                selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, scale, srl_k_keep));
+                selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, slots_mask, scale, srl_k_keep));
 
                 // Save selected slots to out parameter
                 if (out_selected_slots) {
@@ -1000,7 +1000,8 @@ struct ggml_cgraph * build_decode_graph(
                         srl_k_keep, native_maxd, native_maxd,
                         1.0f / std::sqrt((float)head_dim), userdata[l].has_rope ? 1 : 0,
                         config.rope_freq_base, userdata[l].approximate_attn ? 1 : 0,
-                        (int) pool->get_seq_lens()->ne[0]
+                        (int) pool->get_seq_lens()->ne[0],
+                        pool->MAX_RESIDUAL
                     };
                     attn_out = ggml_diffkv_attn(ctx, q_rope_flat, selected_slots,
                         pool->get_U(), pool->get_U_row_scale(), pool->get_VK(), pool->get_VV(),
@@ -1009,6 +1010,9 @@ struct ggml_cgraph * build_decode_graph(
                         native_dense_kr[l], native_dense_v[l], native_dense_pos,
                         native_dense_mask,
                         ggml_reshape_1d(ctx, k, F_kv), ggml_reshape_1d(ctx, v, F_kv), position,
+                        pool->get_res_K_pos(), pool->get_res_V_pos(),
+                        pool->get_res_K_val(), pool->get_res_V_val(),
+                        pool->get_token_positions(),
                         p);
                 } else
                 attn_out = build_native_sparse_attn(
@@ -1538,7 +1542,9 @@ static void run_native_attn_selftest() {
     setenv("DIFFKV_NATIVE_ATTN","1",1); // pool allocates VK_rot/anchorK_rot/valid_mask/U_f16
     // FULL path test (sparse ∪ dense ∪ current). has_rope=false → no rotation to match.
 
-    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_t backend_cpu = ggml_backend_cpu_init();
+    ggml_backend_t backend = ggml_backend_init_best();
+    if (!backend) backend = backend_cpu;
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     NativeBlockPool pool;
     pool.initialize(n_slots, rank, D, nkv, desc_dim, buft);
@@ -1557,9 +1563,33 @@ static void run_native_attn_selftest() {
         ggml_fp16_t* urs=pool.get_host_U_row_scale(s);
         int seqlen = 20 + s*10;  // longer blocks
         sl[s]=seqlen; sc[s]=H(0.3f+0.1f*s); us[s]=H(0.2f); ap[s]=10+s*7;
-        // Uniform per-row scale == the single block scale, so the per-row CPU path and
-        // the single-scale fused graph stay byte-identical (selftest still validates math).
-        for(int t=0;t<S_max;++t) urs[t]=H(0.2f);
+        
+        // Non-uniform per-row scales to test per-row row scale correctness!
+        for(int t=0;t<S_max;++t) urs[t]=H(0.1f + 0.005f * t);
+
+        // Populate mock residuals
+        int32_t* res_K_pos = pool.get_host_res_K_pos(s);
+        int32_t* res_V_pos = pool.get_host_res_V_pos(s);
+        ggml_fp16_t* res_K_val = pool.get_host_res_K_val(s);
+        ggml_fp16_t* res_V_val = pool.get_host_res_V_val(s);
+
+        int max_res = pool.MAX_RESIDUAL;
+        for (int r = 0; r < max_res; ++r) {
+            if (r < 5 && r < seqlen) {
+                res_K_pos[r] = r * 2;
+                res_V_pos[r] = r * 2;
+                for (int kv_idx = 0; kv_idx < nkv; ++kv_idx) {
+                    for (int d = 0; d < D; ++d) {
+                        res_K_val[r * nkv * D + kv_idx * D + d] = H(dist(g) * 0.1f);
+                        res_V_val[r * nkv * D + kv_idx * D + d] = H(dist(g) * 0.1f);
+                    }
+                }
+            } else {
+                res_K_pos[r] = -1;
+                res_V_pos[r] = -1;
+            }
+        }
+
         // EXTREME data to reproduce the real failure: massive anchor-K (|aK|~per-elem 30, like
         // Qwen layer-0), and slots 1,2 NEAR-IDENTICAL to slot 0 (mimics repetitive-prompt blocks).
         int src = (s==0)?0:0; (void)src;
@@ -1617,9 +1647,34 @@ static void run_native_attn_selftest() {
         dkr_use=ggml_reshape_2d(ctx, ggml_rope_ext(ctx,d3,dpos_t,nullptr,D,GGML_ROPE_TYPE_NEOX,0,freq,1.0f,0.0f,1.0f,0.0f,0.0f), F, MAXD);
         krope_use=ggml_rope_ext(ctx, k_rope, cpos_t, nullptr, D, GGML_ROPE_TYPE_NEOX, 0, freq, 1.0f,0.0f,1.0f,0.0f,0.0f);
     }
-    ggml_tensor* out = build_native_sparse_attn(ctx, q_rope, krope_use, v_cur, dkr_use, dv, dmask, MAXD,
-                                                sel, tri, half, &pool, nq, nkv, D, rank, S_max, K, scale,
-                                                false, nullptr);
+    
+    ggml_tensor* out = nullptr;
+    if (backend != backend_cpu) {
+        struct ggml_diffkv_attn_params p = {
+            nq, nkv, rank, S_max, D,
+            K, MAXD, MAXD,
+            scale, HR ? 1 : 0,
+            freq, 0,
+            n_slots,
+            pool.MAX_RESIDUAL
+        };
+        out = ggml_diffkv_attn(ctx, q_rope, sel,
+            pool.get_U(), pool.get_U_row_scale(), pool.get_VK(), pool.get_VV(),
+            pool.get_anchors_K(), pool.get_anchors_V(), pool.get_seq_lens(),
+            pool.get_scales(), pool.get_anchor_positions(),
+            dkr_use, dv, dpos_t,
+            dmask,
+            krope_use, v_cur, cpos_t,
+            pool.get_res_K_pos(), pool.get_res_V_pos(),
+            pool.get_res_K_val(), pool.get_res_V_val(),
+            pool.get_token_positions(),
+            p);
+    } else {
+        out = build_native_sparse_attn(ctx, q_rope, krope_use, v_cur, dkr_use, dv, dmask, MAXD,
+                                       sel, tri, half, &pool, nq, nkv, D, rank, S_max, K, scale,
+                                       false, nullptr);
+    }
+
     ggml_set_output(out);
     ggml_cgraph* gf=ggml_new_graph_custom(ctx, 8192, false);
     ggml_build_forward_expand(gf, out);
@@ -1648,6 +1703,7 @@ static void run_native_attn_selftest() {
     std::cerr<<"[SELFTEST] |native|="<<std::sqrt(nn)<<" |ref|="<<std::sqrt(rn)<<" maxAbsDiff="<<maxd<<(maxd<1e-2*std::sqrt(rn)+1e-3?"  PASS":"  FAIL")<<std::endl;
     std::cerr<<"[SELFTEST] native[0..7]="; for(int i=0;i<8;++i)std::cerr<<nat[i]<<" "; std::cerr<<"\n[SELFTEST] ref   [0..7]="; for(int i=0;i<8;++i)std::cerr<<out_ref[i]<<" "; std::cerr<<std::endl;
     ggml_backend_buffer_free(buf); ggml_free(ctx); ggml_backend_free(backend);
+    if (backend != backend_cpu) ggml_backend_free(backend_cpu);
 }
 
 // DIFFKV_RECON_CMP=1: standalone per-token K/V reconstruction-fidelity probe (no model load).
@@ -2165,14 +2221,14 @@ int main(int argc, char ** argv) {
     }
     
     std::string default_maxd = "2048";
-    std::string default_quant = "q8_0";
+    std::string default_quant = "f16";
     
     if (preset_str == "low") {
         default_maxd = "1024";
-        default_quant = "q4_0";
+        default_quant = "f16";
     } else if (preset_str == "mid") {
         default_maxd = "2048";
-        default_quant = "q8_0";
+        default_quant = "f16";
     } else if (preset_str == "high") {
         default_maxd = "4096";
         default_quant = "f16";
@@ -2181,7 +2237,7 @@ int main(int argc, char ** argv) {
     setenv("DIFFKV_MAX_ACTIVE_DENSE_TOKENS", default_maxd.c_str(), 0);
     setenv("DIFFKV_KV_QUANT", default_quant.c_str(), 0);
 
-    ggml_type kv_quant_type = GGML_TYPE_Q8_0;
+    ggml_type kv_quant_type = GGML_TYPE_F16;
     if (const char* env_quant = std::getenv("DIFFKV_KV_QUANT")) {
         std::string q(env_quant);
         if (q == "f16" || q == "F16" || q == "none") {
@@ -3115,6 +3171,19 @@ int main(int argc, char ** argv) {
             for (int l = 0; l < n_layers; ++l) {
                 ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
                 ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
+                
+                int nan_k = 0;
+                int nan_v = 0;
+                for (int i = 0; i < chunk_len * F_test; ++i) {
+                    if (std::isnan(chunk_k[l][i])) nan_k++;
+                    if (std::isnan(chunk_v[l][i])) nan_v++;
+                }
+                if (nan_k > 0 || nan_v > 0) {
+                    std::cerr << "[PREFILL_NAN_DETECT] layer=" << l 
+                              << " pos_start=" << pos_start << " nan_k=" << nan_k 
+                              << " nan_v=" << nan_v << std::endl;
+                }
+
                 // Store raw K/V into the fp16 host buffers (chunk_k/v stay fp32 for ingest/SVD).
                 for (int i = 0; i < chunk_len * F_test; ++i) {
                     k_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_k[l][i]);

@@ -92,7 +92,8 @@ struct CustomAttnUserData {
 void execute_metal_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
-    struct ggml_tensor * slot_indices,
+    const int32_t * slot_indices,
+    int            K_active,
     CustomAttnUserData * data,
     float* lse_out,
     const float*   dense_K,

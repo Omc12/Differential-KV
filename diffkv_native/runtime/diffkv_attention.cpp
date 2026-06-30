@@ -716,11 +716,18 @@ void custom_attention_op_callback(
 
     bool all_reused = false;
     bool cache_active = (get_global_attn_cache().threshold <= 1.0f);
+    int topk_blocks = 16;
+    if (const char* env_topk = std::getenv("DIFFKV_TOPK_BLOCKS")) {
+        topk_blocks = std::atoi(env_topk);
+    }
+
     std::vector<float> q_host;
-    if (cache_active) {
+    if (cache_active || (topk_blocks > 0 && actual_K > topk_blocks)) {
         q_host.resize(n_q_heads * D);
         ggml_backend_tensor_get(Q, q_host.data(), 0, n_q_heads * D * sizeof(float));
+    }
 
+    if (cache_active) {
         std::vector<bool> reuse_mask(n_q_heads, false);
         std::vector<float> out_cached(n_q_heads * D, 0.0f);
         bool has_cache = get_global_attn_cache().check_and_update(
@@ -732,6 +739,101 @@ void custom_attention_op_callback(
             std::memcpy(dst->data, out_cached.data(), n_q_heads * D * sizeof(float));
             return;
         }
+    }
+
+    // Top-K block selection via residual-key router
+    if (topk_blocks > 0 && actual_K > topk_blocks && data->kv_engine != nullptr) {
+        std::vector<float> relevance(actual_K, -1e30f);
+        NativeBlockPool* pool = data->kv_engine;
+        int n_slots = pool->get_seq_lens()->ne[0];
+        const int half_d = D / 2;
+        const int g = n_q_heads / n_kv_heads;
+
+        std::vector<float> theta_table(half_d);
+        for (int d = 0; d < half_d; ++d) {
+            theta_table[d] = 1.0f / std::pow(data->rope_freq_base, (2.0f * d) / D);
+        }
+
+        for (int k = 0; k < actual_K; ++k) {
+            int s = slot_indices_cpu[k];
+            if (s < 0 || s >= n_slots) continue;
+
+            const ggml_fp16_t* slot_anchors_K = pool->get_host_anchors_K(s);
+            const int32_t* slot_res_K_pos = pool->get_host_res_K_pos(s);
+            const ggml_fp16_t* slot_res_K_val = pool->get_host_res_K_val(s);
+            int slen = pool->get_host_seq_lens()[s];
+            int ap = pool->get_host_anchor_positions()[s];
+
+            float max_blk_score = -1e30f;
+
+            for (int h = 0; h < n_q_heads; ++h) {
+                int kv_head = h / g;
+                const float* q_h = q_host.data() + h * D;
+
+                // 1. Anchor score
+                float score_anc = 0.0f;
+                int ak_off = kv_head * D;
+                if (data->has_rope) {
+                    for (int d = 0; d < half_d; ++d) {
+                        float angle = ap * theta_table[d];
+                        float cos_a = std::cos(angle);
+                        float sin_a = std::sin(angle);
+                        float x = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f;
+                        float y = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d + half_d]) : 0.0f;
+                        score_anc += q_h[d]          * (x * cos_a - y * sin_a);
+                        score_anc += q_h[d + half_d] * (y * cos_a + x * sin_a);
+                    }
+                } else {
+                    for (int d = 0; d < D; ++d) {
+                        score_anc += q_h[d] * (slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[ak_off + d]) : 0.0f);
+                    }
+                }
+                if (score_anc > max_blk_score) max_blk_score = score_anc;
+
+                // 2. Residual scores
+                if (slot_res_K_val && slot_res_K_pos) {
+                    int R_route = NativeBlockPool::MAX_RESIDUAL;
+                    for (int ri = 0; ri < R_route; ++ri) {
+                        int t = slot_res_K_pos[ri];
+                        if (t < 0 || t >= slen) continue;
+
+                        const ggml_fp16_t* rk = slot_res_K_val + ri * n_kv_heads * D + kv_head * D;
+                        float res_score = 0.0f;
+                        if (data->has_rope) {
+                            const int32_t* slot_token_positions = pool->get_host_token_positions(s);
+                            float tpos = slot_token_positions ? (float)slot_token_positions[t] : (float)(ap + t + 1);
+                            for (int d = 0; d < half_d; ++d) {
+                                float angle = tpos * theta_table[d];
+                                float cos_a = std::cos(angle);
+                                float sin_a = std::sin(angle);
+                                float x = ggml_fp16_to_fp32(rk[d]);
+                                float y = ggml_fp16_to_fp32(rk[d + half_d]);
+                                res_score += q_h[d]          * (x * cos_a - y * sin_a);
+                                res_score += q_h[d + half_d] * (y * cos_a + x * sin_a);
+                            }
+                        } else {
+                            for (int d = 0; d < D; ++d) {
+                                res_score += q_h[d] * ggml_fp16_to_fp32(rk[d]);
+                            }
+                        }
+                        if (res_score > max_blk_score) max_blk_score = res_score;
+                    }
+                }
+            }
+            relevance[k] = max_blk_score;
+        }
+
+        std::vector<int> idx(actual_K);
+        for (int i = 0; i < actual_K; ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return relevance[a] > relevance[b]; });
+
+        std::vector<int32_t> topk_slots;
+        topk_slots.reserve(topk_blocks);
+        for (int i = 0; i < topk_blocks; ++i) {
+            topk_slots.push_back(slot_indices_cpu[idx[i]]);
+        }
+        slot_indices_cpu = std::move(topk_slots);
+        actual_K = topk_blocks;
     }
 
     // ── Step 1: Append current token K/V to the dense buffer ─────────────────
@@ -781,28 +883,10 @@ void custom_attention_op_callback(
     // §3.8: We no longer force CPU attention when step_cached_entries is non-empty,
     // as factual K/V attention injection has been removed (matching HF reference).
 
-    // F9: force CPU if any selected block has residuals (Metal doesn't handle them).
-    if (!force_cpu && data->kv_engine != nullptr && slot_indices && actual_K > 0) {
-        NativeBlockPool* pool = data->kv_engine;
-        int n_slots = pool->get_seq_lens()->ne[0];
-        const int32_t* slots_ptr = slot_indices_cpu.data();
-        for (int k = 0; k < actual_K && !force_cpu; ++k) {
-            int s = slots_ptr[k];
-            if (s < 0 || s >= n_slots) continue;
-            const int32_t* rkp_s = pool->get_host_res_K_pos(s);
-            const int32_t* rvp_s = pool->get_host_res_V_pos(s);
-            if (rkp_s && rvp_s) {
-                if (rkp_s[0] != -1 || rvp_s[0] != -1) {
-                    force_cpu = true;
-                }
-            }
-        }
-    }
-
     if (!force_cpu) {
         std::vector<float> lse_dummy(n_q_heads, -1e30f);
         execute_metal_attention(
-            dst, Q, (struct ggml_tensor*)slot_indices, data,
+            dst, Q, slot_indices_cpu.data(), actual_K, data,
             lse_dummy.data(),
             data->active_k_dense, data->active_v_dense,
             data->active_positions_dense, T_dense

@@ -65,6 +65,7 @@ struct ggml_tensor * anchor_screen(
     struct ggml_tensor * Q,               // [head_dim, n_head]
     struct ggml_tensor * anchors_K,       // [head_dim, kv_heads, n_slots]
     struct ggml_tensor * candidate_slots, // [M] I32 candidate slot IDs
+    struct ggml_tensor * slots_mask,      // [n_slots] validity mask
     float scale,
     int k_keep
 ) {
@@ -91,6 +92,12 @@ struct ggml_tensor * anchor_screen(
     // 4. Dot product with mean query: [head_dim, M] x [head_dim, 1] -> [M, 1]
     struct ggml_tensor * scores = ggml_mul_mat(ctx, anc_gather, q_mean);
     ggml_set_name(scores, "srl_scores");
+
+    // 5. Gather and apply slots validity mask to scores
+    struct ggml_tensor * mask_2d = ggml_reshape_2d(ctx, slots_mask, 1, slots_mask->ne[0]);
+    struct ggml_tensor * candidate_mask = ggml_get_rows(ctx, mask_2d, candidate_slots); // [1, M]
+    struct ggml_tensor * candidate_mask_2d = ggml_reshape_2d(ctx, candidate_mask, candidate_slots->ne[0], 1); // [M, 1]
+    scores = ggml_add(ctx, scores, candidate_mask_2d);
 
     // 7. Scale attention scores
     struct ggml_tensor * scaled_scores = ggml_scale(ctx, scores, scale);
