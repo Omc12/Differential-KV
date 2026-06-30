@@ -79,8 +79,6 @@ def run_native(args, prompt_text):
     # Single-threaded BLAS (see cli.py rationale: keeps the Mac responsive during
     # the SVD-heavy prefill and avoids core starvation).
     env.update({
-        "VECLIB_MAXIMUM_THREADS": "1", "OMP_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
         "DIFFKV_MAX_CTX_TK": str(args.ctx + args.gen + 512),
         "DIFFKV_MICRO_BLOCK_SIZE": "256",
         "DIFFKV_PREFILL_CHUNK_SIZE": "512",
@@ -246,6 +244,11 @@ def run_active(args, prompt_text):
 
     # ── prefill (chunked, matches wrapper.generate) ──
     CH = 512
+    if os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
+        try:
+            CH = int(os.environ["DIFFKV_PREFILL_CHUNK_SIZE"])
+        except ValueError:
+            pass
     output = None
     t0 = time.perf_counter()
     for cs in range(0, len(ids), CH):
@@ -306,6 +309,11 @@ def run_dense(args, prompt_text):
 
     cache = make_prompt_cache(model)
     CH = 512
+    if os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
+        try:
+            CH = int(os.environ["DIFFKV_PREFILL_CHUNK_SIZE"])
+        except ValueError:
+            pass
     logits = None
     t0 = time.perf_counter()
     for cs in range(0, len(ids), CH):

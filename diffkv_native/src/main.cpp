@@ -365,8 +365,15 @@ struct ggml_cgraph * build_prefill_ctx_graph(
         struct ggml_tensor * v = ggml_mul_mat(ctx, layer.wv, h);
         if (layer.bv) v = ggml_add(ctx, v, layer.bv);
 
+        bool cast_prefill_gpu = true;
+        if (const char* env_cpg = std::getenv("DIFFKV_PREFILL_CAST_GPU")) {
+            try { cast_prefill_gpu = (std::stoi(env_cpg) != 0); } catch (...) {}
+        }
+
         // Export raw V
-        if (v_layers) (*v_layers)[l] = v;
+        if (v_layers) {
+            (*v_layers)[l] = cast_prefill_gpu ? ggml_cast(ctx, v, GGML_TYPE_F16) : v;
+        }
 
         // 4. RoPE on current chunk only
         int head_dim = config.n_embd / config.n_head;
@@ -380,7 +387,9 @@ struct ggml_cgraph * build_prefill_ctx_graph(
         // BEFORE apply_rotary_pos_emb and stores unrot_key_states in blocks/active_k_dense.
         // RoPE is re-applied at decode time by diffkv_attention.cpp (has_rope=true).
         // For the prior-context prefill path, caller pre-rotates k_activations in CPU.
-        if (k_layers) (*k_layers)[l] = k;  // raw K, shape [n_embd, chunk_len]
+        if (k_layers) {
+            (*k_layers)[l] = cast_prefill_gpu ? ggml_cast(ctx, k, GGML_TYPE_F16) : k;
+        }
 
         // 5. Cast current chunk K/V to F16 (flash-attn's standard K/V dtype; matches the
         //    F16 prior tensors so the concat dtypes agree and the GPU prior context is halved).
@@ -3109,7 +3118,20 @@ int main(int argc, char ** argv) {
         double tp_upload = 0, tp_compute = 0, tp_capture = 0, tp_ingest = 0, tp_build = 0;
         auto tp_start = std::chrono::high_resolution_clock::now();
         int tp_chunks = 0;
+
+        bool ingest_async = true;
+        if (const char* env_ia = std::getenv("DIFFKV_INGEST_ASYNC")) {
+            try { ingest_async = (std::stoi(env_ia) != 0); } catch (...) {}
+        }
+        std::thread prefill_ingest_thread;
+        bool prefill_ingest_thread_active = false;
+
         while (pos_start < L) {
+            if (prefill_ingest_thread_active) {
+                prefill_ingest_thread.join();
+                prefill_ingest_thread_active = false;
+            }
+
             int chunk_len = std::min(chunk_size, L - pos_start);
             if (pos_start == 0 || pos_start + chunk_len >= L || pos_start % 4096 == 0) {
                 std::cerr << "[Prefill Progress] pos=" << pos_start << " / " << L << " (chunk_len=" << chunk_len << ")" << std::endl;
@@ -3214,8 +3236,25 @@ int main(int argc, char ** argv) {
             // Store raw K/V at pos_start offset in k_activations
             int local_offset = pos_start;
             for (int l = 0; l < n_layers; ++l) {
-                ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
-                ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
+                if (prefill_k_layers[l]->type == GGML_TYPE_F16) {
+                    std::vector<ggml_fp16_t> temp_k_f16(chunk_len * F_test);
+                    std::vector<ggml_fp16_t> temp_v_f16(chunk_len * F_test);
+                    ggml_backend_tensor_get(prefill_k_layers[l], temp_k_f16.data(), 0, chunk_len * F_test * sizeof(ggml_fp16_t));
+                    ggml_backend_tensor_get(prefill_v_layers[l], temp_v_f16.data(), 0, chunk_len * F_test * sizeof(ggml_fp16_t));
+                    for (int i = 0; i < chunk_len * F_test; ++i) {
+                        chunk_k[l][i] = ggml_fp16_to_fp32(temp_k_f16[i]);
+                        chunk_v[l][i] = ggml_fp16_to_fp32(temp_v_f16[i]);
+                        k_activations[l][local_offset * F_test + i] = temp_k_f16[i];
+                        v_activations[l][local_offset * F_test + i] = temp_v_f16[i];
+                    }
+                } else {
+                    ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
+                    ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
+                    for (int i = 0; i < chunk_len * F_test; ++i) {
+                        k_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_k[l][i]);
+                        v_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_v[l][i]);
+                    }
+                }
                 
                 int nan_k = 0;
                 int nan_v = 0;
@@ -3227,12 +3266,6 @@ int main(int argc, char ** argv) {
                     std::cerr << "[PREFILL_NAN_DETECT] layer=" << l 
                               << " pos_start=" << pos_start << " nan_k=" << nan_k 
                               << " nan_v=" << nan_v << std::endl;
-                }
-
-                // Store raw K/V into the fp16 host buffers (chunk_k/v stay fp32 for ingest/SVD).
-                for (int i = 0; i < chunk_len * F_test; ++i) {
-                    k_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_k[l][i]);
-                    v_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_v[l][i]);
                 }
             }
 
@@ -3269,7 +3302,16 @@ int main(int argc, char ** argv) {
             auto tp_cap1 = std::chrono::high_resolution_clock::now();
             tp_capture += std::chrono::duration<double,std::milli>(tp_cap1 - tp_g1).count();
             // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
-            runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+            if (ingest_async) {
+                prefill_ingest_thread = std::thread(
+                    [&runtime_manager, chunk_k = std::move(chunk_k), chunk_v = std::move(chunk_v), chunk_len, pos_start, prompt_tokens, &srl_state]() {
+                        runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+                    }
+                );
+                prefill_ingest_thread_active = true;
+            } else {
+                runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+            }
             tp_ingest += std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_cap1).count();
             tp_chunks++;
 
@@ -3278,6 +3320,11 @@ int main(int argc, char ** argv) {
             }
 
             pos_start += chunk_len;
+        }
+
+        if (prefill_ingest_thread_active) {
+            prefill_ingest_thread.join();
+            prefill_ingest_thread_active = false;
         }
         if (dbg_prefill_time && !is_warmup_run) {
             double total = std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_start).count();
@@ -4238,6 +4285,7 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> prev_all_tokens;
         int prev_pos = 0;
         bool has_prev_svd = false;
+        const bool never_use_sparse = (L + max_generate < engage_threshold);
 
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
@@ -5068,7 +5116,7 @@ int main(int argc, char ** argv) {
             prev_decode_v = decode_v;
             prev_all_tokens = all_tokens;
             prev_pos = current_pos;
-            has_prev_svd = true;
+            has_prev_svd = !never_use_sparse;
 
 
             {
