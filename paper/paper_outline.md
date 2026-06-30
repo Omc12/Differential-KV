@@ -4,11 +4,16 @@
 Long-Context Inference on Commodity Unified-Memory Hardware*
 
 **Thesis (what the code actually does and the data actually shows):** compressing each
-KV block to an anchor token plus a rank-16 joint SVD delta, paired with a small dense
-recency window and a fused decode kernel that scores queries in low-rank space without
-ever decompressing KV, lets a 1.5B model process 64k tokens (needle recovered) in ~6 GB
-on an 8 GB Apple M3 — 2× the dense full-KV context reach and a far flatter memory slope
-— at the cost of decode throughput and prefill time.
+KV block to an anchor token, a rank-16 joint SVD delta, AND the top-64 highest-error tokens
+kept as exact residuals — paired with a sliding dense recency window and a fused, top-K-routed
+decode kernel that scores queries in low-rank space without ever decompressing KV and attends
+the residuals exactly — lets a 1.5B model process 64k tokens (needle recovered EXACTLY) in
+~6 GB on an 8 GB Apple M3, where the dense full-KV baseline exhausts memory by 32k. The
+per-block KV reduction is ~2.85x (residuals counted; not the 10x a low-rank-only accounting
+suggests); the residuals are what buy exact recall, at a memory price quantified by the
+residual-budget sweep. Costs: decode throughput (kernel dispatch, localized by the exact
+ablation) and prefill time (per-block SVD). An adaptive policy decodes exactly below 16k so
+short requests never regress.
 
 Section order is dictated by the execution flow: compression → memory layout → prefill →
 decode kernel → evaluation.
@@ -19,21 +24,23 @@ decode kernel → evaluation.
    low-rank); unified memory & MLX; why anchor+delta low-rank.
 4. **System Overview** — components & data flow (Fig: architecture). Active=MLX provenance.
 5. **Differential KV Compression** — anchor decomposition, delta normalization, joint
-   K/V randomized truncated SVD, adaptive rank, fp16 storage (Fig: compression pipeline;
-   Algorithm 1; Table: per-block byte budget & ratio). Memory complexity.
-6. **Runtime & Memory Architecture** — session state; chunked prefill w/ exact causal
-   cache + streaming capture/compress; prefill→decode memory release (Fig: memory layout;
-   Fig: cache lifecycle / execution flow; Algorithm 2).
-7. **Fused Sparse Decode Attention** — low-rank score reconstruction; anchor+delta
-   value reconstruction; dense branch; flash-style LSE merge; numerical robustness;
-   mx.compile fusion (Fig: decode dataflow; Algorithm 3). Compute complexity.
+   K/V randomized truncated SVD (seeded), adaptive rank, fp16 storage, AND exact residual
+   selection (top-error tokens) + key min/max (Fig: compression pipeline; Algorithm 1;
+   Table: per-block byte budget & 2.85x ratio). Memory complexity.
+6. **Runtime & Memory Architecture** — session state (incl. residual + min/max buffers);
+   chunked prefill w/ exact causal cache + streaming capture/compress; prefill→decode memory
+   release + ADAPTIVE decode policy (Fig: memory layout; Fig: cache lifecycle; Algorithm 2).
+7. **Fused Routed Decode Attention** — top-K residual-key routing; low-rank score/value
+   reconstruction; exact residual+recency branch; flash-style LSE merge; numerical robustness;
+   mx.compile fusion (Fig: decode dataflow; Algorithm 3). Compute complexity (scales with K).
 8. **Implementation** — MLX monkeypatch, NumPy rSVD rationale, dtypes, presets, env
-   knobs; optional relational-binding/SRL module (gated off in these experiments).
-9. **Evaluation** — setup (HW/model/NIAH/memory metric); RQs:
-   (E1) memory scaling vs context (Fig: memory), (E2) max usable context within 8 GB,
-   (E3) prefill (Fig: prefill), (E4) decode throughput (Fig: decode),
-   (E5) needle correctness. active vs dense (same engine/weights = clean ablation).
-   (Tables: main results; per-run detail.)
+   knobs (residual/topk/router/seed/auto); optional relational-binding/SRL module (gated off).
+9. **Evaluation** — setup (HW/model/NIAH/memory metric; forced modes + auto policy); RQs:
+   (E1) KV-state footprint vs context (Fig: g1), (E2) context reach (dense OOM@32k),
+   (E3) prefill (Fig: g4), (E4) decode throughput (Fig: g3),
+   (E5) needle correctness (RECOVERED via residuals), (E6) residual-budget trade-off (Fig: g6,
+   Table: t4). active vs dense (same engine/weights = clean ablation).
+   (Tables: main results; residual sweep; per-run detail.)
 10. **Analysis & Discussion** — what DiffKV buys vs costs; prefill-SVD cost; flat-slope
     explanation tied to O(r) per token; when DiffKV wins.
 11. **Limitations & Future Work** — throughput gap; CUDA/Triton fused decode (placeholder

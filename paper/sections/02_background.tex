@@ -37,9 +37,13 @@ IO-aware kernels such as FlashAttention~\cite{dao2022flashattention,dao2023flash
 on a \emph{pretrained, unmodified} model; like a low-rank latent it keeps a compressed
 representation of \emph{all} tokens rather than discarding them. The compression is applied
 \emph{post hoc} to the KV a frozen model produces, using a randomized truncated
-SVD~\cite{halko2011randomized} per block, and---unlike a latent attention---the runtime must
-reconstruct attention from the factors at inference time, which is where the engineering
-lies (\S\ref{sec:decode}).
+SVD~\cite{halko2011randomized} per block, but it is deliberately \emph{hybrid}: alongside the
+low-rank term it keeps a small set of exact residual tokens, so the outliers a low-rank model
+discards---the very tokens eviction would also be most likely to drop---are retained losslessly.
+Its query-aware top-$K$ block selection is in the spirit of Quest~\cite{tang2024quest}, but routes
+on \emph{exact} residual keys rather than a min/max bound so a single distinctive token cannot be
+averaged away. Unlike a latent attention, the runtime must reconstruct attention from the factors
+at inference time, which is where the engineering lies (\S\ref{sec:decode}).
 
 \subsection{Unified memory and MLX}
 We target Apple Silicon, where the CPU and GPU share one physical memory pool. This changes

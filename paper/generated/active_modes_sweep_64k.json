@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "prompt_tokens": 65615,
+      "gen_tokens": 128,
+      "prefill_s": 432.52631987503264,
+      "decode_s": 33.092157208011486,
+      "decode_tps": 3.867985976115564,
+      "mx_peak_gb": 3.914717774,
+      "mx_decode_peak_gb": 3.44337983,
+      "mx_active_end_gb": 1.554238542,
+      "needle_found": true,
+      "output_preview": "The secret passcode hidden in the document is \"OMEGA-7741-DELTA\". \n\nIn distributed systems, consistency is a crucial property that ensures that the system behaves as expected by all users. Consistency",
+      "kv": {
+        "per_block_bytes": 92136,
+        "lowrank_block_bytes": 26600,
+        "residual_block_bytes_max": 65536,
+        "store_alloc_bytes": 682450944,
+        "store_used_bytes": 675886400,
+        "dense_full_bytes": 1881313280,
+        "num_blocks_layer0": 254,
+        "dense_len_layer0": 719,
+        "res_tokens_layer0": 16256,
+        "ratio_used_vs_dense": 2.7834755663081845
+      },
+      "mode": "compressed",
+      "ctx": 65536
+    },
+    {
+      "prompt_tokens": 65615,
+      "gen_tokens": 128,
+      "prefill_s": 449.5595548340352,
+      "decode_s": 14.941639165976085,
+      "decode_tps": 8.566663843112437,
+      "mx_peak_gb": 3.914717768,
+      "mx_decode_peak_gb": 3.450547164,
+      "mx_active_end_gb": 3.447081768,
+      "needle_found": true,
+      "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\n#### Linearizability\nLinearizability is a property that ensures that the behavior of",
+      "kv": {
+        "per_block_bytes": 92136,
+        "lowrank_block_bytes": 26600,
+        "residual_block_bytes_max": 65536,
+        "store_alloc_bytes": 682450944,
+        "store_used_bytes": 675886400,
+        "dense_full_bytes": 1881313280,
+        "num_blocks_layer0": 254,
+        "dense_len_layer0": 719,
+        "res_tokens_layer0": 16256,
+        "ratio_used_vs_dense": 2.7834755663081845
+      },
+      "mode": "exact",
+      "ctx": 65536
+    }
+  ]
+}

@@ -31,12 +31,16 @@ footprint balloons; with them, decode memory tracks the store.
 
 \paragraph{Configuration and presets.}
 The benchmarked configuration is \texttt{rank=16}, \texttt{block\_size=256},
-\texttt{recency\_window=512} (so the dense buffer is $768$), \texttt{max\_blocks=256}, int4
-weights, ``mid'' preset. Most knobs are exposed as both config keys and environment variables;
-notably \texttt{DIFFKV\_COMPRESSED\_DECODE} selects the compressed kernel (default) versus
-exact full-KV decode, \texttt{DIFFKV\_MAX\_BLOCKS} caps the pool, and
-\texttt{DIFFKV\_ENGAGE\_THRESHOLD} sets the recency window. Three presets (low/mid/high) trade
-chunk size, dense budget, and cache policy.
+\texttt{recency\_window=512} (so the dense buffer is $768$), \texttt{max\_blocks=256},
+\texttt{max\_residual=64}, top-$K{=}16$ block routing with the residual-key router, int4 weights,
+``mid'' preset. Most knobs are exposed as both config keys and environment variables: the
+adaptive decode policy and its $16$k threshold are \texttt{DIFFKV\_COMPRESSED\_DECODE} (default
+\texttt{auto}; \texttt{1}/\texttt{0} force the compressed or exact kernel) and
+\texttt{DIFFKV\_COMPRESSED\_MIN\_CTX}; \texttt{DIFFKV\_MAX\_RESIDUAL} sets the residual budget,
+\texttt{DIFFKV\_TOPK\_BLOCKS} the routing width, \texttt{DIFFKV\_ROUTER} the router
+(\texttt{residual} or \texttt{minmax}), \texttt{DIFFKV\_MAX\_BLOCKS} caps the pool, and
+\texttt{DIFFKV\_SVD\_SEED} fixes the SVD seed. Three presets (low/mid/high) trade chunk size,
+dense budget, and cache policy.
 
 \ifext
 \paragraph{Generation loop.}

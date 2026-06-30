@@ -49,6 +49,22 @@ static void ensure_layer_sems(int n_layers) {
 //
 // Fix: one shared set of MTLBuffers per pool pointer. All 28 layers read from the
 // same buffers. Pool data is copied exactly ONCE per version bump.
+struct AttentionParams {
+    int32_t n_q_heads;
+    int32_t n_kv_heads;
+    int32_t rank;
+    int32_t S_max;
+    int32_t K;
+    int32_t D;
+    float scale;
+    int32_t has_rope;
+    float rope_freq_base;
+    int32_t T_dense;
+    int32_t approximate_attn;
+    int32_t S_split;
+    int32_t max_residual;
+};
+
 struct GlobalPoolMtlBufs {
     id<MTLBuffer> u_pool    = nil;
     id<MTLBuffer> u_scale   = nil;
@@ -729,53 +745,42 @@ void execute_metal_attention(
         [encoder setBuffer:out_buf        offset:0 atIndex:9];
         [encoder setBuffer:lse_buf        offset:0 atIndex:10];
 
-        int32_t n_q_heads_i32  = n_q_heads;
-        int32_t n_kv_heads_i32 = n_kv_heads;
-        int32_t rank_i32       = rank;
-        int32_t S_max_i32      = S_max;
-        int32_t K_i32          = active_K;
-        int32_t D_i32          = D;
-        float   scale_f32      = scale;
-        int32_t has_rope_i32   = has_rope ? 1 : 0;
-        float   rope_f32       = rope_freq;
-        int32_t T_dense_i32    = T_clamped;
+        int32_t S_split_i32 = (active_K >= 64) ? 4 : 1;
 
-        [encoder setBytes:&n_q_heads_i32  length:sizeof(n_q_heads_i32)  atIndex:11];
-        [encoder setBytes:&n_kv_heads_i32 length:sizeof(n_kv_heads_i32) atIndex:12];
-        [encoder setBytes:&rank_i32       length:sizeof(rank_i32)       atIndex:13];
-        [encoder setBytes:&S_max_i32      length:sizeof(S_max_i32)      atIndex:14];
-        [encoder setBytes:&K_i32          length:sizeof(K_i32)          atIndex:15];
-        [encoder setBytes:&D_i32          length:sizeof(D_i32)          atIndex:16];
-        [encoder setBytes:&scale_f32      length:sizeof(scale_f32)      atIndex:17];
-        [encoder setBuffer:scales_buf     offset:0                      atIndex:18];
-        [encoder setBytes:&has_rope_i32   length:sizeof(has_rope_i32)   atIndex:19];
-        [encoder setBytes:&rope_f32       length:sizeof(rope_f32)       atIndex:20];
-        [encoder setBuffer:anc_pos_buf    offset:0                      atIndex:21];
+        AttentionParams params;
+        params.n_q_heads = n_q_heads;
+        params.n_kv_heads = n_kv_heads;
+        params.rank = rank;
+        params.S_max = S_max;
+        params.K = active_K;
+        params.D = D;
+        params.scale = scale;
+        params.has_rope = has_rope ? 1 : 0;
+        params.rope_freq_base = rope_freq;
+        params.T_dense = T_clamped;
+        params.approximate_attn = data->approximate_attn ? 1 : 0;
+        params.S_split = S_split_i32;
+        params.max_residual = engine->MAX_RESIDUAL;
 
-        // Buffer bindings 22-25 (dense window)
-        [encoder setBuffer:dense_k_buf    offset:0                      atIndex:22];
-        [encoder setBuffer:dense_v_buf    offset:0                      atIndex:23];
-        [encoder setBuffer:dense_pos_buf  offset:0                      atIndex:24];
-        [encoder setBytes:&T_dense_i32    length:sizeof(T_dense_i32)    atIndex:25];
+        [encoder setBytes:&params         length:sizeof(params)         atIndex:11];
+        [encoder setBuffer:scales_buf     offset:0                      atIndex:12];
+        [encoder setBuffer:anc_pos_buf    offset:0                      atIndex:13];
 
-        // Buffer binding 26 (approximate_attn config)
-        int32_t approx_attn_i32 = data->approximate_attn ? 1 : 0;
-        [encoder setBytes:&approx_attn_i32 length:sizeof(approx_attn_i32) atIndex:26];
+        // Buffer bindings 14-16 (dense window)
+        [encoder setBuffer:dense_k_buf    offset:0                      atIndex:14];
+        [encoder setBuffer:dense_v_buf    offset:0                      atIndex:15];
+        [encoder setBuffer:dense_pos_buf  offset:0                      atIndex:16];
 
-        // Bind Split-K buffers and parameters (indices 27-30)
-        int32_t S_split_i32 = (K_i32 >= 64) ? 4 : 1;
-        [encoder setBuffer:g_split_out_buf offset:0 atIndex:27];
-        [encoder setBuffer:g_split_m_buf   offset:0 atIndex:28];
-        [encoder setBuffer:g_split_d_buf   offset:0 atIndex:29];
-        [encoder setBytes:&S_split_i32     length:sizeof(S_split_i32) atIndex:30];
+        // Bind Split-K buffers and parameters (indices 17-19)
+        [encoder setBuffer:g_split_out_buf offset:0 atIndex:17];
+        [encoder setBuffer:g_split_m_buf   offset:0 atIndex:18];
+        [encoder setBuffer:g_split_d_buf   offset:0 atIndex:19];
 
-        // Bind residual buffers (indices 31-35)
-        [encoder setBuffer:res_k_pos_buf offset:0 atIndex:31];
-        [encoder setBuffer:res_v_pos_buf offset:0 atIndex:32];
-        [encoder setBuffer:res_k_val_buf offset:0 atIndex:33];
-        [encoder setBuffer:res_v_val_buf offset:0 atIndex:34];
-        int32_t max_res_i32 = engine->MAX_RESIDUAL;
-        [encoder setBytes:&max_res_i32     length:sizeof(max_res_i32) atIndex:35];
+        // Bind residual buffers (indices 20-23)
+        [encoder setBuffer:res_k_pos_buf offset:0 atIndex:20];
+        [encoder setBuffer:res_v_pos_buf offset:0 atIndex:21];
+        [encoder setBuffer:res_k_val_buf offset:0 atIndex:22];
+        [encoder setBuffer:res_v_val_buf offset:0 atIndex:23];
 
 
         MTLSize threadsPerTG    = MTLSizeMake(64, 1, 1);
@@ -790,7 +795,7 @@ void execute_metal_attention(
             [encoder setBuffer:out_buf         offset:0 atIndex:3];
             [encoder setBuffer:lse_buf         offset:0 atIndex:4];
             [encoder setBytes:&S_split_i32     length:sizeof(S_split_i32) atIndex:5];
-            [encoder setBytes:&D_i32           length:sizeof(D_i32)       atIndex:6];
+            [encoder setBytes:&params.D         length:sizeof(params.D)       atIndex:6];
 
             MTLSize numThreadgroupsMerge = MTLSizeMake(n_q_heads, 1, 1);
             [encoder dispatchThreadgroups:numThreadgroupsMerge threadsPerThreadgroup:threadsPerTG];

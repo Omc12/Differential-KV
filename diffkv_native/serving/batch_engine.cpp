@@ -736,6 +736,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     if (const char* env_maxd = std::getenv("DIFFKV_MAX_ACTIVE_DENSE_TOKENS")) {
         native_maxd = std::stoi(env_maxd);
     }
+    native_maxd = std::max(native_maxd, engage_threshold);
     int required_dense_cap = L + req->max_tokens + 512;
     int max_active_dense_tokens = std::min(required_dense_cap, native_maxd + 512);
 
@@ -2246,7 +2247,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 W_proj_host.data(),
                 desc_dim,
                 0.30f,        // Lowered to 0.30f to retrieve passcode successfully
-                slot_filter,  // pass active slots filter
+                nullptr,      // active_slots = nullptr (None) to match MLX
                 qbias_ptr
             );
 

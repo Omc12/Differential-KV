@@ -18,10 +18,10 @@ diffkv_venv/bin/python3 paper/scripts/make_tables.py     # T2/T3/T5 LaTeX tables
 ```
 
 ## Re-run the experiments (Apple Silicon + MLX)
+Run with nothing else competing for CPU — the per-block NumPy SVD during prefill is CPU-bound,
+and a concurrent process roughly doubles prefill time:
 ```
-diffkv_venv/bin/python3 paper/scripts/measure_active.py \
-    --ctx 4096 8192 16384 32768 65536 --modes compressed exact --gen 128 \
-    --out paper/generated/active_modes_sweep.json
+zsh paper/scripts/run_paper_measurements.sh   # ablation (4k-32k) + 64k reach + residual sweep
 diffkv_venv/bin/python3 benchmarks/run_bench.py --engines dense \
     --contexts 4096 8192 16384 32768 --gen 128 --ram-cap-gb 7.5
 ```
@@ -41,5 +41,12 @@ diffkv_venv/bin/python3 benchmarks/run_bench.py --engines dense \
 - The paper's **primary** result is the true compressed sparse-decode path; the exact
   full-KV decode is an **upper-bound ablation** only. (An earlier benchmark conflated them;
   see `notes/MEASUREMENT_CONFLICT_REPORT.md`.)
-- Memory headline = MLX allocator peak + analytic KV-state footprint; the compressed path's
-  needle-recall fidelity limitation (rank-16) is reported, not hidden.
+- **Compression ratio is ~2.85x per block, not 10x.** The exact residual tokens (64 per block)
+  dominate the per-block bytes; an earlier accounting omitted them. The 10x figure was wrong.
+- **Needle recall is solved, not a limitation.** The residual mechanism (top-error exact tokens
+  + residual-key router, added 2026-06-29) recovers the buried passcode exactly at every tested
+  context. The primary limitation is now decode throughput (kernel dispatch), not fidelity.
+- Memory headline = MLX allocator peak + decode-phase peak + analytic KV-state footprint;
+  process-tree memory is secondary. The residual-budget/recall trade-off is characterized (E6).
+- Data of record: `generated/active_modes_sweep_v2.json`, `active_modes_sweep_64k.json`,
+  `residual_sweep.json` (this clean re-run), + `benchmarks/results/PAPER_dense_sweep.json`.

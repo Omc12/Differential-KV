@@ -1,3 +1,13 @@
+> **ADDENDUM (2026-06-30): partially superseded — see `AUDIT_2026-06-30.md`.**
+> Decisions 1–2 (compressed = primary, exact = upper-bound ablation; mx_peak + decode-phase +
+> analytic memory headline) still hold. BUT the premise that compressed decode *misses the needle*
+> (a "fidelity limitation / open problem") is **no longer true**: the 2026-06-29 residual fix
+> (`max_residual` 32→64 + residual-key router, both now defaults) makes compressed decode recover
+> the needle EXACTLY at 4k–64k. The paper reports recall as solved, the residual budget as the
+> accuracy/memory knob (E6), and the corrected per-block ratio 2.85× (not 10×; residuals were
+> omitted before). Data of record is the clean re-measured `active_modes_sweep_v2.json` +
+> `active_modes_sweep_64k.json` + `residual_sweep.json`, not the pre-fix `active_modes_sweep.json`.
+
 # Locked decisions (user, 2026-06-28)
 
 1. **Decode framing = Honest full picture.** Primary subject of the paper is the TRUE

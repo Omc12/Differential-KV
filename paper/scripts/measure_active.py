@@ -55,28 +55,46 @@ def _mx_active(mx):
 
 def analytic_kv_bytes(mgr, seq_len):
     """DiffKV store footprint (fixed pre-allocated pool + dense) vs full-KV, in bytes.
+
     Pools are pre-allocated at max_blocks, so the store footprint is BOUNDED &
-    context-independent; we report both the allocated (real) and used footprint."""
+    context-independent; we report both the allocated (real) and used footprint.
+
+    IMPORTANT: every block also keeps `max_residual` EXACT fp16 K/V residual tokens
+    (res_k/res_v) and element-wise key min/max (min_k/max_k) — these dominate the
+    per-block bytes and MUST be counted. Omitting them (as an earlier version did)
+    overstates the compression ratio ~3.5x (10x vs the true ~2.85x at defaults)."""
     L = mgr.num_layers; Hkv = mgr.kv_heads; d = mgr.head_dim
     B = mgr.block_size; r = mgr.rank; M = mgr.max_blocks; Dmax = mgr.max_dense_len
-    per_block = ((B - 1) * r * 2          # U fp16
-                 + 2 * Hkv * r * d * 2     # V_K,V_V fp16
-                 + 2 * Hkv * d * 2         # anchors fp16
-                 + 8)                      # scale fp32 + seq_len int32
-    dense_alloc = Dmax * Hkv * d * 2 * 2   # K,V fp16 over full buffer
+    R = mgr.max_residual
+    fp16 = 2
+    kv_tok = Hkv * d * fp16 * 2            # one exact K+V token, all kv-heads
+    lowrank_block = ((B - 1) * r * fp16        # U
+                     + 2 * Hkv * r * d * fp16  # V_K, V_V
+                     + 2 * Hkv * d * fp16      # anchor_k, anchor_v
+                     + 2 * Hkv * d * fp16      # min_k, max_k (router)
+                     + 8)                       # scale fp32 + seq_len int32
+    residual_block_max = R * kv_tok            # res_k + res_v at max_residual
+    per_block = lowrank_block + residual_block_max
+    dense_alloc = Dmax * kv_tok                # K,V fp16 over full dense buffer
     s0 = mgr.sessions.get("bench")
     nb = s0["num_blocks"][0] if s0 else 0
     dl = s0["dense_lens"][0] if s0 else 0
+    # actual residual occupancy (top-by-error count per block; layer 0, ×L)
+    res_n0 = s0["comp_res_n"][0][:nb] if s0 else []
+    res_tokens_used = int(sum(res_n0))
     store_alloc = L * (M * per_block + dense_alloc)
-    store_used = L * (nb * per_block + dl * Hkv * d * 2 * 2)
-    dense_full = L * seq_len * Hkv * d * 2 * 2
+    store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
+    dense_full = L * seq_len * kv_tok
     return {
         "per_block_bytes": per_block,
+        "lowrank_block_bytes": lowrank_block,
+        "residual_block_bytes_max": residual_block_max,
         "store_alloc_bytes": store_alloc,
         "store_used_bytes": store_used,
         "dense_full_bytes": dense_full,
         "num_blocks_layer0": int(nb),
         "dense_len_layer0": int(dl),
+        "res_tokens_layer0": res_tokens_used,
         "ratio_used_vs_dense": (dense_full / store_used) if store_used else None,
     }
 

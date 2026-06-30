@@ -7,17 +7,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 TBL = os.path.join(HERE, "..", "tables")
 os.makedirs(TBL, exist_ok=True)
-A_JSON = os.path.join(REPO, "paper/generated/active_modes_sweep.json")
+A_JSON = os.path.join(REPO, "paper/generated/active_modes_sweep_v2.json")
+A_JSON_64K = os.path.join(REPO, "paper/generated/active_modes_sweep_64k.json")
 D_JSON = os.path.join(REPO, "benchmarks/results/PAPER_dense_sweep.json")
 CTXS = [4096, 8192, 16384, 32768, 65536]
 
 
 def load_active():
-    if not os.path.exists(A_JSON): return {}
     out = {"compressed": {}, "exact": {}}
-    for r in json.load(open(A_JSON))["results"]:
-        if "decode_tps" in r:
-            out.setdefault(r["mode"], {})[r["ctx"]] = r
+    for path in (A_JSON, A_JSON_64K):
+        if not os.path.exists(path): continue
+        for r in json.load(open(path))["results"]:
+            if "decode_tps" in r:
+                out.setdefault(r["mode"], {})[r["ctx"]] = r
     return out
 
 
@@ -80,18 +82,30 @@ def t_main(A, D):
 
 
 def t_config():
-    """T1 + T2 are static (from code) — emitted by the paper directly; here we emit
-    the derived per-block budget so it stays in sync if dims change."""
-    Hkv, d, B, r, M, Dmax, L = 2, 128, 256, 16, 256, 768, 28
-    per_block = (B-1)*r*2 + 2*Hkv*r*d*2 + 2*Hkv*d*2 + 8
-    dense_block = B*Hkv*d*2*2
+    """T2 per-block budget — derived from code dims so it stays in sync. Includes
+    BOTH the low-rank summary AND the exact residual + min/max buffers (which
+    dominate the block and MUST be counted; omitting them overstates the ratio
+    ~3.5x). Verified against the live MLXKVBlockManager: 92,136 B/block -> 2.845x."""
+    Hkv, d, B, r, M, Dmax, L, R = 2, 128, 256, 16, 256, 768, 28, 64
+    fp16 = 2
+    kv_tok = Hkv * d * fp16 * 2                 # one exact K+V token (all kv-heads)
+    U   = (B-1)*r*fp16
+    VKV = 2*Hkv*r*d*fp16
+    anc = 2*Hkv*d*fp16
+    mm  = 2*Hkv*d*fp16
+    res = R*kv_tok
+    lowrank = U + VKV + anc + mm + 8
+    per_block = lowrank + res
+    dense_block = B*kv_tok
     lines = [
         r"\begin{tabular}{lrr}", r"\toprule",
         r"Component & DiffKV block & Dense block \\", r"\midrule",
-        r"U coefficients $[255,16]$ fp16 & %d B & -- \\" % ((B-1)*r*2),
-        r"$V_K,V_V\ [2,16,128]$ fp16 & %d B & -- \\" % (2*Hkv*r*d*2),
-        r"anchors $a_k,a_v\ [2,128]$ fp16 & %d B & -- \\" % (2*Hkv*d*2),
+        r"$U$ coefficients $[255,16]$ fp16 & %d B & -- \\" % U,
+        r"$V_K,V_V\ [2,16,128]$ fp16 & %d B & -- \\" % VKV,
+        r"anchors $a_k,a_v\ [2,128]$ fp16 & %d B & -- \\" % anc,
+        r"key min/max $[2,128]$ fp16 (router) & %d B & -- \\" % mm,
         r"scale + seq\_len & 8 B & -- \\",
+        r"\textbf{residual $K,V\ [64,2,128]$ fp16} & \textbf{%d B} & -- \\" % res,
         r"full $K,V\ [256,2,128]$ fp16 & -- & %d B \\" % dense_block,
         r"\midrule",
         r"\textbf{Per 256-token block} & \textbf{%s KiB} & \textbf{%s KiB} \\" % (
@@ -134,9 +148,38 @@ def t_detail(A, D):
     write("t5_detail.tex", "\n".join(L))
 
 
+def t_residual():
+    """T4: residual-budget accuracy/memory trade-off (E2). Per-block bytes computed from
+    code dims (low-rank 26,600 B + R*1024 B residuals)."""
+    path = os.path.join(REPO, "paper/generated/residual_sweep.json")
+    if not os.path.exists(path):
+        print("skip t4: no residual_sweep.json"); return
+    rows = [r for r in json.load(open(path))["results"] if r.get("kv")]
+    if not rows:
+        print("skip t4: empty"); return
+    ctx = sorted({r["ctx"] for r in rows})[-1]
+    rs = sorted([r for r in rows if r["ctx"] == ctx], key=lambda r: r["max_residual"])
+    L = [r"\begin{tabular}{rccrrr}", r"\toprule",
+         r"$R$ & Needle & Decode tok/s & Store (GB) & Ratio vs dense & Per-block (KiB) \\",
+         r"\midrule"]
+    for r in rs:
+        R = r["max_residual"]
+        per_block = (26600 + R * 1024) / 1024.0
+        nd = r"\cmark" if r.get("needle_found") else r"\xmark"
+        k = r["kv"]
+        L.append("%d & %s & %s & %s & %s & %.1f \\\\" % (
+            R, nd, f(r.get("decode_tps")),
+            f(k["store_used_bytes"]/1e9, "%.3f"),
+            f(k["ratio_used_vs_dense"], "%.2f") + r"$\times$",
+            per_block))
+    L += [r"\bottomrule", r"\end{tabular}"]
+    write("t4_residual.tex", "\n".join(L))
+
+
 if __name__ == "__main__":
     A, D = load_active(), load_dense()
     t_main(A, D)
     t_config()
     t_detail(A, D)
+    t_residual()
     print("tables done")

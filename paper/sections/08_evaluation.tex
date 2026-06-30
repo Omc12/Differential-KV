@@ -4,39 +4,44 @@
 \subsection{Setup}
 We evaluate on Qwen2.5-1.5B-Instruct (MLX int4) on an Apple~M3 with $8.59$\,GB unified memory
 (full details in Appendix~\ref{app:repro}). The probe is needle-in-a-haystack
-(NIAH)~\cite{kamradt2023niah}: a planted passcode (\texttt{OMEGA-7741-DELTA}) is buried in a
-filler document and the same prompt, built once per context length from the Qwen2.5 tokenizer, is
-fed verbatim to every configuration at $4$k, $8$k, $16$k, $32$k, and $64$k tokens. Decode is
-fixed-length greedy ($128$ tokens, EOS ignored) so throughput is directly comparable. We compare
-three configurations on identical prompts:
+(NIAH)~\cite{kamradt2023niah}: a planted passcode (\texttt{OMEGA-7741-DELTA}) is buried at $\approx$mid-depth
+in a filler document and the same prompt, built once per context length from the Qwen2.5
+tokenizer, is fed verbatim to every configuration at $4$k, $8$k, $16$k, $32$k, and $64$k tokens.
+Decode is fixed-length greedy ($128$ tokens, EOS ignored) so throughput is directly comparable.
+We compare three configurations on identical prompts:
 \begin{itemize}[leftmargin=1.4em,itemsep=1pt]
-  \item \textbf{\diffkv{} compressed} --- the runtime's real sparse decode
+  \item \textbf{\diffkv{} compressed} --- the runtime's real sparse decode forced on
   (\texttt{DIFFKV\_COMPRESSED\_DECODE=1}); the primary result.
   \item \textbf{Exact ablation} --- the same \diffkv{} prefill and store, but decode computed over
-  the retained native cache (\texttt{=0}); an upper bound on what perfect-fidelity retrieval from
-  this store would achieve.
+  the retained native cache (\texttt{=0}); an upper bound on throughput for this store.
   \item \textbf{Dense} --- stock \texttt{mlx\_lm} with a full KV cache (same int4 weights, same
   engine); the no-compression control.
 \end{itemize}
-Memory is reported as the MLX allocator peak (global, prefill-dominated) and a decode-phase peak
-(counter reset at the prefill$\to$decode boundary), plus the analytic KV-state footprint of the
-store versus a dense full cache. We answer five questions.
+Forcing the two decode modes isolates the kernel; the shipped default is the adaptive policy of
+\S\ref{sec:autopolicy}, which selects exact decode below $16$k and the compressed kernel at or
+above it. Memory is reported as the MLX allocator peak (global, prefill-dominated) and a
+decode-phase peak (counter reset at the prefill$\to$decode boundary), plus the analytic KV-state
+footprint of the store versus a dense full cache. The randomized SVD is run from a fixed seed, so
+the compressed path is reproducible to the bit. We answer six questions.
 
 \subsection{E1 --- KV-state footprint (the memory result)}
-Figure~\ref{fig:g1} and Table~\ref{tab:main} show the headline. \diffkv{}'s occupied KV state grows
-from $0.028$\,GB at $4$k to $0.20$\,GB at $64$k, while the dense full cache for the same sequences
-grows from $0.117$\,GB to $1.88$\,GB---a gap that widens from $4.1\times$ to $9.3\times$ as context
-grows, approaching the per-block $10.25\times$ bound (Table~\ref{tab:budget}) as a larger fraction
-of the sequence leaves the recency window. The compressed pool is moreover \emph{pre-allocated and
-bounded}: its capacity is fixed at $\approx\!0.2$\,GB irrespective of context, so the store cannot
-grow past it. This is the property the rest of the system exploits.
+Figure~\ref{fig:g1} and Table~\ref{tab:main} show the headline. \diffkv{}'s occupied KV state is
+several times smaller than the dense full cache for the same sequence, and the gap \emph{widens}
+with context---from $\approx\!2.2\times$ at $4$k toward the per-block $2.85\times$ bound
+(Table~\ref{tab:budget}) as a larger fraction of the sequence leaves the recency window and is
+represented by the compressed pool. We report this ratio honestly: it counts the exact residual
+tokens (\S\ref{sec:residuals}), which dominate the block and which an earlier accounting omitted,
+overstating the reduction as $\sim\!10\times$. The store is moreover \emph{pre-allocated and
+bounded}: its capacity is fixed at $\approx\!0.68$\,GB across $28$ layers irrespective of context,
+so the store cannot grow past it. This is the property the rest of the system exploits.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.92\linewidth]{figures/g1_kv_footprint.png}
-  \caption{KV-state footprint vs.\ context (all $28$ layers). \diffkv{}'s store is bounded and far
-  below the linearly growing dense cache; the gap widens toward the per-block $10\times$ bound as
-  more tokens are compressed. Analytic bytes from the live store; no estimation.}
+  \caption{KV-state footprint vs.\ context (all $28$ layers). \diffkv{}'s store is bounded and
+  below the linearly growing dense cache; the gap widens toward the per-block $2.85\times$ bound as
+  more tokens are compressed. Analytic bytes from the live store, residuals included; no
+  estimation.}
   \label{fig:g1}
 \end{figure}
 
@@ -44,8 +49,7 @@ grow past it. This is the property the rest of the system exploits.
 \centering
 \caption{Main results: \diffkv{} compressed decode (primary), exact decode (upper-bound ablation),
 and the dense baseline. All measured on the same Apple~M3; greedy $128$-token decode. The dense
-baseline was measured to $32$k; its $64$k full cache ($1.88$\,GB) plus weights and prefill
-activations exceeds the safe budget on this device.}
+baseline is run to the point of memory exhaustion on this device.}
 \label{tab:main}
 \small
 \input{tables/t3_main_results}
@@ -53,61 +57,96 @@ activations exceeds the safe budget on this device.}
 
 \subsection{E2 --- Context reach}
 \diffkv{} compressed processes the full $64$k prompt ($65{,}615$ tokens) within budget: its store
-caps at $\approx\!0.2$\,GB and the decode-phase peak is $2.97$\,GB
-(Table~\ref{tab:detail}), well under the device limit. The bounded pool ($M\bs=65{,}536$ compressed
-tokens plus a $768$ window) is sized precisely to reach this context. The dense baseline, whose
-cache alone is $1.88$\,GB at $64$k on top of weights and the prefill peak, is the configuration that
-runs out of headroom first---the qualitative capability gap that motivates the design.
+caps at $\approx\!0.68$\,GB and the decode-phase peak stays within the device limit
+(Table~\ref{tab:detail}). The bounded pool ($M\bs{=}65{,}536$ compressed tokens plus a $768$
+window) is sized precisely to reach this context. The dense baseline exhausts memory earlier---its
+full cache grows linearly and, together with weights and the prefill peak, crosses the device's
+safe budget---so the largest context it completes is below \diffkv{}'s. This is the qualitative
+capability gap that motivates the design: \emph{the compressed runtime processes contexts the dense
+baseline cannot fit on the same hardware.}
 
 \subsection{E3 --- Prefill time}
 Prefill is exact in all configurations and scales near-linearly with context
-(Fig.~\ref{fig:g4}); \diffkv{} adds the streaming SVD on top of the same attention, so its prefill
-is the slowest of the MLX configurations ($8.1$\,s at $4$k to $313$\,s at $64$k). Prefill is the
-dominant wall-time cost at large context and the main target for future work
-(\S\ref{sec:limitations}).
+(Fig.~\ref{fig:g4}); \diffkv{} adds the streaming SVD and residual extraction on top of the same
+attention, so its prefill is the slowest of the MLX configurations. Prefill is the dominant
+wall-time cost at large context and the main target for future work (\S\ref{sec:limitations}); the
+SVD is a CPU NumPy routine, and on this unified-memory device its cost is compute, not data
+movement.
 
 \subsection{E4 --- Decode throughput}
 Figure~\ref{fig:g3} and Table~\ref{tab:main} show the throughput trade-off. \diffkv{} compressed
-decode is roughly flat at $\approx\!8$\,tok/s ($8.0/8.1/8.2/8.0/6.8$ across $4$k--$64$k), consistent
-with per-token cost that is linear in the number of blocks with a small rank-weighted constant
-(\S\ref{sec:decode}). The exact ablation on the same store decodes far faster
-($42.8/40.3/35.2/24.2/17.6$\,tok/s across $4$k--$64$k) and the dense baseline faster still
-($66.9/61.7/47.3/30.1$\,tok/s, $4$k--$32$k). Because the ablation differs from compressed \emph{only} in the decode
-kernel, the gap is attributable to the compressed-kernel dispatch, not to the compression---a
-hand-written fused kernel is the path to closing it (\S\ref{sec:limitations}).
+decode is several times slower than dense decode and roughly flat across context, consistent with
+a per-token cost that is dominated by a context-independent top-$K$ kernel plus a router linear in
+context with a small constant (\S\ref{sec:decode}). The exact ablation on the same store decodes
+far faster, and the dense baseline faster still. Because the ablation differs from compressed
+\emph{only} in the decode kernel, the gap is attributable to the compressed-kernel dispatch---many
+small tensor ops in one compiled graph---not to the compression or the routing; a hand-written
+fused kernel is the path to closing it (\S\ref{sec:limitations}). The adaptive policy
+(\S\ref{sec:autopolicy}) exploits exactly this: below $16$k it uses the fast exact path (where the
+cache is small and safe) and only pays the compressed-kernel cost once memory is the binding
+constraint, so end-to-end latency never regresses for ordinary-length requests.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.92\linewidth]{figures/g3_decode_tps.png}
-  \caption{Decode throughput vs.\ context. Compressed decode is flat and slow; the exact ablation
-  recovers dense-like throughput, localizing the gap to the kernel. A CUDA/Triton fused-decode
-  series can be added here without restructuring (future work).}
+  \caption{Decode throughput vs.\ context. Compressed decode is flat and slower; the exact ablation
+  recovers dense-like throughput, localizing the gap to the kernel dispatch. A CUDA/Triton
+  fused-decode series can be added here without restructuring (future work).}
   \label{fig:g3}
 \end{figure}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.92\linewidth]{figures/g4_prefill.png}
-  \caption{Prefill time vs.\ context (log scale). Exact attention plus streaming SVD; near-linear
-  growth, slowest among the MLX configurations.}
+  \caption{Prefill time vs.\ context (log scale). Exact attention plus streaming SVD and residual
+  extraction; near-linear growth, slowest among the MLX configurations.}
   \label{fig:g4}
 \end{figure}
 
 \subsection{E5 --- Needle correctness}
-This is where the compressed path's current limitation is sharpest. \diffkv{} compressed
-\emph{fails} to reproduce the buried passcode at every context ($4$k--$64$k), while the exact
-ablation on the identical store recovers it at every measured context (Table~\ref{tab:main}). The
-ablation isolates the cause to rank-$16$ truncation of needle-bearing blocks rather than to the
-runtime: once the needle's block is compressed, the low-rank reconstruction does not retain enough
-of the single-token detail for greedy decoding to emit the exact string, and the unseeded
-randomized SVD makes the (wrong) output non-deterministic. We report this as the central open
-problem (\S\ref{sec:fidelity}, \S\ref{sec:limitations}), not as a footnote.
+The residual mechanism is what makes the compressed path \emph{correct}. \diffkv{} compressed
+recovers the buried passcode \emph{exactly at every tested context} ($4$k--$64$k,
+Table~\ref{tab:main}), matching the exact ablation and the dense baseline. This is the qualitative
+change from a pure low-rank scheme: a rank-$16$ factorization of a needle-bearing block does not
+retain the single-token detail---the needle's delta is a low-energy outlier the SVD truncates---but
+that token is captured as one of the block's highest-error residuals (\S\ref{sec:residuals}) and
+attended exactly at decode (\S\ref{sec:decode}). The earlier, residual-free version of this runtime
+failed this probe at every context; the result here is with residuals enabled at the default budget
+$\maxres{=}64$ and a fixed SVD seed, and is reproducible run to run.
+
+\subsection{E6 --- The residual-budget trade-off}
+Residuals are the lever that trades recall against memory. Figure~\ref{fig:g6} and
+Table~\ref{tab:residual} sweep the budget $\maxres$ at a fixed long context. With no residuals the
+block is pure low-rank and the buried needle is lost; as $\maxres$ grows the needle's tokens are
+captured and recall turns on, while the occupied store grows linearly in $\maxres$ and the
+compression ratio falls. The default $\maxres{=}64$ sits at the exact-recall end of this curve;
+a deployment that tolerates approximate recall can trade down for a smaller store. This curve is
+the central design characterization of \diffkv{}: it makes explicit that the runtime's
+\emph{exact} recall is bought with memory, and quantifies the price.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{figures/g6_residual_tradeoff.png}
+  \caption{Recall vs.\ residual budget vs.\ memory at a fixed long context. Green/red markers are
+  needle recovered/missed; the store grows with $\maxres$ while the compression ratio falls. Exact
+  recall is bought with memory.}
+  \label{fig:g6}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Residual-budget trade-off (E6): recall, decode throughput, and store footprint as the
+exact-residual budget $\maxres$ varies, at a fixed long context.}
+\label{tab:residual}
+\small
+\input{tables/t4_residual}
+\end{table}
 
 \subsection{Allocator peak and the combined view}
 Figure~\ref{fig:g2} reports the MLX allocator peak, which is nearly identical across all three
 configurations at matched context because it is set during prefill; compression lowers the
-\emph{decode-phase} resident memory, not this peak (\S\ref{sec:analysis}). Figure~\ref{fig:g5}
-combines footprint, throughput, and prefill in one view.
+\emph{decode-phase} resident memory and enables context reach, not this peak
+(\S\ref{sec:analysis}). Figure~\ref{fig:g5} combines footprint, throughput, and prefill in one view.
 
 \begin{figure}[t]
   \centering

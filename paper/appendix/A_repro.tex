@@ -18,8 +18,11 @@ RoPE $\theta=10^6$.
 
 \paragraph{Configuration.}
 \texttt{rank=16}, \texttt{block\_size=256}, \texttt{recency\_window=512} (dense buffer $768$),
-\texttt{max\_blocks=256}, preset ``mid''. Decode mode is selected by
-\texttt{DIFFKV\_COMPRESSED\_DECODE} ($1$ = compressed, primary; $0$ = exact, ablation).
+\texttt{max\_blocks=256}, \texttt{max\_residual=64}, top-$K{=}16$ routing with the
+\texttt{residual} router, \texttt{DIFFKV\_SVD\_SEED=1234} (deterministic), preset ``mid''. The
+shipped decode policy is \texttt{DIFFKV\_COMPRESSED\_DECODE=auto} (compressed at/above
+\texttt{DIFFKV\_COMPRESSED\_MIN\_CTX}$=16$k, else exact); for the ablation it is forced to
+$1$ (compressed, primary) or $0$ (exact, upper bound).
 
 \paragraph{Protocol.}
 A needle-in-a-haystack chat prompt is built once per context length from the Qwen2.5 tokenizer
@@ -34,23 +37,32 @@ counter at the prefill$\to$decode boundary to isolate steady-state decode memory
 KV-state bytes are computed from the live store occupancy.
 
 \paragraph{Commands.}
+The full measured dataset is produced by one clean, sequential batch (run with nothing else
+competing for CPU: the per-block NumPy SVD during prefill is CPU-bound, and concurrent processes
+inflate prefill time):
 \begin{quote}\small\ttfamily
-\# instrumented active sweep (compressed + exact ablation)\\
+\# clean batch: decode-mode ablation (4k-32k) + 64k reach + residual sweep\\
+zsh paper/scripts/run\_paper\_measurements.sh\\[4pt]
+\# equivalently, the individual drivers it calls:\\
 diffkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
-\ \ --ctx 4096 8192 16384 32768 65536 --modes compressed exact \textbackslash\\
-\ \ --gen 128 --out paper/generated/active\_modes\_sweep.json\\[4pt]
+\ \ --ctx 4096 8192 16384 32768 --modes compressed exact --gen 128 \textbackslash\\
+\ \ --out paper/generated/active\_modes\_sweep\_v2.json\\
+diffkv\_venv/bin/python3 paper/scripts/measure\_residual\_sweep.py \textbackslash\\
+\ \ --ctx 16384 --residuals 0 8 16 32 64 --out paper/generated/residual\_sweep.json\\[4pt]
 \# dense full-KV baseline (same prompts, same memory metric)\\
 diffkv\_venv/bin/python3 benchmarks/run\_bench.py --engines dense \textbackslash\\
 \ \ --contexts 4096 8192 16384 32768 --gen 128 --ram-cap-gb 7.5\\[4pt]
-\# figures + tables from the measured JSON\\
+\# figures + tables from the measured JSON (no hand-typed numbers)\\
 diffkv\_venv/bin/python3 paper/scripts/make\_diagrams.py\\
 diffkv\_venv/bin/python3 paper/scripts/make\_graphs.py\\
 diffkv\_venv/bin/python3 paper/scripts/make\_tables.py
 \end{quote}
 
 \paragraph{Artifacts.}
-Measured JSON: \texttt{paper/generated/active\_modes\_sweep.json} (active, both modes) and
-\texttt{benchmarks/results/PAPER\_dense\_sweep.json} (dense). Figures are regenerated from these
-by the scripts above; tables are emitted to \texttt{paper/tables/}. The provenance and the
-decode-path conflict that motivated this measurement design are documented in
-\texttt{paper/notes/}.
+Measured JSON: \texttt{paper/generated/active\_modes\_sweep\_v2.json} (active ablation, both modes),
+\texttt{paper/generated/active\_modes\_sweep\_64k.json} (64k reach),
+\texttt{paper/generated/residual\_sweep.json} (residual-budget trade-off), and
+\texttt{benchmarks/results/PAPER\_dense\_sweep.json} (dense baseline). Figures are regenerated from
+these by the scripts above; tables are emitted to \texttt{paper/tables/}. The provenance, the
+decode-path attribution that motivated this measurement design, and the corrected
+compression-ratio accounting are documented in \texttt{paper/notes/}.

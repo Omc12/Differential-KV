@@ -15,14 +15,19 @@ $N$ & sequence length (tokens) \\
 $\bs$ & block size ($256$) \\
 $S=\bs-1$ & compressible tokens per block ($255$) \\
 $\rank$ & SVD target rank ($16$; adaptive in $[4,\rank]$) \\
+$\maxres$ & exact residual budget per block ($64$) \\
+$\topk$ & top-$K$ blocks routed at decode ($16$) \\
 $\dwin$ & dense recency window ($512$; buffer $\dwin{+}\bs=768$) \\
 $M$ & compressed-pool capacity ($256$ blocks) \\
 $\anchork,\anchorv$ & anchor key / value (token $0$ of a block) \\
 $U$ & per-token coefficients $\R^{S\times\rank}$ (shared K/V) \\
 $V_K,V_V$ & key / value bases $\R^{\Hkv\times\rank\times\dhead}$ \\
+$R_K,R_V$ & exact residual keys / values $\R^{\maxres\times\Hkv\times\dhead}$ \\
+$k^{\min},k^{\max}$ & per-block element-wise key min / max (router) \\
+$\rho_b$ & router relevance of block $b$ (Eq.~\ref{eq:router}) \\
 $s$ & SVD normalization scale (fp32) \\
 $q,\sigma$ & query, attention scale \\
-$\ell^{\text{sp}},\ell^{\text{dn}}$ & log-sum-exp of compressed / dense branch \\
+$\ell^{\text{sp}},\ell^{\text{dn}}$ & log-sum-exp of low-rank / exact branch \\
 \bottomrule
 \end{tabular}
 \end{center}

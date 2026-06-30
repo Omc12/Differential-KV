@@ -57,6 +57,22 @@ inline SoftmaxState merge_softmax_states(SoftmaxState a, SoftmaxState b) {
 //   ak_rot_shared[128]    =  512 B
 //   dense_weights[2048]    = 8192 B   dense window weights (matches native_maxd=2048)
 //   Total                 ≈ 26.4 KB
+struct AttentionParams {
+    int32_t n_q_heads;
+    int32_t n_kv_heads;
+    int32_t rank;
+    int32_t S_max;
+    int32_t K;
+    int32_t D;
+    float scale;
+    int32_t has_rope;
+    float rope_freq_base;
+    int32_t T_dense;
+    int32_t approximate_attn;
+    int32_t S_split;
+    int32_t max_residual;
+};
+
 kernel void decode_attention_metal_kernel(
     // ── Sparse pool buffers (unchanged from original) ─────────────────────────
     device const float*   Q             [[buffer(0)]],   // [H_q, D] F32
@@ -70,32 +86,20 @@ kernel void decode_attention_metal_kernel(
     device const int32_t* slot_indices  [[buffer(8)]],   // [K] int32
     device float*         out_buf       [[buffer(9)]],   // [H_q, D] f32 combined output
     device float*         lse_buf       [[buffer(10)]],  // [H_q] f32 log-sum-exp
-    device const int32_t& n_q_heads     [[buffer(11)]],
-    device const int32_t& n_kv_heads    [[buffer(12)]],
-    device const int32_t& rank          [[buffer(13)]],
-    device const int32_t& S_max         [[buffer(14)]],
-    device const int32_t& K             [[buffer(15)]],
-    device const int32_t& D             [[buffer(16)]],
-    device const float&   scale         [[buffer(17)]],
-    device const half*    scales        [[buffer(18)]],  // [N_pool] f16 block scales
-    device const int32_t& has_rope      [[buffer(19)]],
-    device const float&   rope_freq_base[[buffer(20)]],
-    device const int32_t* anchor_positions[[buffer(21)]],// [N_pool] sequence positions
+    device const AttentionParams& params [[buffer(11)]],
+    device const half*    scales        [[buffer(12)]],  // [N_pool] f16 block scales
+    device const int32_t* anchor_positions[[buffer(13)]],// [N_pool] sequence positions
     // ── Dense window buffers (NEW) ─────────────────────────────────────────────
-    device const float*   dense_K       [[buffer(22)]],  // [T_dense, n_kv, D] f32
-    device const float*   dense_V       [[buffer(23)]],  // [T_dense, n_kv, D] f32
-    device const int32_t* dense_positions[[buffer(24)]], // [T_dense] sequence positions
-    device const int32_t& T_dense       [[buffer(25)]],  // #dense window tokens
-    device const int32_t& approximate_attn [[buffer(26)]],
-    device float*         split_out     [[buffer(27)]],
-    device float*         split_m       [[buffer(28)]],
-    device float*         split_d       [[buffer(29)]],
-    device const int32_t& S_split       [[buffer(30)]],
-    device const int32_t* res_K_pos     [[buffer(31)]],
-    device const int32_t* res_V_pos     [[buffer(32)]],
-    device const half*    res_K_val     [[buffer(33)]],
-    device const half*    res_V_val     [[buffer(34)]],
-    device const int32_t& max_residual  [[buffer(35)]],
+    device const float*   dense_K       [[buffer(14)]],  // [T_dense, n_kv, D] f32
+    device const float*   dense_V       [[buffer(15)]],  // [T_dense, n_kv, D] f32
+    device const int32_t* dense_positions[[buffer(16)]], // [T_dense] sequence positions
+    device float*         split_out     [[buffer(17)]],
+    device float*         split_m       [[buffer(18)]],
+    device float*         split_d       [[buffer(19)]],
+    device const int32_t* res_K_pos     [[buffer(20)]],
+    device const int32_t* res_V_pos     [[buffer(21)]],
+    device const half*    res_K_val     [[buffer(22)]],
+    device const half*    res_V_val     [[buffer(23)]],
 
     uint3 tg_idx   [[threadgroup_position_in_grid]], // tg_idx.x is head, tg_idx.y is split index
     uint3 tid_vec  [[thread_position_in_threadgroup]],
@@ -103,6 +107,20 @@ kernel void decode_attention_metal_kernel(
 ) {
     const uint tid = tid_vec.x;
     const uint t_per_tg = t_per_tg_vec.x;
+    const int32_t n_q_heads = params.n_q_heads;
+    const int32_t n_kv_heads = params.n_kv_heads;
+    const int32_t rank = params.rank;
+    const int32_t S_max = params.S_max;
+    const int32_t K = params.K;
+    const int32_t D = params.D;
+    const float scale = params.scale;
+    const int32_t has_rope = params.has_rope;
+    const float rope_freq_base = params.rope_freq_base;
+    const int32_t T_dense = params.T_dense;
+    const int32_t approximate_attn = params.approximate_attn;
+    const int32_t S_split = params.S_split;
+    const int32_t max_residual = params.max_residual;
+
     if (tg_idx.x >= (uint)n_q_heads) return;
 
     const int g        = n_q_heads / n_kv_heads;
@@ -120,7 +138,7 @@ kernel void decode_attention_metal_kernel(
     threadgroup float scores_cached[64 * 32]; // Unified token scores cache (≤ 64 blocks × max 32 tokens/block)
     threadgroup float ak_rot_shared[128];     // Rotated anchor key [D]
     threadgroup float dense_weights[1024];    // Dense window weights — chunked 1024 at a time, so 1024 suffices for any T_dense
-    threadgroup float w_shared[64];           // Softmax weights for residual value accumulation
+    threadgroup float w_shared[256];           // Softmax weights for residual value accumulation
 
     // 1. Cache the query into shared memory
     for (int d = (int)tid; d < D; d += (int)t_per_tg) {

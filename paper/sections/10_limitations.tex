@@ -1,40 +1,45 @@
 \section{Limitations and Future Work}
 \label{sec:limitations}
 
-\paragraph{Single-token recall fidelity (primary).}
-As \S\ref{sec:fidelity} shows, rank-$16$ compression does not preserve enough of a single
-buried token for verbatim recall after it leaves the recency window. The most direct remedies,
-all present in spirit elsewhere in the codebase, are: (i) a higher or per-layer-adaptive rank;
-(ii) an \emph{exact-token residual} path that stores a small fraction of high-error tokens
-losslessly alongside the low-rank term; and (iii) keeping known-important spans in the dense
-window. Quantifying the rank/fidelity and residual-budget/fidelity trade-offs is the most
-important next experiment.
+\paragraph{Decode throughput (primary).}
+The fused kernel is expressed as many small ops in a compiled graph and does not yet match native
+fused attention (\S\ref{sec:analysis}); the exact-decode ablation localizes the gap to the kernel
+dispatch, not the algorithm. A hand-written fused decode---a custom Metal op, or a CUDA/Triton
+kernel on NVIDIA hardware---is the natural path to closing it. We have deliberately structured the
+throughput figures and the main results table so that a future \textbf{CUDA/Triton fused-decode}
+measurement can be added as one more series without restructuring the evaluation; no such number is
+reported or estimated here, and the placeholder is labelled as future work. Until then, the
+adaptive policy keeps the cost off the short-context path entirely.
 
-\paragraph{Determinism.}
-The randomized range finder is unseeded, so the compressed path is run-to-run
-non-deterministic. A fixed seed (or an exact small-block SVD) should be adopted before any
-fidelity study so results are reproducible to the bit.
+\paragraph{Compression ratio and the residual memory ceiling.}
+Exact recall is bought with memory: at the default budget a quarter of every block is stored
+verbatim, so the per-block reduction is $\approx\!2.85\times$, not the order of magnitude a pure
+low-rank scheme suggests (\S\ref{sec:compression}). The residuals also set a scaling ceiling---at a
+million tokens the residual K/V alone would dominate the pool---so very long contexts need either a
+smaller budget (trading recall, per E6) or a two-stage router that gathers residuals only for
+selected blocks (which the runtime already does at decode, but the store still holds them). A
+budget that adapts to per-block content, rather than a fixed $\maxres$, is the natural refinement.
 
-\paragraph{Decode throughput.}
-The fused kernel is expressed as many small ops in a compiled graph and does not yet match
-native fused attention (\S\ref{sec:analysis}). A hand-written fused decode---a custom Metal op,
-or a CUDA/Triton kernel on NVIDIA hardware---is the natural path to closing the gap. We have
-deliberately structured the throughput figures and the main results table so that a future
-\textbf{CUDA/Triton fused-decode} measurement can be added as one more series without
-restructuring the evaluation; no such number is reported or estimated here, and the placeholder
-is labelled as future work.
+\paragraph{Router cost.}
+The default residual-key router scores every block's anchor and top residual keys each step, an
+$O(nR\dhead)$ cost linear in context. It is cheap relative to the kernel at the scales we test, but
+at extreme context a cheap pre-filter feeding the exact rerank would be needed---taking care that
+the pre-filter cannot drop the needle's block, the failure mode that motivated the exact router in
+the first place.
+
+\paragraph{Prefill cost and peak.}
+Prefill remains exact and therefore $O(N)$ in attention, with the per-block SVD and residual
+extraction added on top, making it the slowest phase and the dominant wall-time cost at large
+context. The global memory peak is also set during prefill (\S\ref{sec:analysis}); \diffkv{} does
+not reduce it. Compressed or sparse prefill is a known direction (prototyped in the repository) but
+is out of scope here.
 
 \paragraph{Evaluation breadth.}
 We report one model (Qwen2.5-1.5B int4), one device (Apple~M3, $8.6$\,GB), and one probe
-(needle-in-a-haystack) with greedy decoding. Broader claims require additional models and sizes,
-perplexity and downstream-quality metrics beyond exact-string recall, and batched/multi-session
-throughput. The serving stack supports batching and multi-session residency; we did not exercise
-them here.
-
-\paragraph{Prefill cost and peak.}
-Prefill remains exact and therefore $O(N)$ in attention, and the global memory peak is set during
-prefill (\S\ref{sec:analysis}); \diffkv{} does not reduce that peak. Compressed or sparse prefill
-is a known direction (prototyped in the repository) but is out of scope here.
+(needle-in-a-haystack) with greedy decoding. Exact-string recall is a sharp but narrow correctness
+signal; broader claims require additional models and sizes, perplexity and downstream-quality
+metrics, multi-needle and varied-depth probes, and batched/multi-session throughput. The serving
+stack supports batching and multi-session residency; we did not exercise them here.
 
 \paragraph{The grounding module.}
 The semantic-retrieval/factual-binding layer is inactive in the benchmarked runtime
@@ -42,6 +47,6 @@ The semantic-retrieval/factual-binding layer is inactive in the benchmarked runt
 is an open, separately evaluable question.
 
 \paragraph{Portability.}
-The runtime is specialized to MLX and to the Qwen2 attention module it patches. The portable
-PyTorch/Triton backend in the repository targets the same design but is under active development
-and is not evaluated here.
+The runtime is specialized to MLX and to the Qwen2 attention module it patches. A portable
+PyTorch/Triton backend and a C++/GGML reimplementation target the same design in the repository but
+are under active development and are not evaluated here.

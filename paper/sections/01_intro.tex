@@ -18,22 +18,28 @@ window) bounds the cache but discards information that a later query may need.
 \emph{Low-rank latent} caches change the model architecture and require retraining. We pursue
 a different point in the design space, motivated directly by the structure of the cache: KV
 vectors within a local block are highly correlated, so each block is well approximated by a
-single representative token plus a low-rank correction. This is the central idea of
-\diffkv{}: store an \emph{anchor} and a \emph{differential} low-rank term per block, and
-never materialize the dense cache again---not even at attention time.
+single representative token plus a low-rank correction---\emph{except} for a few distinctive
+tokens whose detail a low-rank model discards but a later query may need verbatim. This is the
+central idea of \diffkv{}: store an \emph{anchor}, a \emph{differential} low-rank term, and a
+small set of \emph{exact residual tokens} per block, and never materialize the dense cache
+again---not even at attention time. The low-rank term gives the bounded memory; the residuals
+give back the exact recall that a pure low-rank scheme loses.
 
 \paragraph{What \diffkv{} is.}
 \diffkv{} is a runtime, not a model change. It monkey-patches the attention of a stock
 quantized model and routes the two phases of inference differently. During \emph{prefill},
 it runs exact attention while streaming the produced KV into a compressed store: every
-$256$-token block is reduced to an anchor token plus a rank-$16$ joint-SVD factorization of
-the per-token deltas (\S\ref{sec:compression}). During \emph{decode}, a single fused,
-\texttt{mx.compile}-d kernel (\S\ref{sec:decode}) scores the incoming query against all
-compressed blocks \emph{in low-rank coordinates}---projecting the query through each block's
-$r$-dimensional basis rather than reconstructing $B{\times}d$ keys---and against a small
-uncompressed recency window, then merges the two with a flash-style log-sum-exp. The
-compressed pool is pre-allocated and fixed in size, so the KV state is bounded regardless of
-how long the context grows (\S\ref{sec:runtime}).
+$256$-token block is reduced to an anchor token, a rank-$16$ joint-SVD factorization of the
+per-token deltas, and the $64$ highest-reconstruction-error tokens kept exactly as residuals
+(\S\ref{sec:compression}). During \emph{decode}, a single fused, \texttt{mx.compile}-d kernel
+(\S\ref{sec:decode}) routes the query to the most relevant blocks by an exact residual-key
+score, evaluates those blocks \emph{in low-rank coordinates}---projecting the query through each
+block's $r$-dimensional basis rather than reconstructing $B{\times}d$ keys---attends their exact
+residuals alongside a small uncompressed recency window, and merges the low-rank and exact
+branches with a flash-style log-sum-exp. The compressed pool is pre-allocated and fixed in size,
+so the KV state is bounded regardless of how long the context grows (\S\ref{sec:runtime}). An
+adaptive policy decodes exactly at short context and engages the compressed kernel only when the
+cache is large enough to be the binding cost.
 
 \paragraph{What we measure, and how honestly.}
 A central methodological commitment of this report is to attribute every number to the code
@@ -49,20 +55,22 @@ allocator peak alongside it.
 
 \paragraph{Contributions.}
 \begin{enumerate}[leftmargin=1.4em,itemsep=2pt]
-  \item \textbf{A differential block representation for KV} (anchor + rank-$r$ joint-SVD
-  delta over normalized per-token residuals) that reduces KV state by $\approx\!10\times$
-  per block at fp16, with a closed-form storage budget (\S\ref{sec:compression}).
+  \item \textbf{A differential-plus-residual block representation for KV} (anchor + rank-$r$
+  joint-SVD delta over normalized per-token residuals + the top-error tokens kept exact) that
+  reduces KV state by $\approx\!2.85\times$ per block at fp16 \emph{while preserving verbatim
+  recall of distinctive tokens}, with a closed-form storage budget (\S\ref{sec:compression}).
   \item \textbf{A bounded-memory runtime} that streams compression during a chunked,
   numerically exact prefill, releases the prefill activations at the prefill$\to$decode
-  boundary, and serves decode entirely from a fixed-size compressed pool plus a recency
-  window (\S\ref{sec:runtime}).
-  \item \textbf{A fused low-rank decode-attention kernel} that computes attention scores and
-  outputs from the compressed factors without decompression, and merges the compressed and
-  dense branches stably (\S\ref{sec:decode}).
+  boundary, serves decode entirely from a fixed-size compressed pool plus a recency window, and
+  adapts the decode path to context length so short requests never regress (\S\ref{sec:runtime}).
+  \item \textbf{A fused, routed decode-attention kernel} that selects the relevant blocks by an
+  exact residual-key score, computes their attention from the compressed factors without
+  decompression, attends the exact residuals and recency window, and merges the two branches
+  stably---so decode cost scales with the selection size, not context (\S\ref{sec:decode}).
   \item \textbf{An honest, reproducible evaluation} on an $8.6$\,GB Apple~M3 that separates
   the compressed path from an exact-decode upper bound, quantifies the memory/context-reach
-  benefit and the throughput and fidelity costs, and is structured so a CUDA/Triton
-  fused-decode path can be slotted in later (\S\ref{sec:eval}--\S\ref{sec:analysis}).
+  benefit, the throughput cost, and the residual-budget/recall trade-off, and is structured so a
+  CUDA/Triton fused-decode path can be slotted in later (\S\ref{sec:eval}--\S\ref{sec:analysis}).
 \end{enumerate}
 
 \noindent

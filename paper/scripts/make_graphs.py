@@ -22,19 +22,20 @@ FIG = os.path.join(HERE, "..", "figures")
 GEN = os.path.join(HERE, "..", "generated")
 os.makedirs(FIG, exist_ok=True)
 
-ACTIVE_JSON = os.path.join(REPO, "paper/generated/active_modes_sweep.json")
+ACTIVE_JSON = os.path.join(REPO, "paper/generated/active_modes_sweep_v2.json")
+ACTIVE_JSON_64K = os.path.join(REPO, "paper/generated/active_modes_sweep_64k.json")
 DENSE_JSON = os.path.join(REPO, "benchmarks/results/PAPER_dense_sweep.json")
 
 
 def load_active():
-    if not os.path.exists(ACTIVE_JSON):
-        return {}
-    d = json.load(open(ACTIVE_JSON))["results"]
     out = {"compressed": {}, "exact": {}}
-    for r in d:
-        if r.get("status") == "error" or "decode_tps" not in r:
+    for path in (ACTIVE_JSON, ACTIVE_JSON_64K):
+        if not os.path.exists(path):
             continue
-        out.setdefault(r["mode"], {})[r["ctx"]] = r
+        for r in json.load(open(path))["results"]:
+            if r.get("status") == "error" or "decode_tps" not in r:
+                continue
+            out.setdefault(r["mode"], {})[r["ctx"]] = r
     return out
 
 
@@ -89,23 +90,21 @@ def g1_kv_footprint(A, D):
 
 def g2_mx_peak(A, D):
     fig, ax = plt.subplots(figsize=(7.6, 5.2))
-    comp = A.get("compressed", {}); exa = A.get("exact", {})
-    xs1, y1 = series(comp, CTXS, "mx_decode_peak_gb")
-    xs2, y2 = series(exa, CTXS, "mx_peak_gb")
+    comp = A.get("compressed", {})
+    # Honest single-metric comparison: GLOBAL allocator peak for DiffKV vs dense (≈equal,
+    # both prefill-dominated) + DiffKV's DECODE-PHASE peak (what compression actually lowers).
+    xg, yg = series(comp, CTXS, "mx_peak_gb")
+    xd, yd = series(comp, CTXS, "mx_decode_peak_gb")
     dx = sorted(D); dy = [D[c]["mx_peak_gb"] for c in dx]
-    if xs1: ax.plot(xs1, y1, "-o", color=INK, label="DiffKV compressed (decode-phase peak)")
-    if xs2: ax.plot(xs2, y2, "-s", color=ACCENT, label="DiffKV exact decode (global peak)")
-    if dx: ax.plot(dx, dy, "-^", color=ACCENT2, label="Dense full KV (global peak)")
-    # dense OOM marker at 64k
-    if 65536 not in D and dx:
-        ax.scatter([65536], [max(dy)*1.02], marker="x", s=120, color=BAD, zorder=5)
-        ax.annotate("dense OOM", (65536, max(dy)*1.02), color=BAD, fontsize=9,
-                    ha="center", va="bottom")
+    if xg: ax.plot(xg, yg, "-o", color=INK, label="DiffKV — global allocator peak")
+    if dx: ax.plot(dx, dy, "-^", color=ACCENT2, label="Dense full KV — global allocator peak")
+    if xd: ax.plot(xd, yd, "--s", color=ACCENT, label="DiffKV — decode-phase peak")
     style.context_ticks(ax, CTXS)
     ax.set_ylabel("MLX allocator peak (GB)")
     ax.set_title("Allocator peak memory vs context")
     ax.legend(loc="upper left")
-    ax.text(0.98, 0.04, "peak is weights+prefill-dominated;\ncompression's win is reach, not peak",
+    ax.text(0.98, 0.04, "global peak is weights+prefill-dominated (≈equal);\n"
+            "compression lowers the decode-phase peak and enables reach",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=8.5, color=MUTED)
     style.finalize(fig, os.path.join(FIG, "g2_mx_peak.png"))
 
@@ -173,10 +172,63 @@ def g5_combined(A, D):
     style.finalize(fig, os.path.join(FIG, "g5_combined.png"))
 
 
+RESID_JSON = os.path.join(REPO, "paper/generated/residual_sweep.json")
+
+
+def g6_residual_tradeoff():
+    """G6: the central accuracy/memory trade-off — recall vs residual budget vs store size.
+    Recall turns on once the budget is large enough to capture the needle's tokens; the store
+    grows with the budget. Only measured cells plotted."""
+    if not os.path.exists(RESID_JSON):
+        print("skip g6: no residual_sweep.json yet"); return
+    rows = [r for r in json.load(open(RESID_JSON))["results"] if r.get("kv")]
+    if not rows:
+        print("skip g6: empty"); return
+    # group by context; plot the deepest context (most discriminating)
+    ctxs = sorted({r["ctx"] for r in rows})
+    ctx = ctxs[-1]
+    rs = sorted([r for r in rows if r["ctx"] == ctx], key=lambda r: r["max_residual"])
+    R = [r["max_residual"] for r in rs]
+    store = [r["kv"]["store_used_bytes"] / 1e9 for r in rs]
+    needle = [bool(r["needle_found"]) for r in rs]
+    ratio = [r["kv"]["ratio_used_vs_dense"] for r in rs]
+
+    fig, ax = plt.subplots(figsize=(7.6, 5.2))
+    ax.plot(R, store, "-o", color=INK, label="KV store, occupied (GB)", zorder=3)
+    # mark needle found/missed
+    for x, y, ok in zip(R, store, needle):
+        ax.scatter([x], [y], s=180, marker="o", zorder=4,
+                   facecolor=(GOOD if ok else BAD), edgecolor="white", linewidth=1.4)
+    ax.set_xlabel("Residual budget $R$ (exact tokens kept per 256-token block)")
+    ax.set_ylabel("KV store, occupied (GB, all 28 layers)")
+    ax.set_title(f"Recall vs residual budget vs memory ({ctx//1024}k context)")
+    ax.set_xticks(R)
+    # compression-ratio twin axis
+    ax2 = ax.twinx()
+    ax2.plot(R, ratio, "--", color=ACCENT, label="compression ratio vs dense", zorder=2)
+    ax2.set_ylabel("compression ratio (dense / store)", color=ACCENT)
+    ax2.tick_params(axis="y", colors=ACCENT)
+    ax2.grid(False)
+    # legend: needle markers
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([], [], marker="o", color=INK, label="KV store (GB)"),
+        Line2D([], [], marker="o", color=ACCENT, ls="--", label="ratio vs dense"),
+        Line2D([], [], marker="o", ls="", markerfacecolor=GOOD, markeredgecolor="white",
+               markersize=11, label="needle recovered"),
+        Line2D([], [], marker="o", ls="", markerfacecolor=BAD, markeredgecolor="white",
+               markersize=11, label="needle missed"),
+    ]
+    ax.legend(handles=handles, loc="upper left", fontsize=9)
+    ax.text(0.98, 0.04, "more exact residuals → recall, at the cost of memory",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=8.5, color=MUTED)
+    style.finalize(fig, os.path.join(FIG, "g6_residual_tradeoff.png"))
+
+
 if __name__ == "__main__":
     A = load_active(); D = load_dense()
     print("active modes:", {k: sorted(v) for k, v in A.items()})
     print("dense ctxs:", sorted(D))
     g1_kv_footprint(A, D); g2_mx_peak(A, D); g3_decode_tps(A, D)
-    g4_prefill(A, D); g5_combined(A, D)
+    g4_prefill(A, D); g5_combined(A, D); g6_residual_tradeoff()
     print("graphs done")

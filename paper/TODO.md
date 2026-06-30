@@ -1,27 +1,27 @@
 # Paper TODO
 
-## Done
-- [x] Repository audit (active = MLX runtime; SRL gated off in benchmarks).
-- [x] Architecture reconstruction from implementation (notes/architecture_reconstruction.md).
-- [x] Resolved measurement conflict: REPORT "active" = exact decode, not compressed. User
-      chose: honest full picture + mx_peak headline (notes/DECISIONS.md).
-- [x] Clean paired re-measurement: compressed + exact ablation (4k-64k), dense (4k-32k).
-- [x] Figures F1-F5 (architecture/dataflow) + G1-G5 (data) generators.
-- [x] Tables T2/T3/T5 generated from JSON.
-- [x] Technical report (main.tex) + conference (conference.tex), shared sources.
-- [x] Reproducibility appendix.
+## Done (2026-06-30 rebuild — corrected data + residual design)
+- [x] Re-audit against current code: residual mechanism + residual-key router + top-K routing +
+      adaptive decode policy (auto@16k) are now the defaults; SVD seeded (deterministic).
+- [x] Found & fixed the wrong data: prior `active_modes_sweep.json` was PRE-FIX (compressed
+      missed the needle); compression ratio was overstated 10× (residuals omitted) → true 2.85×.
+- [x] Corrected analytic accounting (`measure_active.py::analytic_kv_bytes` counts residuals+min/max).
+- [x] Clean re-measurement, contention-free (`run_paper_measurements.sh`):
+      ablation 4k–32k (compressed+exact), 64k reach, residual-budget sweep.
+- [x] Rewrote all sections for the residual design + corrected numbers (abstract, intro,
+      background, overview, compression, runtime, decode, impl, evaluation, analysis,
+      limitations, conclusion) + appendices + notation.
+- [x] Regenerated figures F1–F5 (now show residuals/routing/adaptive) + graphs G1–G6
+      (added G6 residual trade-off) + tables T2/T3/T4/T5 from the clean JSON.
 
 ## Needs author attention before submission
-- [ ] **Verify bibliography metadata** (arXiv ids / venues) in bibliography/references.bib —
-      entries are accurate in title/author/year but some identifiers were intentionally omitted.
-- [ ] **Compile**: no system LaTeX on the build machine. Compile on Overleaf/arXiv:
+- [ ] **Compile** (no system LaTeX on the build machine): on Overleaf/arXiv run
       `pdflatex main && bibtex main && pdflatex main && pdflatex main` (same for conference).
+- [ ] **Verify bibliography identifiers** (arXiv ids / venues) in `bibliography/references.bib`.
 - [ ] Add author names/affiliations (currently blank / "Anonymous").
-- [ ] Optional: dense 64k cell (was OOM/swap-thrash in the prior full run; not re-run here —
-      stated analytically). Run if a clean OOM datapoint is wanted.
+- [ ] Optional: dense 64k cell (analytic only here — dense OOMs before 64k on this device).
 
 ## Future experiments (paper calls these out, not blocking)
-- [ ] Rank/fidelity and residual-budget/fidelity sweep (the central open problem).
-- [ ] Fixed-seed SVD for run-to-run determinism.
-- [ ] Hand-written fused decode kernel (Metal / CUDA-Triton) — slot into G3/G5 + T3.
-- [ ] Broader models/sizes, perplexity, batched throughput, SRL-module evaluation.
+- [ ] Hand-written fused decode kernel (Metal / CUDA-Triton) — slot into G3/G5 + T3 (placeholders ready).
+- [ ] Content-adaptive residual budget (raise ratio; address the 1M-token residual memory ceiling).
+- [ ] Broader models/sizes, perplexity, multi-needle/varied-depth recall, batched throughput, SRL eval.
