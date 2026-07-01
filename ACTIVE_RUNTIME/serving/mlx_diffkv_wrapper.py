@@ -1349,21 +1349,21 @@ def _resolve_compressed_decode(seq_len: int) -> bool:
     """Decide whether decode should use the DiffKV compressed sparse kernel.
 
     DIFFKV_COMPRESSED_DECODE:
-      "1"/"on"/"true"   → always compressed (force the sparse path)
+      "1"/"on"/"true"   → always compressed (force the sparse path). THE DEFAULT —
+                          DiffKV's sparse decode engages from token 1 so the
+                          architecture is always exercised. TRADE-OFF: at short
+                          context this is slower than fused dense (~16 vs ~36 tps
+                          @4k) and pre-allocates the bounded block pool, with no
+                          accuracy change — the memory/reach win only materializes
+                          at long context. Accepted by design ("engage from the
+                          start"); flip to "auto" if you want the adaptive policy.
       "0"/"off"/"false" → always dense (force exact full-KV attention)
-      "auto" (default)  → compressed only once the context is long enough that
-                          retaining the full KV cache through decode is the
-                          costly choice. Short/medium contexts use the faster,
-                          numerically-exact dense path, so decode never regresses
-                          vs the dense baseline for normal-length requests.
-
-    The auto threshold is DIFFKV_COMPRESSED_MIN_CTX (default 16384 tokens).
-    Below it the fused full-KV attention is both faster and memory-safe, so we
-    stay dense; at/above it we accept the slower sparse kernel in exchange for a
-    bounded decode-time KV footprint (the regime where retaining the full cache
-    through a long generation risks OOM).
+      "auto"            → OPT-IN adaptive: dense below DIFFKV_COMPRESSED_MIN_CTX
+                          (default 16384), sparse at/above it. Avoids the
+                          short-context regression; use when raw short-prompt
+                          throughput matters more than always exercising DiffKV.
     """
-    mode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "auto").strip().lower()
+    mode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "1").strip().lower()
     if mode in ("1", "on", "true", "yes"):
         return True
     if mode in ("0", "off", "false", "no"):
