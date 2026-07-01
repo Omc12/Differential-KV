@@ -1080,6 +1080,24 @@ class MLXKVBlockManager:
             return
         for layer_idx in range(self.num_layers):
             self._compress_eligible_blocks(session_id, layer_idx)
+            
+        # Eval all compressed buffers across all layers in one parallel sweep
+        eval_targets = []
+        for layer_idx in range(self.num_layers):
+            eval_targets.extend([
+                session["comp_U"][layer_idx],
+                session["comp_VK"][layer_idx],
+                session["comp_VV"][layer_idx],
+                session["comp_anc_k"][layer_idx],
+                session["comp_anc_v"][layer_idx],
+                session["comp_min_k"][layer_idx],
+                session["comp_max_k"][layer_idx],
+                session["comp_res_k"][layer_idx],
+                session["comp_res_v"][layer_idx],
+            ])
+            if "comp_res_mask" in session:
+                eval_targets.append(session["comp_res_mask"][layer_idx])
+        mx.eval(*eval_targets)
 
     def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array):
         """Write incoming prefill KV chunk into the dense buffer.
@@ -1179,44 +1197,23 @@ class MLXKVBlockManager:
         VV = VV_flat.reshape(self.rank, self.kv_heads, self.head_dim).transpose(1, 0, 2)
 
         # ── SVD Residual Correction ──────────────────────────────────────────
-        # Reconstruct block deltas from low-rank SVD components
-        U_np = np.array(U_padded.astype(mx.float32))
-        Vh_np = np.array(Vh_padded.astype(mx.float32))
-        recon_delta = (U_np @ Vh_np) * float(svd_scale)
-        actual_delta = np.array(deltas_2d.astype(mx.float32))
-        
-        # Measure reconstruction error for each token in the block
-        errors = np.linalg.norm(actual_delta - recon_delta, axis=-1)  # [S_comp]
-        
-        # Keep the top-`max_res` highest-reconstruction-error tokens as EXACT
-        # residuals. The needle's distinctive tokens (e.g. a buried passcode) are
-        # precisely the highest-error ones — SVD truncates such low-energy outliers
-        # — so top-by-error reliably captures them. max_res=64 (vs the old 32) is
-        # what lets a content-dense block retain ALL its distinctive tokens; at 32
-        # the passcode's later tokens were truncated and their values corrupted.
-        # (A median+MAD outlier threshold was tried and REGRESSED: on-topic prose
-        # filler has a broad error spread, so the threshold rose above the needle
-        # tokens and dropped them. Plain top-by-error is both simpler and correct.)
-        # NB: `errors[-0:]` is the WHOLE array, not empty — guard max_res==0 explicitly.
-        # Stored HIGHEST-error first so res buffers[:, :R] are the R most
-        # distinctive tokens — the top-K router scores only those (cheap at 1M).
+        # Reconstruct block deltas from low-rank SVD components entirely in MLX on GPU
+        recon_delta = mx.matmul(U_padded, Vh_padded) * svd_scale
+        errors = mx.linalg.norm(deltas_2d - recon_delta, axis=-1)  # [S_comp]
+
         max_res = self.max_residual
         if max_res > 0:
-            top_k = np.argsort(errors)[-max_res:][::-1]
+            top_k = mx.argsort(errors)[-max_res:][::-1]
+            block_k_t = block_k.transpose(1, 0, 2)
+            block_v_t = block_v.transpose(1, 0, 2)
+            res_k_padded = mx.take(block_k_t, top_k + 1, axis=0)
+            res_v_padded = mx.take(block_v_t, top_k + 1, axis=0)
+            n_res = max_res
         else:
-            top_k = np.array([], dtype=np.int64)
-
-        # Extract their exact K/V vectors (transposing block keys/values)
-        block_k_t = np.array(block_k.astype(mx.float32)).transpose(1, 0, 2)
-        block_v_t = np.array(block_v.astype(mx.float32)).transpose(1, 0, 2)
-        res_k_np = block_k_t[top_k + 1]  # skip anchor (index 0)
-        res_v_np = block_v_t[top_k + 1]
-
-        n_res = len(top_k)
-        res_k_padded = np.zeros((max_res, self.kv_heads, self.head_dim), dtype=np.float16)
-        res_v_padded = np.zeros((max_res, self.kv_heads, self.head_dim), dtype=np.float16)
-        res_k_padded[:n_res] = res_k_np.astype(np.float16)
-        res_v_padded[:n_res] = res_v_np.astype(np.float16)
+            top_k = None
+            res_k_padded = mx.zeros((max_res, self.kv_heads, self.head_dim), dtype=block_k.dtype)
+            res_v_padded = mx.zeros((max_res, self.kv_heads, self.head_dim), dtype=block_v.dtype)
+            n_res = 0
 
         session["comp_U"][layer_idx][num_blocks]     = U_padded
         session["comp_VK"][layer_idx][num_blocks]    = VK
@@ -1229,17 +1226,17 @@ class MLXKVBlockManager:
         session["comp_scale"][layer_idx][num_blocks]   = svd_scale
         session["comp_seq_len"][layer_idx][num_blocks] = self.block_size
         
-        session["comp_res_k"][layer_idx][num_blocks] = mx.array(res_k_padded)
-        session["comp_res_v"][layer_idx][num_blocks] = mx.array(res_v_padded)
+        session["comp_res_k"][layer_idx][num_blocks] = res_k_padded
+        session["comp_res_v"][layer_idx][num_blocks] = res_v_padded
         session["comp_res_n"][layer_idx][num_blocks] = n_res
         # Mark which delta positions are kept exact (top_k indexes into the S_comp
         # deltas, aligned with the kernel's delta_s axis) so decode can drop their
         # lossy SVD twin from the sparse pool.
         if "comp_res_mask" in session:
-            res_mask_np = np.zeros(self.block_size - 1, dtype=bool)
-            if n_res > 0:
-                res_mask_np[np.asarray(top_k)] = True
-            session["comp_res_mask"][layer_idx][num_blocks] = mx.array(res_mask_np)
+            mask_val = mx.zeros((self.block_size - 1,), dtype=mx.bool_)
+            if top_k is not None:
+                mask_val[top_k] = True
+            session["comp_res_mask"][layer_idx][num_blocks] = mask_val
         
         session["num_blocks"][layer_idx] = num_blocks + 1
         # Invalidate the cached residual gather for this layer: the block set
@@ -1247,17 +1244,6 @@ class MLXKVBlockManager:
         rc = session.get("_res_cache")
         if rc is not None:
             rc.pop(layer_idx, None)
-        mx.eval(
-            session["comp_U"][layer_idx],
-            session["comp_VK"][layer_idx],
-            session["comp_VV"][layer_idx],
-            session["comp_anc_k"][layer_idx],
-            session["comp_anc_v"][layer_idx],
-            session["comp_min_k"][layer_idx],
-            session["comp_max_k"][layer_idx],
-            session["comp_res_k"][layer_idx],
-            session["comp_res_v"][layer_idx],
-        )
 
     def _flush_oldest_block(self, session: Dict, layer_idx: int):
         """Compress the oldest block_size tokens from the dense buffer and
