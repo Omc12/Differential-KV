@@ -173,6 +173,7 @@ def compute_decode_attention_static(
     comp_anc_v: mx.array,     # [nb, kv_heads, D]
     comp_scale: mx.array,     # [nb]
     comp_seq_len: mx.array,   # [nb]
+    res_mask: mx.array,       # [nb, S_comp] bool — True where the position is an exact residual
     dense_k: mx.array,        # [kv_heads, max_dense_len, D]  (fixed-size padded buffer)
     dense_v: mx.array,        # [kv_heads, max_dense_len, D]
     dense_len: mx.array,      # scalar — how many dense tokens are valid
@@ -227,6 +228,11 @@ def compute_decode_attention_static(
 
     delta_s = delta_s * comp_scale.reshape(1, -1, 1)                  # apply svd_scale
     delta_s = delta_s + mx.expand_dims(s_anc, -1)                     # add anchor score
+
+    # Drop exact-residual positions from the SVD pool: their lossy low-rank twin
+    # is set to -inf so it gets zero softmax weight here, leaving the exact copy in
+    # the dense pool as the token's sole representation. All-False mask = identity.
+    delta_s = mx.where(mx.expand_dims(res_mask, 0), -float('inf'), delta_s)
 
     # Mask padding positions within partially-filled blocks
     s_range   = mx.arange(S_comp).reshape(1, 1, -1)
@@ -419,6 +425,10 @@ class DummyMLXPool:
     def current_blocks(self):
         return self.manager.max_blocks
 
+    @property
+    def W_proj(self):
+        return getattr(self.manager, "W_proj", None)
+
 class MLXKVBlockManager:
     @property
     def native_pool(self):
@@ -477,6 +487,12 @@ class MLXKVBlockManager:
         self.router = os.environ.get("DIFFKV_ROUTER", "residual").lower()
         _rr = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
         self.route_residuals = _rr if _rr > 0 else self.max_residual
+        # When on, exclude exact-residual token positions from the SVD reconstruction
+        # pool so a captured token's ONLY representation at decode is its exact copy in
+        # the dense pool — its lossy low-rank twin no longer dilutes it. Zero memory
+        # cost; fixes precise-token (e.g. digit) corruption that the residual capture
+        # was meant to prevent but couldn't because both copies were attended.
+        self._res_exclude_svd = os.environ.get("DIFFKV_RESIDUAL_EXCLUDE_SVD", "0").strip().lower() in ("1", "on", "true", "yes")
         self.max_dense_len = self.recency_window + self.block_size
         
         self.sessions = {}
@@ -486,8 +502,128 @@ class MLXKVBlockManager:
         self._session_checkpoints = {}
         self._session_srl = {}
 
+        # ── Optional factual-store / SRL subsystem (WS2) ──────────────────────
+        # The whole build→query→consume pipeline already exists in this file; it
+        # was dead only because get_srl_state returned None and nothing built the
+        # store. Gated behind DIFFKV_FACTUAL_STORE (default off) so the validated
+        # sparse path is untouched until this is proven out.
+        self._factual_enabled = os.environ.get("DIFFKV_FACTUAL_STORE", "0").strip().lower() in ("1", "on", "true", "yes")
+        self._factual_stores: dict = {}
+        self._prefill_kv_capture: dict = {}   # sid -> {layer_idx: [K_cpu, V_cpu]}
+        self._pending_query: dict = {}        # sid -> query token ids (entity-binding hint)
+        self._stop_token_ids: set = set()     # set by the wrapper after load
+        self.tokenizer = None                 # set by the wrapper after load
+        # Random projection W_proj [DESC_DIM, head_dim] for factual descriptors —
+        # fixed at construction, normalized rows (mirrors KVRuntimeManager). torch
+        # CPU so the factual store (torch-based) can run alongside the MLX kernels.
+        self.W_proj = None
+        if self._factual_enabled:
+            import torch as _torch
+            _desc_dim = 64
+            _W = _torch.randn(_desc_dim, self.head_dim, dtype=_torch.float32)
+            self.W_proj = _W / (_W.norm(dim=1, keepdim=True) + 1e-8)
+
     def get_srl_state(self, session_id: str):
-        return None
+        return self._session_srl.get(session_id)
+
+    def capture_factual_prefill_kv(self, session_id: str, layer_idx: int, K_unrot: mx.array, V: mx.array):
+        """Stash UNROTATED prefill K/V (layers 0 and middle only) as torch CPU
+        tensors for FactualExactStore.build. Layer 0 supplies span descriptors +
+        key norms; the middle layer supplies the Eagle look-back self-similarity.
+        The store's descriptors must come from the SAME unrotated layer-0 K that the
+        decode-time query uses as proxy Q, so the spaces are comparable."""
+        if not self._factual_enabled:
+            return
+        mid = self.num_layers // 2
+        if layer_idx not in (0, mid):
+            return
+        import numpy as _np, torch as _torch
+        # K_unrot / V: mx.array [1, kv_heads, L, head_dim]
+        k_t = _torch.from_numpy(_np.array(K_unrot.astype(mx.float32)))
+        v_t = _torch.from_numpy(_np.array(V.astype(mx.float32)))
+        cap = self._prefill_kv_capture.setdefault(session_id, {})
+        if layer_idx not in cap:
+            cap[layer_idx] = [k_t, v_t]
+        else:
+            cap[layer_idx][0] = _torch.cat([cap[layer_idx][0], k_t], dim=2)
+            cap[layer_idx][1] = _torch.cat([cap[layer_idx][1], v_t], dim=2)
+
+    def finalize_srl_index(self, session_id: str, cached_len: int = 0):
+        """Build the SessionSRLState + FactualExactStore once, at the prefill→decode
+        boundary, from the captured unrotated prefill K/V.
+
+        WS2-full: also builds an InvertedTokenIndex (important_vocab + IDF) and passes
+        it to the store so ENTITY ASSIGNMENT (RC4 distinguishing-token / IDF binding)
+        and decode-time entity binding work — without it the store biases every
+        matched fact equally and multi-entity generation loops. The query tokens that
+        drive entity binding come from the caller-named question (`_pending_query`,
+        set via generate(query_text=...)); otherwise the uncached tail of the prompt."""
+        if not self._factual_enabled or session_id in self._session_srl:
+            return
+        cap = self._prefill_kv_capture.get(session_id)
+        sess = self.sessions.get(session_id)
+        token_ids = sess.get("token_ids") if sess else None
+        if not cap or not token_ids or self.W_proj is None:
+            return
+        try:
+            import torch as _torch
+            from native_core.srl.session_srl_state import SessionSRLState
+            from native_core.srl.factual_store import FactualExactStore
+            from native_core.srl.inverted_index import build_inverted_index
+            tok_ids = token_ids if isinstance(token_ids, _torch.Tensor) else _torch.tensor(list(token_ids), dtype=_torch.long)
+            bs = self.block_size
+            n_slots = max(1, (int(tok_ids.numel()) + bs - 1) // bs)
+            slot_ids = list(range(n_slots))
+            try:
+                inv_index = build_inverted_index(tok_ids, slot_ids, bs, set(self._stop_token_ids))
+                # Let the store decode tokens (sentence/line-boundary span splitting +
+                # helper-word filtering in prime detection).
+                if inv_index is not None and self.tokenizer is not None:
+                    inv_index._tokenizer_ref = self.tokenizer
+            except Exception:
+                inv_index = None
+            srl_state = SessionSRLState(
+                semantic_index=None, chunk_graph=None, inverted_index=inv_index,
+                ordered_slot_ids=slot_ids, sink_blocks=[],
+            )
+            # Entity-binding query tokens: the caller-named question if given, else
+            # the uncached tail (whole prompt for a single-turn request).
+            pq = self._pending_query.pop(session_id, None)
+            srl_state.current_query_tokens = list(pq) if pq else list(token_ids[cached_len:])
+            store = FactualExactStore(session_id)
+            store.build(
+                prefill_kv=cap,
+                token_ids=tok_ids,
+                W_proj=self.W_proj,
+                stop_token_ids=self._stop_token_ids,
+                slot_ids=slot_ids,
+                block_size=bs,
+                inv_index=inv_index,
+            )
+            srl_state.prompt_eagle_scores = getattr(store, "eagle_scores", None)
+            try:
+                srl_state.setup_sas_and_eqa(tok_ids, self._stop_token_ids, self.tokenizer)
+            except Exception:
+                pass
+            self._session_srl[session_id] = srl_state
+            self._factual_stores[session_id] = store
+            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                _vocab = len(inv_index.important_vocab) if inv_index is not None else 0
+                print(f"[FACTUAL] built session={session_id} entries={len(store.entries)} "
+                      f"primes={sum(1 for e in store.entries if getattr(e,'is_prime',False))} "
+                      f"vocab={_vocab} qtoks={len(srl_state.current_query_tokens)}", flush=True)
+                if os.environ.get("DIFFKV_FACTUAL_DBG") == "1" and self.tokenizer is not None:
+                    for e in store.entries:
+                        _dec = self.tokenizer.decode(e.tokens)
+                        if any(c.isdigit() for c in _dec):
+                            print(f"[FENTRY] digit-span prime={getattr(e,'is_prime',False)} "
+                                  f"eid={getattr(e,'entity_id',-1)} dist={getattr(e,'distinguishing_token',None)} "
+                                  f"toks={_dec!r}", flush=True)
+        except Exception as fe:
+            import traceback; traceback.print_exc()
+            print(f"[FACTUAL] WARNING: build failed for {session_id}: {fe}")
+        finally:
+            self._prefill_kv_capture.pop(session_id, None)
 
     def _create_empty_session(self) -> Dict[str, Any]:
         # Use float16 explicitly to halve the RAM vs float32 defaults
@@ -515,6 +651,9 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.zeros((self.max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_res_v": [mx.zeros((self.max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_res_n": [[0] * self.max_blocks for _ in range(self.num_layers)],
+            # Per-block boolean mask of which delta positions (0..block_size-2) are kept
+            # as EXACT residuals — used to exclude them from the SVD pool at decode.
+            "comp_res_mask": [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             
             "token_ids": []
         }
@@ -780,9 +919,6 @@ class MLXKVBlockManager:
     def finalize_compressed_blocks(self):
         pass
 
-    def finalize_srl_index(self, session_id: str, cached_len: int = 0):
-        pass
-
     def compress_deferred_prefill_blocks(self, session_id: str):
         session = self.sessions.get(session_id)
         if session is None:
@@ -850,6 +986,8 @@ class MLXKVBlockManager:
             session["comp_res_k"][layer_idx][:-1] = session["comp_res_k"][layer_idx][1:]
             session["comp_res_v"][layer_idx][:-1] = session["comp_res_v"][layer_idx][1:]
             session["comp_res_n"][layer_idx][:-1] = session["comp_res_n"][layer_idx][1:]
+            if "comp_res_mask" in session:
+                session["comp_res_mask"][layer_idx][:-1] = session["comp_res_mask"][layer_idx][1:]
             num_blocks = self.max_blocks - 1
 
         block_k = session["dense_keys"][layer_idx][0, :, start:start + self.block_size]
@@ -939,6 +1077,14 @@ class MLXKVBlockManager:
         session["comp_res_k"][layer_idx][num_blocks] = mx.array(res_k_padded)
         session["comp_res_v"][layer_idx][num_blocks] = mx.array(res_v_padded)
         session["comp_res_n"][layer_idx][num_blocks] = n_res
+        # Mark which delta positions are kept exact (top_k indexes into the S_comp
+        # deltas, aligned with the kernel's delta_s axis) so decode can drop their
+        # lossy SVD twin from the sparse pool.
+        if "comp_res_mask" in session:
+            res_mask_np = np.zeros(self.block_size - 1, dtype=bool)
+            if n_res > 0:
+                res_mask_np[np.asarray(top_k)] = True
+            session["comp_res_mask"][layer_idx][num_blocks] = mx.array(res_mask_np)
         
         session["num_blocks"][layer_idx] = num_blocks + 1
         # Invalidate the cached residual gather for this layer: the block set
@@ -1000,12 +1146,21 @@ class MLXKVBlockManager:
         # block cheaply (Quest key min/max bound, no value reconstruction) and keep
         # only the K most relevant. Decode then runs the expensive value
         # reconstruction + exact-residual attention for K blocks instead of all nb,
-        # so cost scales with K rather than total context. `res_blocks` carries the
-        # selected block indices to the residual gather below; None = attend all.
+        # so cost scales with K rather than total context. `topk_sel` (an mx.array of
+        # selected block ids, kept lazy) carries the selection to the residual gather
+        # below; None = attend all blocks.
         k_eff = self.topk_blocks
         if self.topk_blocks > 0 and self.topk_frac > 0.0:
             k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
         use_topk = (self.topk_blocks > 0 and nb > k_eff)
+
+        # Host-cheap uniformity check (Python list, no GPU sync): blocks are only
+        # ever compressed at exactly block_size, so n_res ≡ max_residual for all of
+        # them. When uniform, the top-K residual gather is a fixed-width mx.take with
+        # no host sync; the variable-length loop only runs in the rare non-uniform case.
+        _res_n_list = session["comp_res_n"][layer_idx]
+        all_blocks_full = (self.max_residual > 0 and nb > 0
+                           and min(_res_n_list[:nb]) == self.max_residual)
         if nb > 0 and use_topk:
             if self.router == "residual" and self.max_residual > 0:
                 R = min(self.route_residuals, self.max_residual)
@@ -1026,8 +1181,11 @@ class MLXKVBlockManager:
                     scale, gpk,
                 )
             sel = mx.argsort(relevance)[-k_eff:]               # [k_eff] selected block ids
-            mx.eval(sel)
-            res_blocks   = [int(i) for i in sel.tolist()]
+            # Keep `sel` lazy — drop the per-layer mx.eval(sel)/.tolist() host sync
+            # (previously 28 GPU↔CPU syncs per generated token). The comp_* and
+            # residual gathers consume `sel` directly via mx.take, so block selection
+            # stays on the GPU and the per-layer decode pipeline is never stalled.
+            topk_sel     = sel
             comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
             comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
             comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
@@ -1036,7 +1194,7 @@ class MLXKVBlockManager:
             comp_scale   = mx.take(session["comp_scale"][layer_idx][:nb],   sel, axis=0)
             comp_seq_len = mx.take(session["comp_seq_len"][layer_idx][:nb], sel, axis=0)
         elif nb > 0:
-            res_blocks   = None  # attend all blocks (use the nb-keyed residual cache)
+            topk_sel     = None  # attend all blocks (use the nb-keyed residual cache)
             comp_U       = session["comp_U"][layer_idx][:nb]
             comp_VK      = session["comp_VK"][layer_idx][:nb]
             comp_VV      = session["comp_VV"][layer_idx][:nb]
@@ -1045,7 +1203,7 @@ class MLXKVBlockManager:
             comp_scale   = session["comp_scale"][layer_idx][:nb]
             comp_seq_len = session["comp_seq_len"][layer_idx][:nb]
         else:
-            res_blocks = None
+            topk_sel = None
 
         # ── Residual gather ───────────────────────────────────────────────────
         # Exact-token residuals only change when the block set changes, so the
@@ -1054,7 +1212,21 @@ class MLXKVBlockManager:
         res_k_all = res_v_all = None
         total_res = 0
         if self.max_residual > 0 and nb > 0:
-            if res_blocks is not None:
+            if topk_sel is not None and all_blocks_full:
+                # Vectorized top-K residual gather — fully on-GPU, no host sync.
+                # Every selected block holds exactly max_residual exact tokens, so the
+                # gather is a fixed-width [K, R, kv_heads, D] mx.take folded into
+                # [kv_heads, K*R, D]; all rows are valid (no per-block mask needed).
+                rk = mx.take(session["comp_res_k"][layer_idx][:nb], topk_sel, axis=0)
+                rv = mx.take(session["comp_res_v"][layer_idx][:nb], topk_sel, axis=0)
+                Ksel, Rw = rk.shape[0], rk.shape[1]
+                res_k_all = rk.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
+                res_v_all = rv.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
+                total_res = Ksel * Rw
+            elif topk_sel is not None:
+                # Rare non-uniform fallback: materialize block ids (host sync) and
+                # gather variable-length residual runs per selected block.
+                res_blocks = [int(i) for i in topk_sel.tolist()]
                 res_k_parts, res_v_parts = [], []
                 for bi in res_blocks:
                     n_res = session["comp_res_n"][layer_idx][bi]
@@ -1123,13 +1295,23 @@ class MLXKVBlockManager:
                 scale, gpk, current_max_dense_len
             )
         else:
+            # Residual-position mask for the active blocks: True where a delta
+            # position is also kept as an exact residual (so the kernel drops its
+            # lossy SVD twin). All-False when the feature is off OR the mask buffer
+            # is absent (older/cloned sessions) → identity, current behavior.
+            S_comp = self.block_size - 1
+            if self._res_exclude_svd and "comp_res_mask" in session:
+                _full_mask = session["comp_res_mask"][layer_idx][:nb]
+                res_mask = mx.take(_full_mask, topk_sel, axis=0) if topk_sel is not None else _full_mask
+            else:
+                res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
             # ── Compressed + dense path ───────────────────────────────────────
             # comp_* were sliced/gathered above: [:nb] when attending all blocks
             # (graph keyed on nb, recompiles only as nb grows), or [K] under top-K
             # routing (graph keyed on the constant K — compiles once).
             out_combined = compute_decode_attention_static(
                 q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
-                comp_scale, comp_seq_len,
+                comp_scale, comp_seq_len, res_mask,
                 dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
                 scale, gpk, self.kv_heads, self.block_size, self.rank,
                 current_max_dense_len,
@@ -1334,13 +1516,106 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                             elif getattr(srl_state, "current_entity_id", -1) != -1:
                                 _qbias = {srl_state.current_entity_id}
 
-                            matching_entries = factual_store.query(
-                                Q=q_for_factual,
-                                W_proj=pool.W_proj,
-                                threshold=0.3,
-                                active_slots=None,
-                                query_entity_bias=_qbias,
-                            )
+                            # ── Positional query→value linking (MLX) ───────────────
+                            # The descriptor match surfaces repeated FILLER on real
+                            # docs (proven: it biased "and confirm that…" not the
+                            # answer). Instead, bind the query's DISTINCTIVE (high-IDF)
+                            # tokens to WHERE they occur in the document, and surface
+                            # the fact spans co-located with them — i.e. connect the
+                            # queried entity to its own value span, not filler. Only
+                            # falls back to descriptor matching when no such anchor
+                            # exists. This is what makes the store help, not derail.
+                            matching_entries = None
+                            try:
+                                _inv = getattr(srl_state, "inverted_index", None)
+                                _qtoks = getattr(srl_state, "current_query_tokens", [])
+                                if (_inv is not None and _qtoks
+                                        and getattr(_inv, "occurrences", None)
+                                        and getattr(_inv, "idf", None)):
+                                    _IDF_MIN = float(os.environ.get("DIFFKV_FACTUAL_IDF_MIN", "3.0"))
+                                    _WIN = int(os.environ.get("DIFFKV_FACTUAL_WINDOW", "40"))
+                                    # Max TOTAL occurrences for an anchor token. Block-IDF
+                                    # alone is fooled when a whole table sits in one block
+                                    # (shared words like "module"/"key" get high block-IDF
+                                    # despite repeating); also require the token to be
+                                    # genuinely rare document-wide so only distinctive
+                                    # names (occur ~1-2×) anchor, not repeated schema words.
+                                    _MAX_OCC = int(os.environ.get("DIFFKV_FACTUAL_MAX_OCC", "4"))
+                                    _anchors = []
+                                    for _qt in set(_qtoks):
+                                        _occ = _inv.occurrences.get(_qt)
+                                        # Distinctiveness = RARE (few total occurrences).
+                                        # Block-IDF alone is fragile: on a short doc a
+                                        # name split across the registry + question block
+                                        # dips below IDF_MIN even though it occurs ~twice.
+                                        # So very-rare tokens (≤2 occ) anchor regardless of
+                                        # block-IDF; MAX_OCC stays the primary gate.
+                                        if _occ and len(_occ) <= _MAX_OCC and (
+                                                len(_occ) <= 2 or _inv.idf.get(_qt, 0.0) >= _IDF_MIN):
+                                            _anchors.extend(p for (_s, p, _r) in _occ)
+                                    if _anchors:
+                                        # For each anchor take the SINGLE NEAREST fact
+                                        # span (min distance to the span, 0 if inside),
+                                        # not every span in the window — otherwise a
+                                        # dense table (facts <window apart) surfaces all
+                                        # of them and the bias can't discriminate.
+                                        # Skip spans that are mostly QUERY tokens — those
+                                        # are the question/instruction text at the tail
+                                        # (the query's distinctive token also occurs there,
+                                        # so its anchor would otherwise pull them in as
+                                        # noise instead of the actual fact span).
+                                        _qset = set(_qtoks)
+                                        _pos_map = {}
+                                        _primary_i, _primary_d = -1, _WIN + 1
+                                        for _p in _anchors:
+                                            _best_i, _best_d = -1, _WIN + 1
+                                            for _i, _e in enumerate(factual_store.entries):
+                                                _s0 = getattr(_e, "start_idx", -1)
+                                                _e0 = getattr(_e, "end_idx", _s0)
+                                                if _s0 < 0:
+                                                    continue
+                                                _et = getattr(_e, "tokens", None)
+                                                if _et and (len(set(_et) & _qset) / len(_et)) > 0.5:
+                                                    continue
+                                                _d = 0 if (_s0 <= _p <= _e0) else min(abs(_s0 - _p), abs(_e0 - _p))
+                                                if _d < _best_d:
+                                                    _best_d, _best_i = _d, _i
+                                            if _best_i >= 0 and _best_d <= _WIN:
+                                                _pos_map[_best_i] = factual_store.entries[_best_i]
+                                                if _best_d < _primary_d:
+                                                    _primary_d, _primary_i = _best_d, _best_i
+                                        if _pos_map:
+                                            for _e in _pos_map.values():
+                                                _e.current_sim = 1.0
+                                            matching_entries = list(_pos_map.values())
+                                            # Align entity binding with the positional
+                                            # result: the NEAREST co-located fact defines
+                                            # the queried entity. Overrides the raw-overlap
+                                            # early-binding, which goes dual/entity-0 on
+                                            # repetitive prompts and locks the wrong entity.
+                                            if _primary_i >= 0:
+                                                _peid = getattr(factual_store.entries[_primary_i], "entity_id", -1)
+                                                if _peid != -1:
+                                                    srl_state.current_entity_id = _peid
+                                                    srl_state.dual_entity_mode = False
+                                                    srl_state.dual_entity_ids = []
+                            except Exception:
+                                matching_entries = None
+
+                            # When positional linking pinned the queried entity's own
+                            # fact span(s), inject ONLY those — skip neighbor/triple
+                            # expansion, which on a dense table pulls in ADJACENT rows'
+                            # keys and re-muddies the bias.
+                            _positional_used = matching_entries is not None
+
+                            if matching_entries is None:
+                                matching_entries = factual_store.query(
+                                    Q=q_for_factual,
+                                    W_proj=pool.W_proj,
+                                    threshold=0.3,
+                                    active_slots=None,
+                                    query_entity_bias=_qbias,
+                                )
 
                             if matching_entries:
                                 for entry in matching_entries:
@@ -1349,14 +1624,14 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                                         srl_state.current_step_factual_sequences.append(entry.tokens)
                                     
                                     # RC1 — inject triple sequences from prime entries.
-                                    if getattr(entry, "is_prime", False):
+                                    if getattr(entry, "is_prime", False) and not _positional_used:
                                         for triple_seq in getattr(entry, "triple_sequences", []):
                                             if triple_seq and triple_seq not in srl_state.current_step_factual_sequences:
                                                 srl_state.current_step_factual_sequences.append(triple_seq)
                                                 srl_state.current_step_factual_tokens.update(triple_seq)
 
                                     # ── 1-hop neighbor injection ────────────────────────────
-                                    for nb_idx, nb_weight in zip(entry.neighbors, entry.weights):
+                                    for nb_idx, nb_weight in (zip(entry.neighbors, entry.weights) if not _positional_used else []):
                                         if nb_weight >= 0.35 and nb_idx < len(factual_store.entries):
                                             nb_e = factual_store.entries[nb_idx]
                                             if nb_e.tokens and nb_e.tokens not in srl_state.current_step_factual_sequences:
@@ -1445,6 +1720,18 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                                 sims = [getattr(e, "current_sim", 0.0) for e in matching_entries]
                                 if sims:
                                     srl_state.current_step_max_similarity = max(sims)
+
+                            if os.environ.get("DIFFKV_FACTUAL_DBG") == "1":
+                                try:
+                                    _tk = getattr(manager, "tokenizer", None)
+                                    _seqs = srl_state.current_step_factual_sequences[:6]
+                                    _dec = [(_tk.decode(s) if _tk else s) for s in _seqs]
+                                    print(f"[FDBG] eid={getattr(srl_state,'current_entity_id',-1)} "
+                                          f"dual={getattr(srl_state,'dual_entity_mode',False)} "
+                                          f"maxsim={getattr(srl_state,'current_step_max_similarity',0):.2f} "
+                                          f"nseq={len(srl_state.current_step_factual_sequences)} seqs={_dec}", flush=True)
+                                except Exception:
+                                    pass
                     except Exception as e:
                         import traceback
                         traceback.print_exc()
@@ -1517,6 +1804,14 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 keys_rot[b_idx:b_idx+1],
                 values[ b_idx:b_idx+1]
             )
+            # Stash UNROTATED K/V (layers 0 + middle only) for the optional factual
+            # store — its descriptors must share the unrotated layer-0 space the
+            # decode-time query uses. No-op unless DIFFKV_FACTUAL_STORE is enabled.
+            manager.capture_factual_prefill_kv(
+                sid, layer_idx,
+                keys[b_idx:b_idx+1],
+                values[b_idx:b_idx+1]
+            )
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output)
@@ -1569,6 +1864,12 @@ class MLXQwenModel:
                 seq_len = int(position_ids[0, 0].item()) if position_ids is not None else 0
                 use_compressed = _resolve_compressed_decode(seq_len)
                 self._decode_compressed[cache_key] = use_compressed
+
+                # Build the factual store / SRL state from the captured prefill KV
+                # BEFORE the first decode step queries it. No-op unless enabled.
+                for _sid in self._diffkv_session_ids:
+                    if _sid != "dummy_session":
+                        self.manager.finalize_srl_index(_sid)
 
                 mx.eval()          # flush any pending lazy ops first
                 mx.clear_cache()   # return peak activation memory to OS
@@ -1683,6 +1984,10 @@ class MLXDiffKVWrapper:
             rank=self.rank,
             block_size=self.block_size
         )
+        # Hand the manager what FactualExactStore.build / setup_sas_and_eqa need
+        # (no-ops unless DIFFKV_FACTUAL_STORE is enabled).
+        self.manager.tokenizer = self.tokenizer
+        self.manager._stop_token_ids = set(self.stop_token_ids)
         self._session_token_ids = self.manager._session_token_ids
         
         self._patch_attention_layers(model)
@@ -1720,12 +2025,22 @@ class MLXDiffKVWrapper:
         temperature: float = 0.7,
         top_p: float = 0.9,
         repetition_penalty: float = 1.15,
+        query_text: Optional[str] = None,
     ) -> str:
         self.ensure_loaded()
         session_id = self.active_session or "default"
-        
+
         # Squeeze prompt tokenization
         prompt_ids = self.tokenizer.encode(prompt)
+
+        # Entity-binding hint: the part of the prompt that is the actual question.
+        # Used by the factual store to bind decode to the queried entity (no-op
+        # unless the factual store is enabled). Falls back to the uncached tail.
+        if query_text and getattr(self.manager, "_factual_enabled", False):
+            try:
+                self.manager._pending_query[session_id] = self.tokenizer.encode(query_text)
+            except Exception:
+                pass
         
         # Check cache reuse
         cached_len = 0
@@ -1849,12 +2164,19 @@ class MLXDiffKVWrapper:
                 from native_core.srl.factual_alignment import get_helper_token_ids
                 helper_ids = get_helper_token_ids(self.tokenizer)
 
-                # +7.0 factual token bias (raised from +3)
+                # +7.0 factual token bias (raised from +3).
+                # EXCLUDE tokens already emitted THIS generation: a flat per-token
+                # bias re-boosts a value every step, so once "5198" is out it keeps
+                # winning → "5198-5198-…" loops. Skipping emitted tokens lets the
+                # +10 transition bias carry in-order progression and then release,
+                # so a value/sequence is emitted once. (A repeated token that
+                # legitimately recurs is still reachable via the transition bias.)
                 if getattr(srl_state, "current_step_factual_tokens", None):
                     current_entity = getattr(srl_state, "current_entity_id", -1)
                     entity_ids = getattr(srl_state, "current_step_sequence_entity_ids", [])
                     is_prime_list = getattr(srl_state, "current_step_sequence_is_prime", [])
-                    
+                    _emitted_gen = set(generated[len(prompt_ids):])
+
                     if current_entity != -1:
                         entity_factual_tokens = set()
                         for i, seq in enumerate(srl_state.current_step_factual_sequences):
@@ -1863,11 +2185,11 @@ class MLXDiffKVWrapper:
                             if seq_eid == -1 or seq_eid == current_entity or seq_is_prime:
                                 entity_factual_tokens.update(seq)
                         for tok_id in entity_factual_tokens:
-                            if tok_id < len(logits):
+                            if tok_id < len(logits) and tok_id not in _emitted_gen:
                                 logits[tok_id] += 7.0
                     else:
                         for tok_id in srl_state.current_step_factual_tokens:
-                            if tok_id < len(logits):
+                            if tok_id < len(logits) and tok_id not in _emitted_gen:
                                 logits[tok_id] += 7.0
 
                 # +7.0 VSL active-candidate boost
@@ -1948,7 +2270,7 @@ class MLXDiffKVWrapper:
 
             next_id = sample_logits(logits, effective_temperature, top_p)
 
-            if srl_state is not None:
+            if srl_state is not None and os.environ.get("DIFFKV_FACTUAL_DBG") == "1":
                 print(f"[Python DEBUG] Step {_n_new} next_id_val={next_id} token={repr(self.tokenizer.decode([next_id]))} max_sim={getattr(srl_state, 'current_step_max_similarity', 0.0):.4f} sfa_active={sfa_active}", flush=True)
 
             # Strict Factual Alignment (SFA) State Update and Loop Check

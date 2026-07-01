@@ -353,12 +353,40 @@ class FactualExactStore:
         if in_span:
             spans.append((start, total_seq_len))
             
-        # Split long spans into chunks of max length 12
+        # Split spans at SENTENCE / LINE boundaries first (period, newline, ; ! ?),
+        # then cap length at 20. Without boundary-aware splitting a dense table or
+        # list — many facts packed together — becomes ONE span, and the fixed-20
+        # chunking cuts ACROSS fact rows (e.g. "…BRAVO-5198.\n- The Falcon module's
+        # …BRA"), so no entry cleanly holds a single entity+value. Breaking at
+        # boundaries makes each row its own entry (name and value together).
+        boundary_ids: Set[int] = set()
+        _btok = getattr(inv_index, "_tokenizer_ref", None) if inv_index is not None else None
+        if _btok is not None:
+            try:
+                for _tid in set(token_ids[:total_seq_len].tolist()):
+                    _txt = _btok.decode([_tid])
+                    _st = _txt.strip()
+                    if ("\n" in _txt) or (_st and _st[-1] in ".;!?"):
+                        boundary_ids.add(int(_tid))
+            except Exception:
+                boundary_ids = set()
+
+        # When boundaries drive the split, facts are already delimited by the
+        # sentence/line break, so use a GENEROUS length cap — a small hard cap (the
+        # old 20) chops a long sentence mid-content and can split a multi-token
+        # number (e.g. "4193" → "419" | "3"), corrupting the very value we store.
+        # Without boundaries (no tokenizer), keep the old 20-token behavior.
+        _cap = 64 if boundary_ids else 20
         chunked_spans = []
         for s, e in spans:
-            for sub_s in range(s, e, 20):
-                sub_e = min(sub_s + 20, e)
-                chunked_spans.append((sub_s, sub_e))
+            seg_start = s
+            for i in range(s, e):
+                is_boundary = (int(token_ids[i].item()) in boundary_ids)
+                if is_boundary or (i - seg_start + 1) >= _cap:
+                    chunked_spans.append((seg_start, i + 1))
+                    seg_start = i + 1
+            if seg_start < e:
+                chunked_spans.append((seg_start, e))
                 
         # 7. Extract verbatim KV sequences across all layers for each span
         for s, e in chunked_spans:
