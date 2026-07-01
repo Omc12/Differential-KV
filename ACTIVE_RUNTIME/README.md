@@ -25,9 +25,12 @@ There are **two** implementations of the same concepts; which one runs depends o
 ## Decode paths & the factual store (current behavior)
 
 **Decode routing** — `DIFFKV_COMPRESSED_DECODE`:
-- `auto` (default): exact full-KV dense decode **below 16k** tokens, DiffKV sparse decode **at/above
-  16k** (`DIFFKV_COMPRESSED_MIN_CTX`). Below the threshold the DiffKV kernel does not engage.
-- `1` = always sparse · `0` = always dense.
+- `1` (**default**): DiffKV **sparse decode from token 1** — the architecture is always exercised.
+  Trade-off: at short context this is slower than fused dense (~16 vs ~36 tps @4k) and pre-allocates
+  the block pool, with no accuracy change; the memory/reach win is at long context.
+- `auto` (**opt-in adaptive**): dense below `DIFFKV_COMPRESSED_MIN_CTX` (16k), sparse above — avoids the
+  short-context regression when raw short-prompt throughput matters more than always engaging DiffKV.
+- `0` = always dense (exact full-KV).
 
 **Accuracy:** on realistic prompts, sparse decode recalls facts exactly (single-needle and spread
 multi-entity both pass). The one weak spot is **content-dense blocks** (e.g. a table with many
@@ -47,7 +50,7 @@ table/multi-entity fact extraction.
 
 | flag | default | meaning |
 |---|---|---|
-| `DIFFKV_COMPRESSED_DECODE` | `auto` | `1`/`0`/`auto` — force sparse / force dense / threshold |
+| `DIFFKV_COMPRESSED_DECODE` | **`1`** | sparse-always (default, from token 1); `auto` = adaptive opt-in; `0` = dense |
 | `DIFFKV_COMPRESSED_MIN_CTX` | `16384` | auto sparse threshold (tokens) |
 | `DIFFKV_MAX_RESIDUAL` | `64` | exact residual tokens kept per block (memory ↔ accuracy) |
 | `DIFFKV_TOPK_BLOCKS` | `16` | top-K compressed blocks attended per decode step |
@@ -127,12 +130,14 @@ ACTIVE_RUNTIME/
 
 ## Status & known gaps
 
-- **Decode is overhead/dispatch-bound** on MLX (per-layer Python orchestration), not FLOP-bound —
-  micro-opts give %, real parity with dense needs a fused Metal / batched-layer decode.
-- **Sparse-from-start not yet default:** below ~24k, sparse is slower and uses *more* (pre-allocated)
-  memory than dense, so `auto` waits. Flipping needs the decode-speed work first.
-- **Factual store:** works on realistic + dense-table retrieval (opt-in); remaining gap is verbatim
-  emission of shared synthetic-code prefixes (a VSL in-order-emission tuning item).
+- **Decode is dispatch-bound** on MLX (per-layer Python orchestration), not FLOP-bound — WS1 sync
+  removal captured the safe +20%; router knobs give only ~% (within noise). Real short-ctx parity with
+  dense needs a **fused Metal / batched-layer decode** kernel.
+- **Sparse-from-start is now the default** (`DIFFKV_COMPRESSED_DECODE=1`). Known cost at short context:
+  slower than fused dense and pre-allocates the full block pool (memory scales to the prompt is a
+  deferred follow-up); use `DIFFKV_COMPRESSED_DECODE=auto` if short-prompt throughput matters more.
+- **Factual store:** binding works on realistic (4/4) + dense-table (4/5 value) retrieval (opt-in);
+  remaining gap is verbatim emission of shared synthetic-code prefixes (a VSL in-order-emission item).
 
 See **[../HANDOFF_ACTIVE_MLX_2026-07-01.md](../HANDOFF_ACTIVE_MLX_2026-07-01.md)** for the full
 current-state writeup, benchmark numbers, and prioritized next steps.

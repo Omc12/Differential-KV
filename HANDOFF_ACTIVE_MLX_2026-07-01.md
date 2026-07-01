@@ -13,9 +13,11 @@
    Mac and had never been wired in** — `get_srl_state` hard-returned `None`. It only ran in the
    PyTorch/CUDA `KVRuntimeManager`. On Mac the only retrieval intelligence is SVD low-rank blocks
    ("summaries") + exact residual tokens ("exact word storage") + a top-K residual router.
-3. **DiffKV's sparse kernel is dormant below 16k by design** (`DIFFKV_COMPRESSED_DECODE=auto`,
-   threshold 16384) — 4k/8k decode is plain fused dense attention. That's why "DiffKV doesn't even
-   come up" for normal prompts.
+3. **DiffKV sparse decode now engages from token 1 (DEFAULT FLIPPED).** `DIFFKV_COMPRESSED_DECODE`
+   default is now `1` (sparse-always); `auto` (dense <16k, sparse above) is the **opt-in** adaptive
+   mode; `0` forces dense. Trade-off accepted by design: short-context is slower (~16 vs ~36 tps @4k)
+   + pre-allocates the block pool, no accuracy change — the win is at long context. (Previously `auto`
+   was default, so 4k/8k stayed dense and "DiffKV didn't come up" for normal prompts.)
 4. **Plain sparse decode is accurate on realistic prompts** — a natural multi-entity relational test
    scores **4/4 with the factual store OFF**, same as exact full-KV. The digit corruption we first
    saw was an artifact of an adversarial layout (5 near-identical keys crammed in one block).
@@ -237,7 +239,7 @@ not a bug. This is exactly the failure the factual store compensates for.
 ## 6. Env flags (quick reference)
 | flag | default | meaning |
 |---|---|---|
-| `DIFFKV_COMPRESSED_DECODE` | `auto` | `1`/`0`/`auto` — force sparse / force dense / threshold |
+| `DIFFKV_COMPRESSED_DECODE` | **`1`** | sparse-always (default, from token 1); `auto` = adaptive opt-in; `0` = dense |
 | `DIFFKV_COMPRESSED_MIN_CTX` | `16384` | auto threshold |
 | `DIFFKV_MAX_RESIDUAL` | `64` | exact residual tokens per block (memory lever; 128 fixed adversarial 1→4/5) |
 | `DIFFKV_TOPK_BLOCKS` | `16` | top-K block routing |
@@ -264,20 +266,25 @@ three half-live paths.
 
 ## 8. Recommended next steps (prioritized)
 
-1. **Decode speed (highest leverage, lowest risk).** Continue past WS1: lower `DIFFKV_ROUTE_RESIDUALS`
-   default (R=16 is enough ≤32k), reduce per-layer Python op dispatch, and scope a **fused Metal decode
-   kernel** / batched-layer decode — the only path to actually beating dense at short ctx.
-2. **Then flip the default** to sparse-always with auto as opt-in, AND scale `DIFFKV_MAX_BLOCKS` to the
-   prompt so short contexts don't pre-allocate the 682 MB pool. Do NOT flip before (1): today sparse@4k
-   is 16 vs dense 36 tps with no compensating benefit.
+1. **Decode speed = fused kernel (the ONLY real lever left).** WS1 (sync removal, +20%) captured the
+   safe overhead win. Investigated further: `DIFFKV_ROUTE_RESIDUALS=16` gives only ~+13% @16k (within
+   noise) — **decode is dispatch-bound, not FLOP-bound**, so router/knob micro-opts won't move it. To
+   actually beat dense at short ctx (now the default regime), a **fused Metal decode op / batched-layer
+   decode** is required. Not changing the route_residuals default (marginal + >32k recall tradeoff).
+2. **Sparse-from-start flip: DONE** (`DIFFKV_COMPRESSED_DECODE` default `1`; `auto` opt-in). Follow-up
+   to soften the short-ctx cost: **scale the block pool to the prompt** (today `_create_empty_session`
+   pre-allocs the full `max_blocks`=256 pool = 682 MB even at 4k). This needs per-session `max_blocks`
+   threaded through the overflow-shift + `hard_cap` + `DummyMLXPool` sites — moderate, deferred.
 3. **Prefill speedup:** move `_compress_block` SVD off the numpy round-trip (SVD in MLX / async).
-4. **Factual store (binding now works on realistic AND dense-table prompts, WS2b/WS2c).** Remaining gap
-   = **generation quality on verbatim codes**: the dense-table exact-key is 0/5 (bare-value 4/5) because
-   the +7 bias persists → the value repeats and the multi-token prefix mangles. Fix = VSL should emit the
-   locked sequence in order ONCE and stop, and **decay the bias on already-emitted tokens** (kill the
-   `2741-2741-…` loop). Test with `relational_ab.py` adversarial (compare `n_correct` vs `n_num_correct`).
-   Before enabling by default: eliminate the ~32% decode cost and finish the multi-turn
-   `current_query_tokens` refresh (only set on first build today).
+4. **Factual store (binding solved, WS2b/WS2c/WS2d).** Realistic 4/4 exact; dense-table 4/5 bare-value,
+   2/5 exact. Remaining: (a) verbatim shared-prefix emission (`BRAVO-`→`B`) and (b) the one value miss
+   **Raven** (6620→6666). Both root at the same thing: the VSL tracks position (`vsl_active_candidates`)
+   but never ENGAGES for value extraction (it only starts a lock on the sequence's FIRST token, which the
+   model skips) → naive token-set biases scramble/loop, and repeated digits ('6','6') can't be handled by
+   token-ID exclusion. Proper fix = **seed/drive the VSL lock for value extraction** (in-order emission).
+   HIGH behavioral risk (changes verbatim emission for every factual query incl. the clean natural 4/4),
+   LOW ROI on synthetic codes → **deprioritized**. Before enabling factual by default: kill the ~32%
+   decode cost + finish the multi-turn `current_query_tokens` refresh.
 5. **Adversarial-only capture fix (optional):** dense-block residual overflow (the 1/5 case) is helped
    by adaptive per-block residual budget or content-aware selection prioritizing rare/numeric tokens —
    but weigh against the 8 GB memory ceiling.
