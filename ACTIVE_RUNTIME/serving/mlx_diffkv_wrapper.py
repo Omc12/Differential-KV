@@ -196,27 +196,27 @@ def compute_decode_attention_static(
     S_comp  = block_size - 1
 
     # ── 1. Sparse / Compressed Attention ─────────────────────────────────────
-    AncK_e = comp_anc_k   # [nb, kv_heads, D]
-    AncV_e = comp_anc_v
-    VK_e   = comp_VK      # [nb, kv_heads, rank, D]
-    VV_e   = comp_VV
-
     if gpk > 1:
-        AncK_e = mx.repeat(AncK_e, gpk, axis=1)
-        AncV_e = mx.repeat(AncV_e, gpk, axis=1)
-        VK_e   = mx.repeat(VK_e,   gpk, axis=1)
-        VV_e   = mx.repeat(VV_e,   gpk, axis=1)
-
-    AncK_e_perm = AncK_e.transpose(1, 0, 2)   # [H_q, nb, D]
-    AncV_e_perm = AncV_e.transpose(1, 0, 2)
-
-    # Anchor scores: q · anchor_k for each block
-    s_anc = mx.sum(mx.expand_dims(q, 1) * AncK_e_perm, axis=-1) * scale  # [H_q, nb]
-
-    # Query projection into SVD subspace
-    VK_e_perm = VK_e.transpose(1, 0, 2, 3)                            # [H_q, nb, rank, D]
-    q_expanded = mx.expand_dims(mx.expand_dims(q, 1), 2)              # [H_q, 1, 1, D]
-    q_proj_n   = mx.sum(q_expanded * VK_e_perm, axis=-1) * scale      # [H_q, nb, rank]
+        H_kv = comp_anc_k.shape[1]
+        
+        # 1. AncK score computation
+        AncK_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)           # [H_kv, gpk, 1, D]
+        s_anc = mx.sum(q_exp * AncK_exp, axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = s_anc.reshape(H_q, nb)
+        
+        # 2. VK projection
+        VK_exp = mx.expand_dims(comp_VK.transpose(1, 0, 2, 3), 1)   # [H_kv, 1, nb, rank, D]
+        q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
+        q_proj_n = mx.sum(q_exp2 * VK_exp, axis=-1) * scale   # [H_kv, gpk, nb, rank]
+        q_proj_n = q_proj_n.reshape(H_q, nb, rank)
+    else:
+        AncK_e_perm = comp_anc_k.transpose(1, 0, 2)   # [H_q, nb, D]
+        s_anc = mx.sum(mx.expand_dims(q, 1) * AncK_e_perm, axis=-1) * scale  # [H_q, nb]
+        
+        VK_e_perm = comp_VK.transpose(1, 0, 2, 3)                            # [H_q, nb, rank, D]
+        q_expanded = mx.expand_dims(mx.expand_dims(q, 1), 2)              # [H_q, 1, 1, D]
+        q_proj_n   = mx.sum(q_expanded * VK_e_perm, axis=-1) * scale      # [H_q, nb, rank]
 
     # Delta scores: (q @ VK) @ U^T  →  [H_q, nb, S_comp]
     q_proj_n_perm       = q_proj_n.transpose(1, 0, 2)                 # [nb, H_q, rank]
@@ -242,7 +242,6 @@ def compute_decode_attention_static(
     # Concatenate anchor + delta scores → [H_q, nb * block_size]
     scores_blocks = mx.concatenate([mx.expand_dims(s_anc, -1), delta_s], axis=-1)
     scores_sparse = scores_blocks.reshape(H_q, -1)  # [H_q, nb*block_size]
-    # No block_mask needed: all nb blocks are active (pre-sliced by caller)
 
     lse_sparse = mx.logsumexp(scores_sparse, axis=-1)   # [H_q]
     w          = mx.softmax(scores_sparse, axis=-1)      # [H_q, nb*block_size]
@@ -253,7 +252,14 @@ def compute_decode_attention_static(
 
     # Anchor output contribution
     w_block_sum = w_anc + mx.sum(w_d, axis=-1)           # [H_q, nb]
-    O_anc = mx.sum(mx.expand_dims(w_block_sum, -1) * AncV_e_perm, axis=1)  # [H_q, D]
+    if gpk > 1:
+        AncV_exp = mx.expand_dims(comp_anc_v.transpose(1, 0, 2), 1)             # [H_kv, 1, nb, D]
+        w_block_sum_exp = mx.expand_dims(w_block_sum.reshape(H_kv, gpk, nb), 3) # [H_kv, gpk, nb, 1]
+        O_anc = mx.sum(w_block_sum_exp * AncV_exp, axis=2)                 # [H_kv, gpk, D]
+        O_anc = O_anc.reshape(H_q, D)
+    else:
+        AncV_e_perm = comp_anc_v.transpose(1, 0, 2)
+        O_anc = mx.sum(mx.expand_dims(w_block_sum, -1) * AncV_e_perm, axis=1)  # [H_q, D]
 
     # Delta (SVD) output contribution
     w_d_perm  = w_d.transpose(1, 0, 2)                          # [nb, H_q, S_comp]
@@ -261,8 +267,13 @@ def compute_decode_attention_static(
     w_proj     = mx.matmul(mx.expand_dims(w_d_perm, 2), comp_U_exp).squeeze(2)  # [nb, H_q, rank]
     w_proj     = w_proj * comp_scale.reshape(-1, 1, 1)           # apply svd_scale
 
-    # VV_e: [nb, H_q, rank, D] after GQA expand
-    O_delta_block = mx.matmul(mx.expand_dims(w_proj, 2), VV_e).squeeze(2)  # [nb, H_q, D]
+    if gpk > 1:
+        w_proj_exp = mx.expand_dims(w_proj.reshape(nb, H_kv, gpk, rank), 4)     # [nb, H_kv, gpk, rank, 1]
+        VV_exp = mx.expand_dims(comp_VV, 2)                                     # [nb, H_kv, 1, rank, D]
+        O_delta_block = mx.sum(w_proj_exp * VV_exp, axis=3)                 # [nb, H_kv, gpk, D]
+        O_delta_block = O_delta_block.reshape(nb, H_q, D)
+    else:
+        O_delta_block = mx.matmul(mx.expand_dims(w_proj, 2), comp_VV).squeeze(2)  # [nb, H_q, D]
     O_delta       = mx.sum(O_delta_block, axis=0)                           # [H_q, D]
 
     out_sparse = O_anc + O_delta
@@ -274,17 +285,24 @@ def compute_decode_attention_static(
     dense_mask_expanded = mx.expand_dims(dense_mask, 0)  # [1, max_dense_len]
 
     if gpk > 1:
-        dense_k_rot_perm = mx.repeat(dense_k, gpk, axis=0)
-        dense_v_perm     = mx.repeat(dense_v, gpk, axis=0)
+        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)                       # [H_kv, gpk, 1, D]
+        dk_exp = mx.expand_dims(dense_k, 1)                                      # [H_kv, 1, max_dense_len, D]
+        scores_dense = mx.sum(q_exp * dk_exp, axis=-1) * scale             # [H_kv, gpk, max_dense_len]
+        scores_dense = scores_dense.reshape(H_q, -1)
     else:
-        dense_k_rot_perm = dense_k
-        dense_v_perm     = dense_v
+        scores_dense  = mx.sum(mx.expand_dims(q, 1) * dense_k, axis=-1) * scale
 
-    scores_dense  = mx.sum(mx.expand_dims(q, 1) * dense_k_rot_perm, axis=-1) * scale
     scores_dense  = mx.where(dense_mask_expanded, scores_dense, -float('inf'))
     lse_dense     = mx.logsumexp(scores_dense, axis=-1)
     weights_dense = mx.softmax(scores_dense, axis=-1)
-    out_dense     = mx.sum(mx.expand_dims(weights_dense, -1) * dense_v_perm, axis=1)
+
+    if gpk > 1:
+        w_exp = mx.expand_dims(weights_dense.reshape(H_kv, gpk, -1), 3)          # [H_kv, gpk, max_dense_len, 1]
+        dv_exp = mx.expand_dims(dense_v, 1)                                      # [H_kv, 1, max_dense_len, D]
+        out_dense = mx.sum(w_exp * dv_exp, axis=2)                          # [H_kv, gpk, D]
+        out_dense = out_dense.reshape(H_q, D)
+    else:
+        out_dense     = mx.sum(mx.expand_dims(weights_dense, -1) * dense_v, axis=1)
     out_dense     = mx.where(mx.isnan(out_dense), 0.0, out_dense)
 
     # ── 3. Flash-style LSE merge ──────────────────────────────────────────────
@@ -323,17 +341,131 @@ def _dense_only_attention_static(
     dense_mask_expanded = mx.expand_dims(dense_mask, 0)
 
     if gpk > 1:
-        dk = mx.repeat(dense_k, gpk, axis=0)
-        dv = mx.repeat(dense_v, gpk, axis=0)
+        H_q, D = q.shape
+        H_kv = dense_k.shape[0]
+        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)        # [H_kv, gpk, 1, D]
+        dk_exp = mx.expand_dims(dense_k, 1)                       # [H_kv, 1, max_dense_len, D]
+        scores = mx.sum(q_exp * dk_exp, axis=-1) * scale     # [H_kv, gpk, max_dense_len]
+        scores = scores.reshape(H_q, -1)
     else:
-        dk = dense_k
-        dv = dense_v
+        scores  = mx.sum(mx.expand_dims(q, 1) * dense_k, axis=-1) * scale
 
-    scores  = mx.sum(mx.expand_dims(q, 1) * dk, axis=-1) * scale
     scores  = mx.where(dense_mask_expanded, scores, -float('inf'))
     weights = mx.softmax(scores, axis=-1)
-    out     = mx.sum(mx.expand_dims(weights, -1) * dv, axis=1)
+
+    if gpk > 1:
+        w_exp = mx.expand_dims(weights.reshape(H_kv, gpk, -1), 3)  # [H_kv, gpk, max_dense_len, 1]
+        dv_exp = mx.expand_dims(dense_v, 1)                        # [H_kv, 1, max_dense_len, D]
+        out = mx.sum(w_exp * dv_exp, axis=2)                 # [H_kv, gpk, D]
+        out = out.reshape(H_q, D)
+    else:
+        out     = mx.sum(mx.expand_dims(weights, -1) * dense_v, axis=1)
     return mx.where(mx.isnan(out), 0.0, out)
+
+@mx.compile
+def _execute_decode_attention_compiled(
+    q: mx.array,
+    dense_k: mx.array,
+    dense_v: mx.array,
+    dense_len: mx.array,
+    comp_U: mx.array,
+    comp_VK: mx.array,
+    comp_VV: mx.array,
+    comp_anc_k: mx.array,
+    comp_anc_v: mx.array,
+    comp_min_k: mx.array,
+    comp_max_k: mx.array,
+    comp_scale: mx.array,
+    comp_seq_len: mx.array,
+    comp_res_k: mx.array,
+    comp_res_v: mx.array,
+    comp_res_n: mx.array,
+    res_mask: mx.array,
+    cached_sel: mx.array,
+    # Static parameters
+    scale: float,
+    gpk: int,
+    kv_heads: int,
+    block_size: int,
+    rank: int,
+    max_dense_len: int,
+    max_residual: int,
+    route_residuals: int,
+    k_eff: int,
+    router: str,
+    use_topk: bool,
+    use_cached_sel: bool,
+):
+    nb = comp_U.shape[0]
+
+    if use_topk:
+        if use_cached_sel:
+            sel = cached_sel
+        else:
+            if router == "residual" and max_residual > 0:
+                R = min(route_residuals, max_residual)
+                res_n_slice = comp_res_n[:nb]
+                res_valid = mx.expand_dims(mx.arange(R), 0) < mx.expand_dims(mx.minimum(res_n_slice, R), 1)
+                relevance = _block_relevance_residual(
+                    q, comp_anc_k, comp_res_k[:, :R], res_valid, scale, gpk
+                )
+            else:
+                relevance = _block_relevance_minmax(
+                    q, comp_min_k, comp_max_k, scale, gpk
+                )
+            sel = mx.argsort(relevance)[-k_eff:]
+
+        topk_sel = sel
+        comp_U_s       = mx.take(comp_U,       sel, axis=0)
+        comp_VK_s      = mx.take(comp_VK,      sel, axis=0)
+        comp_VV_s      = mx.take(comp_VV,      sel, axis=0)
+        comp_anc_k_s   = mx.take(comp_anc_k,   sel, axis=0)
+        comp_anc_v_s   = mx.take(comp_anc_v,   sel, axis=0)
+        comp_scale_s   = mx.take(comp_scale,   sel, axis=0)
+        comp_seq_len_s = mx.take(comp_seq_len, sel, axis=0)
+        res_mask_s     = mx.take(res_mask,     sel, axis=0)
+
+        # Vectorized top-K residual gather
+        rk = mx.take(comp_res_k, sel, axis=0)
+        rv = mx.take(comp_res_v, sel, axis=0)
+        Ksel, Rw = rk.shape[0], rk.shape[1]
+        res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, Ksel * Rw, -1)
+        res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, Ksel * Rw, -1)
+        total_res = Ksel * Rw
+    else:
+        comp_U_s       = comp_U
+        comp_VK_s      = comp_VK
+        comp_VV_s      = comp_VV
+        comp_anc_k_s   = comp_anc_k
+        comp_anc_v_s   = comp_anc_v
+        comp_scale_s   = comp_scale
+        comp_seq_len_s = comp_seq_len
+        res_mask_s     = res_mask
+
+        # Uniform gather all blocks
+        rk = comp_res_k
+        rv = comp_res_v
+        nb_blocks = rk.shape[0]
+        R_width = rk.shape[1]
+        res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, nb_blocks * R_width, -1)
+        res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, nb_blocks * R_width, -1)
+        total_res = nb_blocks * R_width
+
+    # Static layout concatenation
+    dense_k_for_attn = mx.concatenate([res_k_all, dense_k], axis=1)
+    dense_v_for_attn = mx.concatenate([res_v_all, dense_v], axis=1)
+    dense_len_for_attn = total_res + dense_len
+    current_max_dense_len = total_res + max_dense_len
+
+    out_combined = compute_decode_attention_static(
+        q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
+        comp_scale_s, comp_seq_len_s, res_mask_s,
+        dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+        scale, gpk, kv_heads, block_size, rank,
+        current_max_dense_len
+    )
+
+    return out_combined, sel if use_topk else cached_sel
 
 
 @mx.compile
@@ -356,15 +488,20 @@ def _block_relevance_minmax(
     exact-residual attention then run only for the top-K blocks, so decode cost
     scales with K, not total context.
     """
-    MIN = comp_min_k
-    MAX = comp_max_k
     if gpk > 1:
-        MIN = mx.repeat(MIN, gpk, axis=1)
-        MAX = mx.repeat(MAX, gpk, axis=1)
-    MIN_p = MIN.transpose(1, 0, 2)                  # [H, nb, D]
-    MAX_p = MAX.transpose(1, 0, 2)
-    q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
-    bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
+        H_q, D = q.shape
+        H_kv = comp_min_k.shape[1]
+        nb = comp_min_k.shape[0]
+        MIN_exp = mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+        MAX_exp = mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
+        bound = mx.sum(mx.maximum(q_exp * MIN_exp, q_exp * MAX_exp), axis=-1) * scale # [H_kv, gpk, nb]
+        bound = bound.reshape(H_q, nb)
+    else:
+        MIN_p = comp_min_k.transpose(1, 0, 2)                  # [H, nb, D]
+        MAX_p = comp_max_k.transpose(1, 0, 2)
+        q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
+        bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
     return mx.max(bound, axis=0)                    # [nb]
 
 
@@ -388,19 +525,32 @@ def _block_relevance_residual(
     cheap enough for 1M-token contexts. Model-agnostic: no tuning to head count,
     RoPE, or content — it scores whatever each block's distinctive keys are.
     """
-    ANC = comp_anc_k
-    RK  = comp_res_k
     if gpk > 1:
-        ANC = mx.repeat(ANC, gpk, axis=1)
-        RK  = mx.repeat(RK,  gpk, axis=2)
-    ANC_p = ANC.transpose(1, 0, 2)                          # [H, nb, D]
-    s_anc = mx.sum(mx.expand_dims(q, 1) * ANC_p, axis=-1) * scale  # [H, nb]
+        H_q, D = q.shape
+        H_kv = comp_anc_k.shape[1]
+        nb = comp_anc_k.shape[0]
+        
+        ANC_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
+        s_anc = mx.sum(q_exp * ANC_exp, axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = s_anc.reshape(H_q, nb)
+        
+        RK_exp = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1) # [H_kv, 1, nb, R, D]
+        q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
+        s_res = mx.sum(q_exp2 * RK_exp, axis=-1) * scale       # [H_kv, gpk, nb, R]
+        res_valid_exp = mx.expand_dims(mx.expand_dims(res_valid, 0), 1)    # [1, 1, nb, R]
+        s_res = mx.where(res_valid_exp, s_res, -float('inf'))
+        res_max = mx.max(s_res, axis=-1)                       # [H_kv, gpk, nb]
+        res_max = res_max.reshape(H_q, nb)
+    else:
+        ANC_p = comp_anc_k.transpose(1, 0, 2)                          # [H, nb, D]
+        s_anc = mx.sum(mx.expand_dims(q, 1) * ANC_p, axis=-1) * scale  # [H, nb]
 
-    RK_p  = RK.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
-    q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
-    s_res = mx.sum(q_e2 * RK_p, axis=-1) * scale            # [H, nb, R]
-    s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
-    res_max = mx.max(s_res, axis=-1)                        # [H, nb]
+        RK_p  = comp_res_k.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
+        q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
+        s_res = mx.sum(q_e2 * RK_p, axis=-1) * scale            # [H, nb, R]
+        s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
+        res_max = mx.max(s_res, axis=-1)                        # [H, nb]
 
     return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
 
@@ -695,6 +845,7 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
+            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             "token_ids": src["token_ids"].copy() if "token_ids" in src else []
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
@@ -739,6 +890,7 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.array(rk) for rk in ckpt["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in ckpt["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in ckpt["comp_res_n"]],
+            "comp_res_mask": [mx.array(rm) for rm in ckpt["comp_res_mask"]] if "comp_res_mask" in ckpt else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else []
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
@@ -824,6 +976,8 @@ class MLXKVBlockManager:
                 session["comp_seq_len"][layer_idx][keep_blocks:] = 0
                 session["comp_res_k"][layer_idx][keep_blocks:] = 0.0
                 session["comp_res_v"][layer_idx][keep_blocks:] = 0.0
+                if "comp_res_mask" in session:
+                    session["comp_res_mask"][layer_idx][keep_blocks:] = False
                 for b_i in range(keep_blocks, self.max_blocks):
                     session["comp_res_n"][layer_idx][b_i] = 0
             else:
@@ -880,6 +1034,7 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
+            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             "token_ids": src["token_ids"].copy() if "token_ids" in src else []
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
@@ -1161,161 +1316,164 @@ class MLXKVBlockManager:
         _res_n_list = session["comp_res_n"][layer_idx]
         all_blocks_full = (self.max_residual > 0 and nb > 0
                            and min(_res_n_list[:nb]) == self.max_residual)
-        if nb > 0 and use_topk:
-            if self.router == "residual" and self.max_residual > 0:
-                R = min(self.route_residuals, self.max_residual)
-                res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)  # [nb]
-                res_valid = mx.arange(R).reshape(1, -1) < mx.minimum(res_n, R).reshape(-1, 1)
-                relevance = _block_relevance_residual(
-                    q,
-                    session["comp_anc_k"][layer_idx][:nb],
-                    session["comp_res_k"][layer_idx][:nb, :R],
-                    res_valid,
-                    scale, gpk,
-                )
-            else:
-                relevance = _block_relevance_minmax(
-                    q,
-                    session["comp_min_k"][layer_idx][:nb],
-                    session["comp_max_k"][layer_idx][:nb],
-                    scale, gpk,
-                )
-            sel = mx.argsort(relevance)[-k_eff:]               # [k_eff] selected block ids
-            # Keep `sel` lazy — drop the per-layer mx.eval(sel)/.tolist() host sync
-            # (previously 28 GPU↔CPU syncs per generated token). The comp_* and
-            # residual gathers consume `sel` directly via mx.take, so block selection
-            # stays on the GPU and the per-layer decode pipeline is never stalled.
-            topk_sel     = sel
-            comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
-            comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
-            comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
-            comp_anc_k   = mx.take(session["comp_anc_k"][layer_idx][:nb],   sel, axis=0)
-            comp_anc_v   = mx.take(session["comp_anc_v"][layer_idx][:nb],   sel, axis=0)
-            comp_scale   = mx.take(session["comp_scale"][layer_idx][:nb],   sel, axis=0)
-            comp_seq_len = mx.take(session["comp_seq_len"][layer_idx][:nb], sel, axis=0)
-        elif nb > 0:
-            topk_sel     = None  # attend all blocks (use the nb-keyed residual cache)
-            comp_U       = session["comp_U"][layer_idx][:nb]
-            comp_VK      = session["comp_VK"][layer_idx][:nb]
-            comp_VV      = session["comp_VV"][layer_idx][:nb]
-            comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
-            comp_anc_v   = session["comp_anc_v"][layer_idx][:nb]
-            comp_scale   = session["comp_scale"][layer_idx][:nb]
-            comp_seq_len = session["comp_seq_len"][layer_idx][:nb]
-        else:
-            topk_sel = None
+        route_once = os.environ.get("DIFFKV_ROUTE_ONCE", "0") == "1" or getattr(self, "route_once", False)
+        if layer_idx == 0:
+            session["_route_once_sel"] = None
 
-        # ── Residual gather ───────────────────────────────────────────────────
-        # Exact-token residuals only change when the block set changes, so the
-        # all-blocks gather is cached keyed on nb. Under top-K routing the selected
-        # set changes every step, so the (few) selected blocks are gathered fresh.
-        res_k_all = res_v_all = None
-        total_res = 0
-        if self.max_residual > 0 and nb > 0:
-            if topk_sel is not None and all_blocks_full:
-                # Vectorized top-K residual gather — fully on-GPU, no host sync.
-                # Every selected block holds exactly max_residual exact tokens, so the
-                # gather is a fixed-width [K, R, kv_heads, D] mx.take folded into
-                # [kv_heads, K*R, D]; all rows are valid (no per-block mask needed).
-                rk = mx.take(session["comp_res_k"][layer_idx][:nb], topk_sel, axis=0)
-                rv = mx.take(session["comp_res_v"][layer_idx][:nb], topk_sel, axis=0)
-                Ksel, Rw = rk.shape[0], rk.shape[1]
-                res_k_all = rk.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
-                res_v_all = rv.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
-                total_res = Ksel * Rw
-            elif topk_sel is not None:
-                # Rare non-uniform fallback: materialize block ids (host sync) and
-                # gather variable-length residual runs per selected block.
-                res_blocks = [int(i) for i in topk_sel.tolist()]
-                res_k_parts, res_v_parts = [], []
-                for bi in res_blocks:
-                    n_res = session["comp_res_n"][layer_idx][bi]
-                    if n_res > 0:
-                        res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
-                        res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
-                if res_k_parts:
-                    res_k_all = mx.concatenate(res_k_parts, axis=1)
-                    res_v_all = mx.concatenate(res_v_parts, axis=1)
-                    total_res = res_k_all.shape[1]
+        if all_blocks_full:
+            comp_res_n_arr = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
+            S_comp = self.block_size - 1
+            if self._res_exclude_svd and "comp_res_mask" in session:
+                res_mask = session["comp_res_mask"][layer_idx][:nb]
             else:
-                rc = session.setdefault("_res_cache", {})
-                ent = rc.get(layer_idx)
-                if ent is not None and ent[0] == nb:
-                    res_k_all, res_v_all, total_res = ent[1], ent[2], ent[3]
+                res_mask = mx.zeros((nb, S_comp), dtype=mx.bool_)
+            
+            cached_sel = session.get("_route_once_sel")
+            use_cached_sel = route_once and cached_sel is not None
+            if cached_sel is None:
+                cached_sel = mx.zeros((1,), dtype=mx.int32)
+                
+            out_combined, sel = _execute_decode_attention_compiled(
+                q, dense_k, dense_v, dense_len,
+                session["comp_U"][layer_idx][:nb],
+                session["comp_VK"][layer_idx][:nb],
+                session["comp_VV"][layer_idx][:nb],
+                session["comp_anc_k"][layer_idx][:nb],
+                session["comp_anc_v"][layer_idx][:nb],
+                session["comp_min_k"][layer_idx][:nb],
+                session["comp_max_k"][layer_idx][:nb],
+                session["comp_scale"][layer_idx][:nb],
+                session["comp_seq_len"][layer_idx][:nb],
+                session["comp_res_k"][layer_idx][:nb],
+                session["comp_res_v"][layer_idx][:nb],
+                comp_res_n_arr,
+                res_mask,
+                cached_sel,
+                scale, gpk, self.kv_heads, self.block_size, self.rank,
+                self.max_dense_len, self.max_residual, self.route_residuals,
+                k_eff, self.router, use_topk, use_cached_sel
+            )
+            if route_once and not use_cached_sel and use_topk:
+                session["_route_once_sel"] = sel
+        else:
+            if nb > 0 and use_topk:
+                if route_once and session.get("_route_once_sel") is not None:
+                    sel = session["_route_once_sel"]
                 else:
+                    if self.router == "residual" and self.max_residual > 0:
+                        R = min(self.route_residuals, self.max_residual)
+                        res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)  # [nb]
+                        res_valid = mx.arange(R).reshape(1, -1) < mx.minimum(res_n, R).reshape(-1, 1)
+                        relevance = _block_relevance_residual(
+                            q,
+                            session["comp_anc_k"][layer_idx][:nb],
+                            session["comp_res_k"][layer_idx][:nb, :R],
+                            res_valid,
+                            scale, gpk,
+                        )
+                    else:
+                        relevance = _block_relevance_minmax(
+                            q,
+                            session["comp_min_k"][layer_idx][:nb],
+                            session["comp_max_k"][layer_idx][:nb],
+                            scale, gpk,
+                        )
+                    sel = mx.argsort(relevance)[-k_eff:]               # [k_eff] selected block ids
+                    if route_once:
+                        session["_route_once_sel"] = sel
+                topk_sel     = sel
+                comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
+                comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
+                comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
+                comp_anc_k   = mx.take(session["comp_anc_k"][layer_idx][:nb],   sel, axis=0)
+                comp_anc_v   = mx.take(session["comp_anc_v"][layer_idx][:nb],   sel, axis=0)
+                comp_scale   = mx.take(session["comp_scale"][layer_idx][:nb],   sel, axis=0)
+                comp_seq_len = mx.take(session["comp_seq_len"][layer_idx][:nb], sel, axis=0)
+            elif nb > 0:
+                topk_sel     = None  # attend all blocks (use the nb-keyed residual cache)
+                comp_U       = session["comp_U"][layer_idx][:nb]
+                comp_VK      = session["comp_VK"][layer_idx][:nb]
+                comp_VV      = session["comp_VV"][layer_idx][:nb]
+                comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
+                comp_anc_v   = session["comp_anc_v"][layer_idx][:nb]
+                comp_scale   = session["comp_scale"][layer_idx][:nb]
+                comp_seq_len = session["comp_seq_len"][layer_idx][:nb]
+            else:
+                topk_sel = None
+
+            # ── Residual gather ───────────────────────────────────────────────────
+            res_k_all = res_v_all = None
+            total_res = 0
+            if self.max_residual > 0 and nb > 0:
+                if topk_sel is not None and all_blocks_full:
+                    rk = mx.take(session["comp_res_k"][layer_idx][:nb], topk_sel, axis=0)
+                    rv = mx.take(session["comp_res_v"][layer_idx][:nb], topk_sel, axis=0)
+                    Ksel, Rw = rk.shape[0], rk.shape[1]
+                    res_k_all = rk.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
+                    res_v_all = rv.transpose(2, 0, 1, 3).reshape(self.kv_heads, Ksel * Rw, self.head_dim)
+                    total_res = Ksel * Rw
+                elif topk_sel is not None:
+                    res_blocks = [int(i) for i in topk_sel.tolist()]
                     res_k_parts, res_v_parts = [], []
-                    for bi in range(nb):
+                    for bi in res_blocks:
                         n_res = session["comp_res_n"][layer_idx][bi]
                         if n_res > 0:
                             res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
                             res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
                     if res_k_parts:
-                        res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
+                        res_k_all = mx.concatenate(res_k_parts, axis=1)
                         res_v_all = mx.concatenate(res_v_parts, axis=1)
                         total_res = res_k_all.shape[1]
-                        mx.eval(res_k_all, res_v_all)
-                    rc[layer_idx] = (nb, res_k_all, res_v_all, total_res)
+                else:
+                    rc = session.setdefault("_res_cache", {})
+                    ent = rc.get(layer_idx)
+                    if ent is not None and ent[0] == nb:
+                        res_k_all, res_v_all, total_res = ent[1], ent[2], ent[3]
+                    else:
+                        res_k_parts, res_v_parts = [], []
+                        for bi in range(nb):
+                            n_res = session["comp_res_n"][layer_idx][bi]
+                            if n_res > 0:
+                                res_k_parts.append(session["comp_res_k"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                                res_v_parts.append(session["comp_res_v"][layer_idx][bi, :n_res].transpose(1, 0, 2))
+                        if res_k_parts:
+                            res_k_all = mx.concatenate(res_k_parts, axis=1)   # [kv_heads, total_res, D]
+                            res_v_all = mx.concatenate(res_v_parts, axis=1)
+                            total_res = res_k_all.shape[1]
+                            mx.eval(res_k_all, res_v_all)
+                        rc[layer_idx] = (nb, res_k_all, res_v_all, total_res)
 
-        if total_res > 0:
-            dl = session["dense_lens"][layer_idx]
-            augmented_k = mx.concatenate([res_k_all, dense_k[:, :dl]], axis=1)  # [kv_heads, total_res+dl, D]
-            augmented_v = mx.concatenate([res_v_all, dense_v[:, :dl]], axis=1)
-            total_active_dense = total_res + dl
-
-            # Pad up to a *bucketed* capacity that tracks actual content, not the
-            # max_blocks*max_residual worst case (8960 @ defaults). @mx.compile
-            # caches one graph per distinct capacity, so bucketing to 256 means a
-            # recompile only when crossing a bucket boundary — while the dense
-            # attention width stays ~proportional to the real token count.
-            BUCKET = 256
-            hard_cap = self.max_dense_len + self.max_blocks * self.max_residual
-            capacity = min(((total_active_dense + BUCKET - 1) // BUCKET) * BUCKET, hard_cap)
-            pad_len = capacity - total_active_dense
-            if pad_len > 0:
-                padding = mx.zeros((self.kv_heads, pad_len, self.head_dim), dtype=dense_k.dtype)
-                dense_k_for_attn = mx.concatenate([augmented_k, padding], axis=1)
-                dense_v_for_attn = mx.concatenate([augmented_v, padding], axis=1)
+            if total_res > 0:
+                dl = session["dense_lens"][layer_idx]
+                dense_k_for_attn = mx.concatenate([res_k_all, dense_k], axis=1)
+                dense_v_for_attn = mx.concatenate([res_v_all, dense_v], axis=1)
+                dense_len_for_attn = mx.array(total_res + dl)
+                current_max_dense_len = total_res + self.max_dense_len
             else:
-                dense_k_for_attn = augmented_k
-                dense_v_for_attn = augmented_v
-            dense_len_for_attn = mx.array(total_active_dense)
-            current_max_dense_len = capacity
-        else:
-            dense_k_for_attn = dense_k
-            dense_v_for_attn = dense_v
-            dense_len_for_attn = dense_len
-            current_max_dense_len = self.max_dense_len
+                dense_k_for_attn = dense_k
+                dense_v_for_attn = dense_v
+                dense_len_for_attn = dense_len
+                current_max_dense_len = self.max_dense_len
 
-        if nb == 0:
-            # ── Pure dense path: no compressed blocks exist yet ───────────────
-            # Skip the compiled sparse kernel entirely — avoids a needless
-            # 256×256-slot allocation and graph compile on early decode steps.
-            out_combined = _dense_only_attention_static(
-                q, dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
-                scale, gpk, current_max_dense_len
-            )
-        else:
-            # Residual-position mask for the active blocks: True where a delta
-            # position is also kept as an exact residual (so the kernel drops its
-            # lossy SVD twin). All-False when the feature is off OR the mask buffer
-            # is absent (older/cloned sessions) → identity, current behavior.
-            S_comp = self.block_size - 1
-            if self._res_exclude_svd and "comp_res_mask" in session:
-                _full_mask = session["comp_res_mask"][layer_idx][:nb]
-                res_mask = mx.take(_full_mask, topk_sel, axis=0) if topk_sel is not None else _full_mask
+            if nb == 0:
+                out_combined = _dense_only_attention_static(
+                    q, dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+                    scale, gpk, current_max_dense_len
+                )
             else:
-                res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
-            # ── Compressed + dense path ───────────────────────────────────────
-            # comp_* were sliced/gathered above: [:nb] when attending all blocks
-            # (graph keyed on nb, recompiles only as nb grows), or [K] under top-K
-            # routing (graph keyed on the constant K — compiles once).
-            out_combined = compute_decode_attention_static(
-                q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
-                comp_scale, comp_seq_len, res_mask,
-                dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
-                scale, gpk, self.kv_heads, self.block_size, self.rank,
-                current_max_dense_len,
-            )
+                S_comp = self.block_size - 1
+                if self._res_exclude_svd and "comp_res_mask" in session:
+                    _full_mask = session["comp_res_mask"][layer_idx][:nb]
+                    res_mask = mx.take(_full_mask, topk_sel, axis=0) if topk_sel is not None else _full_mask
+                else:
+                    res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
+                out_combined = compute_decode_attention_static(
+                    q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
+                    comp_scale, comp_seq_len, res_mask,
+                    dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+                    scale, gpk, self.kv_heads, self.block_size, self.rank,
+                    current_max_dense_len,
+                )
 
         if os.environ.get("DIFFKV_DBG_NAN") == "1":
             mx.eval(out_combined)
@@ -1874,7 +2032,7 @@ class MLXQwenModel:
                 mx.eval()          # flush any pending lazy ops first
                 mx.clear_cache()   # return peak activation memory to OS
                 import gc; gc.collect()
-                if use_compressed:
+                if use_compressed and not getattr(self, "keep_prefill_cache", False):
                     # Compressed decode runs entirely on the DiffKV store
                     # (compressed blocks + dense recency window), so the full
                     # native prefill KV cache is no longer needed. Drop it so
@@ -1992,6 +2150,10 @@ class MLXDiffKVWrapper:
         
         self._patch_attention_layers(model)
         self.model = MLXQwenModel(model, self.manager)
+        self.model.keep_prefill_cache = (
+            self.config.get("draft_model") is not None
+            or os.environ.get("DIFFKV_SPECULATIVE", "0") == "1"
+        )
         self.manager.patched_model = self.model
 
     def _patch_attention_layers(self, model):
