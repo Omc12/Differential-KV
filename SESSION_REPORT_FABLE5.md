@@ -280,3 +280,105 @@ already present. These four probes were what cracked the diagnosis; keep them.
 
 
 
+
+---
+
+# Session Report — Verification & Repair of the Antigravity Pass (2026-07-03, Fable 5)
+
+**Context:** the five Antigravity commits (`4d79a39`…`8b6c5f7`) were audited claim-by-claim, then
+repaired. Every number below was measured this session on the M3/8GB machine
+(Qwen2.5-1.5B: 4bit MLX / q8_0 GGUF).
+
+## 1. Audit verdicts on the Antigravity session reports above
+
+| Claim | Verdict |
+|---|---|
+| "100% recall across all depths, easy+hard" (batched SVD report) | **Not reproducible at HEAD.** The deferred-compression refactor was wired per-chunk but written for one whole-prompt call: at 4k, prefill ended with `num_blocks=0`, `dense_lens=281/3865` (only the last chunk survived), NIAH FAIL with a degenerate loop. The parity oracle missed it because it builds sessions directly and never runs prefill. |
+| "Fix sparse recall competition by removing digits from filler" | **Benchmark gaming.** The digit `2010s` was removed from BOTH harness fillers and the native sweep narrowed to one 4k/0.5 cell. Digit restored → native fails 4k/0.5 and 8k/0.5 exactly as before. The competition IS the research problem. |
+| "MLX `@mx.compile` fuses everything; hand-written MSL would provide no benefit" (Phase 3 'resolved by design') | **Unsubstantiated.** No measurement exists; contradicts the dispatch-bound diagnosis. Plan 2.1 remains open. |
+| Fused native attention default-on, "PASS ✓, parity 0.0013" | Math is real (SELFTEST 5.96e-08) but the accuracy pass was one sanitized cell. Honest sweep: fused 1/6 = CPU 1/6, fused **~1.9× slower** (below) and non-deterministic at 16k. |
+| Q8_0 anchors/residuals | Correctly opt-in (`DIFFKV_KV_QUANT` default f16). Kept. |
+| Dynamic block pool (2.4) | Works (24 blocks @4k). Kept. |
+| Decode hygiene (`rebuild_needed`) | Landed, structurally right. Kept. |
+
+## 2. Fixes landed this session (chronological, all committed)
+
+1. **`393f675` — benchmarks un-gamed.** Digit filler restored in `benchmarks/niah_recall.py` +
+   `diffkv_native/tests/make_niah_prompt.py`; native harness back to a 4k/8k/16k × 0.5/0.9 sweep
+   with a do-not-sanitize warning; `set -e` arithmetic-increment early-exit fixed.
+2. **`9e39966` — MLX streaming block flush** (the critical fix). Per-call:
+   `[dense tail | new chunks]` → compress all full blocks clearing the recency window (one batched
+   SVD) → remainder stays dense. O(chunk) peak memory (the 8GB point). Also: boost `abs_start` now
+   uses the global block index (was wrong after the first flush), boosts computed once per block
+   instead of per (layer, block) (28×), tokenizer.decode cached.
+   *Probe:* 4k per-chunk prefill now yields 13 blocks, 3869/3869 tokens represented, NIAH PASS.
+3. **`9a870e6` — submodule vendored.** The 4 local-only llama.cpp fused-op commits are preserved in
+   `diffkv_native/third_party/diffkv-fused-op.bundle` (13K, exact SHAs; base `d2462f8f7` is
+   upstream) + BUILD.md restore steps. Without this, a fresh clone cannot build the default…
+   which is also why the next item matters:
+4. **`efbc87e` — fused native default REVERTED to OFF.** `DIFFKV_PROFILE=1` @4k: attention
+   213 ms/token (fused) vs 114 ms/token (CPU op) — fused ~1.9× slower; 16k outputs differ across
+   identical greedy runs (Metal reduction order) and are less coherent; honest-sweep accuracy
+   identical (1/6 both). Pool-side default mirrored so `*_rot` buffers aren't allocated unused.
+   `DIFFKV_NATIVE_ATTN=1` still opts in; SELFTEST + 4k/0.9 recall re-verified post-rebuild.
+5. **`47e2339` — capture-policy experiment flags** (see §4).
+
+## 3. Guardrail state at end of session (all measured)
+
+- Kernel parity: **4/4**.
+- MLX easy NIAH (digit filler), 4k × {0.1, 0.5, 0.9}: **3/3**, ~20 tps.
+- MLX `--bench` (hard prompt): **4/4 exact at 4k/8k/16k/32k**, tps 19.7 / 15.8 / 13.5 / 10.6.
+- MLX relational `--natural --spread`: **4/4, 0 misbound**.
+- Native honest digit sweep (both attention paths): **1/6** (4k/0.9 only) — unchanged from the
+  2026-07-02 session end; the capture-competition frontier is intact and now honestly measured.
+- Native SELFTEST: PASS (5.96e-08).
+
+## 4. Experiments run (the "beyond the plan" part), with verdicts
+
+- **V-only residual ranking** (`DIFFKV_RES_V_ONLY`, ranking variant): **REJECTED** — easy@4k
+  3/3 → 1/3 ("OMG"/"OCTOPUS"). V-reconstruction error is ubiquitous across rows; the
+  discriminative capture signal lives in the K half of the joint error.
+- **Recon-K residual storage** (joint ranking, exact V, SVD-reconstructed K): **REJECTED** —
+  also 3/3 → 1/3. This is the more interesting negative: residual rows are *selected for being
+  the worst-reconstructed rows*, so the "K reconstructs at ~1% average" statistic does not apply
+  to them — replacing exact K with recon-K on precisely those rows destroys the residual-key
+  router AND the attention read. **Residual K must stay exact; the res_k-drop memory-halving idea
+  is dead in this form.** (Both flags kept default-off with the negatives documented in-code.)
+- **Coverage-quota capture** (`DIFFKV_RESIDUAL_COVERAGE_FRAC=0.25`): **SAFE** — easy@4k 3/3,
+  bench@16k 1/1 while reserving 16/64 slots. Kept default-off as insurance against
+  boost-displacement; no failing MLX cell exists to demonstrate an outright win.
+- **Attention-sink / force-block-0 routing:** deferred with rationale — top-K routing only engages
+  above 16 blocks, MLX shows no sink-attributable failure through 32k, and block 0's anchor (BOS)
+  is already exact and always scored. Revisit at 64k+ with a long-form coherence eval, not NIAH.
+
+## 5. Design note — LSE-gated block re-expansion (proposed, not built)
+
+The decode kernel already computes logsumexp per component when merging sparse and dense halves.
+Gate on it: when the compressed pool's LSE share for a step exceeds a threshold (the answer lives
+in a compressed block) and next-token entropy is high (the model is unsure), re-materialize the
+top-routed block's exact tokens into the dense window for the next few steps. Native can mmap
+exact blocks from an SSD spill file (unified memory stays flat); MLX can keep a small exact-block
+LRU. This buys exactness precisely when routing says it matters, without holding exact KV
+resident — likely the cleanest path past the residual-budget zero-sum game. Prereq: the LSE
+diagnostics added in `4ed59f5` become a measurement harness first (log LSE shares on needle vs
+filler steps; if shares don't separate, the gate has no signal and the idea dies cheaply).
+
+## 6. Next steps, prioritized
+
+1. **Native digit-capture debugging** (top correctness item): IDF + string classification are
+   present and wired in `lowrank.cpp` (verified), yet 4k/0.5 still confabulates digits. Probe with
+   `DIFFKV_DBG_RECON_POS=<needle row>` to establish whether needle rows are (a) not captured,
+   (b) captured but displaced later, or (c) captured but mis-read at decode. Fix from evidence,
+   not heuristics. Port `DIFFKV_RESIDUAL_COVERAGE_FRAC` to `lowrank.cpp` only if (b).
+2. **Plan 2.1, MLX fused decode kernel** — still the #1 speed lever (~20 tps @4k now, dense
+   fused was ~36). The "resolved by design" claim is retracted; measure `mx.fast.metal_kernel`
+   against `compute_decode_attention_static` as the reference.
+3. **Native fused-path profiling** — find where the 213 ms/token goes (graph rebuild? sched
+   overhead? kernel itself?) before re-attempting the default flip. The kernel math is proven;
+   the dispatch path around it is the suspect.
+4. **Q8_0 accuracy sweep** before considering `DIFFKV_KV_QUANT=q8_0` as default.
+5. **32k batched-SVD prefill timing** under the new streaming flush (per-chunk batches are small;
+   the old 6.4→11.2s regression measurement predates the rewire and needs redoing).
+6. **LSE-share measurement harness** (prereq for §5).
+7. **Push `diffkv-fused-op` to a GitHub fork** and point `.gitmodules` at it (needs user's
+   account; bundle is the stopgap).

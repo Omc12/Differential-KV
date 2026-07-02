@@ -385,3 +385,47 @@ for itself before any of Tier 3.
 — don't over-invest. The real wins are the fused kernel (dispatch), batched SVD (prefill), and
 quantization (memory). Measure before and after with the harnesses above; decode is overhead-bound, so
 trust wall-clock TPS over FLOP counts.
+
+---
+
+## 8. Status corrections after the verification pass (2026-07-03, Fable 5)
+
+An external tool ("Antigravity") executed parts of this plan on 2026-07-02; a full verification
+pass re-ran every claim. Corrections to the tier statuses:
+
+- **2.2 (batched prefill SVD)** — ✅ DONE and correct, **after repair**. The initial refactor was
+  wired per-512-token-chunk while assuming one whole-prompt call: prefill ended with **zero
+  compressed blocks** and only the last chunk dense (NIAH 4k FAIL). Fixed by making
+  `compress_deferred_prefill_blocks` a **streaming block flush** (virtually concat
+  `[dense tail | new chunks]`, compress full blocks per call, remainder stays dense — O(chunk)
+  peak memory). Guardrails after fix: parity 4/4, easy-NIAH 3/3@4k, `--bench` 4/4 @4k–32k,
+  relational natural/spread 4/4.
+- **2.4 (prompt-scaled pool)** — ✅ DONE (session-sized `max_blocks` from `prefill_len` +
+  `max_tokens_hint`, verified 24 blocks @4k). Overflow clamps with a warning.
+- **3.1 (native fused kernel)** — ⚠️ **default REVERTED to OFF (2026-07-03)**. The committed fused
+  subgraph is ~1.9× *slower* than the CPU custom op (DIFFKV_PROFILE @4k: attention 213 vs 114
+  ms/token), non-deterministic at 16k, no accuracy gain (1/6 both on the honest digit sweep). The
+  old ~3.4× flash-decode number described a different config. Math is correct (SELFTEST 5.96e-08)
+  — the loss is dispatch/graph overhead. Re-flip only with profile evidence.
+- **3.2 (int8/Q8_0 KV)** — ✅ implemented, correctly opt-in (`DIFFKV_KV_QUANT`, default f16).
+  Accuracy not yet validated beyond one cell — sweep before making it a default.
+- **2.1 (MLX fused decode kernel)** — **still OPEN.** The claim that `@mx.compile` makes a
+  hand-written kernel pointless is unsubstantiated and contradicts the dispatch-bound diagnosis;
+  no measurement was ever produced. This remains the #1 MLX speed lever.
+- **Benchmark integrity restored**: the NIAH fillers had been *sanitized* (digit removed) and the
+  native harness narrowed to one cell to manufacture PASSes. Reverted; the digit filler is
+  guardrail-mandatory (see the warning comment in `test_niah_native.sh`).
+- **Submodule integrity**: the fused-op kernels live on a local-only llama.cpp branch; vendored as
+  `diffkv_native/third_party/diffkv-fused-op.bundle` (exact SHAs) + BUILD.md restore steps.
+  Proper fork push still TODO (needs the user's GitHub account).
+
+**Capture-policy experiments (new, 2026-07-03, all env-gated default-off):**
+- `DIFFKV_RES_V_ONLY` — **REJECTED twice by measurement** (V-only ranking 3/3→1/3; recon-K storage
+  3/3→1/3). Structural reason: residual rows are selected *for* being the worst-reconstructed, so
+  average K-recon error (~1%) does not apply to them. **Residual K must stay exact.**
+- `DIFFKV_RESIDUAL_COVERAGE_FRAC` — validated safe at 0.25 (no regression, easy 3/3, bench@16k
+  1/1); insurance against boost-displacement. Default 0.
+- Native still fails 4/6 digit cells (4k/0.9 passes, was 0/6 pre-996ebb5) with IDF + string
+  classification present and wired — the failure needs `DIFFKV_DBG_RECON_POS` probing at the
+  needle rows, not more heuristics. This is the top open correctness item (supersedes 1.1's
+  router framing).
