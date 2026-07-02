@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <iostream>
 #include <random>
+#include <unordered_map>
 
 namespace diffkv {
 
@@ -832,27 +833,183 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                 return 8.0f;
             }();
             if (tok_boost > 1.0f) {
-                // Identify code-fragment tokens: digits '0'-'9' (ids 15-24), single
-                // uppercase letters 'A'-'Z' (ids 32-57), and '-' (id 12) — the alphabet
-                // of verbatim identifiers. A blanket byte-token boost was tried and
-                // REJECTED: it floods the budget with prose punctuation and displaces
-                // the multi-char code pieces ("ME","GA","DEL") that error-ranking was
-                // already capturing. Additionally, protect the CHAIN: verbatim recall
-                // requires every token of the identifier, so also boost the immediate
-                // neighbors of code-fragment tokens (a code's hyphens sit between
-                // captured digits; a needle is only recalled if the whole run is exact).
-                std::vector<bool> is_code(S_deltas, false);
+                std::unordered_map<int32_t, int> token_counts;
+                if (params.session_token_ids && params.session_len > 0) {
+                    for (int i = 0; i < params.session_len; ++i) {
+                        token_counts[params.session_token_ids[i]]++;
+                    }
+                }
+
+                std::vector<std::string> tok_strs(S_deltas);
                 for (int s = 0; s < S_deltas; ++s) {
                     int32_t tid = params.token_ids[s + 1];
-                    is_code[s] = (tid >= 15 && tid <= 24) || (tid >= 32 && tid <= 57) || tid == 12;
-                }
-                for (int s = 0; s < S_deltas; ++s) {
-                    bool nb = (s > 0 && is_code[s-1]) || (s + 1 < S_deltas && is_code[s+1]);
-                    if (is_code[s]) {
-                        joint_err[s] *= tok_boost;
-                    } else if (nb) {
-                        joint_err[s] *= 0.5f * tok_boost;
+                    if (params.token_to_piece_fn) {
+                        tok_strs[s] = params.token_to_piece_fn(tid);
+                    } else {
+                        tok_strs[s] = "";
                     }
+                }
+
+                auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
+                auto is_upper_char = [](char c) { return c >= 'A' && c <= 'Z'; };
+                auto is_lower_char = [](char c) { return c >= 'a' && c <= 'z'; };
+                auto is_alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+
+                auto is_title_case = [&](const std::string& str) {
+                    if (str.empty()) return false;
+                    if (!is_upper_char(str[0])) return false;
+                    for (size_t i = 1; i < str.length(); ++i) {
+                        if (is_alpha(str[i]) && !is_lower_char(str[i])) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+
+                auto is_alpha_str = [&](const std::string& str) {
+                    if (str.empty()) return false;
+                    for (char c : str) {
+                        if (!is_alpha(c)) return false;
+                    }
+                    return true;
+                };
+
+                std::vector<bool> is_core(S_deltas, false);
+                std::vector<bool> is_prose(S_deltas, false);
+
+                for (int s = 0; s < S_deltas; ++s) {
+                    std::string raw_str = tok_strs[s];
+                    std::string clean_str = "";
+                    for (char c : raw_str) {
+                        if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+                            clean_str += c;
+                        }
+                    }
+
+                    if (clean_str.empty()) {
+                        is_prose[s] = true;
+                        continue;
+                    }
+
+                    bool has_digit = false;
+                    for (char c : clean_str) {
+                        if (is_digit(c)) {
+                            has_digit = true;
+                            break;
+                        }
+                    }
+
+                    bool is_upper_word = true;
+                    bool has_alpha = false;
+                    for (char c : clean_str) {
+                        if (is_alpha(c)) {
+                            has_alpha = true;
+                            if (!is_upper_char(c)) {
+                                is_upper_word = false;
+                            }
+                        }
+                    }
+                    is_upper_word = is_upper_word && has_alpha && clean_str.length() >= 2;
+
+                    is_core[s] = has_digit || is_upper_word || (clean_str == "-") || (clean_str == "_");
+
+                    bool prose = false;
+                    if (clean_str == "." || clean_str == "," || clean_str == ";" || clean_str == "?" ||
+                        clean_str == "!" || clean_str == ":" || clean_str == "\"" || clean_str == "'" ||
+                        clean_str == "(" || clean_str == ")" || clean_str == "[" || clean_str == "]" ||
+                        clean_str == "{" || clean_str == "}") {
+                        prose = true;
+                    } else if (is_alpha_str(clean_str)) {
+                        bool is_lower_word = true;
+                        for (char c : clean_str) {
+                            if (is_alpha(c) && !is_lower_char(c)) {
+                                is_lower_word = false;
+                                break;
+                            }
+                        }
+                        if (is_lower_word || (is_title_case(clean_str) && clean_str.length() > 1)) {
+                            prose = true;
+                        }
+                    }
+                    is_prose[s] = prose;
+                }
+
+                bool has_strs = false;
+                for (int s = 0; s < S_deltas; ++s) {
+                    if (!tok_strs[s].empty()) {
+                        has_strs = true;
+                        break;
+                    }
+                }
+
+                if (!has_strs) {
+                    for (int s = 0; s < S_deltas; ++s) {
+                        int32_t tid = params.token_ids[s + 1];
+                        bool is_code = (tid >= 15 && tid <= 24) || (tid >= 32 && tid <= 57) || tid == 12;
+                        is_core[s] = is_code;
+                        is_prose[s] = !is_code;
+                    }
+                }
+
+                std::vector<std::vector<int>> segment_indices;
+                bool in_segment = false;
+                for (int i = 0; i < S_deltas; ++i) {
+                    if (!is_prose[i]) {
+                        if (!in_segment) {
+                            in_segment = true;
+                            segment_indices.push_back({i});
+                        } else {
+                            segment_indices.back().push_back(i);
+                        }
+                    } else {
+                        in_segment = false;
+                    }
+                }
+
+                std::vector<float> boost_multipliers(S_deltas, 1.0f);
+                for (const auto& seg : segment_indices) {
+                    bool contains_core = false;
+                    for (int idx : seg) {
+                        if (is_core[idx]) {
+                            contains_core = true;
+                            break;
+                        }
+                    }
+                    if (contains_core) {
+                        for (int idx : seg) {
+                            int32_t tid = params.token_ids[idx + 1];
+                            int count = 1;
+                            auto it = token_counts.find(tid);
+                            if (it != token_counts.end()) {
+                                count = it->second;
+                            }
+                            float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
+                            float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
+                            boost_multipliers[idx] = tok_boost * (rarity_weight / 2.0f);
+                        }
+                    }
+                }
+
+                bool is_needle_block = false;
+                for (int s = 0; s < S_deltas; ++s) {
+                    int32_t tid = params.token_ids[s + 1];
+                    if (tid == 1898 || tid == 87996 || tid == 38332 || tid == 15204 || tid == 22 || tid == 19 || tid == 16) {
+                        is_needle_block = true;
+                        break;
+                    }
+                }
+                if (is_needle_block) {
+                    std::cerr << "[DEBUG_NEEDLE_BLOCK] Block " << params.block_id << " contains needle tokens:\n";
+                    for (int s = 0; s < S_deltas; ++s) {
+                        std::cerr << s << ": id=" << params.token_ids[s + 1] 
+                                  << " str=\"" << tok_strs[s] << "\" "
+                                  << "is_core=" << is_core[s] << " is_prose=" << is_prose[s] 
+                                  << " boost=" << boost_multipliers[s] << "\n";
+                    }
+                }
+
+                for (int s = 0; s < S_deltas; ++s) {
+                    joint_err[s] *= boost_multipliers[s];
                 }
             }
         }

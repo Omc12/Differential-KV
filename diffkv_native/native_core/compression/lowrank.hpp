@@ -4,6 +4,8 @@
 #include "ggml.h"
 #include <vector>
 #include <unordered_set>
+#include <functional>
+#include <string>
 
 namespace diffkv {
 
@@ -23,6 +25,9 @@ struct LowRankCompressParams {
     const float* raw_v_ptr;
     const int32_t* token_ids;
     const std::unordered_set<int32_t>* stop_token_ids;
+    std::function<std::string(int32_t)> token_to_piece_fn = nullptr;
+    const int32_t* session_token_ids = nullptr;
+    int session_len = 0;
     
     // Outputs in block pool
     int8_t* out_u_ptr;

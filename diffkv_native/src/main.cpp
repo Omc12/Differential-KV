@@ -2456,22 +2456,23 @@ int main(int argc, char ** argv) {
             if (prompt.empty() || prompt == "exit" || prompt == "quit") {
                 break;
             }
-            // Unescape \\n sequences back to real newlines (encoded by gateway for single-line stdin)
-            {
-                std::string unescaped;
-                unescaped.reserve(prompt.size());
-                for (size_t ui = 0; ui < prompt.size(); ++ui) {
-                    if (ui + 1 < prompt.size() && prompt[ui] == '\\' && prompt[ui+1] == 'n') {
-                        unescaped += '\n';
-                        ++ui;
-                    } else {
-                        unescaped += prompt[ui];
-                    }
-                }
-                prompt = std::move(unescaped);
-            }
         } else {
             prompt = argv[2];
+        }
+
+        // Unescape \\n sequences back to real newlines (encoded by gateway for single-line stdin or passed via argv)
+        {
+            std::string unescaped;
+            unescaped.reserve(prompt.size());
+            for (size_t ui = 0; ui < prompt.size(); ++ui) {
+                if (ui + 1 < prompt.size() && prompt[ui] == '\\' && prompt[ui+1] == 'n') {
+                    unescaped += '\n';
+                    ++ui;
+                } else {
+                    unescaped += prompt[ui];
+                }
+            }
+            prompt = std::move(unescaped);
         }
 
         // Always do a full reset + re-prefill from token 0 on every turn.
@@ -5097,7 +5098,7 @@ int main(int argc, char ** argv) {
                 std::vector<float> natv((size_t)nq*D); ggml_backend_tensor_get(g_dbg_attn0, natv.data(), 0, natv.size()*sizeof(float));
                 std::vector<float> outS((size_t)nq*D,0.0f), lseS(nq,-1e30f);
                 diffkv::execute_cpu_attention(qh.data(), sl.data(), outS.data(), lseS.data(), kv_engines[cmpL].get(),
-                                              nq, nkv, rank, kv_engines[cmpL]->get_S_max(), K, D, scale, true, freq, true);
+                                              nq, nkv, rank, kv_engines[cmpL]->get_S_max(), K, D, scale, true, freq, userdata[cmpL].approximate_attn);
                 // FULL ref = sparse ⊕ dense(active_k_dense[0] + current token) via 3-way LSE combine.
                 int F=nkv*D, Td=total_dense_tokens[cmpL];
                 // Match the real callback: ignore_c=true → DO NOT attend the current token here

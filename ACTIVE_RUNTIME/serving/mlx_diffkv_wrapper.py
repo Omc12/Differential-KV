@@ -176,7 +176,7 @@ def compute_decode_attention_static(
     res_mask: mx.array,       # [nb, S_comp] bool — True where the position is an exact residual
     dense_k: mx.array,        # [kv_heads, max_dense_len, D]  (fixed-size padded buffer)
     dense_v: mx.array,        # [kv_heads, max_dense_len, D]
-    dense_len: mx.array,      # scalar — how many dense tokens are valid
+    dense_mask: mx.array,     # [max_dense_len] bool mask
     nb_actual: mx.array,      # tensor — how many blocks are actually valid
     scale: float,
     gpk: int,
@@ -278,8 +278,6 @@ def compute_decode_attention_static(
     out_sparse = mx.where(mx.isnan(out_sparse), 0.0, out_sparse)
 
     # ── 2. Dense (recency window) Attention ──────────────────────────────────
-    dense_idx          = mx.arange(max_dense_len)
-    dense_mask         = dense_idx < dense_len
     dense_mask_expanded = mx.expand_dims(dense_mask, 0)  # [1, max_dense_len]
 
     if gpk > 1:
@@ -459,13 +457,17 @@ def _execute_decode_attention_compiled(
     # Static layout concatenation
     dense_k_for_attn = mx.concatenate([res_k_all, dense_k], axis=1)
     dense_v_for_attn = mx.concatenate([res_v_all, dense_v], axis=1)
-    dense_len_for_attn = total_res + dense_len
     current_max_dense_len = total_res + max_dense_len
+
+    # Mask out padded residuals and padded dense elements
+    res_mask_attn = mx.arange(total_res) < (nb_actual_for_attn * max_residual)
+    dense_mask_attn = mx.arange(max_dense_len) < dense_len
+    dense_mask_combined = mx.concatenate([res_mask_attn, dense_mask_attn], axis=0)
 
     out_combined = compute_decode_attention_static(
         q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
         comp_scale_s, comp_seq_len_s, res_mask_s,
-        dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+        dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
         nb_actual_for_attn,
         scale, gpk, kv_heads, block_size, rank,
         current_max_dense_len
@@ -648,7 +650,7 @@ class MLXKVBlockManager:
         # the dense pool — its lossy low-rank twin no longer dilutes it. Zero memory
         # cost; fixes precise-token (e.g. digit) corruption that the residual capture
         # was meant to prevent but couldn't because both copies were attended.
-        self._res_exclude_svd = os.environ.get("DIFFKV_RESIDUAL_EXCLUDE_SVD", "0").strip().lower() in ("1", "on", "true", "yes")
+        self._res_exclude_svd = os.environ.get("DIFFKV_RESIDUAL_EXCLUDE_SVD", "1").strip().lower() not in ("0", "off", "false", "no")
         self.max_dense_len = self.recency_window + self.block_size
         self._comp_res_n_const = mx.full((self.max_blocks,), self.max_residual, dtype=mx.int32)
         
@@ -813,7 +815,8 @@ class MLXKVBlockManager:
             # as EXACT residuals — used to exclude them from the SVD pool at decode.
             "comp_res_mask": [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             
-            "token_ids": []
+            "token_ids": [],
+            "token_counts": Counter()
         }
 
     def init_session(self, session_id: str, prefill_len: int = 0, max_tokens_hint: int = None):
@@ -855,7 +858,8 @@ class MLXKVBlockManager:
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
             "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": src["token_ids"].copy() if "token_ids" in src else []
+            "token_ids": src["token_ids"].copy() if "token_ids" in src else [],
+            "token_counts": Counter(src["token_ids"]) if "token_ids" in src else Counter()
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
             if not hasattr(self, "_session_checkpoints_prompt_cache"):
@@ -901,7 +905,8 @@ class MLXKVBlockManager:
             "comp_res_v": [mx.array(rv) for rv in ckpt["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in ckpt["comp_res_n"]],
             "comp_res_mask": [mx.array(rm) for rm in ckpt["comp_res_mask"]] if "comp_res_mask" in ckpt else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else []
+            "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else [],
+            "token_counts": Counter(ckpt["token_ids"]) if "token_ids" in ckpt else Counter()
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
             if hasattr(self, "_session_checkpoints_prompt_cache") and checkpoint_id in self._session_checkpoints_prompt_cache:
@@ -1013,6 +1018,7 @@ class MLXKVBlockManager:
                 
         if "token_ids" in session and session["token_ids"]:
             session["token_ids"] = session["token_ids"][:target_len]
+            session["token_counts"] = Counter(session["token_ids"])
 
         if hasattr(self, "patched_model") and self.patched_model is not None:
             cache_key = (session_id,)
@@ -1046,7 +1052,8 @@ class MLXKVBlockManager:
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
             "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": src["token_ids"].copy() if "token_ids" in src else []
+            "token_ids": src["token_ids"].copy() if "token_ids" in src else [],
+            "token_counts": Counter(src["token_ids"]) if "token_ids" in src else Counter()
         }
         if hasattr(self, "patched_model") and self.patched_model is not None:
             src_key = (src_sid,)
@@ -1080,7 +1087,11 @@ class MLXKVBlockManager:
 
     def register_prefill_tokens(self, session_id: str, token_ids: torch.Tensor):
         session = self.sessions.setdefault(session_id, self._create_empty_session())
-        session["token_ids"].extend(token_ids.cpu().tolist())
+        tids_list = token_ids.cpu().tolist()
+        session["token_ids"].extend(tids_list)
+        if "token_counts" not in session or session["token_counts"] is None:
+            session["token_counts"] = Counter()
+        session["token_counts"].update(tids_list)
 
     def finalize_compressed_blocks(self):
         pass
@@ -1196,7 +1207,26 @@ class MLXKVBlockManager:
         S_comp = self.block_size - 1
         deltas_k_2d = deltas_k.transpose(1, 0, 2).reshape(S_comp, -1)
         deltas_v_2d = deltas_v.transpose(1, 0, 2).reshape(S_comp, -1)
-        deltas_2d = mx.concatenate([deltas_k_2d, deltas_v_2d], axis=1)
+
+        # V-side rebalancing for the joint K|V SVD
+        v_scale_on = os.environ.get("DIFFKV_V_SCALE", "1") != "0"
+        v_gain = 1.0
+        if v_scale_on:
+            eK = mx.sum(deltas_k_2d.astype(mx.float32)**2)
+            eV = mx.sum(deltas_v_2d.astype(mx.float32)**2)
+            eK_val = eK.item()
+            eV_val = eV.item()
+            if eV_val > 1e-12 and eK_val > 1e-12:
+                import math
+                v_gain = math.sqrt(eK_val / eV_val)
+                v_gain = min(max(v_gain, 1.0), 10000.0)
+
+                deltas_v_2d_scaled = deltas_v_2d * v_gain
+                deltas_2d = mx.concatenate([deltas_k_2d, deltas_v_2d_scaled], axis=1)
+            else:
+                deltas_2d = mx.concatenate([deltas_k_2d, deltas_v_2d], axis=1)
+        else:
+            deltas_2d = mx.concatenate([deltas_k_2d, deltas_v_2d], axis=1)
 
         token_norms = mx.linalg.norm(deltas_2d, axis=-1, keepdims=True)
         token_norms = mx.maximum(token_norms, 1e-5)
@@ -1213,6 +1243,10 @@ class MLXKVBlockManager:
 
         VK_flat = Vh_padded[:, :self.kv_heads * self.head_dim]
         VV_flat = Vh_padded[:, self.kv_heads * self.head_dim:]
+        if v_scale_on and v_gain > 1.0:
+            # The SVD ran on v_gain-scaled V; baking 1/v_gain here makes decode's
+            # reconstruction produce raw-space V with no kernel changes.
+            VV_flat = VV_flat / v_gain
 
         VK = VK_flat.reshape(self.rank, self.kv_heads, self.head_dim).transpose(1, 0, 2)
         VV = VV_flat.reshape(self.rank, self.kv_heads, self.head_dim).transpose(1, 0, 2)
@@ -1220,11 +1254,95 @@ class MLXKVBlockManager:
         # ── SVD Residual Correction ──────────────────────────────────────────
         # Reconstruct block deltas from low-rank SVD components entirely in MLX on GPU
         recon_delta = mx.matmul(U_padded, Vh_padded) * svd_scale
-        errors = mx.linalg.norm(deltas_2d - recon_delta, axis=-1)  # [S_comp]
+        recon_delta_k = recon_delta[:, :self.kv_heads * self.head_dim]
+        recon_delta_v = recon_delta[:, self.kv_heads * self.head_dim:]
+        if v_scale_on and v_gain > 1.0:
+            # Unscale V reconstruction to raw space for error computation
+            recon_delta_v = recon_delta_v / v_gain
+
+        errors_k = mx.linalg.norm(deltas_k_2d - recon_delta_k, axis=-1)
+        errors_v = mx.linalg.norm(deltas_v_2d - recon_delta_v, axis=-1)
+
+        # Rank residual candidates in the BALANCED space: weight V error by v_gain
+        errors_v_balanced = errors_v * v_gain
+        joint_errors = mx.sqrt(errors_k**2 + errors_v_balanced**2)
+
+        # Content-aware residual capture / token boosting
+        tok_boost_env = os.environ.get("DIFFKV_RESIDUAL_TOKEN_BOOST")
+        tok_boost = 8.0
+        if tok_boost_env is not None:
+            try:
+                tok_boost = float(tok_boost_env)
+            except ValueError:
+                pass
+
+        if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
+            abs_start = num_blocks * self.block_size
+            tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
+            if len(tids) == S_comp:
+                counts = session.get("token_counts", {})
+                total_tokens = len(session["token_ids"])
+                
+                # Decode each token to string
+                tok_strs = [self.tokenizer.decode([tid]) for tid in tids]
+                
+                # Classify core information tokens (digits, uppercase words/identifiers)
+                is_core = []
+                for s in tok_strs:
+                    s_clean = s.strip()
+                    has_digit = any(c.isdigit() for c in s_clean)
+                    is_upper = s_clean.isupper() and s_clean.isalpha() and len(s_clean) >= 2
+                    is_core.append(has_digit or is_upper or s_clean == '-' or s_clean == '_')
+                
+                # Classify prose tokens
+                is_prose = []
+                for s in tok_strs:
+                    s_clean = s.strip()
+                    if not s_clean:
+                        is_prose.append(True)
+                        continue
+                    if s_clean in ('.', ',', ';', '?', '!', ':', '"', "'", '(', ')', '[', ']', '{', '}'):
+                        is_prose.append(True)
+                        continue
+                    if s_clean.isalpha():
+                        if s_clean.islower() or (s_clean.istitle() and len(s_clean) > 1):
+                            is_prose.append(True)
+                            continue
+                    is_prose.append(False)
+                
+                boost_multipliers = [1.0] * S_comp
+                in_segment = False
+                segment_indices = []
+                
+                for i in range(S_comp):
+                    if not is_prose[i]:
+                        if not in_segment:
+                            in_segment = True
+                            segment_indices.append([i])
+                        else:
+                            segment_indices[-1].append(i)
+                    else:
+                        in_segment = False
+                
+                boosted_segs = []
+                for seg in segment_indices:
+                    contains_core = any(is_core[i] for i in seg)
+                    if contains_core:
+                        boosted_segs.append([tok_strs[i] for i in seg])
+                        for i in seg:
+                            tid = tids[i]
+                            count = counts.get(tid, 1)
+                            import math
+                            idf = math.log(max(total_tokens, 2) / (count + 0.1))
+                            rarity_weight = max(1.0, min(idf, 6.0))
+                            boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+
+                boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
+                joint_errors = joint_errors * boost_arr
 
         max_res = self.max_residual
         if max_res > 0:
-            top_k = mx.argsort(errors)[-max_res:][::-1]
+            top_k = mx.argsort(joint_errors)[-max_res:][::-1]
             block_k_t = block_k.transpose(1, 0, 2)
             block_v_t = block_v.transpose(1, 0, 2)
             res_k_padded = mx.take(block_k_t, top_k + 1, axis=0)
@@ -1464,11 +1582,17 @@ class MLXKVBlockManager:
                 dense_v_for_attn = mx.concatenate([res_v_all, dense_v], axis=1)
                 dense_len_for_attn = mx.array(total_res + dl)
                 current_max_dense_len = total_res + self.max_dense_len
+                
+                # Construct exact residuals mask + dense mask
+                res_mask_attn = mx.ones((total_res,), dtype=mx.bool_)
+                dense_mask_attn = mx.arange(self.max_dense_len) < dl
+                dense_mask_combined = mx.concatenate([res_mask_attn, dense_mask_attn], axis=0)
             else:
                 dense_k_for_attn = dense_k
                 dense_v_for_attn = dense_v
                 dense_len_for_attn = dense_len
                 current_max_dense_len = self.max_dense_len
+                dense_mask_combined = mx.arange(self.max_dense_len) < dense_len
 
             if nb == 0:
                 out_combined = _dense_only_attention_static(
@@ -1485,7 +1609,7 @@ class MLXKVBlockManager:
                 out_combined = compute_decode_attention_static(
                     q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
                     comp_scale, comp_seq_len, res_mask,
-                    dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+                    dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
                     scale, gpk, self.kv_heads, self.block_size, self.rank,
                     current_max_dense_len,
                 )

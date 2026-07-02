@@ -152,6 +152,9 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     params.raw_v_ptr = job.raw_v_ptr;
     params.token_ids = job.token_ids;
     params.stop_token_ids = job.stop_token_ids;
+    params.token_to_piece_fn = job.token_to_piece_fn;
+    params.session_token_ids = job.session_token_ids;
+    params.session_len = job.session_len;
     params.out_u_ptr = job.out_u_ptr;
     params.out_u_scale = job.out_u_scale;
     params.out_u_row_scale = job.out_u_row_scale;

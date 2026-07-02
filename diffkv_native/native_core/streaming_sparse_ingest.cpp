@@ -695,6 +695,13 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.raw_v_ptr = block->svd_v.data();
     job.token_ids = session_token_ids_.data() + block->anchor_idx;
     job.stop_token_ids = stop_token_ids_;
+    if (model_) {
+        job.token_to_piece_fn = [this](int32_t tid) {
+            return model_->token_to_piece(tid);
+        };
+    }
+    job.session_token_ids = session_token_ids_.data();
+    job.session_len = (int)session_token_ids_.size();
     job.force_lapack = boost;
 
     if (engines[layer_idx]->get_host_U(slot_id) == nullptr) {

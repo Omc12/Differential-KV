@@ -31,6 +31,9 @@ struct CompressJob {
     // Token sequence and stop-word details for landmark scoring
     const int32_t* token_ids = nullptr;
     const std::unordered_set<int32_t>* stop_token_ids = nullptr;
+    std::function<std::string(int32_t)> token_to_piece_fn = nullptr;
+    const int32_t* session_token_ids = nullptr;
+    int session_len = 0;
     
     // Outputs in block pool
     int8_t* out_u_ptr;         // [S_max, rank] destination in pool U
@@ -78,6 +81,9 @@ struct CompressJob {
         raw_v_ptr = other.raw_v_ptr;
         token_ids = other.token_ids;
         stop_token_ids = other.stop_token_ids;
+        token_to_piece_fn = other.token_to_piece_fn;
+        session_token_ids = other.session_token_ids;
+        session_len = other.session_len;
         max_residual = other.max_residual;
         state_table = other.state_table;
         W_proj = other.W_proj;
@@ -147,6 +153,9 @@ struct CompressJob {
             raw_v_ptr = other.raw_v_ptr;
             token_ids = other.token_ids;
             stop_token_ids = other.stop_token_ids;
+            token_to_piece_fn = other.token_to_piece_fn;
+            session_token_ids = other.session_token_ids;
+            session_len = other.session_len;
             max_residual = other.max_residual;
             state_table = other.state_table;
             W_proj = other.W_proj;
