@@ -177,6 +177,7 @@ def compute_decode_attention_static(
     dense_k: mx.array,        # [kv_heads, max_dense_len, D]  (fixed-size padded buffer)
     dense_v: mx.array,        # [kv_heads, max_dense_len, D]
     dense_len: mx.array,      # scalar — how many dense tokens are valid
+    nb_actual: mx.array,      # tensor — how many blocks are actually valid
     scale: float,
     gpk: int,
     kv_heads: int,
@@ -184,15 +185,8 @@ def compute_decode_attention_static(
     rank: int,
     max_dense_len: int,
 ):
-    """Compressed+dense decode attention.
-
-    Tensors are pre-sliced to the *active* block count (nb) by the caller.
-    @mx.compile caches one compiled graph per unique (nb, ...) shape combination,
-    so recompilation only occurs when nb increases — at most once per new block.
-    This eliminates the previous 65k-slot masking overhead at short contexts.
-    """
     H_q, D = q.shape
-    nb      = comp_U.shape[0]   # real block count, from pre-sliced tensor
+    nb      = comp_U.shape[0]   # real block count (padded to power of 2)
     S_comp  = block_size - 1
 
     # ── 1. Sparse / Compressed Attention ─────────────────────────────────────
@@ -217,6 +211,10 @@ def compute_decode_attention_static(
         VK_e_perm = comp_VK.transpose(1, 0, 2, 3)                            # [H_q, nb, rank, D]
         q_expanded = mx.expand_dims(mx.expand_dims(q, 1), 2)              # [H_q, 1, 1, D]
         q_proj_n   = mx.sum(q_expanded * VK_e_perm, axis=-1) * scale      # [H_q, nb, rank]
+
+    # Mask out padded blocks (index >= nb_actual)
+    block_mask = mx.arange(nb) < nb_actual
+    s_anc = mx.where(mx.expand_dims(block_mask, 0), s_anc, -float('inf'))
 
     # Delta scores: (q @ VK) @ U^T  →  [H_q, nb, S_comp]
     q_proj_n_perm       = q_proj_n.transpose(1, 0, 2)                 # [nb, H_q, rank]
@@ -382,6 +380,7 @@ def _execute_decode_attention_compiled(
     comp_res_n: mx.array,
     res_mask: mx.array,
     cached_sel: mx.array,
+    nb_actual: mx.array,
     # Static parameters
     scale: float,
     gpk: int,
@@ -404,7 +403,7 @@ def _execute_decode_attention_compiled(
         else:
             if router == "residual" and max_residual > 0:
                 R = min(route_residuals, max_residual)
-                res_n_slice = comp_res_n[:nb]
+                res_n_slice = comp_res_n
                 res_valid = mx.expand_dims(mx.arange(R), 0) < mx.expand_dims(mx.minimum(res_n_slice, R), 1)
                 relevance = _block_relevance_residual(
                     q, comp_anc_k, comp_res_k[:, :R], res_valid, scale, gpk
@@ -413,6 +412,10 @@ def _execute_decode_attention_compiled(
                 relevance = _block_relevance_minmax(
                     q, comp_min_k, comp_max_k, scale, gpk
                 )
+            # Mask out relevance of padded blocks (index >= nb_actual) to ensure
+            # argsort selects only valid blocks.
+            block_mask = mx.arange(nb) < nb_actual
+            relevance = relevance + (1.0 - block_mask.astype(relevance.dtype)) * -1e9
             sel = mx.argsort(relevance)[-k_eff:]
 
         topk_sel = sel
@@ -432,6 +435,7 @@ def _execute_decode_attention_compiled(
         res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, Ksel * Rw, -1)
         res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, Ksel * Rw, -1)
         total_res = Ksel * Rw
+        nb_actual_for_attn = mx.array(k_eff, dtype=mx.int32)
     else:
         comp_U_s       = comp_U
         comp_VK_s      = comp_VK
@@ -450,6 +454,7 @@ def _execute_decode_attention_compiled(
         res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, nb_blocks * R_width, -1)
         res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, nb_blocks * R_width, -1)
         total_res = nb_blocks * R_width
+        nb_actual_for_attn = nb_actual
 
     # Static layout concatenation
     dense_k_for_attn = mx.concatenate([res_k_all, dense_k], axis=1)
@@ -461,6 +466,7 @@ def _execute_decode_attention_compiled(
         q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
         comp_scale_s, comp_seq_len_s, res_mask_s,
         dense_k_for_attn, dense_v_for_attn, dense_len_for_attn,
+        nb_actual_for_attn,
         scale, gpk, kv_heads, block_size, rank,
         current_max_dense_len
     )
@@ -644,6 +650,7 @@ class MLXKVBlockManager:
         # was meant to prevent but couldn't because both copies were attended.
         self._res_exclude_svd = os.environ.get("DIFFKV_RESIDUAL_EXCLUDE_SVD", "0").strip().lower() in ("1", "on", "true", "yes")
         self.max_dense_len = self.recency_window + self.block_size
+        self._comp_res_n_const = mx.full((self.max_blocks,), self.max_residual, dtype=mx.int32)
         
         self.sessions = {}
         self.active_session_ids = ["default"]
@@ -782,6 +789,7 @@ class MLXKVBlockManager:
             "dense_keys":   [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "dense_values": [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "dense_lens":   [0 for _ in range(self.num_layers)],
+            "dense_lens_mx": [mx.array(0, dtype=mx.int32) for _ in range(self.num_layers)],
             
             "num_blocks": [0 for _ in range(self.num_layers)],
             "comp_U":     [mx.zeros((self.max_blocks, self.block_size - 1, self.rank), dtype=dtype) for _ in range(self.num_layers)],
@@ -832,6 +840,7 @@ class MLXKVBlockManager:
             "dense_keys": [mx.array(k) for k in src["dense_keys"]],
             "dense_values": [mx.array(v) for v in src["dense_values"]],
             "dense_lens": src["dense_lens"].copy(),
+            "dense_lens_mx": [mx.array(dl) for dl in src["dense_lens_mx"]] if "dense_lens_mx" in src else [mx.array(dl, dtype=mx.int32) for dl in src["dense_lens"]],
             "num_blocks": src["num_blocks"].copy(),
             "comp_U": [mx.array(u) for u in src["comp_U"]],
             "comp_VK": [mx.array(vk) for vk in src["comp_VK"]],
@@ -877,6 +886,7 @@ class MLXKVBlockManager:
             "dense_keys": [mx.array(k) for k in ckpt["dense_keys"]],
             "dense_values": [mx.array(v) for v in ckpt["dense_values"]],
             "dense_lens": ckpt["dense_lens"].copy(),
+            "dense_lens_mx": [mx.array(dl) for dl in ckpt["dense_lens_mx"]] if "dense_lens_mx" in ckpt else [mx.array(dl, dtype=mx.int32) for dl in ckpt["dense_lens"]],
             "num_blocks": ckpt["num_blocks"].copy(),
             "comp_U": [mx.array(u) for u in ckpt["comp_U"]],
             "comp_VK": [mx.array(vk) for vk in ckpt["comp_VK"]],
@@ -1021,6 +1031,7 @@ class MLXKVBlockManager:
             "dense_keys": [mx.array(k) for k in src["dense_keys"]],
             "dense_values": [mx.array(v) for v in src["dense_values"]],
             "dense_lens": src["dense_lens"].copy(),
+            "dense_lens_mx": [mx.array(dl) for dl in src["dense_lens_mx"]] if "dense_lens_mx" in src else [mx.array(dl, dtype=mx.int32) for dl in src["dense_lens"]],
             "num_blocks": src["num_blocks"].copy(),
             "comp_U": [mx.array(u) for u in src["comp_U"]],
             "comp_VK": [mx.array(vk) for vk in src["comp_VK"]],
@@ -1094,6 +1105,8 @@ class MLXKVBlockManager:
                 session["comp_max_k"][layer_idx],
                 session["comp_res_k"][layer_idx],
                 session["comp_res_v"][layer_idx],
+                session["dense_keys"][layer_idx],
+                session["dense_values"][layer_idx],
             ])
             if "comp_res_mask" in session:
                 eval_targets.append(session["comp_res_mask"][layer_idx])
@@ -1103,17 +1116,17 @@ class MLXKVBlockManager:
         """Write incoming prefill KV chunk into the dense buffer.
         
         Incoming K/V are shaped [1, kv_heads, L, head_dim].
-        We write token-by-token into the dense window, flushing full blocks
-        inline whenever the buffer would overflow.  This prevents the
-        [broadcast_shapes] error that occurs when L_new > remaining capacity.
+        Uses bulk slice writes instead of token-by-token iteration.
+        Flushes full blocks inline whenever the buffer would overflow.
         """
         session = self.sessions.setdefault(session_id, self._create_empty_session())
-        # K: [1, kv_heads, L, head_dim] → iterate over L dimension
+        # K: [1, kv_heads, L, head_dim] → squeeze batch dim
         L_new = K.shape[2]
         k_squeezed = K.squeeze(0)  # [kv_heads, L, head_dim]
         v_squeezed = V.squeeze(0)  # [kv_heads, L, head_dim]
 
-        for t in range(L_new):
+        t = 0  # cursor into the chunk
+        while t < L_new:
             dense_len = session["dense_lens"][layer_idx]
 
             # If the dense buffer is full, compress the oldest block out
@@ -1121,13 +1134,20 @@ class MLXKVBlockManager:
                 self._flush_oldest_block(session, layer_idx)
                 dense_len = session["dense_lens"][layer_idx]
 
-            session["dense_keys"][layer_idx][0, :, dense_len:dense_len + 1] = (
-                mx.expand_dims(k_squeezed[:, t, :], 1)
+            # How many tokens can we write in one bulk slice?
+            capacity = self.max_dense_len - dense_len
+            write_len = min(L_new - t, capacity)
+
+            # Bulk write: [kv_heads, write_len, head_dim] into the dense buffer
+            session["dense_keys"][layer_idx][0, :, dense_len:dense_len + write_len] = (
+                k_squeezed[:, t:t + write_len, :]
             )
-            session["dense_values"][layer_idx][0, :, dense_len:dense_len + 1] = (
-                mx.expand_dims(v_squeezed[:, t, :], 1)
+            session["dense_values"][layer_idx][0, :, dense_len:dense_len + write_len] = (
+                v_squeezed[:, t:t + write_len, :]
             )
-            session["dense_lens"][layer_idx] += 1
+            session["dense_lens"][layer_idx] += write_len
+            session["dense_lens_mx"][layer_idx] = mx.array(session["dense_lens"][layer_idx], dtype=mx.int32)
+            t += write_len
 
     def compress_prefill_kv(self, session_id: str):
         pass
@@ -1139,6 +1159,7 @@ class MLXKVBlockManager:
         session["dense_keys"][layer_idx][0, :, dense_len:dense_len + 1] = k.squeeze(0)
         session["dense_values"][layer_idx][0, :, dense_len:dense_len + 1] = v.squeeze(0)
         session["dense_lens"][layer_idx] += 1
+        session["dense_lens_mx"][layer_idx] = mx.array(session["dense_lens"][layer_idx], dtype=mx.int32)
         
         self._compress_eligible_blocks(session_id, layer_idx)
         # mx.eval(session["dense_keys"][layer_idx], session["dense_values"][layer_idx])
@@ -1258,7 +1279,9 @@ class MLXKVBlockManager:
         session["dense_keys"][layer_idx][0, :, remaining:dense_len]   = 0.0
         session["dense_values"][layer_idx][0, :, remaining:dense_len] = 0.0
         session["dense_lens"][layer_idx] = remaining
-        # Materialise all pending ops so the lazy graph does not grow unbounded
+        session["dense_lens_mx"][layer_idx] = mx.array(remaining, dtype=mx.int32)
+        # Materialise all pending ops immediately so the lazy graph of slice
+        # shifts does not chain dependencies across blocks.
         mx.eval(
             session["dense_keys"][layer_idx],
             session["dense_values"][layer_idx],
@@ -1280,7 +1303,7 @@ class MLXKVBlockManager:
 
         dense_k   = session["dense_keys"][layer_idx][0]    # [kv_heads, max_dense, D]
         dense_v   = session["dense_values"][layer_idx][0]
-        dense_len = mx.array(session["dense_lens"][layer_idx])
+        dense_len = session["dense_lens_mx"][layer_idx]
 
         # ── Top-K block routing ───────────────────────────────────────────────
         # When enabled and there are more compressed blocks than K, score every
@@ -1307,34 +1330,40 @@ class MLXKVBlockManager:
             session["_route_once_sel"] = None
 
         if all_blocks_full:
-            comp_res_n_arr = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
+            # Pad nb to the next power of 2 to stabilize compile shapes and avoid re-compilations
+            nb_padded = 1 << (nb - 1).bit_length() if nb > 1 else 1
+            nb_padded = min(nb_padded, self.max_blocks)
+
+            comp_res_n_arr = self._comp_res_n_const[:nb_padded]
             S_comp = self.block_size - 1
             if self._res_exclude_svd and "comp_res_mask" in session:
-                res_mask = session["comp_res_mask"][layer_idx][:nb]
+                res_mask = session["comp_res_mask"][layer_idx][:nb_padded]
             else:
-                res_mask = mx.zeros((nb, S_comp), dtype=mx.bool_)
+                res_mask = mx.zeros((nb_padded, S_comp), dtype=mx.bool_)
             
             cached_sel = session.get("_route_once_sel")
             use_cached_sel = route_once and cached_sel is not None
             if cached_sel is None:
                 cached_sel = mx.zeros((1,), dtype=mx.int32)
                 
+            nb_actual_arr = mx.array(nb, dtype=mx.int32)
             out_combined, sel = _execute_decode_attention_compiled(
                 q, dense_k, dense_v, dense_len,
-                session["comp_U"][layer_idx][:nb],
-                session["comp_VK"][layer_idx][:nb],
-                session["comp_VV"][layer_idx][:nb],
-                session["comp_anc_k"][layer_idx][:nb],
-                session["comp_anc_v"][layer_idx][:nb],
-                session["comp_min_k"][layer_idx][:nb],
-                session["comp_max_k"][layer_idx][:nb],
-                session["comp_scale"][layer_idx][:nb],
-                session["comp_seq_len"][layer_idx][:nb],
-                session["comp_res_k"][layer_idx][:nb],
-                session["comp_res_v"][layer_idx][:nb],
+                session["comp_U"][layer_idx][:nb_padded],
+                session["comp_VK"][layer_idx][:nb_padded],
+                session["comp_VV"][layer_idx][:nb_padded],
+                session["comp_anc_k"][layer_idx][:nb_padded],
+                session["comp_anc_v"][layer_idx][:nb_padded],
+                session["comp_min_k"][layer_idx][:nb_padded],
+                session["comp_max_k"][layer_idx][:nb_padded],
+                session["comp_scale"][layer_idx][:nb_padded],
+                session["comp_seq_len"][layer_idx][:nb_padded],
+                session["comp_res_k"][layer_idx][:nb_padded],
+                session["comp_res_v"][layer_idx][:nb_padded],
                 comp_res_n_arr,
                 res_mask,
                 cached_sel,
+                nb_actual_arr,
                 scale, gpk, self.kv_heads, self.block_size, self.rank,
                 self.max_dense_len, self.max_residual, self.route_residuals,
                 k_eff, self.router, use_topk, use_cached_sel

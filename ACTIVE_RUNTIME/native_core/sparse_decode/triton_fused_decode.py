@@ -164,6 +164,10 @@ if HAS_TRITON:
     def _fused_sparse_decode_kernel(
         q_ptr, block_indices_ptr, pool_ak_ptr, pool_av_ptr, pool_vk_ptr, pool_vv_ptr,
         pool_u_ptr, pool_u_scale_ptr, pool_scales_ptr, pool_seq_lens_ptr,
+        # Residual correction pointers (C1)
+        pool_res_k_ptr, pool_res_v_ptr, pool_res_pos_ptr, pool_res_n_ptr,
+        # Fact anchor override pointers (C2)
+        pool_fact_pos_ptr, pool_fact_ak_ptr, pool_fact_av_ptr,
         out_ptr, m_ptr, l_ptr,
         stride_q_h, stride_q_d,
         stride_ak_n, stride_ak_h, stride_ak_d,
@@ -171,9 +175,17 @@ if HAS_TRITON:
         stride_vk_n, stride_vk_r, stride_vk_h, stride_vk_d,
         stride_vv_n, stride_vv_r, stride_vv_h, stride_vv_d,
         stride_u_n, stride_u_s, stride_u_r,
+        stride_res_k_n, stride_res_k_s, stride_res_k_h, stride_res_k_d,
+        stride_res_v_n, stride_res_v_s, stride_res_v_h, stride_res_v_d,
+        stride_res_pos_n,
+        stride_fact_pos_n,
+        stride_fact_ak_n, stride_fact_ak_f, stride_fact_ak_h, stride_fact_ak_d,
+        stride_fact_av_n, stride_fact_av_f, stride_fact_av_h, stride_fact_av_d,
         stride_out_h, stride_out_d,
         N: tl.constexpr, H_q: tl.constexpr, H_kv: tl.constexpr, KV_GRP: tl.constexpr, D: tl.constexpr,
         R: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr, BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
+        MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
+        HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
     ):
         h_q = tl.program_id(0)
         chunk_id = tl.program_id(1)
@@ -223,6 +235,18 @@ if HAS_TRITON:
             delta_scores = tl.sum(u * q_proj[None, :], axis=1) * scale
             s = s_anchor + delta_scores
             
+            # ── C2: Fact Anchor Override — replace scores at flagged positions ──
+            if HAS_FACT:
+                for fi in range(MAX_FACT):
+                    fact_pos = tl.load(pool_fact_pos_ptr + pool_idx * stride_fact_pos_n + fi)
+                    if fact_pos >= 0:
+                        fact_k_ptrs = pool_fact_ak_ptr + pool_idx * stride_fact_ak_n + fi * stride_fact_ak_f + h_kv * stride_fact_ak_h + offs_d * stride_fact_ak_d
+                        fact_k = tl.load(fact_k_ptrs).to(tl.float32)
+                        fact_score = tl.sum(q * fact_k) * INV_SCALE
+                        # Override: scatter exact score at the flagged delta position
+                        replace_mask = offs_s == fact_pos
+                        s = tl.where(replace_mask, fact_score, s)
+            
             s = tl.where(offs_s < actual_s, s, -float("inf"))
             m_b_delta = tl.max(s, axis=0)
             m_b = tl.maximum(s_anchor, m_b_delta)
@@ -239,8 +263,69 @@ if HAS_TRITON:
             p_u = tl.sum(p_delta[:, None] * u, axis=0)
             o_delta = tl.sum(p_u[:, None] * vv, axis=0) * scale
             
-            O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta
+            # ── C2: Fact Anchor Override Value Correction ──
+            O_fact_corr = tl.zeros([D], dtype=tl.float32)
+            if HAS_FACT:
+                for fi in range(MAX_FACT):
+                    fact_pos = tl.load(pool_fact_pos_ptr + pool_idx * stride_fact_pos_n + fi)
+                    if fact_pos >= 0:
+                        # Get attention weight for this fact token
+                        replace_mask = offs_s == fact_pos
+                        p_fact = tl.sum(tl.where(replace_mask, p_delta, 0.0), axis=0)
+                        
+                        # Load exact fact V
+                        fact_v_ptrs = pool_fact_av_ptr + pool_idx * stride_fact_av_n + fi * stride_fact_av_f + h_kv * stride_fact_av_h + offs_d * stride_fact_av_d
+                        fact_v = tl.load(fact_v_ptrs).to(tl.float32)
+                        
+                        # Compute low-rank reconstructed V at fact_pos
+                        u_val_ptrs = pool_u_ptr + pool_idx * stride_u_n + fact_pos * stride_u_s + offs_r * stride_u_r
+                        u_val = tl.load(u_val_ptrs).to(tl.float32) * u_scale
+                        v_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale + av
+                        
+                        # Accumulate correction: p_fact * (fact_v - v_recon)
+                        O_fact_corr += p_fact * (fact_v - v_recon)
+            
+            O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta + O_fact_corr
             m_i = m_new
+
+            # ── C1: Residual Correction — exact K/V tokens added to softmax ──
+            if HAS_RESIDUAL:
+                res_n = tl.load(pool_res_n_ptr + pool_idx)
+                offs_res = tl.arange(0, MAX_RESIDUAL)
+                res_valid = offs_res < res_n
+
+                # Load residual K tokens: [MAX_RESIDUAL, D]
+                res_k_base = pool_res_k_ptr + pool_idx * stride_res_k_n + h_kv * stride_res_k_h
+                res_k = tl.load(
+                    res_k_base + offs_res[:, None] * stride_res_k_s + offs_d[None, :] * stride_res_k_d,
+                    mask=res_valid[:, None], other=0.0
+                ).to(tl.float32)
+
+                # Score residual tokens: [MAX_RESIDUAL]
+                s_res = tl.sum(res_k * q[None, :], axis=1) * INV_SCALE
+                s_res = tl.where(res_valid, s_res, -float("inf"))
+
+                # Online softmax merge for residuals
+                m_res = tl.max(s_res, axis=0)
+                m_new2 = tl.maximum(m_i, m_res)
+                alpha2 = tl.exp(m_i - m_new2)
+                p_res = tl.exp(s_res - m_new2)
+                p_res = tl.where(res_valid, p_res, 0.0)
+                p_res_sum = tl.sum(p_res, axis=0)
+
+                # Load residual V tokens: [MAX_RESIDUAL, D]
+                res_v_base = pool_res_v_ptr + pool_idx * stride_res_v_n + h_kv * stride_res_v_h
+                res_v = tl.load(
+                    res_v_base + offs_res[:, None] * stride_res_v_s + offs_d[None, :] * stride_res_v_d,
+                    mask=res_valid[:, None], other=0.0
+                ).to(tl.float32)
+
+                # Weighted sum of residual V
+                o_res = tl.sum(p_res[:, None] * res_v, axis=0)
+
+                l_i = l_i * alpha2 + p_res_sum
+                O_i = O_i * alpha2 + o_res
+                m_i = m_new2
 
         if NUM_CHUNKS == 1:
             O_i = O_i / l_i
@@ -257,6 +342,7 @@ if HAS_TRITON:
                 tl.store(m_ptr + h_q * NUM_CHUNKS + chunk_id, m_i)
             if l_ptr is not None:
                 tl.store(l_ptr + h_q * NUM_CHUNKS + chunk_id, l_i)
+
 
     @triton.jit
     def _fused_sparse_decode_reduction_kernel(
@@ -390,7 +476,6 @@ def _attend_and_reconstruct_v_compiled(
 ) -> torch.Tensor:
     O_final = torch.zeros((H_q, D), device=P_anchor.device, dtype=P_anchor.dtype)
     if N > 0:
-        print(f"[DiffKV DEBUG_RECON] P_comp shape: {P_comp.shape}, U shape: {U.shape}, H_q parameter: {H_q}, N: {N}, block_capacity: {block_capacity}, R: {R}", flush=True)
         P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)
         P_U = torch.bmm(P_comp_reshaped.float(), U.float())
 
@@ -1331,7 +1416,6 @@ def native_triton_sparse_attn_decode(
                 out_workspace = out
                 m_workspace = m_out
                 l_workspace = l_out
-            
             anchors_K_rot = pool.anchors_K
             V_K_rot = pool.V_K
             
@@ -1354,9 +1438,42 @@ def native_triton_sparse_attn_decode(
                 V_K_rot[indices] = pool.V_K[indices] * cos_anc + rotate_half(pool.V_K[indices]) * sin_anc
                 anchors_K_rot[indices] = pool.anchors_K[indices] * cos_anc_2d + rotate_half(pool.anchors_K[indices]) * sin_anc_2d
             
+            # Get residual fields (C1)
+            res_k = getattr(pool, "residual_K_values", None)
+            res_v = getattr(pool, "residual_V_values", None)
+            res_pos = getattr(pool, "residual_K_positions", None)
+            
+            has_res = (res_k is not None and res_pos is not None)
+            if has_res:
+                res_n = (res_pos >= 0).sum(dim=-1).to(torch.int32)
+                max_res = res_pos.shape[1]
+                max_res_pad = triton.next_power_of_2(max_res)
+            else:
+                res_k = torch.empty((0, 0, 0, 0), device=q.device)
+                res_v = torch.empty((0, 0, 0, 0), device=q.device)
+                res_pos = torch.empty((0, 0), device=q.device, dtype=torch.int16)
+                res_n = torch.zeros((pool.U.shape[0],), device=q.device, dtype=torch.int32)
+                max_res_pad = 1
+                
+            # Get fact anchor fields (C2)
+            fact_pos = getattr(pool, "fact_anchor_positions", None)
+            fact_ak = getattr(pool, "fact_anchors_K", None)
+            fact_av = getattr(pool, "fact_anchors_V", None)
+            
+            has_fact = (fact_pos is not None and fact_ak is not None and fact_av is not None)
+            if has_fact:
+                max_fact = fact_pos.shape[1]
+            else:
+                fact_pos = torch.empty((0, 0), device=q.device, dtype=torch.int16)
+                fact_ak = torch.empty((0, 0, 0, 0), device=q.device)
+                fact_av = torch.empty((0, 0, 0, 0), device=q.device)
+                max_fact = 1
+
             _fused_sparse_decode_kernel[grid](
                 q_sq, block_indices, anchors_K_rot, pool.anchors_V, V_K_rot, pool.V_V,
                 pool.U, pool.U_scale, pool.scales, pool.seq_lens,
+                res_k, res_v, res_pos, res_n,
+                fact_pos, fact_ak, fact_av,
                 out_workspace, m_workspace, l_workspace,
                 q_sq.stride(0), q_sq.stride(1),
                 anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
@@ -1364,9 +1481,17 @@ def native_triton_sparse_attn_decode(
                 V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
                 pool.V_V.stride(0), pool.V_V.stride(1), pool.V_V.stride(2), pool.V_V.stride(3),
                 pool.U.stride(0), pool.U.stride(1), pool.U.stride(2),
+                res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
+                res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
+                res_pos.stride(0),
+                fact_pos.stride(0),
+                fact_ak.stride(0), fact_ak.stride(1), fact_ak.stride(2), fact_ak.stride(3),
+                fact_av.stride(0), fact_av.stride(1), fact_av.stride(2), fact_av.stride(3),
                 out_workspace.stride(0), out_workspace.stride(1),
                 N, H_q, anchors_K_rot.shape[1], num_key_value_groups, D_pad,
-                R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks
+                R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
+                MAX_RESIDUAL=max_res_pad, MAX_FACT=max_fact,
+                HAS_RESIDUAL=has_res, HAS_FACT=has_fact
             )
             
             if num_chunks > 1:

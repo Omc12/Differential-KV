@@ -281,24 +281,43 @@ class AsyncCompressor:
             ctx = (torch.cuda.stream(compress_stream)
                    if compress_stream is not None else _null_context())
             with ctx:
+                mgr = getattr(self._compress_fn, "__self__", None)
+                has_batch_fn = hasattr(mgr, "_compress_blocks_batch")
+                
                 for sz, items in by_size.items():
-                    for item in items:
-                        block, k_cpu, v_cpu, event = item
+                    if has_batch_fn:
                         try:
-                            if event is not None:
-                                event.synchronize()
                             t0 = time.perf_counter()
-                            self._compress_fn(block, k_cpu, v_cpu)
+                            mgr._compress_blocks_batch(items)
                             elapsed = (time.perf_counter() - t0) * 1000
                             with self._stats_lock:
-                                self.stats["completed"]    += 1
+                                self.stats["completed"]    += len(items)
                                 self.stats["total_svd_ms"] += elapsed
                         except Exception as e:
-                            print(
-                                f"[AsyncCompressor] WARNING: compression failed for "
-                                f"block anchor={getattr(block, 'anchor_idx', '?')}: {e}"
-                            )
-                            self._adjust_pending(-1)
+                            print(f"[AsyncCompressor] Batched SVD failed: {e}. Falling back to sequential.")
+                            for item in items:
+                                self._run_item_sequential(item)
+                    else:
+                        for item in items:
+                            self._run_item_sequential(item)
+
+    def _run_item_sequential(self, item):
+        block, k_cpu, v_cpu, event = item
+        try:
+            if event is not None:
+                event.synchronize()
+            t0 = time.perf_counter()
+            self._compress_fn(block, k_cpu, v_cpu)
+            elapsed = (time.perf_counter() - t0) * 1000
+            with self._stats_lock:
+                self.stats["completed"]    += 1
+                self.stats["total_svd_ms"] += elapsed
+        except Exception as e:
+            print(
+                f"[AsyncCompressor] WARNING: compression failed for "
+                f"block anchor={getattr(block, 'anchor_idx', '?')}: {e}"
+            )
+            self._adjust_pending(-1)
 
     # ── Stats ─────────────────────────────────────────────────────────────────
 

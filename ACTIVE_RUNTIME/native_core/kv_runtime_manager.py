@@ -597,11 +597,10 @@ class KVRuntimeManager:
         self.pager.manager = self
         self.decode_workspace = {}
 
-        # On Apple Silicon/MPS, we disable async background SVD to guarantee thread-safety
-        # and prevent Metal command encoder / buffer validation crashes.
+        # On Apple Silicon/MPS, we enable async background SVD with safe CPU-offloaded SVD preprocessing
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
-            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Disabling async background SVD for thread-safety.")
-            self._async = False
+            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Enabling CPU-offloaded async background SVD.")
+            self._async = self.config.async_svd
             # Default MPS approximate attention to ON for Apple Silicon.
             # The fused_decode_mps Project-Then-Attend path avoids per-token RoPE
             # reconstruction over compressed blocks (the main decode bottleneck on MPS).
@@ -2328,8 +2327,6 @@ class KVRuntimeManager:
             last_block.active_k = torch.cat([last_block.active_k, curr_k], dim=2)
             last_block.active_v = torch.cat([last_block.active_v, curr_v], dim=2)
 
-
-
         # Compress oldest full dense blocks outside the recency window
         full_dense = [
             b for b in blocks
@@ -2354,13 +2351,9 @@ class KVRuntimeManager:
         else:
             self._compress_block_sync(block, k, v)
 
-    def _compress_block_sync(self, block: KVBlock,
-                             k: torch.Tensor, v: torch.Tensor):
-        """Synchronous SVD compression (used by AsyncCompressor worker).
-        Fixed rank -- simple, stable, predictable.
-        """
+    def _preprocess_block_for_compression(self, block: KVBlock, k: torch.Tensor, v: torch.Tensor):
         if getattr(block, "skip_compression", False):
-            return
+            return None
         input_device = k.device
         anchor_kv_local = block.anchor_kv
         if anchor_kv_local is not None:
@@ -2413,11 +2406,8 @@ class KVRuntimeManager:
             full_k = full_k * cos_a_full + k_half * sin_a_full
 
         session_id = getattr(block, "session_id", None)
-        print(f"[DiffKV DEBUG] _compress_block_sync: session_id={session_id} token_indices_len={len(block.token_indices) if getattr(block, 'token_indices', None) is not None else 0}", flush=True)
-
 
         block_token_ids = []
-        session_id = getattr(block, "session_id", None)
         if session_id is not None and session_id in self._session_token_ids:
             all_tids = self._session_token_ids[session_id]
             for pos in getattr(block, "token_indices", []):
@@ -2459,9 +2449,9 @@ class KVRuntimeManager:
             
             # Update local anchor
             anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
-            if input_device.type == "cpu":
+            is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+            if input_device.type == "cpu" or is_background:
                 block.anchor_kv_cpu = anchor_kv_local
-                is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
                 if not is_background:
                     gpu_dev = block.anchor_kv.device if block.anchor_kv is not None else self.device
                     block.anchor_kv = anchor_kv_local.to(gpu_dev)
@@ -2474,9 +2464,9 @@ class KVRuntimeManager:
         else:
             # Update local anchor with the unrotated version of the original anchor
             anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
-            if input_device.type == "cpu":
+            is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+            if input_device.type == "cpu" or is_background:
                 block.anchor_kv_cpu = anchor_kv_local
-                is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
                 if not is_background:
                     gpu_dev = block.anchor_kv.device if block.anchor_kv is not None else self.device
                     block.anchor_kv = anchor_kv_local.to(gpu_dev)
@@ -2502,9 +2492,7 @@ class KVRuntimeManager:
         token_norms = torch.clamp(token_norms, min=1e-5)
         normalized_deltas = deltas / token_norms.unsqueeze(1)
 
-
-        # Per-layer rank with optional early-layer boost.
-        # self.config is the DiffKVConfig instance set in __init__.
+        # Per-layer rank with early-layer boost
         _cfg = getattr(self, "config", None)
         _early_boost     = getattr(_cfg, "early_layer_rank_boost", False)
         _max_rank_early  = getattr(_cfg, "max_rank_early", 0)
@@ -2516,7 +2504,7 @@ class KVRuntimeManager:
             early_boost=_early_boost, max_rank_early=_max_rank_early,
         )
 
-        # Check if block qualifies for rank boosting (1.5x) to prevent Precision Loss & Concept Compression Failure
+        # Check if block qualifies for rank boosting (1.5x)
         boost_rank = False
         if block_token_ids and getattr(self, "tokenizer", None) is not None:
             try:
@@ -2525,7 +2513,7 @@ class KVRuntimeManager:
                 if any(c.isdigit() for c in block_text):
                     boost_rank = True
                 else:
-                    # 2. Math formula markers (basic operators, LaTeX symbols)
+                    # 2. Math formula markers
                     import re
                     re_math_boost = re.compile(
                         r'[\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^'
@@ -2549,53 +2537,29 @@ class KVRuntimeManager:
             if rank > seq_len:
                 rank = seq_len
 
-        lr_delta = compress_lowrank(normalized_deltas, rank)
+        return normalized_deltas, token_norms, deltas, rank, block_token_ids, k, v, anchor_kv_local
 
-        # Scale U by token norms to perform token-wise denormalization when reconstructed
-        U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)
-        U_scaled = U_scaled.to(torch.float16)
-        if not torch.isfinite(U_scaled).all():
-            U_scaled = torch.nan_to_num(U_scaled, nan=0.0, posinf=65504.0, neginf=-65504.0)
-
-        # ── Solution 3: The Fact Anchor System ──
-        recon_deltas = (lr_delta.U.float() @ lr_delta.V.float()) * lr_delta.scale
-        recon_errors = (deltas - recon_deltas.to(deltas.device)).norm(dim=1) # [seq_len]
-        
-        top_k_val = min(3, seq_len)
-        fact_anchors_K_val = torch.zeros((3, heads, head_dim), device=input_device, dtype=k.dtype)
-        fact_anchors_V_val = torch.zeros((3, heads, head_dim), device=input_device, dtype=v.dtype)
-        fact_anchor_positions_val = torch.full((3,), -1, device=input_device, dtype=torch.int16)
-        
-        if top_k_val > 0:
-            top_3 = torch.topk(recon_errors, k=top_k_val)
-            for j, pos_val in enumerate(top_3.indices):
-                fact_anchors_K_val[j] = k[0, :, pos_val, :]
-                fact_anchors_V_val[j] = v[0, :, pos_val, :]
-                fact_anchor_positions_val[j] = pos_val.to(torch.int16)
-
-        if self.rank:
-            import os as _local_os
-            if _local_os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1":
-                print(f"[DiffKV SVD Debug] Block anchor_idx={block.anchor_idx} layer={block.layer_idx}: "
-                      f"scale={lr_delta.scale:.4f} cos_sim={lr_delta.cosine_sim:.6f} norm_drift={lr_delta.norm_drift:.6f} "
-                      f"dyn_rank={lr_delta.dynamic_rank}")
-
+    def _postprocess_compressed_block(self, block: KVBlock, U_scaled: torch.Tensor, V: torch.Tensor,
+                                     scale: float, cosine_sim: float, norm_drift: float, dynamic_rank: int,
+                                     fact_anchors_K_val: torch.Tensor, fact_anchors_V_val: torch.Tensor,
+                                     fact_anchor_positions_val: torch.Tensor,
+                                     k_orig: torch.Tensor, v_orig: torch.Tensor, anchor_kv_local: torch.Tensor, rank: int):
         is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
 
         if is_background:
             # CPU-only background SVD to guarantee thread safety
             block.U_cpu          = U_scaled.cpu()
-            block.V_cpu          = lr_delta.V.to(torch.float16).cpu()
-            block.scale          = lr_delta.scale
-            block.cosine_sim     = lr_delta.cosine_sim
-            block.norm_drift     = lr_delta.norm_drift
-            block.dynamic_rank   = getattr(lr_delta, "dynamic_rank", self.rank)
+            block.V_cpu          = V.to(torch.float16).cpu()
+            block.scale          = scale
+            block.cosine_sim     = cosine_sim
+            block.norm_drift     = norm_drift
+            block.dynamic_rank   = dynamic_rank
 
             # Solution 2 CPU components
-            block.U_sem_int4_cpu = lr_delta.U_sem_int4.cpu() if lr_delta.U_sem_int4 is not None else None
-            block.U_sem_scale_cpu = lr_delta.U_sem_scale.cpu() if lr_delta.U_sem_scale is not None else None
-            block.U_fact_fp16_cpu = lr_delta.U_fact_fp16.cpu() if lr_delta.U_fact_fp16 is not None else None
-            block.n_semantic     = lr_delta.n_semantic
+            block.U_sem_int4_cpu = None
+            block.U_sem_scale_cpu = None
+            block.U_fact_fp16_cpu = None
+            block.n_semantic     = 0
 
             # Solution 3 CPU components
             block.fact_anchors_K_cpu = fact_anchors_K_val.cpu()
@@ -2606,11 +2570,10 @@ class KVRuntimeManager:
 
             if hasattr(block, 'state'):
                 block.state = "CPU_COMPRESSED"
-                # Signal main-thread finalizer that there is work to do
         else:
             gpu_device = block.anchor_kv.device if block.anchor_kv is not None else self.device
             u_gpu = U_scaled.to(gpu_device)
-            v_gpu = lr_delta.V.to(torch.float16).to(gpu_device)
+            v_gpu = V.to(torch.float16).to(gpu_device)
 
             lock = getattr(block, "_lock", None)
             if lock is None:
@@ -2624,16 +2587,16 @@ class KVRuntimeManager:
                 with lock:
                     block.U          = u_gpu
                     block.V          = v_gpu
-                    block.scale      = lr_delta.scale
-                    block.cosine_sim = lr_delta.cosine_sim
-                    block.norm_drift = lr_delta.norm_drift
-                    block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
+                    block.scale      = scale
+                    block.cosine_sim = cosine_sim
+                    block.norm_drift = norm_drift
+                    block.dynamic_rank = dynamic_rank
 
                     # Solution 2 components
-                    block.U_sem_int4 = lr_delta.U_sem_int4.to(gpu_device) if lr_delta.U_sem_int4 is not None else None
-                    block.U_sem_scale = lr_delta.U_sem_scale.to(gpu_device) if lr_delta.U_sem_scale is not None else None
-                    block.U_fact_fp16 = lr_delta.U_fact_fp16.to(gpu_device) if lr_delta.U_fact_fp16 is not None else None
-                    block.n_semantic     = lr_delta.n_semantic
+                    block.U_sem_int4 = None
+                    block.U_sem_scale = None
+                    block.U_fact_fp16 = None
+                    block.n_semantic     = 0
 
                     # Solution 3 components
                     block.fact_anchors_K = fact_anchors_K_val.to(gpu_device)
@@ -2653,16 +2616,16 @@ class KVRuntimeManager:
             else:
                 block.U          = u_gpu
                 block.V          = v_gpu
-                block.scale      = lr_delta.scale
-                block.cosine_sim = lr_delta.cosine_sim
-                block.norm_drift = lr_delta.norm_drift
-                block.dynamic_rank = getattr(lr_delta, "dynamic_rank", self.rank)
+                block.scale      = scale
+                block.cosine_sim = cosine_sim
+                block.norm_drift = norm_drift
+                block.dynamic_rank = dynamic_rank
 
                 # Solution 2 components
-                block.U_sem_int4 = lr_delta.U_sem_int4.to(gpu_device) if lr_delta.U_sem_int4 is not None else None
-                block.U_sem_scale = lr_delta.U_sem_scale.to(gpu_device) if lr_delta.U_sem_scale is not None else None
-                block.U_fact_fp16 = lr_delta.U_fact_fp16.to(gpu_device) if lr_delta.U_fact_fp16 is not None else None
-                block.n_semantic     = lr_delta.n_semantic
+                block.U_sem_int4 = None
+                block.U_sem_scale = None
+                block.U_fact_fp16 = None
+                block.n_semantic     = 0
 
                 # Solution 3 components
                 block.fact_anchors_K = fact_anchors_K_val.to(gpu_device)
@@ -2730,20 +2693,151 @@ class KVRuntimeManager:
                         block.fact_anchors_V = None
                         block.fact_anchor_positions = None
                     except Exception as e:
-                        # Log warning but do not crash generation, as we can still decode using the standard PyTorch path!
                         print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
 
                 if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
                     self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
 
         self.total_compressions += 1
-        self.total_cosine_sim   += lr_delta.cosine_sim
-        self.total_norm_drift   += lr_delta.norm_drift
+        self.total_cosine_sim   += cosine_sim
+        self.total_norm_drift   += norm_drift
         self.rank_histogram[rank] = self.rank_histogram.get(rank, 0) + 1
 
+        seq_len = U_scaled.shape[0]
+        feat_dim = V.shape[1]
         fp16_bytes = seq_len * feat_dim * 2
-        lr_bytes   = U_scaled.numel() * 2 + lr_delta.V.numel() * 2
+        lr_bytes   = U_scaled.numel() * 2 + V.numel() * 2
         self.vram_saved_bytes += (fp16_bytes - lr_bytes)
+
+    def _compress_block_sync(self, block: KVBlock, k: torch.Tensor, v: torch.Tensor):
+        """Synchronous SVD compression helper (Sequential fallback)."""
+        res = self._preprocess_block_for_compression(block, k, v)
+        if res is None:
+            return
+            
+        normalized_deltas, token_norms, deltas, rank, block_token_ids, k_orig, v_orig, anchor_kv_local = res
+        
+        lr_delta = compress_lowrank(normalized_deltas, rank)
+        
+        U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)
+        U_scaled = U_scaled.to(torch.float16)
+        if not torch.isfinite(U_scaled).all():
+            U_scaled = torch.nan_to_num(U_scaled, nan=0.0, posinf=65504.0, neginf=-65504.0)
+
+        recon_deltas = (lr_delta.U.float() @ lr_delta.V.float()) * lr_delta.scale
+        recon_errors = (deltas - recon_deltas.to(deltas.device)).norm(dim=1)
+        
+        seq_len = k_orig.shape[2]
+        top_k_val = min(3, seq_len)
+        heads = k_orig.shape[1]
+        head_dim = k_orig.shape[3]
+        fact_anchors_K_val = torch.zeros((3, heads, head_dim), device=k_orig.device, dtype=k_orig.dtype)
+        fact_anchors_V_val = torch.zeros((3, heads, head_dim), device=v_orig.device, dtype=v_orig.dtype)
+        fact_anchor_positions_val = torch.full((3,), -1, device=k_orig.device, dtype=torch.int16)
+        
+        if top_k_val > 0:
+            top_3 = torch.topk(recon_errors, k=top_k_val)
+            for j, pos_val in enumerate(top_3.indices):
+                fact_anchors_K_val[j] = k_orig[0, :, pos_val, :]
+                fact_anchors_V_val[j] = v_orig[0, :, pos_val, :]
+                fact_anchor_positions_val[j] = pos_val.to(torch.int16)
+
+        self._postprocess_compressed_block(
+            block, U_scaled, lr_delta.V, lr_delta.scale, lr_delta.cosine_sim, lr_delta.norm_drift,
+            getattr(lr_delta, "dynamic_rank", self.rank),
+            fact_anchors_K_val, fact_anchors_V_val, fact_anchor_positions_val,
+            k_orig, v_orig, anchor_kv_local, rank
+        )
+
+    def _compress_blocks_batch(self, items):
+        """Batch compression using batched Randomized SVD (C3)"""
+        preprocessed = []
+        for block, k_cpu, v_cpu, event in items:
+            try:
+                if event is not None:
+                    event.synchronize()
+                
+                res = self._preprocess_block_for_compression(block, k_cpu, v_cpu)
+                if res is not None:
+                    preprocessed.append((block, *res))
+            except Exception as e:
+                print(f"[AsyncCompressor] Preprocess failed for block anchor={getattr(block, 'anchor_idx', '?')}: {e}")
+                self._compressor._adjust_pending(-1)
+
+        if not preprocessed:
+            return
+
+        deltas_list = [res[0] for res in preprocessed]
+        max_rank = max(res[3] for res in preprocessed)
+        
+        deltas_batch = torch.stack(deltas_list, dim=0)
+        
+        from native_core.compression.lowrank import compress_lowrank_batch
+        U_batch, S_batch, Vh_batch, scale_batch = compress_lowrank_batch(deltas_batch, max_rank)
+        
+        for i, (block, normalized_deltas, token_norms, deltas_raw, block_rank, block_token_ids, k_orig, v_orig, anchor_kv_local) in enumerate(preprocessed):
+            try:
+                U_i = U_batch[i]
+                S_i = S_batch[i]
+                Vh_i = Vh_batch[i]
+                scale_i = float(scale_batch[i].item())
+                
+                total_energy = (S_i ** 2).sum().item()
+                k_sel = block_rank
+                if total_energy > 1e-9:
+                    cum = torch.cumsum(S_i ** 2, dim=0)
+                    threshold = 0.999 * total_energy
+                    idx = torch.where(cum >= threshold)[0]
+                    if idx.numel() > 0:
+                        k_sel = max(4, min(int(idx[0].item() + 1), block_rank))
+                
+                U_k = U_i[:, :k_sel] * S_i[:k_sel].unsqueeze(0)
+                Vh_k = Vh_i[:k_sel, :]
+                
+                U_k_fp16 = U_k.to(torch.float16)
+                Vh_k_fp16 = Vh_k.to(torch.float16)
+                
+                if not torch.isfinite(U_k_fp16).all():
+                    U_k_fp16 = torch.nan_to_num(U_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+                if not torch.isfinite(Vh_k_fp16).all():
+                    Vh_k_fp16 = torch.nan_to_num(Vh_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                U_scaled = U_k_fp16.float() * token_norms.unsqueeze(1)
+                U_scaled = U_scaled.to(torch.float16)
+                if not torch.isfinite(U_scaled).all():
+                    U_scaled = torch.nan_to_num(U_scaled, nan=0.0, posinf=65504.0, neginf=-65504.0)
+                
+                recon_deltas = (U_k_fp16.float() @ Vh_k_fp16.float()) * scale_i
+                recon_errors = (deltas_raw - recon_deltas.to(deltas_raw.device)).norm(dim=1)
+                
+                seq_len = k_orig.shape[2]
+                top_k_val = min(3, seq_len)
+                heads = k_orig.shape[1]
+                head_dim = k_orig.shape[3]
+                fact_anchors_K_val = torch.zeros((3, heads, head_dim), device=k_orig.device, dtype=k_orig.dtype)
+                fact_anchors_V_val = torch.zeros((3, heads, head_dim), device=v_orig.device, dtype=v_orig.dtype)
+                fact_anchor_positions_val = torch.full((3,), -1, device=k_orig.device, dtype=torch.int16)
+                
+                if top_k_val > 0:
+                    top_3 = torch.topk(recon_errors, k=top_k_val)
+                    for j, pos_val in enumerate(top_3.indices):
+                        fact_anchors_K_val[j] = k_orig[0, :, pos_val, :]
+                        fact_anchors_V_val[j] = v_orig[0, :, pos_val, :]
+                        fact_anchor_positions_val[j] = pos_val.to(torch.int16)
+                
+                recon_norm = recon_deltas.norm()
+                raw_norm = deltas_raw.norm().clamp(min=1e-8)
+                cosine_sim = float((torch.sum(deltas_raw * recon_deltas.to(deltas_raw.device)) / (raw_norm * recon_norm + 1e-8)).item())
+                norm_drift = float((recon_norm / raw_norm).item())
+                
+                self._postprocess_compressed_block(
+                    block, U_scaled, Vh_k_fp16, scale_i, cosine_sim, norm_drift, k_sel,
+                    fact_anchors_K_val, fact_anchors_V_val, fact_anchor_positions_val,
+                    k_orig, v_orig, anchor_kv_local, block_rank
+                )
+            except Exception as e:
+                print(f"[AsyncCompressor] Postprocess failed for block anchor={getattr(block, 'anchor_idx', '?')}: {e}")
+                self._compressor._adjust_pending(-1)
 
     def _get_rotated_anchor_k(self, session_id, anchor_k, anchor_idx):
         """

@@ -469,7 +469,7 @@ class PyTorchDiffKVHFWrapper:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
-                device_map={"": "mps"},
+                device_map="mps",
                 trust_remote_code=True,
                 quantization_config=quantization_config,
                 low_cpu_mem_usage=True,
@@ -489,6 +489,7 @@ class PyTorchDiffKVHFWrapper:
 
         self.model.eval()
         _clear_cpu_grad_state(self.model)
+        _trim_python_heap()
 
         # ── Auto-detect standard 4-bit / 8-bit quantization ──
         is_quantized = False

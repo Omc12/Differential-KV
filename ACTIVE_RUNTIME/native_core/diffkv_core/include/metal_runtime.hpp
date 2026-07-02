@@ -23,7 +23,15 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     float scale,
     int n_q_heads,
     int n_kv_heads,
-    int rank
+    int rank,
+    // Residual and Fact Anchor Override buffers (Track D)
+    const torch::Tensor& res_pos_K,
+    const torch::Tensor& res_val_K,
+    const torch::Tensor& res_pos_V,
+    const torch::Tensor& res_val_V,
+    const torch::Tensor& fact_pos,
+    const torch::Tensor& fact_val_K,
+    const torch::Tensor& fact_val_V
 );
 
 } // namespace diffkv

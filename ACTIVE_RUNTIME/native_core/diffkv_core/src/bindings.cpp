@@ -323,6 +323,13 @@ Returns:
         py::arg("n_q_heads"),
         py::arg("n_kv_heads"),
         py::arg("rank"),
+        py::arg("res_pos_K"),
+        py::arg("res_val_K"),
+        py::arg("res_pos_V"),
+        py::arg("res_val_V"),
+        py::arg("fact_pos"),
+        py::arg("fact_val_K"),
+        py::arg("fact_val_V"),
         R"doc(
 Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, and LSE combination into a single C++ call.
 )doc"
@@ -360,6 +367,13 @@ Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, a
         py::arg("n_q_heads"),
         py::arg("n_kv_heads"),
         py::arg("rank"),
+        py::arg("res_pos_K"),
+        py::arg("res_val_K"),
+        py::arg("res_pos_V"),
+        py::arg("res_val_V"),
+        py::arg("fact_pos"),
+        py::arg("fact_val_K"),
+        py::arg("fact_val_V"),
         R"doc(
 Launch custom Metal Compute Shader for fused Project-Then-Attend decode attention.
 )doc"

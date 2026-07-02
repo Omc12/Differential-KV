@@ -300,6 +300,20 @@ def compress_lowrank(
 
     n_max_residual = int(n * max_residual_frac)
     
+    # Track F2: Adaptive Residual Budget
+    # Check median relative reconstruction error to classify block complexity
+    median_err_K = torch.median(rel_error_K).item() if rel_error_K.numel() > 0 else 0.0
+    median_err_V = torch.median(rel_error_V).item() if rel_error_V.numel() > 0 else 0.0
+    max_median_err = max(median_err_K, median_err_V)
+    
+    if max_median_err < 0.05:
+        # Easy block (prose filler/redundant text): limit to at most 8 residuals
+        n_max_residual = min(8, n_max_residual)
+    elif max_median_err < 0.15:
+        # Medium complexity block: limit to at most 16 residuals
+        n_max_residual = min(16, n_max_residual)
+    # Otherwise: keep full budget for high-complexity blocks (numbers, factual data, code)
+
     fact_positions_K = None
     residual_K_vals = None
     fact_positions_V = None
@@ -734,4 +748,71 @@ def reconstruct_batch_U(pool, idx: torch.Tensor) -> torch.Tensor:
             U_recon[i, :seq_len, n_sem:n_sem+n_fact] = U_fact.to(dtype)
             
     return U_recon
+
+
+def compress_lowrank_batch(
+    deltas: torch.Tensor,  # [B, n, d]
+    rank: int,
+):
+    """
+    Compress a batch of [n, feat_dim] float32 delta matrices to rank-r approximations.
+    Uses batched Randomized SVD (rSVD) for maximum efficiency on CPU/GPU.
+    """
+    assert deltas.dim() == 3
+    B, n, d = deltas.shape
+    rank = min(rank, n, d)
+    device = deltas.device
+    
+    # Perform operations on CPU if not CUDA to avoid syncs
+    deltas_cpu = deltas.cpu() if device.type != "cpu" else deltas
+    
+    # Compute scale per batch item
+    scale = deltas_cpu.abs().view(B, -1).max(dim=-1).values  # [B]
+    scale = torch.clamp(scale, min=1e-9)
+    
+    x = deltas_cpu / scale.view(B, 1, 1)
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Batched Randomized SVD
+    svd_success = False
+    U, S, Vh = None, None, None
+    
+    try:
+        n_oversamples = 5
+        n_iter = 2
+        r_proj = min(rank + n_oversamples, n, d)
+        
+        # 1. Generate random Gaussian projection matrix
+        Omega = torch.randn(d, r_proj, dtype=torch.float32, device=x.device)
+        
+        # 2. Form sample matrix Y with power iterations
+        # x @ Omega: [B, n, d] @ [d, r_proj] -> [B, n, r_proj]
+        Y = torch.matmul(x, Omega)
+        for _ in range(n_iter):
+            Y = torch.matmul(x, torch.matmul(x.transpose(1, 2), Y))
+            
+        # 3. Orthogonalize Y
+        Q, _ = torch.linalg.qr(Y, mode="reduced") # [B, n, r_proj]
+        
+        # 4. Project original matrix onto low-rank subspace Q
+        B_mat = torch.matmul(Q.transpose(1, 2), x)
+        
+        # 5. Standard SVD on the much smaller matrix B_mat
+        U_b, S, Vh = torch.linalg.svd(B_mat, full_matrices=False)
+        U = torch.matmul(Q, U_b)
+        svd_success = True
+    except Exception:
+        # Fallback to standard SVD
+        pass
+        
+    if not svd_success:
+        try:
+            U, S, Vh = torch.linalg.svd(x, full_matrices=False)
+        except Exception:
+            # Complete failure fallback
+            U = torch.zeros((B, n, rank), dtype=torch.float32, device=device)
+            S = torch.zeros((B, rank), dtype=torch.float32, device=device)
+            Vh = torch.zeros((B, rank, d), dtype=torch.float32, device=device)
+            
+    return U, S, Vh, scale
 

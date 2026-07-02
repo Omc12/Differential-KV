@@ -333,7 +333,15 @@ torch::Tensor fused_decode_attention_combined(
     float scale,
     int n_q_heads,
     int n_kv_heads,
-    int rank
+    int rank,
+    // Residual and Fact Anchor Override buffers (Track D)
+    const torch::Tensor& res_pos_K,
+    const torch::Tensor& res_val_K,
+    const torch::Tensor& res_pos_V,
+    const torch::Tensor& res_val_V,
+    const torch::Tensor& fact_pos,
+    const torch::Tensor& fact_val_K,
+    const torch::Tensor& fact_val_V
 ) {
     const auto device = Q.device();
     const int D = Q.size(1);
@@ -350,7 +358,9 @@ torch::Tensor fused_decode_attention_combined(
             std::tie(out_sparse, lse_sparse) = decode_attention_metal(
                 Q, U_pool, U_scale_pool, VK_pool, VV_pool,
                 anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
-                scale, n_q_heads, n_kv_heads, rank
+                scale, n_q_heads, n_kv_heads, rank,
+                res_pos_K, res_val_K, res_pos_V, res_val_V,
+                fact_pos, fact_val_K, fact_val_V
             );
         } else {
             std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(

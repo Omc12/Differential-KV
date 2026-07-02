@@ -43,6 +43,16 @@ kernel void decode_attention_metal_kernel(
     device const float* cos_anc [[buffer(19)]],          // [K, D] float32
     device const float* sin_anc [[buffer(20)]],          // [K, D] float32
     device const int32_t& has_rope [[buffer(21)]],       // 1 if RoPE should be applied
+    
+    // Residual and Fact Anchor Override buffers (Track D)
+    device const int16_t* res_pos_K [[buffer(22)]],       // [N_pool, max_residual]
+    device const half* res_val_K [[buffer(23)]],          // [N_pool, max_residual, n_kv_heads, D]
+    device const int16_t* res_pos_V [[buffer(24)]],       // [N_pool, max_residual]
+    device const half* res_val_V [[buffer(25)]],          // [N_pool, max_residual, n_kv_heads, D]
+    device const int16_t* fact_pos [[buffer(26)]],        // [N_pool, 3]
+    device const half* fact_val_K [[buffer(27)]],         // [N_pool, 3, n_kv_heads, D]
+    device const half* fact_val_V [[buffer(28)]],         // [N_pool, 3, n_kv_heads, D]
+    device const int32_t& max_residual [[buffer(29)]],    // max residual count
 
     uint tg_idx [[threadgroup_position_in_grid]],       // Query head index (0..H_q-1)
     uint tid [[thread_position_in_threadgroup]],        // Thread index within threadgroup
@@ -71,6 +81,12 @@ kernel void decode_attention_metal_kernel(
     // Shared buffer to hold rotated anchor key for current block [D]
     threadgroup float ak_rot_shared[128];
 
+    // Shared buffers for residual and fact overrides (Track D)
+    threadgroup int16_t res_pos_K_shared[64];
+    threadgroup int16_t res_pos_V_shared[64];
+    threadgroup int16_t fact_pos_shared[3];
+    threadgroup float weights_shared[256];
+
     // 1. Cache the query vector in shared memory
     for (int d = tid; d < D; d += t_per_tg) {
         q_shared[d] = (float)Q[tg_idx * D + d];
@@ -84,6 +100,18 @@ kernel void decode_attention_metal_kernel(
     for (int k = 0; k < K; ++k) {
         int slot_id = slot_indices[k];
         int slen = seq_lens[slot_id];
+
+        // Load residual and fact positions for current block into shared memory
+        for (int r = (int)tid; r < max_residual; r += (int)t_per_tg) {
+            if (r < 64) {
+                res_pos_K_shared[r] = res_pos_K[slot_id * max_residual + r];
+                res_pos_V_shared[r] = res_pos_V[slot_id * max_residual + r];
+            }
+        }
+        if (tid < 3) {
+            fact_pos_shared[tid] = fact_pos[slot_id * 3 + tid];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // 1. Compute anchor dot product score (using all threads to collaborate)
         for (int d = tid; d < D; d += t_per_tg) {
@@ -165,7 +193,59 @@ kernel void decode_attention_metal_kernel(
                 delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
             }
             float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
-            sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
+            
+            // Fact anchor override check (K)
+            float final_t_score = t_score;
+            for (int fi = 0; fi < 3; ++fi) {
+                int fpos = (int)fact_pos_shared[fi];
+                if (fpos == t) {
+                    float exact_k_sum = 0.0f;
+                    int base_fact_k = slot_id * 3 * n_kv_heads * D + fi * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_fk = (float)fact_val_K[base_fact_k + d];
+                        if (has_rope) {
+                            float c = cos_anc[k * D + d];
+                            float s = sin_anc[k * D + d];
+                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            float raw_fk_partner = (float)fact_val_K[base_fact_k + partner];
+                            float rot_partner_contrib = (d < half_d) ? -raw_fk_partner : raw_fk_partner;
+                            float fk_rot = raw_fk * c + rot_partner_contrib * s;
+                            exact_k_sum += q_shared[d] * fk_rot;
+                        } else {
+                            exact_k_sum += q_shared[d] * raw_fk;
+                        }
+                    }
+                    final_t_score = exact_k_sum * scale;
+                    break;
+                }
+            }
+            
+            // Residual correction check (K)
+            for (int r = 0; r < max_residual; ++r) {
+                int rpos = (int)res_pos_K_shared[r];
+                if (rpos == t) {
+                    float exact_rk_sum = 0.0f;
+                    int base_res_k = slot_id * max_residual * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_rk = (float)res_val_K[base_res_k + d];
+                        if (has_rope) {
+                            float c = cos_anc[k * D + d];
+                            float s = sin_anc[k * D + d];
+                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            float raw_rk_partner = (float)res_val_K[base_res_k + partner];
+                            float rot_partner_contrib = (d < half_d) ? -raw_rk_partner : raw_rk_partner;
+                            float rk_rot = raw_rk * c + rot_partner_contrib * s;
+                            exact_rk_sum += q_shared[d] * rk_rot;
+                        } else {
+                            exact_rk_sum += q_shared[d] * raw_rk;
+                        }
+                    }
+                    final_t_score += exact_rk_sum * scale;
+                    break;
+                }
+            }
+            
+            sm_state = merge_softmax_states(sm_state, { final_t_score, 1.0f });
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -201,6 +281,18 @@ kernel void decode_attention_metal_kernel(
     for (int k = 0; k < K; ++k) {
         int slot_id = slot_indices[k];
         int slen = seq_lens[slot_id];
+
+        // Load residual and fact positions for current block into shared memory
+        for (int r = (int)tid; r < max_residual; r += (int)t_per_tg) {
+            if (r < 64) {
+                res_pos_K_shared[r] = res_pos_K[slot_id * max_residual + r];
+                res_pos_V_shared[r] = res_pos_V[slot_id * max_residual + r];
+            }
+        }
+        if (tid < 3) {
+            fact_pos_shared[tid] = fact_pos[slot_id * 3 + tid];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // 1. Recompute anchor score & query projection (or load from cache)
         float score_anc;
@@ -271,23 +363,78 @@ kernel void decode_attention_metal_kernel(
         
         float scale_u = (float)U_scale_pool[slot_id];
         float block_scale = (float)scales[slot_id];
-        for (int t = tid; t < slen; t += t_per_tg) {
+        for (int t = (int)tid; t < slen; t += (int)t_per_tg) {
             float delta_sum = 0.0f;
             int u_offset = slot_id * S_max * rank + t * rank;
             for (int r = 0; r < rank; ++r) {
                 delta_sum += q_proj_shared[r] * (float)U_pool[u_offset + r];
             }
             float t_score = (delta_sum * scale_u * block_scale + score_anc) * scale;
-            float w_t = exp(t_score - global_m) / max(global_d, 1e-9f);
+            
+            // Fact anchor override check (K)
+            float final_t_score = t_score;
+            for (int fi = 0; fi < 3; ++fi) {
+                int fpos = (int)fact_pos_shared[fi];
+                if (fpos == t) {
+                    float exact_k_sum = 0.0f;
+                    int base_fact_k = slot_id * 3 * n_kv_heads * D + fi * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_fk = (float)fact_val_K[base_fact_k + d];
+                        if (has_rope) {
+                            float c = cos_anc[k * D + d];
+                            float s = sin_anc[k * D + d];
+                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            float raw_fk_partner = (float)fact_val_K[base_fact_k + partner];
+                            float rot_partner_contrib = (d < half_d) ? -raw_fk_partner : raw_fk_partner;
+                            float fk_rot = raw_fk * c + rot_partner_contrib * s;
+                            exact_k_sum += q_shared[d] * fk_rot;
+                        } else {
+                            exact_k_sum += q_shared[d] * raw_fk;
+                        }
+                    }
+                    final_t_score = exact_k_sum * scale;
+                    break;
+                }
+            }
+            
+            // Residual correction check (K)
+            for (int r = 0; r < max_residual; ++r) {
+                int rpos = (int)res_pos_K_shared[r];
+                if (rpos == t) {
+                    float exact_rk_sum = 0.0f;
+                    int base_res_k = slot_id * max_residual * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                    for (int d = 0; d < D; ++d) {
+                        float raw_rk = (float)res_val_K[base_res_k + d];
+                        if (has_rope) {
+                            float c = cos_anc[k * D + d];
+                            float s = sin_anc[k * D + d];
+                            int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                            float raw_rk_partner = (float)res_val_K[base_res_k + partner];
+                            float rot_partner_contrib = (d < half_d) ? -raw_rk_partner : raw_rk_partner;
+                            float rk_rot = raw_rk * c + rot_partner_contrib * s;
+                            exact_rk_sum += q_shared[d] * rk_rot;
+                        } else {
+                            exact_rk_sum += q_shared[d] * raw_rk;
+                        }
+                    }
+                    final_t_score += exact_rk_sum * scale;
+                    break;
+                }
+            }
+            
+            float w_t = exp(final_t_score - global_m) / max(global_d, 1e-9f);
             
             local_sum_w += w_t;
             for (int r = 0; r < rank; ++r) {
                 local_w_proj[r] += w_t * (float)U_pool[u_offset + r] * scale_u;
             }
+            
+            if (t < 256) {
+                weights_shared[t] = w_t;
+            }
         }
 
         // Reduce sum of weights and projected weights over threadgroup
-        // Reduce sum_w
         red_m[tid] = local_sum_w;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint stride = t_per_tg / 2; stride > 0; stride /= 2) {
@@ -329,6 +476,43 @@ kernel void decode_attention_metal_kernel(
                 svd_v_contribution += red_w_proj[r] * (float)VV_pool[base_vv_offset + r * n_kv_heads * D];
             }
             thread_val[d] += svd_v_contribution * block_scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // 4. Add residual value corrections
+        for (int r = 0; r < max_residual; ++r) {
+            int rpos = (int)res_pos_V_shared[r];
+            if (rpos >= 0 && rpos < slen && rpos < 256) {
+                float w_res = weights_shared[rpos];
+                int base_res_v = slot_id * max_residual * n_kv_heads * D + r * n_kv_heads * D + kv_head * D;
+                for (int d = tid; d < D; d += t_per_tg) {
+                    thread_val[d] += w_res * (float)res_val_V[base_res_v + d];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // 5. Add fact anchor override value corrections
+        for (int fi = 0; fi < 3; ++fi) {
+            int fpos = (int)fact_pos_shared[fi];
+            if (fpos >= 0 && fpos < slen && fpos < 256) {
+                float w_fact = weights_shared[fpos];
+                int base_fact_v = slot_id * 3 * n_kv_heads * D + fi * n_kv_heads * D + kv_head * D;
+                
+                int u_offset = slot_id * S_max * rank + fpos * rank;
+                
+                for (int d = tid; d < D; d += t_per_tg) {
+                    float svd_v = 0.0f;
+                    int base_vv_offset = slot_id * rank * n_kv_heads * D + kv_head * D + d;
+                    for (int r = 0; r < rank; ++r) {
+                        svd_v += (float)U_pool[u_offset + r] * scale_u * (float)VV_pool[base_vv_offset + r * n_kv_heads * D];
+                    }
+                    svd_v = svd_v * block_scale + (float)anchors_V[slot_id * n_kv_heads * D + kv_head * D + d];
+                    
+                    float exact_fact_v = (float)fact_val_V[base_fact_v + d];
+                    thread_val[d] += w_fact * (exact_fact_v - svd_v);
+                }
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }

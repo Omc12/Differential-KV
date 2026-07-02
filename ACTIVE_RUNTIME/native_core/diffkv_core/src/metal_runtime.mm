@@ -88,7 +88,15 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     float scale,
     int n_q_heads,
     int n_kv_heads,
-    int rank
+    int rank,
+    // Residual and Fact Anchor Override buffers (Track D)
+    const torch::Tensor& res_pos_K,
+    const torch::Tensor& res_val_K,
+    const torch::Tensor& res_pos_V,
+    const torch::Tensor& res_val_V,
+    const torch::Tensor& fact_pos,
+    const torch::Tensor& fact_val_K,
+    const torch::Tensor& fact_val_V
 ) {
     auto& mps_pipeline = MetalDecodePipeline::getInstance();
     if (!mps_pipeline.initialized) {
@@ -132,6 +140,19 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
                               : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(Q.device()));
         int has_rope_flag = has_rope ? 1 : 0;
 
+        // Track D: Prepare contiguous tensors for Residual and Fact Overrides
+        bool has_res = (res_pos_K.defined() && res_pos_K.numel() > 0 && res_val_K.defined() && res_val_K.numel() > 0);
+        auto res_pos_K_c = has_res ? (res_pos_K.is_contiguous() ? res_pos_K : res_pos_K.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt16).device(Q.device()));
+        auto res_val_K_c = has_res ? (res_val_K.is_contiguous() ? res_val_K : res_val_K.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+        auto res_pos_V_c = has_res ? (res_pos_V.is_contiguous() ? res_pos_V : res_pos_V.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt16).device(Q.device()));
+        auto res_val_V_c = has_res ? (res_val_V.is_contiguous() ? res_val_V : res_val_V.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+        int max_res_val = has_res ? static_cast<int>(res_pos_K_c.size(1)) : 0;
+
+        bool has_fact = (fact_pos.defined() && fact_pos.numel() > 0 && fact_val_K.defined() && fact_val_K.numel() > 0);
+        auto fact_pos_c = has_fact ? (fact_pos.is_contiguous() ? fact_pos : fact_pos.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt16).device(Q.device()));
+        auto fact_val_K_c = has_fact ? (fact_val_K.is_contiguous() ? fact_val_K : fact_val_K.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+        auto fact_val_V_c = has_fact ? (fact_val_V.is_contiguous() ? fact_val_V : fact_val_V.contiguous()) : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+
         // Get the active PyTorch MPS stream to queue the execution
         at::mps::MPSStream* mps_stream = at::mps::getCurrentMPSStream();
         // Commit any active command encoder and flush the stream to get a clean command buffer.
@@ -154,6 +175,14 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         id<MTLBuffer> buf_cos = at::native::mps::getMTLBufferStorage(cos_c);
         id<MTLBuffer> buf_sin = at::native::mps::getMTLBufferStorage(sin_c);
 
+        id<MTLBuffer> buf_res_pos_K = at::native::mps::getMTLBufferStorage(res_pos_K_c);
+        id<MTLBuffer> buf_res_val_K = at::native::mps::getMTLBufferStorage(res_val_K_c);
+        id<MTLBuffer> buf_res_pos_V = at::native::mps::getMTLBufferStorage(res_pos_V_c);
+        id<MTLBuffer> buf_res_val_V = at::native::mps::getMTLBufferStorage(res_val_V_c);
+        id<MTLBuffer> buf_fact_pos   = at::native::mps::getMTLBufferStorage(fact_pos_c);
+        id<MTLBuffer> buf_fact_val_K = at::native::mps::getMTLBufferStorage(fact_val_K_c);
+        id<MTLBuffer> buf_fact_val_V = at::native::mps::getMTLBufferStorage(fact_val_V_c);
+
         // Compute byte offsets from storage offsets
         size_t off_q = Q_c.storage_offset() * Q_c.element_size();
         size_t off_u = U_c.storage_offset() * U_c.element_size();
@@ -169,6 +198,14 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         size_t off_lse = lse.storage_offset() * lse.element_size();
         size_t off_cos = cos_c.storage_offset() * cos_c.element_size();
         size_t off_sin = sin_c.storage_offset() * sin_c.element_size();
+
+        size_t off_res_pos_K = res_pos_K_c.storage_offset() * res_pos_K_c.element_size();
+        size_t off_res_val_K = res_val_K_c.storage_offset() * res_val_K_c.element_size();
+        size_t off_res_pos_V = res_pos_V_c.storage_offset() * res_pos_V_c.element_size();
+        size_t off_res_val_V = res_val_V_c.storage_offset() * res_val_V_c.element_size();
+        size_t off_fact_pos   = fact_pos_c.storage_offset() * fact_pos_c.element_size();
+        size_t off_fact_val_K = fact_val_K_c.storage_offset() * fact_val_K_c.element_size();
+        size_t off_fact_val_V = fact_val_V_c.storage_offset() * fact_val_V_c.element_size();
 
         id<MTLCommandBuffer> commandBuffer = mps_stream->commandBuffer();
         if (!commandBuffer) {
@@ -210,6 +247,16 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         [encoder setBuffer:buf_cos offset:off_cos atIndex:19];
         [encoder setBuffer:buf_sin offset:off_sin atIndex:20];
         [encoder setBytes:&has_rope_flag length:sizeof(int) atIndex:21];
+
+        // Bind Track D Residual and Fact Override Buffers
+        [encoder setBuffer:buf_res_pos_K offset:off_res_pos_K atIndex:22];
+        [encoder setBuffer:buf_res_val_K offset:off_res_val_K atIndex:23];
+        [encoder setBuffer:buf_res_pos_V offset:off_res_pos_V atIndex:24];
+        [encoder setBuffer:buf_res_val_V offset:off_res_val_V atIndex:25];
+        [encoder setBuffer:buf_fact_pos   offset:off_fact_pos   atIndex:26];
+        [encoder setBuffer:buf_fact_val_K offset:off_fact_val_K atIndex:27];
+        [encoder setBuffer:buf_fact_val_V offset:off_fact_val_V atIndex:28];
+        [encoder setBytes:&max_res_val length:sizeof(int) atIndex:29];
 
         // Threadgroup grid: [n_q_heads, 1, 1] (1 threadgroup per head)
         MTLSize grid = MTLSizeMake(n_q_heads, 1, 1);

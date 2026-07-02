@@ -177,3 +177,137 @@ def test_sparse_residual_correctness():
     print(f"out_dense_dup[0, :10]: {out_dense_dup[0, :10].tolist()}")
     assert diff_with_res < 0.01, f"Attention output with residual correction error {diff_with_res} is too high"
     assert diff_with_res < diff_no_res, "Residual correction should improve accuracy compared to compression-only"
+
+
+def test_metal_residual_and_fact_parity():
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    if device != "mps":
+        print("Metal not available, skipping Metal parity test.")
+        return
+        
+    from runtime.diffkv_attention import _decode_attention_metal, _DIFFKV_HAS_METAL_ATTN
+    if not _DIFFKV_HAS_METAL_ATTN:
+        print("Metal extension bindings not compiled, skipping.")
+        return
+
+    print("\n─── Running test_metal_residual_and_fact_parity ───")
+    # 1. Define dimensions
+    num_kv_heads = 4
+    num_heads = 8  # GQA factor = 2
+    head_dim = 64
+    feat_dim = 2 * num_kv_heads * head_dim
+    seq_len = 8
+    rank = 4
+    
+    torch.manual_seed(42)
+    deltas = torch.randn(seq_len, feat_dim, device=device, dtype=torch.float16) * 0.1
+    deltas[0] = 0.0
+    
+    # Inject residual fact overrides
+    fact_indices = [1, 3, 5, 7]
+    for idx in fact_indices:
+        pattern = torch.zeros(feat_dim, device=device, dtype=torch.float16)
+        start_dim = (idx * 32) % feat_dim
+        pattern[start_dim : start_dim + 64] = 5.0
+        deltas[idx] = pattern
+        
+    lr_delta = compress_lowrank(deltas.float(), rank=rank, error_threshold=0.0, max_residual_frac=1.0)
+    
+    # Setup NativeBlockPool and write the block
+    pool = NativeBlockPool(
+        max_blocks=10,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        rank=rank,
+        max_seq_len=8,
+        device=device,
+        dtype=torch.float16,
+        initial_blocks=2,
+        num_layers=1,
+        lazy=False,
+    )
+    
+    pool_idx = pool.allocate_block()
+    anchor_K = deltas[0, :num_kv_heads * head_dim].view(num_kv_heads, head_dim)
+    anchor_V = deltas[0, num_kv_heads * head_dim:].view(num_kv_heads, head_dim)
+    
+    pool.write_block(
+        pool_idx=pool_idx,
+        U=lr_delta.U,
+        V=lr_delta.V,
+        anchor_K=anchor_K,
+        anchor_V=anchor_V,
+        scale=lr_delta.scale,
+        seq_len=seq_len,
+        residual_K_positions=lr_delta.residual_K_positions,
+        residual_K_values=lr_delta.residual_K_values,
+        residual_V_positions=lr_delta.residual_V_positions,
+        residual_V_values=lr_delta.residual_V_values
+    )
+    
+    Q = torch.randn(num_heads, head_dim, device=device, dtype=torch.float16)
+    block_indices = torch.tensor([pool_idx], device=device, dtype=torch.long)
+    blk_sizes = torch.tensor([seq_len], device=device, dtype=torch.int32)
+    anchor_indices = torch.tensor([0], device=device, dtype=torch.long)
+    
+    _ca = torch.empty(0, device=device, dtype=torch.float32)
+    _sa = torch.empty(0, device=device, dtype=torch.float32)
+    _scale = 1.0 / math.sqrt(head_dim)
+    
+    _res_pos_K = pool.residual_K_positions if pool.residual_K_positions is not None else torch.empty(0, device=device, dtype=torch.int16)
+    _res_val_K = pool.residual_K_values if pool.residual_K_values is not None else torch.empty(0, device=device, dtype=torch.float16)
+    _res_pos_V = pool.residual_V_positions if pool.residual_V_positions is not None else torch.empty(0, device=device, dtype=torch.int16)
+    _res_val_V = pool.residual_V_values if pool.residual_V_values is not None else torch.empty(0, device=device, dtype=torch.float16)
+    _fact_pos = pool.fact_anchor_positions if pool.fact_anchor_positions is not None else torch.empty(0, device=device, dtype=torch.int16)
+    _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=device, dtype=torch.float16)
+    _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=device, dtype=torch.float16)
+
+    # 1. Launch the custom Metal shader path
+    out_metal, lse_metal = _decode_attention_metal(
+        Q.contiguous(),
+        pool.U.contiguous(),
+        pool.U_scale.contiguous(),
+        pool.V_K.contiguous(),
+        pool.V_V.contiguous(),
+        pool.anchors_K.contiguous(),
+        pool.anchors_V.contiguous(),
+        pool.seq_lens.contiguous(),
+        pool.scales.contiguous(),
+        _ca,
+        _sa,
+        block_indices.contiguous(),
+        _scale,
+        num_heads,
+        num_kv_heads,
+        rank,
+        _res_pos_K.contiguous(),
+        _res_val_K.contiguous(),
+        _res_pos_V.contiguous(),
+        _res_val_V.contiguous(),
+        _fact_pos.contiguous(),
+        _fact_val_K.contiguous(),
+        _fact_val_V.contiguous(),
+    )
+    
+    # 2. Run Python/MPS reference fallback (fused_decode_mps)
+    out_ref, lse_ref = fused_decode_mps(
+        Q=Q,
+        pool=pool,
+        block_indices=block_indices,
+        blk_sizes=blk_sizes,
+        num_key_value_groups=2,
+        anchor_indices=anchor_indices,
+        cos=None,
+        sin=None,
+    )
+    
+    # 3. Assert outputs match
+    diff_out = (out_metal - out_ref).abs().max().item()
+    diff_lse = (lse_metal - lse_ref).abs().max().item()
+    print(f"Output Max Difference: {diff_out:.6f}")
+    print(f"LSE Max Difference: {diff_lse:.6f}")
+    
+    assert diff_out < 1e-2, f"Metal output mismatch: max diff {diff_out}"
+    assert diff_lse < 1e-2, f"Metal LSE mismatch: max diff {diff_lse}"
+    print("Success! Metal shader parity validated.")
+
