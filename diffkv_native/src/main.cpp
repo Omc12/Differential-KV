@@ -4036,6 +4036,7 @@ int main(int argc, char ** argv) {
         }
 
         // Note: §3.1 Adaptive-k scaling block moved to start of decode phase to ensure correct size allocations.
+        bool graph_is_native = false;
 
         struct ggml_cgraph * decode_graph = build_decode_graph(
             decode_ctx, model, input_token_decode, position_decode, W_proj_decode,
@@ -4059,8 +4060,17 @@ int main(int argc, char ** argv) {
         // Native path: allocate the decode graph with NO buffer reuse (ggml_backend_sched's
         // reuse corrupts the native sparse-attn subgraph on big-score inputs — verified: the
         // subgraph MATH is exact under no-reuse via DIFFKV_SELFTEST). Direct backend compute.
+        bool factual_empty = true;
+        if (!userdata.empty() && userdata[0].srl_state) {
+            factual_empty = static_cast<diffkv::SessionSRLState*>(userdata[0].srl_state)->factual_store.entries.empty();
+        }
+        bool use_native_attn = native_attn_on && decode_use_sparse && factual_empty &&
+                               !userdata.empty() && userdata[0].kv_engine &&
+                               userdata[0].kv_engine->native_attn_enabled();
+
+        graph_is_native = use_native_attn;
         bool decode_alloc_ok;
-        if (native_attn_on) {
+        if (use_native_attn) {
             if (native_decode_buf) ggml_backend_buffer_free(native_decode_buf);
             native_decode_buf = ggml_backend_alloc_ctx_tensors(decode_ctx, backend);
             decode_alloc_ok = (native_decode_buf != nullptr);
@@ -4073,6 +4083,15 @@ int main(int argc, char ** argv) {
                 if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
             }
             if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+
+            // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend 
+            // so the scheduler doesn't erroneously propagate Metal/GPU backend to them.
+            for (int i = 0; i < decode_graph->n_nodes; ++i) {
+                struct ggml_tensor * node = decode_graph->nodes[i];
+                if (node->op == GGML_OP_MAP_CUSTOM3) {
+                    ggml_backend_sched_set_tensor_backend(sched, node, backend_owner.cpu_backend);
+                }
+            }
             decode_alloc_ok = ggml_backend_sched_alloc_graph(sched, decode_graph);
         }
         if (!decode_alloc_ok) {
@@ -4547,8 +4566,17 @@ int main(int argc, char ** argv) {
                 if (decode_concat_k) ggml_set_output(decode_concat_k);
                 if (decode_concat_v) ggml_set_output(decode_concat_v);
 
+                bool factual_empty = true;
+                if (!userdata.empty() && userdata[0].srl_state) {
+                    factual_empty = static_cast<diffkv::SessionSRLState*>(userdata[0].srl_state)->factual_store.entries.empty();
+                }
+                bool use_native_attn = native_attn_on && decode_use_sparse && factual_empty &&
+                                       !userdata.empty() && userdata[0].kv_engine &&
+                                       userdata[0].kv_engine->native_attn_enabled();
+
+                graph_is_native = use_native_attn;
                 bool realloc_ok;
-                if (native_attn_on) {
+                if (use_native_attn) {
                     if (native_decode_buf) ggml_backend_buffer_free(native_decode_buf);
                     native_decode_buf = ggml_backend_alloc_ctx_tensors(decode_ctx, backend);
                     realloc_ok = (native_decode_buf != nullptr);
@@ -4561,6 +4589,15 @@ int main(int argc, char ** argv) {
                         if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
                     }
                     if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+
+                    // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend 
+                    // so the scheduler doesn't erroneously propagate Metal/GPU backend to them.
+                    for (int i = 0; i < decode_graph->n_nodes; ++i) {
+                        struct ggml_tensor * node = decode_graph->nodes[i];
+                        if (node->op == GGML_OP_MAP_CUSTOM3) {
+                            ggml_backend_sched_set_tensor_backend(sched, node, backend_owner.cpu_backend);
+                        }
+                    }
                     realloc_ok = ggml_backend_sched_alloc_graph(sched, decode_graph);
                 }
                 if (!realloc_ok) {
@@ -4655,29 +4692,47 @@ int main(int argc, char ** argv) {
                 filtered_candidates = physical_candidates;
                 const auto& state_table = kv_engines[0]->get_state_table();
                 int n_pool_slots = (int)kv_engines[0]->get_seq_lens()->ne[0];
+                int fallback_sid = 0;
+                for (auto sid : filtered_candidates) {
+                    if (sid >= 0 && sid < n_pool_slots &&
+                        state_table.get(sid) == diffkv::BlockState::CompressedResident) {
+                        fallback_sid = sid;
+                        break;
+                    }
+                }
                 for (auto& sid : filtered_candidates) {
                     if (sid < 0 || sid >= n_pool_slots ||
                         state_table.get(sid) != diffkv::BlockState::CompressedResident) {
-                        sid = -1;
+                        sid = fallback_sid;
                     } else {
                         n_valid_compressed++;
                     }
                 }
                 // If no CompressedResident blocks are available (e.g. decode step 0 before
-                // compression completes), fill all host slots with -1 so the native graph
+                // compression completes), fill all host slots with 0 so the native graph
                 // attends nothing in the sparse pool — only the dense window contributes.
                 // This prevents the in-graph SRL router (which operates on relative scores and
                 // always selects K slot IDs regardless of mask) from routing to Freed-state slots.
                 if (n_valid_compressed == 0) {
-                    std::fill(filtered_candidates.begin(), filtered_candidates.end(), -1);
+                    std::fill(filtered_candidates.begin(), filtered_candidates.end(), 0);
                 }
                 ggml_backend_tensor_set(host_slots_decode, filtered_candidates.data(), 0, srl_k_host * sizeof(int32_t));
                 // Also upload to native_attn_slots (host-controlled, srl_k_keep wide).
-                // Pad filtered_candidates to srl_k_keep with -1 if needed.
+                // Pad with -1 if needed, as the Metal kernel supports negative IDs natively.
                 if (native_attn_on && native_attn_slots) {
                     std::vector<int32_t> nat_slots(srl_k_keep, -1);
-                    int copy_n = std::min((int)filtered_candidates.size(), srl_k_keep);
-                    for (int i = 0; i < copy_n; ++i) nat_slots[i] = filtered_candidates[i];
+                    int copy_n = std::min((int)physical_candidates.size(), srl_k_keep);
+                    for (int i = 0; i < copy_n; ++i) {
+                        int32_t sid = physical_candidates[i];
+                        if (sid < 0 || sid >= n_pool_slots ||
+                            state_table.get(sid) != diffkv::BlockState::CompressedResident) {
+                            sid = -1;
+                        }
+                        nat_slots[i] = sid;
+                    }
+                    if (n_valid_compressed == 0) {
+                        std::fill(nat_slots.begin(), nat_slots.end(), -1);
+                    }
                     ggml_backend_tensor_set(native_attn_slots, nat_slots.data(), 0, (size_t)srl_k_keep * sizeof(int32_t));
                 }
 
@@ -5003,7 +5058,7 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            ggml_status decode_st = native_attn_on
+            ggml_status decode_st = graph_is_native
                 ? ggml_backend_graph_compute(backend, decode_graph)
                 : ggml_backend_sched_graph_compute(sched, decode_graph);
 

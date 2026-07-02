@@ -99,11 +99,10 @@ This log records the implementation details and benchmark measurements for the n
   - **Identified Risk:** SVD block eviction rules normally discard the least recently accessed/activated block to fit the target GPU VRAM budget. Under extremely long sequences, block 0 (which contains sequence positions 0 to 63, the critical attention sinks) could be evicted if not touched recently. Evicting the attention sinks causes model attention weights to collapse, leading to garbage/hallucinatory token generation.
   - **Resolution / Fix:** Modified `PagedKVStore::maybe_evict` in `paged_kv_store.cpp` to explicitly check and protect block 0 (key `"0"`) from ever being evicted. This guarantees that sequence positions 0-63 remain resident in GPU memory at all times, preserving model perplexity and semantic coherence even at 64k+ context sizes.
 
+---
 
+## Bug Fixes (July 2026)
 
-
-
-
-
-
-
+### Native C++ Crash on Long Prompts
+- **Scheduling Bug:** Resolved a crash where the CPU-fallback custom op (`MAP_CUSTOM3`) was scheduled on the Metal GPU backend, causing a runtime assertion failure. Fixed by routing `MAP_CUSTOM3` tensors to the CPU backend explicitly and selecting the correct compute path (direct Metal vs scheduler) based on graph properties.
+- **Out-of-bounds Indexing Bug:** Resolved a crash where unused candidate slots were padded with `-1`, which caused `ggml_get_rows` in `anchor_screen` to fail with an out-of-bounds assert. Fixed by padding unused slots with a valid candidate index (ignored via the `-1e10f` validity mask).
