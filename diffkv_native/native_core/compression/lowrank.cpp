@@ -990,6 +990,20 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     }
                 }
 
+                // Apply window boost (Phase 2: contiguous runs)
+                std::vector<float> final_boosts = boost_multipliers;
+                const int W = 2;
+                for (int i = 0; i < S_deltas; ++i) {
+                    if (boost_multipliers[i] > 1.0f) {
+                        int start_j = std::max(0, i - W);
+                        int end_j = std::min(S_deltas - 1, i + W);
+                        for (int j = start_j; j <= end_j; ++j) {
+                            final_boosts[j] = std::max(final_boosts[j], boost_multipliers[i]);
+                        }
+                    }
+                }
+                boost_multipliers = final_boosts;
+
                 bool is_needle_block = false;
                 for (int s = 0; s < S_deltas; ++s) {
                     int32_t tid = params.token_ids[s + 1];

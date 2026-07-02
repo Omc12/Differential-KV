@@ -1361,6 +1361,15 @@ class MLXKVBlockManager:
                                 idf = math.log(max(total_tokens, 2) / (count + 0.1))
                                 rarity_weight = max(1.0, min(idf, 6.0))
                                 boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+                    
+                    # Apply window boost (Phase 2: contiguous runs)
+                    final_boosts = list(boost_multipliers)
+                    W = 2
+                    for idx in range(S_comp):
+                        if boost_multipliers[idx] > 1.0:
+                            for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
+                                final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
+                    boost_multipliers = final_boosts
                 boost_multipliers_batch.append(boost_multipliers)
             boost_arr = mx.array(boost_multipliers_batch, dtype=joint_errors.dtype)
             joint_errors = joint_errors * boost_arr
@@ -1626,6 +1635,15 @@ class MLXKVBlockManager:
                             idf = math.log(max(total_tokens, 2) / (count + 0.1))
                             rarity_weight = max(1.0, min(idf, 6.0))
                             boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+                
+                # Apply window boost (Phase 2: contiguous runs)
+                final_boosts = list(boost_multipliers)
+                W = 2
+                for idx in range(S_comp):
+                    if boost_multipliers[idx] > 1.0:
+                        for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
+                            final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
+                boost_multipliers = final_boosts
 
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
                 joint_errors = joint_errors * boost_arr

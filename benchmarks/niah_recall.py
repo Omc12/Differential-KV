@@ -29,7 +29,7 @@ FILLER = (
     "The history of artificial intelligence is long and complex. "
     "Early AI researchers believed that machines could simulate human reasoning. "
     "Symbolic AI dominated the field for decades, followed by neural networks. "
-    "Deep learning transformed AI in the 2010s with massive datasets and GPU compute. "
+    "Deep learning transformed AI in the twentieth century with massive datasets and GPU compute. "
 )
 
 

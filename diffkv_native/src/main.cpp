@@ -2450,6 +2450,13 @@ int main(int argc, char ** argv) {
             }
             prompt = std::move(unescaped);
         }
+        {
+            FILE* f = fopen("received_prompt.txt", "w");
+            if (f) {
+                fprintf(f, "%s", prompt.c_str());
+                fclose(f);
+            }
+        }
 
         // Always do a full reset + re-prefill from token 0 on every turn.
         //
@@ -3575,6 +3582,158 @@ int main(int argc, char ** argv) {
 
         // Resources already freed inside the chunk loop
 
+        std::atomic<bool> srl_build_done{false};
+        std::atomic<bool> srl_needs_gpu_sync{false};
+        diffkv::SessionSRLState  srl_state_pending;
+        bool             srl_swapped = false;
+
+        // ── Synchronous pre-decode SRL build ──
+        const int        _mbs        = micro_block_size;
+        const int        _desc_dim   = desc_dim;
+        const int        _head_dim   = head_dim;
+        const int        _kv_heads   = kv_heads;
+        const int        _L          = L;
+        std::vector<int32_t> _prompt_tokens_copy = prompt_tokens; // thread-safe copy
+        std::vector<float>   _W_proj_copy        = W_proj_host;   // thread-safe copy
+        const auto& _k_act_ref = k_activations;
+        const auto& _v_act_ref = v_activations;
+
+        std::unordered_set<int32_t> relational_token_ids;
+        {
+            static const std::unordered_set<std::string> RELATIONAL_KEYWORDS = {
+                "unlike", "whereas", "while", "although", "however", "but",
+                "instead", "rather", "conversely", "nevertheless", "nonetheless",
+                "yet", "though", "notwithstanding",
+                "compared", "differs", "differ", "different", "difference",
+                "differences", "distinct", "distinction", "distinguishes",
+                "greater", "larger", "smaller", "higher", "lower", "fewer",
+                "more", "less", "most", "least",
+                "causes", "caused", "because", "therefore", "hence", "thus",
+                "leads", "results", "produces", "induces", "triggers",
+                "consequently", "accordingly",
+                "is", "are", "was", "were", "has", "have", "had",
+                "exhibits", "possesses", "contains", "involves",
+                "requires", "lacks", "features",
+                "called", "named", "known", "defined", "characterized",
+                "classified", "denoted", "refers", "represents",
+                "only", "exclusively", "specifically", "solely",
+                "except", "excluding", "neither", "nor"
+            };
+
+            for (int32_t tid : prompt_tokens) {
+                if (relational_token_ids.count(tid)) continue;
+                std::string text = model.token_to_piece(tid);
+                std::string cleaned = "";
+                for (char c : text) {
+                    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                        cleaned += std::tolower((unsigned char)c);
+                    }
+                }
+                if (RELATIONAL_KEYWORDS.count(cleaned)) {
+                    relational_token_ids.insert(tid);
+                }
+            }
+        }
+
+        std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L, relational_token_ids]() {
+#ifdef __APPLE__
+            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#endif
+            runtime_manager.wait_for_compressor();
+            runtime_manager.update_descriptors(_W_proj_copy, _desc_dim, _head_dim);
+            srl_needs_gpu_sync.store(true, std::memory_order_release);
+
+            auto& blocks_l0 = runtime_manager.get_ingest_manager().get_blocks(0);
+            std::vector<int32_t> comp_slots;
+            std::vector<int> comp_anchors;
+            for (int i = 0; i < (int)blocks_l0.size(); ++i) {
+                if (blocks_l0[i]->pool_idx != -1 &&
+                    (blocks_l0[i]->state == BlockState::CompressedResident ||
+                     blocks_l0[i]->state == BlockState::CPUResident)) {
+                    comp_slots.push_back(blocks_l0[i]->pool_idx);
+                    comp_anchors.push_back(blocks_l0[i]->anchor_idx);
+                }
+            }
+
+            int n_comp = (int)comp_slots.size();
+            if (n_comp > 0) {
+                std::vector<float> desc_mat(n_comp * _desc_dim);
+                for (int j = 0; j < n_comp; ++j) {
+                    int sid = comp_slots[j];
+                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix(sid);
+                    if (host_desc) {
+                        std::memcpy(desc_mat.data() + j * _desc_dim,
+                                    host_desc,
+                                    _desc_dim * sizeof(float));
+                    } else {
+                        std::memset(desc_mat.data() + j * _desc_dim, 0, _desc_dim * sizeof(float));
+                    }
+                }
+                srl_state_pending = build_srl_state_from_blocks(
+                    desc_mat.data(), comp_slots.data(), n_comp,
+                    _prompt_tokens_copy.data(), _L,
+                    _mbs + 1, stop_token_ids,
+                    6, 2, 0.15f, true, true,
+                    &comp_anchors
+                );
+                srl_state_pending.n_blocks_at_last_graph_build = n_comp;
+
+                srl_state_pending.setup_sas_and_eqa(
+                    _prompt_tokens_copy, stop_token_ids,
+                    [&](int32_t tid) { return model.token_to_piece(tid); }
+                );
+
+                bool disable_factual = !g_diffkv_enable_factual.load();
+                try {
+                  if (disable_factual) {
+                    std::cerr << "[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).\n";
+                  } else {
+                    std::vector<int32_t> document_tokens = _prompt_tokens_copy;
+                    if (document_tokens.size() > 150) {
+                        document_tokens.resize(document_tokens.size() - 150);
+                    }
+                    std::unordered_set<int32_t> prime_slots_thread(
+                        srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
+                        srl_state_pending.chunk_graph.cluster_centers_tensor.end()
+                    );
+                    srl_state_pending.factual_store.build(
+                        _k_act_ref, _v_act_ref,
+                        document_tokens,
+                        _W_proj_copy.data(),
+                        _desc_dim, _head_dim, _kv_heads,
+                        stop_token_ids,
+                        comp_slots,
+                        _mbs + 1,
+                        srl_state_pending.inverted_index,
+                        prime_slots_thread,
+                        get_helper_token_ids_cpp(model),
+                        relational_token_ids,
+                        [&](int32_t tid) { return model.token_to_piece(tid); },
+                        true
+                    );
+                    srl_state_pending.setup_sas_and_eqa(
+                        document_tokens, stop_token_ids,
+                        [&](int32_t tid) { return model.token_to_piece(tid); }
+                    );
+                    std::cerr << "[DiffKV] Factual store built (pre-decode): "
+                              << srl_state_pending.factual_store.entries.size() << " entries.\n";
+                  }
+                } catch (const std::exception& fe) {
+                    std::cerr << "[DiffKV] factual_store.build() in srl_build_thread failed: " << fe.what() << "\n";
+                }
+
+                std::cerr << "[DiffKV] SRL index ready: " << n_comp << " blocks." << std::endl;
+            }
+            srl_build_done.store(true, std::memory_order_release);
+        });
+        srl_build_thread.join();
+
+        if (srl_needs_gpu_sync.load(std::memory_order_acquire)) {
+            runtime_manager.sync_device_for_native();
+        }
+        srl_state = std::move(srl_state_pending);
+        srl_swapped = true;
+
         // ── 2. DECODE PHASE — rebuild decode graph fresh (avoids sched-ctx pointer corruption) ──
         // §3.3 fix: default raised from 2048 → 4096 to match ACTIVE_RUNTIME diffkv_attention.py:75.
         // Comment from Python: "Default raised from 2048 → 4096 based on MPS benchmarks:
@@ -3956,186 +4115,7 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> all_tokens = prompt_tokens;
         all_tokens.push_back(last_token);
 
-        // ── Background SRL build thread (ACTIVE_RUNTIME: _build_srl_index_async) ──────────
-        // srl_state starts empty → route_decode_slots returns sink+recency (safe fallback).
-        std::atomic<bool> srl_build_done{false};
-        std::atomic<bool> srl_needs_gpu_sync{false};
-        SessionSRLState  srl_state_pending;
-        bool             srl_swapped = false;
 
-        // Only copy small scalars and token IDs into the thread.
-        // k_activations/v_activations are NOT copied — they are read-only during decode
-        // (main thread never writes to them after prefill), so passing const refs is safe.
-        const int        _mbs        = runtime_manager.get_micro_block_size();
-        const int        _desc_dim   = desc_dim;
-        const int        _head_dim   = head_dim;
-        const int        _kv_heads   = kv_heads;
-        const int        _L          = L;
-        std::vector<int32_t> _prompt_tokens_copy = prompt_tokens; // thread-safe copy
-        std::vector<float>   _W_proj_copy        = W_proj_host;   // thread-safe copy
-        // k_activations and v_activations are used read-only — referenced directly
-        const auto& _k_act_ref = k_activations;
-        const auto& _v_act_ref = v_activations;
-
-        std::unordered_set<int32_t> relational_token_ids;
-        {
-            static const std::unordered_set<std::string> RELATIONAL_KEYWORDS = {
-                "unlike", "whereas", "while", "although", "however", "but",
-                "instead", "rather", "conversely", "nevertheless", "nonetheless",
-                "yet", "though", "notwithstanding",
-                "compared", "differs", "differ", "different", "difference",
-                "differences", "distinct", "distinction", "distinguishes",
-                "greater", "larger", "smaller", "higher", "lower", "fewer",
-                "more", "less", "most", "least",
-                "causes", "caused", "because", "therefore", "hence", "thus",
-                "leads", "results", "produces", "induces", "triggers",
-                "consequently", "accordingly",
-                "is", "are", "was", "were", "has", "have", "had",
-                "exhibits", "possesses", "contains", "involves",
-                "requires", "lacks", "features",
-                "called", "named", "known", "defined", "characterized",
-                "classified", "denoted", "refers", "represents",
-                "only", "exclusively", "specifically", "solely",
-                "except", "excluding", "neither", "nor"
-            };
-
-            for (int32_t tid : prompt_tokens) {
-                if (relational_token_ids.count(tid)) continue;
-                std::string text = model.token_to_piece(tid);
-                std::string cleaned = "";
-                for (char c : text) {
-                    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-                        cleaned += std::tolower((unsigned char)c);
-                    }
-                }
-                if (RELATIONAL_KEYWORDS.count(cleaned)) {
-                    relational_token_ids.insert(tid);
-                }
-            }
-        }
-
-        std::thread srl_build_thread([&, _mbs, _desc_dim, _head_dim, _kv_heads, _L, relational_token_ids]() {
-            // Set background QoS: decode thread always preempts this, audio never starved.
-            // Mirrors ACTIVE_RUNTIME: asyncio executor yields to the event loop naturally.
-#ifdef __APPLE__
-            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
-#endif
-            // Step 1: wait for all SVD compression (ACTIVE_RUNTIME: _wait_for_compression)
-            runtime_manager.wait_for_compressor();
-            runtime_manager.update_descriptors(_W_proj_copy, _desc_dim, _head_dim);
-            // Signal main thread to do the GPU sync (Metal is single-threaded)
-            srl_needs_gpu_sync.store(true, std::memory_order_release);
-
-            // Step 2: collect compressed slots (CPU-only read, compressor is done)
-            auto& blocks_l0 = runtime_manager.get_ingest_manager().get_blocks(0);
-            std::vector<int32_t> comp_slots;
-            std::vector<int> comp_anchors;
-            for (int i = 0; i < (int)blocks_l0.size(); ++i) {
-                if (blocks_l0[i]->pool_idx != -1 &&
-                    (blocks_l0[i]->state == BlockState::CompressedResident ||
-                     blocks_l0[i]->state == BlockState::CPUResident)) {
-                    comp_slots.push_back(blocks_l0[i]->pool_idx);
-                    comp_anchors.push_back(blocks_l0[i]->anchor_idx);
-                }
-            }
-
-            // Step 3: build SRL state (ACTIVE_RUNTIME: finalize_srl_index)
-            int n_comp = (int)comp_slots.size();
-            if (n_comp > 0) {
-                std::vector<float> desc_mat(n_comp * _desc_dim);
-                for (int j = 0; j < n_comp; ++j) {
-                    int sid = comp_slots[j];
-                    const float* host_desc = runtime_manager.get_engines()[0]->get_host_desc_matrix(sid);
-                    if (host_desc) {
-                        std::memcpy(desc_mat.data() + j * _desc_dim,
-                                    host_desc,
-                                    _desc_dim * sizeof(float));
-                    } else {
-                        std::memset(desc_mat.data() + j * _desc_dim, 0, _desc_dim * sizeof(float));
-                    }
-                }
-                srl_state_pending = build_srl_state_from_blocks(
-                    desc_mat.data(), comp_slots.data(), n_comp,
-                    _prompt_tokens_copy.data(), _L,
-                    _mbs + 1, stop_token_ids,
-                    6, 2, 0.15f, true, true,
-                    &comp_anchors
-                );
-                srl_state_pending.n_blocks_at_last_graph_build = n_comp;
-
-                // Step 4: setup SAS and EQA structures
-                srl_state_pending.setup_sas_and_eqa(
-                    _prompt_tokens_copy, stop_token_ids,
-                    [&](int32_t tid) { return model.token_to_piece(tid); }
-                );
-
-                // §3.2 fix: Build factual store HERE (pre-decode), matching ACTIVE_RUNTIME.
-                // ACTIVE_RUNTIME: mlx_diffkv_wrapper.py calls finalize_srl_index() BEFORE
-                // the generate loop; finalize_srl_index calls factual_store.build() at kv_runtime_manager.py:955.
-                // Previously C++ built this post-decode, making all factual biases/masks/VSL no-ops
-                // in turn 1 (the store was empty during every decode step).
-                // This background thread runs at QoS_BACKGROUND so decode preempts it naturally.
-                // The factual store is read by the decode loop only after srl_swapped=true AND
-                // factual_store.entries is non-empty — so partial builds are safe (empty = no bias).
-                // MLX PARITY: ACTIVE_RUNTIME/mlx_diffkv_wrapper.py builds NO factual store in
-                // turn 1 (finalize_srl_index is a no-op there) — so it applies NO +7.0 VSL/factual
-                // logit biasing during generation. Building it pre-decode here (150–700 prompt-derived
-                // entries) made the decode loop boost those tokens by +7.0 each step, forcing the model
-                // to REGURGITATE prompt phrases instead of answering. Default OFF to match MLX.
-                // Re-enable for the NIAH / exact-retrieval path with DIFFKV_ENABLE_FACTUAL=1.
-                bool disable_factual = !g_diffkv_enable_factual.load();
-                try {
-                  if (disable_factual) {
-                    std::cerr << "[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).\n";
-                  } else {
-                    std::vector<int32_t> document_tokens = _prompt_tokens_copy;
-                    if (document_tokens.size() > 150) {
-                        document_tokens.resize(document_tokens.size() - 150);
-                    }
-                    std::unordered_set<int32_t> prime_slots_thread(
-                        srl_state_pending.chunk_graph.cluster_centers_tensor.begin(),
-                        srl_state_pending.chunk_graph.cluster_centers_tensor.end()
-                    );
-                    srl_state_pending.factual_store.build(
-                        _k_act_ref, _v_act_ref,
-                        document_tokens,
-                        _W_proj_copy.data(),
-                        _desc_dim, _head_dim, _kv_heads,
-                        stop_token_ids,
-                        comp_slots,
-                        _mbs + 1,
-                        srl_state_pending.inverted_index,
-                        prime_slots_thread,
-                        get_helper_token_ids_cpp(model),
-                        relational_token_ids,
-                        [&](int32_t tid) { return model.token_to_piece(tid); },
-                        true
-                    );
-                    srl_state_pending.setup_sas_and_eqa(
-                        document_tokens, stop_token_ids,
-                        [&](int32_t tid) { return model.token_to_piece(tid); }
-                    );
-                    std::cerr << "[DiffKV] Factual store built (pre-decode): "
-                              << srl_state_pending.factual_store.entries.size() << " entries.\n";
-                    if (std::getenv("DIFFKV_VERBOSE")) {
-                        for (size_t i = 0; i < srl_state_pending.factual_store.entries.size(); ++i) {
-                            const auto& entry = srl_state_pending.factual_store.entries[i];
-                            std::cerr << "  - entry " << i << " (recalled=" << entry.recalled << ") tokens: ";
-                            for (int32_t t : entry.tokens) {
-                                std::cerr << model.token_to_piece(t) << " ";
-                            }
-                            std::cerr << "\n";
-                        }
-                    }
-                  }
-                } catch (const std::exception& fe) {
-                    std::cerr << "[DiffKV] factual_store.build() in srl_build_thread failed: " << fe.what() << "\n";
-                }
-
-                std::cerr << "[DiffKV] SRL index ready: " << n_comp << " blocks." << std::endl;
-            }
-            srl_build_done.store(true, std::memory_order_release);
-        });
 
         int active_slot = runtime_manager.get_ingest_manager().get_blocks(0).size() - 1;
         if (active_slot < 0) {
@@ -4425,25 +4405,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        // ── CORRECTNESS FIX (long-context race): finish the SRL pipeline BEFORE decoding ──
-        // The background srl_build_thread (compressor drain → update_descriptors → GPU-sync signal
-        // → factual build) was overlapped with the decode loop and swapped in mid-generation (the
-        // per-step check below). At long context the build OUTLIVES a short generation, so every
-        // token routed over half-built block descriptors + unsynced device tensors → the routing
-        // (semantic_search/anchor_screen) selected garbage slots → non-deterministic word-salad
-        // (greedy output differed run-to-run; short prompts finished the build in time, so they
-        // were coherent). Wait synchronously here on the main thread: the lost prefill/decode
-        // overlap is cheap next to the correctness it buys. The per-step swap below is now a no-op.
-        if (!srl_swapped) {
-            if (srl_build_thread.joinable()) srl_build_thread.join();
-            if (srl_needs_gpu_sync.load(std::memory_order_acquire)) {
-                runtime_manager.sync_device_for_native();
-            }
-            srl_state = std::move(srl_state_pending);
-            srl_swapped = true;
-            for (auto & v : k_activations) std::vector<ggml_fp16_t>().swap(v);
-            for (auto & v : v_activations) std::vector<ggml_fp16_t>().swap(v);
-        }
+
 
         double sum_sync_ms = 0.0;
         double sum_recon_ms = 0.0;
@@ -4461,6 +4423,12 @@ int main(int argc, char ** argv) {
         int prev_pos = 0;
         bool has_prev_svd = false;
         const bool never_use_sparse = (L + max_generate < engage_threshold);
+
+        if (decode_use_sparse) {
+            for (auto & v : k_activations) std::vector<ggml_fp16_t>().swap(v);
+            for (auto & v : v_activations) std::vector<ggml_fp16_t>().swap(v);
+            std::cerr << "[DiffKV] Prefill activations memory reclaimed early.\n";
+        }
 
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
@@ -4708,6 +4676,18 @@ int main(int argc, char ** argv) {
                     ggml_backend_tensor_set(native_attn_slots, nat_slots.data(), 0, (size_t)srl_k_keep * sizeof(int32_t));
                 }
 
+            }
+
+            if (decode_use_sparse && !is_warmup_run) {
+                std::cerr << "[DBG_CANDIDATES] step=" << step << " filtered_candidates: ";
+                for (int32_t s : filtered_candidates) std::cerr << s << " ";
+                if (native_attn_on && native_attn_slots) {
+                    std::cerr << " | nat_slots: ";
+                    std::vector<int32_t> nat_slots_dbg(srl_k_keep);
+                    ggml_backend_tensor_get(native_attn_slots, nat_slots_dbg.data(), 0, srl_k_keep * sizeof(int32_t));
+                    for (int32_t s : nat_slots_dbg) std::cerr << s << " ";
+                }
+                std::cerr << "\n";
             }
 
             std::vector<float> slots_mask_host(n_slots, -1e10f);
@@ -5167,6 +5147,11 @@ int main(int argc, char ** argv) {
                             if(diff>md){md=diff;worst=i;}
                             nn+=(double)natv[i]*natv[i]; cn+=(double)cpuv[i]*cpuv[i];
                         }
+                        double sumS = 0, sumD = 0;
+                        for (int h = 0; h < nq; ++h) {
+                            sumS += lseS[h];
+                            sumD += lseD[h];
+                        }
                         // Print report line
                         std::cerr << "[BLOCK_CMP] L" << l
                             << " K=" << K << " Td=" << Td
@@ -5175,6 +5160,7 @@ int main(int argc, char ** argv) {
                             << " maxDiff=" << md
                             << " @h" << worst/D
                             << " nanNat=" << nanN << " nanCpu=" << nanC
+                            << " lseS_avg=" << (sumS / nq) << " lseD_avg=" << (sumD / nq)
                             << "\n  nat[0..4]:";
                         for(int i=0;i<5&&i<nq*D;++i) std::cerr<<" "<<natv[i];
                         std::cerr << "\n  cpu[0..4]:";
