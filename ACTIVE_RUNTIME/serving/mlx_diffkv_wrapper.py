@@ -1161,29 +1161,64 @@ class MLXKVBlockManager:
         pass
 
     def compress_deferred_prefill_blocks(self, session_id: str):
+        """Flush stashed prefill K/V through the batched SVD compressor.
+
+        STREAMING semantics: safe (and intended) to call after EVERY prefill
+        chunk. Each call virtually concatenates [current dense tail | newly
+        stashed chunks], compresses every full block that clears the recency
+        window (one batched SVD across layers x blocks), and leaves the
+        remainder in the dense buffers. This keeps peak uncompressed KV
+        bounded by ~(recency_window + chunk) tokens instead of the whole
+        prompt — the difference between fitting and not fitting 32k+ prefill
+        in 8GB. Calling it once at end-of-prefill is numerically equivalent.
+
+        Invariant relied on here and in _compress_block: compressed blocks
+        tile the prompt contiguously from token 0, so global block index b
+        covers tokens [b*block_size, (b+1)*block_size).
+        """
         session = self.sessions.get(session_id)
         if session is None:
             return
-            
-        # 1. Concatenate stashed prefill chunks for each layer
+
+        # 1. Virtually concatenate [dense tail | stashed chunks] per layer.
+        #    The tail is whatever survived the previous flush uncompressed;
+        #    without it, per-chunk calls would clobber prior chunks (the
+        #    2026-07-02 regression: only the last 512 tokens survived prefill).
         K_all_layers = []
         V_all_layers = []
         for l in range(self.num_layers):
             if not session["prefill_K_chunks"][l]:
                 return
-            K_all_layers.append(mx.concatenate(session["prefill_K_chunks"][l], axis=2))
-            V_all_layers.append(mx.concatenate(session["prefill_V_chunks"][l], axis=2))
+            parts_k = list(session["prefill_K_chunks"][l])
+            parts_v = list(session["prefill_V_chunks"][l])
+            tail = session["dense_lens"][l]
+            if tail > 0:
+                parts_k.insert(0, mx.expand_dims(session["dense_keys"][l][0, :, :tail], 0))
+                parts_v.insert(0, mx.expand_dims(session["dense_values"][l][0, :, :tail], 0))
+            K_all_layers.append(mx.concatenate(parts_k, axis=2) if len(parts_k) > 1 else parts_k[0])
+            V_all_layers.append(mx.concatenate(parts_v, axis=2) if len(parts_v) > 1 else parts_v[0])
             # Clear stashed chunks
             session["prefill_K_chunks"][l] = []
             session["prefill_V_chunks"][l] = []
-            
+
         L = K_all_layers[0].shape[2]
-        
-        # 2. Check if we have eligible blocks to compress
+
+        # 2. How many full blocks clear the recency window?
         num_blocks = (L - self.recency_window) // self.block_size
-        
+
+        # Session pool capacity guard (reused sessions can outgrow their
+        # allocation): clamp and keep the newest tokens dense.
+        max_b = session.get("max_blocks", self.max_blocks)
+        start_blocks = session["num_blocks"][0]
+        if num_blocks > 0 and start_blocks + num_blocks > max_b:
+            print(f"[DiffKV MLX] WARNING: session '{session_id}' block pool full "
+                  f"({start_blocks}+{num_blocks} > {max_b}); clamping flush.")
+            num_blocks = max(0, max_b - start_blocks)
+
         if num_blocks <= 0:
-            # No blocks to compress, copy all tokens to dense buffers
+            # Nothing clears the window yet: everything (tail + new) stays
+            # dense. num_blocks<=0 implies L < recency_window + block_size,
+            # so this always fits max_dense_len.
             for l in range(self.num_layers):
                 L_dense = L
                 session["dense_keys"][l][0, :, :L_dense]   = K_all_layers[l].squeeze(0)
@@ -1191,7 +1226,7 @@ class MLXKVBlockManager:
                 session["dense_lens"][l] = L_dense
                 session["dense_lens_mx"][l] = mx.array(L_dense, dtype=mx.int32)
             return
-            
+
         N_comp = num_blocks * self.block_size
         S_comp = self.block_size - 1
         B_batch = self.num_layers * num_blocks
@@ -1304,26 +1339,37 @@ class MLXKVBlockManager:
                 pass
                 
         if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
-            boost_multipliers_batch = []
-            for b in range(B_batch):
-                layer_idx = b // num_blocks
-                block_idx = b % num_blocks
-                abs_start = block_idx * self.block_size
+            # Boosts depend only on token ids, so compute once per BLOCK and
+            # tile across layers (28x less work), with a persistent per-token
+            # decode cache (tokenizer.decode dominated 32k prefill otherwise).
+            counts = session.get("token_counts", {})
+            total_tokens = len(session["token_ids"])
+            decode_cache = getattr(self, "_tok_decode_cache", None)
+            if decode_cache is None:
+                decode_cache = self._tok_decode_cache = {}
+            boost_rows = []
+            for block_idx in range(num_blocks):
+                # Global block index: blocks tile the prompt from token 0 and
+                # start_blocks blocks were compressed by earlier flushes.
+                abs_start = (start_blocks + block_idx) * self.block_size
                 tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
-                
+
                 boost_multipliers = [1.0] * S_comp
                 if len(tids) == S_comp:
-                    counts = session.get("token_counts", {})
-                    total_tokens = len(session["token_ids"])
-                    tok_strs = [self.tokenizer.decode([tid]) for tid in tids]
-                    
+                    tok_strs = []
+                    for tid in tids:
+                        s = decode_cache.get(tid)
+                        if s is None:
+                            s = decode_cache[tid] = self.tokenizer.decode([tid])
+                        tok_strs.append(s)
+
                     is_core = []
                     for s in tok_strs:
                         s_clean = s.strip()
                         has_digit = any(c.isdigit() for c in s_clean)
                         is_upper = s_clean.isupper() and s_clean.isalpha() and len(s_clean) >= 2
                         is_core.append(has_digit or is_upper or s_clean == '-' or s_clean == '_')
-                        
+
                     is_prose = []
                     for s in tok_strs:
                         s_clean = s.strip()
@@ -1338,7 +1384,7 @@ class MLXKVBlockManager:
                                 is_prose.append(True)
                                 continue
                         is_prose.append(False)
-                        
+
                     in_segment = False
                     segment_indices = []
                     for i in range(S_comp):
@@ -1350,18 +1396,17 @@ class MLXKVBlockManager:
                                 segment_indices[-1].append(i)
                         else:
                             in_segment = False
-                    
+
                     for seg in segment_indices:
                         contains_core = any(is_core[i] for i in seg)
                         if contains_core:
                             for i in seg:
                                 tid = tids[i]
                                 count = counts.get(tid, 1)
-                                import math
                                 idf = math.log(max(total_tokens, 2) / (count + 0.1))
                                 rarity_weight = max(1.0, min(idf, 6.0))
                                 boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
-                    
+
                     # Apply window boost (Phase 2: contiguous runs)
                     final_boosts = list(boost_multipliers)
                     W = 2
@@ -1370,9 +1415,10 @@ class MLXKVBlockManager:
                             for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                                 final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                     boost_multipliers = final_boosts
-                boost_multipliers_batch.append(boost_multipliers)
-            boost_arr = mx.array(boost_multipliers_batch, dtype=joint_errors.dtype)
-            joint_errors = joint_errors * boost_arr
+                boost_rows.append(boost_multipliers)
+            # b = layer*num_blocks + block  →  tile the per-block rows per layer
+            boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
+            joint_errors = joint_errors * mx.array(boost_np).astype(joint_errors.dtype)
             
         max_res = self.max_residual
         if max_res > 0:
