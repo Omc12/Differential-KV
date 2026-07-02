@@ -45,7 +45,12 @@ static bool is_native_attn_enabled() {
     if (e) {
         return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
     }
-    return true;
+    // Default OFF: measured 2026-07-03 at 4k (DIFFKV_PROFILE=1), the fused
+    // ggml-graph path is ~1.9x SLOWER per decode step than the CPU custom op
+    // (attention 213 vs 114 ms/token) and is non-deterministic/less coherent
+    // at 16k, with identical NIAH accuracy (1/6 both on the digit sweep).
+    // Re-flip only with profile numbers showing the fused path winning.
+    return false;
 }
 
 struct ggml_backend_owner {
