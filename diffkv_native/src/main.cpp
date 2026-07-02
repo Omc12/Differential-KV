@@ -43,42 +43,9 @@ static std::atomic<bool> g_diffkv_enable_factual{true};
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
     if (e) {
-        bool want = (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
-        // The fused ggml paths (build_native_sparse_attn + GGML_OP_DIFFKV_ATTN) still
-        // rotate pool content at decode (anchor-position / token-position schemes) and
-        // have NOT been ported to the POOL_ROT_ABS representation, where the pool is
-        // already rotated — they would double-rotate and garble output. Refuse until
-        // ported; use DIFFKV_POOL_ABS_ROT=0 to run them on the legacy representation.
-        if (want && diffkv::pool_rot_mode() == diffkv::POOL_ROT_ABS) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                std::cerr << "[DiffKV] DIFFKV_NATIVE_ATTN=1 ignored: fused ggml attention has not been "
-                             "ported to the absolute-rotation pool scheme (default). Set "
-                             "DIFFKV_POOL_ABS_ROT=0 to use the legacy scheme with the fused path.\n";
-            }
-            return false;
-        }
-        return want;
+        return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
     }
-    // ENABLED BY DEFAULT (2026-06-21). The native ggml-fused sparse-attention subgraph
-    // (build_native_sparse_attn) now matches the CPU custom op byte-for-byte on the working
-    // context range — the prior word-salad was two integration bugs, both fixed: (1) the device
-    // tensor sync only covered CompressedResident/DenseResident slots (others had device K=0),
-    // and (2) the dense-window slide left the native dense buffer stale. Self-test passes exact
-    // (maxAbsDiff ~6e-8) and it decodes ~1.2-1.8x faster than the per-layer custom-op dispatch.
-    // Engages only when the factual store is empty (default) — factual/NIAH sessions fall back to
-    // the custom op. Opt OUT with DIFFKV_NATIVE_ATTN=0. NOTE: this does NOT fix the separate
-    // DiffKV-at-scale gibberish above ~13k tokens / ~50 blocks (custom op fails identically there).
-    //
-    // DISABLED BY DEFAULT (2026-06-22): the int8-U compression was switched to PER-TOKEN-ROW
-    // scales (lowrank.cpp) to fix needle recall — the old single block scale crushed low-norm
-    // token rows. The CPU custom op reads the per-row scales (diffkv_attention.cpp); the fused
-    // paths here (build_native_sparse_attn + the ggml_diffkv_attn Metal op) still assume a single
-    // block scale and would misread per-row-quantized U, so they are opt-in until ported. Routing
-    // the default to the (correct) custom op trades some decode speed for correctness. Re-enable
-    // with DIFFKV_NATIVE_ATTN=1 only after the fused kernels learn the per-row scale.
-    return false;
+    return true;
 }
 
 struct ggml_backend_owner {

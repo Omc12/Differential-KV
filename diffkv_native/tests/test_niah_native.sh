@@ -12,9 +12,10 @@ NEEDLE="The secret passcode is OMEGA-7741-DELTA."
 QUESTION="What is the secret passcode? Repeat it exactly."
 
 export DIFFKV_ENGAGE_THRESHOLD=1024  # ensure sparse at 4k+
-export DIFFKV_CPU_EXACT_ATTN=1       # use CPU path: per-token RoPE + SVD residual correction
-export DIFFKV_NO_FUSED_OP=1          # disable fused Metal op (required for CPU_EXACT_ATTN branch)
-export DIFFKV_FORCE_CPU_ATTN=1       # force CPU execution inside callback
+export DIFFKV_NATIVE_ATTN=1          # enable native attention engine
+export DIFFKV_CPU_EXACT_ATTN=0       # use fused op path
+export DIFFKV_NO_FUSED_OP=0          # enable fused Metal op
+export DIFFKV_FORCE_CPU_ATTN=0       # run on GPU
 export DIFFKV_DBG_GRAPH=1            # enable graph counter logs
 export DIFFKV_DBG_INPUTS=1           # enable input debug logs
 export DIFFKV_MPS_APPROXIMATE_ATTN=0 # force exact attention scoring

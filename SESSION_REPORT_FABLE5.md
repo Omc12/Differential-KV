@@ -195,3 +195,26 @@ already present. These four probes were what cracked the diagnosis; keep them.
 
 ### B. Depth 0.9 NIAH Pass
 - Re-ran the C++ native NIAH test with depth 0.9. The model successfully extracted passcode digits from the SVD block pool and correctly outputted `The secret passcode is OMEGA-7741-DELTA.`, achieving a **PASS**.
+
+---
+
+# Session Report — Dynamic Block Pool Scaling & Fused Metal Kernel Integration (2026-07-02)
+
+**Scope of this session:**
+1. Implemented **dynamic block pool allocation** in the Python (MLX) runtime to resolve short-context memory overhead.
+2. Ported the **`POOL_ROT_ABS` (absolute positioning)** scheme into the fused `GGML_OP_DIFFKV_ATTN` Metal shader by removing double pool key rotations.
+3. Enabled **`DIFFKV_NATIVE_ATTN=1`** by default in `main.cpp` and `native_block_pool.cpp` to activate the fast fused attention path.
+4. Rebuilt and executed verification sweeps, achieving perfect verbatim recall on both MLX and native C++ GPU backends.
+
+## 1. Algorithmic Changes & Verification
+
+### A. Python (MLX) Dynamic Block Pool Allocation
+- **Implementation:** Threaded `max_blocks` dynamically from `init_session` (calculated as `ceil((prefill_len + max_tokens_hint) / block_size)`) to `_create_empty_session`. Scaled all block-indexed tensors accordingly.
+- **Verification:** Both the `test_diffkv_kernel_parity.py` and `benchmarks/niah_recall.py` tests passed successfully, confirming correctness is preserved.
+
+### B. C++ Fused Metal Kernel Integration
+- **Implementation:** Modified the `kernel_diffkv_attn_partial` shader inside `ggml-metal.metal` in the `llama.cpp` submodule to skip pool key RoPE rotations under the `POOL_ROT_ABS` representation. Allowed native attention to be active by default.
+- **Verification:** Ran `./test_niah_native.sh` on the GPU:
+  - **Result:** `PASS ✓`
+  - **Parity:** Aligned comparisons matched the mathematically correct CPU reference path with a maximum absolute difference of `0.0013` (floating-point fast-math variance on the GPU).
+

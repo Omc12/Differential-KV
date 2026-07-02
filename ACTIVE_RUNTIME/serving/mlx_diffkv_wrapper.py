@@ -784,36 +784,39 @@ class MLXKVBlockManager:
         finally:
             self._prefill_kv_capture.pop(session_id, None)
 
-    def _create_empty_session(self) -> Dict[str, Any]:
+    def _create_empty_session(self, max_blocks: int = None) -> Dict[str, Any]:
+        if max_blocks is None:
+            max_blocks = self.max_blocks
         # Use float16 explicitly to halve the RAM vs float32 defaults
         dtype = mx.float16
         return {
+            "max_blocks": max_blocks,
             "dense_keys":   [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "dense_values": [mx.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "dense_lens":   [0 for _ in range(self.num_layers)],
             "dense_lens_mx": [mx.array(0, dtype=mx.int32) for _ in range(self.num_layers)],
             
             "num_blocks": [0 for _ in range(self.num_layers)],
-            "comp_U":     [mx.zeros((self.max_blocks, self.block_size - 1, self.rank), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_VK":    [mx.zeros((self.max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_VV":    [mx.zeros((self.max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_anc_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_anc_v": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_U":     [mx.zeros((max_blocks, self.block_size - 1, self.rank), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_VK":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_VV":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_anc_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_anc_v": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             # Per-block element-wise key min/max — one of two signals the top-K
             # router uses: a Quest-style upper bound on the block's max q·k. It is
             # cheap but LOOSE (over-estimates at large block counts), so the router
             # also scores the exact residual keys to reliably rank needle blocks.
-            "comp_min_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_max_k": [mx.zeros((self.max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_scale":    [mx.zeros((self.max_blocks,)) for _ in range(self.num_layers)],
-            "comp_seq_len": [mx.zeros((self.max_blocks,), dtype=mx.int32) for _ in range(self.num_layers)],
+            "comp_min_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_max_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_scale":    [mx.zeros((max_blocks,)) for _ in range(self.num_layers)],
+            "comp_seq_len": [mx.zeros((max_blocks,), dtype=mx.int32) for _ in range(self.num_layers)],
             
-            "comp_res_k": [mx.zeros((self.max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_res_v": [mx.zeros((self.max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
-            "comp_res_n": [[0] * self.max_blocks for _ in range(self.num_layers)],
+            "comp_res_k": [mx.zeros((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_res_v": [mx.zeros((max_blocks, self.max_residual, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_res_n": [[0] * max_blocks for _ in range(self.num_layers)],
             # Per-block boolean mask of which delta positions (0..block_size-2) are kept
             # as EXACT residuals — used to exclude them from the SVD pool at decode.
-            "comp_res_mask": [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
+            "comp_res_mask": [mx.zeros((max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             
             "token_ids": [],
             "token_counts": Counter()
@@ -821,7 +824,11 @@ class MLXKVBlockManager:
 
     def init_session(self, session_id: str, prefill_len: int = 0, max_tokens_hint: int = None):
         if session_id not in self.sessions:
-            self.sessions[session_id] = self._create_empty_session()
+            max_gen = max_tokens_hint if max_tokens_hint is not None else 2048
+            expected_total_len = prefill_len + max_gen
+            needed_blocks = math.ceil(expected_total_len / self.block_size)
+            sess_max_blocks = min(self.max_blocks, max(1, needed_blocks))
+            self.sessions[session_id] = self._create_empty_session(sess_max_blocks)
 
     def clear_session(self, session_id: str):
         if hasattr(self, "manager") and self.manager is not None:
@@ -839,7 +846,9 @@ class MLXKVBlockManager:
         if session_id not in self.sessions:
             raise ValueError(f"Session {session_id} not found to snapshot.")
         src = self.sessions[session_id]
+        max_b = src.get("max_blocks", self.max_blocks)
         self._session_checkpoints[checkpoint_id] = {
+            "max_blocks": max_b,
             "dense_keys": [mx.array(k) for k in src["dense_keys"]],
             "dense_values": [mx.array(v) for v in src["dense_values"]],
             "dense_lens": src["dense_lens"].copy(),
@@ -857,7 +866,7 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
-            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
+            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((max_b, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             "token_ids": src["token_ids"].copy() if "token_ids" in src else [],
             "token_counts": Counter(src["token_ids"]) if "token_ids" in src else Counter()
         }
@@ -881,12 +890,14 @@ class MLXKVBlockManager:
                         new_layer.step = layer_cache.step
                     dst_cache.append(new_layer)
                 self._session_checkpoints_prompt_cache[checkpoint_id] = dst_cache
-
+ 
     def restore_session(self, session_id: str, checkpoint_id: str):
         if checkpoint_id not in self._session_checkpoints:
             raise ValueError(f"Checkpoint {checkpoint_id} not found.")
         ckpt = self._session_checkpoints[checkpoint_id]
+        max_b = ckpt.get("max_blocks", self.max_blocks)
         self.sessions[session_id] = {
+            "max_blocks": max_b,
             "dense_keys": [mx.array(k) for k in ckpt["dense_keys"]],
             "dense_values": [mx.array(v) for v in ckpt["dense_values"]],
             "dense_lens": ckpt["dense_lens"].copy(),
@@ -904,7 +915,7 @@ class MLXKVBlockManager:
             "comp_res_k": [mx.array(rk) for rk in ckpt["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in ckpt["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in ckpt["comp_res_n"]],
-            "comp_res_mask": [mx.array(rm) for rm in ckpt["comp_res_mask"]] if "comp_res_mask" in ckpt else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
+            "comp_res_mask": [mx.array(rm) for rm in ckpt["comp_res_mask"]] if "comp_res_mask" in ckpt else [mx.zeros((max_b, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
             "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else [],
             "token_counts": Counter(ckpt["token_ids"]) if "token_ids" in ckpt else Counter()
         }
@@ -993,7 +1004,7 @@ class MLXKVBlockManager:
                 session["comp_res_v"][layer_idx][keep_blocks:] = 0.0
                 if "comp_res_mask" in session:
                     session["comp_res_mask"][layer_idx][keep_blocks:] = False
-                for b_i in range(keep_blocks, self.max_blocks):
+                for b_i in range(keep_blocks, session.get("max_blocks", self.max_blocks)):
                     session["comp_res_n"][layer_idx][b_i] = 0
             else:
                 # Only slice dense window
@@ -1179,7 +1190,8 @@ class MLXKVBlockManager:
         """Compress a single block starting at `start` in the dense buffer
         and store its low-rank representation in the compressed arrays."""
         num_blocks = session["num_blocks"][layer_idx]
-        if num_blocks >= self.max_blocks:
+        max_b = session.get("max_blocks", self.max_blocks)
+        if num_blocks >= max_b:
             # Safety: drop oldest compressed block by shifting (rare)
             session["comp_U"][layer_idx][:-1]     = session["comp_U"][layer_idx][1:]
             session["comp_VK"][layer_idx][:-1]    = session["comp_VK"][layer_idx][1:]
@@ -1193,7 +1205,7 @@ class MLXKVBlockManager:
             session["comp_res_n"][layer_idx][:-1] = session["comp_res_n"][layer_idx][1:]
             if "comp_res_mask" in session:
                 session["comp_res_mask"][layer_idx][:-1] = session["comp_res_mask"][layer_idx][1:]
-            num_blocks = self.max_blocks - 1
+            num_blocks = max_b - 1
 
         block_k = session["dense_keys"][layer_idx][0, :, start:start + self.block_size]
         block_v = session["dense_values"][layer_idx][0, :, start:start + self.block_size]
@@ -1450,7 +1462,7 @@ class MLXKVBlockManager:
         if all_blocks_full:
             # Pad nb to the next power of 2 to stabilize compile shapes and avoid re-compilations
             nb_padded = 1 << (nb - 1).bit_length() if nb > 1 else 1
-            nb_padded = min(nb_padded, self.max_blocks)
+            nb_padded = min(nb_padded, session.get("max_blocks", self.max_blocks))
 
             comp_res_n_arr = self._comp_res_n_const[:nb_padded]
             S_comp = self.block_size - 1

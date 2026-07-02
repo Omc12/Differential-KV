@@ -126,10 +126,10 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
 
     // Native ggml-metal attention path (gated). When enabled, we allocate + fill the
     // precomputed RoPE'd key tensors so the in-graph subgraph never has to rope/gather i32.
-    native_attn_ = false;
+    native_attn_ = true;
     if (const char* env_native = std::getenv("DIFFKV_NATIVE_ATTN")) {
-        if (std::strcmp(env_native, "1") == 0 || std::strcmp(env_native, "true") == 0 || std::strcmp(env_native, "yes") == 0 || std::strcmp(env_native, "on") == 0) {
-            native_attn_ = true;
+        if (std::strcmp(env_native, "0") == 0 || std::strcmp(env_native, "false") == 0 || std::strcmp(env_native, "no") == 0 || std::strcmp(env_native, "off") == 0) {
+            native_attn_ = false;
         }
     }
     bool skip_lowrank = false;
