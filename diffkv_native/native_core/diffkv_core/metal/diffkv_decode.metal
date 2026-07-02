@@ -71,6 +71,10 @@ struct AttentionParams {
     int32_t approximate_attn;
     int32_t S_split;
     int32_t max_residual;
+    // 1 → pool K (anchors, VK basis, residual K) is stored FULLY rotated at its
+    // absolute sequence position (POOL_ROT_ABS ingest). Pool score sites must then
+    // apply NO rotation; only the dense window (raw K + positions) still rotates.
+    int32_t pool_prerotated;
 };
 
 kernel void decode_attention_metal_kernel(
@@ -120,6 +124,9 @@ kernel void decode_attention_metal_kernel(
     const int32_t approximate_attn = params.approximate_attn;
     const int32_t S_split = params.S_split;
     const int32_t max_residual = params.max_residual;
+    // Rotation gate for POOL content only (anchors / VK / per-token recon / residual K).
+    // Dense-window sites keep using has_rope: dense K is stored raw with positions.
+    const int32_t rope_pool = has_rope && !params.pool_prerotated;
 
     if (tg_idx.x >= (uint)n_q_heads) return;
 
@@ -163,7 +170,7 @@ kernel void decode_attention_metal_kernel(
         // Step 1: Rotate anchor key at anchor_pos
         for (int d = (int)tid; d < D; d += (int)t_per_tg) {
             float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
-            if (has_rope) {
+            if (rope_pool) {
                 int   partner   = (d < half_d) ? (d + half_d) : (d - half_d);
                 int   idx       = (d < half_d) ? d : (d - half_d);
                 float theta     = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -229,7 +236,7 @@ kernel void decode_attention_metal_kernel(
 
                     float k_rot1 = k_raw1;
                     float k_rot2 = k_raw2;
-                    if (has_rope) {
+                    if (rope_pool) {
                         float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
                         float angle = pos * theta;
                         float c = cos(angle), s = sin(angle);
@@ -258,7 +265,7 @@ kernel void decode_attention_metal_kernel(
                 for (int d = 0; d < D; ++d) {
                     float raw_vk = (float)VK_pool[base_vk + d];
                     float vk_rot;
-                    if (has_rope) {
+                    if (rope_pool) {
                         int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
                         int   idx     = (d < half_d) ? d : (d - half_d);
                         float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -314,7 +321,7 @@ kernel void decode_attention_metal_kernel(
                     for (int d = 0; d < D; ++d) {
                         float raw_rk = (float)res_K_val[base_res + d];
                         float rk_rot;
-                        if (has_rope) {
+                        if (rope_pool) {
                             int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
                             int   idx     = (d < half_d) ? d : (d - half_d);
                             float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -393,7 +400,7 @@ kernel void decode_attention_metal_kernel(
             int anchor_pos = anchor_positions[slot_id];
             for (int d = (int)tid; d < D; d += (int)t_per_tg) {
                 float raw_ak = (float)anchors_K[slot_id * n_kv_heads * D + kv_head * D + d];
-                if (has_rope) {
+                if (rope_pool) {
                     int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
                     int   idx     = (d < half_d) ? d : (d - half_d);
                     float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -418,7 +425,7 @@ kernel void decode_attention_metal_kernel(
                     for (int d = 0; d < D; ++d) {
                         float raw_vk = (float)VK_pool[base_vk + d];
                         float vk_rot;
-                        if (has_rope) {
+                        if (rope_pool) {
                             int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
                             int   idx     = (d < half_d) ? d : (d - half_d);
                             float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -464,7 +471,7 @@ kernel void decode_attention_metal_kernel(
                 for (int d = 0; d < D; ++d) {
                     float raw_rk = (float)res_K_val[base_res + d];
                     float rk_rot;
-                    if (has_rope) {
+                    if (rope_pool) {
                         int   partner = (d < half_d) ? (d + half_d) : (d - half_d);
                         int   idx     = (d < half_d) ? d : (d - half_d);
                         float theta   = 1.0f / pow(rope_freq_base, (2.0f * idx) / D);
@@ -514,7 +521,7 @@ kernel void decode_attention_metal_kernel(
 
                         float k_rot1 = k_raw1;
                         float k_rot2 = k_raw2;
-                        if (has_rope) {
+                        if (rope_pool) {
                             float theta = 1.0f / pow(rope_freq_base, (2.0f * d) / D);
                             float angle = pos * theta;
                             float c = cos(angle), s = sin(angle);

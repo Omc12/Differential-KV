@@ -612,29 +612,32 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     std::memcpy(block->svd_k.data() + F_test, block->active_k.data(), (S_total - 1) * F_test * sizeof(float));
     std::memcpy(block->svd_v.data() + F_test, block->active_v.data(), (S_total - 1) * F_test * sizeof(float));
 
-    // ── PER-TOKEN ROTATION FIX (gated: DIFFKV_ROTATE_AT_INGEST) ────────────────────────────────
-    // The decode rotates the WHOLE reconstructed block at the anchor position (anchor_idx),
-    // collapsing all within-block positions onto the anchor → at long context the compressed
-    // attention is too lossy → gibberish. RoPE rotations compose additively, so pre-rotate each
-    // token here at its WITHIN-BLOCK offset t (K only; V is not RoPE'd). Combined with the decode's
-    // anchor-position rotation the net is rotate(K_t, t + anchor_idx) = the true absolute position
-    // for every token — matching MLX's per-token ingest rotation. Baked in BEFORE the landmark
-    // swap, so it also corrects the landmark's position. Only valid when the decode rotates
-    // (has_rope); otherwise it would not compose to the absolute position, so skip.
-    // DEFAULT ON (fixes long-context compressed-attn gibberish); DIFFKV_NO_ROTATE_AT_INGEST to disable.
-    static const bool rotate_at_ingest = (std::getenv("DIFFKV_NO_ROTATE_AT_INGEST") == nullptr);
-    if (rotate_at_ingest && engines[layer_idx]->get_has_rope()) {
+    // ── PER-TOKEN ROTATION AT INGEST (scheme selected by diffkv::pool_rot_mode()) ──────────────
+    // POOL_ROT_ABS (default): rotate each token at its ABSOLUTE sequence position
+    //   (anchor_idx + t) — the same representation the MLX reference compresses. Decode
+    //   then does NO rotation for pool content, which makes the cheap project-then-attend
+    //   score path mathematically exact and removes a whole class of ingest/decode
+    //   rotation-composition bugs (double rotation garbled all sparse output at HEAD).
+    // POOL_ROT_WITHIN (DIFFKV_POOL_ABS_ROT=0): legacy within-block-offset pre-rotation;
+    //   only composes correctly with the approximate anchor-rotation decode paths.
+    // POOL_ROT_RAW (DIFFKV_NO_ROTATE_AT_INGEST): no pre-rotation; decode must rotate at
+    //   true token positions.
+    // K only; V is not RoPE'd. Applied BEFORE the landmark swap so the landmark carries
+    // its own true position into the anchor slot.
+    const PoolRotMode rot_mode = pool_rot_mode();
+    if (rot_mode != POOL_ROT_RAW && engines[layer_idx]->get_has_rope()) {
         const int D = head_dim;
         const int nkv = (D > 0) ? (F_test / D) : 1;
         const int half_d = D / 2;
         const float freq = engines[layer_idx]->get_rope_freq_base();
+        const int64_t base_pos = (rot_mode == POOL_ROT_ABS) ? (int64_t)block->anchor_idx : 0;
         for (int t = 0; t < S_total; ++t) {
             for (int kv = 0; kv < nkv; ++kv) {
                 float* vec = block->svd_k.data() + (size_t)t * F_test + (size_t)kv * D;
                 for (int d = 0; d < half_d; ++d) {
-                    float theta = 1.0f / std::pow(freq, (2.0f * d) / D);
-                    float angle = (float)t * theta;
-                    float cos_a = std::cos(angle), sin_a = std::sin(angle);
+                    double theta = 1.0 / std::pow((double)freq, (2.0 * d) / D);
+                    double angle = std::fmod((double)(base_pos + t) * theta, 2.0 * M_PI);
+                    float cos_a = (float)std::cos(angle), sin_a = (float)std::sin(angle);
                     float x = vec[d], y = vec[d + half_d];
                     vec[d]         = x * cos_a - y * sin_a;
                     vec[d + half_d]= y * cos_a + x * sin_a;

@@ -12,7 +12,36 @@
 #include "native_core/diffkv_core/include/block_state.hpp"
 #include "runtime/page_aligned_allocator.hpp"
 
+#include <cstdlib>
+
 namespace diffkv {
+
+// ── Pool K rotation scheme (single source of truth for ingest + every decode path) ──
+// Historically two sessions left the ingest and the decode paths on DIFFERENT RoPE
+// schemes (ingest pre-rotated K at the within-block offset while the exact decode
+// paths rotated the reconstruction again at the absolute token position), silently
+// double-rotating every compressed token. All rotation decisions now read this one
+// mode so ingest and decode cannot disagree again.
+//   POOL_ROT_RAW     — pool holds raw K; decode rotates at true token positions.
+//   POOL_ROT_WITHIN  — legacy: pool pre-rotated at within-block offsets; decode adds
+//                      the block-start rotation (only the approximate paths compose
+//                      this correctly).
+//   POOL_ROT_ABS     — DEFAULT: pool holds K fully rotated at its absolute sequence
+//                      position (exactly what the MLX reference stores). Decode does
+//                      NO rotation for pool content (anchors, U·VK deltas, residuals),
+//                      which also makes the cheap project-then-attend score exact.
+enum PoolRotMode { POOL_ROT_RAW = 0, POOL_ROT_WITHIN = 1, POOL_ROT_ABS = 2 };
+
+inline PoolRotMode pool_rot_mode() {
+    static const PoolRotMode mode = []() {
+        if (std::getenv("DIFFKV_NO_ROTATE_AT_INGEST")) return POOL_ROT_RAW;
+        if (const char* e = std::getenv("DIFFKV_POOL_ABS_ROT")) {
+            if (std::string(e) == "0") return POOL_ROT_WITHIN;
+        }
+        return POOL_ROT_ABS;
+    }();
+    return mode;
+}
 
 struct SlotHostBuffer {
     std::vector<int8_t, PageAlignedAllocator<int8_t>> U;

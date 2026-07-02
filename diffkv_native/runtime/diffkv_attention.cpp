@@ -60,6 +60,15 @@ void execute_cpu_attention(
     const int32_t* anchor_positions = kv_engine->get_host_anchor_positions();
     const int MR = NativeBlockPool::MAX_RESIDUAL;
 
+    // Everything this function touches is POOL content (anchors, U·VK deltas,
+    // residuals) — the dense window is handled separately by cpu_dense_attention.
+    // Under POOL_ROT_ABS the pool already stores K rotated at its absolute sequence
+    // position, so no decode-side rotation may be applied here at all: clearing
+    // has_rope routes every site below through its existing no-rotation branch.
+    if (pool_rot_mode() == POOL_ROT_ABS) {
+        has_rope = false;
+    }
+
     int n_slots = kv_engine->get_seq_lens()->ne[0];
     std::unordered_set<int32_t> seen_set;
     seen_set.reserve(K);
@@ -770,10 +779,10 @@ void custom_attention_op_callback(
                 int kv_head = h / g;
                 const float* q_h = q_host.data() + h * D;
 
-                // 1. Anchor score
+                // 1. Anchor score (POOL_ROT_ABS: anchor already rotated — no decode rotation)
                 float score_anc = 0.0f;
                 int ak_off = kv_head * D;
-                if (data->has_rope) {
+                if (data->has_rope && pool_rot_mode() != POOL_ROT_ABS) {
                     for (int d = 0; d < half_d; ++d) {
                         float angle = ap * theta_table[d];
                         float cos_a = std::cos(angle);
@@ -799,7 +808,9 @@ void custom_attention_op_callback(
 
                         const ggml_fp16_t* rk = slot_res_K_val + ri * n_kv_heads * D + kv_head * D;
                         float res_score = 0.0f;
-                        if (data->has_rope) {
+                        // Under POOL_ROT_ABS the pool residual K is already rotated at its
+                        // absolute position — score it directly (no decode-side rotation).
+                        if (data->has_rope && pool_rot_mode() != POOL_ROT_ABS) {
                             const int32_t* slot_token_positions = pool->get_host_token_positions(s);
                             float tpos = slot_token_positions ? (float)slot_token_positions[t] : (float)(ap + t + 1);
                             for (int d = 0; d < half_d; ++d) {

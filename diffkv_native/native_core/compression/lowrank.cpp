@@ -537,6 +537,41 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     // F9: keep the raw (pre-normalisation) delta to compute sparse residuals later.
     std::vector<float> raw_delta = K_V_joint;
 
+    // ── V-side rebalancing for the joint K|V SVD ────────────────────────────────
+    // K rows carry enormous norms (Qwen "massive activations": |K| ~ 1100 at layer 0)
+    // while |V| ~ 5. In the JOINT SVD the V half contributes <1% of the energy, so the
+    // rank-k basis barely represents V at all — measured V reconstruction error was
+    // 24-73% per token (vs ~1% for K) even though the joint floor looked fine. Attention
+    // ROUTES correctly (K good) but READS garbage (V bad) → exact-token recall (digits,
+    // codes) fails for any token that didn't win a residual slot. Fix: scale the V half
+    // up to K's RMS before the SVD so the basis serves both sides, and bake the inverse
+    // into the stored VV basis (decode math unchanged). DIFFKV_V_SCALE=0 disables.
+    float v_gain = 1.0f;
+    {
+        static const bool v_scale_on = []() {
+            const char* e = std::getenv("DIFFKV_V_SCALE");
+            return !(e && std::string(e) == "0");
+        }();
+        if (v_scale_on) {
+            double eK = 0.0, eV = 0.0;
+            for (int s = 0; s < S_deltas; ++s) {
+                for (int f = 0; f < F; ++f) {
+                    float kd = K_V_joint[(size_t)s * joint_F + f];
+                    float vd = K_V_joint[(size_t)s * joint_F + F + f];
+                    eK += (double)kd * kd;
+                    eV += (double)vd * vd;
+                }
+            }
+            if (eV > 1e-12 && eK > 1e-12) {
+                v_gain = (float)std::sqrt(eK / eV);
+                v_gain = std::min(std::max(v_gain, 1.0f), 10000.0f);
+                for (int s = 0; s < S_deltas; ++s)
+                    for (int f = 0; f < F; ++f)
+                        K_V_joint[(size_t)s * joint_F + F + f] *= v_gain;
+            }
+        }
+    }
+
     std::vector<float> token_norms(S_deltas);
     for (int s = 0; s < S_deltas; ++s) {
         float sum_sq = 0.0f;
@@ -654,11 +689,14 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
 
     std::memset(params.out_vk_ptr, 0, pool_rank * F * sizeof(ggml_fp16_t));
     std::memset(params.out_vv_ptr, 0, pool_rank * F * sizeof(ggml_fp16_t));
+    const float inv_v_gain = 1.0f / v_gain;
     for (int r = 0; r < svd_dim; ++r) {
         if (r < k_dynamic) {
             for (int f = 0; f < F; ++f) {
                 params.out_vk_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + f]);
-                params.out_vv_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + F + f]);
+                // The SVD ran on v_gain-scaled V; baking 1/v_gain here makes decode's
+                // U·VV reconstruction produce raw-space V with no kernel changes.
+                params.out_vv_ptr[r * F + f] = ggml_fp32_to_fp16(VT_joint[r * joint_F + F + f] * inv_v_gain);
             }
         }
     }
@@ -751,6 +789,9 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                 float recon = 0.0f;
                 for (int r = 0; r < svd_dim; ++r) recon += U_scaled[s * R + r] * VT_joint[r * joint_F + f];
                 recon *= scale;
+                // The SVD's V half is in v_gain-scaled space — bring the reconstruction
+                // back to raw space before computing the stored residual correction.
+                if (f >= F) recon *= inv_v_gain;
                 float res = raw_delta[s * joint_F + f] - recon;
                 resid[(size_t)s * joint_F + f] = res;
                 float raw = raw_delta[s * joint_F + f];
@@ -764,7 +805,56 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
 
         std::vector<float> joint_err(S_deltas);
         for (int s = 0; s < S_deltas; ++s) {
-            joint_err[s] = std::sqrt(aerr_K[s] * aerr_K[s] + aerr_V[s] * aerr_V[s]);
+            // Rank residual candidates in the BALANCED space: an unscaled absolute error
+            // is dominated by K's huge norms, so a token whose VALUE is 50% wrong but
+            // whose key happens to reconstruct well ranks below ordinary prose and never
+            // wins a residual slot (measured: needle digits lost while 64 slots went to
+            // rows with slightly higher K-absolute error). Weight the V error by v_gain
+            // (the K/V RMS ratio) so both sides compete on equal footing.
+            float ev_bal = aerr_V[s] * v_gain;
+            joint_err[s] = std::sqrt(aerr_K[s] * aerr_K[s] + ev_bal * ev_bal);
+        }
+
+        // ── Content-aware residual capture ──────────────────────────────────────
+        // Reconstruction error CANNOT identify recall-critical tokens: the rank-16 V
+        // reconstruction is 25-70% wrong for MOST tokens, so a buried passcode digit
+        // ranks no higher than prose and never wins a slot — while emitting that digit
+        // exactly requires ITS value to be exact. High-information token CLASSES
+        // (digits, letter-like code fragments) get a multiplicative rank boost so the
+        // exact-recall-critical rows claim residual slots first. Uses the tokenizer ids
+        // actually produced by Qwen ('0'..'9' = 15..24; the older landmark boost checked
+        // ids 48-57, which are NOT digits in this vocab). DIFFKV_RESIDUAL_TOKEN_BOOST=0
+        // disables; value tunable (default 8×).
+        if (params.token_ids) {
+            static const float tok_boost = []() {
+                const char* e = std::getenv("DIFFKV_RESIDUAL_TOKEN_BOOST");
+                if (e) { try { return std::stof(e); } catch (...) {} }
+                return 8.0f;
+            }();
+            if (tok_boost > 1.0f) {
+                // Identify code-fragment tokens: digits '0'-'9' (ids 15-24), single
+                // uppercase letters 'A'-'Z' (ids 32-57), and '-' (id 12) — the alphabet
+                // of verbatim identifiers. A blanket byte-token boost was tried and
+                // REJECTED: it floods the budget with prose punctuation and displaces
+                // the multi-char code pieces ("ME","GA","DEL") that error-ranking was
+                // already capturing. Additionally, protect the CHAIN: verbatim recall
+                // requires every token of the identifier, so also boost the immediate
+                // neighbors of code-fragment tokens (a code's hyphens sit between
+                // captured digits; a needle is only recalled if the whole run is exact).
+                std::vector<bool> is_code(S_deltas, false);
+                for (int s = 0; s < S_deltas; ++s) {
+                    int32_t tid = params.token_ids[s + 1];
+                    is_code[s] = (tid >= 15 && tid <= 24) || (tid >= 32 && tid <= 57) || tid == 12;
+                }
+                for (int s = 0; s < S_deltas; ++s) {
+                    bool nb = (s > 0 && is_code[s-1]) || (s + 1 < S_deltas && is_code[s+1]);
+                    if (is_code[s]) {
+                        joint_err[s] *= tok_boost;
+                    } else if (nb) {
+                        joint_err[s] *= 0.5f * tok_boost;
+                    }
+                }
+            }
         }
 
         int n_max = std::min(S_deltas, MR);

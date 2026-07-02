@@ -43,7 +43,23 @@ static std::atomic<bool> g_diffkv_enable_factual{true};
 static bool is_native_attn_enabled() {
     const char* e = std::getenv("DIFFKV_NATIVE_ATTN");
     if (e) {
-        return (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
+        bool want = (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "yes" || std::string(e) == "on");
+        // The fused ggml paths (build_native_sparse_attn + GGML_OP_DIFFKV_ATTN) still
+        // rotate pool content at decode (anchor-position / token-position schemes) and
+        // have NOT been ported to the POOL_ROT_ABS representation, where the pool is
+        // already rotated — they would double-rotate and garble output. Refuse until
+        // ported; use DIFFKV_POOL_ABS_ROT=0 to run them on the legacy representation.
+        if (want && diffkv::pool_rot_mode() == diffkv::POOL_ROT_ABS) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::cerr << "[DiffKV] DIFFKV_NATIVE_ATTN=1 ignored: fused ggml attention has not been "
+                             "ported to the absolute-rotation pool scheme (default). Set "
+                             "DIFFKV_POOL_ABS_ROT=0 to use the legacy scheme with the fused path.\n";
+            }
+            return false;
+        }
+        return want;
     }
     // ENABLED BY DEFAULT (2026-06-21). The native ggml-fused sparse-attention subgraph
     // (build_native_sparse_attn) now matches the CPU custom op byte-for-byte on the working
@@ -3326,11 +3342,154 @@ int main(int argc, char ** argv) {
             prefill_ingest_thread.join();
             prefill_ingest_thread_active = false;
         }
+
+        // ── DIFFKV_DBG_EXPORT_CHECK: verify the raw-K export (k_activations, feeds the
+        // custom-op dense window + compression pool) against the in-graph persistent
+        // rotated K cache (feeds ggml flash decode — the known-good path). For sampled
+        // positions: rotate raw K at its position and diff vs the persistent cache.
+        // Large diffs pinpoint which chunks' exports are corrupted (buffer reuse etc.).
+        if (std::getenv("DIFFKV_DBG_EXPORT_CHECK") && !is_warmup_run && persistent_k_cache[0]) {
+            const int half_dim = head_dim / 2;
+            const float freq_base = model.get_config().rope_freq_base;
+            for (int pos = 64; pos < L; pos += 256) {
+                for (int l = 0; l < std::min(2, n_layers); ++l) {
+                    std::vector<ggml_fp16_t> pk_row(F_test);
+                    ggml_backend_tensor_get(persistent_k_cache[l], pk_row.data(),
+                                            (size_t)pos * F_test * sizeof(ggml_fp16_t),
+                                            F_test * sizeof(ggml_fp16_t));
+                    double max_diff = 0.0, ref_nrm = 0.0;
+                    for (int kv = 0; kv < kv_heads; ++kv) {
+                        for (int d = 0; d < half_dim; ++d) {
+                            float x = ggml_fp16_to_fp32(k_activations[l][(size_t)pos * F_test + kv * head_dim + d]);
+                            float y = ggml_fp16_to_fp32(k_activations[l][(size_t)pos * F_test + kv * head_dim + d + half_dim]);
+                            double theta = 1.0 / std::pow((double)freq_base, (2.0 * d) / head_dim);
+                            double ang = std::fmod((double)pos * theta, 2.0 * M_PI);
+                            float c = (float)std::cos(ang), s = (float)std::sin(ang);
+                            float r1 = x * c - y * s;
+                            float r2 = y * c + x * s;
+                            float g1 = ggml_fp16_to_fp32(pk_row[kv * head_dim + d]);
+                            float g2 = ggml_fp16_to_fp32(pk_row[kv * head_dim + d + half_dim]);
+                            max_diff = std::max(max_diff, (double)std::fabs(r1 - g1));
+                            max_diff = std::max(max_diff, (double)std::fabs(r2 - g2));
+                            ref_nrm += (double)g1 * g1 + (double)g2 * g2;
+                        }
+                    }
+                    // V side: no rotation — direct compare raw export vs persistent cache.
+                    std::vector<ggml_fp16_t> pv_row(F_test);
+                    ggml_backend_tensor_get(persistent_v_cache[l], pv_row.data(),
+                                            (size_t)pos * F_test * sizeof(ggml_fp16_t),
+                                            F_test * sizeof(ggml_fp16_t));
+                    double v_max_diff = 0.0, v_ref = 0.0;
+                    for (int f = 0; f < F_test; ++f) {
+                        float ve = ggml_fp16_to_fp32(v_activations[l][(size_t)pos * F_test + f]);
+                        float vg = ggml_fp16_to_fp32(pv_row[f]);
+                        v_max_diff = std::max(v_max_diff, (double)std::fabs(ve - vg));
+                        v_ref += (double)vg * vg;
+                    }
+                    std::cerr << "[EXPORT_CHECK] pos=" << pos << " layer=" << l
+                              << " K_maxDiff=" << max_diff << " |K|=" << std::sqrt(ref_nrm)
+                              << " V_maxDiff=" << v_max_diff << " |V|=" << std::sqrt(v_ref)
+                              << "\n";
+                }
+            }
+        }
+
         if (dbg_prefill_time && !is_warmup_run) {
             double total = std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_start).count();
             std::cerr << "[PREFILL_TIME] L=" << L << " chunks=" << tp_chunks << " TOTAL=" << total/1000.0 << "s"
                       << " | graph_build=" << tp_build/1000.0 << "s prior_upload=" << tp_upload/1000.0 << "s"
                       << " compute=" << tp_compute/1000.0 << "s capture=" << tp_capture/1000.0 << "s ingest=" << tp_ingest/1000.0 << "s\n";
+        }
+
+        // ── DIFFKV_DBG_RECON_POS=<global token pos>: pool-reconstruction fidelity probe ──
+        // After prefill (before k_activations is freed), find the compressed block holding
+        // <pos>, reconstruct every delta row from the pool (anchor + U·VK·row_scale·blk_scale
+        // + residual correction) and compare against ground truth (k_activations rotated at
+        // the row's absolute position under POOL_ROT_ABS). Prints per-row relative error for
+        // rows near <pos>. Separates capture-side corruption from decode-side bugs.
+        if (const char* env_rp = std::getenv("DIFFKV_DBG_RECON_POS")) {
+            int want_pos = std::stoi(env_rp);
+            runtime_manager.wait_for_compressor();
+            auto & blks = runtime_manager.get_ingest_manager().get_blocks(0);
+            for (auto & blk : blks) {
+                int a0 = blk->anchor_idx, cnt = blk->token_count();
+                if (!(want_pos >= a0 && want_pos < a0 + cnt)) continue;
+                int slot = blk->pool_idx;
+                std::cerr << "[RECON_POS] block anchor_idx=" << a0 << " count=" << cnt
+                          << " slot=" << slot << " state=" << (int)blk->state << "\n";
+                if (slot < 0) break;
+                NativeBlockPool* pool = kv_engines[0].get();
+                const int8_t* U = pool->get_host_U(slot);
+                const ggml_fp16_t* rowsc = pool->get_host_U_row_scale(slot);
+                const ggml_fp16_t* VK = pool->get_host_VK(slot);
+                const ggml_fp16_t* ancK = pool->get_host_anchors_K(slot);
+                const ggml_fp16_t* resKv = pool->get_host_res_K_val(slot);
+                const int32_t* resKp = pool->get_host_res_K_pos(slot);
+                const int32_t* tpos = pool->get_host_token_positions(slot);
+                float bsc = ggml_fp16_to_fp32(pool->get_host_scales()[slot]);
+                int slen = pool->get_host_seq_lens()[slot];
+                int R = pool->get_rank();
+                const int MRR = NativeBlockPool::MAX_RESIDUAL;
+                const int half_dim = head_dim / 2;
+                const float fb = model.get_config().rope_freq_base;
+                if (!U || !VK || !ancK || !tpos) { std::cerr << "[RECON_POS] null host buffers\n"; break; }
+                for (int t = 0; t < slen; ++t) {
+                    int gp = tpos[t];
+                    if (gp < want_pos - 6 || gp > want_pos + 12) continue;
+                    int ri = -1;
+                    if (resKp) for (int r = 0; r < MRR; ++r) if (resKp[r] == t) { ri = r; break; }
+                    double err = 0, nrm = 0;
+                    float ru = ggml_fp16_to_fp32(rowsc[t]);
+                    for (int kv = 0; kv < kv_heads; ++kv) {
+                        for (int d = 0; d < head_dim; ++d) {
+                            float rec = ggml_fp16_to_fp32(ancK[kv*head_dim + d]);
+                            for (int r = 0; r < R; ++r)
+                                rec += (float)U[t*R + r] * ggml_fp16_to_fp32(VK[r*kv_heads*head_dim + kv*head_dim + d]) * ru * bsc;
+                            if (ri >= 0 && resKv)
+                                rec += ggml_fp16_to_fp32(resKv[(size_t)ri*kv_heads*head_dim + kv*head_dim + d]);
+                            // ground truth: raw K rotated at absolute pos (ABS scheme)
+                            float x = ggml_fp16_to_fp32(k_activations[0][(size_t)gp*F_test + kv*head_dim + (d < half_dim ? d : d - half_dim)]);
+                            float y = ggml_fp16_to_fp32(k_activations[0][(size_t)gp*F_test + kv*head_dim + (d < half_dim ? d + half_dim : d)]);
+                            double th = 1.0 / std::pow((double)fb, (2.0 * (d < half_dim ? d : d - half_dim)) / head_dim);
+                            double ang = std::fmod((double)gp * th, 2.0 * M_PI);
+                            float c = (float)std::cos(ang), s = (float)std::sin(ang);
+                            float truth = (d < half_dim) ? (x * c - y * s) : (x * c + y * s);
+                            // note: for d>=half: stored pair is (x=row[d-half],y=row[d]); rotated second = y*c + x*s
+                            if (d >= half_dim) { float xx = ggml_fp16_to_fp32(k_activations[0][(size_t)gp*F_test + kv*head_dim + d - half_dim]);
+                                                 float yy = ggml_fp16_to_fp32(k_activations[0][(size_t)gp*F_test + kv*head_dim + d]);
+                                                 truth = yy * c + xx * s; }
+                            err += (double)(rec - truth) * (rec - truth);
+                            nrm += (double)truth * truth;
+                        }
+                    }
+                    // V-side reconstruction: anchor_v + U·VV·row_scale·blk_scale (+resV). No rotation.
+                    const ggml_fp16_t* VV = pool->get_host_VV(slot);
+                    const ggml_fp16_t* ancV = pool->get_host_anchors_V(slot);
+                    const ggml_fp16_t* resVv = pool->get_host_res_V_val(slot);
+                    const int32_t* resVp = pool->get_host_res_V_pos(slot);
+                    int rvi = -1;
+                    if (resVp) for (int r = 0; r < MRR; ++r) if (resVp[r] == t) { rvi = r; break; }
+                    double verr = 0, vnrm = 0;
+                    if (VV && ancV) {
+                        for (int kv = 0; kv < kv_heads; ++kv) {
+                            for (int d = 0; d < head_dim; ++d) {
+                                float rec = ggml_fp16_to_fp32(ancV[kv*head_dim + d]);
+                                for (int r = 0; r < R; ++r)
+                                    rec += (float)U[t*R + r] * ggml_fp16_to_fp32(VV[r*kv_heads*head_dim + kv*head_dim + d]) * ru * bsc;
+                                if (rvi >= 0 && resVv)
+                                    rec += ggml_fp16_to_fp32(resVv[(size_t)rvi*kv_heads*head_dim + kv*head_dim + d]);
+                                float truth = ggml_fp16_to_fp32(v_activations[0][(size_t)gp*F_test + kv*head_dim + d]);
+                                verr += (double)(rec - truth) * (rec - truth);
+                                vnrm += (double)truth * truth;
+                            }
+                        }
+                    }
+                    std::cerr << "[RECON_POS] t=" << t << " gp=" << gp << " res=" << (ri >= 0 ? "Y" : "n")
+                              << " K_rel_err=" << (nrm > 0 ? std::sqrt(err/nrm) : -1)
+                              << " V_rel_err=" << (vnrm > 0 ? std::sqrt(verr/vnrm) : -1) << "\n";
+                }
+                break;
+            }
         }
 
         if (prefill_ctx) {
@@ -3451,6 +3610,40 @@ int main(int argc, char ** argv) {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks == 0) {
                 decode_use_sparse = false;
+                // FALLBACK GAP FIX: the prefill loop only fills k_rotated_activations when
+                // the PRE-prefill decode_use_sparse was false (perf: sparse decode doesn't
+                // need it). When sparse-mode prefill ends with ZERO compressed blocks (e.g.
+                // recency window ≥ prompt), we fall back to dense decode here — which uploads
+                // k_rotated_activations. Without this backfill those buffers are all-zero and
+                // dense decode attends garbage keys (observed: wrong needle digits).
+                if (L >= engage_threshold) {
+                    std::cerr << "[DiffKV] sparse→dense fallback (0 compressed blocks): backfilling "
+                                 "k_rotated_activations for " << L << " tokens\n";
+                    int half_dim = head_dim / 2;
+                    std::vector<float> inv_freq(half_dim);
+                    for (int i = 0; i < half_dim; ++i) {
+                        inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+                    }
+                    std::vector<float> cos_table((size_t)L * half_dim);
+                    std::vector<float> sin_table((size_t)L * half_dim);
+                    for (int t = 0; t < L; ++t) {
+                        for (int i = 0; i < half_dim; ++i) {
+                            float theta = (float)t * inv_freq[i];
+                            cos_table[(size_t)t * half_dim + i] = std::cos(theta);
+                            sin_table[(size_t)t * half_dim + i] = std::sin(theta);
+                        }
+                    }
+                    for (int l = 0; l < n_layers; ++l) {
+                        // Allocation was skipped for sparse-mode prefill — resize before writing.
+                        k_rotated_activations[l].resize((size_t)L * F_test, ggml_fp32_to_fp16(0.0f));
+                        apply_rope_neox_cpu_fast(
+                            k_activations[l].data(),
+                            k_rotated_activations[l].data(),
+                            cos_table.data(), sin_table.data(),
+                            L, kv_heads, head_dim
+                        );
+                    }
+                }
             }
         }
 
@@ -3562,11 +3755,16 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * dense_attn_mask_decode = ggml_new_tensor_2d(decode_ctx, GGML_TYPE_F16, required_dense_cap + 1, 1);
         ggml_set_input(dense_attn_mask_decode);
 
-        // Default to the EXACT (non-approximate) attention path: only it applies correct
-        // per-token RoPE (true positions). The approximate path bakes a single anchor-position
-        // rotation into the shared V-basis and cannot rotate per token, so it garbles compressed
-        // needles. Opt back into the (faster, inexact) path with DIFFKV_MPS_APPROXIMATE_ATTN=1.
-        bool approx = false;
+        // Attention scoring structure. Under POOL_ROT_ABS (default) the pool stores K
+        // fully rotated at absolute positions, so NO decode-side rotation happens and the
+        // cheap project-then-attend structure ("approximate") is mathematically EXACT —
+        // delta scores (q·VK)·U[t] equal the reconstruct-then-dot scores because no
+        // per-token rotation intervenes. Default it on there for speed. Under the legacy
+        // raw/within-offset pool schemes, project-then-attend really is approximate
+        // (single anchor-position rotation baked into the shared basis), so keep the
+        // per-token reconstruct-and-rotate path as the default. DIFFKV_MPS_APPROXIMATE_ATTN
+        // overrides in either direction.
+        bool approx = (diffkv::pool_rot_mode() == diffkv::POOL_ROT_ABS);
         if (const char* env_approx = std::getenv("DIFFKV_MPS_APPROXIMATE_ATTN")) {
             approx = (std::strcmp(env_approx, "1") == 0 || std::strcmp(env_approx, "true") == 0 || std::strcmp(env_approx, "yes") == 0 || std::strcmp(env_approx, "on") == 0);
         }
@@ -4570,6 +4768,11 @@ int main(int argc, char ** argv) {
                 userdata[l].active_slot = (total_dense_tokens[l] > 0) ? dense_start_positions[l] : current_pos;
                 userdata[l].current_pos = current_pos;  // for Metal dense-window RoPE
             }
+            if (std::getenv("DIFFKV_DBG_WINDOW") && step < 4 && !is_warmup_run) {
+                std::cerr << "[DBG_WINDOW] step=" << step << " refresh: total_dense_tokens[0]="
+                          << total_dense_tokens[0] << " total_positions=" << total_positions
+                          << " current_pos=" << current_pos << "\n";
+            }
 
             // ═══════════════════════════════════════════════════════════════════════════
             // OPTIMIZED: Persistent GPU Buffer Upload (Option 3)
@@ -5057,6 +5260,22 @@ int main(int argc, char ** argv) {
             ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
             auto t_after_logits = std::chrono::high_resolution_clock::now();
 
+            // DIFFKV_DBG_STEP_LOGITS: top-5 logits for the first few decode steps —
+            // lets a sparse-mode run be diffed against a bypass (all-dense) run on the
+            // same prompt to see exactly where the two decode paths diverge.
+            if (std::getenv("DIFFKV_DBG_STEP_LOGITS") && step < 4 && !is_warmup_run) {
+                std::vector<std::pair<float,int>> tk;
+                tk.reserve(n_vocab);
+                for (int i = 0; i < n_vocab; ++i) tk.push_back({output_logits[i], i});
+                std::partial_sort(tk.begin(), tk.begin()+5, tk.end(),
+                                  [](auto&a, auto&b){ return a.first > b.first; });
+                std::cerr << "[STEP_LOGITS] step=" << step << " top5:";
+                for (int i = 0; i < 5; ++i)
+                    std::cerr << " \"" << model.token_to_piece(tk[i].second) << "\"(" << tk[i].second
+                              << "," << tk[i].first << ")";
+                std::cerr << "\n";
+            }
+
             auto t_before_kv_get = std::chrono::high_resolution_clock::now();
             // Fast path: K/V captured INSIDE custom_attention_op_callback — zero GPU readback.
             // Mirrors batch_engine.cpp bug-3 fix and ACTIVE_RUNTIME's in-callback capture.
@@ -5172,6 +5391,23 @@ int main(int argc, char ** argv) {
                     const int target_idx = current_pos;
                     ggml_backend_tensor_set(dense_k_past_inputs[l], k_f16.data(), target_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
                     ggml_backend_tensor_set(dense_v_past_inputs[l], v_f16.data(), target_idx * F_test * sizeof(ggml_fp16_t), F_test * sizeof(ggml_fp16_t));
+                    // Also mirror into the sparse-path host window (if allocated). Without this,
+                    // dense-mode steps advance total_dense_tokens but leave a zero hole in
+                    // active_k_dense; if the session later flips to the sparse graph, the window
+                    // has gaps at those positions. NOTE: decode_k here is ALREADY-ROTATED K
+                    // (from the in-graph rope); the sparse window stores RAW K rotated at decode.
+                    // Rather than un-rotating, store the rotated K in BOTH buffers and rely on the
+                    // position entry: the sparse kernels rotate by position — to keep this exact
+                    // we store into the *rotated* buffer only and leave the raw slot zero, which
+                    // the CPU/Metal kernels don't read for these positions unless a flip happens
+                    // (pre-existing edge case, documented in SESSION_REPORT).
+                    int offset = total_dense_tokens[l] * F_test;
+                    if (!active_k_dense_rotated[l].empty() &&
+                        offset + F_test <= (int)active_k_dense_rotated[l].size()) {
+                        std::memcpy(active_k_dense_rotated[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
+                        if (offset + F_test <= (int)active_v_dense[l].size())
+                            std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
+                    }
                     total_dense_tokens[l]++;
                 }
                 if (total_positions < (int)active_positions_dense.size()) {
@@ -5199,6 +5435,10 @@ int main(int argc, char ** argv) {
                 if (total_positions < (int)active_positions_dense.size()) {
                     active_positions_dense[total_positions++] = current_pos;
                 }
+            }
+            if (std::getenv("DIFFKV_DBG_WINDOW") && step < 4 && !is_warmup_run) {
+                std::cerr << "[DBG_WINDOW] step=" << step << " after-append: total_dense_tokens[0]="
+                          << total_dense_tokens[0] << " total_positions=" << total_positions << "\n";
             }
 
             // ── MLX-parity dense-window SLIDE (sparse path only) ──────────────────────
@@ -6038,7 +6278,26 @@ int main(int argc, char ** argv) {
 
             } // if (rebuild_needed)
 
-            if (decode_use_sparse && (pool_version_changed || rebuild_needed)) {
+            // ── LEGACY dense-window re-derivation (DISABLED by default — root cause of the
+            // native decode garbling). This block re-derived the dense window from the
+            // per-block ingest buffers on every pool-version change / rebuild. Two problems:
+            //   1. It OVERWRITES the contiguous prefill-activation window (installed before
+            //      the loop) with block-buffer content — the exact divergence the pre-loop
+            //      MLX-parity comment calls out as the source of gibberish.
+            //   2. It DROPS freshly generated tokens: their ingest into block->active_k runs
+            //      asynchronously (svd_thread), so a scan at end-of-step misses them and the
+            //      window "forgets" the model's own recent output. Since a rebuild fires on
+            //      effectively every step, generation history was never reliably attendable
+            //      (observed: step-1 logits collapse vs the bypass path; wrong needle digits;
+            //      at-scale echo loops).
+            // The window is fully maintained without this: initialized contiguously from the
+            // prefill activations before the loop, extended by the per-step append below, and
+            // bounded by the MLX-parity slide. Restore with DIFFKV_LEGACY_WINDOW_REBUILD=1.
+            static const bool legacy_window_rebuild = (std::getenv("DIFFKV_LEGACY_WINDOW_REBUILD") != nullptr);
+            if (decode_use_sparse && (pool_version_changed || rebuild_needed) && !legacy_window_rebuild) {
+                last_pool_version = kv_engines[0]->get_pool_version();
+            }
+            if (decode_use_sparse && (pool_version_changed || rebuild_needed) && legacy_window_rebuild) {
                 last_pool_version = kv_engines[0]->get_pool_version();
                 // When a block completes, also sync the dense buffer for ALL layers
                 // (this is the correct place — before this guard it ran every token)

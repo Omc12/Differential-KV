@@ -64,6 +64,10 @@ struct AttentionParams {
     int32_t approximate_attn;
     int32_t S_split;
     int32_t max_residual;
+    // Mirrors the struct in diffkv_decode.metal — keep layouts in sync.
+    // 1 → pool K is stored fully rotated at absolute positions (POOL_ROT_ABS);
+    // the kernel then applies no rotation to pool content (dense still rotates).
+    int32_t pool_prerotated;
 };
 
 struct GlobalPoolMtlBufs {
@@ -774,6 +778,7 @@ void execute_metal_attention(
         params.approximate_attn = data->approximate_attn ? 1 : 0;
         params.S_split = S_split_i32;
         params.max_residual = engine->MAX_RESIDUAL;
+        params.pool_prerotated = (pool_rot_mode() == POOL_ROT_ABS) ? 1 : 0;
 
         [encoder setBytes:&params         length:sizeof(params)         atIndex:11];
         [encoder setBuffer:scales_buf     offset:0                      atIndex:12];
