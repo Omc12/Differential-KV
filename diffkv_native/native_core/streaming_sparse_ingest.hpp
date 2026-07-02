@@ -54,6 +54,7 @@ public:
 
     void initialize(int n_layers, const DiffKVModel* model);
     void clear();
+    void register_prefill_tokens(const std::vector<int32_t>& token_ids);
     
     // Truncates/rolls back the sequence to target_len.
     void rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines);

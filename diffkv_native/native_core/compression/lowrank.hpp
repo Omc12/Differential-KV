@@ -70,4 +70,6 @@ bool run_svd_driver(
     float* VT_out
 );
 
+void print_rank_energy_histogram();
+
 } // namespace diffkv

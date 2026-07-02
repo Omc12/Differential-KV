@@ -4976,7 +4976,7 @@ int main(int argc, char ** argv) {
             }}
             if (has_prev_svd) {
                 svd_thread = std::thread([&runtime_manager, prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state]() {
-                    runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state);
+                    runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state, true);
                 });
                 svd_thread_active = true;
             }
@@ -5010,6 +5010,8 @@ int main(int argc, char ** argv) {
             if (svd_thread_active) {
                 svd_thread.join();
                 svd_thread_active = false;
+                runtime_manager.sync_device_for_native();
+                runtime_manager.get_pager().maybe_evict(kv_engines, &srl_state);
             }
 
             if (native_attn_on && std::getenv("DIFFKV_DBG_NAN")) {
@@ -6403,6 +6405,8 @@ int main(int argc, char ** argv) {
         if (svd_thread_active) {
             svd_thread.join();
             svd_thread_active = false;
+            runtime_manager.sync_device_for_native();
+            runtime_manager.get_pager().maybe_evict(kv_engines, &srl_state);
         }
         // Run SVD for the final token synchronously
         if (has_prev_svd) {
@@ -6425,6 +6429,7 @@ int main(int argc, char ** argv) {
             std::cerr << "--------------------------------------------------\n";
             std::cerr << "  Total Step Time:          " << (total_profile_ms / profile_steps) << " ms\n";
             std::cerr << "==================================================\n\n";
+            diffkv::print_rank_energy_histogram();
         }
         if (!is_warmup_run && std::getenv("DIFFKV_DBG_GRAPH")) {
             std::cerr << "[DBG_CBTOTAL] custom_attention_op_callback total invocations this response = "

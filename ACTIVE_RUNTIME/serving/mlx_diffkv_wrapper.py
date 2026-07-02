@@ -415,7 +415,7 @@ def compute_decode_attention_static(
         + out_dense * mx.expand_dims(w_dense, -1)
     ) / mx.expand_dims(denom, -1)
     out_combined = mx.where(mx.isnan(out_combined), 0.0, out_combined)
-    return out_combined
+    return out_combined, lse_sparse, lse_dense
 
 
 @mx.compile
@@ -454,6 +454,192 @@ def _dense_only_attention_static(
     else:
         out     = mx.sum(mx.expand_dims(weights, -1) * dense_v, axis=1)
     return mx.where(mx.isnan(out), 0.0, out)
+
+
+_fused_decode_kernel = None
+
+def get_fused_decode_kernel():
+    global _fused_decode_kernel
+    if _fused_decode_kernel is None:
+        source = """
+            uint h_q = thread_position_in_grid.x;
+            uint D = q_shape[1]; // head dim
+            uint nb = comp_U_shape[0];
+            uint S_comp = comp_U_shape[1];
+            uint rank = comp_U_shape[2];
+            uint kv_heads = comp_VK_shape[1];
+            uint gpk = q_shape[0] / kv_heads;
+            uint h_kv = h_q / gpk;
+
+            int actual_blocks = (int)nb_actual[0];
+
+            // Sparse / Compressed Attention online Softmax
+            float global_m = -1e9f;
+            float global_d = 0.0f;
+            float out_accum[128];
+            for (uint d = 0; d < D; ++d) {
+                out_accum[d] = 0.0f;
+            }
+
+            for (int b = 0; b < actual_blocks; ++b) {
+                if (b >= 256) break; // safeguard
+                
+                float s_anc = 0.0f;
+                for (uint d = 0; d < D; ++d) {
+                    s_anc += q[h_q * D + d] * comp_anc_k[b * kv_heads * D + h_kv * D + d];
+                }
+                s_anc *= scale;
+                
+                float m_b = s_anc;
+                
+                float q_proj_n[16];
+                for (uint r = 0; r < rank; ++r) {
+                    float sum = 0.0f;
+                    for (uint d = 0; d < D; ++d) {
+                        sum += q[h_q * D + d] * comp_VK[b * kv_heads * rank * D + h_kv * rank * D + r * D + d];
+                    }
+                    q_proj_n[r] = sum * scale;
+                }
+                
+                float b_scale = comp_scale[b];
+                int b_seq_len = comp_seq_len[b];
+                
+                // First pass: local max m_b
+                for (uint s = 0; s < S_comp; ++s) {
+                    if (res_mask[b * S_comp + s]) continue;
+                    if ((int)s >= b_seq_len) continue;
+                    
+                    float dot_u = 0.0f;
+                    for (uint r = 0; r < rank; ++r) {
+                        dot_u += q_proj_n[r] * (float)comp_U[b * S_comp * rank + s * rank + r];
+                    }
+                    float val = dot_u * b_scale + s_anc;
+                    m_b = metal::max(m_b, val);
+                }
+                
+                // Second pass: local sum_exp and w_proj
+                float d_b = metal::exp(s_anc - m_b);
+                float w_proj[16];
+                for (uint r = 0; r < rank; ++r) {
+                    w_proj[r] = 0.0f;
+                }
+                
+                for (uint s = 0; s < S_comp; ++s) {
+                    if (res_mask[b * S_comp + s]) continue;
+                    if ((int)s >= b_seq_len) continue;
+                    
+                    float dot_u = 0.0f;
+                    for (uint r = 0; r < rank; ++r) {
+                        dot_u += q_proj_n[r] * (float)comp_U[b * S_comp * rank + s * rank + r];
+                    }
+                    float val = dot_u * b_scale + s_anc;
+                    float w_s = metal::exp(val - m_b);
+                    d_b += w_s;
+                    for (uint r = 0; r < rank; ++r) {
+                        w_proj[r] += w_s * (float)comp_U[b * S_comp * rank + s * rank + r];
+                    }
+                }
+                
+                // Compute representative block value (anchor value is weighted by total local sum d_b)
+                float v_block[128];
+                for (uint d = 0; d < D; ++d) {
+                    v_block[d] = d_b * comp_anc_v[b * kv_heads * D + h_kv * D + d];
+                }
+                for (uint r = 0; r < rank; ++r) {
+                    float w_proj_scaled = w_proj[r] * b_scale;
+                    for (uint d = 0; d < D; ++d) {
+                        v_block[d] += w_proj_scaled * comp_VV[b * kv_heads * rank * D + h_kv * rank * D + r * D + d];
+                    }
+                }
+                
+                // Update global softmax state with (m_b, d_b, v_block)
+                if (m_b > global_m) {
+                    float fac = metal::exp(global_m - m_b);
+                    global_d = global_d * fac + d_b;
+                    for (uint d = 0; d < D; ++d) {
+                        out_accum[d] = out_accum[d] * fac + v_block[d];
+                    }
+                    global_m = m_b;
+                } else {
+                    float fac = metal::exp(m_b - global_m);
+                    global_d = global_d + d_b * fac;
+                    for (uint d = 0; d < D; ++d) {
+                        out_accum[d] = out_accum[d] + v_block[d] * fac;
+                    }
+                }
+            }
+
+            float lse_sparse_val = (global_d > 0.0f) ? (global_m + metal::log(global_d)) : -1e9f;
+            float sparse_out[128];
+            for (uint d = 0; d < D; ++d) {
+                sparse_out[d] = (global_d > 0.0f) ? (out_accum[d] / global_d) : 0.0f;
+            }
+
+            // Dense Attention online Softmax
+            float dense_m = -1e9f;
+            float dense_d = 0.0f;
+            float dense_accum[128];
+            for (uint d = 0; d < D; ++d) {
+                dense_accum[d] = 0.0f;
+            }
+
+            uint max_dense_len = dense_k_shape[1];
+            for (uint t = 0; t < max_dense_len; ++t) {
+                if (!dense_mask[t]) continue;
+                
+                float sum = 0.0f;
+                for (uint d = 0; d < D; ++d) {
+                    sum += q[h_q * D + d] * dense_k[h_kv * max_dense_len * D + t * D + d];
+                }
+                float score_t = sum * scale;
+                
+                if (score_t > dense_m) {
+                    float fac = metal::exp(dense_m - score_t);
+                    dense_d = dense_d * fac + 1.0f;
+                    for (uint d = 0; d < D; ++d) {
+                        dense_accum[d] = dense_accum[d] * fac + dense_v[h_kv * max_dense_len * D + t * D + d];
+                    }
+                    dense_m = score_t;
+                } else {
+                    float fac = metal::exp(score_t - dense_m);
+                    dense_d = dense_d + fac;
+                    for (uint d = 0; d < D; ++d) {
+                        dense_accum[d] = dense_accum[d] + dense_v[h_kv * max_dense_len * D + t * D + d] * fac;
+                    }
+                }
+            }
+
+            float lse_dense_val = (dense_d > 0.0f) ? (dense_m + metal::log(dense_d)) : -1e9f;
+            float dense_out[128];
+            for (uint d = 0; d < D; ++d) {
+                dense_out[d] = (dense_d > 0.0f) ? (dense_accum[d] / dense_d) : 0.0f;
+            }
+
+            // Flash-style LSE merge
+            float lse_max_combined = metal::max(lse_sparse_val, lse_dense_val);
+            float w_sparse_comb = metal::exp(lse_sparse_val - lse_max_combined);
+            float w_dense_comb = metal::exp(lse_dense_val - lse_max_combined);
+            float denom = w_sparse_comb + w_dense_comb + 1e-9f;
+
+            for (uint d = 0; d < D; ++d) {
+                out[h_q * D + d] = (sparse_out[d] * w_sparse_comb + dense_out[d] * w_dense_comb) / denom;
+            }
+
+            lse_sparse_out[h_q] = lse_sparse_val;
+            lse_dense_out[h_q] = lse_dense_val;
+        """
+        _fused_decode_kernel = mx.fast.metal_kernel(
+            name="fused_decode_online",
+            input_names=[
+                "q", "comp_U", "comp_VK", "comp_VV", "comp_anc_k", "comp_anc_v",
+                "comp_scale", "comp_seq_len", "res_mask", "dense_k", "dense_v",
+                "dense_mask", "nb_actual", "scale"
+            ],
+            output_names=["out", "lse_sparse_out", "lse_dense_out"],
+            source=source
+        )
+    return _fused_decode_kernel
+
 
 @mx.compile
 def _execute_decode_attention_compiled(
@@ -561,16 +747,32 @@ def _execute_decode_attention_compiled(
     dense_mask_attn = mx.arange(max_dense_len) < dense_len
     dense_mask_combined = mx.concatenate([res_mask_attn, dense_mask_attn], axis=0)
 
-    out_combined = compute_decode_attention_static(
-        q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
-        comp_scale_s, comp_seq_len_s, res_mask_s,
-        dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
-        nb_actual_for_attn,
-        scale, gpk, kv_heads, block_size, rank,
-        current_max_dense_len
-    )
+    if os.environ.get("DIFFKV_FUSED_DECODE") == "1":
+        fused = get_fused_decode_kernel()
+        out_combined, lse_sparse, lse_dense = fused(
+            inputs=[
+                q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
+                comp_scale_s, comp_seq_len_s, res_mask_s,
+                dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
+                nb_actual_for_attn, scale
+            ],
+            template=[("T", q.dtype)],
+            grid=(q.shape[0], 1, 1),
+            threadgroup=(1, 1, 1),
+            output_shapes=[q.shape, (q.shape[0],), (q.shape[0],)],
+            output_dtypes=[q.dtype, q.dtype, q.dtype]
+        )
+    else:
+        out_combined, lse_sparse, lse_dense = compute_decode_attention_static(
+            q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
+            comp_scale_s, comp_seq_len_s, res_mask_s,
+            dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
+            nb_actual_for_attn,
+            scale, gpk, kv_heads, block_size, rank,
+            current_max_dense_len
+        )
 
-    return out_combined, sel if use_topk else cached_sel
+    return out_combined, (sel if use_topk else cached_sel), lse_sparse, lse_dense
 
 
 @mx.compile
@@ -1872,6 +2074,62 @@ class MLXKVBlockManager:
             session["_route_once_sel"] = None
 
         if all_blocks_full:
+            if os.environ.get("DIFFKV_FUSED_DECODE") == "1":
+                nb_padded = 1 << (nb - 1).bit_length() if nb > 1 else 1
+                nb_padded = min(nb_padded, session.get("max_blocks", self.max_blocks))
+                
+                comp_U_s = session["comp_U"][layer_idx][:nb_padded]
+                comp_VK_s = session["comp_VK"][layer_idx][:nb_padded]
+                comp_VV_s = session["comp_VV"][layer_idx][:nb_padded]
+                comp_anc_k_s = session["comp_anc_k"][layer_idx][:nb_padded]
+                comp_anc_v_s = session["comp_anc_v"][layer_idx][:nb_padded]
+                comp_scale_s = session["comp_scale"][layer_idx][:nb_padded]
+                comp_seq_len_s = session["comp_seq_len"][layer_idx][:nb_padded]
+                comp_res_k_s = session["comp_res_k"][layer_idx][:nb_padded]
+                comp_res_v_s = session["comp_res_v"][layer_idx][:nb_padded]
+                
+                res_k_all = comp_res_k_s[:, :, :self.max_residual].transpose(0, 2, 1, 3).reshape(self.kv_heads, -1, self.head_dim)
+                res_v_all = comp_res_v_s[:, :, :self.max_residual].transpose(0, 2, 1, 3).reshape(self.kv_heads, -1, self.head_dim)
+                total_res = nb_padded * self.max_residual
+                
+                dense_k_for_attn = mx.concatenate([res_k_all, dense_k], axis=1)
+                dense_v_for_attn = mx.concatenate([res_v_all, dense_v], axis=1)
+                
+                res_mask_attn = mx.arange(total_res) < (nb * self.max_residual)
+                dense_mask_attn = mx.arange(self.max_dense_len) < dense_len
+                dense_mask_combined = mx.concatenate([res_mask_attn, dense_mask_attn], axis=0)
+                
+                S_comp = self.block_size - 1
+                if self._res_exclude_svd and "comp_res_mask" in session:
+                    res_mask = session["comp_res_mask"][layer_idx][:nb_padded]
+                else:
+                    res_mask = mx.zeros((nb_padded, S_comp), dtype=mx.bool_)
+                
+                nb_actual_arr = mx.array([nb], dtype=mx.int32)
+                
+                fused = get_fused_decode_kernel()
+                out_combined, lse_sparse, lse_dense = fused(
+                    inputs=[
+                        q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
+                        comp_scale_s, comp_seq_len_s, res_mask,
+                        dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
+                        nb_actual_arr, scale
+                    ],
+                    template=[("T", q.dtype)],
+                    grid=(q.shape[0], 1, 1),
+                    threadgroup=(1, 1, 1),
+                    output_shapes=[q.shape, (q.shape[0],), (q.shape[0],)],
+                    output_dtypes=[q.dtype, q.dtype, q.dtype]
+                )
+                
+                if os.environ.get("DIFFKV_DBG_LSE_SHARE") == "1":
+                    share_comp = mx.exp(lse_sparse) / (mx.exp(lse_sparse) + mx.exp(lse_dense) + 1e-9)
+                    max_share = float(mx.max(share_comp).item())
+                    avg_share = float(mx.mean(share_comp).item())
+                    print(f"[LSE_SHARE] Layer {layer_idx}: max={max_share:.4f} avg={avg_share:.4f} top_block=-1", flush=True)
+                
+                return mx.expand_dims(mx.expand_dims(out_combined, 0), 2)
+
             # Pad nb to the next power of 2 to stabilize compile shapes and avoid re-compilations
             nb_padded = 1 << (nb - 1).bit_length() if nb > 1 else 1
             nb_padded = min(nb_padded, session.get("max_blocks", self.max_blocks))
@@ -1888,8 +2146,8 @@ class MLXKVBlockManager:
             if cached_sel is None:
                 cached_sel = mx.zeros((1,), dtype=mx.int32)
                 
-            nb_actual_arr = mx.array(nb, dtype=mx.int32)
-            out_combined, sel = _execute_decode_attention_compiled(
+            nb_actual_arr = mx.array([nb], dtype=mx.int32)
+            out_combined, sel, lse_sparse, lse_dense = _execute_decode_attention_compiled(
                 q, dense_k, dense_v, dense_len,
                 session["comp_U"][layer_idx][:nb_padded],
                 session["comp_VK"][layer_idx][:nb_padded],
@@ -1910,6 +2168,12 @@ class MLXKVBlockManager:
                 self.max_dense_len, self.max_residual, self.route_residuals,
                 k_eff, self.router, use_topk, use_cached_sel
             )
+            if os.environ.get("DIFFKV_DBG_LSE_SHARE") == "1":
+                share_comp = mx.exp(lse_sparse) / (mx.exp(lse_sparse) + mx.exp(lse_dense) + 1e-9)
+                max_share = float(mx.max(share_comp).item())
+                avg_share = float(mx.mean(share_comp).item())
+                top_block = int(sel[0].item()) if (sel is not None and sel.size > 0) else -1
+                print(f"[LSE_SHARE] Layer {layer_idx}: max={max_share:.4f} avg={avg_share:.4f} top_block={top_block}", flush=True)
             if route_once and not use_cached_sel and use_topk:
                 session["_route_once_sel"] = sel
         else:
@@ -2030,7 +2294,7 @@ class MLXKVBlockManager:
                     res_mask = mx.take(_full_mask, topk_sel, axis=0) if topk_sel is not None else _full_mask
                 else:
                     res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
-                out_combined = compute_decode_attention_static(
+                out_combined, _, _ = compute_decode_attention_static(
                     q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
                     comp_scale, comp_seq_len, res_mask,
                     dense_k_for_attn, dense_v_for_attn, dense_mask_combined,

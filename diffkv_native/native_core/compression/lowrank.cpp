@@ -10,8 +10,15 @@
 #include <iostream>
 #include <random>
 #include <unordered_map>
+#include <mutex>
+#include <iomanip>
 
 namespace diffkv {
+
+static std::mutex g_hist_mutex;
+static double g_cum_energy[17] = {0.0};
+static double g_total_energy = 0.0;
+static long long g_svd_count = 0;
 
 #ifndef __APPLE__
 static bool run_cpu_jacobi_svd(
@@ -618,6 +625,19 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         total_energy += S_joint[r] * S_joint[r];
     }
 
+    if (total_energy > 1e-9f) {
+        std::lock_guard<std::mutex> lock(g_hist_mutex);
+        float cum = 0.0f;
+        for (int r = 0; r < 16; ++r) {
+            if (r < svd_dim) {
+                cum += S_joint[r] * S_joint[r];
+            }
+            g_cum_energy[r] += cum;
+        }
+        g_total_energy += total_energy;
+        g_svd_count++;
+    }
+
     int k_dynamic = svd_dim;
     if (total_energy > 1e-9f) {
         float cum_energy = 0.0f;
@@ -814,6 +834,32 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             // (the K/V RMS ratio) so both sides compete on equal footing.
             float ev_bal = aerr_V[s] * v_gain;
             joint_err[s] = std::sqrt(aerr_K[s] * aerr_K[s] + ev_bal * ev_bal);
+        }
+
+        // ── Stride-stratified residual coverage bonus ────────────────────────────
+        static const float cov_frac = []() {
+            const char* e = std::getenv("DIFFKV_RESIDUAL_COVERAGE_FRAC");
+            if (e) { try { return std::stof(e); } catch (...) {} }
+            return 0.0f;
+        }();
+        if (cov_frac > 0.0f && MR > 0) {
+            int n_cov = std::min(MR, std::max(1, (int)std::round(cov_frac * MR)));
+            std::vector<int> cols;
+            for (int i = 0; i < n_cov; ++i) {
+                float val = 0.0f;
+                if (n_cov > 1) {
+                    val = (float)i * (S_deltas - 1) / (n_cov - 1);
+                }
+                int col = (int)std::round(val);
+                if (std::find(cols.begin(), cols.end(), col) == cols.end()) {
+                    cols.push_back(col);
+                }
+            }
+            for (int col : cols) {
+                if (col >= 0 && col < S_deltas) {
+                    joint_err[col] += 1e12f;
+                }
+            }
         }
 
         // ── Content-aware residual capture ──────────────────────────────────────
@@ -1080,6 +1126,24 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
     }
 
     return true;
+}
+
+void print_rank_energy_histogram() {
+    std::lock_guard<std::mutex> lock(g_hist_mutex);
+    if (g_svd_count == 0) {
+        std::cerr << "\n[Rank Energy Profile] No SVD computations recorded.\n";
+        return;
+    }
+    std::cerr << "\n==================================================\n";
+    std::cerr << "       SVD RANK-ENERGY HISTOGRAM & PROFILE\n";
+    std::cerr << "       Averaged over " << g_svd_count << " block compressions\n";
+    std::cerr << "==================================================\n";
+    for (int r = 0; r < 16; ++r) {
+        double avg_pct = (g_cum_energy[r] / g_total_energy) * 100.0;
+        std::cerr << "  Rank " << std::setw(2) << (r + 1) << ":  "
+                  << std::fixed << std::setprecision(4) << avg_pct << "%\n";
+    }
+    std::cerr << "==================================================\n\n";
 }
 
 } // namespace diffkv

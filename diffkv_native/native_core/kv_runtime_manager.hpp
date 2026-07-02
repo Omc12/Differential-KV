@@ -36,6 +36,7 @@ public:
     );
 
     void reset();
+    void register_prefill_tokens(const std::vector<int32_t>& token_ids);
 
     // Ingest a chunk of prefill tokens for all layers
     void ingest_prefill(
@@ -53,7 +54,8 @@ public:
         const std::vector<std::vector<float>>& v_layers, // [n_layers][F_test]
         int current_pos,
         const std::vector<int32_t>& token_ids,
-        SessionSRLState* srl_state = nullptr
+        SessionSRLState* srl_state = nullptr,
+        bool defer_device_sync = false
     );
 
     // Dynamic per-layer adaptive SVD rank schedule

@@ -141,6 +141,12 @@ void KVRuntimeManager::reset() {
     }
 }
 
+void KVRuntimeManager::register_prefill_tokens(const std::vector<int32_t>& token_ids) {
+    if (ingest_manager_) {
+        ingest_manager_->register_prefill_tokens(token_ids);
+    }
+}
+
 int KVRuntimeManager::get_layer_rank(int layer_idx) const {
     double ratio = (double)layer_idx / std::max(n_layers_, 1);
     if (ratio < 0.15) {
@@ -168,6 +174,10 @@ void KVRuntimeManager::ingest_prefill(
     const std::vector<int32_t>& token_ids,
     SessionSRLState* srl_state
 ) {
+    if (position_start == 0) {
+        register_prefill_tokens(token_ids);
+    }
+
     // 1. Extract query words from the latest 128 tokens of the prompt/prefill
     if (model_) {
         int prefill_len = token_ids.size();
@@ -259,7 +269,8 @@ void KVRuntimeManager::ingest_decode(
     const std::vector<std::vector<float>>& v_layers,
     int current_pos,
     const std::vector<int32_t>& token_ids,
-    SessionSRLState* srl_state
+    SessionSRLState* srl_state,
+    bool defer_device_sync
 ) {
     // 1. Sync states of any compressing blocks from background thread to host blocks
     for (int l = 0; l < n_layers_; ++l) {
@@ -312,8 +323,10 @@ void KVRuntimeManager::ingest_decode(
     }
     
     // 3b. Native attn: push host→device for compressed-but-unsynced slots (main thread).
-    sync_device_for_native();
-    pager_->maybe_evict(engines_, srl_state);
+    if (!defer_device_sync) {
+        sync_device_for_native();
+        pager_->maybe_evict(engines_, srl_state);
+    }
 }
 
 std::vector<int32_t> KVRuntimeManager::route_decode_slots(

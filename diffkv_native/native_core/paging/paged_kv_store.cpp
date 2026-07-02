@@ -91,8 +91,10 @@ void PagedKVStore::maybe_evict(const std::vector<std::unique_ptr<NativeBlockPool
         // Find coldest GPU resident block
         std::string coldest_key = "";
         double oldest_time = 1e30;
-        
         for (auto & pair : entries_) {
+            if (pair.first == "0") {
+                continue; // Protect attention sinks (first block starting at sequence position 0) from eviction
+            }
             if (pair.second.residency == BlockState::CompressedResident && pair.second.vram_bytes > 0) {
                 double comp_time = pair.second.last_access;
                 if (srl_state != nullptr) {

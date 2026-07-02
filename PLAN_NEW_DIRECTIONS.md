@@ -178,10 +178,10 @@ git push fork diffkv-fused-op
 
 ## Status checkboxes
 
-- [ ] D1 native needle-capture root cause (probe → classified → fixed → sweep table)
-- [ ] D2A LSE-share harness + go/no-go
-- [ ] D2B LSE-gated re-expansion (only if D2A go)
-- [ ] D3 MLX fused decode kernel (parity case → guardrails → tps table)
-- [ ] D4 native fused-path profile table (+ 16k non-determinism explained)
-- [ ] D5 rank-energy histogram + decision
-- [ ] D6.1 Q8_0 sweep   [ ] D6.2 32k prefill re-timing   [ ] D6.3 64k coherence + sink probe
+- [x] D1 native needle-capture root cause (probe → classified → fixed → sweep table)
+- [x] D2A LSE-share harness + go/no-go
+- [x] D2B LSE-gated re-expansion (skipped - No-Go)
+- [x] D3 MLX fused decode kernel (parity case → guardrails → tps table)
+- [x] D4 native fused-path profile table (+ 16k non-determinism explained)
+- [x] D5 rank-energy histogram + decision
+- [x] D6.1 Q8_0 sweep   [x] D6.2 32k prefill re-timing   [x] D6.3 64k coherence + sink probe

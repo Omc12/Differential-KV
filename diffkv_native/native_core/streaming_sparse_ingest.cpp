@@ -204,6 +204,10 @@ void StreamingSparseIngestManager::clear() {
     last_compression_scan_idx_.assign(n_layers_, 0);  // reset scan pointer on session clear
 }
 
+void StreamingSparseIngestManager::register_prefill_tokens(const std::vector<int32_t>& token_ids) {
+    session_token_ids_ = token_ids;
+}
+
 void StreamingSparseIngestManager::rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines) {
     if (target_len < (int)session_token_ids_.size()) {
         session_token_ids_.resize(target_len);
