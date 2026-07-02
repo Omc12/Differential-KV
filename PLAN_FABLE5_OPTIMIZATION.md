@@ -1,5 +1,26 @@
 # Optimization & Hardening Plan — Differential-KV (for Fable 5)
 
+> **⚠️ 2026-07-02 (Fable 5 execution pass, commit `996ebb5`): read `SESSION_REPORT_FABLE5.md`
+> FIRST.** Several of this plan's premises were disproven by measurement:
+> - Native was NOT "coherent ≤13k" — NIAH failed at **all** contexts at HEAD. Root causes
+>   (all fixed): a dense-window reset that erased generation history every step, a RoPE
+>   ingest/decode scheme conflict (double rotation), and a sparse→dense fallback uploading
+>   zero K. Pool K is now stored rotated at absolute positions (`POOL_ROT_ABS`, MLX parity);
+>   decode does no pool rotation, making project-then-attend exact (and the default).
+> - **1.1 (router port) is moot** — routing was never the failure; a residual-key router
+>   already exists natively.
+> - **3.1's precondition is stale** — the fused kernel already reads per-row U scales. The
+>   actual 3.1 blocker now: port `POOL_ROT_ABS` (= delete pool rotation) into the two fused
+>   ggml kernels, then selftest → flip default.
+> - The remaining accuracy gap (verbatim digit recall from compressed blocks) is **shared
+>   with MLX** (A/B on the identical prompt: MLX also fails). Mechanism: the joint K|V SVD
+>   is blind to V (|K|≫|V| ⇒ V recon error 24–73%), so exact recall depends entirely on
+>   residual capture, whose error-based ranking cannot see recall-critical tokens. Partial
+>   fixes landed native-side (V rebalancing `DIFFKV_V_SCALE`, content-aware capture
+>   `DIFFKV_RESIDUAL_TOKEN_BOOST`); the capture policy is now the top accuracy work item,
+>   above any routing/kernel change. Tier 2 (2.1/2.2/2.4) remains open with design notes in
+>   the session report.
+
 **Author:** Opus 4.8 (exploration + planning pass) · **Date:** 2026-07-02
 **Scope:** both engines — `ACTIVE_RUNTIME/` (Python, MLX on Mac / PyTorch+Triton on CUDA) and
 `diffkv_native/` (C++17 / llama.cpp / ggml, Metal + CPU + CUDA).
