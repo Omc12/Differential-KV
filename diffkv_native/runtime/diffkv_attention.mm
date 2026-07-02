@@ -68,6 +68,7 @@ struct AttentionParams {
     // 1 → pool K is stored fully rotated at absolute positions (POOL_ROT_ABS);
     // the kernel then applies no rotation to pool content (dense still rotates).
     int32_t pool_prerotated;
+    int32_t is_q8;
 };
 
 struct GlobalPoolMtlBufs {
@@ -779,6 +780,7 @@ void execute_metal_attention(
         params.S_split = S_split_i32;
         params.max_residual = engine->MAX_RESIDUAL;
         params.pool_prerotated = (pool_rot_mode() == POOL_ROT_ABS) ? 1 : 0;
+        params.is_q8 = (engine->get_kv_type() == GGML_TYPE_Q8_0) ? 1 : 0;
 
         [encoder setBytes:&params         length:sizeof(params)         atIndex:11];
         [encoder setBuffer:scales_buf     offset:0                      atIndex:12];

@@ -160,16 +160,13 @@ bool NativeBlockPool::initialize(int n_slots, int rank, int head_dim, int kv_hea
         VV_          = ggml_new_tensor_4d(pool_ctx_, kv_type_, head_dim, kv_heads, rank, n_allocated_slots_);
         res_K_pos_   = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_I32, MAX_RESIDUAL, n_allocated_slots_);
         res_V_pos_   = ggml_new_tensor_2d(pool_ctx_, GGML_TYPE_I32, MAX_RESIDUAL, n_allocated_slots_);
-        res_K_val_   = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
-        res_V_val_   = ggml_new_tensor_4d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
+        res_K_val_   = ggml_new_tensor_4d(pool_ctx_, kv_type_, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
+        res_V_val_   = ggml_new_tensor_4d(pool_ctx_, kv_type_, head_dim, kv_heads, MAX_RESIDUAL, n_allocated_slots_);
     }
     
     // anchors shape: [head_dim, kv_heads, n_allocated_slots_]
-    // Always F16 regardless of kv_type_: all Metal shaders (diffkv_decode.metal,
-    // ggml-metal.metal) declare anchors_K/V as `half*`. Quantizing them would corrupt
-    // both the CPU custom op and the fused kernel. Only VK_/VV_ are quantized.
-    anchors_K_   = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, n_allocated_slots_);
-    anchors_V_   = ggml_new_tensor_3d(pool_ctx_, GGML_TYPE_F16, head_dim, kv_heads, n_allocated_slots_);
+    anchors_K_   = ggml_new_tensor_3d(pool_ctx_, kv_type_, head_dim, kv_heads, n_allocated_slots_);
+    anchors_V_   = ggml_new_tensor_3d(pool_ctx_, kv_type_, head_dim, kv_heads, n_allocated_slots_);
 
     // Native-attn precomputed RoPE'd keys (same shapes as VK_ / anchors_K_). Only allocated
     // when native attn is enabled, to keep the default path RAM-conservative.
@@ -466,13 +463,13 @@ bool NativeBlockPool::grow_gpu_pool_impl(int min_slots_needed) {
         new_VV          = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, rank_, new_allocated_slots);
         new_res_K_pos   = ggml_new_tensor_2d(new_ctx, GGML_TYPE_I32, MAX_RESIDUAL, new_allocated_slots);
         new_res_V_pos   = ggml_new_tensor_2d(new_ctx, GGML_TYPE_I32, MAX_RESIDUAL, new_allocated_slots);
-        new_res_K_val   = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
-        new_res_V_val   = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
+        new_res_K_val   = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
+        new_res_V_val   = ggml_new_tensor_4d(new_ctx, kv_type_, head_dim_, kv_heads_, MAX_RESIDUAL, new_allocated_slots);
 
     }
     
-    struct ggml_tensor * new_anchors_K   = ggml_new_tensor_3d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, new_allocated_slots);
-    struct ggml_tensor * new_anchors_V   = ggml_new_tensor_3d(new_ctx, GGML_TYPE_F16, head_dim_, kv_heads_, new_allocated_slots);
+    struct ggml_tensor * new_anchors_K   = ggml_new_tensor_3d(new_ctx, kv_type_, head_dim_, kv_heads_, new_allocated_slots);
+    struct ggml_tensor * new_anchors_V   = ggml_new_tensor_3d(new_ctx, kv_type_, head_dim_, kv_heads_, new_allocated_slots);
 
     if (native_attn_ && !skip_lowrank) {
         new_VK_rot      = ggml_new_tensor_4d(new_ctx, GGML_TYPE_F32, head_dim_, kv_heads_, rank_, new_allocated_slots);
@@ -624,10 +621,17 @@ void NativeBlockPool::upload_slot_impl(int slot_id) {
         }
     }
     if (slot_buf) {
-        // anchors_K_ / anchors_V_ are ALWAYS F16 (see allocation above). Never quantize them:
-        // every Metal shader reads these as `half*`. Upload raw f16 unconditionally.
-        ggml_backend_tensor_set(anchors_K_, slot_buf->anchors_K.data(), slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
-        ggml_backend_tensor_set(anchors_V_, slot_buf->anchors_V.data(), slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+        if (ggml_is_quantized(kv_type_)) {
+            int n = head_dim_ * kv_heads_;
+            std::vector<char> qbuf(ggml_row_size(kv_type_, n));
+            quantize_row(kv_type_, slot_buf->anchors_K.data(), qbuf.data(), n);
+            ggml_backend_tensor_set(anchors_K_, qbuf.data(), slot_id * anchors_K_->nb[2], qbuf.size());
+            quantize_row(kv_type_, slot_buf->anchors_V.data(), qbuf.data(), n);
+            ggml_backend_tensor_set(anchors_V_, qbuf.data(), slot_id * anchors_V_->nb[2], qbuf.size());
+        } else {
+            ggml_backend_tensor_set(anchors_K_, slot_buf->anchors_K.data(), slot_id * anchors_K_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(anchors_V_, slot_buf->anchors_V.data(), slot_id * anchors_V_->nb[2], head_dim_ * kv_heads_ * sizeof(ggml_fp16_t));
+        }
     }
     ggml_backend_tensor_set(seq_lens_, host_seq_lens_.data() + slot_id, slot_id * seq_lens_->nb[0], sizeof(int32_t));
     ggml_backend_tensor_set(scales_, host_scales_.data() + slot_id, slot_id * scales_->nb[0], sizeof(ggml_fp16_t));
@@ -644,10 +648,24 @@ void NativeBlockPool::upload_slot_impl(int slot_id) {
         ggml_backend_tensor_set(res_V_pos_, slot_buf->res_V_pos.data(), slot_id * res_V_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
     }
     if (res_K_val_ && slot_buf) {
-        ggml_backend_tensor_set(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        if (ggml_is_quantized(kv_type_)) {
+            int n = head_dim_ * kv_heads_ * MAX_RESIDUAL;
+            std::vector<char> qbuf(ggml_row_size(kv_type_, n));
+            quantize_row(kv_type_, slot_buf->res_K_val.data(), qbuf.data(), n);
+            ggml_backend_tensor_set(res_K_val_, qbuf.data(), slot_id * res_K_val_->nb[3], qbuf.size());
+        } else {
+            ggml_backend_tensor_set(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        }
     }
     if (res_V_val_ && slot_buf) {
-        ggml_backend_tensor_set(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        if (ggml_is_quantized(kv_type_)) {
+            int n = head_dim_ * kv_heads_ * MAX_RESIDUAL;
+            std::vector<char> qbuf(ggml_row_size(kv_type_, n));
+            quantize_row(kv_type_, slot_buf->res_V_val.data(), qbuf.data(), n);
+            ggml_backend_tensor_set(res_V_val_, qbuf.data(), slot_id * res_V_val_->nb[3], qbuf.size());
+        } else {
+            ggml_backend_tensor_set(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        }
     }
 
 
@@ -775,10 +793,24 @@ void NativeBlockPool::download_slot(int slot_id) {
         ggml_backend_tensor_get(res_V_pos_, slot_buf->res_V_pos.data(), slot_id * res_V_pos_->nb[1], MAX_RESIDUAL * sizeof(int32_t));
     }
     if (res_K_val_ && slot_id < n_allocated_slots_) {
-        ggml_backend_tensor_get(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        if (kv_type_ == GGML_TYPE_Q8_0) {
+            int n = head_dim_ * kv_heads_ * MAX_RESIDUAL;
+            std::vector<char> qbuf(n / 32 * 34);
+            ggml_backend_tensor_get(res_K_val_, qbuf.data(), slot_id * res_K_val_->nb[3], qbuf.size());
+            dequantize_q8_0(qbuf.data(), slot_buf->res_K_val.data(), n);
+        } else {
+            ggml_backend_tensor_get(res_K_val_, slot_buf->res_K_val.data(), slot_id * res_K_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        }
     }
     if (res_V_val_ && slot_id < n_allocated_slots_) {
-        ggml_backend_tensor_get(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        if (kv_type_ == GGML_TYPE_Q8_0) {
+            int n = head_dim_ * kv_heads_ * MAX_RESIDUAL;
+            std::vector<char> qbuf(n / 32 * 34);
+            ggml_backend_tensor_get(res_V_val_, qbuf.data(), slot_id * res_V_val_->nb[3], qbuf.size());
+            dequantize_q8_0(qbuf.data(), slot_buf->res_V_val.data(), n);
+        } else {
+            ggml_backend_tensor_get(res_V_val_, slot_buf->res_V_val.data(), slot_id * res_V_val_->nb[3], head_dim_ * kv_heads_ * MAX_RESIDUAL * sizeof(ggml_fp16_t));
+        }
     }
 }
 

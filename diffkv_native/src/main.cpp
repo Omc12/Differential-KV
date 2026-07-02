@@ -575,8 +575,16 @@ static struct ggml_tensor * build_native_sparse_attn(
     };
     struct ggml_tensor* aKr  = ggml_reshape_3d(ctx, gather(pool->get_anchorK_rot(), D*nkv),     D, nkv, K);       // [D,nkv,K]
     struct ggml_tensor* VKr  = ggml_reshape_4d(ctx, gather(pool->get_VK_rot(),      D*nkv*R),   D, nkv, R, K);    // [D,nkv,R,K]
-    struct ggml_tensor* VVs  = ggml_reshape_4d(ctx, gather(pool->get_VV(),          D*nkv*R),   D, nkv, R, K);    // [D,nkv,R,K]
-    struct ggml_tensor* aVs  = ggml_reshape_3d(ctx, gather(pool->get_anchors_V(),   D*nkv),     D, nkv, K);       // [D,nkv,K]
+    struct ggml_tensor* VV_gathered = gather(pool->get_VV(), D*nkv*R);
+    if (ggml_is_quantized(VV_gathered->type)) {
+        VV_gathered = ggml_cast(ctx, VV_gathered, GGML_TYPE_F32);
+    }
+    struct ggml_tensor* VVs  = ggml_reshape_4d(ctx, VV_gathered, D, nkv, R, K);    // [D,nkv,R,K]
+    struct ggml_tensor* aV_gathered = gather(pool->get_anchors_V(), D*nkv);
+    if (ggml_is_quantized(aV_gathered->type)) {
+        aV_gathered = ggml_cast(ctx, aV_gathered, GGML_TYPE_F32);
+    }
+    struct ggml_tensor* aVs  = ggml_reshape_3d(ctx, aV_gathered, D, nkv, K);       // [D,nkv,K]
     struct ggml_tensor* Usel = ggml_reshape_3d(ctx, gather(pool->get_U_f16(),       R*S),       R, S, K);         // [R,S,K]
     struct ggml_tensor* Msel = gather(pool->get_valid_mask(), S);                                                 // [S,K] additive -inf
     struct ggml_tensor* USf  = ggml_cast(ctx, gather(pool->get_U_row_scale(), S), GGML_TYPE_F32);                 // [S,K]
@@ -990,7 +998,8 @@ struct ggml_cgraph * build_decode_graph(
                         1.0f / std::sqrt((float)head_dim), userdata[l].has_rope ? 1 : 0,
                         config.rope_freq_base, userdata[l].approximate_attn ? 1 : 0,
                         (int) pool->get_seq_lens()->ne[0],
-                        pool->MAX_RESIDUAL
+                        pool->MAX_RESIDUAL,
+                        pool->get_kv_type() == GGML_TYPE_Q8_0 ? 1 : 0
                     };
                     attn_out = ggml_diffkv_attn(ctx, q_rope_flat, selected_slots,
                         pool->get_U(), pool->get_U_row_scale(), pool->get_VK(), pool->get_VV(),
@@ -5090,7 +5099,6 @@ int main(int argc, char ** argv) {
                 std::vector<float> cpuv((size_t)nq*D);
                 for(int h=0;h<nq;++h){ double lmax=std::max(lseS[h],lseD[h]); double ws=(lseS[h]<=-1e20?0.0:std::exp(lseS[h]-lmax)), wd=(lseD[h]<=-1e20?0.0:std::exp(lseD[h]-lmax)); double den=std::max(ws+wd,1e-9); for(int d=0;d<D;++d) cpuv[h*D+d]=(float)((outS[h*D+d]*ws+outD[h*D+d]*wd)/den); }
                 double md=0,nn=0,cn=0; int worst=0; for(int i=0;i<nq*D;++i){ double d=std::fabs((double)natv[i]-cpuv[i]); if(d>md){md=d;worst=i;} nn+=(double)natv[i]*natv[i]; cn+=(double)cpuv[i]*cpuv[i]; }
-                std::cerr<<"[DBG_CMP] step="<<step<<" FULL L"<<cmpL<<" (K="<<K<<" Td="<<Td<<"): |native|="<<std::sqrt(nn)<<" |cpu|="<<std::sqrt(cn)<<" maxAbsDiff="<<md<<" @"<<worst<<" head"<<worst/D<<std::endl;
             }
 
             // DIFFKV_BLOCK_CMP: per-layer comparison table vs CPU reference
