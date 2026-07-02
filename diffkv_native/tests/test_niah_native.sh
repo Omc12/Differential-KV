@@ -1,13 +1,17 @@
 #!/bin/bash
 set -e
 
-# Run NIAH test for C++ native runtime
-# We test 4k, 8k, 16k, 32k contexts.
+# Run NIAH test for C++ native runtime.
+# Sweep 4k/8k/16k × depth 0.5/0.9. The filler intentionally contains a digit
+# token ("2010s") — it competes with the needle digits for residual slots,
+# which is the real accuracy frontier. Do NOT sanitize the filler to make
+# this pass; a single-cell or digit-free run hides regressions.
+# (32k is excluded: native OOMs there on the 8GB dev machine.)
 
 BINARY="../build/diffkv_native"
 MODEL="../qwen2.5-1.5b-instruct-q8_0.gguf"
-CONTEXTS=(4000)
-DEPTHS=(0.5)
+CONTEXTS=(4000 8000 16000)
+DEPTHS=(0.5 0.9)
 NEEDLE="The secret passcode is OMEGA-7741-DELTA."
 QUESTION="What is the secret passcode? Repeat it exactly."
 
@@ -41,16 +45,16 @@ for ctx in "${CONTEXTS[@]}"; do
         echo "============================================================"
         prompt=$(python3 make_niah_prompt.py "$ctx" "$depth" "$NEEDLE" "$QUESTION")
         # Run C++ binary
-        output=$("$BINARY" "$MODEL" "$prompt" 2>native_test_stderr.log)
+        output=$("$BINARY" "$MODEL" "$prompt" 2>native_test_stderr.log) || true
         
         # Check output
         if echo "$output" | grep -qi "OMEGA-7741-DELTA"; then
             echo "Result: PASS ✓"
-            ((pass++))
+            pass=$((pass+1))
         else
             echo "Result: FAIL ✗"
             echo "Output was: $output"
-            ((fail++))
+            fail=$((fail+1))
         fi
         echo ""
     done
