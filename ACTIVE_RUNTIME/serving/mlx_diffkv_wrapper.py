@@ -101,6 +101,56 @@ class MLXCompressedBlock:
             self.seq_len
         )
 
+def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, mx.array]:
+    """Compress a batch of KV delta vectors using randomised truncated SVD on GPU in parallel.
+    
+    deltas shape: (B_batch, n, d)
+    Returns:
+      U_k: shape (B_batch, n, rank)
+      Vh_k: shape (B_batch, rank, d)
+      scale: shape (B_batch,)
+    """
+    B_batch, n, d = deltas.shape
+    r_proj = min(rank + n_oversamples, n, d)
+    
+    # Cast to float32 to prevent float16 norm overflow and type errors in QR/SVD
+    deltas_f32 = deltas.astype(mx.float32)
+    
+    # 1. Scale each matrix in the batch by its max absolute value
+    scales = mx.max(mx.abs(deltas_f32), axis=(1, 2), keepdims=True)
+    scales = mx.maximum(scales, 1e-9)
+    x = deltas_f32 / scales
+    
+    # 2. Random projection matrix Omega (shared deterministic projection)
+    seed = int(os.environ.get("DIFFKV_SVD_SEED", "1234"))
+    key = mx.random.key(seed)
+    Omega_single = mx.random.normal(shape=(d, r_proj), key=key, dtype=mx.float32)
+    Omega = mx.broadcast_to(mx.expand_dims(Omega_single, 0), (B_batch, d, r_proj))
+    
+    # 3. Power iteration
+    Y = x @ Omega  # (B_batch, n, r_proj)
+    for _ in range(n_iter):
+        Y = x @ (mx.transpose(x, (0, 2, 1)) @ Y)
+        
+    # 4. Batched QR decomposition
+    Q, _ = mx.linalg.qr(Y, stream=mx.cpu)
+    
+    # 5. Project onto low-rank subspace
+    B = mx.transpose(Q, (0, 2, 1)) @ x
+    
+    # 6. Batched SVD
+    U_b, S, Vh = mx.linalg.svd(B, stream=mx.cpu)
+    
+    # 7. Truncate to rank and reconstruct U
+    U_k = (Q @ U_b)[:, :, :rank]
+    S_k = S[:, :rank]
+    Vh_k = Vh[:, :rank, :]
+    
+    # Scale U_k by S_k
+    U_k = U_k * mx.expand_dims(S_k, 1)
+    
+    return U_k.astype(deltas.dtype), Vh_k.astype(deltas.dtype), scales.squeeze(-1).squeeze(-1).astype(deltas.dtype)
+
 def compress_mlx_block(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, float, int]:
     """Compress a block of KV delta vectors using randomised truncated SVD.
 
@@ -796,6 +846,9 @@ class MLXKVBlockManager:
             "dense_lens":   [0 for _ in range(self.num_layers)],
             "dense_lens_mx": [mx.array(0, dtype=mx.int32) for _ in range(self.num_layers)],
             
+            "prefill_K_chunks": [[] for _ in range(self.num_layers)],
+            "prefill_V_chunks": [[] for _ in range(self.num_layers)],
+            
             "num_blocks": [0 for _ in range(self.num_layers)],
             "comp_U":     [mx.zeros((max_blocks, self.block_size - 1, self.rank), dtype=dtype) for _ in range(self.num_layers)],
             "comp_VK":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
@@ -1111,65 +1164,290 @@ class MLXKVBlockManager:
         session = self.sessions.get(session_id)
         if session is None:
             return
-        for layer_idx in range(self.num_layers):
-            self._compress_eligible_blocks(session_id, layer_idx)
             
-        # Eval all compressed buffers across all layers in one parallel sweep
+        # 1. Concatenate stashed prefill chunks for each layer
+        K_all_layers = []
+        V_all_layers = []
+        for l in range(self.num_layers):
+            if not session["prefill_K_chunks"][l]:
+                return
+            K_all_layers.append(mx.concatenate(session["prefill_K_chunks"][l], axis=2))
+            V_all_layers.append(mx.concatenate(session["prefill_V_chunks"][l], axis=2))
+            # Clear stashed chunks
+            session["prefill_K_chunks"][l] = []
+            session["prefill_V_chunks"][l] = []
+            
+        L = K_all_layers[0].shape[2]
+        
+        # 2. Check if we have eligible blocks to compress
+        num_blocks = (L - self.recency_window) // self.block_size
+        
+        if num_blocks <= 0:
+            # No blocks to compress, copy all tokens to dense buffers
+            for l in range(self.num_layers):
+                L_dense = L
+                session["dense_keys"][l][0, :, :L_dense]   = K_all_layers[l].squeeze(0)
+                session["dense_values"][l][0, :, :L_dense] = V_all_layers[l].squeeze(0)
+                session["dense_lens"][l] = L_dense
+                session["dense_lens_mx"][l] = mx.array(L_dense, dtype=mx.int32)
+            return
+            
+        N_comp = num_blocks * self.block_size
+        S_comp = self.block_size - 1
+        B_batch = self.num_layers * num_blocks
+        
+        # 3. Build deltas for all blocks across all layers
+        accum_deltas_k = []
+        accum_deltas_v = []
+        accum_anchors_k = []
+        accum_anchors_v = []
+        accum_blocks_k = []
+        accum_blocks_v = []
+        
+        for l in range(self.num_layers):
+            K_all = K_all_layers[l]
+            V_all = V_all_layers[l]
+            
+            K_comp = K_all[:, :, :N_comp, :]
+            V_comp = V_all[:, :, :N_comp, :]
+            
+            # Shape: (H_kv, num_blocks, block_size, D)
+            K_comp_blocks = K_comp.squeeze(0).reshape(self.kv_heads, num_blocks, self.block_size, self.head_dim).transpose(1, 0, 2, 3)
+            V_comp_blocks = V_comp.squeeze(0).reshape(self.kv_heads, num_blocks, self.block_size, self.head_dim).transpose(1, 0, 2, 3)
+            
+            anchor_k = K_comp_blocks[:, :, 0, :]  # (num_blocks, H_kv, D)
+            anchor_v = V_comp_blocks[:, :, 0, :]  # (num_blocks, H_kv, D)
+            
+            deltas_k = K_comp_blocks[:, :, 1:, :] - mx.expand_dims(anchor_k, 2)  # (num_blocks, H_kv, S_comp, D)
+            deltas_v = V_comp_blocks[:, :, 1:, :] - mx.expand_dims(anchor_v, 2)  # (num_blocks, H_kv, S_comp, D)
+            
+            # (num_blocks, S_comp, H_kv * D)
+            deltas_k_2d = deltas_k.transpose(0, 2, 1, 3).reshape(num_blocks, S_comp, -1)
+            deltas_v_2d = deltas_v.transpose(0, 2, 1, 3).reshape(num_blocks, S_comp, -1)
+            
+            accum_deltas_k.append(deltas_k_2d)
+            accum_deltas_v.append(deltas_v_2d)
+            accum_anchors_k.append(anchor_k)
+            accum_anchors_v.append(anchor_v)
+            accum_blocks_k.append(K_comp_blocks)
+            accum_blocks_v.append(V_comp_blocks)
+            
+        # Concatenate across layers
+        batch_deltas_k = mx.concatenate(accum_deltas_k, axis=0)  # (B_batch, S_comp, H_kv * D)
+        batch_deltas_v = mx.concatenate(accum_deltas_v, axis=0)  # (B_batch, S_comp, H_kv * D)
+        batch_anchors_k = mx.concatenate(accum_anchors_k, axis=0)  # (B_batch, H_kv, D)
+        batch_anchors_v = mx.concatenate(accum_anchors_v, axis=0)  # (B_batch, H_kv, D)
+        batch_blocks_k = mx.concatenate(accum_blocks_k, axis=0)  # (B_batch, H_kv, block_size, D)
+        batch_blocks_v = mx.concatenate(accum_blocks_v, axis=0)  # (B_batch, H_kv, block_size, D)
+        
+        # 4. V-side rebalancing for the joint K|V SVD
+        v_scale_on = os.environ.get("DIFFKV_V_SCALE", "1") != "0"
+        v_gain = 1.0
+        if v_scale_on:
+            eK = mx.sum(batch_deltas_k.astype(mx.float32)**2, axis=(1, 2))
+            eV = mx.sum(batch_deltas_v.astype(mx.float32)**2, axis=(1, 2))
+            
+            v_gain = mx.sqrt(eK / mx.maximum(eV, 1e-12))
+            v_gain = mx.minimum(mx.maximum(v_gain, 1.0), 10000.0)
+            
+            v_gain_broadcast = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)  # (B_batch, 1, 1)
+            batch_deltas_v_scaled = batch_deltas_v * v_gain_broadcast
+            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v_scaled], axis=2)
+        else:
+            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v], axis=2)
+            
+        token_norms = mx.linalg.norm(batch_deltas, axis=-1, keepdims=True)
+        token_norms = mx.maximum(token_norms, 1e-5)
+        batch_deltas_normalized = batch_deltas / token_norms
+        
+        # 5. Batched GPU SVD
+        U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, self.rank)
+        
+        U_batch = U_batch * token_norms  # U_batch shape: (B_batch, S_comp, rank)
+        
+        # Split Vh_batch back into VK and VV
+        VK_flat = Vh_batch[:, :, :self.kv_heads * self.head_dim]
+        VV_flat = Vh_batch[:, :, self.kv_heads * self.head_dim:]
+        
+        if v_scale_on:
+            # Unscale V components
+            v_gain_div = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)
+            VV_flat = VV_flat / v_gain_div
+            
+        # Reshape to (B_batch, H_kv, rank, D)
+        VK_batch = VK_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        VV_batch = VV_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        
+        # 6. SVD Residual Correction (batched)
+        recon_delta = mx.matmul(U_batch, Vh_batch) * mx.expand_dims(mx.expand_dims(scales_batch, 1), 2)
+        recon_delta_k = recon_delta[:, :, :self.kv_heads * self.head_dim]
+        recon_delta_v = recon_delta[:, :, self.kv_heads * self.head_dim:]
+        if v_scale_on:
+            recon_delta_v = recon_delta_v / v_gain_broadcast
+            
+        errors_k = mx.linalg.norm(batch_deltas_k - recon_delta_k, axis=-1)
+        errors_v = mx.linalg.norm(batch_deltas_v - recon_delta_v, axis=-1)
+        
+        if v_scale_on:
+            errors_v_balanced = errors_v * mx.expand_dims(v_gain, 1)
+        else:
+            errors_v_balanced = errors_v
+        joint_errors = mx.sqrt(errors_k**2 + errors_v_balanced**2)
+        
+        # Content-aware residual capture / token boosting
+        tok_boost_env = os.environ.get("DIFFKV_RESIDUAL_TOKEN_BOOST")
+        tok_boost = 8.0
+        if tok_boost_env is not None:
+            try:
+                tok_boost = float(tok_boost_env)
+            except ValueError:
+                pass
+                
+        if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
+            boost_multipliers_batch = []
+            for b in range(B_batch):
+                layer_idx = b // num_blocks
+                block_idx = b % num_blocks
+                abs_start = block_idx * self.block_size
+                tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
+                
+                boost_multipliers = [1.0] * S_comp
+                if len(tids) == S_comp:
+                    counts = session.get("token_counts", {})
+                    total_tokens = len(session["token_ids"])
+                    tok_strs = [self.tokenizer.decode([tid]) for tid in tids]
+                    
+                    is_core = []
+                    for s in tok_strs:
+                        s_clean = s.strip()
+                        has_digit = any(c.isdigit() for c in s_clean)
+                        is_upper = s_clean.isupper() and s_clean.isalpha() and len(s_clean) >= 2
+                        is_core.append(has_digit or is_upper or s_clean == '-' or s_clean == '_')
+                        
+                    is_prose = []
+                    for s in tok_strs:
+                        s_clean = s.strip()
+                        if not s_clean:
+                            is_prose.append(True)
+                            continue
+                        if s_clean in ('.', ',', ';', '?', '!', ':', '"', "'", '(', ')', '[', ']', '{', '}'):
+                            is_prose.append(True)
+                            continue
+                        if s_clean.isalpha():
+                            if s_clean.islower() or (s_clean.istitle() and len(s_clean) > 1):
+                                is_prose.append(True)
+                                continue
+                        is_prose.append(False)
+                        
+                    in_segment = False
+                    segment_indices = []
+                    for i in range(S_comp):
+                        if not is_prose[i]:
+                            if not in_segment:
+                                in_segment = True
+                                segment_indices.append([i])
+                            else:
+                                segment_indices[-1].append(i)
+                        else:
+                            in_segment = False
+                    
+                    for seg in segment_indices:
+                        contains_core = any(is_core[i] for i in seg)
+                        if contains_core:
+                            for i in seg:
+                                tid = tids[i]
+                                count = counts.get(tid, 1)
+                                import math
+                                idf = math.log(max(total_tokens, 2) / (count + 0.1))
+                                rarity_weight = max(1.0, min(idf, 6.0))
+                                boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+                boost_multipliers_batch.append(boost_multipliers)
+            boost_arr = mx.array(boost_multipliers_batch, dtype=joint_errors.dtype)
+            joint_errors = joint_errors * boost_arr
+            
+        max_res = self.max_residual
+        if max_res > 0:
+            top_k = mx.argsort(joint_errors, axis=-1)[:, -max_res:][:, ::-1]
+            indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
+            batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
+            batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
+            res_k_padded = mx.take_along_axis(batch_blocks_k_t, indices, axis=1)
+            res_v_padded = mx.take_along_axis(batch_blocks_v_t, indices, axis=1)
+            
+            # Construct res mask
+            match = (top_k[:, :, None] == mx.arange(S_comp)[None, None, :])
+            res_mask = mx.any(match, axis=1)
+        else:
+            top_k = None
+            res_k_padded = mx.zeros((B_batch, max_res, self.kv_heads, self.head_dim), dtype=batch_blocks_k.dtype)
+            res_v_padded = mx.zeros((B_batch, max_res, self.kv_heads, self.head_dim), dtype=batch_blocks_v.dtype)
+            res_mask = mx.zeros((B_batch, S_comp), dtype=mx.bool_)
+            
+        # 7. Scatter back to session layers
+        for l in range(self.num_layers):
+            start_idx = session["num_blocks"][l]
+            l_slice = slice(l * num_blocks, (l + 1) * num_blocks)
+            
+            session["comp_U"][l][start_idx:start_idx+num_blocks] = U_batch[l_slice]
+            session["comp_VK"][l][start_idx:start_idx+num_blocks] = VK_batch[l_slice]
+            session["comp_VV"][l][start_idx:start_idx+num_blocks] = VV_batch[l_slice]
+            session["comp_anc_k"][l][start_idx:start_idx+num_blocks] = batch_anchors_k[l_slice]
+            session["comp_anc_v"][l][start_idx:start_idx+num_blocks] = batch_anchors_v[l_slice]
+            session["comp_min_k"][l][start_idx:start_idx+num_blocks] = mx.min(batch_blocks_k[l_slice], axis=2)
+            session["comp_max_k"][l][start_idx:start_idx+num_blocks] = mx.max(batch_blocks_k[l_slice], axis=2)
+            session["comp_scale"][l][start_idx:start_idx+num_blocks] = scales_batch[l_slice]
+            session["comp_seq_len"][l][start_idx:start_idx+num_blocks] = self.block_size
+            
+            session["comp_res_k"][l][start_idx:start_idx+num_blocks] = res_k_padded[l_slice]
+            session["comp_res_v"][l][start_idx:start_idx+num_blocks] = res_v_padded[l_slice]
+            for b_idx in range(num_blocks):
+                session["comp_res_n"][l][start_idx + b_idx] = max_res
+            if "comp_res_mask" in session:
+                session["comp_res_mask"][l][start_idx:start_idx+num_blocks] = res_mask[l_slice]
+                
+            session["num_blocks"][l] = start_idx + num_blocks
+            
+            # Copy remaining dense tokens
+            K_all = K_all_layers[l]
+            V_all = V_all_layers[l]
+            K_dense = K_all[:, :, N_comp:, :]
+            V_dense = V_all[:, :, N_comp:, :]
+            L_dense = L - N_comp
+            
+            session["dense_keys"][l][0, :, :L_dense] = K_dense.squeeze(0)
+            session["dense_values"][l][0, :, :L_dense] = V_dense.squeeze(0)
+            session["dense_lens"][l] = L_dense
+            session["dense_lens_mx"][l] = mx.array(L_dense, dtype=mx.int32)
+            
+            rc = session.get("_res_cache")
+            if rc is not None:
+                rc.pop(l, None)
+                
+        # 8. Parallel evaluate all targets
         eval_targets = []
-        for layer_idx in range(self.num_layers):
+        for l in range(self.num_layers):
             eval_targets.extend([
-                session["comp_U"][layer_idx],
-                session["comp_VK"][layer_idx],
-                session["comp_VV"][layer_idx],
-                session["comp_anc_k"][layer_idx],
-                session["comp_anc_v"][layer_idx],
-                session["comp_min_k"][layer_idx],
-                session["comp_max_k"][layer_idx],
-                session["comp_res_k"][layer_idx],
-                session["comp_res_v"][layer_idx],
-                session["dense_keys"][layer_idx],
-                session["dense_values"][layer_idx],
+                session["comp_U"][l],
+                session["comp_VK"][l],
+                session["comp_VV"][l],
+                session["comp_anc_k"][l],
+                session["comp_anc_v"][l],
+                session["comp_min_k"][l],
+                session["comp_max_k"][l],
+                session["comp_res_k"][l],
+                session["comp_res_v"][l],
+                session["dense_keys"][l],
+                session["dense_values"][l],
             ])
             if "comp_res_mask" in session:
-                eval_targets.append(session["comp_res_mask"][layer_idx])
+                eval_targets.append(session["comp_res_mask"][l])
         mx.eval(*eval_targets)
 
     def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array):
-        """Write incoming prefill KV chunk into the dense buffer.
-        
-        Incoming K/V are shaped [1, kv_heads, L, head_dim].
-        Uses bulk slice writes instead of token-by-token iteration.
-        Flushes full blocks inline whenever the buffer would overflow.
-        """
+        """Write incoming prefill KV chunk into the stashed lists for deferred compression."""
         session = self.sessions.setdefault(session_id, self._create_empty_session())
-        # K: [1, kv_heads, L, head_dim] → squeeze batch dim
-        L_new = K.shape[2]
-        k_squeezed = K.squeeze(0)  # [kv_heads, L, head_dim]
-        v_squeezed = V.squeeze(0)  # [kv_heads, L, head_dim]
-
-        t = 0  # cursor into the chunk
-        while t < L_new:
-            dense_len = session["dense_lens"][layer_idx]
-
-            # If the dense buffer is full, compress the oldest block out
-            if dense_len >= self.max_dense_len:
-                self._flush_oldest_block(session, layer_idx)
-                dense_len = session["dense_lens"][layer_idx]
-
-            # How many tokens can we write in one bulk slice?
-            capacity = self.max_dense_len - dense_len
-            write_len = min(L_new - t, capacity)
-
-            # Bulk write: [kv_heads, write_len, head_dim] into the dense buffer
-            session["dense_keys"][layer_idx][0, :, dense_len:dense_len + write_len] = (
-                k_squeezed[:, t:t + write_len, :]
-            )
-            session["dense_values"][layer_idx][0, :, dense_len:dense_len + write_len] = (
-                v_squeezed[:, t:t + write_len, :]
-            )
-            session["dense_lens"][layer_idx] += write_len
-            session["dense_lens_mx"][layer_idx] = mx.array(session["dense_lens"][layer_idx], dtype=mx.int32)
-            t += write_len
+        session["prefill_K_chunks"][layer_idx].append(K)
+        session["prefill_V_chunks"][layer_idx].append(V)
 
     def compress_prefill_kv(self, session_id: str):
         pass
