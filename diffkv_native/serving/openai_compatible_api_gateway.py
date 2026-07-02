@@ -91,8 +91,17 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = 16384
     temperature: Optional[float] = 0.7
 
-BINARY_PATH_DEFAULT = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/build/diffkv_native"
-MODEL_PATH_DEFAULT  = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
+# Resolve paths relative to this file (…/diffkv_native/serving/ → …/diffkv_native/)
+# so the server runs from any checkout location. Overridable via env vars.
+_NATIVE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _model_path(filename: str) -> str:
+    return os.path.join(_NATIVE_ROOT, filename)
+
+BINARY_PATH_DEFAULT = os.environ.get(
+    "DIFFKV_BINARY_PATH", os.path.join(_NATIVE_ROOT, "build", "diffkv_native"))
+MODEL_PATH_DEFAULT  = os.environ.get(
+    "DIFFKV_MODEL_PATH", _model_path("qwen2.5-0.5b-instruct.gguf"))
 
 # Sentinel bytes
 _SENTINEL_RESPONSE = b"__RESPONSE__"
@@ -738,13 +747,13 @@ if __name__ == '__main__':
         if model_arg.endswith(".gguf") and os.path.exists(model_arg):
             os.environ["DIFFKV_MODEL_PATH"] = os.path.abspath(model_arg)
         elif "0.5b" in model_arg.lower():
-            os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-0.5b-instruct.gguf"
+            os.environ["DIFFKV_MODEL_PATH"] = _model_path("qwen2.5-0.5b-instruct.gguf")
         elif "1.5b" in model_arg.lower():
-            q4_path = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+            q4_path = _model_path("qwen2.5-1.5b-instruct-q4_k_m.gguf")
             if os.path.exists(q4_path):
                 os.environ["DIFFKV_MODEL_PATH"] = q4_path
             else:
-                os.environ["DIFFKV_MODEL_PATH"] = "/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+                os.environ["DIFFKV_MODEL_PATH"] = _model_path("qwen2.5-1.5b-instruct-q8_0.gguf")
         else:
             os.environ["DIFFKV_MODEL_PATH"] = MODEL_PATH_DEFAULT
 

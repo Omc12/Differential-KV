@@ -8,6 +8,31 @@ verification step so you can execute without re-deriving context.
 
 ---
 
+## Status — what's already fixed vs. left for Fable 5 (updated 2026-07-02)
+
+An initial hardening pass (Opus) landed the **safe, self-contained, inspect-verifiable** portability
+fixes. Everything algorithmic/perf (needs building + benchmarking) is left for Fable 5.
+
+**✅ DONE in this pass** (all portability/hygiene — no behavior change to the hot paths):
+- **0.1** — hardcoded `/Users/...` Metal shader path removed. `diffkv_attention.mm` now resolves via
+  `DIFFKV_METAL_DIR` env → executable-relative → CWD-relative → CMake-injected `DIFFKV_METAL_SOURCE_DIR`
+  (this build's source tree). CMake wires the define. *(Consolidating onto embedded-metallib = 0.5, still open.)*
+- **0.2** — native serving gateway paths now resolve relative to the checkout + honor
+  `DIFFKV_BINARY_PATH`/`DIFFKV_MODEL_PATH`.
+- **0.3 (partial)** — `.gitignore` now excludes `*.so`/`*.dylib`/`*.o`; the one-time `git rm --cached`
+  untracking is documented in `BUILD.md §6` (left for the user to run at a clean checkpoint, so it
+  doesn't muddy the current large uncommitted diff).
+- **0.6** — `BUILD.md` added: fresh-machine build steps for both engines, no absolute paths.
+- **Flag F** — `plot_graphs.py` personal `~/.gemini` dir → `PLOT_OUT_DIR` env / `./plots` default.
+
+**⏭️ LEFT FOR FABLE 5** (why not now: needs a build + benchmark loop, or is algorithmic/high-risk):
+0.4 (move `scratch/`), 0.5 (consolidate the two Metal loaders), 0.7 (user checkpoints uncommitted work);
+all of **Tier 1** (native router port, NaN-assert mode, factual store), all of **Tier 2/3** (fused
+kernels, batched SVD, adaptive/quantized compression, speculative, prefix reuse), **Tier 4**, and flags
+G/H/I/J/K. Verification harnesses in §7 must gate each.
+
+---
+
 ## 0. How to read this plan
 
 Work the tiers **top-down**. Tier 0 is the "runs on a machine that is not the author's" gate — do it
@@ -36,7 +61,7 @@ Two facts that reshape several of the suggestions you may have seen (from me and
 These are the reasons a fresh clone on another Mac / Linux box / CI runner will **fail or silently
 misbehave**. None are algorithmic; all are hygiene/portability.
 
-### 0.1 Hardcoded absolute author path in a *compiled* Metal loader  🔴
+### 0.1 Hardcoded absolute author path in a *compiled* Metal loader  🔴 ✅ DONE (2026-07-02)
 - **File:** [diffkv_native/runtime/diffkv_attention.mm:138](diffkv_native/runtime/diffkv_attention.mm)
 - **What:** the Split-K decode Metal path loads `diffkv_decode.metal` by **reading the source file at
   runtime**, trying a few relative paths and then falling back to
@@ -53,7 +78,7 @@ misbehave**. None are algorithmic; all are hygiene/portability.
   (`[[NSBundle mainBundle] pathForResource]` or `dladdr`-derived dir), never a hardcoded home dir.
 - **Impact:** high (portability) · **Effort:** low-med · **Risk:** low · **Confidence:** high
 
-### 0.2 Hardcoded absolute paths in the native serving gateway  🔴
+### 0.2 Hardcoded absolute paths in the native serving gateway  🔴 ✅ DONE (2026-07-02)
 - **File:** [diffkv_native/serving/openai_compatible_api_gateway.py:94-95, 741-747](diffkv_native/serving/openai_compatible_api_gateway.py)
 - **What:** `BINARY_PATH_DEFAULT`, `MODEL_PATH_DEFAULT`, and the model-size selection block all hardcode
   `/Users/omchimurkar1/Desktop/Differential-KV/...`.
@@ -62,7 +87,7 @@ misbehave**. None are algorithmic; all are hygiene/portability.
   Python side already does this cleanly — mirror its convention.
 - **Impact:** high · **Effort:** low · **Risk:** low · **Confidence:** high
 
-### 0.3 Committed, architecture-locked build artifacts  🟠
+### 0.3 Committed, architecture-locked build artifacts  🟠 ✅ PARTIAL (2026-07-02: .gitignore done; untrack step documented in BUILD.md §6)
 - **What is tracked in git (verified via `git ls-files`):**
   - `ACTIVE_RUNTIME/native_core/diffkv_core/diffkv_core.cpython-314-darwin.so` (arm64 + CPython 3.14 only;
     **also modified on the current branch**),
@@ -93,7 +118,7 @@ misbehave**. None are algorithmic; all are hygiene/portability.
   once 0.1 lands. Reduces surface area and removes a class of "works on my machine" bugs.
 - **Impact:** med (maintainability) · **Effort:** med · **Risk:** low · **Confidence:** med
 
-### 0.6 No reproducible build / run docs for a clean machine  🟠
+### 0.6 No reproducible build / run docs for a clean machine  🟠 ✅ DONE (2026-07-02: BUILD.md added; bootstrap.sh still optional)
 - **What:** there is no single "clone → build native → build the CPython ext → run" script that works
   from a fresh checkout with no absolute paths. `CMakeLists.txt` + `setup.py` exist but rely on the
   committed artifacts (0.3) and submodule state.
@@ -291,19 +316,19 @@ misbehave**. None are algorithmic; all are hygiene/portability.
 
 ## 5. Non-production / "shouldn't be here" flags (consolidated)
 
-| # | Item | Location | Severity |
-|---|------|----------|----------|
-| A | Hardcoded `/Users/omchimurkar1/...` Metal shader path (compiled in) | `diffkv_native/runtime/diffkv_attention.mm:138` | 🔴 |
-| B | Hardcoded binary/model paths | `diffkv_native/serving/openai_compatible_api_gateway.py:94-95,741-747` | 🔴 |
-| C | Committed arch-locked `.so` + `.o` build artifacts + `build/` tree | `ACTIVE_RUNTIME/native_core/diffkv_core/` | 🟠 |
-| D | Dozens of `DIFFKV_DBG_*` / experimental env flags interleaved in the hot path | `diffkv_native/src/main.cpp` (6280 lines) | 🟡 |
-| E | 181 hardcoded-path scratch scripts in the tree | `scratch/`, `ACTIVE_RUNTIME/scratch/` | 🟡 |
-| F | Personal `~/.gemini/...` output dir | `plot_graphs.py:6` | 🟡 |
-| G | Hardcoded physics-domain tokens in SRL scoring | `query_router.{py,hpp}` | 🟡 |
-| H | Stop-word list duplicated in 3 places, diverging | (SRL / tokenizer utils) | 🟡 |
-| I | No C++ test suite (only shell scripts); no fresh-clone build script | `diffkv_native/tests/`, repo root | 🟠 |
-| J | `__pycache__` committed inside the C++ production tree | `diffkv_native/native_core/` | 🟡 |
-| K | Blanket NaN-masking hides numerical fragility | `mlx_diffkv_wrapper.py` decode kernel | 🟡 |
+| # | Item | Location | Severity | Status |
+|---|------|----------|----------|--------|
+| A | Hardcoded `/Users/omchimurkar1/...` Metal shader path (compiled in) | `diffkv_native/runtime/diffkv_attention.mm:138` | 🔴 | ✅ fixed |
+| B | Hardcoded binary/model paths | `diffkv_native/serving/openai_compatible_api_gateway.py` | 🔴 | ✅ fixed |
+| C | Committed arch-locked `.so` + `.o` build artifacts + `build/` tree | `ACTIVE_RUNTIME/native_core/diffkv_core/` | 🟠 | ⚠️ gitignore’d; untrack pending (BUILD.md §6) |
+| D | Dozens of `DIFFKV_DBG_*` / experimental env flags interleaved in the hot path | `diffkv_native/src/main.cpp` (6280 lines) | 🟡 | ⏭️ Fable |
+| E | 181 hardcoded-path scratch scripts in the tree | `scratch/`, `ACTIVE_RUNTIME/scratch/` | 🟡 | ⏭️ Fable/user |
+| F | Personal `~/.gemini/...` output dir | `plot_graphs.py:6` | 🟡 | ✅ fixed |
+| G | Hardcoded physics-domain tokens in SRL scoring | `query_router.{py,hpp}` | 🟡 | ⏭️ Fable |
+| H | Stop-word list duplicated in 3 places, diverging | (SRL / tokenizer utils) | 🟡 | ⏭️ Fable |
+| I | No C++ test suite (only shell scripts) | `diffkv_native/tests/` | 🟠 | ⏭️ Fable (BUILD.md added) |
+| J | `__pycache__` committed inside the C++ production tree | `diffkv_native/native_core/` | 🟡 | ⚠️ untrack pending (BUILD.md §6) |
+| K | Blanket NaN-masking hides numerical fragility | `mlx_diffkv_wrapper.py` decode kernel | 🟡 | ⏭️ Fable (1.2) |
 
 `main.cpp` at 6,280 lines with ~40 debug env flags is the biggest maintainability risk: it makes the
 "which path actually runs by default" question hard to answer (I had to trace it: default = CPU custom

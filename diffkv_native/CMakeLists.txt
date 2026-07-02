@@ -93,6 +93,11 @@ if (APPLE)
         ${METAL_LIBRARY}
         ${ACCELERATE_LIBRARY}
     )
+    # Portable fallback path to the Metal shader source, pointing at THIS build's
+    # source tree (not any author-specific home dir). Overridable at runtime with
+    # the DIFFKV_METAL_DIR env var. Used by runtime/diffkv_attention.mm.
+    target_compile_definitions(diffkv_native PRIVATE
+        "DIFFKV_METAL_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/native_core/diffkv_core/metal\"")
 endif()
 
 if (GGML_CUDA)

@@ -2,8 +2,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Output Directory
-out_dir = "/Users/omchimurkar1/.gemini/antigravity/brain/c25f85df-71ef-497d-bcf0-7dd6af598e02"
+# Output Directory — override with PLOT_OUT_DIR; defaults to ./plots next to this file.
+out_dir = os.environ.get(
+    "PLOT_OUT_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots"))
 os.makedirs(out_dir, exist_ok=True)
 
 # Colors

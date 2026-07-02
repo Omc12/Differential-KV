@@ -35,6 +35,15 @@ archive/ARCHIVED_SYNTHETIC_SYSTEMS/
 **/build/
 build/
 
+# Compiled native extensions & object files — build per-platform, never commit.
+# NOTE: .gitignore does not untrack files already in the index. Some artifacts
+# (diffkv_core.cpython-*-darwin.so, build/*.o) were committed before these rules;
+# see BUILD.md → "Untracking committed build artifacts" for the one-time cleanup.
+*.so
+*.dylib
+*.o
+*.obj
+
 # GGUF models
 *.gguf
 **/qwen2.5-0.5b-instruct.gguf

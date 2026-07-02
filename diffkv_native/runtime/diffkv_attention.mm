@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <mach-o/dyld.h>
 #include <unordered_map>
 #include <mutex>
@@ -105,10 +106,17 @@ static void init_metal_runtime() {
     NSString* source = nil;
     NSString* path = nil;
 
+    // 0. Explicit override via the DIFFKV_METAL_DIR env var (portable; highest
+    //    priority — lets a relocated binary point at the shader dir directly).
+    if (const char* env_dir = std::getenv("DIFFKV_METAL_DIR")) {
+        path   = [NSString stringWithFormat:@"%s/diffkv_decode.metal", env_dir];
+        source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
+    }
+
     // 1. Try relative to the executable's path
     char exec_path[1024];
     uint32_t sz = sizeof(exec_path);
-    if (_NSGetExecutablePath(exec_path, &sz) == 0) {
+    if (!source && _NSGetExecutablePath(exec_path, &sz) == 0) {
         NSString* binPath = [NSString stringWithUTF8String:exec_path];
         NSString* binDir  = [binPath stringByDeletingLastPathComponent];
         path   = [binDir stringByAppendingPathComponent:@"../native_core/diffkv_core/metal/diffkv_decode.metal"];
@@ -133,11 +141,16 @@ static void init_metal_runtime() {
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
 
-    // 3. Absolute path fallback
+    // 3. Compile-time source-tree location — set by CMake to THIS build's source
+    //    dir (see DIFFKV_METAL_SOURCE_DIR in CMakeLists.txt). Correct on any build
+    //    machine; not author-specific. Kept as a last-resort fallback after the
+    //    env override + executable/CWD-relative probes above.
+#ifdef DIFFKV_METAL_SOURCE_DIR
     if (!source) {
-        path   = @"/Users/omchimurkar1/Desktop/Differential-KV/diffkv_native/native_core/diffkv_core/metal/diffkv_decode.metal";
+        path   = @(DIFFKV_METAL_SOURCE_DIR "/diffkv_decode.metal");
         source = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&error];
     }
+#endif
 
     if (!source) {
         std::cerr << "[Metal Attention] Error: Could not load diffkv_decode.metal from any known location!" << std::endl;
