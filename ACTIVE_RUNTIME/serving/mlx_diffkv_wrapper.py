@@ -101,6 +101,53 @@ class MLXCompressedBlock:
             self.seq_len
         )
 
+def _capture_policy_env() -> Tuple[bool, float]:
+    """Experimental residual-capture policies (env-gated, both default OFF).
+
+    DIFFKV_RES_V_ONLY=1 — keep the JOINT error ranking, but store
+    SVD-reconstructed K (not exact K) for the captured rows; V stays exact.
+    K reconstructs at ~1% error while V is 25-70% (2026-07-02 session §2.4),
+    so exact residual K should be dispensable; if recall holds, res_k storage
+    can be dropped entirely (recomputed at decode), doubling the V-residual
+    budget at equal memory.
+    NOTE (measured 2026-07-03): ranking by V-error ALONE was also tried and
+    REJECTED — easy-NIAH@4k fell 3/3 → 1/3 ("OMG"/"OCTOPUS" confabulations).
+    V error is ubiquitous across rows, so the discriminative capture signal
+    lives in the K half of the joint error; do not resurrect V-only ranking
+    without new evidence.
+
+    DIFFKV_RESIDUAL_COVERAGE_FRAC=f — reserve round(f*max_residual) slots for
+    stride-stratified coverage of the block, so ranked capture is never fully
+    zero-sum (the boost-displacement failure mode: boosting needle digits
+    evicted the adjacent 'TA' row at 16k/0.9).
+    """
+    res_v_only = os.environ.get("DIFFKV_RES_V_ONLY", "0") == "1"
+    try:
+        cov_frac = float(os.environ.get("DIFFKV_RESIDUAL_COVERAGE_FRAC", "0"))
+    except ValueError:
+        cov_frac = 0.0
+    return res_v_only, cov_frac
+
+
+_COV_BONUS_CACHE: Dict[Tuple[int, int], mx.array] = {}
+
+def _coverage_bonus(S_comp: int, max_res: int, cov_frac: float) -> Optional[mx.array]:
+    """(S_comp,) float32 vector with +1e12 at the stratified coverage columns,
+    or None when coverage is off. Adding it before the top-k argsort forces
+    those columns into the residual set while ranking the rest normally."""
+    if cov_frac <= 0.0 or max_res <= 0:
+        return None
+    n_cov = min(max_res, max(1, int(round(cov_frac * max_res))))
+    key = (S_comp, n_cov)
+    got = _COV_BONUS_CACHE.get(key)
+    if got is None:
+        cols = np.unique(np.round(np.linspace(0, S_comp - 1, n_cov)).astype(int))
+        bonus = np.zeros((S_comp,), dtype=np.float32)
+        bonus[cols] = 1e12
+        got = _COV_BONUS_CACHE[key] = mx.array(bonus)
+    return got
+
+
 def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, mx.array]:
     """Compress a batch of KV delta vectors using randomised truncated SVD on GPU in parallel.
     
@@ -1418,17 +1465,31 @@ class MLXKVBlockManager:
                 boost_rows.append(boost_multipliers)
             # b = layer*num_blocks + block  →  tile the per-block rows per layer
             boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
-            joint_errors = joint_errors * mx.array(boost_np).astype(joint_errors.dtype)
+            boost_mx = mx.array(boost_np).astype(joint_errors.dtype)
+            joint_errors = joint_errors * boost_mx
             
         max_res = self.max_residual
+        res_v_only, cov_frac = _capture_policy_env()
         if max_res > 0:
-            top_k = mx.argsort(joint_errors, axis=-1)[:, -max_res:][:, ::-1]
+            capture_scores = joint_errors
+            cov_bonus = _coverage_bonus(S_comp, max_res, cov_frac)
+            if cov_bonus is not None:
+                capture_scores = capture_scores.astype(mx.float32) + cov_bonus
+            top_k = mx.argsort(capture_scores, axis=-1)[:, -max_res:][:, ::-1]
             indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
             batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
             batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
             res_k_padded = mx.take_along_axis(batch_blocks_k_t, indices, axis=1)
             res_v_padded = mx.take_along_axis(batch_blocks_v_t, indices, axis=1)
-            
+            if res_v_only:
+                # Store SVD-reconstructed K for the captured rows (V stays
+                # exact): tests that the router/attention tolerate ~1%-error
+                # residual keys — the precondition for dropping res_k storage.
+                recon_k_rows = (recon_delta_k.reshape(B_batch, S_comp, self.kv_heads, self.head_dim)
+                                + mx.expand_dims(batch_anchors_k, 1))
+                idx_recon = mx.expand_dims(mx.expand_dims(top_k, -1), -1)
+                res_k_padded = mx.take_along_axis(recon_k_rows, idx_recon, axis=1).astype(res_v_padded.dtype)
+
             # Construct res mask
             match = (top_k[:, :, None] == mx.arange(S_comp)[None, None, :])
             res_mask = mx.any(match, axis=1)
@@ -1695,12 +1756,21 @@ class MLXKVBlockManager:
                 joint_errors = joint_errors * boost_arr
 
         max_res = self.max_residual
+        res_v_only, cov_frac = _capture_policy_env()
         if max_res > 0:
-            top_k = mx.argsort(joint_errors)[-max_res:][::-1]
+            capture_scores = joint_errors
+            cov_bonus = _coverage_bonus(S_comp, max_res, cov_frac)
+            if cov_bonus is not None:
+                capture_scores = capture_scores.astype(mx.float32) + cov_bonus
+            top_k = mx.argsort(capture_scores)[-max_res:][::-1]
             block_k_t = block_k.transpose(1, 0, 2)
             block_v_t = block_v.transpose(1, 0, 2)
             res_k_padded = mx.take(block_k_t, top_k + 1, axis=0)
             res_v_padded = mx.take(block_v_t, top_k + 1, axis=0)
+            if res_v_only:
+                recon_k_rows = (recon_delta_k.reshape(S_comp, self.kv_heads, self.head_dim)
+                                + mx.expand_dims(anchor_k, 0))
+                res_k_padded = mx.take(recon_k_rows, top_k, axis=0).astype(res_v_padded.dtype)
             n_res = max_res
         else:
             top_k = None
