@@ -24,6 +24,28 @@ The `llama.cpp` dependency is a git submodule:
 git submodule update --init --recursive
 ```
 
+> **IMPORTANT — fresh clones:** the pinned submodule commit (branch
+> `diffkv-fused-op`, the DiffKV fused-attention ggml/Metal kernels) exists
+> only in this repo, **not** on upstream `ggerganov/llama.cpp`, so the plain
+> `submodule update` above will fail to find it. The commits are vendored in
+> `diffkv_native/third_party/diffkv-fused-op.bundle` (exact SHAs preserved).
+> Restore them with:
+>
+> ```bash
+> git submodule init
+> git -C diffkv_native/third_party/llama.cpp fetch origin d2462f8f7ac6d80070a587ffebf6cd73730f4280 || \
+>     git submodule update --init diffkv_native/third_party/llama.cpp || true
+> git -C diffkv_native/third_party/llama.cpp fetch \
+>     "$(git rev-parse --show-toplevel)/diffkv_native/third_party/diffkv-fused-op.bundle" \
+>     diffkv-fused-op:diffkv-fused-op
+> git submodule update diffkv_native/third_party/llama.cpp
+> ```
+>
+> Long-term fix (TODO): push `diffkv-fused-op` to a fork of llama.cpp under
+> your GitHub account and point `.gitmodules` at the fork. Regenerate the
+> bundle after any new submodule commits:
+> `git -C diffkv_native/third_party/llama.cpp bundle create ../diffkv-fused-op.bundle $(git -C diffkv_native/third_party/llama.cpp merge-base origin/master diffkv-fused-op)..diffkv-fused-op`
+
 ---
 
 ## 2. Python environment (the "active" runtime)
