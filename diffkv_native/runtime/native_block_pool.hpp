@@ -63,7 +63,7 @@ public:
     NativeBlockPool();
     ~NativeBlockPool();
 
-    bool initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft, int S_max = 64, ggml_type kv_type = GGML_TYPE_F16);
+    bool initialize(int n_slots, int rank, int head_dim, int kv_heads, int desc_dim, ggml_backend_buffer_type_t buft, int S_max = 64, ggml_type kv_type = GGML_TYPE_Q8_0);
 
     int get_rank() const { return rank_; }
     int get_S_max() const { return S_max_; }
@@ -193,7 +193,7 @@ private:
     int kv_heads_ = 0;
     int desc_dim_ = 0;
     int S_max_ = 64;
-    ggml_type kv_type_ = GGML_TYPE_F16;
+    ggml_type kv_type_ = GGML_TYPE_Q8_0;
 
     struct ggml_context * pool_ctx_ = nullptr;
     struct ggml_backend_buffer * pool_buffer_ = nullptr;

@@ -40,7 +40,7 @@ LINKED_PAIRS = [
 
 def compute_scores(text):
     text_lower = text.lower()
-    facts_found = [f for f in FACTS if f in text_lower]
+    facts_found = [f for f in FACTS if re.search(r"\b" + re.escape(f) + r"\b", text_lower)]
     n_facts = len(facts_found)
     
     # Split sentences
@@ -50,9 +50,9 @@ def compute_scores(text):
     for x, y in LINKED_PAIRS:
         satisfied = False
         for i in range(len(sentences)):
-            if x in sentences[i]:
+            if re.search(r"\b" + re.escape(x) + r"\b", sentences[i]):
                 for j in [i-1, i, i+1]:
-                    if 0 <= j < len(sentences) and y in sentences[j]:
+                    if 0 <= j < len(sentences) and re.search(r"\b" + re.escape(y) + r"\b", sentences[j]):
                         satisfied = True
                         break
             if satisfied:

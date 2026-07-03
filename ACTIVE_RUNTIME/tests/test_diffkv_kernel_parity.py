@@ -292,8 +292,6 @@ def test_needle_in_compressed_block():
     assert sim > 0.90, f"FAIL: needle cosine {sim:.4f} < 0.90"
     print("  PASS ✓")
     return sim
-
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

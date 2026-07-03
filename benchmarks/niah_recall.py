@@ -151,6 +151,8 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=
             ids = tok.encode(prompt)
             sid = "niah"
             mgr.clear_session(sid)
+            if not hasattr(wrapper, "_session_token_ids"):
+                wrapper._session_token_ids = {}
             wrapper._session_token_ids[sid] = []
             mgr.init_session(sid, prefill_len=len(ids))
             mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))

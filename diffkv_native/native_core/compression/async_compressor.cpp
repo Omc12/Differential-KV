@@ -11,6 +11,7 @@
 namespace diffkv {
 
 extern std::atomic<int> g_diffkv_dbg_pos;
+extern std::atomic<int> g_diffkv_dbg_block_states;
 
 AsyncCompressor::AsyncCompressor(DiffKVBlockStateTable& state_table, std::function<bool(const std::string&)> alive_cb)
     : state_table_(state_table), alive_cb_(alive_cb) {}
@@ -204,6 +205,9 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     if (trans_ok) {
         if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
             std::cerr << "[DBG_TRANS] Session " << job.session_id << " anchor_idx=" << job.anchor_idx << " pool_idx=" << job.block_id << " state=CompressedResident\n";
+        }
+        if (g_diffkv_dbg_block_states.load(std::memory_order_relaxed)) {
+            std::cerr << "[DBG_BLOCK_STATES] Session " << job.session_id << " block_id=" << job.local_block_id << " anchor_idx=" << job.anchor_idx << " pool_idx=" << job.block_id << " state=CompressedResident\n";
         }
     } else {
         active_table.force_invalidate(job.block_id);

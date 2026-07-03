@@ -18,6 +18,7 @@ namespace diffkv {
 // sparse-attention custom op actually executed by the sched?). Read from main after decode.
 std::atomic<long> g_diffkv_cb_invocations{0};
 std::atomic<int>  g_diffkv_dbg_pos{0};   // mirror of DIFFKV_DBG_POS, set from main (worker-thread getenv fails)
+std::atomic<int>  g_diffkv_dbg_block_states{0}; // mirror of DIFFKV_DBG_BLOCK_STATES, set from main
 std::atomic<long> g_cpu_attn_count{0};   // execute_cpu_attention entries (live path = CPU?)
 std::atomic<long> g_metal_attn_count{0}; // execute_metal_attention entries (live path = Metal?)
 

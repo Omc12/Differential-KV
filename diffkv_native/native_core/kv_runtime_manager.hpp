@@ -32,7 +32,7 @@ public:
         int n_layers,
         const DiffKVModel* model,
         ggml_backend_buffer_type_t buft,
-        ggml_type kv_quant_type = GGML_TYPE_F16
+        ggml_type kv_quant_type = GGML_TYPE_Q8_0
     );
 
     void reset();

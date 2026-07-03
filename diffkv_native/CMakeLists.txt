@@ -107,3 +107,29 @@ if (GGML_CUDA)
         CUDA::cudart
     )
 endif()
+
+# Standalone conformance test executable
+set(CONF_SOURCES
+    ../tools/conformance_test.cpp
+    runtime/native_block_pool.cpp
+    runtime/diffkv_attention.cpp
+)
+if (APPLE)
+    list(APPEND CONF_SOURCES runtime/diffkv_attention.mm)
+endif()
+
+add_executable(conformance_test ${CONF_SOURCES})
+target_link_libraries(conformance_test PRIVATE
+    llama
+    ggml
+)
+if (APPLE)
+    target_link_libraries(conformance_test PRIVATE
+        ${FOUNDATION_LIBRARY}
+        ${METAL_LIBRARY}
+        ${ACCELERATE_LIBRARY}
+    )
+    # Enable Objective-C++ compilation flags for Metal files in conformance_test
+    set_source_files_properties(runtime/diffkv_attention.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
+

@@ -16,6 +16,7 @@ namespace diffkv {
 struct CompressJob {
     std::string session_id;
     int block_id;
+    int local_block_id = -1;
     int block_size;  // S (total tokens in block, typically 64)
     int feat_dim;    // F
     int rank;        // R
@@ -70,6 +71,7 @@ struct CompressJob {
         force_lapack = other.force_lapack;
         session_id = other.session_id;
         block_id = other.block_id;
+        local_block_id = other.local_block_id;
         block_size = other.block_size;
         feat_dim = other.feat_dim;
         rank = other.rank;
@@ -142,6 +144,7 @@ struct CompressJob {
             force_lapack = other.force_lapack;
             session_id = other.session_id;
             block_id = other.block_id;
+            local_block_id = other.local_block_id;
             block_size = other.block_size;
             feat_dim = other.feat_dim;
             rank = other.rank;

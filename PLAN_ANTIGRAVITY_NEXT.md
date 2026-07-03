@@ -51,6 +51,7 @@ production compressor**. All were caught and reverted. The rules:
 | `cd diffkv_native/tests && ./test_niah_native.sh` (fused-ggml path) | not re-run at HEAD; was 3/6 with 16k deterministic salad — path slated for deletion (see AUDIT §5) |
 | `DIFFKV_SELFTEST=1 diffkv_native/build/diffkv_native <gguf> "x"` | PASS, 5.96e-08 |
 | MLX fused kernel (`DIFFKV_FUSED_DECODE=1`) 4k bench | **0/1 garbage @9.8 tps — broken, keep OFF** |
+| `./benchmarks/native_margin_probe.sh` (logit margin probe) | 8k/0.5: +11.3469, 16k/0.5: FAIL (retrieval failure) |
 | MLX 13.2k-prefill peak (see `16bed46` message for the script) | ~3.0 GB, ~27s |
 
 > The native sweep is now SATURATED at 6/6 — pass-counts are a weak signal from here.

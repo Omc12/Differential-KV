@@ -9,6 +9,7 @@
 namespace diffkv {
 
 extern std::atomic<int> g_diffkv_dbg_pos;
+extern std::atomic<int> g_diffkv_dbg_block_states;
 
 static std::vector<uint32_t> decode_utf8(const std::string& str) {
     std::vector<uint32_t> codepoints;
@@ -465,6 +466,9 @@ void StreamingSparseIngestManager::ingest_chunk(
                 if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
                     std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << anchor_pos << " pool_idx=" << slot_id << " state=DenseResident\n";
                 }
+                if (g_diffkv_dbg_block_states.load(std::memory_order_relaxed)) {
+                    std::cerr << "[DBG_BLOCK_STATES] Layer " << layer_idx << " block_id=" << blocks.size() << " anchor_idx=" << anchor_pos << " pool_idx=" << slot_id << " state=DenseResident\n";
+                }
             }
             
             new_block->token_indices.push_back(position_start + t);
@@ -661,6 +665,9 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
         std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=Compressing\n";
     }
+    if (g_diffkv_dbg_block_states.load(std::memory_order_relaxed)) {
+        std::cerr << "[DBG_BLOCK_STATES] Layer " << layer_idx << " block_id=" << block_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=Compressing\n";
+    }
 
     // Check if block qualifies for rank boosting (1.5x) to prevent Precision Loss
     bool boost = false;
@@ -691,6 +698,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     CompressJob job;
     job.session_id = active_session_id_.empty() ? "42" : active_session_id_;
     job.block_id = slot_id;
+    job.local_block_id = block_idx;
     job.block_size = S_total;
     job.feat_dim = F_test;
     job.rank = svd_rank;
@@ -782,6 +790,9 @@ void StreamingSparseIngestManager::submit_block_for_compression(
             block->state = BlockState::DenseResident;
             if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
                 std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=DenseResident (failed submit)\n";
+            }
+            if (g_diffkv_dbg_block_states.load(std::memory_order_relaxed)) {
+                std::cerr << "[DBG_BLOCK_STATES] Layer " << layer_idx << " block_id=" << block_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=DenseResident\n";
             }
         } else {
             stats_.total_compressed++;

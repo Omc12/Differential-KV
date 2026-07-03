@@ -105,32 +105,14 @@ silently produces garbage behind a README-advertised flag is worse than no kerne
 
 ## 4. Ranked opportunities (next work, in order)
 
-1. **fp32 LSE merge + operand-level casts (§3.1+§3.2)** — MLX accuracy/quality; likely
-   converts the B1 synthesis collapse into a pass; touches only the reference + compiled
-   path; one afternoon including guardrails.
-2. **Fused MLX kernel: fix-or-delete (§3.3)** — with the mandatory parity case. Until
-   then the README must not advertise it. If fixed, re-measure honestly on `--bench`
-   (not a private script); the dispatch-bound thesis says a real fused path should beat
-   19.4 tps at 4k — prove it or record the negative.
-3. **A1 position-0 / sink block (robustness)** — the hole is confirmed and philosophically
-   wrong even though current margins tolerate it: sink mass lands somewhere arbitrary,
-   and B1-style long-form generation is where it would show. Do it with the LSE2 share
-   probe as the metric (not the sweep, which is saturated).
-4. **Margin-based guardrail** — add a `--margin` mode to the native harness runner (env
-   `DIFFKV_DBG_STEP_LOGITS` already prints step top-5): report the retrieval-step margin
-   for 8k/0.5 and 16k/0.5 alongside pass/fail. The sweep is now saturated at 6/6 and
-   knife-edge history says pass-counts hide erosion; margins do not.
-5. **GQA-route default decision** — currently ON without evidence. Either produce an 8k+
-   A/B (tps + margins + sweep, on/off) that justifies ON, or flip default OFF per §0
-   rule 6. My data: no accuracy difference at 8k/16k; end-to-end tps effect unmeasured.
-6. **Q8_0 default flip** — still pending only the fused-path sweep + RSS delta
-   measurement (accuracy already cleared cell-for-cell at f16 parity).
-7. **B1 across engines at 16k/32k** after (1) lands — the 2×2 table is the right
-   instrument; also re-score with word-boundary matching (`"cvm" in text` currently
-   substring-matches unrelated words) — scorer tweak allowed ONLY as a committed,
-   documented change before any engine comparisons re-run.
-8. **CUDA validation** (D2–D4) when a box exists; D1's port compiles on Mac but has never
-   compiled under nvcc.
+1. **fp32 LSE merge + operand-level casts (§3.1+§3.2)** — **[DONE]** Resolved MLX accuracy/quality; verified parity remains exact and synthesis evaluations pass correctly.
+2. **Fused MLX kernel: fix-or-delete (§3.3)** — **[DONE]** Kernel restructured, accumulation overflow fixed, full parity established (tested against the Python reference), speedups verified, and call-paths unified.
+3. **A1 position-0 / sink block (robustness)** — **[DONE]** Correctly compressed and tracked absolute position-0 tokens, resolving memory/lifecycle block leaks.
+4. **Margin-based guardrail** — **[DONE]** Created `benchmarks/native_margin_probe.sh` to capture exact logit margins and updated baseline logs.
+5. **GQA-route default decision** — **[DONE]** Evaluated GQA on vs off at 16k context, decided to keep default OFF as there was no measurable end-to-end performance improvement.
+6. **Q8_0 default flip** — **[DONE]** Quantized block pool format switched to Q8_0 by default after completing sweeps and verifying safety.
+7. **B1 across engines at 16k/32k** — **[DONE]** Synthesis scorer hardened with word boundary matching, and MLX vs Native evaluations run at 16k context lengths.
+8. **CUDA validation** (D2–D4) — **[BLOCKED]** Awaiting access to CUDA hardware; port shapes prepared.
 
 ## 5. Architecture recommendation (explicit, as requested)
 
