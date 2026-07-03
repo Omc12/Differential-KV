@@ -237,11 +237,49 @@ results (2026-07-03, commit `06ef021` + A/Bs):
 
 **Synthesis:** native's sparse-read logits at the emission steps are MARGINALLY right
 (answer tokens near-top, losing to interference under any sampler shaping) where MLX's
-are decisively right on identical input. Next probe, sharply defined: same 8k/0.5
-prompt, first digit-emission step — dump native vs MLX top-5 logits (native already
-prints them; add the same to the MLX A/B script), quantify the margin gap, then bisect
-per-layer attention outputs at that step to find where the divergence enters. Remaining
-structural suspects after `06ef021`: fp16 rounding of the stored correction itself vs
-MLX's exact-row storage; the q8_0-GGUF vs 4bit-MLX weight difference (control: run MLX
-q8 or native q4); approximate-attn scoring mode (`DIFFKV_MPS_APPROXIMATE_ATTN=1` in the
-harness — try exact mode); dense/sparse LSE merge weighting.
+are decisively right on identical input.
+
+**Probe results (2026-07-03 fifth pass, commit with DIFFKV_DBG_LSE2):**
+- Step-level logit comparison at 8k/0.5, the post-"OMEGA" step (must emit "-"):
+  MLX sparse: `-` = 30.41, margin **+8.4**. Native dense control (same gguf, sparse
+  disengaged): `-` = 33.14, margin **+12.5**, exact passcode. Native sparse: `-` = 20.9,
+  **loses to `.` by 1.35**. → The sparse read alone costs ~14 logit points; weights,
+  routing, capture all exonerated.
+- ELIMINATED by direct A/B this pass: router pruning (TOPK=64 unchanged), rep-penalty
+  (shuffles failures only), exact-vs-approximate scoring (identical failure), route-once
+  (MLX defaults OFF too), MAX_RESIDUAL (both engines 64), CPU-vs-Metal callback (both
+  weak, differ slightly from each other).
+- **The quantitative signature (new cross-engine instrument):** at layer 0 on the same
+  prompt/steps, per-head compressed-pool share — MLX retrieval heads SATURATE
+  (max share 1.0000 on the digit steps; avg 0.03–0.24); native's best head peaks at
+  ~0.41–0.59 (avg 0.11–0.15). MLX lets a retrieval head commit ~100% to the compressed
+  pool; native's equivalent head stays diluted by several nats.
+- Instruments: `DIFFKV_DBG_LSE2=1` (native, CPU path `DIFFKV_FORCE_CPU_ATTN=1`) and
+  `DIFFKV_DBG_LSE_SHARE=1` (MLX — NOTE: was printing nan until this pass; exp() overflow
+  at Qwen's ~1e4 LSE magnitudes, now a stable sigmoid. The Antigravity D2A "share" table
+  predates this fix and cannot have come from this code path).
+
+**Next step (sharply defined):** find the several-nat per-head deficit. Extend LSE2 to
+print per-head (share, lse_s, lse_d) for the top-3 sparse heads and the same on the MLX
+side; then for THE retrieval head, dump its top-5 scoring rows in the sparse half
+(block, row, score) native-vs-MLX at the "-" step. Candidates the head-level data will
+separate: (a) per-row score ceiling inside blocks (e.g. the w_anc/anchor term or
+block_scale flattening within-block contrast for high-magnitude heads), (b) dense-half
+scores inflated in native (self/recency handling), (c) a head-indexing/GQA subtlety in
+the sparse half only.
+
+## D3-redo — MLX fused decode kernel, proper parallelization (next session's main item)
+
+Antigravity's 0.8-tps kernel proves only that grid=(H_q,1,1)/threadgroup=(1,1,1) is
+wrong. Design for the redo (per plan 2.1, still the #1 speed lever, ~20→30+ tps target):
+- Grid: one THREADGROUP per (q_head, block_tile) — e.g. 12 heads × ⌈nb/4⌉ tiles;
+  256 threads per group. Each thread owns (token, rank-slice) work; simdgroup
+  reductions for the rank-16 dot products (fits one simdgroup width naturally).
+- Two-pass online softmax per tile (local m/d/accum), then a tiny second kernel (or
+  threadgroup-atomic merge) LSE-combines tile results + the dense window half —
+  mirrors `compute_decode_attention_static` exactly, which stays as the parity oracle.
+- Keep shapes static per (nb_padded, dense_cap) bucket exactly like the compiled path;
+  template on rank=16, D=128 (Qwen 1.5B: D=128? verify — head_dim from config), GQA
+  g=q_heads/kv_heads broadcast INSIDE the threadgroup so comp_* loads are shared.
+- Acceptance unchanged: parity case in test_diffkv_kernel_parity.py (seeded, fp16
+  atol 2e-2) → full guardrails → ≥1.5× decode tps @4k, else report profile, leave OFF.

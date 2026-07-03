@@ -549,3 +549,60 @@ Parity 4/4 (unchanged, no MLX code touched this pass) · SELFTEST PASS 5.96e-08 
 native default-path honest sweep **3/6** (4k/0.5 ✓ 4k/0.9 ✓ 16k/0.9 ✓; all failures now
 near-misses that begin "OMEGA-") · fused harness sweep 3/6 at `b16c3ac` (not re-run after
 `06ef021` — re-run before any fused work). Baseline at session start was 1/6 on both paths.
+
+---
+
+# Session Report — Fifth Pass: D7 Bisection, Q8_0 Clearance, Hygiene (2026-07-03, Fable 5)
+
+## D7 bisection — the experiment, run to its current bottom
+
+All on the identical 8k/0.5 native-harness prompt, greedy, rep-penalty 1.0:
+
+| Read | '-' logit after "OMEGA" | verdict |
+|---|---|---|
+| native DENSE (sparse disengaged, same gguf) | **33.14, margin +12.5** → exact passcode | weights/prompt exonerated |
+| MLX sparse (4-bit, forced compressed) | **30.41, margin +8.4** → exact passcode | reference behavior |
+| native sparse (Metal callback) | 20.88, **loses to '.' by 1.35** | the gap |
+| native sparse (CPU-forced) | fails one step earlier (" O" loses by 0.15) | both impls weak, slightly different |
+
+Eliminated by direct A/B this pass: router pruning (TOPK=64 unchanged), rep-penalty,
+approximate-vs-exact scoring, route-once (MLX defaults OFF too), MAX_RESIDUAL (both 64),
+attention cache (off). **The sparse read alone costs ~14 logit points.**
+
+**Quantitative signature (new cross-engine instrument):** layer-0 per-head compressed-pool
+share on the same steps — MLX retrieval heads SATURATE (max 1.0000 on digit steps, avg
+0.03–0.24); native's best head peaks at 0.41–0.59 (avg 0.11–0.15). MLX lets a retrieval head
+commit ~100% of its mass to the compressed pool; native's stays diluted by several nats.
+Instruments: native `DIFFKV_DBG_LSE2=1` (CPU path), MLX `DIFFKV_DBG_LSE_SHARE=1` — the MLX
+one printed nan until this pass (exp overflow at Qwen's ~1e4 LSE magnitudes; fixed to a
+stable sigmoid — Antigravity's D2A share table predates the fix and cannot have come from
+this code). Next step is written in PLAN_NEW_DIRECTIONS.md §D7: per-head score dumps for THE
+retrieval head, native vs MLX, at the '-' step.
+
+## Q8_0 pool quantization — accuracy CLEARED (D6.1's missing half)
+
+`DIFFKV_KV_QUANT=q8_0`, default path, honest 6-cell sweep: **3/6 — cell-for-cell identical
+to f16**, including identical failure strings; SELFTEST PASS 5.96e-08. Combined with the
+Antigravity RSS table (flat scaling), q8_0 is now a viable default candidate; kept opt-in
+pending a fused-path check and an MLX-parity decision.
+
+## Fused-path 16k degeneration — now DETERMINISTIC
+
+Two identical greedy 16k/0.5 fused runs produce byte-identical token salad
+("The secretSecretTheThe unary…"). Antigravity's defer_device_sync fix holds (the old
+run-to-run divergence is gone); what remains is a reproducible scale-dependent correctness
+bug in the fused subgraph (appears between 8k≈27 blocks, which passes, and 16k≈57 blocks).
+Suspect list: srl_k_keep raised to nb at build time vs 16-wide native_attn_slots/pool
+tensor widths. Next session, after D7.
+
+## Hygiene landed
+
+Real README restored (Antigravity log → docs/ANTIGRAVITY_LOG_2026-07.md); env-gated the
+formerly unconditional [DBG_CANDIDATES]/[DEBUG_Q]/[DEBUG_RESIDUALS]/prompt-dump debug
+output; deleted the hardcoded-needle-token-id debug block from the production compressor;
+stray received_prompt.txt files removed. MLX fused-kernel redo (plan 2.1) scoped with a
+concrete threadgroup design in PLAN_NEW_DIRECTIONS.md §D3-redo — next session's main item.
+
+## Guardrails at end: parity 4/4 · SELFTEST PASS (f16 and q8_0) · native default sweep 3/6
+(unchanged) · fused sweep 3/6 at ≤8k, deterministic-wrong at 16k · MLX untouched except
+nan-fix in debug-only code path.
