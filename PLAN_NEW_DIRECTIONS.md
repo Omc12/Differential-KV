@@ -1,5 +1,10 @@
 # New Directions — Implementation Plan (handoff, written 2026-07-03)
 
+> **SUPERSEDED as the execution doc by `PLAN_ANTIGRAVITY_NEXT.md` (2026-07-03 evening),**
+> which carries the confirmed position-0-hole finding (A1), the hardened verification
+> protocol, and the full cross-engine quality/perf/CUDA program. This file remains the
+> reference for the D7 evidence chain and the §D3-redo kernel design it cites.
+
 This is the work plan for the NEW sparse-attention directions, written for whichever
 agent/tool executes next. It assumes HEAD ≥ `bb0f343` (verification pass complete).
 Read `SESSION_REPORT_FABLE5.md` (last two sections) and `PLAN_FABLE5_OPTIMIZATION.md` §8
