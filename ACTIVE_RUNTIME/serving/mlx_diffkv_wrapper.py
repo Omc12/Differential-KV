@@ -2123,7 +2123,10 @@ class MLXKVBlockManager:
                 )
                 
                 if os.environ.get("DIFFKV_DBG_LSE_SHARE") == "1":
-                    share_comp = mx.exp(lse_sparse) / (mx.exp(lse_sparse) + mx.exp(lse_dense) + 1e-9)
+                    # sigmoid(lse_s - lse_d): numerically stable — Qwen2.5's massive
+                    # activations push LSE magnitudes to ~1e4, so raw exp() overflows
+                    # to inf/inf = nan (silently broke the 2026-07-03 D2A measurement).
+                    share_comp = mx.sigmoid(lse_sparse - lse_dense)
                     max_share = float(mx.max(share_comp).item())
                     avg_share = float(mx.mean(share_comp).item())
                     print(f"[LSE_SHARE] Layer {layer_idx}: max={max_share:.4f} avg={avg_share:.4f} top_block=-1", flush=True)
@@ -2169,7 +2172,10 @@ class MLXKVBlockManager:
                 k_eff, self.router, use_topk, use_cached_sel
             )
             if os.environ.get("DIFFKV_DBG_LSE_SHARE") == "1":
-                share_comp = mx.exp(lse_sparse) / (mx.exp(lse_sparse) + mx.exp(lse_dense) + 1e-9)
+                # sigmoid(lse_s - lse_d): numerically stable — Qwen2.5's massive
+                # activations push LSE magnitudes to ~1e4, so raw exp() overflows to
+                # inf/inf = nan (which silently broke the 2026-07-03 D2A measurement).
+                share_comp = mx.sigmoid(lse_sparse - lse_dense)
                 max_share = float(mx.max(share_comp).item())
                 avg_share = float(mx.mean(share_comp).item())
                 top_block = int(sel[0].item()) if (sel is not None and sel.size > 0) else -1

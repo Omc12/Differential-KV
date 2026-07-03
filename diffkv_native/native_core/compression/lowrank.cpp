@@ -1065,24 +1065,6 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                 }
                 boost_multipliers = final_boosts;
 
-                bool is_needle_block = false;
-                for (int s = 0; s < S_deltas; ++s) {
-                    int32_t tid = params.token_ids[s + 1];
-                    if (tid == 1898 || tid == 87996 || tid == 38332 || tid == 15204 || tid == 22 || tid == 19 || tid == 16) {
-                        is_needle_block = true;
-                        break;
-                    }
-                }
-                if (is_needle_block) {
-                    std::cerr << "[DEBUG_NEEDLE_BLOCK] Block " << params.block_id << " contains needle tokens:\n";
-                    for (int s = 0; s < S_deltas; ++s) {
-                        std::cerr << s << ": id=" << params.token_ids[s + 1] 
-                                  << " str=\"" << tok_strs[s] << "\" "
-                                  << "is_core=" << is_core[s] << " is_prose=" << is_prose[s] 
-                                  << " boost=" << boost_multipliers[s] << "\n";
-                    }
-                }
-
                 for (int s = 0; s < S_deltas; ++s) {
                     joint_err[s] *= boost_multipliers[s];
                 }
@@ -1107,7 +1089,8 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             written++;
         }
 
-        if (written > 0) {
+        static const bool dbg_residuals = (std::getenv("DIFFKV_DBG_RESIDUALS") != nullptr);
+        if (dbg_residuals && written > 0) {
             // Print residuals debug info
             if (params.token_ids) {
                 std::cerr << "[DEBUG_RESIDUALS] block_id=" << params.block_id 

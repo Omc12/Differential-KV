@@ -1017,6 +1017,23 @@ void custom_attention_op_callback(
         }
     }
 
+    // DIFFKV_DBG_LSE2: per-step layer-0 sparse-vs-dense LSE balance (D7 probe;
+    // compare against MLX's DIFFKV_DBG_LSE_SHARE on the same prompt/step).
+    static const bool dbg_lse2 = (std::getenv("DIFFKV_DBG_LSE2") != nullptr);
+    if (dbg_lse2 && data->layer_idx == 0) {
+        // Per-head sparse share (sigmoid of the per-head LSE difference), then
+        // max/avg over heads — the same statistic MLX's DIFFKV_DBG_LSE_SHARE prints.
+        float max_share = 0.0f, sum_share = 0.0f;
+        for (int h = 0; h < n_q_heads; ++h) {
+            float sh = 1.0f / (1.0f + std::exp(lse_dense[h] - lse_sparse[h]));
+            max_share = std::max(max_share, sh);
+            sum_share += sh;
+        }
+        static int lse2_step = 0;
+        fprintf(stderr, "[LSE2] step=%d L0 max_share_sparse=%.4f avg_share_sparse=%.4f\n",
+                lse2_step++, max_share, sum_share / n_q_heads);
+    }
+
     // Two-way LSE combine (sparse ⊕ dense)
     static const bool dbg_sparseoff = (std::getenv("DIFFKV_DBG_SPARSEOFF") != nullptr);
     static const bool dbg_denseoff  = (std::getenv("DIFFKV_DBG_DENSEOFF2") != nullptr);

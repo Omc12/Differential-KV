@@ -2461,7 +2461,7 @@ int main(int argc, char ** argv) {
             }
             prompt = std::move(unescaped);
         }
-        {
+        if (std::getenv("DIFFKV_DBG_DUMP_PROMPT")) {
             FILE* f = fopen("received_prompt.txt", "w");
             if (f) {
                 fprintf(f, "%s", prompt.c_str());
@@ -4744,7 +4744,8 @@ int main(int argc, char ** argv) {
 
             }
 
-            if (decode_use_sparse && !is_warmup_run) {
+            static const bool dbg_candidates = (std::getenv("DIFFKV_DBG_CANDIDATES") != nullptr);
+            if (dbg_candidates && decode_use_sparse && !is_warmup_run) {
                 std::cerr << "[DBG_CANDIDATES] step=" << step << " filtered_candidates: ";
                 for (int32_t s : filtered_candidates) std::cerr << s << " ";
                 if (native_attn_on && native_attn_slots) {
@@ -5318,11 +5319,14 @@ int main(int argc, char ** argv) {
             if (userdata[0].layer0_q_tensor) {
                 decode_q.resize((int)model.get_config().n_embd, 0.0f);
                 ggml_backend_tensor_get(userdata[0].layer0_q_tensor, decode_q.data(), 0, (int)model.get_config().n_embd * sizeof(float));
-                double sum_sq = 0.0;
-                for (float val : decode_q) sum_sq += (double)val * val;
-                std::cerr << "[DEBUG_Q] step=" << step << " norm=" << std::sqrt(sum_sq) << " first5: ";
-                for (int i = 0; i < 5 && i < (int)decode_q.size(); ++i) std::cerr << decode_q[i] << " ";
-                std::cerr << std::endl;
+                static const bool dbg_q = (std::getenv("DIFFKV_DBG_Q") != nullptr);
+                if (dbg_q) {
+                    double sum_sq = 0.0;
+                    for (float val : decode_q) sum_sq += (double)val * val;
+                    std::cerr << "[DEBUG_Q] step=" << step << " norm=" << std::sqrt(sum_sq) << " first5: ";
+                    for (int i = 0; i < 5 && i < (int)decode_q.size(); ++i) std::cerr << decode_q[i] << " ";
+                    std::cerr << std::endl;
+                }
             }
             bool any_from_gpu = false;
             bool all_captured = true;
