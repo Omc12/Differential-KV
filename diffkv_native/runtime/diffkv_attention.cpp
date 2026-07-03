@@ -38,7 +38,8 @@ thread_local std::vector<HeadSparseInfo> g_last_sparse_info;
 void execute_cuda_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
-    const struct ggml_tensor * slot_indices,
+    const int32_t * slot_indices,
+    int            actual_K,
     void * userdata,
     float * lse_out,
     const float * dense_k,
@@ -1029,7 +1030,7 @@ void custom_attention_op_callback(
     if (!force_cpu) {
         std::vector<float> lse_dummy(n_q_heads, -1e30f);
         execute_cuda_attention(
-            dst, Q, (struct ggml_tensor*)slot_indices, data,
+            dst, Q, slot_indices_cpu.data(), actual_K, data,
             lse_dummy.data(),
             data->active_k_dense, data->active_v_dense,
             data->active_positions_dense, T_dense

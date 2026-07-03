@@ -307,7 +307,8 @@ static float* d_split_d = nullptr;
 void execute_cuda_attention(
     struct ggml_tensor * dst,
     const struct ggml_tensor * Q,
-    const struct ggml_tensor * slot_indices,
+    const int32_t * slot_indices,
+    int            actual_K,
     void * userdata,
     float * lse_out,
     const float * dense_k,
@@ -322,7 +323,7 @@ void execute_cuda_attention(
     int D = data->D;
     int rank = data->rank;
     int S_max = data->S_max;
-    int K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
+    int K = actual_K;
     float scale = data->scale;
     int has_rope = data->has_rope ? 1 : 0;
     float rope_freq_base = data->rope_freq_base;
@@ -332,6 +333,18 @@ void execute_cuda_attention(
         cudaMalloc(&d_split_out, 64 * 8 * 128 * sizeof(float));
         cudaMalloc(&d_split_m, 64 * 8 * sizeof(float));
         cudaMalloc(&d_split_d, 64 * 8 * sizeof(float));
+    }
+
+    // Allocate and copy slot indices to CUDA scratch memory
+    static int32_t* d_slot_indices_scratch = nullptr;
+    static int scratch_capacity = 0;
+    if (K > 0 && slot_indices != nullptr) {
+        if (d_slot_indices_scratch == nullptr || scratch_capacity < K) {
+            if (d_slot_indices_scratch) cudaFree(d_slot_indices_scratch);
+            cudaMalloc(&d_slot_indices_scratch, std::max(256, K) * sizeof(int32_t));
+            scratch_capacity = std::max(256, K);
+        }
+        cudaMemcpy(d_slot_indices_scratch, slot_indices, K * sizeof(int32_t), cudaMemcpyHostToDevice);
     }
 
     int S_split = (K >= 64) ? 4 : 1;
@@ -354,7 +367,7 @@ void execute_cuda_attention(
         (const half*)data->kv_engine->get_anchors_K()->data,
         (const half*)data->kv_engine->get_anchors_V()->data,
         (const int32_t*)data->kv_engine->get_seq_lens()->data,
-        (const int32_t*)slot_indices->data,
+        d_slot_indices_scratch,
         d_out,
         nullptr, // LSE is filled in merge pass
         n_q_heads,
