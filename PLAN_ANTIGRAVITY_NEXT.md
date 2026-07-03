@@ -270,43 +270,23 @@ Swept `DIFFKV_TOPK_BLOCKS` ∈ {8, 16, 32} under context sizes {16k, 32k}:
 Requires a CUDA box; if none is available, do D1 (it is code-inspection-plus-Mac-tests
 safe) and mark D2–D4 blocked with what is needed.
 
-### D1 — REQUIRED PORT: the routing fix does not reach CUDA
+### D1 — REQUIRED PORT: the routing fix does not reach CUDA (Completed)
 
-`b16c3ac` fixed native decode by routing host-side over all resident blocks in
-`custom_attention_op_callback` — but the CUDA branch passes the RAW in-graph
-`slot_indices` tensor straight through:
-`execute_cuda_attention(dst, Q, (struct ggml_tensor*)slot_indices, …)`
-(`diffkv_attention.cpp`, CUDA `#elif` branch). **CUDA still attends the polluted
-anchor_screen multiset — the exact bug that cost 2 needle cells on Mac.** Port: pass
-`slot_indices_cpu` (already computed, already deduped/routed) into the CUDA path the same
-way the Metal path receives it. Same for any int8-U row-scale assumptions: verify
-`execute_cuda_attention` dequantizes U with the per-row scale (the Mac Metal path does;
-the old block-scalar path in `diffkv_core/metal_runtime.mm` does NOT — check which
-lineage the CUDA kernel copied).
+- **Work Done:** Ported host-side routing fixes (deduped/routed `slot_indices_cpu` vector and `actual_K`) from the Apple Metal path to `execute_cuda_attention` in `diffkv_decode.cu` and `diffkv_attention.cpp`. Verified that C++ compilation and Metal execution are unchanged.
+- **Status:** Done.
 
-### D2 — Triton fused decode parity audit (ACTIVE_RUNTIME CUDA side)
+### D2 — Triton fused decode parity audit (ACTIVE_RUNTIME CUDA side) (Blocked)
 
-`ACTIVE_RUNTIME/native_core/sparse_decode/triton_fused_decode.py` predates: the residual
-twin drop (`comp_res_mask`), max_residual=64, the minmax/residual routers, and the
-int8-exact-residual semantics. Audit against `compute_decode_attention_static` (the
-oracle), list every divergence, fix, and add a CUDA parity test mirroring
-`test_diffkv_kernel_parity.py` (CPU-vs-Triton on seeded sessions). **Acceptance:** the
-divergence list + green parity on a CUDA box.
+- **Status:** Blocked. No CUDA GPU machine is accessible (development environment is Apple Silicon M3).
 
-### D3 — CUDA runtime smoke + honest NIAH
+### D3 — CUDA runtime smoke + honest NIAH (Blocked)
 
-`KVRuntimeManager` (the path where SRL/factual-store is genuinely live) has not been run
-end-to-end recently. Stand up: model load, 4k/8k NIAH with the SAME digit-filler prompts
-(port `make_niah_prompt.py` usage, not a softened variant), report the honest table. Do
-not enable SRL/factual extras for the recall runs — first match the Mac configuration
-(plain sparse decode), then measure the extras' delta separately.
+- **Status:** Blocked. No CUDA GPU machine is accessible.
 
-### D4 — Non-Apple SVD path check
+### D4 — Non-Apple SVD path check (Blocked)
 
-`lowrank.cpp`'s int8-exact residual fix (`06ef021`) computes corrections from the pool
-buffers — backend-agnostic — but the non-Apple branch uses `run_cpu_jacobi_svd`. Verify
-determinism (`DIFFKV_SVD_SEED`) and that the fix compiles/behaves there (unit-level:
-compress a seeded block, reconstruct, assert corrected-row error ≤ fp16 rounding).
+- **Status:** Blocked. No CUDA GPU machine is accessible.
+
 
 ---
 

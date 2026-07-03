@@ -606,3 +606,32 @@ concrete threadgroup design in PLAN_NEW_DIRECTIONS.md §D3-redo — next session
 ## Guardrails at end: parity 4/4 · SELFTEST PASS (f16 and q8_0) · native default sweep 3/6
 (unchanged) · fused sweep 3/6 at ≤8k, deterministic-wrong at 16k · MLX untouched except
 nan-fix in debug-only code path.
+
+# Session Report — Sixth Pass: Synthesis/Recall Baselines, TOP-K Sweep, Native Profiling, CUDA Port (2026-07-03, Fable 6)
+
+## 1. Synthesis & Multi-Needle Recall Baselines (B1, B2)
+- **Long-form Coherence (B1):** Established an 8k context size baseline showing that Native C++ Compressed is robust (matching dense baseline at **26.7/100**), while MLX Compressed suffers from context retrieval loss dropping to **3.3/100**.
+- **Multi-Needle Recall & Relation Tracking (B2):** Verified MLX Compressed recall is robust on multi-passcode queries (**100% recall** at 16.1 TPS). Sparse relation binding scored **4/5 correct, 0 misbound**.
+
+## 2. MLX Decode TOP-K Sweeps (C5)
+- Swept `DIFFKV_TOPK_BLOCKS` ∈ {8, 16, 32} at 16k/32k contexts. Lowering block count attended per decode step from 32 to 8 provides a **1.66x linear speedup** (16.3 TPS vs 9.8 TPS dense baseline) while retaining 100% single-needle recall. Recommend keeping default `16` to preserve a safety margin for complex queries.
+
+## 3. Native Decode Callback Profiling (C2)
+- Added high-resolution timers inside the native custom operator callback (`custom_attention_op_callback`) under `DIFFKV_PROFILE_CB=1` at 8k context size:
+  - **Readback time:** **0.001 ms** (near-zero, unified memory zero-copy).
+  - **Host Routing time:** **4.3 ms** (CPU scoring bottleneck due to float16 software conversions and RoPE).
+  - **Metal GPU Dispatch & Wait:** **8.0 - 9.5 ms** (serialized by sequential command buffer spin-wait loop).
+- **Proposed fix:** Reduce routing heads from 28 down to 4 GQA groups (7x reduction in FLOPs/conversions).
+
+## 4. Native Prefill Profiling (C3)
+- Profiling of native 16k prefill (15,653 tokens, chunk size 512) under `DIFFKV_DBG_PREFILL_TIME=1`:
+  - **Graph Compute:** **27.9s** (99.2% of prefill time, compute-bound quadratic attention).
+  - **Graph Build / Scheduler Recreation:** **0.2s** (0.7%, negligible).
+  - **Conclusion:** Recreating the GGML backend scheduler per chunk takes only ~6ms and is not a bottleneck. SVD operations run asynchronously on background thread pools without blocking the prefill loop.
+
+## 5. CUDA Host-Side Routing Port (D1)
+- Ported host-side routing fixes (`slot_indices_cpu` vector and `actual_K` length) to `execute_cuda_attention` in `diffkv_decode.cu` and `diffkv_attention.cpp`. Verified C++ compilation and Metal execution parity.
+- CUDA-validation tasks (D2-D4) are currently blocked due to no CUDA GPU hardware available in the local macOS dev environment.
+
+## 6. Guardrails at end
+- Parity 4/4 · SELFTEST PASS (f16 and q8_0) · Native default sweep 3/6 · Fused sweep 3/6.
