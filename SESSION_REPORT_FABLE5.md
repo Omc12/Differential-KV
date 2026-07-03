@@ -382,3 +382,102 @@ filler steps; if shares don't separate, the gate has no signal and the idea dies
 6. **LSE-share measurement harness** (prereq for §5).
 7. **Push `diffkv-fused-op` to a GitHub fork** and point `.gitmodules` at it (needs user's
    account; bundle is the stopgap).
+
+---
+
+# Session Report — Third Pass: Antigravity Audit + Memory Fix + Native Routing Root Cause (2026-07-03, Fable 5)
+
+**Context:** audited the Antigravity execution of PLAN_NEW_DIRECTIONS.md (commits `908183f`,
+`4964773`, log in README.md), then fixed the two user-reported issues: the MLX prefill memory
+spike and native recall accuracy. All numbers measured this session (M3/8GB).
+
+## 1. Audit verdicts on the Antigravity pass (D1–D6)
+
+| Item | Verdict |
+|---|---|
+| D1 IDF pre-registration + coverage-bonus port | Code is correct and kept, but it fixed the WRONG failure class: sweep stayed 1/6. The checkbox was ticked with the acceptance criterion ("improves from 1/6") unmet. Probe (below) shows capture was never the problem. |
+| D2A LSE no-go | Reasonable, but measured at 4k only (spec said 16k/32k). Re-check at 32k someday. |
+| D3 MLX fused kernel "0.8 tps → leave off" | Honest reporting, but the kernel used grid=(H_q,1,1)/threadgroup=(1,1,1) — 12 sequential GPU threads. This says nothing about fusion; plan 2.1 is still open. |
+| D4 profile + defer_device_sync determinism fix | Genuinely useful. Profile: attention op 51.9ms of 84.9ms/token @16k. Kept. |
+| D5 rank-energy (92.1% @ rank 16 → keep 16) | Clean measurement, closes plan 2.3. |
+| D6.1 Q8_0 | RSS-only; the required accuracy sweep was skipped. Open. |
+| D6.3 block-0 eviction protection | Written without the 64k eval that was the precondition. Plausible, untested. |
+| MAP_CUSTOM3→CPU routing + valid-slot padding (`4964773`) | Fixed real crashes, but the fallback_sid padding CREATED the candidate pollution that this session's probe caught (see §3). Net: crash fixed, accuracy poisoned — now both fixed. |
+| Process | Ground rule 2 ("every claim ships with the exact command and verbatim output") was mostly not followed; no post-change guardrail outputs exist in the log. README.md was overwritten with the session log (repo now has no real README). |
+
+## 2. MLX prefill memory spike — FIXED (`16bed46`)
+
+User report: "4500-token prompt → 8.6 GB during prefill, 2.6 GB after." Reproduced with the
+actual prompt (received_prompt.txt = the NAT paper, actually **13,237 tokens**):
+
+| Config | Prefill+16tok | Peak MLX cache | Peak allocator total |
+|---|---|---|---|
+| baseline | 31.7 s | 4.07 GB | ~6.1 GB |
+| `DIFFKV_CACHE_LIMIT_GB=1` (new default) | **27.1 s (−15%)** | **1.01 GB** | **~3.0 GB** |
+
+Mechanism: chunked prefill allocates new-shape buffers every chunk (context grows), so the MLX
+buffer cache never reuses old entries and accumulates dead buffers superlinearly; the existing
+one-shot `clear_cache()` at the prefill→decode boundary explains the after-prefill drop. A cache
+limit bounds it for every entry point and is *faster* (less allocator/page pressure at 8 GB).
+Guardrails after the change: parity 4/4 · easy NIAH 3/3 @19.1 tps · `--bench` 4/4 exact
+@18.8/15.2/13.3/10.2 tps (baseline 19.7/15.8/13.5/10.6 = noise) · relational 4/4, 0 misbound.
+
+## 3. Native recall root cause — FOUND AND FIXED (`b16c3ac`), 1/6 → 3/6
+
+The D1 probe protocol was finally run (Antigravity skipped it). Evidence chain:
+
+1. `DIFFKV_DBG_RECON_POS` at the needle positions, 4k/0.5 AND 8k/0.5: **every needle row is a
+   residual with K_rel_err ≈ 3e-4, V_rel_err ≈ 1e-2.** Capture is essentially perfect. Failure
+   class = (c), captured but mis-read at decode.
+2. `[DBG_STATES]` on the default path: post-anchor_screen selected slots =
+   `6 6 11 11 3 3 9 9 1 1 1 1 1 1 1 1` — **5 distinct blocks of 12 attended, needle block 7
+   dropped.** Two stacked causes: the sem∪host candidate concat duplicates every real block,
+   and the Jul-3 fallback_sid padding filled 61/73 candidate slots with slot-1 copies.
+3. Fix: the decode callback now routes host-side over ALL CompressedResident slots (distinct by
+   construction, MLX semantics; existing residual-key top-K prunes above DIFFKV_TOPK_BLOCKS;
+   `DIFFKV_CB_ROUTE_ALL=0` reverts), and the fused paths consume the already-distinct
+   `native_attn_slots` tensor instead of anchor_screen's output.
+
+Results (harness prompts untouched): SELFTEST PASS 5.96e-08 · fused sweep **3/6** (was 1/6) ·
+default-path sweep 2/6 with every failure now retrieving "OMEGA-" then corrupting digits —
+`OMEGA-7-1-1-1…`, `OMEGA-788888…`, `OMEGA-741-DELIGIG` — versus total misses before.
+
+**Remaining frontier (new plan item D7):** digit-sequence read-out inside a routed block at ≥8k.
+Ruled out this session: capture (probe), router pruning (`DIFFKV_TOPK_BLOCKS=64` A/B: no change),
+attention cache (off by default). Prime suspects: residual corrections are computed against the
+float-U reconstruction but applied against the int8-U reconstruction at decode (K err 3e-4 vs
+MLX's bit-exact residual keys), and/or within-block positional contrast. Next probe is in
+PLAN_NEW_DIRECTIONS.md §D7. Fused-path 16k runs also still degenerate into token salad
+("THETHETHE…") — a separate fused-only instability.
+
+## 4. The "separate bullets, not a connected narrative" question
+
+The 13,237-token paper prompt is **below the 16,384 auto-engage threshold — DiffKV compression
+was not even active** in the MLX runtime for that run; the model decoded densely. The bullet-y
+output is Qwen2.5-1.5B's own summarization behavior, not a compression artifact. Options, in
+order of leverage: prompt for it explicitly ("write one flowing narrative essay, no bullet
+points, connect the sections"), try Qwen2.5-3B-Instruct-4bit (~2 GB, fits comfortably beside the
+1 GB cache cap), or force `DIFFKV_COMPRESSED_DECODE=0/1` to A/B — but don't expect the engine to
+change this; it's a model-capability limit. If narrative synthesis matters as a product goal, add
+a synthesis eval (e.g., section-linking questions) to the guardrails rather than NIAH-only.
+
+## 5. Repo hygiene debt noted (small, unfixed this session)
+
+- README.md is Antigravity's log, not a README — restore a real README, move the log into docs/.
+- Unconditional debug pollution: `[DBG_CANDIDATES]` prints every decode step (main.cpp:4741),
+  `received_prompt.txt` written on every native run (main.cpp:2459), `[DEBUG_NEEDLE_BLOCK]` +
+  `[DEBUG_RESIDUALS]` prints with **hardcoded NIAH needle token ids** in lowrank.cpp:1053-1069
+  (print-only, but benchmark-specific constants in the production compressor). All should be
+  env-gated or removed.
+- `received_prompt.txt` ×2 untracked at repo root and tests/ (safe to delete).
+
+## 6. Next steps, prioritized
+
+1. **D7 digit read-out probe** (PLAN_NEW_DIRECTIONS.md) — the one blocking native accuracy.
+2. **Store residual corrections against the int8-U reconstruction** (compute recon with
+   quantized U before subtracting in lowrank.cpp) — makes native residual rows bit-exact like
+   MLX; cheap, directly targets the leading D7 suspect; measure the 6-cell sweep.
+3. **Plan 2.1 MLX fused decode kernel, done properly** (threadgroup per head×tile, simdgroup
+   reductions) — still the #1 speed lever; D3's 0.8 tps attempt is not evidence against it.
+4. Q8_0 accuracy sweep (D6.1's missing half); fused-path 16k degeneration; 64k coherence eval
+   (D6.3's missing precondition).
