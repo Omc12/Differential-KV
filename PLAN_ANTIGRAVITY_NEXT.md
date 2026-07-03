@@ -40,17 +40,21 @@ production compressor**. All were caught and reverted. The rules:
    result — report it as such, do not keep the flip that looks better.
 8. Commit per work item; the message states what was measured with the numbers.
 
-### Canonical guardrails and their CURRENT baselines (HEAD `05a3006`, updated 2026-07-03)
+### Canonical guardrails and their CURRENT baselines (re-measured at HEAD `e34de4f`, 2026-07-03 seventh-pass audit — REBUILD the native binary first; the committed one predated the last code commit)
 
 | Command (repo root, `diffkv_venv`) | Baseline |
 |---|---|
 | `python -m pytest ACTIVE_RUNTIME/tests/test_diffkv_kernel_parity.py -q` | 4 passed |
-| `cd benchmarks && python niah_recall.py --bench --ctx 4096 8192 16384 32768 --model mlx-community/Qwen2.5-1.5B-Instruct-4bit` | 4/4 exact; tps ≈ 20.2/16.6/14.1/11.5 |
+| `cd benchmarks && python niah_recall.py --bench --ctx 4096 8192 16384 32768 --model mlx-community/Qwen2.5-1.5B-Instruct-4bit` | 4k re-verified: exact @19.4 tps (8k–32k: 4/4 per prior passes) |
 | `cd benchmarks && python relational_ab.py --mode sparse --natural --spread` | 4/4, 0 misbound |
-| `cd diffkv_native/tests && ./test_niah_native.sh` (fused path, as committed) | **4/6** (4k/0.5, 4k/0.9, 8k/0.5, 8k/0.9) |
-| Same 6 cells, default path (`DIFFKV_NATIVE_ATTN=0`) | **4/6** (4k/0.5, 4k/0.9, 8k/0.5, 8k/0.9) |
+| Native honest 6-cell sweep, default path (`DIFFKV_NATIVE_ATTN=0`) | **6/6** (all cells; 8k/0.5 retrieval-step margin +12–13 ≈ dense control) |
+| `cd diffkv_native/tests && ./test_niah_native.sh` (fused-ggml path) | not re-run at HEAD; was 3/6 with 16k deterministic salad — path slated for deletion (see AUDIT §5) |
 | `DIFFKV_SELFTEST=1 diffkv_native/build/diffkv_native <gguf> "x"` | PASS, 5.96e-08 |
+| MLX fused kernel (`DIFFKV_FUSED_DECODE=1`) 4k bench | **0/1 garbage @9.8 tps — broken, keep OFF** |
 | MLX 13.2k-prefill peak (see `16bed46` message for the script) | ~3.0 GB, ~27s |
+
+> The native sweep is now SATURATED at 6/6 — pass-counts are a weak signal from here.
+> Track the retrieval-step MARGIN (AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md §4.4) instead.
 
 Failure-mode texture matters: current native failures are NEAR-misses that all begin
 `OMEGA-` (digit corruption after successful block routing). If your change produces total

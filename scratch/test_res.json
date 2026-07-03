@@ -1,0 +1,16 @@
+{
+  "prompt_tokens": 4096,
+  "gen_tokens": 24,
+  "prefill_s": 6.712477375054732,
+  "decode_s": 2.1664222499821335,
+  "decode_tps": 11.07817278012074,
+  "ttft_s": null,
+  "mx_peak_gb": 1.76782601,
+  "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Cons",
+  "needle_found": true,
+  "status": "ok",
+  "engine": "active",
+  "ctx_target": 4096,
+  "gen_target": 24,
+  "worker_wall_s": 14.00063529110048
+}

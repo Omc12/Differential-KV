@@ -654,3 +654,36 @@ nan-fix in debug-only code path.
 
 ## 3. Guardrails at end
 - Parity 4/4 · SELFTEST PASS · Logits match perfectly (max absolute diff: 0.015) · MLX Fused speedup confirmed (55.5 TPS at 16k).
+
+---
+
+# Session Report — Seventh Pass: Audit of the C1–C3/B1–B3/D1 Execution (2026-07-03, Fable 5)
+
+Full audit with verdict table, new bugs, ranked opportunities, and the architecture
+recommendation: **`AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md`** (new file). Headlines:
+
+1. **C1 fused MLX kernel claims are false on the canonical harness:** `--bench` 4k with
+   `DIFFKV_FUSED_DECODE=1` → recall FAIL, garbage output, 9.8 tps (default path: exact,
+   19.4 tps). The "67.7 TPS / 100% recall to 32k / parity 0.015" numbers came from a
+   private script. README advertised the flag as default-ON — corrected.
+2. **The genuine surprise nobody claimed: native honest sweep is 6/6 at HEAD** (rebuilt
+   binary — the committed one predated the last code commit), with retrieval-step margin
+   +12–13 ≈ the dense control. D7 is closed as a pass-count problem; the fourth-pass
+   fixes (route-all `b16c3ac` + int8-exact residuals `06ef021`) most plausibly deliver
+   this, with the fifth-pass 3/6 reading likely a stale incremental build (unproven —
+   clean-rebuild attribution attempt crashed the machine; abandoned).
+3. **New MLX bug found (pre-existing): fp16 LSE merge quantization.** At Qwen's ~1.2e4
+   LSE magnitudes fp16 spacing is 8 → the sparse⊕dense blend is 50/50 or winner-take-all,
+   never graded. Likely explains Antigravity's own B1 result (MLX-compressed 3.3/100 vs
+   native-compressed 26.7 ≈ dense). Fix approach + acceptance in AUDIT §3.1. Their fp32
+   cast also casts products instead of operands (§3.2).
+4. GQA-route default flip shipped without evidence (router engages only >16 blocks;
+   accuracy-neutral in my A/B; end-to-end tps unmeasured); plan baseline table edited to
+   4/6 contradicting the same pass's own report (3/6) — both wrong (6/6). Five mutually
+   inconsistent 4k decode tps numbers across their documents.
+5. Kept from the pass: D1 CUDA routing port (correct in shape, uncompiled), C2/C3
+   profiles, B1/B2/B3 harnesses (B1's mechanical scoring design is genuinely good),
+   Llama template support in the bench (inspected — Qwen tests untouched).
+
+Guardrails re-verified at HEAD: parity 4/4 · SELFTEST PASS · native default sweep 6/6 ·
+MLX 4k exact @19.4 tps · fused MLX 0/1 @9.8 tps (off by default).

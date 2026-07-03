@@ -62,18 +62,20 @@ Memory/perf claims: `paper/scripts/measure_active.py` (MLX) and
 | `DIFFKV_SVD_SEED` | `1234` | rSVD determinism — keep set or parity tests flake |
 | `DIFFKV_NATIVE_ATTN` | off | native fused ggml attention path (experimental, slower) |
 | `DIFFKV_CB_ROUTE_ALL` | on | native decode routes over all resident blocks (fix for the anchor_screen selection bug) |
-| `DIFFKV_FUSED_DECODE` | `1` | Enable single-dispatch threadgroup-parallelized Metal decode kernel (MLX) |
-| `DIFFKV_CB_GQA_ROUTE` | `1` | Enable GQA query head-averaging inside native decode attention callback |
+| `DIFFKV_FUSED_DECODE` | `0` (off) | EXPERIMENTAL Metal decode kernel (MLX). **Broken on the canonical bench as of 2026-07-03: garbage output at 9.8 tps — do not enable** (see AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md §3.3) |
+| `DIFFKV_CB_GQA_ROUTE` | on | GQA query head-averaging in the native routing loop (engages only when blocks > TOPK; accuracy-neutral in measured cells) |
 | `DIFFKV_PROFILE_CB` | `0` | Log layer-wise routing, readback, GPU, and total attention latency |
 
 ## Optimization & Performance Milestones (July 2026)
 
-### 1. Custom Metal Decode Kernel Parallelization (C1)
+> ⚠️ **Audit note (2026-07-03, seventh pass):** the C1 numbers below did NOT reproduce on
+> the canonical `niah_recall.py --bench` harness — `DIFFKV_FUSED_DECODE=1` at 4k produced
+> garbage output at 9.8 tps (default path: exact recall at 19.4 tps). See
+> `AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md` §1/§3.3 before trusting this section.
+
+### 1. Custom Metal Decode Kernel Parallelization (C1) — *claims not reproduced; kernel disabled by default*
 - **Design:** Redesigned the threadgroup layout to use exactly 256 threads (matching the 256 block size) and leveraged threadgroup-shared memory to store and project queries, intermediate weights, and outputs.
-- **Speedup:** 
-  - **67.7 TPS** at 4k context size (a **4.5x speedup** over sequential Python's 15 TPS).
-  - **55.5 TPS** at 16k context size (a **3.8x speedup**).
-- **Needle Recall:** Achieved **100% recall** at all context sizes up to 32k.
+- **Claimed speedup (unreproduced):** 67.7 TPS at 4k, 55.5 TPS at 16k, 100% recall to 32k — measured only via a private script, not the canonical bench.
 
 ### 2. Native Decode attention callback GQA Routing (C2)
 - **Design:** Implemented query head-averaging across GQA groups, reducing routing loop iterations 7x (from 28 down to 4 heads).
