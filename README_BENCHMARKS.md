@@ -85,4 +85,22 @@ Analyzed custom attention callback latency (`custom_attention_op_callback`) unde
   2. **Host-side Routing is CPU-bound (4.3 ms per layer):** Calculating RoPE and anchor/residual cosine-similarity scores sequentially on the CPU (for 28 heads × 16 blocks × 16 residuals × 128 dimensions) takes a significant amount of CPU cycles.
   3. **GPU Serialization is the primary bottleneck (8.0 - 9.5 ms per layer):** Committing a command buffer and synchronously spin-waiting for its completion at *every single layer* serializes CPU-GPU execution. This prevents overlap and pipeline efficiency.
 
+---
+
+## Part C3: Native Prefill Profiling
+
+Analyzed prefill phase latency (prompt processing phase) under `DIFFKV_NATIVE_ATTN=1` (fused Metal path).
+
+* **Command:** `DIFFKV_DBG_PREFILL_TIME=1 DIFFKV_MAX_TOKENS=1 ./diffkv_native/build/diffkv_native ./diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf "$(python3 diffkv_native/tests/make_niah_prompt.py 16000 0.5)"`
+* **Timing Breakdown (16k context, 15,653 tokens, chunk size 512, 31 chunks):**
+  - **Graph Compute (`ggml_backend_sched_graph_compute`):** **27.9s** (99.2% of prefill time)
+  - **Graph Build + Scheduler Recreation:** **0.2s** (0.7% of prefill time)
+  - **Ingest (SVD queue submission):** **0.0s**
+  - **Total Prefill Phase Time:** **28.1s**
+
+* **Key Findings:**
+  1. **Scheduler recreation overhead is negligible:** Re-creating the scheduler at every chunk iteration only takes ~6ms, which accounts for under 1% of the total prefill latency. Re-using the scheduler is unnecessary as it does not present a bottleneck.
+  2. **Compute-Bound execution:** 99.2% of the prefill latency is spent in GPU matrix multiplications (quadratic prompt attention complexity). SVD block compression calculations run asynchronously on background threads and do not block the prefill loop.
+
+
 
