@@ -1006,7 +1006,13 @@ struct ggml_cgraph * build_decode_graph(
                         pool->MAX_RESIDUAL,
                         pool->get_kv_type() == GGML_TYPE_Q8_0 ? 1 : 0
                     };
-                    attn_out = ggml_diffkv_attn(ctx, q_rope_flat, selected_slots,
+                    // Route with the host-controlled DISTINCT slot list when available:
+                    // anchor_screen's selected_slots is a polluted multiset (sem∪host
+                    // concat duplicates + padding dupes crowd out real blocks — measured
+                    // 5/12 distinct blocks attended at 4k, needle block dropped). The
+                    // kernel handles the -1 padding in native_attn_slots natively.
+                    attn_out = ggml_diffkv_attn(ctx, q_rope_flat,
+                        native_attn_slots ? native_attn_slots : selected_slots,
                         pool->get_U(), pool->get_U_row_scale(), pool->get_VK(), pool->get_VV(),
                         pool->get_anchors_K(), pool->get_anchors_V(), pool->get_seq_lens(),
                         pool->get_scales(), pool->get_anchor_positions(),
@@ -1020,7 +1026,7 @@ struct ggml_cgraph * build_decode_graph(
                 } else
                 attn_out = build_native_sparse_attn(
                     ctx, q_rope, k_rope_n, v, dkr_flat, native_dense_v[l], native_dense_mask, native_maxd,
-                    selected_slots,
+                    native_attn_slots ? native_attn_slots : selected_slots,
                     native_dup_tri, native_half, userdata[l].kv_engine,
                     config.n_head, config.n_head_kv, head_dim,
                     userdata[l].kv_engine->get_rank(), userdata[l].kv_engine->get_S_max(), srl_k_keep,
