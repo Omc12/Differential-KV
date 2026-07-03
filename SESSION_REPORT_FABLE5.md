@@ -481,3 +481,71 @@ a synthesis eval (e.g., section-linking questions) to the guardrails rather than
    reductions) — still the #1 speed lever; D3's 0.8 tps attempt is not evidence against it.
 4. Q8_0 accuracy sweep (D6.1's missing half); fused-path 16k degeneration; 64k coherence eval
    (D6.3's missing precondition).
+
+---
+
+# Session Report — Fourth Pass: New Sparse-Attention Directions, Evaluated with Measurements (2026-07-03, Fable 5)
+
+User proposed five directions; verdicts below, each backed by a run from this session or a
+recorded prior measurement. Plus one direction of my own that landed.
+
+## Landed: int8-exact residual corrections (`06ef021`) — default sweep 2/6 → 3/6
+
+Residual corrections were computed against float-U×float-VT reconstruction but decode
+dequantizes int8 U × fp16 row-scale × fp16 VK/VV × fp16 block scale — the quantization error
+stayed inside the corrected rows (probe: K err ~3e-4). Corrections are now computed against the
+pool-dequantized recon (read back from the very buffers decode reads). 16k/0.9 flipped to exact
+PASS; 8k/0.9 improved to "OMEGA-7-DELTA". SELFTEST PASS. This also fixes residual SELECTION
+(rows ranked by the error decode actually sees).
+
+## Verdicts on the five proposed directions
+
+1. **V-only residuals (drop residual K, keep exact V)** — **DO NOT REDO.** Both variants were
+   measured and rejected 2026-07-02/03: V-only ranking 3/3→1/3, recon-K storage 3/3→1/3. The
+   "K reconstructs at ~1%" statistic is an average over all rows; residual rows are selected
+   for being the WORST-reconstructed, so recon-K on exactly those rows destroys the router and
+   the read. Today's evidence strengthens the rejection: a 3e-4 K error on residual rows was
+   already measurably corrupting digits (fixed by `06ef021`); a 25%+ recon-K error is fatal.
+2. **Coverage-quota capture** — already implemented in both engines
+   (`DIFFKV_RESIDUAL_COVERAGE_FRAC`, default 0). Measured TODAY on native post-routing-fix at
+   0.25: flips 16k/0.5 to PASS, flips 16k/0.9 to FAIL — 3/6 either way, zero-sum. Keep default
+   0; it remains available as insurance. The knife-edge behavior it exposed is itself the
+   finding: 16k cells sit at the decision boundary, so capture tweaks shuffle rather than fix.
+3. **Per-block adaptive rank** — **CLOSED by D5 data.** The measured spectrum (avg 92.1% energy
+   at rank 16, only 80% at rank 8) shows blocks do NOT saturate early; energy-threshold
+   truncation would keep rank ~16 nearly everywhere or trade accuracy we cannot spare while D7
+   is open. No memory upside worth the risk now.
+4. **Attention sink (always-keep-first-N)** — deferred again, same rationale as 07-02: MLX
+   passes 32k --bench, block-0 anchor is exact and always scored, native's pager now pins
+   block 0 (Antigravity), and NO eval exists that can detect a sink effect (NIAH can't). Build
+   the 64k long-form coherence eval first (D6.3's missing half); a knob nothing can measure is
+   not a fix.
+5. **LSE-gated block re-expansion** — kept on the shelf, below D7. Antigravity's Phase A no-go
+   (shares don't separate needle-vs-prose) was measured at 4k only, but the direction of the
+   bias is against the gate at LARGER contexts too: with more of the context compressed, the
+   compressed pool's LSE share is high on nearly every step, so the specced signal saturates.
+   If revived, gate on top-block mass concentration WITHIN the compressed half (available from
+   the router) rather than compressed-vs-dense share. Not before D7: if the read-out margin gap
+   is fixed, re-expansion is unnecessary; if it is not fixable, re-expansion becomes the
+   workaround — either way D7's probe decides.
+
+## The decisive experiment: engine A/B on identical bytes
+
+MLX (4-bit weights, compressed decode forced ON, pure greedy, same 8k/0.5 prompt file native
+fails): `The secret passcode is **OMEGA-7741-DELTA**.` — exact. Native (q8_0, HIGHER-precision
+weights): `OMEGA-7-1-1-1...`. The remaining gap is native-specific. **Supersedes** the 07-02
+"verbatim-digit gap is shared with MLX" note (measured pre-routing-fix).
+
+Repetition-penalty A/B (`DIFFKV_REPETITION_PENALTY=1.0` vs default 1.15) shows the sampler only
+selects which failure appears: 1.0 lets the repeated "7741" through at 16k/0.5 (then "DELAY")
+but loses the 8k cells to an early period the penalty had been suppressing. Conclusion: native's
+sparse-read logits at emission steps are marginally right where MLX's are decisively right —
+the frontier is a logit-margin gap, and the next probe (in PLAN_NEW_DIRECTIONS.md §D7) is a
+step-level top-5 logit comparison + per-layer bisection on the first digit step.
+
+## Guardrail state at end of this pass
+
+Parity 4/4 (unchanged, no MLX code touched this pass) · SELFTEST PASS 5.96e-08 ·
+native default-path honest sweep **3/6** (4k/0.5 ✓ 4k/0.9 ✓ 16k/0.9 ✓; all failures now
+near-misses that begin "OMEGA-") · fused harness sweep 3/6 at `b16c3ac` (not re-run after
+`06ef021` — re-run before any fused work). Baseline at session start was 1/6 on both paths.

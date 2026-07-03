@@ -211,18 +211,37 @@ git push fork diffkv-fused-op
   degradation"). The code change is small and plausibly harmless, but it is an untested
   speculative fix; the eval still does not exist.
 
-## D7 — NEW (2026-07-03): native digit-sequence read-out at ≥8k (the current frontier)
+## D7 — native decode logit-margin gap vs MLX (the current frontier; updated after second pass)
 
-After `b16c3ac`, native routes to the needle block at every scale (all failures now
-begin "OMEGA-") but the digit sequence corrupts during emission at 8k+ on both paths:
-`OMEGA-7-1-1-1...` (8k), `OMEGA-788888...` (16k/0.5), `OMEGA-741-DELIGIG` (16k/0.9).
-Established by A/B: NOT capture (probe: needle rows exact residuals at 8k), NOT router
-pruning (DIFFKV_TOPK_BLOCKS=64 → no change), NOT the query-similarity attention cache
-(threshold defaults 2.0 = off). MLX passes the harder --bench at 32k with the same
-model, so a real design/precision difference remains in the decode read-out. Next probe:
-per-step log of WHICH row inside the needle block wins attention during each digit
-emission step (native vs MLX side-by-side at 8k) — if the same row wins repeatedly, it
-is positional discrimination inside the block (suspects: the 3e-4 K error from residual
-corrections being computed against float-U recon but applied against int8-U recon at
-decode — MLX residual keys are bit-exact; or the anchor-score term added to every row
-flattening within-block contrast). Then fix from evidence.
+After `b16c3ac` (routing) native reaches the needle block at every scale. Second-pass
+results (2026-07-03, commit `06ef021` + A/Bs):
+
+1. **int8-exact residuals LANDED (`06ef021`)**: residual corrections are now computed
+   against the pool-dequantized reconstruction (int8 U × fp16 row scale × fp16 VK/VV ×
+   fp16 block scale) instead of float-U recon. Default sweep 2/6 → **3/6** (16k/0.9
+   flipped to exact; 8k/0.9 improved to near-miss "OMEGA-7-DELTA"). Residual-row K
+   precision measurably controls digit fidelity.
+2. **Coverage quota is zero-sum on native** (`DIFFKV_RESIDUAL_COVERAGE_FRAC=0.25`):
+   flips 16k/0.5 to PASS but flips 16k/0.9 to FAIL — 3/6 either way. Keep default 0.
+   The 16k capture landscape is knife-edge: single-row changes flip cells.
+3. **The gap is NATIVE-SPECIFIC — proven on identical bytes**: MLX (4-bit!, compressed
+   decode forced, pure greedy) on the exact 8k/0.5 prompt native fails:
+   `**OMEGA-7741-DELTA**` exact. This SUPERSEDES the 07-02 note that the verbatim-digit
+   gap is "shared with MLX" (that predated the routing fix).
+4. **Repetition penalty interaction**: native applies rep-penalty 1.15 over a 64-token
+   window by default (main.cpp:5665; MLX benchmarks apply none). At the digit steps it
+   penalizes the SECOND "7" of "7741" (→ "7-1-1-1", "788888"); with
+   `DIFFKV_REPETITION_PENALTY=1.0`, 16k/0.5 emits the full "7741" (then "DELAY"≠DELTA)
+   but 8k cells stop early at "OMEGA." (the penalty had been suppressing the period).
+   Sampler knobs only choose WHICH failure appears.
+
+**Synthesis:** native's sparse-read logits at the emission steps are MARGINALLY right
+(answer tokens near-top, losing to interference under any sampler shaping) where MLX's
+are decisively right on identical input. Next probe, sharply defined: same 8k/0.5
+prompt, first digit-emission step — dump native vs MLX top-5 logits (native already
+prints them; add the same to the MLX A/B script), quantify the margin gap, then bisect
+per-layer attention outputs at that step to find where the divergence enters. Remaining
+structural suspects after `06ef021`: fp16 rounding of the stored correction itself vs
+MLX's exact-row storage; the q8_0-GGUF vs 4bit-MLX weight difference (control: run MLX
+q8 or native q4); approximate-attn scoring mode (`DIFFKV_MPS_APPROXIMATE_ATTN=1` in the
+harness — try exact mode); dense/sparse LSE merge weighting.
