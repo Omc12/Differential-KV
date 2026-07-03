@@ -804,15 +804,30 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
 
         std::vector<float> resid((size_t)S_deltas * joint_F);
         std::vector<float> rel_K(S_deltas), rel_V(S_deltas), aerr_K(S_deltas), aerr_V(S_deltas);
+        // Reconstruct EXACTLY as decode dequantizes — int8 U row (out_u_ptr) ×
+        // fp16 per-row scale × fp16 VK/VV (inv_v_gain already baked into VV) ×
+        // fp16 block scale — so the stored residual correction makes the row
+        // bit-exact (up to the fp16 rounding of the correction itself) at read
+        // time. The previous float-U/float-VT reconstruction left the int8+fp16
+        // quantization error INSIDE the corrected rows: measured K_rel_err ~3e-4
+        // on needle rows at 4k/8k — the leading D7 digit-corruption suspect.
+        // All pool buffers referenced here are written above (lines ~672-725).
+        const float bsc_deq = ggml_fp16_to_fp32(*params.out_scale);
+        const float ku_blk_deq = ggml_fp16_to_fp32(*params.out_u_scale);
         for (int s = 0; s < S_deltas; ++s) {
             float eK = 0.0f, eV = 0.0f, nK = 0.0f, nV = 0.0f;
+            const float ku_deq = params.out_u_row_scale
+                ? ggml_fp16_to_fp32(params.out_u_row_scale[s]) : ku_blk_deq;
             for (int f = 0; f < joint_F; ++f) {
                 float recon = 0.0f;
-                for (int r = 0; r < svd_dim; ++r) recon += U_scaled[s * R + r] * VT_joint[r * joint_F + f];
-                recon *= scale;
-                // The SVD's V half is in v_gain-scaled space — bring the reconstruction
-                // back to raw space before computing the stored residual correction.
-                if (f >= F) recon *= inv_v_gain;
+                for (int r = 0; r < R; ++r) {
+                    float u_deq = (float)params.out_u_ptr[(size_t)s * pool_rank + r];
+                    float v_deq = (f < F)
+                        ? ggml_fp16_to_fp32(params.out_vk_ptr[r * F + f])
+                        : ggml_fp16_to_fp32(params.out_vv_ptr[r * F + (f - F)]);
+                    recon += u_deq * v_deq;
+                }
+                recon *= ku_deq * bsc_deq;
                 float res = raw_delta[s * joint_F + f] - recon;
                 resid[(size_t)s * joint_F + f] = res;
                 float raw = raw_delta[s * joint_F + f];
