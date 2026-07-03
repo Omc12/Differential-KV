@@ -42,7 +42,7 @@ FILLER = (
 )
 
 
-def build_prompt(tok, ctx, depth):
+def build_prompt(tok, ctx, depth, is_llama=False):
     filler = tok.encode(FILLER, add_special_tokens=False)
     needle = tok.encode(NEEDLE_SENT + "\n", add_special_tokens=False)
     q = tok.encode(QUESTION, add_special_tokens=False)
@@ -54,6 +54,12 @@ def build_prompt(tok, ctx, depth):
     at = int(len(allf) * depth)
     p1 = tok.decode(allf[:at])
     p2 = tok.decode(allf[at:])
+    if is_llama:
+        return (
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful assistant.<|eot_id|>"
+            "<|start_header_id|>user<|end_header_id|>\n\n" + p1 + "\n" + NEEDLE_SENT + "\n" + p2 + "\n\n"
+            + QUESTION + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
     return (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         "<|im_start|>user\n" + p1 + "\n" + NEEDLE_SENT + "\n" + p2 + "\n\n"
@@ -61,7 +67,7 @@ def build_prompt(tok, ctx, depth):
     )
 
 
-def build_multi_needle_prompt(tok, ctx):
+def build_multi_needle_prompt(tok, ctx, is_llama=False):
     filler = tok.encode(FILLER, add_special_tokens=False)
     sents_tokens = []
     for s in NEEDLE_SENTS_MULTI:
@@ -83,6 +89,14 @@ def build_multi_needle_prompt(tok, ctx):
     p3 = tok.decode(allf[at2:at3])
     p4 = tok.decode(allf[at3:])
     
+    if is_llama:
+        return (
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful assistant.<|eot_id|>"
+            "<|start_header_id|>user<|end_header_id|>\n\n" + p1 + "\n" + NEEDLE_SENTS_MULTI[0] + "\n"
+            + p2 + "\n" + NEEDLE_SENTS_MULTI[1] + "\n"
+            + p3 + "\n" + NEEDLE_SENTS_MULTI[2] + "\n"
+            + p4 + "\n\n" + QUESTION_MULTI + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
     return (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         "<|im_start|>user\n" + p1 + "\n" + NEEDLE_SENTS_MULTI[0] + "\n"
@@ -103,7 +117,8 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=
     os.chdir(ACTIVE)
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
 
-    cfg = {"quantization": "int4", "rank": rank, "block_size": 256,
+    quant_val = None if (model_id.startswith(".") or model_id.startswith("/")) else "int4"
+    cfg = {"quantization": quant_val, "rank": rank, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
     wrapper = DiffKVHFWrapper(model_id=model_id, config=cfg)
     wrapper.ensure_loaded()
@@ -124,6 +139,15 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=
                 prompt, _ = build_niah_prompt(ctx, tok)
             else:
                 prompt = build_prompt(tok, ctx, depth)
+            
+            is_llama = "llama" in model_id.lower() or "llama" in str(type(tok)).lower()
+            if is_llama:
+                prompt = prompt.replace("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful assistant.<|eot_id|>")
+                prompt = prompt.replace("<|im_start|>system\n", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n")
+                prompt = prompt.replace("<|im_start|>user\n", "<|start_header_id|>user<|end_header_id|>\n\n")
+                prompt = prompt.replace("<|im_end|>\n<|im_start|>assistant\n", "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n")
+                prompt = prompt.replace("<|im_end|>", "<|eot_id|>")
+                
             ids = tok.encode(prompt)
             sid = "niah"
             mgr.clear_session(sid)
