@@ -414,8 +414,7 @@ def compute_decode_attention_static(
         out_sparse * mx.expand_dims(w_sparse, -1)
         + out_dense * mx.expand_dims(w_dense, -1)
     ) / mx.expand_dims(denom, -1)
-    out_combined = mx.where(mx.isnan(out_combined), 0.0, out_combined)
-    return out_combined, lse_sparse, lse_dense
+    return out_combined, lse_sparse, lse_dense, scores_sparse
 
 
 @mx.compile
@@ -762,8 +761,9 @@ def _execute_decode_attention_compiled(
             output_shapes=[q.shape, (q.shape[0],), (q.shape[0],)],
             output_dtypes=[q.dtype, q.dtype, q.dtype]
         )
+        scores_sparse = mx.zeros((q.shape[0], 1))
     else:
-        out_combined, lse_sparse, lse_dense = compute_decode_attention_static(
+        out_combined, lse_sparse, lse_dense, scores_sparse = compute_decode_attention_static(
             q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
             comp_scale_s, comp_seq_len_s, res_mask_s,
             dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
@@ -772,7 +772,7 @@ def _execute_decode_attention_compiled(
             current_max_dense_len
         )
 
-    return out_combined, (sel if use_topk else cached_sel), lse_sparse, lse_dense
+    return out_combined, (sel if use_topk else cached_sel), lse_sparse, lse_dense, scores_sparse
 
 
 @mx.compile
@@ -2150,7 +2150,7 @@ class MLXKVBlockManager:
                 cached_sel = mx.zeros((1,), dtype=mx.int32)
                 
             nb_actual_arr = mx.array([nb], dtype=mx.int32)
-            out_combined, sel, lse_sparse, lse_dense = _execute_decode_attention_compiled(
+            out_combined, sel, lse_sparse, lse_dense, scores_sparse = _execute_decode_attention_compiled(
                 q, dense_k, dense_v, dense_len,
                 session["comp_U"][layer_idx][:nb_padded],
                 session["comp_VK"][layer_idx][:nb_padded],
@@ -2180,6 +2180,50 @@ class MLXKVBlockManager:
                 avg_share = float(mx.mean(share_comp).item())
                 top_block = int(sel[0].item()) if (sel is not None and sel.size > 0) else -1
                 print(f"[LSE_SHARE] Layer {layer_idx}: max={max_share:.4f} avg={avg_share:.4f} top_block={top_block}", flush=True)
+                if layer_idx in (0, 20):
+                    max_h = int(mx.argmax(share_comp).item())
+                    max_sh = float(share_comp[max_h].item())
+                    print(f"[LSE_SHARE_INFO] Layer {layer_idx} Max-Share Head={max_h} share={max_sh:.4f} lse_sparse={float(lse_sparse[max_h].item()):.4f} lse_dense={float(lse_dense[max_h].item()):.4f}", flush=True)
+                    print(f"[LSE_SHARE_INFO] (Ledger: Residuals are in the DENSE half for MLX)", flush=True)
+                    
+                    h_scores = scores_sparse[max_h]
+                    session_token_ids = session.get("token_ids", [])
+                    sel_list = [int(x) for x in sel.tolist()]
+                    all_rows = []
+                    for k, block_idx in enumerate(sel_list):
+                        ap = block_idx * self.block_size
+                        anc_score = float(h_scores[k * self.block_size].item())
+                        
+                        token_str = ""
+                        if ap < len(session_token_ids) and self.tokenizer is not None:
+                            token_str = f" ('{self.tokenizer.decode([session_token_ids[ap]])}')"
+                            
+                        all_rows.append({
+                            "block_id": block_idx,
+                            "row": -1,
+                            "abs_pos": ap,
+                            "score": anc_score,
+                            "token_str": token_str
+                        })
+                        
+                        for t in range(self.block_size - 1):
+                            abs_pos = ap + 1 + t
+                            t_score = float(h_scores[k * self.block_size + 1 + t].item())
+                            
+                            token_str = ""
+                            if abs_pos < len(session_token_ids) and self.tokenizer is not None:
+                                token_str = f" ('{self.tokenizer.decode([session_token_ids[abs_pos]])}')"
+                                
+                            all_rows.append({
+                                "block_id": block_idx,
+                                "row": t,
+                                "abs_pos": abs_pos,
+                                "score": t_score,
+                                "token_str": token_str
+                            })
+                    all_rows.sort(key=lambda x: x["score"], reverse=True)
+                    for i, r in enumerate(all_rows[:5]):
+                        print(f"  [LSE_SHARE_ROW] #{i}: block_id={r['block_id']} row={r['row']} abs_pos={r['abs_pos']}{r['token_str']} score={r['score']:.4f}", flush=True)
             if route_once and not use_cached_sel and use_topk:
                 session["_route_once_sel"] = sel
         else:

@@ -21,6 +21,19 @@ std::atomic<int>  g_diffkv_dbg_pos{0};   // mirror of DIFFKV_DBG_POS, set from m
 std::atomic<long> g_cpu_attn_count{0};   // execute_cpu_attention entries (live path = CPU?)
 std::atomic<long> g_metal_attn_count{0}; // execute_metal_attention entries (live path = Metal?)
 
+struct SparseRowScore {
+    int block_id;
+    int row; // -1 for anchor, 0..slen-1 for reconstructed
+    int abs_pos;
+    float score;
+};
+
+struct HeadSparseInfo {
+    std::vector<SparseRowScore> top_rows;
+};
+
+thread_local std::vector<HeadSparseInfo> g_last_sparse_info;
+
 #if defined(GGML_USE_CUDA) || defined(USE_CUDA)
 void execute_cuda_attention(
     struct ggml_tensor * dst,
@@ -53,6 +66,7 @@ void execute_cpu_attention(
     int n_q_heads, int n_kv_heads, int rank, int S_max, int K, int D, float scale,
     bool has_rope, float rope_freq_base, bool approximate_attn
 ) {
+    g_last_sparse_info.resize(n_q_heads);
     const float* Q_ptr = Q;
     const ggml_fp16_t* U_scale_arr = kv_engine->get_host_U_scale();
     const int32_t* seq_lens = kv_engine->get_host_seq_lens();
@@ -508,6 +522,40 @@ void execute_cpu_attention(
                 sum_exp += std::exp(slot_infos[k].token_scores[t] - max_score);
         }
         lse_sparse[h] = max_score + std::log(std::max(sum_exp, 1e-9));
+
+        {
+            std::vector<SparseRowScore> all_rows;
+            all_rows.reserve(active_K * (S_max + 1));
+            for (int k = 0; k < active_K; ++k) {
+                int slot_id = active_slots[k];
+                int slen = seq_lens[slot_id];
+                int ap = anchor_positions[slot_id];
+                const int32_t* slot_token_positions = kv_engine->get_host_token_positions(slot_id);
+
+                SparseRowScore anc;
+                anc.block_id = slot_id;
+                anc.row = -1;
+                anc.abs_pos = ap;
+                anc.score = slot_infos[k].anchor_score * scale;
+                all_rows.push_back(anc);
+
+                for (int t = 0; t < slen; ++t) {
+                    SparseRowScore row;
+                    row.block_id = slot_id;
+                    row.row = t;
+                    row.abs_pos = slot_token_positions ? slot_token_positions[t] : (ap + t + 1);
+                    row.score = slot_infos[k].token_scores[t];
+                    all_rows.push_back(row);
+                }
+            }
+            std::sort(all_rows.begin(), all_rows.end(), [](const SparseRowScore& a, const SparseRowScore& b) {
+                return a.score > b.score;
+            });
+            if (all_rows.size() > 5) {
+                all_rows.resize(5);
+            }
+            g_last_sparse_info[h].top_rows = std::move(all_rows);
+        }
 
         std::vector<double> accum(D, 0.0);
         for (int k = 0; k < active_K; ++k) {
@@ -1020,18 +1068,35 @@ void custom_attention_op_callback(
     // DIFFKV_DBG_LSE2: per-step layer-0 sparse-vs-dense LSE balance (D7 probe;
     // compare against MLX's DIFFKV_DBG_LSE_SHARE on the same prompt/step).
     static const bool dbg_lse2 = (std::getenv("DIFFKV_DBG_LSE2") != nullptr);
-    if (dbg_lse2 && data->layer_idx == 0) {
-        // Per-head sparse share (sigmoid of the per-head LSE difference), then
-        // max/avg over heads — the same statistic MLX's DIFFKV_DBG_LSE_SHARE prints.
-        float max_share = 0.0f, sum_share = 0.0f;
+    if (dbg_lse2 && (data->layer_idx == 0 || data->layer_idx == 20)) {
+        float max_share = -1.0f;
+        int max_h = 0;
+        float sum_share = 0.0f;
         for (int h = 0; h < n_q_heads; ++h) {
             float sh = 1.0f / (1.0f + std::exp(lse_dense[h] - lse_sparse[h]));
-            max_share = std::max(max_share, sh);
             sum_share += sh;
+            if (sh > max_share) {
+                max_share = sh;
+                max_h = h;
+            }
         }
         static int lse2_step = 0;
-        fprintf(stderr, "[LSE2] step=%d L0 max_share_sparse=%.4f avg_share_sparse=%.4f\n",
-                lse2_step++, max_share, sum_share / n_q_heads);
+        int current_step = lse2_step;
+        if (data->layer_idx == 0) {
+            lse2_step++;
+        }
+        fprintf(stderr, "[LSE2] step=%d Layer=%d max_share_sparse=%.4f avg_share_sparse=%.4f\n",
+                current_step, data->layer_idx, max_share, sum_share / n_q_heads);
+        fprintf(stderr, "[LSE2_INFO] Layer=%d Max-Share Head=%d share=%.4f lse_sparse=%.4f lse_dense=%.4f\n",
+                data->layer_idx, max_h, max_share, lse_sparse[max_h], lse_dense[max_h]);
+        fprintf(stderr, "[LSE2_INFO] (Ledger: Residuals are in the SPARSE half for Native)\n");
+        if (max_h < (int)g_last_sparse_info.size()) {
+            const auto& top_rows = g_last_sparse_info[max_h].top_rows;
+            for (size_t i = 0; i < top_rows.size(); ++i) {
+                fprintf(stderr, "  [LSE2_ROW] #%d: block_id=%d row=%d abs_pos=%d score=%.4f\n",
+                        (int)i, top_rows[i].block_id, top_rows[i].row, top_rows[i].abs_pos, top_rows[i].score);
+            }
+        }
     }
 
     // Two-way LSE combine (sparse ⊕ dense)
