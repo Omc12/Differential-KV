@@ -756,6 +756,16 @@ void custom_attention_op_callback(
     g_diffkv_cb_invocations.fetch_add(1, std::memory_order_relaxed);  // unconditional: did the callback run?
     if (ith != 0) return;
 
+    static const bool profile_cb = []() {
+        const char* e = std::getenv("DIFFKV_PROFILE_CB");
+        return (e && std::string(e) == "1");
+    }();
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+    double t_readback_ms = 0.0;
+    double t_route_ms = 0.0;
+    double t_gpu_ms = 0.0;
+
     const struct ggml_tensor* Q             = a;
     const struct ggml_tensor* slot_indices  = b;
     CustomAttnUserData* data = static_cast<CustomAttnUserData*>(userdata);
@@ -768,7 +778,10 @@ void custom_attention_op_callback(
     int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
     std::vector<int32_t> slot_indices_cpu(actual_K, 0);
     if (actual_K > 0 && slot_indices) {
+        auto t_r0 = std::chrono::high_resolution_clock::now();
         ggml_backend_tensor_get(slot_indices, slot_indices_cpu.data(), 0, actual_K * sizeof(int32_t));
+        auto t_r1 = std::chrono::high_resolution_clock::now();
+        t_readback_ms += std::chrono::duration<double, std::milli>(t_r1 - t_r0).count();
     }
 
     // ── Route over ALL resident blocks, ignoring the in-graph selection ──────
@@ -812,8 +825,11 @@ void custom_attention_op_callback(
 
     std::vector<float> q_host;
     if (cache_active || (topk_blocks > 0 && actual_K > topk_blocks)) {
+        auto t_rq0 = std::chrono::high_resolution_clock::now();
         q_host.resize(n_q_heads * D);
         ggml_backend_tensor_get(Q, q_host.data(), 0, n_q_heads * D * sizeof(float));
+        auto t_rq1 = std::chrono::high_resolution_clock::now();
+        t_readback_ms += std::chrono::duration<double, std::milli>(t_rq1 - t_rq0).count();
     }
 
     if (cache_active) {
@@ -826,11 +842,18 @@ void custom_attention_op_callback(
         all_reused = has_cache && std::all_of(reuse_mask.begin(), reuse_mask.end(), [](bool b) { return b; });
         if (all_reused) {
             std::memcpy(dst->data, out_cached.data(), n_q_heads * D * sizeof(float));
+            auto t_end = std::chrono::high_resolution_clock::now();
+            double t_total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+            if (profile_cb) {
+                std::printf("[DIFFKV_PROFILE_CB] layer=%d actual_K=%d readback=%.3fms route=%.3fms gpu=%.3fms total=%.3fms (cached)\n",
+                            data->layer_idx, actual_K, t_readback_ms, t_route_ms, t_gpu_ms, t_total_ms);
+            }
             return;
         }
     }
 
     // Top-K block selection via residual-key router
+    auto t_rt0 = std::chrono::high_resolution_clock::now();
     if (topk_blocks > 0 && actual_K > topk_blocks && data->kv_engine != nullptr) {
         std::vector<float> relevance(actual_K, -1e30f);
         NativeBlockPool* pool = data->kv_engine;
@@ -926,6 +949,8 @@ void custom_attention_op_callback(
         slot_indices_cpu = std::move(topk_slots);
         actual_K = topk_blocks;
     }
+    auto t_rt1 = std::chrono::high_resolution_clock::now();
+    t_route_ms += std::chrono::duration<double, std::milli>(t_rt1 - t_rt0).count();
 
     // ── Step 1: Append current token K/V to the dense buffer ─────────────────
     int T_dense = data->active_block_tokens;
@@ -975,6 +1000,7 @@ void custom_attention_op_callback(
     // as factual K/V attention injection has been removed (matching HF reference).
 
     if (!force_cpu) {
+        auto t_g0 = std::chrono::high_resolution_clock::now();
         std::vector<float> lse_dummy(n_q_heads, -1e30f);
         execute_metal_attention(
             dst, Q, slot_indices_cpu.data(), actual_K, data,
@@ -982,9 +1008,18 @@ void custom_attention_op_callback(
             data->active_k_dense, data->active_v_dense,
             data->active_positions_dense, T_dense
         );
+        auto t_g1 = std::chrono::high_resolution_clock::now();
+        t_gpu_ms += std::chrono::duration<double, std::milli>(t_g1 - t_g0).count();
 
         if (cache_active)
             get_global_attn_cache().save(data->session_id, data->layer_idx, q_host.data(), n_q_heads, D, (const float*)dst->data);
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double t_total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        if (profile_cb) {
+            std::printf("[DIFFKV_PROFILE_CB] layer=%d actual_K=%d readback=%.3fms route=%.3fms gpu=%.3fms total=%.3fms\n",
+                        data->layer_idx, actual_K, t_readback_ms, t_route_ms, t_gpu_ms, t_total_ms);
+        }
         return;
     }
 #elif defined(GGML_USE_CUDA) || defined(USE_CUDA)

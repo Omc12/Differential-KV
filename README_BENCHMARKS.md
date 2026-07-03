@@ -66,3 +66,23 @@ Swept `DIFFKV_TOPK_BLOCKS` ∈ {8, 16, 32} under `DIFFKV_COMPRESSED_DECODE=1` on
   2. **Recall Stability:** 100% recall was maintained across all values of `K` ∈ {8, 16, 32} on the single-needle benchmark.
   3. **Default Value Recommendation:** Keep `16` as the default setting because it provides a strong speedup (1.19x to 1.49x) while maintaining a higher safety margin for complex queries and multi-needle layouts where more than 8 blocks might need to be attended.
 
+---
+
+## Part C2: Native Decode Profiling
+
+Analyzed custom attention callback latency (`custom_attention_op_callback`) under `DIFFKV_NATIVE_ATTN=1` (fused Metal path).
+
+* **Command:** `DIFFKV_PROFILE_CB=1 python scratch/test_native_compressed.py` (with max tokens limited to 20)
+* **Profile Results per Layer (8k Context size, actual_K=16):**
+  - **Host-device Readback (`ggml_backend_tensor_get`):** **0.001 ms** (near zero)
+  - **Host-side Top-K Routing (CPU computation):** **4.3 ms**
+  - **GPU Dispatch + Spin-Wait (`execute_metal_attention`):** **8.0 ms - 9.5 ms**
+  - **Total Callback Time per Layer:** **12.5 ms - 13.8 ms**
+  - **Total Callback Time per Token (28 layers):** **~350 ms - 390 ms**
+
+* **Key Findings:**
+  1. **Readback overhead is negligible (0.001 ms):** Unified memory on Apple Silicon allows near zero-copy host-device tensor reads.
+  2. **Host-side Routing is CPU-bound (4.3 ms per layer):** Calculating RoPE and anchor/residual cosine-similarity scores sequentially on the CPU (for 28 heads × 16 blocks × 16 residuals × 128 dimensions) takes a significant amount of CPU cycles.
+  3. **GPU Serialization is the primary bottleneck (8.0 - 9.5 ms per layer):** Committing a command buffer and synchronously spin-waiting for its completion at *every single layer* serializes CPU-GPU execution. This prevents overlap and pipeline efficiency.
+
+
