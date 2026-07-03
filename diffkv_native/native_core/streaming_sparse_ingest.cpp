@@ -8,6 +8,8 @@
 
 namespace diffkv {
 
+extern std::atomic<int> g_diffkv_dbg_pos;
+
 static std::vector<uint32_t> decode_utf8(const std::string& str) {
     std::vector<uint32_t> codepoints;
     size_t i = 0;
@@ -460,6 +462,9 @@ void StreamingSparseIngestManager::ingest_chunk(
                 engines[layer_idx]->get_host_anchor_positions()[slot_id] = anchor_pos;
 
                 engines[layer_idx]->get_state_table().transition(slot_id, BlockState::Freed, BlockState::DenseResident);
+                if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
+                    std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << anchor_pos << " pool_idx=" << slot_id << " state=DenseResident\n";
+                }
             }
             
             new_block->token_indices.push_back(position_start + t);
@@ -653,6 +658,9 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     // Transition state in table
     engines[layer_idx]->get_state_table().transition(slot_id, BlockState::DenseResident, BlockState::Compressing);
     block->state = BlockState::Compressing;
+    if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
+        std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=Compressing\n";
+    }
 
     // Check if block qualifies for rank boosting (1.5x) to prevent Precision Loss
     bool boost = false;
@@ -772,6 +780,9 @@ void StreamingSparseIngestManager::submit_block_for_compression(
         if (!submitted) {
             engines[layer_idx]->get_state_table().transition(slot_id, BlockState::Compressing, BlockState::DenseResident);
             block->state = BlockState::DenseResident;
+            if (g_diffkv_dbg_pos.load(std::memory_order_relaxed)) {
+                std::cerr << "[DBG_TRANS] Layer " << layer_idx << " anchor_idx=" << block->anchor_idx << " pool_idx=" << slot_id << " state=DenseResident (failed submit)\n";
+            }
         } else {
             stats_.total_compressed++;
         }

@@ -106,7 +106,7 @@ bool KVRuntimeManager::initialize(
         micro_block_size_,
         recency_window_,
         short_context_threshold_,
-        true // protect block zero
+        false // protect block zero
     );
     ingest_manager_->initialize(n_layers, model);
 

@@ -1289,6 +1289,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
             if (mlx_parity) {
                 int target_k = std::min(n_comp_blocks, n_slots);
+                target_k = std::min(target_k, 256);
                 if (target_k > srl_k_keep) {
                     srl_k_keep = target_k;
                     int sem_floor2 = srl_k_keep * 3;
@@ -1301,6 +1302,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
                 int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
                 int adaptive_k_max = std::min(200, n_comp_blocks);
                 int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                adaptive_k = std::min(adaptive_k, 256);
                 if (adaptive_k > srl_k_keep) {
                     srl_k_keep = adaptive_k;
                     int sem_floor2 = srl_k_keep * 3;
@@ -1312,7 +1314,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
         if (n_slots <= 32) {
-            int target_k = n_slots;
+            int target_k = std::min(n_slots, 256);
             if (target_k > srl_k_keep) {
                 srl_k_keep = target_k;
                 int sem_floor2 = srl_k_keep * 3;
@@ -1324,6 +1326,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
         }
         if (n_comp_blocks <= 36 && n_comp_blocks > 0) {
             int target_k = std::min(n_comp_blocks, n_slots);
+            target_k = std::min(target_k, 256);
             if (target_k > srl_k_keep) {
                 srl_k_keep = target_k;
                 int sem_floor2 = srl_k_keep * 3;

@@ -2230,14 +2230,14 @@ int main(int argc, char ** argv) {
     }
     
     std::string default_maxd = "2048";
-    std::string default_quant = "f16";
+    std::string default_quant = "q8_0";
     
     if (preset_str == "low") {
         default_maxd = "1024";
-        default_quant = "f16";
+        default_quant = "q4_0";
     } else if (preset_str == "mid") {
         default_maxd = "2048";
-        default_quant = "f16";
+        default_quant = "q8_0";
     } else if (preset_str == "high") {
         default_maxd = "4096";
         default_quant = "f16";
@@ -3803,8 +3803,9 @@ int main(int argc, char ** argv) {
                 }
                 if (mlx_parity) {
                     int target_k = std::min(n_comp_blocks, n_slots);
+                    target_k = std::min(target_k, 256);
                     std::cerr << "[DiffKV] MLX parity active: srl_k_keep raised from " << srl_k_keep
-                              << " → " << target_k << " (attending all compressed blocks)\n";
+                              << " → " << target_k << " (attending all compressed blocks capped at 256)\n";
                     srl_k_keep = target_k;
                     int sem_floor2 = srl_k_keep * 3;
                     if (srl_k_semantic < sem_floor2) {
@@ -3816,10 +3817,11 @@ int main(int argc, char ** argv) {
                     int adaptive_k_min = std::max(20, (int)(0.15f * n_comp_blocks));
                     int adaptive_k_max = std::min(200, n_comp_blocks);
                     int adaptive_k     = std::max(adaptive_k_min, std::min(srl_k_keep, adaptive_k_max));
+                    adaptive_k = std::min(adaptive_k, 256);
                     // Only grow srl_k_keep, never shrink below the N4.2 floor already applied
                     if (adaptive_k > srl_k_keep) {
                         std::cerr << "[DiffKV] §3.1 adaptive-k: srl_k_keep raised from " << srl_k_keep
-                                  << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks)\n";
+                                  << " → " << adaptive_k << " (15% of " << n_comp_blocks << " blocks capped at 256)\n";
                         srl_k_keep = adaptive_k;
                         // Ensure candidate pool stays ≥3× srl_k_keep for anchor_screen
                         int sem_floor2 = srl_k_keep * 3;
@@ -3836,7 +3838,7 @@ int main(int argc, char ** argv) {
 
         // Short context dense fallback: if n_slots <= 32 or n_comp_blocks <= 32, we should attend to all blocks.
         if (n_slots <= 32) {
-            int target_k = n_slots;
+            int target_k = std::min(n_slots, 256);
             if (target_k > srl_k_keep) {
                 std::cerr << "[DiffKV] Short context dense fallback (n_slots <= 32): srl_k_keep raised from " << srl_k_keep
                           << " → " << target_k << "\n";
@@ -3852,6 +3854,7 @@ int main(int argc, char ** argv) {
             int n_comp_blocks_for_dense = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks_for_dense <= 36 && n_comp_blocks_for_dense > 0) {
                 int target_k = std::min(n_comp_blocks_for_dense, n_slots);
+                target_k = std::min(target_k, 256);
                 if (target_k > srl_k_keep) {
                     std::cerr << "[DiffKV] Short context dense fallback (n_comp_blocks <= 36): srl_k_keep raised from " << srl_k_keep
                               << " → " << target_k << "\n";
