@@ -862,6 +862,28 @@ void custom_attention_op_callback(
         const int half_d = D / 2;
         const int g = n_q_heads / n_kv_heads;
 
+        static const bool gqa_route = []() {
+            const char* e = std::getenv("DIFFKV_CB_GQA_ROUTE");
+            return !(e && std::string(e) == "0");
+        }();
+
+        std::vector<float> q_avg;
+        if (gqa_route && g > 1 && !q_host.empty()) {
+            q_avg.resize(n_kv_heads * D, 0.0f);
+            for (int kv = 0; kv < n_kv_heads; ++kv) {
+                for (int d = 0; d < D; ++d) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < g; ++i) {
+                        sum += q_host[(kv * g + i) * D + d];
+                    }
+                    q_avg[kv * D + d] = sum / (float)g;
+                }
+            }
+        }
+
+        const int n_r_heads = (gqa_route && g > 1) ? n_kv_heads : n_q_heads;
+        const float* Q_routing = (gqa_route && g > 1) ? q_avg.data() : q_host.data();
+
         std::vector<float> theta_table(half_d);
         for (int d = 0; d < half_d; ++d) {
             theta_table[d] = 1.0f / std::pow(data->rope_freq_base, (2.0f * d) / D);
@@ -879,9 +901,9 @@ void custom_attention_op_callback(
 
             float max_blk_score = -1e30f;
 
-            for (int h = 0; h < n_q_heads; ++h) {
-                int kv_head = h / g;
-                const float* q_h = q_host.data() + h * D;
+            for (int h = 0; h < n_r_heads; ++h) {
+                int kv_head = (gqa_route && g > 1) ? h : h / g;
+                const float* q_h = Q_routing + h * D;
 
                 // 1. Anchor score (POOL_ROT_ABS: anchor already rotated — no decode rotation)
                 float score_anc = 0.0f;
