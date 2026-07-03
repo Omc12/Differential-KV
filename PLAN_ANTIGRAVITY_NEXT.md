@@ -186,12 +186,10 @@ disconnected bullets). Built `benchmarks/synthesis_eval.py` to evaluate long-con
 2. Native Compressed performs exceptionally well in quality (30.0 -> 26.7), successfully retrieving and summarizing the paper text, matching the MLX Dense baseline.
 3. Native Compressed is currently compute-bottlenecked on SVD calculations (1.0 TPS) due to the sequential CPU execution of Accelerate/GESDD on Apple Silicon (highlighting the need for C3 SVD Batching).
 
-### B2 — Multi-needle + adversarial tracking (extend, don't replace)
+### B2 — Multi-needle + adversarial tracking (Completed)
 
-Add a 3-needle variant to `niah_recall.py --bench` semantics (three distinct passcodes,
-query asks for all three) as a NEW flag — existing single-needle behavior untouched.
-Track `relational_ab.py` adversarial crammed mode as a reported number (known-hard; do
-not tune against it at the expense of `--natural`).
+- Multi-needle: Added `--multi-needle` option to `benchmarks/niah_recall.py` which places 3 distinct passcodes at 0.25, 0.50, and 0.75 depths. Measured MLX compressed at 8k context size: **1/1 cells PASS (100% recall)** at **16.1 TPS**.
+- Adversarial crammed mode: Evaluated `benchmarks/relational_ab.py` in default registry mode without `--spread` and without `--natural`. Measured MLX compressed: **4/5 correct, 0 misbound** (Osprey module key mis-retrieved as `BRAVO-3326` instead of `BRAVO-3306`, indicating minor digit boundary noise in the compressed state).
 
 ### B3 — Bigger-model-on-8GB capability claim (high user value, low risk)
 

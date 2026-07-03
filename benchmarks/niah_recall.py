@@ -25,6 +25,15 @@ ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
 NEEDLE = "OMEGA-7741-DELTA"
 NEEDLE_SENT = f"The secret passcode is {NEEDLE}."
 QUESTION = "What is the secret passcode? Repeat it exactly."
+
+NEEDLES_MULTI = ["OMEGA-7741-DELTA", "SIGMA-9923-BETA", "THETA-1105-ALPHA"]
+NEEDLE_SENTS_MULTI = [
+    "The first secret passcode is OMEGA-7741-DELTA.",
+    "The second secret passcode is SIGMA-9923-BETA.",
+    "The third secret passcode is THETA-1105-ALPHA."
+]
+QUESTION_MULTI = "What are the three secret passcodes? List them all in order."
+
 FILLER = (
     "The history of artificial intelligence is long and complex. "
     "Early AI researchers believed that machines could simulate human reasoning. "
@@ -52,7 +61,38 @@ def build_prompt(tok, ctx, depth):
     )
 
 
-def run(model_id, contexts, depths, gen, use_bench=False, rank=16):
+def build_multi_needle_prompt(tok, ctx):
+    filler = tok.encode(FILLER, add_special_tokens=False)
+    sents_tokens = []
+    for s in NEEDLE_SENTS_MULTI:
+        sents_tokens.extend(tok.encode(s + "\n", add_special_tokens=False))
+    q_tokens = tok.encode(QUESTION_MULTI, add_special_tokens=False)
+    
+    budget = ctx - len(sents_tokens) - len(q_tokens) - 80
+    if budget < 100:
+        budget = 100
+    reps = budget // len(filler) + 1
+    allf = (filler * reps)[:budget]
+    
+    at1 = int(len(allf) * 0.25)
+    at2 = int(len(allf) * 0.50)
+    at3 = int(len(allf) * 0.75)
+    
+    p1 = tok.decode(allf[:at1])
+    p2 = tok.decode(allf[at1:at2])
+    p3 = tok.decode(allf[at2:at3])
+    p4 = tok.decode(allf[at3:])
+    
+    return (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n" + p1 + "\n" + NEEDLE_SENTS_MULTI[0] + "\n"
+        + p2 + "\n" + NEEDLE_SENTS_MULTI[1] + "\n"
+        + p3 + "\n" + NEEDLE_SENTS_MULTI[2] + "\n"
+        + p4 + "\n\n" + QUESTION_MULTI + "<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+
+def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=False):
     import numpy as np
     import torch
     import mlx.core as mx  # noqa: F401
@@ -70,16 +110,17 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16):
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
 
     mode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "auto")
-    src = "bench_common (on-topic, hard)" if use_bench else "ai-history (easy)"
+    src = "multi-needle" if multi_needle else ("bench_common" if use_bench else "ai-history")
     print(f"DIFFKV_COMPRESSED_DECODE={mode}  gen={gen}  prompt={src}", flush=True)
     print(f"{'ctx':>7} {'depth':>5} {'recall':>6} {'tps':>6}   sample", flush=True)
 
-    # In --bench mode the needle is fixed at ~50% depth, so depths collapse to one.
-    iter_depths = [0.5] if use_bench else depths
+    iter_depths = [0.5] if (use_bench or multi_needle) else depths
     results = []
     for ctx in contexts:
         for depth in iter_depths:
-            if use_bench:
+            if multi_needle:
+                prompt = build_multi_needle_prompt(tok, ctx)
+            elif use_bench:
                 prompt, _ = build_niah_prompt(ctx, tok)
             else:
                 prompt = build_prompt(tok, ctx, depth)
@@ -103,7 +144,7 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16):
 
             cur = len(ids)
             generated = []
-            # one warmup decode step (compiles the per-nb kernel) before timing
+            # one warmup decode step before timing
             nid = int(np.argmax(logits))
             generated.append(nid)
             mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long))
@@ -118,9 +159,13 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16):
                 nid = int(np.argmax(logits))
                 generated.append(nid)
                 steps += 1
-                # early-out as soon as the needle is fully emitted (avoids burying)
-                if NEEDLE in tok.decode(generated):
-                    break
+                text_so_far = tok.decode(generated)
+                if multi_needle:
+                    if all(n in text_so_far for n in NEEDLES_MULTI):
+                        break
+                else:
+                    if NEEDLE in text_so_far:
+                        break
                 mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long))
                 output = model(torch.tensor([[nid]], dtype=torch.long),
                                torch.tensor([[cur]], dtype=torch.long))
@@ -129,13 +174,15 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16):
             dt = time.perf_counter() - t0
 
             text = tok.decode(generated)
-            ok = NEEDLE in text
+            if multi_needle:
+                ok = all(n in text for n in NEEDLES_MULTI)
+            else:
+                ok = NEEDLE in text
             tps = steps / dt if dt > 0 else 0.0
             results.append((ctx, depth, ok, tps))
             print(f"{ctx:>7} {depth:>5.1f} {('Y' if ok else 'N'):>6} {tps:>6.1f}   {text[:140]!r}",
                   flush=True)
 
-    n_pass = sum(1 for *_, ok, _ in [(c, d, ok, t) for c, d, ok, t in results] if ok)
     print(f"\nRECALL: {sum(1 for _,_,ok,_ in results if ok)}/{len(results)} cells", flush=True)
     return results
 
@@ -147,7 +194,15 @@ if __name__ == "__main__":
     ap.add_argument("--gen", type=int, default=24)
     ap.add_argument("--bench", action="store_true",
                     help="use the harder on-topic bench_common NIAH prompt")
+    ap.add_argument("--multi-needle", action="store_true",
+                    help="use 3 distinct passcodes distributed at different depths")
     ap.add_argument("--rank", type=int, default=16, help="SVD rank for block compression")
     ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     args = ap.parse_args()
-    run(args.model, args.ctx, args.depths, args.gen, use_bench=args.bench, rank=args.rank)
+    
+    # Auto-increase generation length for multi-needle if not customized
+    generation_length = args.gen
+    if args.multi_needle and args.gen == 24:
+        generation_length = 64
+        
+    run(args.model, args.ctx, args.depths, generation_length, use_bench=args.bench, rank=args.rank, multi_needle=args.multi_needle)
