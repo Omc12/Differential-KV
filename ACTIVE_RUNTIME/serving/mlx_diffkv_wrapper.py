@@ -290,24 +290,26 @@ def compute_decode_attention_static(
     if gpk > 1:
         H_kv = comp_anc_k.shape[1]
         
-        # 1. AncK score computation
+        # 1. AncK score computation (accumulate in float32 to prevent float16 overflow)
         AncK_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)           # [H_kv, gpk, 1, D]
-        s_anc = mx.sum(q_exp * AncK_exp, axis=-1) * scale     # [H_kv, gpk, nb]
-        s_anc = s_anc.reshape(H_q, nb)
+        s_anc = mx.sum((q_exp * AncK_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
         
         # 2. VK projection
         VK_exp = mx.expand_dims(comp_VK.transpose(1, 0, 2, 3), 1)   # [H_kv, 1, nb, rank, D]
         q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
-        q_proj_n = mx.sum(q_exp2 * VK_exp, axis=-1) * scale   # [H_kv, gpk, nb, rank]
-        q_proj_n = q_proj_n.reshape(H_q, nb, rank)
+        q_proj_n = mx.sum((q_exp2 * VK_exp).astype(mx.float32), axis=-1) * scale   # [H_kv, gpk, nb, rank]
+        q_proj_n = q_proj_n.reshape(H_q, nb, rank).astype(q.dtype)
     else:
         AncK_e_perm = comp_anc_k.transpose(1, 0, 2)   # [H_q, nb, D]
-        s_anc = mx.sum(mx.expand_dims(q, 1) * AncK_e_perm, axis=-1) * scale  # [H_q, nb]
+        s_anc = mx.sum((mx.expand_dims(q, 1) * AncK_e_perm).astype(mx.float32), axis=-1) * scale  # [H_q, nb]
+        s_anc = s_anc.astype(q.dtype)
         
         VK_e_perm = comp_VK.transpose(1, 0, 2, 3)                            # [H_q, nb, rank, D]
         q_expanded = mx.expand_dims(mx.expand_dims(q, 1), 2)              # [H_q, 1, 1, D]
-        q_proj_n   = mx.sum(q_expanded * VK_e_perm, axis=-1) * scale      # [H_q, nb, rank]
+        q_proj_n   = mx.sum((q_expanded * VK_e_perm).astype(mx.float32), axis=-1) * scale      # [H_q, nb, rank]
+        q_proj_n   = q_proj_n.astype(q.dtype)
 
     # Mask out padded blocks (index >= nb_actual)
     block_mask = mx.arange(nb) < nb_actual
@@ -338,7 +340,8 @@ def compute_decode_attention_static(
     scores_blocks = mx.concatenate([mx.expand_dims(s_anc, -1), delta_s], axis=-1)
     scores_sparse = scores_blocks.reshape(H_q, -1)  # [H_q, nb*block_size]
 
-    lse_sparse = mx.logsumexp(scores_sparse, axis=-1)   # [H_q]
+    # Accumulate logsumexp in float32 to prevent float16 overflow
+    lse_sparse = mx.logsumexp(scores_sparse.astype(mx.float32), axis=-1).astype(q.dtype)   # [H_q]
     w          = mx.softmax(scores_sparse, axis=-1)      # [H_q, nb*block_size]
 
     W_comp    = w.reshape(H_q, nb, block_size)           # [H_q, nb, block_size]
@@ -380,13 +383,14 @@ def compute_decode_attention_static(
     if gpk > 1:
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)                       # [H_kv, gpk, 1, D]
         dk_exp = mx.expand_dims(dense_k, 1)                                      # [H_kv, 1, max_dense_len, D]
-        scores_dense = mx.sum(q_exp * dk_exp, axis=-1) * scale             # [H_kv, gpk, max_dense_len]
-        scores_dense = scores_dense.reshape(H_q, -1)
+        scores_dense = mx.sum((q_exp * dk_exp).astype(mx.float32), axis=-1) * scale             # [H_kv, gpk, max_dense_len]
+        scores_dense = scores_dense.reshape(H_q, -1).astype(q.dtype)
     else:
-        scores_dense  = mx.sum(mx.expand_dims(q, 1) * dense_k, axis=-1) * scale
+        scores_dense  = mx.sum((mx.expand_dims(q, 1) * dense_k).astype(mx.float32), axis=-1) * scale
+        scores_dense  = scores_dense.astype(q.dtype)
 
     scores_dense  = mx.where(dense_mask_expanded, scores_dense, -float('inf'))
-    lse_dense     = mx.logsumexp(scores_dense, axis=-1)
+    lse_dense     = mx.logsumexp(scores_dense.astype(mx.float32), axis=-1).astype(q.dtype)
     weights_dense = mx.softmax(scores_dense, axis=-1)
 
     if gpk > 1:
@@ -437,10 +441,11 @@ def _dense_only_attention_static(
         H_kv = dense_k.shape[0]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)        # [H_kv, gpk, 1, D]
         dk_exp = mx.expand_dims(dense_k, 1)                       # [H_kv, 1, max_dense_len, D]
-        scores = mx.sum(q_exp * dk_exp, axis=-1) * scale     # [H_kv, gpk, max_dense_len]
-        scores = scores.reshape(H_q, -1)
+        scores = mx.sum((q_exp * dk_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, max_dense_len]
+        scores = scores.reshape(H_q, -1).astype(q.dtype)
     else:
-        scores  = mx.sum(mx.expand_dims(q, 1) * dense_k, axis=-1) * scale
+        scores  = mx.sum((mx.expand_dims(q, 1) * dense_k).astype(mx.float32), axis=-1) * scale
+        scores  = scores.astype(q.dtype)
 
     scores  = mx.where(dense_mask_expanded, scores, -float('inf'))
     weights = mx.softmax(scores, axis=-1)
@@ -461,7 +466,8 @@ def get_fused_decode_kernel():
     global _fused_decode_kernel
     if _fused_decode_kernel is None:
         source = """
-            uint h_q = thread_position_in_grid.x;
+            uint h_q = threadgroup_position_in_grid.x;
+            uint tid = thread_position_in_threadgroup.x;
             uint D = q_shape[1]; // head dim
             uint nb = comp_U_shape[0];
             uint S_comp = comp_U_shape[1];
@@ -472,146 +478,227 @@ def get_fused_decode_kernel():
 
             int actual_blocks = (int)nb_actual[0];
 
-            // Sparse / Compressed Attention online Softmax
+            // Allocate shared memory
+            threadgroup float q_shared[256];
+            threadgroup float temp_shared[256];
+            threadgroup float q_proj_shared[16];
+            threadgroup float w_proj_shared[16];
+            threadgroup float out_accum_shared[256];
+
+            // Cache query
+            if (tid < D) {
+                q_shared[tid] = (float)q[h_q * D + tid];
+            } else {
+                q_shared[tid] = 0.0f;
+            }
+            out_accum_shared[tid] = 0.0f;
+            threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+
             float global_m = -1e9f;
             float global_d = 0.0f;
-            float out_accum[128];
-            for (uint d = 0; d < D; ++d) {
-                out_accum[d] = 0.0f;
-            }
 
+            // Loop over sparse blocks
             for (int b = 0; b < actual_blocks; ++b) {
                 if (b >= 256) break; // safeguard
-                
-                float s_anc = 0.0f;
-                for (uint d = 0; d < D; ++d) {
-                    s_anc += q[h_q * D + d] * comp_anc_k[b * kv_heads * D + h_kv * D + d];
+
+                // 1. Compute s_anc (dot product of q and comp_anc_k, size D)
+                float thread_anc_val = 0.0f;
+                if (tid < D) {
+                    thread_anc_val = q_shared[tid] * (float)comp_anc_k[b * kv_heads * D + h_kv * D + tid];
                 }
-                s_anc *= scale;
                 
-                float m_b = s_anc;
-                
-                float q_proj_n[16];
-                for (uint r = 0; r < rank; ++r) {
-                    float sum = 0.0f;
-                    for (uint d = 0; d < D; ++d) {
-                        sum += q[h_q * D + d] * comp_VK[b * kv_heads * rank * D + h_kv * rank * D + r * D + d];
+                // Block-level sum reduction
+                temp_shared[tid] = thread_anc_val;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                for (uint offset = 128; offset > 0; offset /= 2) {
+                    if (tid < offset) {
+                        temp_shared[tid] += temp_shared[tid + offset];
                     }
-                    q_proj_n[r] = sum * scale;
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
                 }
-                
+                float s_anc = temp_shared[0] * scale;
+
+                // 2. Compute q_proj_n (16 projection values, each is a dot product of q and comp_VK)
+                for (uint r = 0; r < rank; ++r) {
+                    float thread_proj_val = 0.0f;
+                    if (tid < D) {
+                        thread_proj_val = q_shared[tid] * (float)comp_VK[b * kv_heads * rank * D + h_kv * rank * D + r * D + tid];
+                    }
+                    temp_shared[tid] = thread_proj_val;
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                    for (uint offset = 128; offset > 0; offset /= 2) {
+                        if (tid < offset) {
+                            temp_shared[tid] += temp_shared[tid + offset];
+                        }
+                        threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                    }
+                    if (tid == 0) {
+                        q_proj_shared[r] = temp_shared[0] * scale;
+                    }
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                }
+
                 float b_scale = comp_scale[b];
                 int b_seq_len = comp_seq_len[b];
-                
-                // First pass: local max m_b
-                for (uint s = 0; s < S_comp; ++s) {
-                    if (res_mask[b * S_comp + s]) continue;
-                    if ((int)s >= b_seq_len) continue;
-                    
-                    float dot_u = 0.0f;
-                    for (uint r = 0; r < rank; ++r) {
-                        dot_u += q_proj_n[r] * (float)comp_U[b * S_comp * rank + s * rank + r];
+
+                // 3. Compute local dot_u and max score m_b
+                float thread_score = -1e9f;
+                float w_s = 0.0f;
+                if (tid < S_comp) {
+                    if (!res_mask[b * S_comp + tid] && (int)tid < b_seq_len) {
+                        float dot_u = 0.0f;
+                        for (uint r = 0; r < rank; ++r) {
+                            dot_u += q_proj_shared[r] * (float)comp_U[b * S_comp * rank + tid * rank + r];
+                        }
+                        thread_score = dot_u * b_scale + s_anc;
                     }
-                    float val = dot_u * b_scale + s_anc;
-                    m_b = metal::max(m_b, val);
                 }
                 
-                // Second pass: local sum_exp and w_proj
-                float d_b = metal::exp(s_anc - m_b);
-                float w_proj[16];
+                // Also include s_anc itself as the anchor candidate
+                float anchor_candidate = s_anc;
+                
+                // Find m_b (max over residual tokens and anchor)
+                temp_shared[tid] = (tid < S_comp) ? thread_score : -1e9f;
+                if (tid == S_comp) temp_shared[tid] = anchor_candidate;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                for (uint offset = 128; offset > 0; offset /= 2) {
+                    if (tid < offset) {
+                        temp_shared[tid] = metal::max(temp_shared[tid], temp_shared[tid + offset]);
+                    }
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                }
+                float m_b = temp_shared[0];
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+
+                // Compute local sum_exp d_b
+                if (tid < S_comp) {
+                    if (!res_mask[b * S_comp + tid] && (int)tid < b_seq_len) {
+                        w_s = metal::exp(thread_score - m_b);
+                    }
+                }
+                float anchor_w = metal::exp(anchor_candidate - m_b);
+                
+                temp_shared[tid] = (tid < S_comp) ? w_s : 0.0f;
+                if (tid == S_comp) temp_shared[tid] = anchor_w;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                for (uint offset = 128; offset > 0; offset /= 2) {
+                    if (tid < offset) {
+                        temp_shared[tid] += temp_shared[tid + offset];
+                    }
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                }
+                float d_b = temp_shared[0];
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+
+                // 4. Compute w_proj[r]
                 for (uint r = 0; r < rank; ++r) {
-                    w_proj[r] = 0.0f;
+                    float thread_w_proj = 0.0f;
+                    if (tid < S_comp) {
+                        if (!res_mask[b * S_comp + tid] && (int)tid < b_seq_len) {
+                            thread_w_proj = w_s * (float)comp_U[b * S_comp * rank + tid * rank + r];
+                        }
+                    }
+                    temp_shared[tid] = (tid < S_comp) ? thread_w_proj : 0.0f;
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                    for (uint offset = 128; offset > 0; offset /= 2) {
+                        if (tid < offset) {
+                            temp_shared[tid] += temp_shared[tid + offset];
+                        }
+                        threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                    }
+                    if (tid == 0) {
+                        w_proj_shared[r] = temp_shared[0];
+                    }
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
                 }
-                
-                for (uint s = 0; s < S_comp; ++s) {
-                    if (res_mask[b * S_comp + s]) continue;
-                    if ((int)s >= b_seq_len) continue;
-                    
-                    float dot_u = 0.0f;
+
+                // 5. Compute v_block[tid]
+                float v_block_val = 0.0f;
+                if (tid < D) {
+                    v_block_val = d_b * (float)comp_anc_v[b * kv_heads * D + h_kv * D + tid];
                     for (uint r = 0; r < rank; ++r) {
-                        dot_u += q_proj_n[r] * (float)comp_U[b * S_comp * rank + s * rank + r];
-                    }
-                    float val = dot_u * b_scale + s_anc;
-                    float w_s = metal::exp(val - m_b);
-                    d_b += w_s;
-                    for (uint r = 0; r < rank; ++r) {
-                        w_proj[r] += w_s * (float)comp_U[b * S_comp * rank + s * rank + r];
+                        v_block_val += w_proj_shared[r] * b_scale * (float)comp_VV[b * kv_heads * rank * D + h_kv * rank * D + r * D + tid];
                     }
                 }
-                
-                // Compute representative block value (anchor value is weighted by total local sum d_b)
-                float v_block[128];
-                for (uint d = 0; d < D; ++d) {
-                    v_block[d] = d_b * comp_anc_v[b * kv_heads * D + h_kv * D + d];
+
+                // Update global softmax state
+                float m_b_new = metal::max(global_m, m_b);
+                float fac_old = metal::exp(global_m - m_b_new);
+                float fac_new = metal::exp(m_b - m_b_new);
+
+                if (tid < D) {
+                    out_accum_shared[tid] = out_accum_shared[tid] * fac_old + v_block_val * fac_new;
                 }
-                for (uint r = 0; r < rank; ++r) {
-                    float w_proj_scaled = w_proj[r] * b_scale;
-                    for (uint d = 0; d < D; ++d) {
-                        v_block[d] += w_proj_scaled * comp_VV[b * kv_heads * rank * D + h_kv * rank * D + r * D + d];
-                    }
-                }
-                
-                // Update global softmax state with (m_b, d_b, v_block)
-                if (m_b > global_m) {
-                    float fac = metal::exp(global_m - m_b);
-                    global_d = global_d * fac + d_b;
-                    for (uint d = 0; d < D; ++d) {
-                        out_accum[d] = out_accum[d] * fac + v_block[d];
-                    }
-                    global_m = m_b;
-                } else {
-                    float fac = metal::exp(m_b - global_m);
-                    global_d = global_d + d_b * fac;
-                    for (uint d = 0; d < D; ++d) {
-                        out_accum[d] = out_accum[d] + v_block[d] * fac;
-                    }
-                }
+                global_d = global_d * fac_old + d_b * fac_new;
+                global_m = m_b_new;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
             }
 
             float lse_sparse_val = (global_d > 0.0f) ? (global_m + metal::log(global_d)) : -1e9f;
-            float sparse_out[128];
-            for (uint d = 0; d < D; ++d) {
-                sparse_out[d] = (global_d > 0.0f) ? (out_accum[d] / global_d) : 0.0f;
+            float sparse_out_val = 0.0f;
+            if (tid < D && global_d > 0.0f) {
+                sparse_out_val = out_accum_shared[tid] / global_d;
             }
+            
+            // Re-use out_accum_shared to store sparse_out_val
+            out_accum_shared[tid] = sparse_out_val;
+            threadgroup_barrier(metal::mem_flags::mem_threadgroup);
 
-            // Dense Attention online Softmax
+            // ── Dense Attention online Softmax ─────────────────────────────────
             float dense_m = -1e9f;
             float dense_d = 0.0f;
-            float dense_accum[128];
-            for (uint d = 0; d < D; ++d) {
-                dense_accum[d] = 0.0f;
-            }
+            
+            // Clear out temp_shared to use for dense accumulator
+            temp_shared[tid] = 0.0f;
+            threadgroup_barrier(metal::mem_flags::mem_threadgroup);
 
             uint max_dense_len = dense_k_shape[1];
             for (uint t = 0; t < max_dense_len; ++t) {
                 if (!dense_mask[t]) continue;
-                
-                float sum = 0.0f;
-                for (uint d = 0; d < D; ++d) {
-                    sum += q[h_q * D + d] * dense_k[h_kv * max_dense_len * D + t * D + d];
+
+                // Dot product q and dense_k
+                float thread_k_val = 0.0f;
+                if (tid < D) {
+                    thread_k_val = q_shared[tid] * (float)dense_k[h_kv * max_dense_len * D + t * D + tid];
                 }
-                float score_t = sum * scale;
                 
-                if (score_t > dense_m) {
-                    float fac = metal::exp(dense_m - score_t);
-                    dense_d = dense_d * fac + 1.0f;
-                    for (uint d = 0; d < D; ++d) {
-                        dense_accum[d] = dense_accum[d] * fac + dense_v[h_kv * max_dense_len * D + t * D + d];
+                // Do sum reduction of thread_k_val across all threads
+                q_shared[tid] = thread_k_val;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+                for (uint offset = 128; offset > 0; offset /= 2) {
+                    if (tid < offset) {
+                        q_shared[tid] += q_shared[tid + offset];
                     }
-                    dense_m = score_t;
-                } else {
-                    float fac = metal::exp(score_t - dense_m);
-                    dense_d = dense_d + fac;
-                    for (uint d = 0; d < D; ++d) {
-                        dense_accum[d] = dense_accum[d] + dense_v[h_kv * max_dense_len * D + t * D + d] * fac;
-                    }
+                    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
                 }
+                float score_t = q_shared[0] * scale;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+
+                // Restore q_shared
+                if (tid < D) {
+                    q_shared[tid] = (float)q[h_q * D + tid];
+                }
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+
+                // Update dense softmax state
+                float dense_m_new = metal::max(dense_m, score_t);
+                float fac_old = metal::exp(dense_m - dense_m_new);
+                float fac_new = metal::exp(score_t - dense_m_new);
+
+                float v_t_val = 0.0f;
+                if (tid < D) {
+                    v_t_val = (float)dense_v[h_kv * max_dense_len * D + t * D + tid];
+                    temp_shared[tid] = temp_shared[tid] * fac_old + v_t_val * fac_new;
+                }
+                dense_d = dense_d * fac_old + fac_new;
+                dense_m = dense_m_new;
+                threadgroup_barrier(metal::mem_flags::mem_threadgroup);
             }
 
             float lse_dense_val = (dense_d > 0.0f) ? (dense_m + metal::log(dense_d)) : -1e9f;
-            float dense_out[128];
-            for (uint d = 0; d < D; ++d) {
-                dense_out[d] = (dense_d > 0.0f) ? (dense_accum[d] / dense_d) : 0.0f;
+            float dense_out_val = 0.0f;
+            if (tid < D && dense_d > 0.0f) {
+                dense_out_val = temp_shared[tid] / dense_d;
             }
 
             // Flash-style LSE merge
@@ -620,12 +707,14 @@ def get_fused_decode_kernel():
             float w_dense_comb = metal::exp(lse_dense_val - lse_max_combined);
             float denom = w_sparse_comb + w_dense_comb + 1e-9f;
 
-            for (uint d = 0; d < D; ++d) {
-                out[h_q * D + d] = (sparse_out[d] * w_sparse_comb + dense_out[d] * w_dense_comb) / denom;
+            if (tid < D) {
+                out[h_q * D + tid] = (out_accum_shared[tid] * w_sparse_comb + dense_out_val * w_dense_comb) / denom;
             }
 
-            lse_sparse_out[h_q] = lse_sparse_val;
-            lse_dense_out[h_q] = lse_dense_val;
+            if (tid == 0) {
+                lse_sparse_out[h_q] = lse_sparse_val;
+                lse_dense_out[h_q] = lse_dense_val;
+            }
         """
         _fused_decode_kernel = mx.fast.metal_kernel(
             name="fused_decode_online",
@@ -750,14 +839,24 @@ def _execute_decode_attention_compiled(
         fused = get_fused_decode_kernel()
         out_combined, lse_sparse, lse_dense = fused(
             inputs=[
-                q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
-                comp_scale_s, comp_seq_len_s, res_mask_s,
-                dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
-                nb_actual_for_attn, scale
+                mx.contiguous(q),
+                mx.contiguous(comp_U_s),
+                mx.contiguous(comp_VK_s),
+                mx.contiguous(comp_VV_s),
+                mx.contiguous(comp_anc_k_s),
+                mx.contiguous(comp_anc_v_s),
+                mx.contiguous(comp_scale_s),
+                mx.contiguous(comp_seq_len_s),
+                mx.contiguous(res_mask_s.astype(mx.int8)),
+                mx.contiguous(dense_k_for_attn),
+                mx.contiguous(dense_v_for_attn),
+                mx.contiguous(dense_mask_combined),
+                mx.contiguous(nb_actual_for_attn),
+                scale
             ],
             template=[("T", q.dtype)],
-            grid=(q.shape[0], 1, 1),
-            threadgroup=(1, 1, 1),
+            grid=(q.shape[0] * 256, 1, 1),
+            threadgroup=(256, 1, 1),
             output_shapes=[q.shape, (q.shape[0],), (q.shape[0],)],
             output_dtypes=[q.dtype, q.dtype, q.dtype]
         )
@@ -839,23 +938,26 @@ def _block_relevance_residual(
         
         ANC_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
-        s_anc = mx.sum(q_exp * ANC_exp, axis=-1) * scale     # [H_kv, gpk, nb]
-        s_anc = s_anc.reshape(H_q, nb)
+        s_anc = mx.sum((q_exp * ANC_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
         
         RK_exp = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1) # [H_kv, 1, nb, R, D]
         q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
-        s_res = mx.sum(q_exp2 * RK_exp, axis=-1) * scale       # [H_kv, gpk, nb, R]
+        s_res = mx.sum((q_exp2 * RK_exp).astype(mx.float32), axis=-1) * scale       # [H_kv, gpk, nb, R]
+        s_res = s_res.astype(q.dtype)
         res_valid_exp = mx.expand_dims(mx.expand_dims(res_valid, 0), 1)    # [1, 1, nb, R]
         s_res = mx.where(res_valid_exp, s_res, -float('inf'))
         res_max = mx.max(s_res, axis=-1)                       # [H_kv, gpk, nb]
         res_max = res_max.reshape(H_q, nb)
     else:
         ANC_p = comp_anc_k.transpose(1, 0, 2)                          # [H, nb, D]
-        s_anc = mx.sum(mx.expand_dims(q, 1) * ANC_p, axis=-1) * scale  # [H, nb]
+        s_anc = mx.sum((mx.expand_dims(q, 1) * ANC_p).astype(mx.float32), axis=-1) * scale  # [H, nb]
+        s_anc = s_anc.astype(q.dtype)
 
         RK_p  = comp_res_k.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
         q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
-        s_res = mx.sum(q_e2 * RK_p, axis=-1) * scale            # [H, nb, R]
+        s_res = mx.sum((q_e2 * RK_p).astype(mx.float32), axis=-1) * scale            # [H, nb, R]
+        s_res = s_res.astype(q.dtype)
         s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
         res_max = mx.max(s_res, axis=-1)                        # [H, nb]
 
@@ -2110,14 +2212,24 @@ class MLXKVBlockManager:
                 fused = get_fused_decode_kernel()
                 out_combined, lse_sparse, lse_dense = fused(
                     inputs=[
-                        q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
-                        comp_scale_s, comp_seq_len_s, res_mask,
-                        dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
-                        nb_actual_arr, scale
+                        mx.contiguous(q),
+                        mx.contiguous(comp_U_s),
+                        mx.contiguous(comp_VK_s),
+                        mx.contiguous(comp_VV_s),
+                        mx.contiguous(comp_anc_k_s),
+                        mx.contiguous(comp_anc_v_s),
+                        mx.contiguous(comp_scale_s),
+                        mx.contiguous(comp_seq_len_s),
+                        mx.contiguous(res_mask.astype(mx.int8)),
+                        mx.contiguous(dense_k_for_attn),
+                        mx.contiguous(dense_v_for_attn),
+                        mx.contiguous(dense_mask_combined),
+                        mx.contiguous(nb_actual_arr),
+                        scale
                     ],
                     template=[("T", q.dtype)],
-                    grid=(q.shape[0], 1, 1),
-                    threadgroup=(1, 1, 1),
+                    grid=(q.shape[0] * 256, 1, 1),
+                    threadgroup=(256, 1, 1),
                     output_shapes=[q.shape, (q.shape[0],), (q.shape[0],)],
                     output_dtypes=[q.dtype, q.dtype, q.dtype]
                 )

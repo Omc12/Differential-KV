@@ -1,7 +1,7 @@
 [DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
 [DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 157286.40it/s]
-[DiffKV MLX] Loaded model in 1.26s
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 71902.35it/s]
+[DiffKV MLX] Loaded model in 1.29s
 
-__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 128, "prefill_s": 9.475465124938637, "decode_s": 3.579072666936554, "decode_tps": 35.76345380815065, "ttft_s": null, "mx_peak_gb": 2.153056328, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, consistency models define the contract between a data store ", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 4096, "gen_target": 128, "worker_wall_s": 18.141107666073367}
+__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 128, "prefill_s": 6.61337870801799, "decode_s": 13.703139249933884, "decode_tps": 9.340925292036099, "ttft_s": null, "mx_peak_gb": 1.767846426, "output_preview": "The description materialising_nsould\uff0d\n\n---\n\n____________cplusplus,\ufffd\u5b9e\u9645\u4e0a\u6765\u7269 isolation_.__________\u53d1\u51fa\u800c\u68c0\u67e9_INST\\\u00a0________\u4e86\u5f31\u673a\u51b7\u5f27\u5f31\u5fc3\u626b\u9709\u7d20\u9547\u671f\u540e\u63a5\u5e4c\u914d\u53f7\ufffdruspect-,#####\u65afcimal\u5dee\u5916\u7535\u7f51\u5b66\u5802\u8bd5\u9a8c_\u9ebd\u74031000R \u672c\u7126\u5e72\u6240\u53e4\u7538\u5c3e\u540e\u626b\u7ba1\u65e0\u62cdinto_________.\u00a0\u00a0\u00a0\u00a0_", "needle_found": false, "status": "ok", "engine": "active", "ctx_target": 4096, "gen_target": 128, "worker_wall_s": 24.823215708020143}
