@@ -2925,6 +2925,23 @@ class MLXDiffKVWrapper:
         if self.model is not None:
             return
 
+        # Bound the MLX buffer cache. During chunked prefill every chunk's
+        # tensors have new shapes (context grows), so cached buffers from
+        # earlier chunks are never reused and the cache grows superlinearly:
+        # measured 4.07 GB dead cache (~6.1 GB total allocator footprint) on a
+        # 13.2k-token prefill. A 1 GB limit cut peak to ~3.0 GB AND made the
+        # same prefill 15% faster (31.7s -> 27.1s) on the 8 GB M3 machine.
+        # DIFFKV_CACHE_LIMIT_GB=0 disables the cap.
+        cache_gb = os.environ.get("DIFFKV_CACHE_LIMIT_GB", "1")
+        try:
+            cache_bytes = int(float(cache_gb) * 1e9)
+        except ValueError:
+            cache_bytes = 0
+        if cache_bytes > 0:
+            _set_limit = getattr(mx, "set_cache_limit", None) or getattr(mx.metal, "set_cache_limit", None)
+            if _set_limit is not None:
+                _set_limit(cache_bytes)
+
         model_id = self.model_id
         quant = self.config.get("quantization")
         
