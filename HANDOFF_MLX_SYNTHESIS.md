@@ -3,6 +3,24 @@
 Read this first in the new session, then `SESSION_REPORT_FABLE5.md` and
 `memory/project_w1_lse_merge_regression_fixed.md`.
 
+## ENGAGE POLICY — when DiffKV runs dense vs sparse (clarified 2026-07-04)
+- **Active/MLX default is `DIFFKV_COMPRESSED_DECODE=1` = sparse-ALWAYS from token 1** (README
+  L53). Compression of old blocks begins once context > recency_window+block_size (~768 tok).
+  So a bare user ALREADY runs DiffKV from the start — it is NOT dormant until 16k.
+- **The "16k" behavior is only the `auto` mode**, which the benchmarks set
+  (`niah_recall.py` L127 defaults to `auto`; `DIFFKV_COMPRESSED_MIN_CTX` default 16384).
+  `auto` = exact dense while a turn's context < threshold, sparse once it's ≥ threshold.
+- **Growing conversation:** the dense/sparse choice is re-resolved at EVERY prefill→decode
+  boundary from the current seq_len (`_decode_compressed[cache_key]`, wrapper L2685-2691) — NOT
+  sticky. So under `auto` a convo that grows 2k→32k runs dense until it crosses the threshold,
+  then flips to sparse for subsequent turns. Under the default `1` it is sparse throughout.
+- **Threshold tradeoff (the "start at 4k not 16k?" question):** lower threshold = DiffKV engages
+  earlier = memory/reach benefit sooner BUT exposes the compression caveats (below) at contexts
+  where exact dense was affordable. For Qwen-1.5B on 8GB, full KV is ~28KB/tok (16k≈458MB,
+  32k≈916MB) so dense is memory-fine to ~32k; compression is only memory-NEEDED beyond that.
+  Retrieval (needles/codes) is exact on sparse at every ctx, so early engagement is safe for
+  retrieval; synthesis/prose is where sparse is weaker. Pick the threshold by workload.
+
 ## VERIFICATION (10th pass, real DiffKV sparse path — not dense)
 - **The sparse path is real and good.** NIAH with `DIFFKV_COMPRESSED_DECODE=1` (force sparse
   from token 1, NOT the `auto` default which is dense <16k) → **4/4** at 4k/8k/16k/32k, and
@@ -21,6 +39,16 @@ Read this first in the new session, then `SESSION_REPORT_FABLE5.md` and
 - **CLIs:** native binary CLI works end-to-end (coherent, DiffKV engages). The active
   `openai_compatible_api_gateway.py` uses the SAME `DiffKVHFWrapper` verified here (not started
   as a full HTTP server this pass).
+
+## CAVEAT STATUS after this pass (which are fixable vs fundamental)
+1. **Prose-fact fidelity — FIXABLE, not fundamental.** `DIFFKV_MAX_RESIDUAL=128` (double the
+   exact-token budget per block, default 64) rescued the prose name "Voss" (64→confabulated
+   "Thompson", 128→correct "Dr. Voss"), with NIAH still 4/4. Cost: ~25-30% slower decode
+   (10.3 vs ~14 tps @16k) + 2× residual memory. So prose recall trades against speed/memory —
+   a knob, not a wall. Validated on ONE prose fact so far; validate on more before defaulting.
+2. **Synthesis topic-selection — FIXED at 8k** via `DIFFKV_SPARSE_BIAS=2.0` (window [2.0,2.5]).
+3. **16k synthesis — likely ill-posed** (paper≈filler mass); bias/routing don't help.
+   The bias fixes topic-selection, NOT prose fidelity (orthogonal levers: bias vs max_residual).
 
 ## STATUS UPDATE (10th pass): root cause FOUND and 8k FIXED.
 The MLX compressed-synthesis bug is **root-caused and fixed for 8k** via a new flag.
