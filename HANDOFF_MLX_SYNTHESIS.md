@@ -103,9 +103,16 @@ does not translate into the output. The remaining suspects (for the next session
    on the same "attend everything" intent) — a good isolated target: fix that path to match
    native, then compare.
 
-## 3. Remaining work for the next session — 16k synthesis routing
-The 8k case is fixed (`DIFFKV_SPARSE_BIAS=2.0`). The open problem is **16k**, where the
-top-K router does not surface the paper blocks (forced-sparse@16k is empty/degenerate).
+## 3. Remaining work for the next session — 16k synthesis (likely ill-posed)
+The 8k case is fixed (`DIFFKV_SPARSE_BIAS=2.0`). **16k is harder AND may be ill-posed:** at
+16k the paper is 8k tokens and the filler is ALSO ~8k tokens, so "summarize the text above" is
+genuinely ambiguous (both regions ARE "the text above"). Tested this session: `SPARSE_BIAS=2.0`
+with `TOPK_FRAC=0.5` and `1.0` (route half / all blocks) — both still summarize the filler at
+16k. So growing K / biasing the merge cannot disambiguate two equal-mass competing regions.
+Before investing here, first check whether **native** even reads the paper at 16k (if native
+also picks the filler, 16k is ill-posed and not worth chasing). If native does read it at 16k,
+then it's still an MLX gap and the router path below applies.
+Router notes (for the still-open case, if pursued):
 1. Instrument the router (`_block_relevance_residual`) at a 16k synthesis step: which block
    ids get selected, and where do the paper blocks (0–31 of ~63) rank? Expect: filler blocks
    win because the residual router scores single-token q·k peaks, which favour distinctive
