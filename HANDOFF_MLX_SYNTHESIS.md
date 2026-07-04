@@ -3,6 +3,25 @@
 Read this first in the new session, then `SESSION_REPORT_FABLE5.md` and
 `memory/project_w1_lse_merge_regression_fixed.md`.
 
+## VERIFICATION (10th pass, real DiffKV sparse path — not dense)
+- **The sparse path is real and good.** NIAH with `DIFFKV_COMPRESSED_DECODE=1` (force sparse
+  from token 1, NOT the `auto` default which is dense <16k) → **4/4** at 4k/8k/16k/32k, and
+  **3/3 depths** at 4k, 8k, 16k. (Earlier "NIAH 4/4" via `auto` had 4k/8k running DENSE — the
+  bias/compression were no-ops there; this re-run exercises the compressed kernel at every ctx.)
+- **`DIFFKV_SPARSE_BIAS=2.0` safe window mapped:** synthesis needs ≥2.0 (1.5→filler); NIAH
+  forced-sparse is 4/4 at 2.0 across all ctx+depths, but **3.0 corrupts 4k NIAH**
+  ("omega7741delta") and 4.0 breaks more. Safe window ≈ **[2.0, 2.5]** — narrow, so it stays a
+  flag and likely needs re-tuning per model/config.
+- **Real generations (5.6k-token prompt, key facts in the COMPRESSED region):** both engines
+  retrieve the exact distinctive code `FALCON-9926-ZULU` from compression — native (`decode_use_sparse=1`
+  confirmed) and active MLX (forced sparse). PROSE facts are weaker: the lead-engineer NAME
+  ("Voss") was confabulated on both (bias=0→"Reed", bias=2.0→"Sarah Thompson"). So the bias
+  fixes TOPIC-SELECTION (synthesis), not general prose-fact fidelity — prose recall remains the
+  compression frontier.
+- **CLIs:** native binary CLI works end-to-end (coherent, DiffKV engages). The active
+  `openai_compatible_api_gateway.py` uses the SAME `DiffKVHFWrapper` verified here (not started
+  as a full HTTP server this pass).
+
 ## STATUS UPDATE (10th pass): root cause FOUND and 8k FIXED.
 The MLX compressed-synthesis bug is **root-caused and fixed for 8k** via a new flag.
 - **Root cause:** the sparse⊕dense flash merge **under-weights the compressed (sparse) half**
