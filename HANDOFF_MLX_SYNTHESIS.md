@@ -1,8 +1,25 @@
 # HANDOFF — MLX compressed-synthesis bug (2026-07-04, Opus 4.8)
 
-Read this first in the new session, then `SESSION_REPORT_FABLE5.md` "Ninth pass" and
-`memory/project_w1_lse_merge_regression_fixed.md`. This continues the ninth pass: NIAH is
-fixed (see below); the open item is **MLX compressed multi-fact synthesis**.
+Read this first in the new session, then `SESSION_REPORT_FABLE5.md` and
+`memory/project_w1_lse_merge_regression_fixed.md`.
+
+## STATUS UPDATE (10th pass): root cause FOUND and 8k FIXED.
+The MLX compressed-synthesis bug is **root-caused and fixed for 8k** via a new flag.
+- **Root cause:** the sparse⊕dense flash merge **under-weights the compressed (sparse) half**
+  because the low-rank reconstruction systematically UNDER-scores it. The sparse half attends
+  the correct paper tokens but LOSES the merge to the exact recent dense window (filler) —
+  proven with `DIFFKV_DBG_FORCE_HALF` (sparse-only → paper words; dense-only → filler) and the
+  LSE-share probe.
+- **Fix:** `DIFFKV_SPARSE_BIAS` (nats added to `lse_sparse`; default 0.0 = exact/parity-safe).
+  `DIFFKV_SPARSE_BIAS=2.0` flips 8k compressed synthesis from the filler summary to the PAPER
+  summary, with **NIAH 4/4 (bench) + 3/3 (16k depths) and relational 4/4 and parity 4/4 all
+  still green** (NIAH's exact needle residual has a big enough margin to survive the bias).
+  `+4.0` DOES break NIAH → the safe window is narrow, so it ships as a flag, not a default.
+- **STILL OPEN — 16k synthesis:** at 16k the paper is only half the context and the **top-K
+  router selects filler blocks, not paper** (forced-sparse@16k is empty/degenerate → the paper
+  isn't even in the sparse half). The bias can't help there. This is a **routing** problem for
+  diffuse multi-fact queries (the residual router is tuned for single-needle retrieval), and is
+  the next work item (§3).
 
 ---
 
@@ -86,27 +103,36 @@ does not translate into the output. The remaining suspects (for the next session
    on the same "attend everything" intent) — a good isolated target: fix that path to match
    native, then compare.
 
-## 3. Suggested plan for the next session
-1. Re-verify §0 guardrails. Decide on the uncommitted Antigravity changes (§1).
-2. Instrument out_sparse vs out_dense value norms/content at a synthesis step; confirm whether
-   the paper's out_sparse is usable or noise. (`compute_decode_attention_static`, ~line 300–441.)
-3. Line-by-line compare MLX `compute_decode_attention_static` merge math against native's
-   decode (`diffkv_native/src/main.cpp` execute_cpu_attention / the Metal callback) — native
-   is the working oracle here.
-4. Any change is gated by the FULL §0 table AND `niah_recall.py --bench 16k 32k` (the ≥16k
-   compressed retrieval is knife-edge — a synthesis fix must not re-break recall). New behavior
-   behind an env flag, default OFF, per the repo protocol.
+## 3. Remaining work for the next session — 16k synthesis routing
+The 8k case is fixed (`DIFFKV_SPARSE_BIAS=2.0`). The open problem is **16k**, where the
+top-K router does not surface the paper blocks (forced-sparse@16k is empty/degenerate).
+1. Instrument the router (`_block_relevance_residual`) at a 16k synthesis step: which block
+   ids get selected, and where do the paper blocks (0–31 of ~63) rank? Expect: filler blocks
+   win because the residual router scores single-token q·k peaks, which favour distinctive
+   filler prose over diffuse technical paper text.
+2. Design a routing signal that surfaces the answer region for a DIFFUSE multi-fact query
+   (not a single needle). Candidates: (a) union the top-K with a spread of early/low-index
+   blocks; (b) a coverage/diversity term so selection isn't collapsed onto one region;
+   (c) `topk_frac>0` so K grows with block count at 16k+. All are experiments — measure.
+3. Consider auto-calibrating `DIFFKV_SPARSE_BIAS` from the observed lse_sparse/lse_dense gap
+   instead of a magic constant (the principled version of the 8k fix).
+4. Every change gated by the FULL §0 table AND `niah_recall.py --bench 16k 32k` AND
+   `relational_ab.py` — a synthesis/routing change must not re-break recall or binding. Flag,
+   default OFF, per the repo protocol.
 
 ## 4. Exact repro commands
 ```bash
 source diffkv_venv/bin/activate
-# the bug (filler summary, 1/15):
-python benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 8192 | tail -1
-# the working oracles (paper summary):
-python benchmarks/synthesis_eval.py --single-run --engine mlx  --mode dense      --ctx 8192 | tail -1
-python benchmarks/synthesis_eval.py --single-run --engine native --mode compressed --ctx 8192 | tail -1
-# attention evidence (sparse half attends paper tokens):
-DIFFKV_DBG_LSE_SHARE=1 python benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 8192 --gen 3 2>&1 | grep LSE_SHARE_ROW
+# the fix (8k: filler -> paper):
+DIFFKV_SPARSE_BIAS=2.0 python benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 8192 | tail -1
+python           benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 8192 | tail -1   # bias off = filler
+# still-open 16k (bias does NOT help — routing):
+DIFFKV_SPARSE_BIAS=2.0 python benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 16384 | tail -1
+# guardrails the fix must not break:
+DIFFKV_SPARSE_BIAS=2.0 python benchmarks/niah_recall.py --bench --ctx 4096 8192 16384 32768 --model mlx-community/Qwen2.5-1.5B-Instruct-4bit   # 4/4
+# diagnostics used to root-cause (still available):
+DIFFKV_DBG_FORCE_HALF=sparse python benchmarks/synthesis_eval.py --single-run --engine mlx --mode compressed --ctx 8192   # (probe removed from code; re-add if needed)
 ```
 NOTE: `run_mlx` in `synthesis_eval.py` hardcodes `rank:16` (line 96) — rank is confirmed
-irrelevant here, but be aware the eval does not use the rank=32 default.
+irrelevant here. The uncommitted native `diffkv_native/src/main.cpp` (Antigravity's alnum
+repetition filter) is still in the tree — decide whether to keep it in the native/perf session.

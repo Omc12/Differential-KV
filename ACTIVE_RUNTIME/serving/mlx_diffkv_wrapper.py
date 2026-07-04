@@ -3,6 +3,25 @@ import sys
 import time
 import math
 import re
+
+# DIFFKV_SPARSE_BIAS — additive bias (in nats) on the compressed/sparse half's LSE in the
+# sparse⊕dense flash merge. Default 0.0 (exact flash attention; required for the parity
+# oracle). The low-rank reconstruction systematically UNDER-scores the compressed pool, so
+# when the answer lives in OLD (compressed) context that is out-competed by the recent exact
+# dense window, the model reads the wrong region. Concretely: MLX compressed multi-fact
+# synthesis@8k summarized the recent filler (Pride & Prejudice) instead of the buried paper —
+# the sparse half attended the correct paper tokens but LOST the merge (proven 2026-07-04 via
+# forced-half + DIFFKV_DBG_LSE_SHARE). A +2.0 bias tips the blend to the paper (filler→paper
+# summary) while NIAH stays 4/4 (bench 4k–32k) + 3/3 (16k depths 0.1/0.5/0.9) and relational
+# stays 4/4 — NIAH's exact needle residual has a large margin the bias doesn't erode. +4.0
+# DOES break NIAH (needle corruption), so the safe window is narrow → a flag, not a default.
+# It does NOT fix 16k synthesis (there the router selects filler blocks, so the paper isn't in
+# the sparse half at all — a separate routing problem). See HANDOFF_MLX_SYNTHESIS.md.
+try:
+    _SPARSE_BIAS = float(os.environ.get("DIFFKV_SPARSE_BIAS", "0.0"))
+except ValueError:
+    _SPARSE_BIAS = 0.0
+
 from collections import Counter
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
@@ -411,6 +430,11 @@ def compute_decode_attention_static(
     lse_dense  = mx.where(mx.isnan(lse_dense)  | mx.isinf(lse_dense),  NEG, lse_dense)
     out_sparse = mx.where(mx.isnan(out_sparse), 0.0, out_sparse)
     out_dense  = mx.where(mx.isnan(out_dense),  0.0, out_dense)
+
+    # Correct the compressed pool's systematic LSE under-scoring (see DIFFKV_SPARSE_BIAS
+    # note at module top). Default 0.0 → exact flash merge (parity-safe, no-op).
+    if _SPARSE_BIAS != 0.0:
+        lse_sparse = mx.where(lse_sparse <= NEG, lse_sparse, lse_sparse + _SPARSE_BIAS)
 
     lse_max  = mx.maximum(lse_sparse, lse_dense)
     w_sparse = mx.exp(lse_sparse - lse_max)
