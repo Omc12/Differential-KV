@@ -780,6 +780,24 @@ flags a real W7 over-claim: `NATIVE_ATTN=1` still routes to a broken decode path
 degrading to the default (default-OFF, so not user-facing, but the graceful-degradation W7
 promised is absent).
 
+### W9.5 — Compressed-synthesis deficit is reconstruction fidelity, not routing (diagnostic)
+The MLX-compressed synthesis deficit (3.3/100 vs dense 23.3) is the real MLX quality
+frontier. Diagnosed this pass, NOT fixed (a fix here is research-grade and risks a NIAH
+regression — deferred deliberately). Test: force **all** blocks (`DIFFKV_TOPK_BLOCKS=999`,
+no top-K routing) → synthesis drops to **0.0/100**, WORSE than top-16's 3.3. So routing is
+not the bottleneck — the opposite. Interpretation: the low-rank + capped-residual
+reconstruction carries a per-block noise floor that **accumulates** with the number of
+attended blocks (all-blocks 0.0 < top-16 3.3 < exact-dense 23.3). Unlike single-needle NIAH
+(one fact, one block, exact-residual rescue), multi-fact synthesis needs many blocks' fine
+detail simultaneously, which the compression cannot retain. This is an inherent
+compression↔recall tradeoff, and rank=32 does not close it (measured same 3.3 at rank 16
+and 32). Candidate directions (all substantial, none attempted): fact-aware residual
+capture (zero-sum with NIAH per prior measurements), LSE-gated on-demand block re-expansion
+(`PLAN_NEW_DIRECTIONS.md` D2), or per-block reconstruction-noise suppression. Recommend
+treating this as its own scoped research item, guarded by both `synthesis_eval` AND
+`niah_recall --bench` so a synthesis gain can't silently cost recall.
+
 Guardrails on main (`3e7c15d`+, rank=32, native rebuilt): parity 4/4 · MLX NIAH `--bench`
 4/4 (4k–32k) · relational 4/4 · native honest sweep 6/6 · native margins 8k +12.6 / 16k
-+14.1 · conformance PASS (1.19e-07, via run_conformance.sh).
++14.1 · conformance PASS (1.19e-07, via run_conformance.sh). MLX-compressed synthesis@8k
+3.3/100 (dense 23.3) — separate reconstruction-fidelity frontier, characterized not fixed.
