@@ -14,7 +14,7 @@ int NativeBlockPool::MAX_RESIDUAL = []() {
             return std::stoi(env);
         } catch (...) {}
     }
-    return 64;
+    return 128;
 }();
 
 namespace {

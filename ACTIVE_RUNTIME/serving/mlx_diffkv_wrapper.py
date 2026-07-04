@@ -2710,7 +2710,7 @@ class MLXDiffKVWrapper:
         self.is_mlx = True
         
         self.block_size = self.config.get("block_size", 256)
-        self.rank = self.config.get("rank", 16)
+        self.rank = self.config.get("rank", 32)
         self.micro_block_size = self.config.get("micro_block_size", 256)
         self.device = "mps"
         

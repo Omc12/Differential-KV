@@ -149,9 +149,16 @@ def run_native(model_path, prompt_text, mode, max_tokens=250):
         
     cmd = [binary_path, model_path, prompt_text]
     t0 = time.perf_counter()
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, errors='replace')
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, errors='replace')
     dt = time.perf_counter() - t0
     
+    if res.stderr:
+        print(f"--- SUBPROCESS STDERR ({mode}) ---", file=sys.stderr)
+        print(res.stderr, file=sys.stderr)
+        print("--------------------------------", file=sys.stderr)
+    if res.returncode != 0:
+        print(f"[ERROR] Native binary exited with code {res.returncode}", file=sys.stderr)
+        
     output = res.stdout
     summary = output.strip()
     words = len(summary.split())
@@ -235,8 +242,13 @@ def main():
                 ]
                 
                 t0 = time.perf_counter()
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors='replace')
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace')
                 dt = time.perf_counter() - t0
+                
+                if res.stderr:
+                    print(f"--- SUBPROCESS SINGLE-RUN STDERR ---", file=sys.stderr)
+                    print(res.stderr, file=sys.stderr)
+                    print("-------------------------------------", file=sys.stderr)
                 
                 try:
                     stdout_str = res.stdout.strip()

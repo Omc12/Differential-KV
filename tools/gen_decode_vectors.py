@@ -30,7 +30,7 @@ def main():
     H_q = 8
     H_kv = 2
     D = 64
-    rank = 16
+    rank = 32;
     S_max = 64
     n_slots = 4
     K_active = 3
@@ -38,7 +38,7 @@ def main():
     has_rope = False
     rope_freq_base = 1000000.0
     approximate_attn = True
-    MAX_RESIDUAL = 64
+    MAX_RESIDUAL = 128
     
     # Inputs
     Q = np.random.randn(H_q, D).astype(np.float32) * 0.1

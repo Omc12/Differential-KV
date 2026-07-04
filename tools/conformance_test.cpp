@@ -75,7 +75,7 @@ int main() {
         int H_q = 8;
         int H_kv = 2;
         int D = 64;
-        int rank = 16;
+        int rank = 32;
         int S_max = 64;
         int n_slots = 4;
         int K_active = 3;
@@ -145,10 +145,10 @@ int main() {
             std::memcpy(pool.get_host_anchors_K(s), host_anchors_K + s * H_kv * D, H_kv * D * sizeof(uint16_t));
             std::memcpy(pool.get_host_anchors_V(s), host_anchors_V + s * H_kv * D, H_kv * D * sizeof(uint16_t));
             
-            std::memcpy(pool.get_host_res_K_pos(s), host_res_K_pos + s * 64, 64 * sizeof(int32_t));
-            std::memcpy(pool.get_host_res_V_pos(s), host_res_V_pos + s * 64, 64 * sizeof(int32_t));
-            std::memcpy(pool.get_host_res_K_val(s), host_res_K_val + s * 64 * H_kv * D, 64 * H_kv * D * sizeof(uint16_t));
-            std::memcpy(pool.get_host_res_V_val(s), host_res_V_val + s * 64 * H_kv * D, 64 * H_kv * D * sizeof(uint16_t));
+            std::memcpy(pool.get_host_res_K_pos(s), host_res_K_pos + s * 128, 128 * sizeof(int32_t));
+            std::memcpy(pool.get_host_res_V_pos(s), host_res_V_pos + s * 128, 128 * sizeof(int32_t));
+            std::memcpy(pool.get_host_res_K_val(s), host_res_K_val + s * 128 * H_kv * D, 128 * H_kv * D * sizeof(uint16_t));
+            std::memcpy(pool.get_host_res_V_val(s), host_res_V_val + s * 128 * H_kv * D, 128 * H_kv * D * sizeof(uint16_t));
         }
         
         // Output buffers
