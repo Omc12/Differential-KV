@@ -745,15 +745,28 @@ did not help synthesis); the merge-grading flag had no measured benefit and was 
 The MLX-compressed synthesis deficit (3.3 vs dense 23.3) is a **separate, pre-existing
 compression-fidelity issue** — the real MLX quality frontier — NOT a merge/LSE problem.
 
-### Other findings this pass
+### W9.3 — Conformance guardrail was silently RED on main; added run_conformance.sh
 - **W7 deleted the `DIFFKV_SELFTEST` guardrail** (it rode along with the fused-ggml
-  removal). The standalone `conformance_test` replaces it and PASSES (max diff 8.9e-08),
-  so native CPU correctness stays guarded; but `tools/run_conformance.sh` and the
-  MLX/Metal conformance runners the W7 spec required were never created — guardrail
-  hygiene debt, not a correctness bug.
+  removal). The standalone `conformance_test` replaces it, but W7 never built
+  `tools/run_conformance.sh` and the golden vectors (`tools/conformance_vectors.bin`)
+  are a **gitignored, generated artifact**.
+- Consequence found this pass: `8058506` bumped the decode config (rank 16→32,
+  MAX_RESIDUAL 64→128) in `gen_decode_vectors.py` + `conformance_test.cpp` but did NOT
+  regenerate the vectors — so on main, `conformance_test` **FAILS on stale vectors**
+  (max output discrepancy **0.40**, LSE 0.042). Regenerating the vectors
+  (`python tools/gen_decode_vectors.py`, seed=42, deterministic) → **PASS 1.19e-07**, so
+  native CPU decode at rank=32 correctly matches the MLX reference (main's double-rotation
+  fix is sound; only the guardrail's vectors were stale).
+- **Fix:** added `tools/run_conformance.sh` (NEW file) — regenerates the vectors from the
+  current config, then runs the native CPU conformance, so the two can never drift. Run it
+  after any decode-math/config change; non-zero exit = red guardrail. The MLX-compiled and
+  native-Metal conformance runners the W7 spec also wanted remain TODO (they would not have
+  caught W1 — a ~fp16-epsilon change well inside the 2e-2 tolerance — so the standing NIAH
+  `--bench 16k 32k` remains the real guard for that class).
 - The MLX wrapper still carries **two near-duplicate decode paths** (the `all_blocks_full`
   compiled path and the else path), each with its own routing — the exact divergence class
   the AUDIT §5 consolidation recommendation targets.
 
-Guardrails at working tree: parity 4/4 · MLX NIAH `--bench` 4/4 (4k–32k) · relational 4/4 ·
-native honest sweep 6/6 · conformance PASS.
+Guardrails on main (`3e7c15d`, rank=32, native rebuilt): parity 4/4 · MLX NIAH `--bench`
+4/4 (4k–32k) · relational 4/4 · native honest sweep 6/6 · conformance PASS (1.19e-07,
+via run_conformance.sh).
