@@ -7,7 +7,11 @@ import sys
 # Define standard sweep env
 env = os.environ.copy()
 env["DIFFKV_ENGAGE_THRESHOLD"] = "1024"
-env["DIFFKV_NATIVE_ATTN"] = "1"
+# Probe the DEFAULT decode path (NATIVE_ATTN=0), the same path as the honest 6-cell
+# sweep and what users run. NATIVE_ATTN=1 (the fused-ggml path W7 removed) does NOT
+# degrade gracefully — it emits gibberish at 16k ("The secret secretTheThe unary…"),
+# which made this probe report a false 16k failure. Fixed 2026-07-04.
+env["DIFFKV_NATIVE_ATTN"] = "0"
 env["DIFFKV_FORCE_CPU_ATTN"] = "0"
 env["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
 env["DIFFKV_DENSE_DIRECT"] = "1"

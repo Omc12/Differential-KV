@@ -767,6 +767,19 @@ compression-fidelity issue** — the real MLX quality frontier — NOT a merge/L
   compiled path and the else path), each with its own routing — the exact divergence class
   the AUDIT §5 consolidation recommendation targets.
 
-Guardrails on main (`3e7c15d`, rank=32, native rebuilt): parity 4/4 · MLX NIAH `--bench`
-4/4 (4k–32k) · relational 4/4 · native honest sweep 6/6 · conformance PASS (1.19e-07,
-via run_conformance.sh).
+### W9.4 — Native margins healthy; margin probe was testing the wrong (broken) path
+Ran the native honest sweep on main (rebuilt): **6/6** — `8058506`'s double-rotation fix
+did not regress recall. Margins (`native_margin_probe.sh`, default path): **8k/0.5 = +12.6,
+16k/0.5 = +14.1** (dense control ≈ +12.5) — native decode is robust at the margin level, NOT
+knife-edge like MLX's ≥16k compressed path. But the eighth pass's probe hardcoded
+`DIFFKV_NATIVE_ATTN=1` (the fused-ggml path W7 removed), which does **not** degrade
+gracefully — it emits gibberish at 16k ("The secret secretTheThe unary…"), so the probe was
+reporting a **false 16k failure** and could not measure the 16k margin at all. Fixed the
+probe to `NATIVE_ATTN=0` (the default path = what the honest sweep and users run). Separately
+flags a real W7 over-claim: `NATIVE_ATTN=1` still routes to a broken decode path instead of
+degrading to the default (default-OFF, so not user-facing, but the graceful-degradation W7
+promised is absent).
+
+Guardrails on main (`3e7c15d`+, rank=32, native rebuilt): parity 4/4 · MLX NIAH `--bench`
+4/4 (4k–32k) · relational 4/4 · native honest sweep 6/6 · native margins 8k +12.6 / 16k
++14.1 · conformance PASS (1.19e-07, via run_conformance.sh).
