@@ -41,11 +41,13 @@ Read this first in the new session, then `SESSION_REPORT_FABLE5.md` and
   as a full HTTP server this pass).
 
 ## CAVEAT STATUS after this pass (which are fixable vs fundamental)
-1. **Prose-fact fidelity — FIXABLE, not fundamental.** `DIFFKV_MAX_RESIDUAL=128` (double the
-   exact-token budget per block, default 64) rescued the prose name "Voss" (64→confabulated
-   "Thompson", 128→correct "Dr. Voss"), with NIAH still 4/4. Cost: ~25-30% slower decode
-   (10.3 vs ~14 tps @16k) + 2× residual memory. So prose recall trades against speed/memory —
-   a knob, not a wall. Validated on ONE prose fact so far; validate on more before defaulting.
+1. **Prose-fact fidelity — FIXED (default bumped 64→128).** Validated on 3 buried-fact prompts
+   (rover log, corporate memo): at 64 the model confabulated ("Dr. Sarah Thompson",
+   "Dr. Toshiko Yamada", "Boston, MA"); at 128 it returned the correct names/places
+   ("Dr. Sara Voss", "Dr. Yuki Tanaka", "Fairhaven Square"). NIAH 4/4 + parity 4/4 at 128.
+   **Native was ALREADY 128** — MLX at 64 was the outlier, which is why native prose worked and
+   MLX didn't; the bump aligns them. Cost ~25-30% slower decode + 2× residual memory (accepted:
+   accuracy > short-ctx throughput). `DIFFKV_MAX_RESIDUAL=64` trades back for retrieval-only speed.
 2. **Synthesis topic-selection — FIXED at 8k** via `DIFFKV_SPARSE_BIAS=2.0` (window [2.0,2.5]).
 3. **16k synthesis — likely ill-posed** (paper≈filler mass); bias/routing don't help.
    The bias fixes topic-selection, NOT prose fidelity (orthogonal levers: bias vs max_residual).

@@ -761,13 +761,23 @@ class MLXKVBlockManager:
         # Configurable via DIFFKV_MAX_BLOCKS env var (lower = less VRAM).
         self.max_blocks = int(os.environ.get("DIFFKV_MAX_BLOCKS", "256"))
         # Exact residual tokens kept per block (top-by-reconstruction-error).
-        # 64 (was 32) lets a content-dense block — e.g. one holding a buried
-        # passcode — retain ALL its distinctive tokens; at 32 the passcode's later
-        # tokens were truncated and their values corrupted to garbage. Most filler
-        # blocks still store 64 too, but Phase-2 top-K routing only GATHERS
-        # residuals from the few selected blocks at decode, so the decode-time cost
-        # is bounded by K, not by this cap.
-        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "64"))
+        # DEFAULT 128 (raised from 64 on 2026-07-04) — DO NOT lower this for a decode-speed
+        # win without re-checking PROSE fidelity: raising 64→128 measurably fixed multi-fact
+        # PROSE recall from compressed context (names/places/roles), which the low-rank
+        # reconstruction otherwise confabulates. A/B on 3 buried-fact prompts (rover log,
+        # corporate memo): at 64 the model returned "Dr. Sarah Thompson", "Dr. Toshiko Yamada",
+        # "Boston, MA" (all WRONG); at 128 it returned the correct "Dr. Sara Voss",
+        # "Dr. Yuki Tanaka", "Fairhaven Square". NIAH (distinctive-token recall) is 4/4 at both
+        # 64 and 128 — 64 was already enough for a single needle, which is why the earlier
+        # "MAX_RESIDUAL increases don't help" note (true for NIAH) did NOT generalize to prose.
+        # COST is ~25-30% slower decode (e.g. 16k: ~14→~10 tps) + 2× residual pool memory;
+        # accepted deliberately (accuracy > short-context throughput). To trade back for speed
+        # on retrieval-only workloads, set DIFFKV_MAX_RESIDUAL=64.
+        # NOTE: the NATIVE engine (native_block_pool.cpp) and the conformance vectors were
+        # ALREADY 128 — MLX at 64 was the lone outlier, which is precisely why native compressed
+        # SYNTHESIS/prose read correctly while MLX confabulated. This bump aligns MLX with native.
+        # Keep it unless a measured perf pass proves prose recall is unaffected at a lower value.
+        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "128"))
         # Top-K block routing: when >0 and the live block count exceeds it, decode
         # scores all blocks cheaply (Quest-style key min/max upper bound) but runs
         # the expensive value reconstruction + exact-residual attention only for the
