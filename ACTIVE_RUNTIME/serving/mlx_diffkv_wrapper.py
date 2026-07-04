@@ -290,25 +290,27 @@ def compute_decode_attention_static(
     if gpk > 1:
         H_kv = comp_anc_k.shape[1]
         
-        # 1. AncK score computation (accumulate in float32 to prevent float16 overflow)
+        # 1. AncK score (fp16 product, fp32 SUM — the validated pre-W1 form; see the
+        # decode-precision note above the LSE merge for why W1's fp32 casts here were
+        # reverted).
         AncK_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)           # [H_kv, gpk, 1, D]
-        s_anc = mx.sum(q_exp.astype(mx.float32) * AncK_exp.astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = mx.sum((q_exp * AncK_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
         s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
-        
+
         # 2. VK projection
         VK_exp = mx.expand_dims(comp_VK.transpose(1, 0, 2, 3), 1)   # [H_kv, 1, nb, rank, D]
         q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
-        q_proj_n = mx.sum(q_exp2.astype(mx.float32) * VK_exp.astype(mx.float32), axis=-1) * scale   # [H_kv, gpk, nb, rank]
+        q_proj_n = mx.sum((q_exp2 * VK_exp).astype(mx.float32), axis=-1) * scale   # [H_kv, gpk, nb, rank]
         q_proj_n = q_proj_n.reshape(H_q, nb, rank).astype(q.dtype)
     else:
         AncK_e_perm = comp_anc_k.transpose(1, 0, 2)   # [H_q, nb, D]
-        s_anc = mx.sum(mx.expand_dims(q, 1).astype(mx.float32) * AncK_e_perm.astype(mx.float32), axis=-1) * scale  # [H_q, nb]
+        s_anc = mx.sum((mx.expand_dims(q, 1) * AncK_e_perm).astype(mx.float32), axis=-1) * scale  # [H_q, nb]
         s_anc = s_anc.astype(q.dtype)
-        
+
         VK_e_perm = comp_VK.transpose(1, 0, 2, 3)                            # [H_q, nb, rank, D]
         q_expanded = mx.expand_dims(mx.expand_dims(q, 1), 2)              # [H_q, 1, 1, D]
-        q_proj_n   = mx.sum(q_expanded.astype(mx.float32) * VK_e_perm.astype(mx.float32), axis=-1) * scale      # [H_q, nb, rank]
+        q_proj_n   = mx.sum((q_expanded * VK_e_perm).astype(mx.float32), axis=-1) * scale      # [H_q, nb, rank]
         q_proj_n   = q_proj_n.astype(q.dtype)
 
     # Mask out padded blocks (index >= nb_actual)
@@ -340,8 +342,9 @@ def compute_decode_attention_static(
     scores_blocks = mx.concatenate([mx.expand_dims(s_anc, -1), delta_s], axis=-1)
     scores_sparse = scores_blocks.reshape(H_q, -1)  # [H_q, nb*block_size]
 
-    # Accumulate logsumexp in float32 to prevent float16 overflow
-    lse_sparse = mx.logsumexp(scores_sparse.astype(mx.float32), axis=-1)   # [H_q] (float32)
+    # Accumulate logsumexp in float32 (overflow-safe), then cast back to the
+    # activation dtype — the pre-W1 form. See the decode-precision note at the merge.
+    lse_sparse = mx.logsumexp(scores_sparse.astype(mx.float32), axis=-1).astype(q.dtype)   # [H_q]
     w          = mx.softmax(scores_sparse, axis=-1)      # [H_q, nb*block_size]
 
     W_comp    = w.reshape(H_q, nb, block_size)           # [H_q, nb, block_size]
@@ -383,14 +386,14 @@ def compute_decode_attention_static(
     if gpk > 1:
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)                       # [H_kv, gpk, 1, D]
         dk_exp = mx.expand_dims(dense_k, 1)                                      # [H_kv, 1, max_dense_len, D]
-        scores_dense = mx.sum(q_exp.astype(mx.float32) * dk_exp.astype(mx.float32), axis=-1) * scale             # [H_kv, gpk, max_dense_len]
+        scores_dense = mx.sum((q_exp * dk_exp).astype(mx.float32), axis=-1) * scale             # [H_kv, gpk, max_dense_len]
         scores_dense = scores_dense.reshape(H_q, -1).astype(q.dtype)
     else:
-        scores_dense  = mx.sum(mx.expand_dims(q, 1).astype(mx.float32) * dense_k.astype(mx.float32), axis=-1) * scale
+        scores_dense  = mx.sum((mx.expand_dims(q, 1) * dense_k).astype(mx.float32), axis=-1) * scale
         scores_dense  = scores_dense.astype(q.dtype)
 
     scores_dense  = mx.where(dense_mask_expanded, scores_dense, -float('inf'))
-    lse_dense     = mx.logsumexp(scores_dense.astype(mx.float32), axis=-1)
+    lse_dense     = mx.logsumexp(scores_dense.astype(mx.float32), axis=-1).astype(q.dtype)
     weights_dense = mx.softmax(scores_dense, axis=-1)
 
     if gpk > 1:
@@ -414,11 +417,24 @@ def compute_decode_attention_static(
     w_dense  = mx.exp(lse_dense  - lse_max)
     denom    = w_sparse + w_dense + 1e-9
 
+    # DECODE-PRECISION NOTE (2026-07-04). This combine, and the score computations
+    # above, keep the pre-W1 fp16 arithmetic (fp32 only where it always was: the
+    # logsumexp accumulation). The eighth pass (W1) recast operands/accumulators to
+    # fp32 for "overflow safety"; that is numerically cleaner but shifted the combine
+    # by ~fp16-epsilon, which — because the >=16k compressed-decode retrieval sits on
+    # a knife-edge (single-row/epsilon perturbations flip a cell; see AUDIT) —
+    # REGRESSED NIAH from PASS to a repetition-loop FAIL at 16k/32k. A/B proven
+    # 2026-07-04: reverting these casts (this combine was the load-bearing one)
+    # restores exact recall at 16k/32k with parity/relational unchanged. W1 justified
+    # the fp32 merge as a synthesis fix, but that was DISPROVEN: MLX-compressed
+    # synthesis@8k scored 3.3/100 both with and without the fp32 merge, so the graded
+    # blend is not the synthesis lever and the flag was dropped. Do not re-introduce
+    # fp32 casts on this decode path without re-checking niah_recall.py --bench 16k/32k.
     out_combined = (
-        out_sparse.astype(mx.float32) * mx.expand_dims(w_sparse, -1)
-        + out_dense.astype(mx.float32) * mx.expand_dims(w_dense, -1)
+        out_sparse * mx.expand_dims(w_sparse, -1)
+        + out_dense * mx.expand_dims(w_dense, -1)
     ) / mx.expand_dims(denom, -1)
-    return out_combined.astype(q.dtype), lse_sparse, lse_dense, scores_sparse
+    return out_combined, lse_sparse, lse_dense, scores_sparse
 
 
 @mx.compile
@@ -604,20 +620,15 @@ def _block_relevance_minmax(
         MIN_exp = mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         MAX_exp = mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
-        q_exp_f32 = q_exp.astype(mx.float32)
-        MIN_exp_f32 = MIN_exp.astype(mx.float32)
-        MAX_exp_f32 = MAX_exp.astype(mx.float32)
-        bound = mx.sum(mx.maximum(q_exp_f32 * MIN_exp_f32, q_exp_f32 * MAX_exp_f32), axis=-1) * scale # [H_kv, gpk, nb]
-        bound = bound.reshape(H_q, nb).astype(q.dtype)
+        # fp16 product / fp32 sum — pre-W1 router arithmetic (kept in lockstep with
+        # the decode path; see the decode-precision note in compute_decode_attention_static).
+        bound = mx.sum(mx.maximum(q_exp * MIN_exp, q_exp * MAX_exp), axis=-1) * scale # [H_kv, gpk, nb]
+        bound = bound.reshape(H_q, nb)
     else:
         MIN_p = comp_min_k.transpose(1, 0, 2)                  # [H, nb, D]
         MAX_p = comp_max_k.transpose(1, 0, 2)
         q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
-        q_e_f32 = q_e.astype(mx.float32)
-        MIN_p_f32 = MIN_p.astype(mx.float32)
-        MAX_p_f32 = MAX_p.astype(mx.float32)
-        bound = mx.sum(mx.maximum(q_e_f32 * MIN_p_f32, q_e_f32 * MAX_p_f32), axis=-1) * scale  # [H, nb]
-        bound = bound.astype(q.dtype)
+        bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
     return mx.max(bound, axis=0)                    # [nb]
 
 
@@ -646,14 +657,16 @@ def _block_relevance_residual(
         H_kv = comp_anc_k.shape[1]
         nb = comp_anc_k.shape[0]
         
+        # fp16 product / fp32 sum — pre-W1 router arithmetic (see the decode-precision
+        # note in compute_decode_attention_static; kept in lockstep with the decode path).
         ANC_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
         q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
-        s_anc = mx.sum(q_exp.astype(mx.float32) * ANC_exp.astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
+        s_anc = mx.sum((q_exp * ANC_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
         s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
-        
+
         RK_exp = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1) # [H_kv, 1, nb, R, D]
         q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
-        s_res = mx.sum(q_exp2.astype(mx.float32) * RK_exp.astype(mx.float32), axis=-1) * scale       # [H_kv, gpk, nb, R]
+        s_res = mx.sum((q_exp2 * RK_exp).astype(mx.float32), axis=-1) * scale       # [H_kv, gpk, nb, R]
         s_res = s_res.astype(q.dtype)
         res_valid_exp = mx.expand_dims(mx.expand_dims(res_valid, 0), 1)    # [1, 1, nb, R]
         s_res = mx.where(res_valid_exp, s_res, -float('inf'))
@@ -661,12 +674,12 @@ def _block_relevance_residual(
         res_max = res_max.reshape(H_q, nb)
     else:
         ANC_p = comp_anc_k.transpose(1, 0, 2)                          # [H, nb, D]
-        s_anc = mx.sum(mx.expand_dims(q, 1).astype(mx.float32) * ANC_p.astype(mx.float32), axis=-1) * scale  # [H, nb]
+        s_anc = mx.sum((mx.expand_dims(q, 1) * ANC_p).astype(mx.float32), axis=-1) * scale  # [H, nb]
         s_anc = s_anc.astype(q.dtype)
 
         RK_p  = comp_res_k.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
         q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
-        s_res = mx.sum(q_e2.astype(mx.float32) * RK_p.astype(mx.float32), axis=-1) * scale            # [H, nb, R]
+        s_res = mx.sum((q_e2 * RK_p).astype(mx.float32), axis=-1) * scale            # [H, nb, R]
         s_res = s_res.astype(q.dtype)
         s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
         res_max = mx.max(s_res, axis=-1)                        # [H, nb]

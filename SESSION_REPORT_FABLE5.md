@@ -687,3 +687,73 @@ recommendation: **`AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md`** (new file). Headli
 
 Guardrails re-verified at HEAD: parity 4/4 · SELFTEST PASS · native default sweep 6/6 ·
 MLX 4k exact @19.4 tps · fused MLX 0/1 @9.8 tps (off by default).
+
+---
+
+## Ninth pass — W1 (fp32 LSE merge) regressed MLX NIAH at 16k/32k; reverted (2026-07-04, Opus 4.8)
+
+> Diagnosed at `9ba2100` (rank=16); the bug reproduces IDENTICALLY on `main` (`8058506`,
+> rank=32 — a later commit that bumped the MLX rank default) — rank does not mask it. The
+> fix was applied and ALL guardrails below re-verified on `main` at rank=32.
+
+The eighth pass (`9ba2100`) marked W1–W8 all `[DONE]` in the AUDIT. Empirical re-check at
+`9ba2100` shows **W1 broke the MLX NIAH guardrail at every context where compressed decode
+engages** — the eighth pass never ran 16k/32k NIAH (its baseline table only lists MLX 4k),
+so the regression shipped undetected. Native was unaffected (6/6, C++ path).
+
+### W9.1 — MLX compressed-decode NIAH: 16k/32k FAIL → 4/4 (HEAD 9ba2100 → working tree)
+
+**Baseline (fresh, at 9ba2100):**
+```
+niah_recall.py --bench --ctx 4096 8192 16384 32768   → 4096 Y · 8192 Y · 16384 N · 32768 N   (2/4)
+  16384 sample: "The secret passcode hidden above is:\nThe secret passcode hidden above is:\n…"  (repetition loop)
+niah_recall.py --bench --ctx 16384  DIFFKV_COMPRESSED_DECODE=0 (dense)  → Y  (isolates the bug to the compressed path)
+parity 4/4 · relational 4/4
+```
+**Root cause (A/B proven):** reverting *only* `mlx_diffkv_wrapper.py` to `36d4dd0` (pre-W1)
+→ 16k PASS; restoring `9ba2100` → 16k FAIL, deterministic (2/2 each way). Bisected inside
+the file: the load-bearing change is W1's **fp32 recast of the decode combine**
+(`out_combined` + `scores_dense`) in `compute_decode_attention_static`. The `>=16k`
+compressed retrieval is knife-edge (the AUDIT's own "single-row changes flip cells"); W1's
+~fp16-epsilon precision shift tipped it from PASS to a repetition-loop FAIL. The operand
+casts on `s_anc`/`q_proj_n`/routers are numerical **no-ops at 16k** (no overflow there;
+verified by byte-identical output) but were reverted too, to restore the exact validated
+pre-W1 decode/router arithmetic in lockstep.
+
+**Change:** revert all of W1's fp32 numeric casts on the MLX decode path (scores, LSE
+cast-back, combine) and both routers (`_block_relevance_minmax`/`_residual`) to their
+pre-W1 fp16-product / fp32-sum form. `mlx_diffkv_wrapper.py` only; native untouched.
+
+**After (same commands):**
+```
+niah_recall.py --bench --ctx 4096 8192 16384 32768   → 4/4 exact OMEGA-7741-DELTA (tps 19.7/15.3/14.0/11.6)
+parity 4/4 · relational 4/4 (0 misbound)
+```
+**Verdict: DONE** (acceptance met verbatim; the guardrail W1 silently broke is restored).
+
+### W9.2 — Disproves W1's rationale: fp32 merge is NOT the synthesis lever (NEGATIVE)
+
+W1/AUDIT §3.1 claimed the fp16 LSE merge caused the B1 synthesis collapse (MLX-compressed
+3.3/100). Measured directly (`synthesis_eval.py --engine mlx --ctx 8192`):
+```
+MLX dense      : 23.3/100 (4/15 facts, 1/5 links)
+MLX compressed : 3.3/100  (1/15, 0/5)   ← fp16 merge (new default)
+MLX compressed : 3.3/100  (1/15, 0/5)   ← fp32 graded merge (DIFFKV_FP32_LSE_MERGE=1, tried then removed)
+```
+The graded fp32 merge gives **identical** synthesis. So W1 was net-negative (broke NIAH,
+did not help synthesis); the merge-grading flag had no measured benefit and was dropped.
+The MLX-compressed synthesis deficit (3.3 vs dense 23.3) is a **separate, pre-existing
+compression-fidelity issue** — the real MLX quality frontier — NOT a merge/LSE problem.
+
+### Other findings this pass
+- **W7 deleted the `DIFFKV_SELFTEST` guardrail** (it rode along with the fused-ggml
+  removal). The standalone `conformance_test` replaces it and PASSES (max diff 8.9e-08),
+  so native CPU correctness stays guarded; but `tools/run_conformance.sh` and the
+  MLX/Metal conformance runners the W7 spec required were never created — guardrail
+  hygiene debt, not a correctness bug.
+- The MLX wrapper still carries **two near-duplicate decode paths** (the `all_blocks_full`
+  compiled path and the else path), each with its own routing — the exact divergence class
+  the AUDIT §5 consolidation recommendation targets.
+
+Guardrails at working tree: parity 4/4 · MLX NIAH `--bench` 4/4 (4k–32k) · relational 4/4 ·
+native honest sweep 6/6 · conformance PASS.
