@@ -1,7 +1,30 @@
 # DiffKV — Master Handoff & Working Protocol
 
-## §BIG-WIN — "decompress-and-cache" decode — MLX DONE ✅, NATIVE/CUDA TODO
-_MLX built + verified (`DIFFKV_DECODE_CACHE=1`, commit `c848c2b`). Native/Triton/CUDA = same design._
+## §BIG-WIN — "decompress-and-cache" decode — MLX DONE ✅, NATIVE DONE ✅, CUDA TODO
+_MLX built + verified (`DIFFKV_DECODE_CACHE=1`, commit `c848c2b`). Native built + verified
+(`DIFFKV_DECODE_CACHE=1`, commits `71ad7d5` + fix `6e37e02`). Triton/CUDA = same design._
+
+**NATIVE RESULT — 14th pass (2026-07-05), BUILT + VERIFIED ✅.** Ported the decompress-and-cache
+design to C++/GGML: on sparse decode, MATERIALIZE the routed compressed blocks (anchor row +
+`anchor + U·V·row_scale·blk_scale` + exact residuals, pre-rotated per POOL_ROT_ABS) into a
+contiguous F16 K/V buffer once per N tokens (`materialize_routed_kv`, threaded across layers),
+fill the dense window per token, and attend `[routed ++ window ++ current]` with the SAME GPU
+`ggml_flash_attn_ext` the dense path uses — eliminating the per-layer CPU-op-in-GPU-graph stall.
+**Measured (forced sparse, `DIFFKV_PROFILE`, Qwen-1.5B q8):** decode tps 2k **3.69→19.4 (5.3×)**,
+16k **1.27→4.79 (3.77×)**. Correctness: honest 6-cell NIAH sweep `DIFFKV_DECODE_CACHE=1` = **6/6**
+(4k/8k/16k × depth 0.5/0.9); flag-OFF baseline unchanged 6/6; conformance bit-exact (4.77e-07).
+Default OFF (flag-gated). **TWO subtle bugs cost most of the session, both now fixed:** (1) each
+routed block's ANCHOR is a SEPARATE attended row (`anchor_K`/`anchor_V` at `anchor_idx`, distinct
+from the slen delta tokens at `anchor_idx+1+t`) — omitting it corrupted the softmax; (2) the dense
+window's DECODE-appended tokens are stored ALREADY-ROTATED in `active_k_dense` (only prefill tokens
+are raw), so re-rotating the whole window DOUBLE-rotated them → progressive garble after the first
+few tokens (fixed by rotating only `pos < L` rows). **Remaining native lever:** the per-token
+full-window re-rotate+re-upload dominates at 16k (~150ms of the 209ms); adopt the incremental
+single-token window upload the `native_attn` path already uses to push 16k further. **TRAP for the
+next agent:** verify native env with **faithful bash `export` (per-line)**, NOT `env $VAR` — zsh
+does NOT word-split unquoted vars, so `env "$ALL" bin` silently drops flags (incl. DECODE_CACHE) and
+gives false PASSES on the baseline. Use `diffkv_native/tests/test_niah_native.sh` (the canonical
+harness) as the gate.
 
 **MLX RESULT (measured, Qwen-1.5B, forced sparse):** decode tps 4k 16.6→22.9, 16k 11.4→19.0,
 32k 9.5→18.1 (**+38/67/90%, ~2× @32k**), much flatter across ctx. Correctness: bit-exact at
