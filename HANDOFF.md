@@ -97,6 +97,15 @@ materialize helper + its parity test FIRST (provable in isolation), then wire th
 
 ---
 
+## §PREFILL — where the time goes (measured 12th pass)
+16k prefill = 28.1s, of which the model FORWARD (O(L²) attention + K/V capture) = 25.9s (92%) and
+DiffKV SVD compression = 2.2s (**only 8%**). So prefill is NOT a DiffKV bottleneck — it's the
+inherent quadratic transformer forward (DiffKV prefill 28s ≈ dense prefill 27s). Little clean
+headroom without changing the prefill ATTENTION itself (e.g. streaming-sparse prefill: once blocks
+compress, later chunks attend the compressed pool instead of full KV → O(L·K) — big, risky, own
+project). Don't chase the 8% SVD. RAM is already good. The high-leverage lever is DECODE, which is
+now near the model's per-token MLP/proj floor after the cache.
+
 ## §PERF — measured performance results (11th pass, 2026-07-04, Qwen-1.5B, forced sparse)
 - **MLX decode +38% @32k — DONE (`1f97ff1`).** The residual router scores R residuals/block
   EVERY token (O(nb·R·D)) = the dominant decode cost at long ctx (proven: `route_once`, which
