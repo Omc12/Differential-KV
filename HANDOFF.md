@@ -156,6 +156,31 @@ compress, later chunks attend the compressed pool instead of full KV → O(L·K)
 project). Don't chase the 8% SVD. RAM is already good. The high-leverage lever is DECODE, which is
 now near the model's per-token MLP/proj floor after the cache.
 
+## §PERF — CROSS-RUNTIME comparison (14th pass, 2026-07-05, forced sparse, decode-cache ON)
+Honest side-by-side decode tps (native q8 via DIFFKV_PROFILE; MLX 4-bit via niah_recall --bench):
+```
+ ctx     native q8    native q4    MLX 4-bit
+ 2k       24.1         ~26          26.6
+ 8k       16.1          —           21.2
+ 16k      11.6         13.0         21.0
+```
+**Native no longer collapses (was 4.79 tps @16k pre-BLAS) but is still SLOWER than MLX at long
+ctx, opposite to the intuition that C++ "should" beat Python.** Why: MLX is NOT slow-Python — its
+compute is Metal, same as native's ggml-metal, so both are GPU-forward-bound. The residual native
+gap at 16k breaks down as: (a) ~18 ms/tok CPU materialize (MLX does it on the GPU via einsum,
+~free) + ~5 ms/tok window fill; (b) q8 vs 4-bit model forward (native q4 forward ≈ MLX's). Even
+with materialize fully free, native @16k ≈ 63 ms (16 tps) vs MLX 48 ms — the rest is MLX's
+hand-tuned Metal SDPA + 4-bit. **So "native much faster than active" is not achievable while both
+run the same Metal forward; the realistic target is PARITY, reached via (1) GPU materialize +
+(2) native on a 4-bit gguf.** Wins landed this pass: BLAS (cblas_sgemm/AMX) materialize replaced
+the scalar rank loop → 16k 4.79→11.6 tps (2.4×), `775958e`; decode-cache default ON on both CLIs
+(`f0a6127`) so they use DiffKV's fast sparse path, not dense/CPU-op. **NEXT native lever = GPU
+materialize:** reconstruct the routed blocks with a small ggml matmul subgraph (pool U/VK/VV are
+already GPU tensors) into cache_k/cache_v once per N — eliminates the 18 ms CPU fill AND the 58 MB
+upload. This is the rejected-native_attn territory (which reconstructed EVERY token); the CACHE
+(every-N) is what makes it win. Verify with the 6-cell sweep + conformance before shipping.
+Fill timing probe: `DIFFKV_DBG_FILL_TIME=1`.
+
 ## §PERF — measured performance results (11th pass, 2026-07-04, Qwen-1.5B, forced sparse)
 - **MLX decode +38% @32k — DONE (`1f97ff1`).** The residual router scores R residuals/block
   EVERY token (O(nb·R·D)) = the dominant decode cost at long ctx (proven: `route_once`, which
