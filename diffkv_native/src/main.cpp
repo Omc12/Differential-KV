@@ -4809,6 +4809,19 @@ int main(int argc, char ** argv) {
                             }
                             apply_rope_neox_cpu_fast(active_k_dense[l].data(), rot.data(),
                                                      cosw.data(), sinw.data(), n_window, kv_heads, head_dim);
+                            // active_k_dense holds RAW K for PREFILL tokens (pos < L) but
+                            // ALREADY-ROTATED K for DECODE-appended tokens (pos >= L; decode_k is
+                            // the in-graph rope output — see the window-append at the else-branch).
+                            // Re-rotating the decode tokens would DOUBLE-rotate them and corrupt
+                            // generation after the first few tokens. Overwrite those rows with the
+                            // stored (already-rotated) value.
+                            for (int t = 0; t < n_window; ++t) {
+                                if (active_positions_dense[t] >= L) {
+                                    std::memcpy(rot.data() + (size_t)t * F,
+                                                active_k_dense[l].data() + (size_t)t * F,
+                                                (size_t)F * sizeof(float));
+                                }
+                            }
                             for (size_t i = 0; i < (size_t)n_window * F; ++i) {
                                 host_win_k[l][i] = ggml_fp32_to_fp16(rot[i]);
                                 host_win_v[l][i] = ggml_fp32_to_fp16(active_v_dense[l][i]);
