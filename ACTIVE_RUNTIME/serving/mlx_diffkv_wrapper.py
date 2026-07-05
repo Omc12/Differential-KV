@@ -14,13 +14,35 @@ import re
 # forced-half + DIFFKV_DBG_LSE_SHARE). A +2.0 bias tips the blend to the paper (filler→paper
 # summary) while NIAH stays 4/4 (bench 4k–32k) + 3/3 (16k depths 0.1/0.5/0.9) and relational
 # stays 4/4 — NIAH's exact needle residual has a large margin the bias doesn't erode. +4.0
-# DOES break NIAH (needle corruption), so the safe window is narrow → a flag, not a default.
+# DOES break NIAH (needle corruption), so a fixed value is narrow → use "auto".
 # It does NOT fix 16k synthesis (there the router selects filler blocks, so the paper isn't in
 # the sparse half at all — a separate routing problem). See HANDOFF_MLX_SYNTHESIS.md.
-try:
-    _SPARSE_BIAS = float(os.environ.get("DIFFKV_SPARSE_BIAS", "0.0"))
-except ValueError:
+#
+# MODES:
+#   "0.0"        (default) → exact flash merge, parity-safe no-op.
+#   "<float>"    → fixed additive bias (e.g. "2.0"); tuned per model/ctx, narrow safe window.
+#   "auto[,base]"→ ADAPTIVE (recommended). Applies `base` (default 2.0) when the sparse pool is
+#                  competitive and DECAYS it to 0 as the dense half pulls ahead, so it boosts
+#                  synthesis (sparse-competitive) yet leaves NIAH untouched (the exact needle
+#                  residual makes lse_dense dominate → bias→0). Verified 2026-07-04: NIAH
+#                  forced-sparse 3/3 (4k/16k/32k) + synthesis@8k reads the PAPER. Formula:
+#                  bias = max(0, base − 0.5·max(0, (lse_dense−lse_sparse) − 4)).
+_SPARSE_BIAS_ENV = os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower()
+if _SPARSE_BIAS_ENV.startswith("auto"):
+    _SPARSE_BIAS_MODE = "auto"
+    _parts = _SPARSE_BIAS_ENV.split(",")
+    try:
+        _SPARSE_BIAS_BASE = float(_parts[1]) if len(_parts) > 1 and _parts[1] else 2.0
+    except ValueError:
+        _SPARSE_BIAS_BASE = 2.0
     _SPARSE_BIAS = 0.0
+else:
+    _SPARSE_BIAS_MODE = "fixed"
+    _SPARSE_BIAS_BASE = 0.0
+    try:
+        _SPARSE_BIAS = float(_SPARSE_BIAS_ENV)
+    except ValueError:
+        _SPARSE_BIAS = 0.0
 
 from collections import Counter
 from typing import Dict, Any, Optional, List, Tuple
@@ -433,7 +455,12 @@ def compute_decode_attention_static(
 
     # Correct the compressed pool's systematic LSE under-scoring (see DIFFKV_SPARSE_BIAS
     # note at module top). Default 0.0 → exact flash merge (parity-safe, no-op).
-    if _SPARSE_BIAS != 0.0:
+    if _SPARSE_BIAS_MODE == "auto":
+        # Adaptive: full boost when sparse is competitive, decays to 0 as the dense half
+        # (e.g. an exact needle residual) pulls ahead — synthesis-helpful AND NIAH-safe.
+        adaptive_bias = mx.maximum(0.0, _SPARSE_BIAS_BASE - 0.5 * mx.maximum(0.0, (lse_dense - lse_sparse) - 4.0))
+        lse_sparse = mx.where(lse_sparse <= NEG, lse_sparse, lse_sparse + adaptive_bias)
+    elif _SPARSE_BIAS != 0.0:
         lse_sparse = mx.where(lse_sparse <= NEG, lse_sparse, lse_sparse + _SPARSE_BIAS)
 
     lse_max  = mx.maximum(lse_sparse, lse_dense)
