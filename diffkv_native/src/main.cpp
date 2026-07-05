@@ -13,6 +13,7 @@
 #include <map>
 #include <unistd.h>
 #include <thread>
+#include <functional>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #include <pthread.h>
@@ -51,6 +52,28 @@ static bool is_native_attn_enabled() {
     // at 16k, with identical NIAH accuracy (1/6 both on the digit sweep).
     // Re-flip only with profile numbers showing the fused path winning.
     return false;
+}
+
+// DIFFKV_DECODE_CACHE=1: "decompress-and-cache" sparse decode (the MLX §BIG-WIN, ported).
+// Instead of running the CPU custom op (execute_cpu_attention) inside the GPU graph every
+// token — which stalls the GPU ~9 ms/layer waiting on the CPU (measured: sparse decode 3.3 tps
+// vs dense 44) — this path MATERIALIZES the routed compressed blocks (anchor + U·V + exact
+// residuals, pre-rotated) into a contiguous F16 K/V buffer ONCE per N tokens, then attends
+// [routed-blocks ++ dense-window ++ current] with the SAME GPU ggml_flash_attn_ext the dense
+// path uses. No per-token reconstruction, no CPU-op-in-graph stall. Default OFF until the
+// 6-cell NIAH sweep is 6/6 and decode tps is measured to beat the CPU-op baseline.
+static bool is_decode_cache_enabled() {
+    const char* e = std::getenv("DIFFKV_DECODE_CACHE");
+    return e && (std::string(e) == "1" || std::string(e) == "true" ||
+                 std::string(e) == "yes" || std::string(e) == "on");
+}
+// Re-route + re-materialize the routed blocks every N decode tokens (amortizes the
+// reconstruction cost). The dense window + mask + current token are refreshed EVERY token.
+// N=16 matches the MLX default; MLX's NIAH+synthesis sweep proved it staleness-safe.
+static int decode_cache_interval() {
+    const char* e = std::getenv("DIFFKV_DECODE_CACHE_INTERVAL");
+    int n = e ? atoi(e) : 16;
+    return n > 0 ? n : 16;
 }
 
 struct ggml_backend_owner {
@@ -526,6 +549,99 @@ static struct ggml_tensor* g_bcmp_slots[BLOCK_CMP_MAX_LAYERS]  = {};
 static struct ggml_tensor* g_bcmp_curk [BLOCK_CMP_MAX_LAYERS]  = {};
 static struct ggml_tensor* g_bcmp_curv [BLOCK_CMP_MAX_LAYERS]  = {};
 
+// ── DIFFKV_DECODE_CACHE materialize helper ─────────────────────────────────────────────
+// Reconstruct the routed compressed blocks of ONE layer's pool into contiguous F16 K/V
+// buffers laid out [token, kv_head, dim] (dim fastest) — exactly the memory order of a ggml
+// [head_dim, kv_heads, n_tokens] flash-attn past-KV input. K is emitted PRE-ROTATED at each
+// token's absolute position (POOL_ROT_ABS: the pool already stores rotated K, verified by
+// DIFFKV_DBG_RECON_POS), so it drops straight into flash. V is raw. The reconstruction math
+// is identical to the DBG_RECON_POS probe: rec = anchor + Σ_r U[t,r]·V[r]·row_scale·blk_scale
+// (+ exact residual override for the ≤MAX_RESIDUAL captured rows).
+//
+// slots[] is the routed candidate list (may contain -1, duplicates, or non-resident IDs — all
+// skipped). Only the first `max_blocks` DISTINCT CompressedResident blocks are materialized.
+// Returns the number of valid routed tokens written (rows [ret, cap) are padding for the caller
+// to mask). Thread-safe across layers (writes disjoint out buffers, reads const pool state).
+static int materialize_routed_kv(
+    diffkv::NativeBlockPool* pool,
+    const int32_t* slots, int n_slots, int max_blocks,
+    int kv_heads, int head_dim, float freq,
+    int cap_tokens,
+    ggml_fp16_t* out_k, ggml_fp16_t* out_v)
+{
+    const int F = kv_heads * head_dim;
+    const int R = pool->get_rank();
+    const int MR = diffkv::NativeBlockPool::MAX_RESIDUAL;
+    const int n_pool = (int)pool->get_seq_lens()->ne[0];
+    const auto& state_table = pool->get_state_table();
+    const ggml_fp16_t* scales = pool->get_host_scales();
+    const int32_t* seq_lens = pool->get_host_seq_lens();
+
+    int written = 0;
+    int blocks_done = 0;
+    std::vector<int> seen; seen.reserve(max_blocks);
+    for (int si = 0; si < n_slots && blocks_done < max_blocks && written < cap_tokens; ++si) {
+        int slot = slots[si];
+        if (slot < 0 || slot >= n_pool) continue;
+        if (state_table.get(slot) != diffkv::BlockState::CompressedResident) continue;
+        bool dup = false; for (int s : seen) if (s == slot) { dup = true; break; }
+        if (dup) continue;
+        seen.push_back(slot);
+        blocks_done++;
+
+        const int8_t*      U    = pool->get_host_U(slot);
+        const ggml_fp16_t* rowsc= pool->get_host_U_row_scale(slot);
+        const ggml_fp16_t* VK   = pool->get_host_VK(slot);
+        const ggml_fp16_t* VV   = pool->get_host_VV(slot);
+        const ggml_fp16_t* ancK = pool->get_host_anchors_K(slot);
+        const ggml_fp16_t* ancV = pool->get_host_anchors_V(slot);
+        const ggml_fp16_t* resKv= pool->get_host_res_K_val(slot);
+        const int32_t*     resKp= pool->get_host_res_K_pos(slot);
+        const ggml_fp16_t* resVv= pool->get_host_res_V_val(slot);
+        const int32_t*     resVp= pool->get_host_res_V_pos(slot);
+        if (!U || !VK || !VV || !ancK || !ancV || !rowsc) continue;
+        const float bsc = ggml_fp16_to_fp32(scales[slot]);
+        const int slen = seq_lens[slot];
+
+        // Emit the ANCHOR as its own attended row (the CPU op attends anchor_K/anchor_V at
+        // anchor_idx separately from the slen delta tokens at anchor_idx+1+t; both are stored
+        // pre-rotated). Omitting it drops the block's landmark token from the softmax.
+        if (written < cap_tokens) {
+            ggml_fp16_t* ok = out_k + (size_t)written * F;
+            ggml_fp16_t* ov = out_v + (size_t)written * F;
+            for (int f = 0; f < F; ++f) { ok[f] = ancK[f]; ov[f] = ancV[f]; }
+            written++;
+        }
+
+        for (int t = 0; t < slen && written < cap_tokens; ++t) {
+            const float ru = ggml_fp16_to_fp32(rowsc[t]);
+            int rik = -1, riv = -1;
+            if (resKp) for (int r = 0; r < MR; ++r) if (resKp[r] == t) { rik = r; break; }
+            if (resVp) for (int r = 0; r < MR; ++r) if (resVp[r] == t) { riv = r; break; }
+            ggml_fp16_t* ok = out_k + (size_t)written * F;
+            ggml_fp16_t* ov = out_v + (size_t)written * F;
+            for (int kv = 0; kv < kv_heads; ++kv) {
+                for (int d = 0; d < head_dim; ++d) {
+                    const int f = kv * head_dim + d;
+                    float rk = ggml_fp16_to_fp32(ancK[f]);
+                    float rv = ggml_fp16_to_fp32(ancV[f]);
+                    for (int r = 0; r < R; ++r) {
+                        float u = (float)U[(size_t)t * R + r] * ru * bsc;
+                        rk += u * ggml_fp16_to_fp32(VK[(size_t)r * F + f]);
+                        rv += u * ggml_fp16_to_fp32(VV[(size_t)r * F + f]);
+                    }
+                    if (rik >= 0 && resKv) rk += ggml_fp16_to_fp32(resKv[(size_t)rik * F + f]);
+                    if (riv >= 0 && resVv) rv += ggml_fp16_to_fp32(resVv[(size_t)riv * F + f]);
+                    ok[f] = ggml_fp32_to_fp16(rk);
+                    ov[f] = ggml_fp32_to_fp16(rv);
+                }
+            }
+            written++;
+        }
+    }
+    return written;
+}
+
 // Helper to build the Qwen 2.5 sparse decode forward pass graph with SRL routing and custom Metal attention
 struct ggml_cgraph * build_decode_graph(
     struct ggml_context * ctx,
@@ -558,6 +674,10 @@ struct ggml_cgraph * build_decode_graph(
     struct ggml_tensor * native_half = nullptr,        // [1] = 0.5
     struct ggml_tensor * native_dense_pos = nullptr,   // [native_maxd] i32 past-dense positions
     struct ggml_tensor * native_attn_slots = nullptr,  // [srl_k_keep] host-controlled CompressedResident-filtered slots
+    struct ggml_tensor ** cache_k = nullptr,           // DIFFKV_DECODE_CACHE: [n_layer] each [head_dim,kv_heads,cache_cap] materialized routed+window K (F16, rotated)
+    struct ggml_tensor ** cache_v = nullptr,           // DIFFKV_DECODE_CACHE: [n_layer] each [head_dim,kv_heads,cache_cap] materialized routed+window V (F16)
+    struct ggml_tensor * cache_mask = nullptr,         // DIFFKV_DECODE_CACHE: [cache_cap+1,1] F16 validity bias (0 valid / -inf pad; +1 = current token)
+    int cache_cap = 0,                                 // DIFFKV_DECODE_CACHE: capacity of the cache buffers (routed + window tokens)
     struct ggml_tensor ** out_dbg_anc = nullptr        // DEBUG: layer-0 anchor scores [K,group]
 ) {
     const auto & config = model.get_config();
@@ -675,7 +795,26 @@ struct ggml_cgraph * build_decode_graph(
                           << " selected_slots=" << (void*)selected_slots
                           << " userdata=" << (void*)userdata << "\n";
             }
-            if (use_native_attn && selected_slots && native_dense_kr && native_dense_v && native_dense_mask) {
+            static const bool decode_cache_on = is_decode_cache_enabled();
+            if (decode_cache_on && cache_k && cache_v && cache_mask && cache_k[l]) {
+                // ── DIFFKV_DECODE_CACHE: attend [materialized routed blocks ++ dense window
+                // ++ current token] with the SAME GPU flash kernel the dense path uses. The
+                // host fills cache_k/cache_v (routed materialized once per N; window per token);
+                // here we only concat the current token and flash. No CPU op, no per-token
+                // reconstruction, no LSE merge → the GPU never stalls on a CPU callback.
+                struct ggml_tensor * kcur = ggml_cast(ctx, k_rope_n, GGML_TYPE_F16);      // [head_dim,kv_heads,1] rotated
+                struct ggml_tensor * v3   = ggml_reshape_3d(ctx, v, head_dim, config.n_head_kv, 1);
+                struct ggml_tensor * vcur = ggml_cast(ctx, v3, GGML_TYPE_F16);
+                struct ggml_tensor * k_ctx = ggml_concat(ctx, cache_k[l], kcur, 2);       // [head_dim,kv_heads,cap+1]
+                struct ggml_tensor * v_ctx = ggml_concat(ctx, cache_v[l], vcur, 2);
+                struct ggml_tensor * q_perm = ggml_permute(ctx, q_rope, 0, 2, 1, 3);
+                struct ggml_tensor * k_perm = ggml_permute(ctx, k_ctx, 0, 2, 1, 3);
+                struct ggml_tensor * v_perm = ggml_permute(ctx, v_ctx, 0, 2, 1, 3);
+                float scale_val = 1.0f / std::sqrt((float)head_dim);
+                struct ggml_tensor * ao = ggml_flash_attn_ext(ctx, q_perm, k_perm, v_perm, cache_mask, scale_val, 0.0f, 0.0f);
+                ggml_flash_attn_ext_set_prec(ao, GGML_PREC_F32);
+                attn_out = ggml_reshape_2d(ctx, ao, config.n_embd, 1);
+            } else if (use_native_attn && selected_slots && native_dense_kr && native_dense_v && native_dense_mask) {
                 // Past-dense keys are uploaded already rotated; no need to RoPE them in-graph!
                 struct ggml_tensor * dkr_flat = ggml_reshape_2d(ctx, native_dense_kr[l], head_dim * config.n_head_kv, native_maxd);
                 // Flash-decoding in-graph fused op (GGML_OP_DIFFKV_ATTN)
@@ -3455,6 +3594,28 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // ── DIFFKV_DECODE_CACHE: persistent F16 buffers for the materialized sparse cache.
+        // Layout per layer: [routed blocks (srl_k_keep × micro_block_size) | dense window
+        // (required_dense_cap)]. Filled host-side (routed once per N tokens; window per token)
+        // and attended by the GPU flash kernel — replacing the CPU custom op. Bounded by K, so
+        // decode RAM stays flat with context (the compression win is preserved).
+        const bool decode_cache_on = is_decode_cache_enabled();
+        const int cache_routed_cap = srl_k_keep * micro_block_size;
+        const int cache_cap = cache_routed_cap + required_dense_cap;
+        std::vector<struct ggml_tensor *> cache_k(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> cache_v(n_layers, nullptr);
+        struct ggml_tensor * cache_mask = nullptr;
+        if (decode_cache_on && decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                cache_k[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F16, head_dim, kv_heads, cache_cap);
+                ggml_set_input(cache_k[l]);
+                cache_v[l] = ggml_new_tensor_3d(dense_past_ctx, GGML_TYPE_F16, head_dim, kv_heads, cache_cap);
+                ggml_set_input(cache_v[l]);
+            }
+            cache_mask = ggml_new_tensor_2d(dense_past_ctx, GGML_TYPE_F16, cache_cap + 1, 1);
+            ggml_set_input(cache_mask);
+        }
+
         // Native sparse-attn dense-window inputs (past rotated K / V + validity mask),
         // persistent (survive graph rebuilds), filled each decode step. Gated.
         // DIFFKV_CPU_EXACT_ATTN=1 forces the CPU callback path (execute_cpu_attention,
@@ -3547,7 +3708,8 @@ int main(int argc, char ** argv) {
             dense_k_past_inputs.data(), dense_v_past_inputs.data(),
             dense_attn_mask_decode,
             native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
-            native_dup_tri, native_half, native_dense_pos, native_attn_slots, &dbg_anc
+            native_dup_tri, native_half, native_dense_pos, native_attn_slots,
+            cache_k.data(), cache_v.data(), cache_mask, cache_cap, &dbg_anc
         );
         if (dbg_anc) ggml_set_output(dbg_anc);
         ggml_set_output(decode_logits);
@@ -3579,10 +3741,13 @@ int main(int argc, char ** argv) {
             for (int l = 0; l < n_layers; ++l) {
                 if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
                 if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+                if (cache_k[l]) ggml_backend_sched_set_tensor_backend(sched, cache_k[l], backend);
+                if (cache_v[l]) ggml_backend_sched_set_tensor_backend(sched, cache_v[l], backend);
             }
             if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+            if (cache_mask) ggml_backend_sched_set_tensor_backend(sched, cache_mask, backend);
 
-            // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend 
+            // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend
             // so the scheduler doesn't erroneously propagate Metal/GPU backend to them.
             for (int i = 0; i < decode_graph->n_nodes; ++i) {
                 struct ggml_tensor * node = decode_graph->nodes[i];
@@ -3671,6 +3836,18 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> cached_physical_candidates;
         int last_retrieval_step = -retrieval_interval; // force retrieval on step 0
         int last_retrieval_active_slot = -1;
+
+        // ── DIFFKV_DECODE_CACHE persistent host state ──
+        // host_routed_k/v[l]: F16 materialized routed blocks (refreshed every N tokens).
+        // cache_n_routed: valid routed token count from the last materialization (shared across
+        // layers, since all layers route the same blocks). -1 forces a (re)materialize.
+        const int decode_cache_N = decode_cache_interval();
+        std::vector<std::vector<ggml_fp16_t>> host_routed_k(decode_cache_on ? n_layers : 0);
+        std::vector<std::vector<ggml_fp16_t>> host_routed_v(decode_cache_on ? n_layers : 0);
+        std::vector<std::vector<ggml_fp16_t>> host_win_k(decode_cache_on ? n_layers : 0);
+        std::vector<std::vector<ggml_fp16_t>> host_win_v(decode_cache_on ? n_layers : 0);
+        int cache_n_routed = -1;
+        int cache_last_remat_version = -1;
 
         std::vector<int> dense_start_positions(n_layers, 0);
         std::vector<int> total_dense_tokens(n_layers, 0);
@@ -4057,7 +4234,8 @@ int main(int argc, char ** argv) {
                     dense_k_past_inputs.data(), dense_v_past_inputs.data(),
                     dense_attn_mask_decode,
                     native_dense_kr.data(), native_dense_v.data(), native_dense_mask, native_maxd,
-                    native_dup_tri, native_half, native_dense_pos, native_attn_slots
+                    native_dup_tri, native_half, native_dense_pos, native_attn_slots,
+                    cache_k.data(), cache_v.data(), cache_mask, cache_cap
                 );
                 ggml_set_output(decode_logits);
                 if (decode_selected_slots) ggml_set_output(decode_selected_slots);
@@ -4085,10 +4263,13 @@ int main(int argc, char ** argv) {
                     for (int l = 0; l < n_layers; ++l) {
                         if (dense_k_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_k_past_inputs[l], backend);
                         if (dense_v_past_inputs[l]) ggml_backend_sched_set_tensor_backend(sched, dense_v_past_inputs[l], backend);
+                        if (cache_k[l]) ggml_backend_sched_set_tensor_backend(sched, cache_k[l], backend);
+                        if (cache_v[l]) ggml_backend_sched_set_tensor_backend(sched, cache_v[l], backend);
                     }
                     if (dense_attn_mask_decode) ggml_backend_sched_set_tensor_backend(sched, dense_attn_mask_decode, backend);
+                    if (cache_mask) ggml_backend_sched_set_tensor_backend(sched, cache_mask, backend);
 
-                    // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend 
+                    // Explicitly route MAP_CUSTOM3 nodes (CPU custom op callbacks) to the CPU backend
                     // so the scheduler doesn't erroneously propagate Metal/GPU backend to them.
                     for (int i = 0; i < decode_graph->n_nodes; ++i) {
                         struct ggml_tensor * node = decode_graph->nodes[i];
@@ -4554,6 +4735,113 @@ int main(int argc, char ** argv) {
                             memcpy(nd->op_params, &dp, sizeof(dp));
                         }
                     }
+                }
+            }
+
+            // ── DIFFKV_DECODE_CACHE: fill the materialized sparse cache before the flash graph ──
+            // Routed compressed blocks (materialized once per N tokens) + dense window (rotated
+            // per token) → the F16 cache_k/cache_v the flash kernel attends. CPU work (recon,
+            // rotate, F16-convert) runs parallel across layers into disjoint host buffers; the
+            // ggml_backend_tensor_set uploads run SERIALLY (backend uploads aren't thread-safe).
+            if (decode_cache_on && decode_use_sparse && cache_mask) {
+                const int F = F_test;
+                const int n_window = std::min(total_dense_tokens[0], required_dense_cap);
+                const int pool_ver = kv_engines[0]->get_pool_version();
+                const int nthreads = std::max(1, std::min((int)std::thread::hardware_concurrency(), n_layers));
+                auto dispatch = [&](const std::function<void(int,int)>& work) {
+                    std::vector<std::thread> pool;
+                    int chunk = (n_layers + nthreads - 1) / nthreads;
+                    for (int t = 0; t < nthreads; ++t) {
+                        int lo = t * chunk, hi = std::min(n_layers, lo + chunk);
+                        if (lo < hi) pool.emplace_back(work, lo, hi);
+                    }
+                    for (auto& th : pool) th.join();
+                };
+
+                // (1) (Re)materialize routed blocks every N tokens (or on reroute / pool growth).
+                bool remat = (cache_n_routed < 0) || (pool_ver != cache_last_remat_version) ||
+                             (step % decode_cache_N == 0);
+                if (remat) {
+                    std::vector<int> nwritten(n_layers, 0);
+                    dispatch([&](int lo, int hi) {
+                        for (int l = lo; l < hi; ++l) {
+                            if ((int)host_routed_k[l].size() < cache_routed_cap * F) {
+                                host_routed_k[l].assign((size_t)cache_routed_cap * F, ggml_fp32_to_fp16(0.0f));
+                                host_routed_v[l].assign((size_t)cache_routed_cap * F, ggml_fp32_to_fp16(0.0f));
+                            } else {
+                                std::fill(host_routed_k[l].begin(), host_routed_k[l].end(), ggml_fp32_to_fp16(0.0f));
+                                std::fill(host_routed_v[l].begin(), host_routed_v[l].end(), ggml_fp32_to_fp16(0.0f));
+                            }
+                            nwritten[l] = materialize_routed_kv(
+                                kv_engines[l].get(), filtered_candidates.data(),
+                                (int)filtered_candidates.size(), srl_k_keep,
+                                kv_heads, head_dim, model.get_config().rope_freq_base,
+                                cache_routed_cap, host_routed_k[l].data(), host_routed_v[l].data());
+                        }
+                    });
+                    cache_n_routed = nwritten[0];
+                    cache_last_remat_version = pool_ver;
+                    for (int l = 0; l < n_layers; ++l) {
+                        ggml_backend_tensor_set(cache_k[l], host_routed_k[l].data(), 0, (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t));
+                        ggml_backend_tensor_set(cache_v[l], host_routed_v[l].data(), 0, (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t));
+                    }
+                }
+
+                // (2) Dense window: rotate raw K at abs position + F16-convert (parallel), upload (serial).
+                if (n_window > 0) {
+                    const int half = head_dim / 2;
+                    const float fb = model.get_config().rope_freq_base;
+                    std::vector<float> cosw((size_t)n_window * half), sinw((size_t)n_window * half);
+                    for (int t = 0; t < n_window; ++t) {
+                        int pos = active_positions_dense[t];
+                        for (int i = 0; i < half; ++i) {
+                            float th = (float)pos / std::pow(fb, (float)(2 * i) / head_dim);
+                            cosw[(size_t)t * half + i] = std::cos(th);
+                            sinw[(size_t)t * half + i] = std::sin(th);
+                        }
+                    }
+                    dispatch([&](int lo, int hi) {
+                        std::vector<float> rot((size_t)n_window * F);
+                        for (int l = lo; l < hi; ++l) {
+                            if ((int)host_win_k[l].size() < n_window * F) {
+                                host_win_k[l].resize((size_t)n_window * F);
+                                host_win_v[l].resize((size_t)n_window * F);
+                            }
+                            apply_rope_neox_cpu_fast(active_k_dense[l].data(), rot.data(),
+                                                     cosw.data(), sinw.data(), n_window, kv_heads, head_dim);
+                            for (size_t i = 0; i < (size_t)n_window * F; ++i) {
+                                host_win_k[l][i] = ggml_fp32_to_fp16(rot[i]);
+                                host_win_v[l][i] = ggml_fp32_to_fp16(active_v_dense[l][i]);
+                            }
+                        }
+                    });
+                    const size_t off = (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t);
+                    for (int l = 0; l < n_layers; ++l) {
+                        ggml_backend_tensor_set(cache_k[l], host_win_k[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
+                        ggml_backend_tensor_set(cache_v[l], host_win_v[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
+                    }
+                }
+
+                // (3) Validity mask: 0 for routed [0,n_routed) + window [routed_cap,+n_window) +
+                // current (index cache_cap); -65500 (fp16 -inf) elsewhere.
+                // DIFFKV_DBG_CACHE_WINONLY / _ROUTEDONLY isolate the two halves for debugging.
+                static const bool winonly    = (std::getenv("DIFFKV_DBG_CACHE_WINONLY") != nullptr);
+                static const bool routedonly = (std::getenv("DIFFKV_DBG_CACHE_ROUTEDONLY") != nullptr);
+                std::vector<ggml_fp16_t> cmask((size_t)cache_cap + 1, ggml_fp32_to_fp16(-65500.0f));
+                if (!winonly) for (int j = 0; j < cache_n_routed && j < cache_routed_cap; ++j) cmask[j] = ggml_fp32_to_fp16(0.0f);
+                if (!routedonly) for (int j = 0; j < n_window; ++j) cmask[cache_routed_cap + j] = ggml_fp32_to_fp16(0.0f);
+                cmask[cache_cap] = ggml_fp32_to_fp16(0.0f);
+                ggml_backend_tensor_set(cache_mask, cmask.data(), 0, (size_t)(cache_cap + 1) * sizeof(ggml_fp16_t));
+
+                if (std::getenv("DIFFKV_DBG_CACHE") && step < 3 && !is_warmup_run) {
+                    auto nrm = [&](const ggml_fp16_t* p){ double s=0; for(int i=0;i<F;++i){float x=ggml_fp16_to_fp32(p[i]); s+=(double)x*x;} return std::sqrt(s); };
+                    std::cerr << "[DBG_CACHE] step=" << step << " remat=" << (int)remat
+                              << " n_routed=" << cache_n_routed << " routed_cap=" << cache_routed_cap
+                              << " n_window=" << n_window << " cache_cap=" << cache_cap
+                              << " n_cands=" << filtered_candidates.size()
+                              << " |routed_k[0]|=" << (cache_n_routed>0?nrm(host_routed_k[0].data()):-1)
+                              << " |win_k[0]|=" << (n_window>0?nrm(host_win_k[0].data()):-1)
+                              << " winonly=" << (int)winonly << " routedonly=" << (int)routedonly << "\n";
                 }
             }
 
