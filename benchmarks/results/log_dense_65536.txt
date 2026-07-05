@@ -1,0 +1,3 @@
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 33054.94it/s]
+
+__BENCH_RESULT__ {"prompt_tokens": 65615, "gen_tokens": 128, "prefill_s": 927.1558522909982, "decode_s": 8.188489624997601, "decode_tps": 15.631698379301238, "ttft_s": null, "mx_peak_gb": 3.233870896, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\n#### Linearizability\nLinearizability is a property that ensures that the behavior of", "needle_found": true, "status": "ok", "engine": "dense", "ctx_target": 65536, "gen_target": 128, "worker_wall_s": 940.5802674160004}

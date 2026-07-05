@@ -2,13 +2,15 @@
 \toprule
 Component & DiffKV block & Dense block \\
 \midrule
-U coefficients $[255,16]$ fp16 & 8160 B & -- \\
+$U$ coefficients $[255,16]$ fp16 & 8160 B & -- \\
 $V_K,V_V\ [2,16,128]$ fp16 & 16384 B & -- \\
 anchors $a_k,a_v\ [2,128]$ fp16 & 1024 B & -- \\
+key min/max $[2,128]$ fp16 (router) & 1024 B & -- \\
 scale + seq\_len & 8 B & -- \\
+\textbf{residual $K,V\ [64,2,128]$ fp16} & \textbf{65536 B} & -- \\
 full $K,V\ [256,2,128]$ fp16 & -- & 262144 B \\
 \midrule
-\textbf{Per 256-token block} & \textbf{25.0 KiB} & \textbf{256 KiB} \\
-Compression ratio & \multicolumn{2}{c}{$10.25\times$} \\
+\textbf{Per 256-token block} & \textbf{90.0 KiB} & \textbf{256 KiB} \\
+Compression ratio & \multicolumn{2}{c}{$2.85\times$} \\
 \bottomrule
 \end{tabular}

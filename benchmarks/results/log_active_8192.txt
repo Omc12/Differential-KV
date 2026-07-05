@@ -1,7 +1,7 @@
 [DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
 [DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 62497.91it/s]
-[DiffKV MLX] Loaded model in 1.51s
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 122960.05it/s]
+[DiffKV MLX] Loaded model in 0.97s
 
-__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 13.314977249945514, "decode_s": 22.47934412502218, "decode_tps": 5.6941163090928795, "ttft_s": null, "mx_peak_gb": 1.888128402, "output_preview": "The CX_\u544a\u7535\u8def\u5de5\u4f5c\u4f1a\u8baeucchini\u58f3\u91cc\u4e07\u77f3\u88c2_____d3081\\$________.0000000 __oftwareBURYCHAPTER__000000000________\u8981\u4e0a Yates\u5f97\u52a0\u4ee5\u5185\u5212\u603b\u7b97\u578b\u52a8\u6b64\u65f6\u953a\u8089 OPTIONAL\u6700\u4f4e Jaeoplevel0000000000000xff000000000000000\u8ba1\u7b97\u8102\u5408\u683c\u71c3\u70e7\u8865\u9898\u7d20\u53ea\u662f\u4e3a\u4e86_\u8584\u58f3_MESSAGE.which_", "needle_found": false, "status": "ok", "engine": "active", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 40.610186915961094}
+__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 12.981580291998398, "decode_s": 10.861832292001054, "decode_tps": 11.784383753951223, "ttft_s": null, "mx_peak_gb": 1.961510556, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, the **consistency** of data is crucial for maintaining the i", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 27.598300958998152}
