@@ -15,7 +15,20 @@ no accuracy loss.** Ceiling not fully reached (POC said ~89 tok/s cached) becaus
 ctx-independent floor + the N=8 materialise + concat/mask overhead; tuning N and fusing the
 concat could push further.
 
-**NATIVE PORT (TODO, same 3 steps in C++/GGML):** in the decode callback, when re-routing (every
+**NATIVE — measured 12th pass (CRITICAL, changes the native plan):** native SPARSE decode is
+**3.3 tps** vs native DENSE **44 tps** — **13× slower** (measured: forced 160-token gen at 2k,
+sparse 47.9s vs dense 3.6s). Root cause: the sparse path runs the **CPU custom op**
+(`execute_cpu_attention`, per-token low-rank reconstruction) while dense runs the **GPU ggml
+graph**. So native decode is even more bottlenecked than MLX was — and the fix has TWO layers:
+(a) cache the reconstruction (materialise the routed blocks' K/V once per N tokens instead of
+every token — `execute_cpu_attention` already builds `block_reconstructed_K` per call; make it
+persist per-layer across N calls and materialise V too), AND ideally (b) get the attention OFF
+the CPU: materialise into a ggml tensor and run the GPU flash/soft-max graph (what dense uses),
+bypassing the CPU op entirely. (a) alone should be a large multiple (reconstruction is ~rank×
+the attention cost); (b) targets ~dense speed. (b) is a bigger graph change in main.cpp; do (a)
+first, verify, then (b). Guardrail: conformance (fast) + the 6-cell sweep must be 6/6 before flip.
+
+**NATIVE PORT (same 3 steps in C++/GGML):** in the decode callback, when re-routing (every
 N), materialise the selected blocks into a CONTIGUOUS K/V buffer (`anchor + comp_scale*(U@V)` +
 exact residuals; the pool is pre-rotated) and cache it on the session; every token run the
 existing native flash/attention over [cached buffer + dense window]. Native decode is 93%
