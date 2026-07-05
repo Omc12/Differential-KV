@@ -1,6 +1,31 @@
 # DiffKV — Master Handoff & Working Protocol
 
-## §BIG-WIN — "decompress-and-cache" decode (THE path to near/beyond-dense speed) — DESIGNED, NOT BUILT
+## §BIG-WIN — "decompress-and-cache" decode — MLX DONE ✅, NATIVE/CUDA TODO
+_MLX built + verified (`DIFFKV_DECODE_CACHE=1`, commit `c848c2b`). Native/Triton/CUDA = same design._
+
+**MLX RESULT (measured, Qwen-1.5B, forced sparse):** decode tps 4k 16.6→22.9, 16k 11.4→19.0,
+32k 9.5→18.1 (**+38/67/90%, ~2× @32k**), much flatter across ctx. Correctness: bit-exact at
+bias 0 → parity 4/4, relational 4/4, NIAH forced-sparse 3/3 exact, synthesis@8k reads paper.
+**Tradeoffs (16k, cache off→on):** prefill 28.2→28.1s (UNCHANGED — decode-only); decode peak RAM
+1.63→1.74 GB (**+110 MB, +6.7%**, and BOUNDED BY K so it does NOT grow with context — the memory
+win is preserved); accuracy none lost. Staleness: routed blocks cached for N tokens
+(`DIFFKV_DECODE_CACHE_INTERVAL`, default 8), re-routed on interval OR block-count change; NIAH +
+synthesis pass, so N=8 is safe. Net: **~110 MB extra RAM buys +50–90% decode tps, no prefill cost,
+no accuracy loss.** Ceiling not fully reached (POC said ~89 tok/s cached) because MLP/proj/norm are
+ctx-independent floor + the N=8 materialise + concat/mask overhead; tuning N and fusing the
+concat could push further.
+
+**NATIVE PORT (TODO, same 3 steps in C++/GGML):** in the decode callback, when re-routing (every
+N), materialise the selected blocks into a CONTIGUOUS K/V buffer (`anchor + comp_scale*(U@V)` +
+exact residuals; the pool is pre-rotated) and cache it on the session; every token run the
+existing native flash/attention over [cached buffer + dense window]. Native decode is 93%
+attention (attends all blocks) so this is directly applicable. Gate behind an env flag, verify
+with the honest 6-cell sweep + SELFTEST/conformance before default. CUDA/Triton: same — reconstruct
+(cuBLAS/Triton matmul) into a buffer, FlashAttention over it. `tools/poc_decode_cache.py` is the
+reference; `_execute_decode_cache` in `mlx_diffkv_wrapper.py` is the working implementation to port.
+
+---
+### (original design notes below, now IMPLEMENTED for MLX)
 _This is the highest-value open item. It is validated by a measured ceiling, not a guess._
 
 **Why decode is slow (root cause):** the current sparse decode RECONSTRUCTS the compressed KV
