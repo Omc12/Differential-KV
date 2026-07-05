@@ -1,6 +1,3 @@
-"""POC — decompress-and-cache decode (HANDOFF.md §BIG-WIN). Proves materialize+SDPA reproduces
-compute_decode_attention_static and is 3.6-10x faster. Run: python tools/poc_decode_cache.py
-Missing (spec'd, not in POC): residual override (closes 0.936->0.99), re-route-every-N caching."""
 """POC: materialize routed blocks' K/V from low-rank form, SDPA, compare to reference DiffKV."""
 import sys, os, math, time, numpy as np
 sys.path.insert(0, "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME")
@@ -65,18 +62,38 @@ def materialize():
 dl = int(sess["dense_lens"][0])
 dk = sess["dense_keys"][0][0, :, :dl, :]    # [kv_heads, dl, D]
 dv = sess["dense_values"][0][0, :, :dl, :]
+csl = sess["comp_seq_len"][0][:nb]          # [nb] valid tokens per block
+res_n = mx.array(sess["comp_res_n"][0][:nb], dtype=mx.int32)  # [nb] valid residuals per block
+R = rk.shape[1]
+NEG = mx.array(-1e9, dtype=mx.float32)
+# exact residual tokens (flattened) + validity
+res_k_all = rk.transpose(2,0,1,3).reshape(H_kv, nb*R, D)  # [kv_heads, nb*R, D]
+res_v_all = rv.transpose(2,0,1,3).reshape(H_kv, nb*R, D)
+res_valid = (mx.arange(R).reshape(1,R) < res_n.reshape(nb,1)).reshape(nb*R)  # [nb*R] bool
+
 def build_kv():
-    mk, mv = materialize()
-    # concat materialized compressed blocks + the exact dense recency window
-    fk = mx.concatenate([mk, dk], axis=1)   # [kv_heads, nb*BS + dl, D]
-    fv = mx.concatenate([mv, dv], axis=1)
+    mk, mv = materialize()  # [kv_heads, nb*BS, D]
+    fk = mx.concatenate([mk, res_k_all, dk], axis=1)
+    fv = mx.concatenate([mv, res_v_all, dv], axis=1)
     return fk, fv
+
+# additive key mask [L_total]: drop low-rank twins at residual positions + padding
+pos = mx.arange(S_comp).reshape(1, S_comp)
+recon_valid = (pos < (csl.reshape(nb,1)))                 # within block length (delta positions)
+if res_mask is not None:
+    recon_valid = recon_valid & (~res_mask)               # drop residual twins
+anchor_valid = mx.ones((nb,1), dtype=mx.bool_)            # anchor always valid
+block_valid = mx.concatenate([anchor_valid, recon_valid], axis=1).reshape(nb*BLOCK_SIZE)  # [nb*BS]
+key_valid = mx.concatenate([block_valid, res_valid, mx.ones((dl,), dtype=mx.bool_)])       # [L_total]
+add_mask = mx.where(key_valid, mx.array(0.0, dtype=mx.float32), NEG)  # [L_total]
+
 fk, fv = build_kv(); mx.eval(fk, fv)
 L = fk.shape[1]
 qs = Q.reshape(1, H_q, 1, D)
 ks = fk.reshape(1, H_kv, L, D)
 vs = fv.reshape(1, H_kv, L, D)
-out_poc = mx.fast.scaled_dot_product_attention(qs, ks, vs, scale=scale)[0,:,0,:]; mx.eval(out_poc)
+mask4d = add_mask.reshape(1,1,1,L)
+out_poc = mx.fast.scaled_dot_product_attention(qs, ks, vs, scale=scale, mask=mask4d)[0,:,0,:]; mx.eval(out_poc)
 print(f"[POC materialize+SDPA] cosine vs exact = {cosine_sim(out_exact, out_poc):.5f}")
 print(f"[POC vs reference DiffKV] cosine = {cosine_sim(out_ref, out_poc):.5f}")
 
@@ -86,7 +103,7 @@ def timeit(fn, iters=200):
     t0=time.perf_counter()
     for _ in range(iters): mx.eval(fn())
     return iters/(time.perf_counter()-t0)
-sdpa_only = timeit(lambda: mx.fast.scaled_dot_product_attention(qs, ks, vs, scale=scale))
-mat_sdpa  = timeit(lambda: (lambda fk_,fv_: mx.fast.scaled_dot_product_attention(qs, fk_.reshape(1,H_kv,fk_.shape[1],D), fv_.reshape(1,H_kv,fv_.shape[1],D), scale=scale))(*build_kv()))
+sdpa_only = timeit(lambda: mx.fast.scaled_dot_product_attention(qs, ks, vs, scale=scale, mask=mask4d))
+mat_sdpa  = timeit(lambda: (lambda fk_,fv_: mx.fast.scaled_dot_product_attention(qs, fk_.reshape(1,H_kv,fk_.shape[1],D), fv_.reshape(1,H_kv,fv_.shape[1],D), scale=scale, mask=mask4d))(*build_kv()))
 print(f"[speed 1-layer] SDPA-only(cached)={sdpa_only:.0f}/s  materialize+SDPA(every token)={mat_sdpa:.0f}/s")
 print(f"  => 28-layer tok/s: cached-SDPA ~{sdpa_only/28:.1f}   materialize-every-token ~{mat_sdpa/28:.1f}")
