@@ -577,6 +577,11 @@ static int materialize_routed_kv(
     const ggml_fp16_t* scales = pool->get_host_scales();
     const int32_t* seq_lens = pool->get_host_seq_lens();
 
+    // Reusable per-block scratch (float): the low-rank reconstruction delta = U_scaled @ V is a
+    // small dense matmul, so we do it with cblas_sgemm (AMX) instead of a scalar rank loop — the
+    // scalar version was the dominant native decode cost (~1900 ms per full re-materialisation).
+    std::vector<float> U_scaled, VKf, VVf, dK, dV;
+
     int written = 0;
     int blocks_done = 0;
     std::vector<int> seen; seen.reserve(max_blocks);
@@ -613,28 +618,44 @@ static int materialize_routed_kv(
             written++;
         }
 
-        for (int t = 0; t < slen && written < cap_tokens; ++t) {
-            const float ru = ggml_fp16_to_fp32(rowsc[t]);
+        const int nt = std::min(slen, cap_tokens - written);   // delta rows we can still write
+        if (nt <= 0) continue;
+
+        // U_scaled[t,r] = U[t,r] * row_scale[t] * block_scale   (fold both scales into U so the
+        // gemm output is the final delta). VKf/VVf = fp16→f32 of the block's rank-basis.
+        U_scaled.resize((size_t)nt * R);
+        for (int t = 0; t < nt; ++t) {
+            const float s = ggml_fp16_to_fp32(rowsc[t]) * bsc;
+            const int8_t* ur = U + (size_t)t * R;
+            float* us = U_scaled.data() + (size_t)t * R;
+            for (int r = 0; r < R; ++r) us[r] = (float)ur[r] * s;
+        }
+        VKf.resize((size_t)R * F); VVf.resize((size_t)R * F);
+        for (size_t i = 0; i < (size_t)R * F; ++i) { VKf[i] = ggml_fp16_to_fp32(VK[i]); VVf[i] = ggml_fp16_to_fp32(VV[i]); }
+        dK.resize((size_t)nt * F); dV.resize((size_t)nt * F);
+        // dK[nt,F] = U_scaled[nt,R] @ VKf[R,F]   (row-major)
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, nt, F, R, 1.0f,
+                    U_scaled.data(), R, VKf.data(), F, 0.0f, dK.data(), F);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, nt, F, R, 1.0f,
+                    U_scaled.data(), R, VVf.data(), F, 0.0f, dV.data(), F);
+
+        for (int t = 0; t < nt; ++t) {
             int rik = -1, riv = -1;
             if (resKp) for (int r = 0; r < MR; ++r) if (resKp[r] == t) { rik = r; break; }
             if (resVp) for (int r = 0; r < MR; ++r) if (resVp[r] == t) { riv = r; break; }
             ggml_fp16_t* ok = out_k + (size_t)written * F;
             ggml_fp16_t* ov = out_v + (size_t)written * F;
-            for (int kv = 0; kv < kv_heads; ++kv) {
-                for (int d = 0; d < head_dim; ++d) {
-                    const int f = kv * head_dim + d;
-                    float rk = ggml_fp16_to_fp32(ancK[f]);
-                    float rv = ggml_fp16_to_fp32(ancV[f]);
-                    for (int r = 0; r < R; ++r) {
-                        float u = (float)U[(size_t)t * R + r] * ru * bsc;
-                        rk += u * ggml_fp16_to_fp32(VK[(size_t)r * F + f]);
-                        rv += u * ggml_fp16_to_fp32(VV[(size_t)r * F + f]);
-                    }
-                    if (rik >= 0 && resKv) rk += ggml_fp16_to_fp32(resKv[(size_t)rik * F + f]);
-                    if (riv >= 0 && resVv) rv += ggml_fp16_to_fp32(resVv[(size_t)riv * F + f]);
-                    ok[f] = ggml_fp32_to_fp16(rk);
-                    ov[f] = ggml_fp32_to_fp16(rv);
-                }
+            const float* dk = dK.data() + (size_t)t * F;
+            const float* dv = dV.data() + (size_t)t * F;
+            const ggml_fp16_t* rkres = (rik >= 0 && resKv) ? resKv + (size_t)rik * F : nullptr;
+            const ggml_fp16_t* rvres = (riv >= 0 && resVv) ? resVv + (size_t)riv * F : nullptr;
+            for (int f = 0; f < F; ++f) {
+                float rk = ggml_fp16_to_fp32(ancK[f]) + dk[f];
+                float rv = ggml_fp16_to_fp32(ancV[f]) + dv[f];
+                if (rkres) rk += ggml_fp16_to_fp32(rkres[f]);
+                if (rvres) rv += ggml_fp16_to_fp32(rvres[f]);
+                ok[f] = ggml_fp32_to_fp16(rk);
+                ov[f] = ggml_fp32_to_fp16(rv);
             }
             written++;
         }
@@ -3600,7 +3621,9 @@ int main(int argc, char ** argv) {
         // and attended by the GPU flash kernel — replacing the CPU custom op. Bounded by K, so
         // decode RAM stays flat with context (the compression win is preserved).
         const bool decode_cache_on = is_decode_cache_enabled();
-        const int cache_routed_cap = srl_k_keep * micro_block_size;
+        // +1 per block for the ANCHOR row (materialize emits anchor + seq_len delta tokens =
+        // micro_block_size+1 rows per block); without the +1 the last block's tail is truncated.
+        const int cache_routed_cap = srl_k_keep * (micro_block_size + 1);
         const int cache_cap = cache_routed_cap + required_dense_cap;
         std::vector<struct ggml_tensor *> cache_k(n_layers, nullptr);
         std::vector<struct ggml_tensor *> cache_v(n_layers, nullptr);
@@ -4758,6 +4781,10 @@ int main(int argc, char ** argv) {
                     for (auto& th : pool) th.join();
                 };
 
+                static double t_remat_ms = 0, t_win_ms = 0; static int t_fill_n = 0;
+                const bool t_fill = (std::getenv("DIFFKV_DBG_FILL_TIME") != nullptr);
+                auto t_m0 = std::chrono::high_resolution_clock::now();
+
                 // (1) (Re)materialize routed blocks every N tokens (or on reroute / pool growth).
                 bool remat = (cache_n_routed < 0) || (pool_ver != cache_last_remat_version) ||
                              (step % decode_cache_N == 0);
@@ -4786,6 +4813,8 @@ int main(int argc, char ** argv) {
                         ggml_backend_tensor_set(cache_v[l], host_routed_v[l].data(), 0, (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t));
                     }
                 }
+
+                auto t_m1 = std::chrono::high_resolution_clock::now();
 
                 // (2) Dense window: rotate raw K at abs position + F16-convert (parallel), upload (serial).
                 if (n_window > 0) {
@@ -4833,6 +4862,16 @@ int main(int argc, char ** argv) {
                         ggml_backend_tensor_set(cache_k[l], host_win_k[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
                         ggml_backend_tensor_set(cache_v[l], host_win_v[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
                     }
+                }
+
+                auto t_m2 = std::chrono::high_resolution_clock::now();
+                if (t_fill && !is_warmup_run) {
+                    t_remat_ms += std::chrono::duration<double,std::milli>(t_m1 - t_m0).count();
+                    t_win_ms   += std::chrono::duration<double,std::milli>(t_m2 - t_m1).count();
+                    if (++t_fill_n % 40 == 0)
+                        std::cerr << "[FILL_TIME] avg over " << t_fill_n << ": materialize+routed-upload="
+                                  << (t_remat_ms/t_fill_n) << "ms window(rotate+conv+upload)="
+                                  << (t_win_ms/t_fill_n) << "ms\n";
                 }
 
                 // (3) Validity mask: 0 for routed [0,n_routed) + window [routed_cap,+n_window) +
