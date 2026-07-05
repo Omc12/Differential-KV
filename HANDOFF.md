@@ -1,5 +1,59 @@
 # DiffKV — Master Handoff & Working Protocol
 
+## §BIG-WIN — "decompress-and-cache" decode (THE path to near/beyond-dense speed) — DESIGNED, NOT BUILT
+_This is the highest-value open item. It is validated by a measured ceiling, not a guess._
+
+**Why decode is slow (root cause):** the current sparse decode RECONSTRUCTS the compressed KV
+(low-rank U·V) via many small ops EVERY token, then does a hand-rolled 2-half LSE merge. Dense
+does ONE fused `scaled_dot_product_attention`. That per-token reconstruction is the overhead —
+it dwarfs the compute saved by attending fewer tokens. PROOF it's not dispatch overhead: the
+fused-kernel attempts gave zero speedup. So the fix is DO LESS WORK PER TOKEN, not fuse ops.
+
+**Measured ceiling (this pass, MLX microbench of `mx.fast.scaled_dot_product_attention` at
+decode, 12 q-heads/2 kv-heads/D=128, ×28 layers):**
+```
+ keys attended     attn-bound tok/s     (current sparse actual)   (dense actual)
+   768 (window)         ~110
+  4864 (16 blk+win)     ~83               32k sparse = 9.5 tps
+ 16384                  ~54
+ 32768 (dense@32k)      ~34                                        ~37 tps
+```
+So attending [routed 16 blocks + dense window] ≈ 4864 keys → **~83 tok/s ceiling vs 9.5 today
+and ~37 dense**. i.e. sparse can be ~2× FASTER than dense at 32k, not 4× slower — while keeping
+the memory win. Real number will be lower (MLP/proj/norm add ctx-independent cost) but plausibly
+40–70 tps at 32k. This is the swing.
+
+**The design:**
+1. Route top-K blocks (existing router). Re-route every N tokens (`DIFFKV_DECODE_CACHE_INTERVAL`,
+   default ~8), NOT every token.
+2. On re-route, MATERIALIZE the K selected blocks' exact-ish K/V once and cache in the session:
+   `recon_K[b,h] = concat(anchor_k[b,h], (comp_U[b] @ comp_VK[b,h]) * comp_scale[b])` → then
+   OVERWRITE residual rows with the exact `comp_res_k` (this folds in the twin-drop cleanly, so
+   no res_mask needed). Same for V. Shape → `[kv_heads, K*block_size, D]`. Cost ≈ 0.4 ms/reroute
+   (K·S·rank·D matmul), amortized over N → negligible.
+3. EVERY token: `out = mx.fast.scaled_dot_product_attention(q, concat[cached_recon_KV,
+   dense_window_KV], concat[...V], scale, mask)`. One fused kernel. No per-token reconstruction,
+   no LSE merge. Pool stays pre-rotated (POOL_ROT_ABS) so q(rotated)·K(prerotated) is correct;
+   no RoPE in-loop.
+4. Correctness gate: it must match `compute_decode_attention_static` within fp16 tol on a seeded
+   session (add to `test_diffkv_kernel_parity.py`) BEFORE trusting tps. Then NIAH `--bench` 4/4
+   (force sparse) + synthesis@8k reads paper + relational 4/4. Flag `DIFFKV_DECODE_CACHE=1`,
+   default off until green; then it can BECOME the default sparse path.
+5. Staleness risk: re-routing every N covers it (a needle needed for several tokens is picked up
+   within N steps). Validate N by sweeping {1,4,8,16} vs NIAH.
+
+**Cross-platform:** this is just "reconstruct (a matmul) + SDPA (exists everywhere) + a periodic
+cache". It ports directly to CUDA (cuBLAS + FlashAttention), Triton (matmul + flash kernel), and
+CPU (gemm + attention) — NO bespoke per-platform fused kernel needed. Build MLX first as the
+reference, then port the same 3 steps. Native (C++/GGML) gets the same treatment: reconstruct
+selected blocks into a contiguous KV buffer once per N, run the existing flash/attention over it.
+
+**Effort:** ~1 focused session per engine to build+verify (MLX, then native, then CUDA/Triton).
+Do NOT half-build it and leave a broken flag — that's the fused-kernel anti-pattern. Build the
+materialize helper + its parity test FIRST (provable in isolation), then wire the SDPA path.
+
+---
+
 ## §PERF — measured performance results (11th pass, 2026-07-04, Qwen-1.5B, forced sparse)
 - **MLX decode +38% @32k — DONE (`1f97ff1`).** The residual router scores R residuals/block
   EVERY token (O(nb·R·D)) = the dominant decode cost at long ctx (proven: `route_once`, which
