@@ -4776,15 +4776,20 @@ int main(int argc, char ** argv) {
                 const int n_window = std::min(total_dense_tokens[0], required_dense_cap);
                 const int pool_ver = kv_engines[0]->get_pool_version();
                 const int nthreads = std::max(1, std::min((int)std::thread::hardware_concurrency(), n_layers));
-                auto dispatch = [&](const std::function<void(int,int)>& work) {
+                auto dispatch_n = [&](int nth, const std::function<void(int,int)>& work) {
+                    nth = std::max(1, std::min(nth, n_layers));
                     std::vector<std::thread> pool;
-                    int chunk = (n_layers + nthreads - 1) / nthreads;
-                    for (int t = 0; t < nthreads; ++t) {
+                    int chunk = (n_layers + nth - 1) / nth;
+                    for (int t = 0; t < nth; ++t) {
                         int lo = t * chunk, hi = std::min(n_layers, lo + chunk);
                         if (lo < hi) pool.emplace_back(work, lo, hi);
                     }
                     for (auto& th : pool) th.join();
                 };
+                auto dispatch = [&](const std::function<void(int,int)>& work) { dispatch_n(nthreads, work); };
+                // BLAS (Accelerate/AMX) already parallelises each gemm; running materialize across
+                // many std::threads can oversubscribe. DIFFKV_MAT_THREADS tunes it (default = full).
+                static const int mat_threads = (std::getenv("DIFFKV_MAT_THREADS") ? atoi(std::getenv("DIFFKV_MAT_THREADS")) : nthreads);
 
                 static double t_remat_ms = 0, t_win_ms = 0; static int t_fill_n = 0;
                 const bool t_fill = (std::getenv("DIFFKV_DBG_FILL_TIME") != nullptr);
@@ -4795,7 +4800,7 @@ int main(int argc, char ** argv) {
                              (step % decode_cache_N == 0);
                 if (remat) {
                     std::vector<int> nwritten(n_layers, 0);
-                    dispatch([&](int lo, int hi) {
+                    dispatch_n(mat_threads, [&](int lo, int hi) {
                         for (int l = lo; l < hi; ++l) {
                             if ((int)host_routed_k[l].size() < cache_routed_cap * F) {
                                 host_routed_k[l].assign((size_t)cache_routed_cap * F, ggml_fp32_to_fp16(0.0f));
