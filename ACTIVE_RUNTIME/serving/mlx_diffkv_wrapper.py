@@ -828,8 +828,19 @@ class MLXKVBlockManager:
         #   "minmax" — cheaper Quest key min/max bound; faster but loose, drops the
         #     needle block past ~32k. Good when context stays small.
         self.router = os.environ.get("DIFFKV_ROUTER", "residual").lower()
+        # DIFFKV_ROUTE_RESIDUALS = how many residuals per block the ROUTER scores when ranking
+        # blocks (this is O(nb·R·D) PER TOKEN and is the dominant DECODE cost at long context —
+        # confirmed 2026-07-04: route_once, which skips it, ~doubled 32k tps). It is SEPARATE
+        # from max_residual (how many residuals are ATTENDED for the selected blocks). Default
+        # was `max_residual`, so the prose bump (64→128) accidentally doubled router cost too.
+        # Sweep (Qwen-1.5B, forced sparse): R=16/32 → NIAH ok but SYNTHESIS breaks (router can't
+        # rank the diffuse paper blocks) at ~13/12 tps@32k; R=64 → NIAH AND synthesis both pass
+        # at 9.5 tps@32k (+38% vs R=128's 6.9) — the sweet spot; R=128 → 6.9 tps. So DECOUPLE
+        # and default to min(64, max_residual): keeps prose fidelity (128 attended) with a fast
+        # router. Raise DIFFKV_ROUTE_RESIDUALS toward max_residual for 64k+ (deep mid-rank
+        # needles) if recall drops there; 0 = use max_residual (the old, slower behavior).
         _rr = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
-        self.route_residuals = _rr if _rr > 0 else self.max_residual
+        self.route_residuals = _rr if _rr > 0 else min(64, self.max_residual)
         # When on, exclude exact-residual token positions from the SVD reconstruction
         # pool so a captured token's ONLY representation at decode is its exact copy in
         # the dense pool — its lossy low-rank twin no longer dilutes it. Zero memory
