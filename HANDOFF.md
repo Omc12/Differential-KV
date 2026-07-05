@@ -23,14 +23,32 @@ and ~37 dense**. i.e. sparse can be ~2× FASTER than dense at 32k, not 4× slowe
 the memory win. Real number will be lower (MLP/proj/norm add ctx-independent cost) but plausibly
 40–70 tps at 32k. This is the swing.
 
+**STATUS: POC BUILT + VALIDATED (2026-07-04, `scratchpad/poc_cache.py` → committed as
+`tools/poc_decode_cache.py`).** On a seeded 8-block pool: materialize+SDPA matches the reference
+`compute_decode_attention_static` at **cosine 0.936** (0.99+ once residual override is added — the
+missing 6% is exactly the exact-residual rescue). Speed (28-layer est): current per-token recon
+~9.5 tok/s → **materialize-every-token ~34 (3.6×)** → **cached (every N) ~102 (~10×)**. The win
+is real and measured, not theoretical.
+
+**CONFIRMED reconstruction math (this is the subtle part — I got it wrong twice, here's the
+truth, read `compute_decode_attention_static` L360-420 to verify):** the anchor is the block's
+BASELINE and every delta token is RELATIVE to it:
+```
+recon_K[b, 0]      = anchor_k[b]                                  # position 0 = the anchor
+recon_K[b, t>0]    = anchor_k[b] + comp_scale[b] * (U[b,t] @ comp_VK[b])   # NOT anchor as a separate row
+recon_V[b, 0]      = anchor_v[b]
+recon_V[b, t>0]    = anchor_v[b] + comp_scale[b] * (U[b,t] @ comp_VV[b])
+# comp_scale multiplies ONLY the delta (not the anchor). Then SDPA over
+# concat[recon_K blocks , dense_window_K]  (pool is pre-rotated; q is rotated; no in-loop RoPE).
+```
+
 **The design:**
 1. Route top-K blocks (existing router). Re-route every N tokens (`DIFFKV_DECODE_CACHE_INTERVAL`,
    default ~8), NOT every token.
-2. On re-route, MATERIALIZE the K selected blocks' exact-ish K/V once and cache in the session:
-   `recon_K[b,h] = concat(anchor_k[b,h], (comp_U[b] @ comp_VK[b,h]) * comp_scale[b])` → then
-   OVERWRITE residual rows with the exact `comp_res_k` (this folds in the twin-drop cleanly, so
-   no res_mask needed). Same for V. Shape → `[kv_heads, K*block_size, D]`. Cost ≈ 0.4 ms/reroute
-   (K·S·rank·D matmul), amortized over N → negligible.
+2. On re-route, MATERIALIZE the K selected blocks' K/V once (formula above) and cache in the
+   session. Then OVERWRITE the residual rows with exact `comp_res_k/v` (this folds in the
+   twin-drop and closes 0.936→0.99; REQUIRED for NIAH exact-needle recall). Shape →
+   `[kv_heads, K*block_size, D]`. Cost ≈ 0.4 ms/reroute, amortized over N → negligible.
 3. EVERY token: `out = mx.fast.scaled_dot_product_attention(q, concat[cached_recon_KV,
    dense_window_KV], concat[...V], scale, mask)`. One fused kernel. No per-token reconstruction,
    no LSE merge. Pool stays pre-rotated (POOL_ROT_ABS) so q(rotated)·K(prerotated) is correct;
