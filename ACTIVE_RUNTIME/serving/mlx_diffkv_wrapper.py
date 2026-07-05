@@ -849,7 +849,16 @@ class MLXKVBlockManager:
         self._res_exclude_svd = os.environ.get("DIFFKV_RESIDUAL_EXCLUDE_SVD", "1").strip().lower() not in ("0", "off", "false", "no")
         self.max_dense_len = self.recency_window + self.block_size
         self._comp_res_n_const = mx.full((self.max_blocks,), self.max_residual, dtype=mx.int32)
-        
+
+        # DIFFKV_DECODE_CACHE=1 — "decompress-and-cache" decode (HANDOFF.md §BIG-WIN).
+        # Instead of reconstructing the low-rank pool EVERY token, route + MATERIALISE the
+        # selected blocks' exact-ish K/V once every DIFFKV_DECODE_CACHE_INTERVAL tokens, cache
+        # it, and attend with ONE fused SDPA over [cached blocks + exact residuals + dense
+        # window]. Bit-exact to compute_decode_attention_static (POC cosine 1.0) but ~3-10x
+        # faster at long ctx. Default OFF until fully guardrail-verified.
+        self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "0") == "1"
+        self._decode_cache_interval = max(1, int(os.environ.get("DIFFKV_DECODE_CACHE_INTERVAL", "8")))
+
         self.sessions = {}
         self.active_session_ids = ["default"]
         self.position_ids = None
@@ -1935,12 +1944,108 @@ class MLXKVBlockManager:
         while session["dense_lens"][layer_idx] >= self.recency_window + self.block_size:
             self._flush_oldest_block(session, layer_idx)
 
+    def _execute_decode_cache(self, session, layer_idx, q, dense_k, dense_v, dense_len, scale, gpk):
+        """Decompress-and-cache decode (see DIFFKV_DECODE_CACHE). Materialises the routed blocks'
+        K/V from the low-rank pool once per interval, caches it, and attends [cached blocks +
+        exact residuals + dense window] with a single masked SDPA. Bit-exact to
+        compute_decode_attention_static (POC cosine 1.0). Returns out [H_q, D]."""
+        nb = session["num_blocks"][layer_idx]
+        kv_heads, D, bs = self.kv_heads, self.head_dim, self.block_size
+        S_comp = bs - 1
+        NEGf = mx.array(-1e9, dtype=mx.float32)
+        ZEROf = mx.array(0.0, dtype=mx.float32)
+        cache = session.setdefault("_cache_kv", {})
+        ent = cache.get(layer_idx)
+        # Re-route on interval, OR whenever the block count changed (a block was flushed from the
+        # dense window into the pool since the last route — else its content is attended nowhere).
+        need_route = (ent is None) or (ent["steps"] >= self._decode_cache_interval) or (ent.get("nb") != nb)
+
+        if need_route:
+            U  = session["comp_U"][layer_idx][:nb]
+            VK = session["comp_VK"][layer_idx][:nb]
+            VV = session["comp_VV"][layer_idx][:nb]
+            ak = session["comp_anc_k"][layer_idx][:nb]
+            av = session["comp_anc_v"][layer_idx][:nb]
+            sc = session["comp_scale"][layer_idx][:nb]
+            csl = session["comp_seq_len"][layer_idx][:nb]
+            rk = session["comp_res_k"][layer_idx][:nb]
+            rv = session["comp_res_v"][layer_idx][:nb]
+            res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
+            res_mask = session["comp_res_mask"][layer_idx][:nb] if "comp_res_mask" in session else None
+
+            k_eff = self.topk_blocks
+            if self.topk_blocks > 0 and self.topk_frac > 0.0:
+                k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+            if self.topk_blocks > 0 and nb > k_eff:
+                R_route = min(self.route_residuals, self.max_residual)
+                rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(mx.minimum(res_n, R_route), 1)
+                relevance = _block_relevance_residual(q, ak, rk[:, :R_route], rvld, scale, gpk)
+                sel = mx.argsort(relevance)[-k_eff:]
+                U = mx.take(U, sel, 0); VK = mx.take(VK, sel, 0); VV = mx.take(VV, sel, 0)
+                ak = mx.take(ak, sel, 0); av = mx.take(av, sel, 0); sc = mx.take(sc, sel, 0)
+                csl = mx.take(csl, sel, 0); rk = mx.take(rk, sel, 0); rv = mx.take(rv, sel, 0)
+                res_n = mx.take(res_n, sel, 0)
+                if res_mask is not None:
+                    res_mask = mx.take(res_mask, sel, 0)
+            K, R = U.shape[0], rk.shape[1]
+
+            # Materialise: recon[t>0] = anchor + comp_scale*(U[t] @ V_basis); position 0 = anchor.
+            delta_k = mx.einsum("bsr,bhrd->bhsd", U, VK) * sc.reshape(K, 1, 1, 1)
+            delta_v = mx.einsum("bsr,bhrd->bhsd", U, VV) * sc.reshape(K, 1, 1, 1)
+            ak_e = mx.expand_dims(ak, 2); av_e = mx.expand_dims(av, 2)
+            full_k = mx.concatenate([ak_e, ak_e + delta_k], axis=2).transpose(1, 0, 2, 3).reshape(kv_heads, K * bs, D)
+            full_v = mx.concatenate([av_e, av_e + delta_v], axis=2).transpose(1, 0, 2, 3).reshape(kv_heads, K * bs, D)
+            res_k_all = rk.transpose(2, 0, 1, 3).reshape(kv_heads, K * R, D)
+            res_v_all = rv.transpose(2, 0, 1, 3).reshape(kv_heads, K * R, D)
+
+            pos = mx.arange(S_comp).reshape(1, S_comp)
+            recon_valid = pos < csl.reshape(K, 1)
+            if res_mask is not None:
+                recon_valid = recon_valid & (~res_mask)          # drop low-rank twins of residuals
+            block_valid = mx.concatenate([mx.ones((K, 1), dtype=mx.bool_), recon_valid], axis=1).reshape(K * bs)
+            res_valid = (mx.arange(R).reshape(1, R) < res_n.reshape(K, 1)).reshape(K * R)
+
+            mk = mx.concatenate([full_k, res_k_all], axis=1)
+            mv = mx.concatenate([full_v, res_v_all], axis=1)
+            # SPARSE_BIAS in the unified SDPA = an additive score bonus on the COMPRESSED-block
+            # keys only (not residuals, not the dense window) — the same up-weighting the LSE
+            # merge applies. auto mode uses its base as a fixed value (the unified SDPA has no
+            # separate sparse/dense LSE to adapt on). 0.0 → bit-exact to the reference.
+            _bias = _SPARSE_BIAS_BASE if _SPARSE_BIAS_MODE == "auto" else _SPARSE_BIAS
+            block_add = mx.where(block_valid, mx.array(_bias, dtype=mx.float32), NEGf)
+            res_add   = mx.where(res_valid, ZEROf, NEGf)
+            block_add_mask = mx.concatenate([block_add, res_add])
+            mx.eval(mk, mv, block_add_mask)                       # materialise the cache now
+            ent = {"mk": mk, "mv": mv, "mask": block_add_mask, "steps": 0, "nb": nb}
+            cache[layer_idx] = ent
+
+        mk, mv, block_add_mask = ent["mk"], ent["mv"], ent["mask"]
+        ent["steps"] += 1
+
+        # Append the CURRENT dense window (changes every token) + its validity mask.
+        fk = mx.concatenate([mk, dense_k], axis=1)
+        fv = mx.concatenate([mv, dense_v], axis=1)
+        dense_add = mx.where(mx.arange(dense_k.shape[1]) < dense_len, ZEROf, NEGf)
+        add_mask = mx.concatenate([block_add_mask, dense_add])
+        L = fk.shape[1]
+        out = mx.fast.scaled_dot_product_attention(
+            q.reshape(1, self.heads, 1, D), fk.reshape(1, kv_heads, L, D), fv.reshape(1, kv_heads, L, D),
+            scale=scale, mask=add_mask.reshape(1, 1, 1, L))
+        return out[0, :, 0, :]
+
     def execute_decode_attention(self, session_id: str, layer_idx: int, q_rot: mx.array, rope: Any, scale: float, num_key_value_groups: int) -> mx.array:
         session = self.sessions[session_id]
 
         q   = q_rot.squeeze(2).squeeze(0)   # [H_q, D]
         gpk = num_key_value_groups
         nb  = session["num_blocks"][layer_idx]  # Python int — used for slicing
+
+        if self._decode_cache and nb > 0:
+            dk = session["dense_keys"][layer_idx][0]
+            dv = session["dense_values"][layer_idx][0]
+            dl = session["dense_lens_mx"][layer_idx]
+            out = self._execute_decode_cache(session, layer_idx, q, dk, dv, dl, scale, gpk)
+            return mx.expand_dims(mx.expand_dims(out, 0), 2)
 
         dense_k   = session["dense_keys"][layer_idx][0]    # [kv_heads, max_dense, D]
         dense_v   = session["dense_values"][layer_idx][0]
