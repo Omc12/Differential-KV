@@ -16,7 +16,7 @@ NEEDLE="The secret passcode is OMEGA-7741-DELTA."
 QUESTION="What is the secret passcode? Repeat it exactly."
 
 export DIFFKV_ENGAGE_THRESHOLD=1024  # ensure sparse at 4k+
-export DIFFKV_NATIVE_ATTN=1          # enable native attention engine
+export DIFFKV_NATIVE_ATTN=0          # enable native attention engine (default path)
 # export DIFFKV_CPU_EXACT_ATTN=0       # use fused op path
 # export DIFFKV_NO_FUSED_OP=0          # enable fused Metal op
 export DIFFKV_FORCE_CPU_ATTN=0       # run on GPU
