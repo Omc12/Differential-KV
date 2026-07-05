@@ -857,7 +857,11 @@ class MLXKVBlockManager:
         # window]. Bit-exact to compute_decode_attention_static (POC cosine 1.0) but ~3-10x
         # faster at long ctx. Default OFF until fully guardrail-verified.
         self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "0") == "1"
-        self._decode_cache_interval = max(1, int(os.environ.get("DIFFKV_DECODE_CACHE_INTERVAL", "8")))
+        # Re-route + re-materialise every N tokens. Higher N = faster (less materialisation) but
+        # staler block selection. Measured @32k: N=8→18, 16→20, 32→23 tps; NIAH exact + synthesis
+        # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
+        # raise toward 32 for retrieval-heavy/long-answer workloads.
+        self._decode_cache_interval = max(1, int(os.environ.get("DIFFKV_DECODE_CACHE_INTERVAL", "16")))
 
         self.sessions = {}
         self.active_session_ids = ["default"]
