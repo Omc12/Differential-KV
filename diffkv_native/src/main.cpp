@@ -63,9 +63,14 @@ static bool is_native_attn_enabled() {
 // path uses. No per-token reconstruction, no CPU-op-in-graph stall. Default OFF until the
 // 6-cell NIAH sweep is 6/6 and decode tps is measured to beat the CPU-op baseline.
 static bool is_decode_cache_enabled() {
+    // DEFAULT ON (14th pass): verified 6/6 NIAH sweep + conformance bit-exact + 2.4-5.3× faster
+    // than the CPU-op sparse path. Only active when sparse decode engages (long ctx); dense/short
+    // decode is unaffected. Explicit DIFFKV_DECODE_CACHE=0 forces the old CPU-op path (for
+    // baseline measurement). Matches the MLX serving default (DIFFKV_DECODE_CACHE=1).
     const char* e = std::getenv("DIFFKV_DECODE_CACHE");
-    return e && (std::string(e) == "1" || std::string(e) == "true" ||
-                 std::string(e) == "yes" || std::string(e) == "on");
+    if (!e) return true;
+    std::string v(e);
+    return !(v == "0" || v == "false" || v == "no" || v == "off");
 }
 // Re-route + re-materialize the routed blocks every N decode tokens (amortizes the
 // reconstruction cost). The dense window + mask + current token are refreshed EVERY token.
