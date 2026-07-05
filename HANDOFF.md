@@ -15,8 +15,22 @@ no accuracy loss.** Ceiling not fully reached (POC said ~89 tok/s cached) becaus
 ctx-independent floor + the N=8 materialise + concat/mask overhead; tuning N and fusing the
 concat could push further.
 
-**NATIVE — measured 12th pass (CRITICAL, changes the native plan):** native SPARSE decode is
-**3.3 tps** vs native DENSE **44 tps** — **13× slower** (measured: forced 160-token gen at 2k,
+**NATIVE — 13th pass: parallelization RULED OUT (bit-exact but NO speedup); bottleneck is the
+CPU-op-in-GPU-graph, not compute.** Tried the obvious fix: `execute_cpu_attention`'s per-head loop
+runs single-threaded (callback `if (ith!=0) return`), so I parallelised it across std::threads
+(DIFFKV_ATTN_THREADS). Conformance stayed BIT-EXACT (1.19e-07) with 8 threads → the parallelisation
+is CORRECT. But decode tps was UNCHANGED (2k: 4.4→4.3). Reason: thread-spawn overhead is only ~2%,
+so the head-loop COMPUTE is not the bottleneck — native decode is dominated by the per-token
+overhead of running a CPU custom op inside the GPU ggml graph (the GPU stalls each layer waiting on
+the CPU op; profiling showed ~8-9 ms/layer GPU spin-wait). **Reverted** (unmeasured benefit = don't
+ship). So the ONLY effective native fix is to get the sparse attention OFF the CPU op and ONTO the
+GPU: materialise the routed blocks into a ggml K/V tensor (cheap, once per N) and run the GPU
+flash/soft-max graph over [buffer + dense window] — the decompress-and-cache design, done in ggml.
+This eliminates the per-layer CPU↔GPU stall entirely. It's a real graph change in main.cpp
+(a prior non-cached in-graph reconstruction was 1.9× slower BECAUSE it reconstructed every token; the
+CACHE is the key difference). This is the native focus item; don't retry CPU-side parallelisation.
+
+**NATIVE (earlier measurement):** native SPARSE decode is **3.3 tps** vs native DENSE **44 tps** — **13× slower** (measured: forced 160-token gen at 2k,
 sparse 47.9s vs dense 3.6s). Root cause: the sparse path runs the **CPU custom op**
 (`execute_cpu_attention`, per-token low-rank reconstruction) while dense runs the **GPU ggml
 graph**. So native decode is even more bottlenecked than MLX was — and the fix has TWO layers:
