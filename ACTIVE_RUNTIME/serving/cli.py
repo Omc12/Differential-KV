@@ -634,22 +634,13 @@ async def run_direct_mode(args):
         print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
         print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
 
-    # ── BEST DiffKV decode config (identical to the serving gateway) ──
-    # The CLI previously left DIFFKV_DECODE_CACHE unset → the wrapper defaulted it OFF, so the
-    # interactive CLI ran the SLOW per-token-reconstruction sparse decode. Wire the same verified
-    # best config the gateway uses: exact-dense for short prompts (fast), DiffKV sparse at >=8k,
-    # and the decompress-and-cache fast decode + adaptive bias when sparse. setdefault → an
-    # explicit env still wins. Force DiffKV always-on with DIFFKV_COMPRESSED_DECODE=1.
-    _diffkv_best = {
-        "DIFFKV_COMPRESSED_DECODE": "auto",   # dense (fast) short, sparse (DiffKV) long
-        "DIFFKV_COMPRESSED_MIN_CTX": "8192",  # engage DiffKV at 8k+
-        "DIFFKV_DECODE_CACHE": "1",           # decompress-and-cache fast decode (~2x tps when sparse)
-        "DIFFKV_SPARSE_BIAS": "auto",         # adaptive merge bias (multi-fact synthesis)
-    }
-    for _k, _v in _diffkv_best.items():
-        if os.environ.get(_k) is None:
-            os.environ[_k] = _v
-    print_system("DiffKV decode config: " + ", ".join(f"{k}={os.environ.get(k)}" for k in _diffkv_best))
+    # ── BEST DiffKV decode config (shared with the serving gateway) ──
+    # setdefault the user-optimal serving policy: fast exact-dense for short prompts, DiffKV
+    # sparse at >=8k, decompress-and-cache fast decode + adaptive bias when sparse. Single
+    # source of truth in serving/decode_config.py (an explicit env still wins). Force DiffKV
+    # always-on with DIFFKV_COMPRESSED_DECODE=1.
+    from serving.decode_config import apply_best_decode_defaults
+    apply_best_decode_defaults(log=print_system)
 
     # Preset low configurations
     if args.preset == "low":

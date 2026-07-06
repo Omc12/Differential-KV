@@ -10,6 +10,23 @@ worst, selected by boosted joint K/V error + IDF rarity). Decode attends
 anchors + deltas + residuals + a dense recency window instead of the full sequence,
 merging the sparse and dense halves with a logsumexp combine.
 
+## Quickstart (macOS / Apple Silicon)
+
+```bash
+git clone --recurse-submodules <repo-url> && cd Differential-KV
+make setup      # create venv + install Python deps
+make chat       # interactive DiffKV chat (downloads the model on first run)
+```
+
+- `make serve` — run an OpenAI-compatible API at `http://localhost:8000` instead.
+- `make test` — run the NIAH recall guardrail (8k + 16k).
+- `make` (no target) — list all commands. Pick a model with `make chat MODEL=<hf-id>`.
+
+The best decode config (fast dense for short prompts, DiffKV sparse ≥8k, decompress-and-cache
+decode) is applied automatically — see [`ACTIVE_RUNTIME/serving/decode_config.py`](ACTIVE_RUNTIME/serving/decode_config.py).
+**Linux/CUDA:** `make setup` installs the base deps; see [`BUILD.md`](BUILD.md) for the CUDA
+extras (triton, cuSOLVER/cuBLAS) and the native `-DGGML_CUDA=ON` build (`make native`).
+
 ## Two implementations
 
 | | `ACTIVE_RUNTIME/` | `diffkv_native/` |

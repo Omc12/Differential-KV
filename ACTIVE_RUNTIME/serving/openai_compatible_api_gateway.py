@@ -915,26 +915,16 @@ def main():
         print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
         print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
 
-    # ── BEST DiffKV decode config for the serving CLI (all verified this session) ──
-    # Performance-optimal: run EXACT DENSE for short prompts (fastest + exact there) and switch to
-    # DiffKV sparse only once the context is long enough that its memory/reach win matters
-    # (COMPRESSED_DECODE=auto, engages >= COMPRESSED_MIN_CTX=8192 — lowered from 16384 so DiffKV
-    # engages earlier per user preference while sub-8k chats stay fast dense). When sparse IS on:
-    # the decompress-and-cache fast decode (~2x tps, bit-exact) + the adaptive sparse bias
-    # (synthesis-safe + NIAH-safe). Each is a setdefault so an explicit env still wins. To force
-    # DiffKV always-on (showcase / max memory savings), set DIFFKV_COMPRESSED_DECODE=1.
-    # Guardrails for the sparse path: parity 4/4, NIAH forced-sparse exact, relational 4/4,
-    # synthesis reads the paper.
-    _diffkv_best = {
-        "DIFFKV_COMPRESSED_DECODE": "auto",  # dense (fast) short, sparse (DiffKV) long
-        "DIFFKV_COMPRESSED_MIN_CTX": "8192", # engage DiffKV at 8k+ (was 16384)
-        "DIFFKV_DECODE_CACHE": "1",          # decompress-and-cache fast decode (when sparse)
-        "DIFFKV_SPARSE_BIAS": "auto",        # adaptive merge bias (multi-fact synthesis)
-    }
-    for _k, _v in _diffkv_best.items():
-        if os.environ.get(_k) is None:
-            os.environ[_k] = _v
-    print("[DiffKV] Serving decode config: " + ", ".join(f"{k}={os.environ.get(k)}" for k in _diffkv_best))
+    # ── BEST DiffKV decode config (shared with the interactive CLI) ──
+    # Performance-optimal serving policy: EXACT DENSE for short prompts (fastest + exact), switch
+    # to DiffKV sparse once the context is long enough that its memory/reach win matters
+    # (COMPRESSED_DECODE=auto, engages >= COMPRESSED_MIN_CTX=8192). When sparse IS on: the
+    # decompress-and-cache fast decode (~2x tps, bit-exact) + adaptive sparse bias (synthesis-safe
+    # + NIAH-safe). Single source of truth in serving/decode_config.py; each is a setdefault so an
+    # explicit env still wins. Force DiffKV always-on with DIFFKV_COMPRESSED_DECODE=1.
+    # Guardrails for the sparse path: parity 4/4, NIAH forced-sparse exact, relational 5/5.
+    from serving.decode_config import apply_best_decode_defaults
+    apply_best_decode_defaults(log=lambda m: print("[DiffKV] Serving " + m))
 
     # ── Platform-specific auto-optimization for 'low' preset ──
     if args.preset == "low":
