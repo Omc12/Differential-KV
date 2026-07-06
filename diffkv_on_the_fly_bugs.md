@@ -106,19 +106,37 @@ SIGMA-9923-BETA."` and stops — it KNOWS there are "three" but surfaces only th
 (SIGMA @0.5) and never OMEGA (0.25) or THETA (0.75). **MLX on the SAME model gets all 3/3**
 (`1. OMEGA 2. SIGMA 3. THETA`). So the 1.5B model is capable; the gap is 100% in native's decode.
 
-**Ruled out (measured this pass, all still 1/3):** adaptive-k pruning vs `DIFFKV_MLX_PARITY=1`
-(attend all blocks); `DIFFKV_DECODE_CACHE=0`; re-route interval `DIFFKV_DECODE_CACHE_INTERVAL=1`
-and `=4`; **quantization** (native q4_k_m == native q8 == 1/3, while MLX q4 = 3/3); repetition
-penalty (default 1.15 + loop-escalation already on). So it is not pruning, not the cache, not
-re-route frequency, not quant, not the sampler.
+**FULL DIAGNOSIS (this pass — thorough, every knob ruled out):**
+- **Not generation.** Pure dense native (2k, DiffKV OFF via `DIFFKV_ENGAGE_THRESHOLD=8192`) gets
+  multi-needle **3/3** ("The three secret passcodes are: …" + all 3 codes). The 1.5B model + native
+  generation are fine — the gap is 100% in the DiffKV COMPRESSED-DECODE path at long ctx.
+- **Degrades with context:** DiffKV-on gets 4k **2/3** (OMEGA+SIGMA), 8k **2/3** (SIGMA+THETA),
+  16k **1/3** (SIGMA). The MIDDLE needle (0.5) always survives; edges drop as ctx grows → softmax
+  DILUTION over more compressed keys, not a per-needle failure.
+- **Not routing coverage.** `DIFFKV_MLX_PARITY=1` (attend ALL blocks, no top-k pruning) is still
+  **1/3** at 16k. All 3 needle blocks are attended, yet only one surfaces.
+- **Not compression fidelity.** `DIFFKV_RANK=32`, `RANK=48 MAX_RESIDUAL=256`, and
+  `MLX_PARITY=1 + RANK=32 + MAX_RESIDUAL=256` combined are ALL still **1/3**. (Note native
+  `NativeBlockPool::MAX_RESIDUAL` already defaults to 128 via `DIFFKV_MAX_RESIDUAL`, not 8.)
+- **Not cache / interval / quant / sampler:** `DECODE_CACHE=0`, `INTERVAL=1/4`, native q4_k_m == q8,
+  rep-penalty 1.15+loop-escalation — all **1/3**.
+- **The decode-attention MATH is not buggy:** the CPU conformance harness passes **bit-exact
+  (1.19e-7)** vs golden vectors. So native computes the intended DiffKV attention correctly; the
+  gap is that native's compression POLICY / reconstruction / block+window COMPOSITION differs from
+  MLX's such that a diffuse "list all three" query can't attend 3 specific blocks sharply enough.
+- **MLX gets 3/3 at 16k on the SAME model** ("1. OMEGA 2. SIGMA 3. THETA"). MLX differences that
+  likely matter: per-token min/max q·k routing + `DIFFKV_SPARSE_BIAS` (additive boost on compressed
+  block keys so they compete with the exact dense window) — **native has NO sparse-bias equivalent**
+  (grep found none). But a UNIFORM compressed boost wouldn't discriminate needle-vs-filler blocks,
+  so SPARSE_BIAS alone is unlikely to be the whole fix.
 
-**Hypothesis for the real fix:** native decode does not SHIFT retrieval across distinct facts as
-generation proceeds the way MLX's per-token min/max q·k + LSE-merged compressed attention does — it
-locks onto the one dominant/first-surfaced needle. A proper fix = bring native's decode retrieval
-fidelity up to MLX's (per-token q·k routing over the pool with a correct multi-block LSE merge, so
-each generated list item can attend a DIFFERENT needle block). This is the native-decode frontier
-already flagged in HANDOFF §D7 / relational-binding notes — a substantial standalone pass, not a
-sparse-prefill item. Reproduce: `make_multineedle_prompt.py 16000 > p.txt` then run the binary.
+**Recommended next step (NOT a knob — a deep parity pass):** trace one multi-needle decode step in
+BOTH engines on the same compressed state and diff (a) the per-block attention scores the needle
+blocks receive, (b) the reconstructed needle-token keys, (c) the compressed-vs-dense-window LSE
+merge weights. The dilution pattern says native's needle blocks get too little attention mass at
+16k relative to MLX. Do NOT speculatively patch the bit-exact, 6/6-passing decode path — find the
+score/merge divergence first. This is the HANDOFF §D7 / HANDOFF_MLX_SYNTHESIS.md frontier.
+Reproduce: `diffkv_native/tests/make_multineedle_prompt.py 16000 > p.txt` then run the binary.
 
 ## FOLLOW-UP 3 — Router uses a single MEAN-pooled query per chunk
 **Where:** `_sparse_prefill_attend`, `q_rep = mx.mean(q_rot[0], axis=1)`. All L=512 query
