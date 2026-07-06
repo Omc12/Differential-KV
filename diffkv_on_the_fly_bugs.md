@@ -162,10 +162,31 @@ coverage (attend-all still 1/3), compression fidelity (rank 32/48 + residuals 25
 quant (q4==q8), sampler/rep-penalty, decode-cache on/off, re-route interval, per-needle
 reconstruction (each individually retrievable at 16k), generation (pure dense native = 3/3).
 
-**FIX DIRECTION (for a targeted pass, not done here):** give native decode a MLX-style separate
-small exact-residual pool with its own normalization (or up-weight exact-residual token scores) so a
-diffuse query can attend all of them instead of one — i.e. stop diluting the exact residuals in the
-unified flash. Verify the existing single-needle 6-cell 6/6 + conformance stay green.
+**SHARPENED DIAGNOSIS (2nd deep pass — the residual-pool fix idea above is WRONG, disproven):**
+- A two-path LSE merge is **mathematically identical** to one unified softmax over the same keys, so
+  the MLX "separate dense pool" STRUCTURE cannot be the cause (confirmed: MLX is 3/3 even with
+  `DIFFKV_SPARSE_BIAS=0`, i.e. its two-path ≡ a unified softmax). Do not "give native a separate
+  residual pool" — it would be a no-op.
+- **The gap is attention BREADTH, and breadth comes from the LOW-RANK RECONSTRUCTION of the needle
+  SENTENCES, not the residuals.** Decisive test: MLX with `DIFFKV_MAX_RESIDUAL=8` still produces the
+  correct PLURAL LIST format ("The three secret passcodes are:\n1.\n2.\n3.") but HALLUCINATED values
+  (OMEGA-**1234**-ALPHA) — so residuals only fix the exact digits; the "there are 3 distinct facts"
+  breadth signal comes from the low-rank recon. Native says SINGULAR ("passcode **is** SIGMA") → its
+  low-rank recon conveys the distinct-facts signal WORSE than MLX's.
+- **Not a knob:** ruled out this pass — pool precision (`DIFFKV_KV_QUANT=f16`), `DIFFKV_V_SCALE`
+  (0/1/2), rank 32/48, residuals 256, attend-all, decode-cache, interval, quant, sampler. All 1/3.
+- So the residual native-vs-MLX difference is in the **low-rank reconstruction VALUES themselves**
+  (the SVD basis / U·VK·row_scale·blk_scale / POOL_ROT_ABS RoPE math produce K/V that carry less
+  multi-fact structure than MLX's `comp_scale·(U@V)` recon), NOT any exposed parameter. This is the
+  same native-vs-MLX compressed-decode fidelity frontier as HANDOFF_MLX_SYNTHESIS.md ("native
+  compressed reads the paper 4-5/15 vs MLX better").
+
+**FIX DIRECTION (deep, needs a decision — cross-engine value comparison):** dump native's
+reconstructed needle-block K AND V (host `get_host_*` + the `DIFFKV_DBG_RECON_POS` machinery, extend
+it to V) at 16k and diff against BOTH ground-truth exact K/V and MLX's reconstruction of the same
+block; find where native's recon diverges (candidates: V basis vs K basis fidelity, blk/row scale,
+randomized-SVD basis quality, RoPE-abs). This is a standalone diagnostic sub-project, not a knob.
+MLX handles multi-fact today, so this only matters if native must match MLX on multi-fact.
 Reproduce: `diffkv_native/tests/make_multineedle_prompt.py 16000 > p.txt` then run the binary.
 
 ## FOLLOW-UP 3 — Router uses a single MEAN-pooled query per chunk
