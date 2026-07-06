@@ -38,6 +38,73 @@ no accuracy loss.** Ceiling not fully reached (POC said ~89 tok/s cached) becaus
 ctx-independent floor + the N=8 materialise + concat/mask overhead; tuning N and fusing the
 concat could push further.
 
+## §SPARSE-PREFILL — DSA/NSA sparse PREFILL — MLX DONE ✅, NATIVE DONE ✅, DEFAULT ON ✅
+_16th pass (2026-07-06, Opus 4.8). `DIFFKV_SPARSE_PREFILL` now **defaults ON** in both runtimes
+(reversible with `=0`) — flipped after the full guardrail suite passed sparse-ON (table below).
+MLX = routed sparse (min/max q·k). Native = StreamingLLM + Stage-B lexical routing._
+
+**DEFAULT-FLIP guardrail table (all measured sparse-ON, this pass):** MLX — NIAH bench sweep
+**4/4** (4k/8k/16k/32k), multi-depth **3/3** @16k, multi-needle **1/1** @16k, synthesis reads the
+paper (named "Randomized Feature Maps… Rahimi & Jordan"), relational **4/4**. Native — 6-cell
+**6/6** (baseline 6/6), conformance **PASS 1.19e-07**, margins 8k/16k **12.6/14.3** (= baseline),
+multi-needle **1/3 = dense** (no regression). Caveat: compute-only (no memory/reach change), and the
+guardrails are NIAH/synthesis/relational/margins — broader RULER/LongBench/code eval is still TODO
+(TRACK A) before treating it as battle-tested; `=0` reverts instantly.
+
+**KEY FINDING (why native is simple):** needle recall is a **DECODE-time** job, not a prefill one —
+each token's KV is captured exactly regardless of prefill sparsity, and decode retrieves from the
+pool. Verified in MLX: **pure StreamingLLM prefill (K=0, sink+window only, ZERO routing) passes
+single-needle NIAH** (bench 2/2 @16k+32k, multi-depth 3/3 @16k) — it only fails MULTI-needle (0/1,
+model refuses without the far facts primed). So single-needle sparse prefill needs no query-dependent
+routing; multi-fact does. Native ships the routing-free version (correct-by-construction, minimal bug
+surface); MLX keeps routing (handles multi-needle 1/1).
+
+**NATIVE RESULT (Qwen-1.5B **q8**, `diffkv_native/tests/test_niah_native.sh`, `DIFFKV_SPARSE_PREFILL=1`):**
+each chunk past `MIN` attends only `[sink block | recency window | current chunk]` (contiguous cache
+views concat'd in `build_prefill_ctx_graph` + a positional mask — no ggml_get_rows, no routing, no
+readback). **16k prefill compute 28.63→18.98s (−34%)**, total 31.47→21.65s (−31%); needle recalled;
+6-cell NIAH (4k/8k/16k × 0.5/0.9) **6/6**, flag-OFF baseline **6/6**, conformance **PASS (1.19e-07)**.
+Engagement confirmed via the `[DiffKV] SPARSE_PREFILL on:` log. Commit: working tree only (uncommitted).
+
+**The lever (HANDOFF §DSA "NEXT"):** prefill was dense O(L²) — every chunk attends over ALL
+preceding tokens. Now each chunk attends a SPARSE key set instead:
+`[block-0 sink | top-K routed history blocks | recency window | self(causal)]`. Routing is a
+Quest min/max bound (`_block_relevance_minmax`) over the RAW block keys (blocks aren't compressed
+yet mid-prefill), on a mean-pooled chunk query. Compute drops O(L²)→O(L·K). Training-free
+(StreamingLLM sinks + MInference block retrieval) on a frozen model → verified empirically.
+`_sparse_prefill_attend` in `mlx_diffkv_wrapper.py`; ON-defaults KMIN=8 FRAC=0.05 WINDOW=1024
+MIN=2048 (Qwen-1.5B/NIAH-tuned).
+
+**MLX RESULT (measured, mlx-community/Qwen2.5-1.5B-Instruct-4bit, `benchmarks/sparse_prefill_bench.py`
+which times prefill wall-clock + splits fwd/compression):** prefill total dense→sparse
+16k **32.61→27.66s**, 32k **89.75→58.00s (−35%)**. The saving is in the model FORWARD:
+16k fwd **30.11→25.17s (−16%)**, 32k fwd **83.85→53.07s (−37%)**; compression (SVD) is UNCHANGED
+(~2.5s@16k, ~5s@32k = ~8-9% of prefill) and small. The win GROWS with ctx (attention's share of the
+forward grows with L; at 16k attention is only ~½ the forward, so the residual is the MLP/projection
+FLOOR + the sparse attention). Two extra levers: (a) the gather index is built ENTIRELY in MLX (no
+per-layer `mx.eval`/`.tolist()` host sync — the mask makes history-key order irrelevant), worth
+~5% @32k; (b) `WINDOW=512 MIN=1024` shaves another ~4% (32k 58.0→55.8s) but is riskier (kept
+1024/2048 as the safe default). Recall held at the aggressive K: NIAH bench (COMPRESSED_DECODE=1)
+**2/2 @16k+32k**; multi-depth (0.1/0.5/0.9) **3/3 @16k**; multi-needle (3 needles) **1/1 @16k**.
+Guardrails after the change: parity **4/4**, relational **4/4** (0 misbound). Isolated gate: with
+K≥nb the sparse path is **bit-exact** to dense SDPA (maxabs_diff 0.0 across aligned/odd/L=1).
+**Tradeoff:** COMPUTE-only — raw KV still held in the native MLX prefill cache, so prefill PEAK RAM
+is UNCHANGED (does not yet extend max ctx reach). The memory win (evict compressed blocks' raw KV,
+attend the reconstructed pool) is Stage 2 (FOLLOW-UP 1). Default OFF (frozen-model accuracy risk;
+K is model/needle-tuned — sweep synthesis+RULER before enabling on a new model).
+
+**NATIVE — BUILT (Stage A StreamingLLM + Stage B lexical routing):** `build_prefill_ctx_graph` takes
+an `sp_ranges` list and builds `k_ctx`/`v_ctx` as `ggml_concat` of contiguous cache views; the driver
+computes ranges + a range-driven positional mask per chunk. **Stage B** adds the top-K prior blocks
+that share the most DISTINCTIVE (rare, count≤MAX_OCC) tokens with the current chunk — a **lexical
+router** that needs NO in-graph query (the whole prompt's token IDs are known on the host, sidestepping
+both GGML blockers below). Recovered multi-needle **0/3 → 1/3** (= dense) with single-needle still 6/6,
+prefill compute still **28.6→19.0s (−34%)**. Knobs: KMIN/FRAC/MAX_OCC (default 8/0.05/8).
+**Native multi-fact ceiling (1/3, not 3/3) is a separate native-DECODE gap** — dense native is also
+1/3, MLX is 3/3 on the same model; characterized (ruled out pruning/cache/interval/quant/sampler) in
+`diffkv_on_the_fly_bugs.md` FOLLOW-UP 5. A stronger semantic router (layer-0 mini pass-1 q, no
+attention) is still available if lexical proves too weak on non-lexical queries (FOLLOW-UP 4).
+
 **NATIVE — 13th pass: parallelization RULED OUT (bit-exact but NO speedup); bottleneck is the
 CPU-op-in-GPU-graph, not compute.** Tried the obvious fix: `execute_cpu_attention`'s per-head loop
 runs single-threaded (callback `if (ith!=0) return`), so I parallelised it across std::threads

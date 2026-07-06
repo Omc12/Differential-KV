@@ -738,6 +738,109 @@ def _block_relevance_residual(
     return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
 
 
+def _sparse_prefill_attend(
+    q_rot: mx.array,       # [1, H_q, L, D]   rotated queries for the current chunk
+    all_k: mx.array,       # [1, H_kv, T, D]  rotated keys, ALL tokens so far (T = cur_start + L)
+    all_v: mx.array,       # [1, H_kv, T, D]
+    cur_start: int,        # absolute position of the first query in this chunk
+    scale: float,
+    gpk: int,              # GQA group size = H_q // H_kv
+    block_size: int,
+    window: int,           # exact recency window (tokens), always attended
+    sink_blocks: int,      # leading blocks kept as always-attended attention sinks
+    kmin: int,
+    frac: float,
+    dbg: bool = False,
+):
+    """DSA/NSA-style block-sparse PREFILL attention for one chunk (HANDOFF §DSA).
+
+    Instead of dense attention over all T keys, build a SPARSE key/value set —
+        [ leading sink blocks | top-K routed history blocks | recency window | current chunk ]
+    — and run ONE masked SDPA over it. History keys (absolute pos < cur_start) are fully
+    visible; the current chunk is causal. Blocks are not yet compressed during prefill, so
+    routing is a Quest-style min/max bound (`_block_relevance_minmax`) computed on-the-fly
+    from the RAW block keys. Compute drops O(L*T) -> O(L*Ksel). Returns [1, H_q, L, D].
+    """
+    _, H_q, L, D = q_rot.shape
+    H_kv = all_k.shape[1]
+    T = all_k.shape[2]
+    neg_inf = mx.array(-float("inf"), dtype=q_rot.dtype)
+    zero = mx.array(0.0, dtype=q_rot.dtype)
+
+    # Aligned routable region: whole blocks fully inside [sink_end, cur_start - window).
+    sink_end = sink_blocks * block_size
+    first_blk = (sink_end + block_size - 1) // block_size    # first block fully >= sink_end
+    last_blk = (cur_start - window) // block_size            # blocks fully below cur_start-window
+    nb = last_blk - first_blk
+
+    if nb <= 0:
+        # Not enough prunable history — dense causal over everything.
+        ii = mx.arange(L).reshape(L, 1) + cur_start
+        jj = mx.arange(T).reshape(1, T)
+        mask = mx.where(jj <= ii, zero, neg_inf)
+        return mx.fast.scaled_dot_product_attention(q_rot, all_k, all_v, scale=scale, mask=mask)
+
+    aligned_lo = first_blk * block_size
+    aligned_hi = last_blk * block_size
+
+    # Per-block key min/max over the raw keys → [nb, H_kv, D].
+    mid_k = all_k[:, :, aligned_lo:aligned_hi, :].reshape(H_kv, nb, block_size, D)
+    comp_min_k = mx.min(mid_k, axis=2).transpose(1, 0, 2)
+    comp_max_k = mx.max(mid_k, axis=2).transpose(1, 0, 2)
+
+    # Coarse block selection uses a single pooled query per head (mean over the chunk).
+    q_rep = mx.mean(q_rot[0], axis=1)                        # [H_q, D]
+    rel = _block_relevance_minmax(q_rep, comp_min_k, comp_max_k, scale, gpk)  # [nb]
+
+    K = min(nb, max(kmin, int(math.ceil(frac * nb))))
+    # Build the gather index list ENTIRELY in MLX (no host sync). The mask makes ALL history
+    # keys fully visible regardless of order, so the selected blocks need NOT be sorted — which
+    # lets us skip the per-layer `mx.eval(sel)` + `.tolist()` GPU→CPU sync that otherwise
+    # serialized ~L/CH×n_layers times per prefill.
+    i32 = mx.int32
+    if K >= nb:
+        sel_tok = mx.arange(aligned_lo, aligned_hi, dtype=i32)          # all routable tokens
+    elif K <= 0:
+        sel_tok = mx.arange(0, 0, dtype=i32)                            # pure StreamingLLM: no routed blocks
+    else:
+        sel_blk = mx.argpartition(-rel, K)[:K].astype(i32)             # [K] routable block idxs
+        sel_abs = (first_blk + sel_blk) * block_size                   # [K] absolute block starts
+        offs = mx.arange(block_size, dtype=i32)                        # [block_size]
+        sel_tok = (mx.expand_dims(sel_abs, 1) + mx.expand_dims(offs, 0)).reshape(-1)  # [K*bs]
+
+    # Global key index list:
+    #   [0, aligned_lo)          leading sink blocks + pre-alignment slack (fully attended)
+    #   selected blocks          K*block_size rows (unordered — mask treats them uniformly)
+    #   [aligned_hi, cur_start)  post-alignment slack + recency window (fully attended)
+    #   [cur_start, T)           current chunk (causal)
+    idx_parts = []
+    if aligned_lo > 0:
+        idx_parts.append(mx.arange(0, aligned_lo, dtype=i32))
+    idx_parts.append(sel_tok)
+    if cur_start > aligned_hi:
+        idx_parts.append(mx.arange(aligned_hi, cur_start, dtype=i32))
+    idx_parts.append(mx.arange(cur_start, T, dtype=i32))
+    key_idx = mx.concatenate(idx_parts)                     # [Ksel]  (shape is static → no sync)
+    Ksel = int(key_idx.shape[0])
+
+    k_sel = mx.take(all_k, key_idx, axis=2)                 # [1, H_kv, Ksel, D]
+    v_sel = mx.take(all_v, key_idx, axis=2)
+
+    # Additive mask [L, Ksel]: history keys visible (0); current chunk causal.
+    n_hist = Ksel - L
+    hist_mask = mx.broadcast_to(zero, (L, n_hist))
+    ii = mx.arange(L).reshape(L, 1)
+    jj = mx.arange(L).reshape(1, L)
+    cur_mask = mx.where(jj <= ii, zero, neg_inf)            # [L, L]
+    mask = mx.concatenate([hist_mask, cur_mask], axis=1)    # [L, Ksel]
+
+    out = mx.fast.scaled_dot_product_attention(q_rot, k_sel, v_sel, scale=scale, mask=mask)
+    if dbg:
+        print(f"[SP] cur_start={cur_start} L={L} nb={nb} K={K} Ksel={Ksel} dense={T} "
+              f"({100.0*Ksel/max(1,T):.0f}% of dense)", flush=True)
+    return out
+
+
 class DummyMLXPool:
     def __init__(self, manager):
         self.manager = manager
@@ -862,6 +965,38 @@ class MLXKVBlockManager:
         # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
         # raise toward 32 for retrieval-heavy/long-answer workloads.
         self._decode_cache_interval = max(1, int(os.environ.get("DIFFKV_DECODE_CACHE_INTERVAL", "16")))
+
+        # ── DIFFKV_SPARSE_PREFILL=1 — DSA/NSA-style block-sparse PREFILL (HANDOFF §DSA). ──
+        # Prefill is otherwise dense O(L^2): every chunk attends over ALL preceding tokens.
+        # With this on, a chunk instead attends to a SPARSE key set:
+        #   [block 0 (attention sink) | top-K routed history blocks | recency window | self(causal)]
+        # selected by a Quest-style min/max router over the raw (not-yet-compressed) KV. This is
+        # training-free sparse attention (StreamingLLM sinks + MInference block retrieval) on a
+        # frozen model, so it carries real accuracy risk — default OFF, gated by ctx, verified via
+        # niah_recall before any default flip. Compute drops O(L^2)->O(L*K); memory is unchanged in
+        # this stage (raw KV still held) — the memory win (drop compressed blocks' raw KV) is a
+        # separate follow-up (see diffkv_on_the_fly_bugs.md).
+        # DEFAULT ON (16th pass): flipped after the full guardrail suite passed sparse-ON — NIAH
+        # sweep 4/4 (4k-32k), multi-depth 3/3, multi-needle 1/1, synthesis reads the paper,
+        # relational 4/4. Reversible: DIFFKV_SPARSE_PREFILL=0. Compute-only (no memory change);
+        # only engages above _sp_min_ctx tokens, no-op below.
+        self._sparse_prefill = os.environ.get("DIFFKV_SPARSE_PREFILL", "1") != "0"
+        # Only engage once the current chunk's start position is this far in — small prompts stay
+        # dense (sparse only helps when there is enough history beyond the window to prune, and the
+        # gather/route overhead only amortizes at long ctx).
+        self._sp_min_ctx = int(os.environ.get("DIFFKV_SPARSE_PREFILL_MIN", "2048"))
+        # Exact recency window (tokens, always attended, in addition to the current chunk).
+        self._sp_window = int(os.environ.get("DIFFKV_SPARSE_PREFILL_WINDOW", "1024"))
+        # Number of leading blocks kept as always-attended attention sinks (StreamingLLM).
+        self._sp_sink_blocks = int(os.environ.get("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS", "1"))
+        # Top-K routed history blocks = max(KMIN, ceil(FRAC * nb)). These ON-defaults (8 / 0.05)
+        # were verified on Qwen2.5-1.5B: NIAH bench 2/2 @16k+32k, multi-depth 3/3 @16k, multi-needle
+        # 1/1 @16k, with 16k prefill -14% and 32k -31% vs dense. They are model/needle-tuned — a
+        # diffuse-query or larger model may want a larger K (raise FRAC). The win grows with ctx
+        # (attention's share of the forward grows with L).
+        self._sp_kmin = int(os.environ.get("DIFFKV_SPARSE_PREFILL_KMIN", "8"))
+        self._sp_frac = float(os.environ.get("DIFFKV_SPARSE_PREFILL_FRAC", "0.05"))
+        self._sp_dbg = os.environ.get("DIFFKV_SPARSE_PREFILL_DBG", "0") == "1"
 
         self.sessions = {}
         self.active_session_ids = ["default"]
@@ -2767,13 +2902,27 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         else:
             all_k, all_v = keys_rot, values
 
-        out_b = mx.fast.scaled_dot_product_attention(
-            queries_rot,
-            all_k,
-            all_v,
-            scale=self.scale,
-            mask=mask
-        )
+        # ── DSA/NSA-style sparse prefill (DIFFKV_SPARSE_PREFILL) ──
+        # Attend to [sink blocks + top-K routed history blocks + recency window + self]
+        # instead of the full accumulated KV, once the chunk is far enough in that there
+        # is prunable history. Default OFF; verified via niah_recall before any default flip.
+        _T = all_k.shape[2]
+        _cur_start = _T - L
+        if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
+            out_b = _sparse_prefill_attend(
+                queries_rot, all_k, all_v, _cur_start,
+                self.scale, self.n_heads // self.n_kv_heads,
+                manager.block_size, manager._sp_window, manager._sp_sink_blocks,
+                manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
+            )
+        else:
+            out_b = mx.fast.scaled_dot_product_attention(
+                queries_rot,
+                all_k,
+                all_v,
+                scale=self.scale,
+                mask=mask
+            )
 
         # 2. Capture ONLY the current chunk's K/V into DiffKV store
         #    (all_k/all_v grow with every chunk; we store incrementally)

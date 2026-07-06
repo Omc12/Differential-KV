@@ -358,7 +358,11 @@ struct ggml_cgraph * build_prefill_ctx_graph(
     bool need_logits = false,
     std::vector<struct ggml_tensor *> * persistent_k_cache = nullptr,
     std::vector<struct ggml_tensor *> * persistent_v_cache = nullptr,
-    int pos_start = 0
+    int pos_start = 0,
+    // DIFFKV_SPARSE_PREFILL (HANDOFF §SPARSE-PREFILL): when non-empty, k_ctx/v_ctx attend only
+    // these absolute [start,len) ranges of the persistent cache (sink + recency window + current
+    // chunk) instead of the full [0, ctx_len) view — training-free StreamingLLM sparse prefill.
+    const std::vector<std::pair<int,int>>* sp_ranges = nullptr
 ) {
     const auto & config = model.get_config();
     struct ggml_cgraph * gf = ggml_new_graph(ctx);
@@ -436,14 +440,33 @@ struct ggml_cgraph * build_prefill_ctx_graph(
             ggml_build_forward_expand(gf, copy_k);
             ggml_build_forward_expand(gf, copy_v);
 
-            k_ctx = ggml_view_3d(ctx, pk,
-                head_dim, config.n_head_kv, pos_start + k_rope_f16->ne[2],
-                pk->nb[1], pk->nb[2],
-                0);
-            v_ctx = ggml_view_3d(ctx, pv,
-                head_dim, config.n_head_kv, pos_start + v_reshaped_f16->ne[2],
-                pv->nb[1], pv->nb[2],
-                0);
+            if (sp_ranges && !sp_ranges->empty()) {
+                // Sparse prefill: attend only [sink | recency window | current chunk] — each a
+                // contiguous absolute range of the cache. The current chunk was just cpy'd into
+                // pk/pv at pos_start, so the window range (which covers it) reads it back.
+                struct ggml_tensor * kacc = nullptr;
+                struct ggml_tensor * vacc = nullptr;
+                for (const auto & r : *sp_ranges) {
+                    int rs = r.first, rl = r.second;
+                    struct ggml_tensor * kv = ggml_view_3d(ctx, pk, head_dim, config.n_head_kv, rl,
+                        pk->nb[1], pk->nb[2], (size_t)rs * pk->nb[2]);
+                    struct ggml_tensor * vv = ggml_view_3d(ctx, pv, head_dim, config.n_head_kv, rl,
+                        pv->nb[1], pv->nb[2], (size_t)rs * pv->nb[2]);
+                    kacc = kacc ? ggml_concat(ctx, kacc, kv, 2) : kv;
+                    vacc = vacc ? ggml_concat(ctx, vacc, vv, 2) : vv;
+                }
+                k_ctx = kacc;
+                v_ctx = vacc;
+            } else {
+                k_ctx = ggml_view_3d(ctx, pk,
+                    head_dim, config.n_head_kv, pos_start + k_rope_f16->ne[2],
+                    pk->nb[1], pk->nb[2],
+                    0);
+                v_ctx = ggml_view_3d(ctx, pv,
+                    head_dim, config.n_head_kv, pos_start + v_reshaped_f16->ne[2],
+                    pv->nb[1], pv->nb[2],
+                    0);
+            }
         } else {
             k_ctx = k_rope_f16;
             v_ctx = v_reshaped_f16;
@@ -2791,6 +2814,45 @@ int main(int argc, char ** argv) {
         std::thread prefill_ingest_thread;
         bool prefill_ingest_thread_active = false;
 
+        // ── DIFFKV_SPARSE_PREFILL (HANDOFF §SPARSE-PREFILL) ──────────────────────────────
+        // Training-free StreamingLLM sparse prefill: a chunk far enough in attends only
+        // [sink blocks | recency window | current chunk] instead of the full prior context,
+        // dropping prefill attention from O(L^2) to O(L·(sink+window)). Default OFF. Single-needle
+        // retrieval is preserved (recall is a DECODE-time job); multi-fact needs routing (parked —
+        // see diffkv_on_the_fly_bugs.md FOLLOW-UP 4).
+        // DEFAULT ON (16th pass): flipped after 6-cell 6/6 + conformance PASS + margins unchanged
+        // (12.6/14.3) + multi-needle no-regression vs dense, all with sparse-ON. Reversible:
+        // DIFFKV_SPARSE_PREFILL=0. Only engages above sp_min tokens, no-op below.
+        bool sp_enabled = true;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL")) { try { sp_enabled = (std::stoi(e) != 0); } catch (...) {} }
+        int sp_window = 1024, sp_sink_blocks = 1, sp_min = 2048;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_WINDOW")) { try { sp_window = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS")) { try { sp_sink_blocks = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MIN")) { try { sp_min = std::stoi(e); } catch (...) {} }
+        const int sp_sink_end = sp_sink_blocks * micro_block_size;
+        // Stage B — lexical routing knobs. A chunk far enough in also attends the top-K prior
+        // blocks that share the most DISTINCTIVE (rare, count<=MAX_OCC) tokens with it. The whole
+        // prompt is known on the host, so this needs no query/graph/readback (the current chunk's
+        // K/Q aren't available pre-graph, but its token IDs are). K=0 recovers pure StreamingLLM.
+        int sp_kmin = 8; float sp_frac = 0.05f; int sp_max_occ = 8;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_KMIN")) { try { sp_kmin = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_FRAC")) { try { sp_frac = std::stof(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MAX_OCC")) { try { sp_max_occ = std::stoi(e); } catch (...) {} }
+        std::map<int32_t,int> sp_tok_count;                       // token id -> total count in prompt
+        std::vector<std::unordered_set<int32_t>> sp_block_tokens; // per aligned block: unique token ids
+        if (sp_enabled) {
+            for (int32_t t : prompt_tokens) sp_tok_count[t]++;
+            int nblk = (L + micro_block_size - 1) / micro_block_size;
+            sp_block_tokens.resize(nblk);
+            for (int b = 0; b < nblk; ++b) {
+                int s = b * micro_block_size, e = std::min(L, s + micro_block_size);
+                for (int i = s; i < e; ++i) sp_block_tokens[b].insert(prompt_tokens[i]);
+            }
+            std::cerr << "[DiffKV] SPARSE_PREFILL on: sink_end=" << sp_sink_end
+                      << " window=" << sp_window << " min=" << sp_min
+                      << " kmin=" << sp_kmin << " frac=" << sp_frac << " max_occ=" << sp_max_occ << std::endl;
+        }
+
         while (pos_start < L) {
             if (prefill_ingest_thread_active) {
                 prefill_ingest_thread.join();
@@ -2803,6 +2865,50 @@ int main(int argc, char ** argv) {
             }
             auto tp_c0 = std::chrono::high_resolution_clock::now();
             int ctx_len   = pos_start + chunk_len;  // total KV context length
+
+            // Sparse-prefill key ranges for THIS chunk (empty = dense full context). Engage only
+            // once there is prunable history beyond the sink + window.
+            std::vector<std::pair<int,int>> sp_ranges;
+            bool use_sp = sp_enabled && pos_start >= sp_min && pos_start > sp_sink_end + sp_window;
+            int sp_win_start = 0;
+            if (use_sp) {
+                sp_win_start = pos_start - sp_window;                          // > sp_sink_end
+                // ── Stage B lexical routing: pick the prior blocks that share the most
+                //    distinctive tokens with the current chunk (top-K), so multi-fact prompts
+                //    keep the needle blocks. Filler chunks match nothing → pure StreamingLLM.
+                int first_blk = (sp_sink_end + micro_block_size - 1) / micro_block_size;
+                int last_blk  = sp_win_start / micro_block_size;               // blocks fully below window
+                int nb = last_blk - first_blk;
+                std::vector<int> selected;
+                if (nb > 0 && (sp_kmin > 0 || sp_frac > 0.0f)) {
+                    std::unordered_set<int32_t> distinct;
+                    for (int i = pos_start; i < ctx_len; ++i) {
+                        int32_t t = prompt_tokens[i];
+                        auto it = sp_tok_count.find(t);
+                        if (it != sp_tok_count.end() && it->second <= sp_max_occ) distinct.insert(t);
+                    }
+                    std::vector<std::pair<int,int>> scored;   // (overlap score, abs block idx)
+                    for (int b = first_blk; b < last_blk; ++b) {
+                        int sc = 0;
+                        for (int32_t t : sp_block_tokens[b]) if (distinct.count(t)) sc++;
+                        if (sc > 0) scored.push_back({sc, b});
+                    }
+                    int K = std::max(sp_kmin, (int)std::ceil(sp_frac * nb));
+                    K = std::min(K, (int)scored.size());
+                    if (K > 0) {
+                        std::partial_sort(scored.begin(), scored.begin() + K, scored.end(),
+                            [](const std::pair<int,int>& a, const std::pair<int,int>& b){ return a.first > b.first; });
+                        for (int i = 0; i < K; ++i) selected.push_back(scored[i].second);
+                        std::sort(selected.begin(), selected.end());
+                    }
+                }
+                sp_ranges.push_back({0, sp_sink_end});                                // attention sink
+                for (int b : selected) sp_ranges.push_back({b * micro_block_size, micro_block_size});
+                sp_ranges.push_back({sp_win_start, ctx_len - sp_win_start});          // window + current chunk
+            }
+            int sp_klen = 0;
+            if (use_sp) { for (const auto& r : sp_ranges) sp_klen += r.second; }
+            else        { sp_klen = ctx_len; }
 
             // Recreate the scheduler at each chunk iteration to prevent memory accumulation in the scheduler pool.
             {
@@ -2826,10 +2932,10 @@ int main(int argc, char ** argv) {
             struct ggml_tensor * positions_prefill = ggml_new_tensor_1d(prefill_ctx, GGML_TYPE_I32, chunk_len);
             ggml_set_input(positions_prefill);
 
-            // Full-context mask: [intra_ctx_len, chunk_len]
-            // intra_ctx_len = pos_start + chunk_len (full causal window for this chunk).
+            // Mask: [key_len, chunk_len]. key_len = full context (dense) or sp_klen (sparse).
             int intra_ctx_len = pos_start + chunk_len;
-            struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, intra_ctx_len, chunk_len);
+            int mask_klen = use_sp ? sp_klen : intra_ctx_len;
+            struct ggml_tensor * mask_prefill = ggml_new_tensor_2d(prefill_ctx, GGML_TYPE_F16, mask_klen, chunk_len);
             ggml_set_input(mask_prefill);
 
             // ── 4. Build the graph ────────────────────────────────────────────
@@ -2847,7 +2953,8 @@ int main(int argc, char ** argv) {
                 is_last_chunk,
                 &persistent_k_cache,
                 &persistent_v_cache,
-                pos_start
+                pos_start,
+                use_sp ? &sp_ranges : nullptr
             );
             if (is_last_chunk && prefill_logits) {
                 ggml_set_output(prefill_logits);
@@ -2866,14 +2973,34 @@ int main(int argc, char ** argv) {
             for (int i = 0; i < chunk_len; ++i) pos_host[i] = pos_start + i;
             ggml_backend_tensor_set(positions_prefill, pos_host.data(), 0, chunk_len * sizeof(int32_t));
 
-            // Build full-context mask
-            int intra_prior = pos_start;
-            std::vector<ggml_fp16_t> mask_host(chunk_len * intra_ctx_len, ggml_fp32_to_fp16(0.0f));
-            for (int qi = 0; qi < chunk_len; ++qi) {
-                for (int kj = intra_prior; kj < intra_ctx_len; ++kj) {
-                    int chunk_kj = kj - intra_prior;
-                    if (chunk_kj > qi) {
-                        mask_host[qi * intra_ctx_len + kj] = ggml_fp32_to_fp16(-INFINITY);
+            // Build the mask, matching the K/V layout the graph attends.
+            std::vector<ggml_fp16_t> mask_host;
+            if (use_sp) {
+                // Range-driven mask: walk sp_ranges in order (matches the ggml_concat key layout);
+                // each key slot's abs pos = range.start + offset. History keys (abs < pos_start)
+                // are always visible; current-chunk keys are causal.
+                mask_host.assign((size_t)chunk_len * sp_klen, ggml_fp32_to_fp16(0.0f));
+                for (int qi = 0; qi < chunk_len; ++qi) {
+                    int slot = 0;
+                    for (const auto& r : sp_ranges) {
+                        for (int j = 0; j < r.second; ++j, ++slot) {
+                            int chunk_j = (r.first + j) - pos_start;   // >=0 only for current-chunk keys
+                            if (chunk_j > qi) {
+                                mask_host[(size_t)qi * sp_klen + slot] = ggml_fp32_to_fp16(-INFINITY);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Dense full-context mask.
+                int intra_prior = pos_start;
+                mask_host.assign((size_t)chunk_len * intra_ctx_len, ggml_fp32_to_fp16(0.0f));
+                for (int qi = 0; qi < chunk_len; ++qi) {
+                    for (int kj = intra_prior; kj < intra_ctx_len; ++kj) {
+                        int chunk_kj = kj - intra_prior;
+                        if (chunk_kj > qi) {
+                            mask_host[(size_t)qi * intra_ctx_len + kj] = ggml_fp32_to_fp16(-INFINITY);
+                        }
                     }
                 }
             }
