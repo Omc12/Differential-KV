@@ -181,13 +181,33 @@ reconstruction (each individually retrievable at 16k), generation (pure dense na
   same native-vs-MLX compressed-decode fidelity frontier as HANDOFF_MLX_SYNTHESIS.md ("native
   compressed reads the paper 4-5/15 vs MLX better").
 
-**FIX DIRECTION (deep, needs a decision — cross-engine value comparison):** dump native's
-reconstructed needle-block K AND V (host `get_host_*` + the `DIFFKV_DBG_RECON_POS` machinery, extend
-it to V) at 16k and diff against BOTH ground-truth exact K/V and MLX's reconstruction of the same
-block; find where native's recon diverges (candidates: V basis vs K basis fidelity, blk/row scale,
-randomized-SVD basis quality, RoPE-abs). This is a standalone diagnostic sub-project, not a knob.
-MLX handles multi-fact today, so this only matters if native must match MLX on multi-fact.
-Reproduce: `diffkv_native/tests/make_multineedle_prompt.py 16000 > p.txt` then run the binary.
+**DATA GATHERED (2026-07-06, `DIFFKV_DBG_RECON_POS` extended to scan the POOL by slot — the old
+ingest-manager-list version couldn't find flushed blocks at long ctx; committed).** Probed all 3
+needle blocks at 16k:
+- **Native low-rank V reconstruction = 40-80% relative error for NON-residual tokens** (the needle
+  SENTENCE context), while K = ~1%. The needle VALUE tokens (residuals) are exact (~0.0002) for all
+  3 needles. So the sentence context that conveys "3 distinct facts" is badly V-reconstructed.
+- **Inherent to the rank-16 shared K|V basis, NOT the SVD impl:** `DIFFKV_RAND_SVD=0` (exact LAPACK)
+  gives IDENTICAL 40-80% V error. The joint SVD + v_gain rebalance can't represent V well at rank 16
+  because K and V have different row-space structure and K dominates the shared basis.
+- **`DIFFKV_MAX_RESIDUAL=256` makes ALL tokens exact residuals** (probe confirms V_err → 0.0002 for
+  the context tokens) and lifts native multi-needle **1/3 → 2/3**. So V fidelity IS a real
+  contributor. (Native `job.max_residual = NativeBlockPool::MAX_RESIDUAL`=128 by default, not the
+  struct's 8; residual selection already uses the V-balanced `joint_err = sqrt(aerrK² + (aerrV·v_gain)²)`
+  matching MLX, plus an 8× digit/title-case boost that steals slots from prose context.)
+- **BUT even MR=256 (perfect reconstruction) is only 2/3, not 3/3** → the LAST needle is lost to a
+  DECODE factor (routing/attention/window), NOT reconstruction. So the multi-needle gap is **TWO
+  entangled factors**: (a) low-rank V-recon fidelity (worth ~1 needle, fixable via residual budget at
+  a memory cost or a V-aware basis), and (b) a decode-side breadth factor (the remaining needle).
+- MLX comparison inconclusive: MLX measures recon error relative to the DELTA norm (native uses the
+  FULL-K/V norm incl. anchor), so the two numbers aren't comparable without re-instrumenting.
+
+**FIX DIRECTION (multi-factor, needs a decision):** (a) V-fidelity — give the V half its own rank
+budget / a V-aware basis so non-residual V drops below ~10% without exploding residuals (raising
+residuals to 256 works but is just "don't compress"); (b) decode-breadth — the remaining needle
+needs the decode-attention parity trace (why does perfect-recon native still miss 1 fact at 16k
+while MLX gets all 3). Both are real sub-projects. MLX handles multi-fact today.
+Reproduce: `make_multineedle_prompt.py 16000 > p.txt`; probe with `DIFFKV_DBG_RECON_POS=<pos>`.
 
 ## FOLLOW-UP 3 — Router uses a single MEAN-pooled query per chunk
 **Where:** `_sparse_prefill_attend`, `q_rep = mx.mean(q_rot[0], axis=1)`. All L=512 query

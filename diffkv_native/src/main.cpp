@@ -3186,15 +3186,18 @@ int main(int argc, char ** argv) {
         if (const char* env_rp = std::getenv("DIFFKV_DBG_RECON_POS")) {
             int want_pos = std::stoi(env_rp);
             runtime_manager.wait_for_compressor();
-            auto & blks = runtime_manager.get_ingest_manager().get_blocks(0);
-            for (auto & blk : blks) {
-                int a0 = blk->anchor_idx, cnt = blk->token_count();
-                if (!(want_pos >= a0 && want_pos < a0 + cnt)) continue;
-                int slot = blk->pool_idx;
-                std::cerr << "[RECON_POS] block anchor_idx=" << a0 << " count=" << cnt
-                          << " slot=" << slot << " state=" << (int)blk->state << "\n";
-                if (slot < 0) break;
-                NativeBlockPool* pool = kv_engines[0].get();
+            // Scan the POOL directly by slot (older blocks are flushed from the ingest
+            // manager's list into the pool at long ctx, so that list can't find them).
+            NativeBlockPool* pool = kv_engines[0].get();
+            int _nsl = pool->get_n_slots();
+            for (int slot = 0; slot < _nsl; ++slot) {
+                const int32_t* _tp = pool->get_host_token_positions(slot);
+                int _sl = pool->get_host_seq_lens()[slot];
+                if (!_tp || _sl <= 0) continue;
+                bool _holds = false;
+                for (int _t = 0; _t < _sl; ++_t) if (_tp[_t] >= want_pos - 2 && _tp[_t] <= want_pos + 2) { _holds = true; break; }
+                if (!_holds) continue;
+                std::cerr << "[RECON_POS] slot=" << slot << " holds pos ~" << want_pos << " seq_len=" << _sl << "\n";
                 const int8_t* U = pool->get_host_U(slot);
                 const ggml_fp16_t* rowsc = pool->get_host_U_row_scale(slot);
                 const ggml_fp16_t* VK = pool->get_host_VK(slot);
