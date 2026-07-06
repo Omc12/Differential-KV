@@ -499,6 +499,37 @@ class ContinuousBatchEngine:
         encoded = self.tokenizer(req.prompt, return_tensors="pt", add_special_tokens=False)
         req.prompt_ids = encoded.input_ids[0].tolist()
 
+        # ---------------------------------------------------------------------------
+        # Input token limit guard
+        # Default hard limit is 32,768 tokens. Raise it with DIFFKV_MAX_INPUT_TOKENS.
+        # Inputs above the WARN threshold (75% of limit) get a yellow warning.
+        # Inputs above the limit get truncated to the limit with a clear message
+        # instead of crashing Python with an MPS OOM.
+        # ---------------------------------------------------------------------------
+        _max_input_tokens = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+        _warn_threshold   = int(_max_input_tokens * 0.75)
+        n_prompt_tokens   = len(req.prompt_ids)
+
+        if n_prompt_tokens > _max_input_tokens:
+            truncated_to = _max_input_tokens
+            print(
+                f"\n[DiffKV] ⚠️  INPUT TOO LARGE: {n_prompt_tokens:,} tokens (limit {_max_input_tokens:,}).\n"
+                f"[DiffKV] Truncating to {truncated_to:,} tokens to prevent OOM crash.\n"
+                f"[DiffKV] Tip: raise the limit with  DIFFKV_MAX_INPUT_TOKENS=65536  "
+                f"(ensure your Mac has enough unified memory).\n",
+                file=sys.stderr
+            )
+            req.prompt_ids = req.prompt_ids[:truncated_to]
+            # Re-decode truncated ids so prompt string stays in sync
+            req.prompt = self.tokenizer.decode(req.prompt_ids, skip_special_tokens=False)
+        elif n_prompt_tokens > _warn_threshold:
+            print(
+                f"[DiffKV] ⚠️  Large input: {n_prompt_tokens:,} tokens "
+                f"({n_prompt_tokens / _max_input_tokens * 100:.0f}% of {_max_input_tokens:,} limit). "
+                f"Prefill may take {n_prompt_tokens // 50:.0f}–{n_prompt_tokens // 30:.0f}s on MPS.",
+                file=sys.stderr
+            )
+
         # O(1) Smart Prefix Check: check if the session already has resident KV cache.
         # If so, mark the cached length so prefill is incremental (avoiding O(N) re-prefill of history).
         #
@@ -806,10 +837,27 @@ class ContinuousBatchEngine:
             # Ensure session is registered and metadata initialized at the start of prefill
             if req.prefill_offset == cached_len:
                 max_expected = len(req.prompt_ids) + req.max_tokens + 512
-                if hasattr(self.wrapper.manager, "init_session"):
-                    self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
-                if self.draft_wrapper is not None:
-                    self.draft_wrapper.manager.init_session(req.session_id + "_draft", prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
+                try:
+                    if hasattr(self.wrapper.manager, "init_session"):
+                        self.wrapper.manager.init_session(req.session_id, prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
+                    if self.draft_wrapper is not None:
+                        self.draft_wrapper.manager.init_session(req.session_id + "_draft", prefill_len=len(req.prompt_ids), max_tokens_hint=max_expected)
+                except RuntimeError as _oom_err:
+                    _msg = str(_oom_err)
+                    if "out of memory" in _msg.lower() or "mps" in _msg.lower():
+                        oom_hint = (
+                            f"MPS out of memory while allocating KV cache for "
+                            f"{len(req.prompt_ids):,} tokens. "
+                            f"Try a shorter input, or set DIFFKV_MAX_INPUT_TOKENS to a lower value "
+                            f"(currently {os.environ.get('DIFFKV_MAX_INPUT_TOKENS', '32768')}). "
+                            f"You can also free memory with --preset low or --serving-mode lightweight."
+                        )
+                        req.chunks_queue.put_nowait({"error": oom_hint, "is_final": True})
+                        req.is_finished = True
+                        self._free_session_kv(req.session_id)
+                        self.active_requests = [r for r in self.active_requests if r is not req]
+                        return
+                    raise
 
             # Inject session ID so the attention patch stores KV under the right key
             self.wrapper.model._diffkv_session_ids = [req.session_id]
@@ -848,6 +896,32 @@ class ContinuousBatchEngine:
                             max_chunk = 512
                         else:
                             max_chunk = 2048
+
+                # ── Metal GPU timeout guard ──────────────────────────────────────────
+                # Apple's Metal driver has a hard ~60s per-command-buffer watchdog.
+                # When it fires it throws a C++ std::runtime_error that bypasses ALL
+                # Python try/except and kills the process with:
+                #   libc++abi: terminating due to uncaught exception … GPU Timeout Error
+                #
+                # For large MPS inputs, auto-reduce max_chunk so each individual
+                # forward pass completes well within 1–2s, regardless of prompt length.
+                # The user can override with DIFFKV_PREFILL_CHUNK_SIZE if they know
+                # their hardware can handle larger chunks without triggering the watchdog.
+                # ────────────────────────────────────────────────────────────────────
+                if is_mps and not os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
+                    # With chunk-level flushes (mx.eval() and SVD flushes) active,
+                    # we keep the command buffers small and prevent timeouts naturally.
+                    # We can use a standard chunk size of 512. Going smaller (e.g. 128)
+                    # causes a massive quadratic overhead in SVD history-reconstruction
+                    # inside the attention loops, slowing down prefill by 15x.
+                    max_chunk = min(max_chunk, 512)
+                    if req.prefill_offset == 0 and len(req.prompt_ids) > 4000:
+                        print(
+                            f"[DiffKV] Auto-configured prefill chunk size to 512 tokens to balance "
+                            f"Metal GPU dispatch rate and attention reconstruction overhead.",
+                            file=sys.stderr
+                        )
+
                 chunk_size = min(remaining, max_chunk)
             else:
                 cfg = getattr(self.wrapper.manager, "config", None)
@@ -955,9 +1029,36 @@ class ContinuousBatchEngine:
 
             if torch.backends.mps.is_available():
                 torch.mps.synchronize()
-                # Flush Metal command buffers every 4 chunks to prevent accumulation.
-                # Without this, 32 chunks × ~80 MB Metal intermediates = ~2.5 GB driver overhead.
-                # Every-4 balances RAM usage vs dispatch latency (4 chunks = 1024 tokens between flushes).
+                # Flush Metal command buffers every chunk to prevent accumulation.
+                # IMPORTANT: We must also call mx.eval() here. PyTorch MPS and MLX
+                # share the same Metal command queue on Apple Silicon. Without an
+                # explicit mx.eval() after each chunk, MLX lazy ops from DiffKV's
+                # attention hooks (KV capture, routing, compression) keep piling up
+                # in an un-evaluated graph. When torch.mps.synchronize() finally
+                # forces a Metal flush, ALL accumulated MLX ops execute in one
+                # command buffer submission, which takes 60s+ and triggers Apple's
+                # Metal GPU watchdog — killing the process with:
+                #   libc++abi: terminating … GPU Timeout Error
+                # Flushing both runtimes together after every chunk keeps each
+                # individual Metal dispatch well under 1s regardless of prompt length.
+                is_mlx = getattr(self.wrapper, "is_mlx", False)
+                _mx = sys.modules.get("mlx.core")
+                if _mx is not None:
+                    try:
+                        # CRITICAL: Since MLX is lazy, if we don't evaluate the model's outputs
+                        # (out/out.logits), the entire sequence of 226 chunk forward passes builds
+                        # up in a single monster graph. When we finally try to evaluate the first
+                        # decode token's logits, the engine gets stuck compiling a 6,300+ layer graph.
+                        # Evaluating out.logits forces immediate GPU computation of each chunk.
+                        if is_mlx and out is not None:
+                            if hasattr(out, "logits"):
+                                _mx.eval(out.logits)
+                            else:
+                                _mx.eval(out)
+                        else:
+                            _mx.eval()   # force-evaluate other pending MLX lazy operations
+                    except Exception:
+                        pass
                 if is_last_chunk or (_prefill_chunk_idx % 4 == 3):
                     torch.mps.empty_cache()
                     import gc as _gc; _gc.collect()  # return freed malloc arenas to the OS
@@ -966,8 +1067,23 @@ class ContinuousBatchEngine:
             # position_ids was filled from a reusable buffer; only need to drop the device view
             del input_ids, position_ids
 
-            # Double-buffered async compression after each chunk
-            if hasattr(self.wrapper.manager, "compress_prefill_kv"):
+            # ── Per-chunk KV compression flush ──────────────────────────────────────
+            # CRITICAL for MLX models: compress_prefill_kv() is intentionally a no-op
+            # in MLXDiffKVKVManager (line 1815: `pass`). All KV tensors from each
+            # forward pass are stashed by the MLX attention hook. Without per-chunk
+            # compression, we accumulate ALL 226 chunks × 28 layers of raw KV into
+            # RAM (~6–8 GB for 29K tokens), then attempt one giant batched SVD at
+            # end-of-prefill. That single Metal submission takes 60s+ → GPU watchdog.
+            #
+            # compress_deferred_prefill_blocks() has "STREAMING semantics: safe (and
+            # intended) to call after EVERY prefill chunk" (its own docstring). The
+            # standalone generate() method does exactly this. batch_engine.py must too.
+            #
+            # Calling it per-chunk keeps the stash bounded to ~1 chunk per layer,
+            # memory stays flat, and each Metal SVD dispatch completes in <1s.
+            if hasattr(self.wrapper.manager, "compress_deferred_prefill_blocks"):
+                self.wrapper.manager.compress_deferred_prefill_blocks(req.session_id)
+            elif hasattr(self.wrapper.manager, "compress_prefill_kv"):
                 self.wrapper.manager.compress_prefill_kv(req.session_id)
 
             if req.prefill_offset >= len(req.prompt_ids):

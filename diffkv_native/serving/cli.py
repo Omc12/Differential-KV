@@ -130,7 +130,11 @@ class ThemedStdout:
         if data != "\n":
             self._skip_next_newline = False
             
-        if self._buffering_enabled:
+        # Bypass buffering for engine-level [DiffKV] warnings/updates
+        # so they print immediately when they occur (e.g. before prefill starts).
+        is_engine_warning = "[DiffKV]" in data
+        
+        if self._buffering_enabled and not is_engine_warning:
             formatted_data = self._format_themed_output(data)
             if formatted_data == "" and data.strip() != "":
                 self._skip_next_newline = True
@@ -272,26 +276,45 @@ async def async_input(prompt: str) -> str:
             
             # Read first chunk
             try:
-                chunk = os.read(fd, 8192)
+                chunk = os.read(fd, 65536)
                 if not chunk:
                     raise EOFError()
             except OSError:
                 raise EOFError()
                 
             chunks = [chunk]
+            total_bytes = len(chunk)
+            paste_spinner_shown = False
+            spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            spinner_idx = 0
+
             # Accumulate any immediately available chunks (pasted text)
+            # Use 50ms timeout (was 10ms) to safely capture large multi-chunk pastes
+            # like research papers without premature read termination.
             while True:
                 try:
-                    r, _, _ = select.select([fd], [], [], 0.01)
+                    r, _, _ = select.select([fd], [], [], 0.05)
                     if r:
-                        next_chunk = os.read(fd, 8192)
+                        next_chunk = os.read(fd, 65536)
                         if not next_chunk:
                             break
                         chunks.append(next_chunk)
+                        total_bytes += len(next_chunk)
+                        # Show a paste-reading spinner for large inputs (>4KB = likely a paste)
+                        if total_bytes > 4096:
+                            frame = spinner_frames[spinner_idx % len(spinner_frames)]
+                            spinner_idx += 1
+                            sys.stdout.write(f"\r{COLOR_SYSTEM}{frame} Reading paste... {total_bytes // 1024}KB{COLOR_RESET}  ")
+                            sys.stdout.flush()
+                            paste_spinner_shown = True
                     else:
                         break
                 except (AttributeError, OSError, select.error):
                     break
+
+            if paste_spinner_shown:
+                sys.stdout.write(f"\r{COLOR_SYSTEM}✓ Captured {total_bytes // 1024}KB ({total_bytes} chars){COLOR_RESET}\n")
+                sys.stdout.flush()
                     
             # Decode and clean control characters
             text = b"".join(chunks).decode("utf-8", errors="replace")
@@ -348,21 +371,37 @@ async def run_raw_paste() -> str:
                 return sys.stdin.read()
                 
             chunks = []
-            # Phase 2: Read chunks until we see a 150ms pause in input
+            total_bytes = 0
+            spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            spinner_idx = 0
+
+            # Phase 2: Read chunks with animated spinner; 200ms pause signals end of paste
             while True:
                 try:
-                    chunk = os.read(fd, 8192)
+                    chunk = os.read(fd, 65536)
                     if not chunk:
                         break
                     chunks.append(chunk)
+                    total_bytes += len(chunk)
+
+                    # Animated spinner showing KB received
+                    frame = spinner_frames[spinner_idx % len(spinner_frames)]
+                    spinner_idx += 1
+                    sys.stdout.write(f"\r{COLOR_SYSTEM}{frame} Receiving paste... {total_bytes // 1024}KB ({total_bytes} chars){COLOR_RESET}  ")
+                    sys.stdout.flush()
                     
-                    r, _, _ = select.select([fd], [], [], 0.15)
+                    r, _, _ = select.select([fd], [], [], 0.20)
                     if not r:
                         break
                 except OSError:
                     break
                 except (AttributeError, select.error):
                     break
+
+            if total_bytes > 0:
+                est_tokens = total_bytes // 4
+                sys.stdout.write(f"\r{COLOR_SYSTEM}✓ Captured {total_bytes // 1024}KB — ~{est_tokens:,} tokens ready to send{COLOR_RESET}\n")
+                sys.stdout.flush()
                     
             text = b"".join(chunks).decode("utf-8", errors="replace")
             cleaned_chars = []
@@ -381,6 +420,62 @@ async def run_raw_paste() -> str:
                     pass
 
     return await asyncio.to_thread(_read)
+
+# ---------------------------------------------------------------------------
+# Prefill progress bar — runs in a real daemon thread so it ticks every 1s
+# regardless of the asyncio event loop being blocked by C++ binary I/O.
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+class PrefillBar:
+    """Starts a daemon thread that animates a progress bar during prefill."""
+    def __init__(self, n_chars: int):
+        self._est_tokens = max(1, n_chars // 4)
+        self._stop_event = _threading.Event()
+        self._thread = _threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        sys.stdout.write("\r" + " " * 90 + "\r")
+        sys.stdout.flush()
+
+    def _run(self):
+        est_tokens = self._est_tokens
+        bar_width = 28
+        spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        est_seconds = max(2.0, est_tokens / 70.0)
+        start = time.time()
+        idx = 0
+        while not self._stop_event.is_set():
+            elapsed = time.time() - start
+            progress = min(0.95, elapsed / est_seconds)
+            filled = int(bar_width * progress)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            pct = int(progress * 100)
+            frame = spinner_frames[idx % len(spinner_frames)]
+            idx += 1
+            sys.stdout.write(
+                f"\r{COLOR_SYSTEM}{frame} Prefilling {est_tokens:,} tokens  "
+                f"[{COLOR_SKY_BLUE}{bar}{COLOR_SYSTEM}] {pct}%  {elapsed:.0f}s{COLOR_RESET}  "
+            )
+            sys.stdout.flush()
+            self._stop_event.wait(timeout=1.0)
+
+def _make_prefill_bar(n_input_chars: int):
+    if n_input_chars > 1024:
+        bar = PrefillBar(n_input_chars)
+        bar.start()
+        return bar
+    return None
+
+def _stop_prefill_bar(bar):
+    if bar is not None:
+        bar.stop()
+
 
 # ---------------------------------------------------------------------------
 # Text reference normalization (copied from openai_compatible_api_gateway.py)
@@ -547,8 +642,19 @@ class SubprocessWrapper:
             self.process = None
 
     def _write_stdin(self, text: str):
-        self.process.stdin.write(text.encode("utf-8"))
-        self.process.stdin.flush()
+        # Write in chunks to avoid overflowing the OS pipe buffer (65536 bytes).
+        # A research paper encoded as a single \n-escaped line can exceed 100KB;
+        # writing that in one shot blocks until the reader drains — but the reader
+        # (C++ binary) is waiting for a newline that hasn't arrived yet, causing
+        # a deadlock/crash. Chunked writes + flush prevent this.
+        data = text.encode("utf-8")
+        chunk_size = 32768
+        offset = 0
+        while offset < len(data):
+            end = min(offset + chunk_size, len(data))
+            self.process.stdin.write(data[offset:end])
+            self.process.stdin.flush()
+            offset = end
 
     def _is_alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -766,7 +872,10 @@ async def run_client_mode(args):
             sys.stderr.enable_buffering()
 
         model_display = get_display_model_name(args.model)
-        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
+        n_input_chars = len(user_prompt_stripped)
+
+        # Show prefill progress bar (thread-based, ticks every 1s)
+        prefill_bar = _make_prefill_bar(n_input_chars)
         
         start_time = time.time()
         first_token_time = None
@@ -777,6 +886,8 @@ async def run_client_mode(args):
                 async with client.stream("POST", f"{api_url}/chat/completions", json=payload) as r:
                     if r.status_code != 200:
                         body = await r.aread()
+                        _stop_prefill_bar(prefill_bar)
+                        prefill_bar = None
                         print()
                         print_error(f"Server returned code {r.status_code}: {body.decode()}")
                         messages.pop()  # Remove last message on failure
@@ -795,12 +906,22 @@ async def run_client_mode(args):
                                 content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                 if content:
                                     if first_token_time is None:
+                                        # First token — stop the prefill bar, print AI prompt
                                         first_token_time = time.time()
+                                        _stop_prefill_bar(prefill_bar)
+                                        prefill_bar = None
+                                        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
                                     print(content, end="", flush=True)
                                     response_chunks.append(content)
                             except Exception:
                                 pass
-                                
+
+            # Stop bar even if no tokens came
+            _stop_prefill_bar(prefill_bar)
+            prefill_bar = None
+            if not first_token_time:
+                print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
+                                 
             print() # end line
             
             # Print performance metrics
@@ -1004,7 +1125,10 @@ async def run_direct_mode(args):
             sys.stderr.enable_buffering()
 
         model_display = get_display_model_name(args.model)
-        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
+        n_input_chars = len(user_prompt_formatted)
+
+        # Show prefill progress bar (thread-based, ticks every 1s)
+        prefill_bar = _make_prefill_bar(n_input_chars)
 
         start_time = time.time()
         first_token_time = None
@@ -1019,12 +1143,17 @@ async def run_direct_mode(args):
                 
                 if isinstance(item, dict):
                     if "error" in item:
+                        _stop_prefill_bar(prefill_bar)
+                        prefill_bar = None
                         print()
                         print_error(f"C++ binary error: {item['error']}")
                         messages.pop()
                         break
                     if "prefill_done" in item:
-                        # Prefill completed
+                        # Prefill completed — stop bar, print AI prompt header
+                        _stop_prefill_bar(prefill_bar)
+                        prefill_bar = None
+                        print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
                         continue
                     if "cached_len" in item:
                         new_cached_len = item["cached_len"]
@@ -1032,7 +1161,11 @@ async def run_direct_mode(args):
                     text = item.get("text", "")
                     if text:
                         if first_token_time is None:
+                            # First token but no prefill_done — stop bar and show header
                             first_token_time = time.time()
+                            _stop_prefill_bar(prefill_bar)
+                            prefill_bar = None
+                            print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
                         print(text, end="", flush=True)
                         response_chunks.append(text)
                 else:
@@ -1040,8 +1173,17 @@ async def run_direct_mode(args):
                     if text:
                         if first_token_time is None:
                             first_token_time = time.time()
+                            _stop_prefill_bar(prefill_bar)
+                            prefill_bar = None
+                            print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
                         print(text, end="", flush=True)
                         response_chunks.append(text)
+
+            # Ensure bar always stops (no-token edge case)
+            _stop_prefill_bar(prefill_bar)
+            prefill_bar = None
+            if not first_token_time:
+                print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
 
             print() # end line
 
