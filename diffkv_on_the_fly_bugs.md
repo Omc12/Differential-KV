@@ -202,11 +202,24 @@ needle blocks at 16k:
 - MLX comparison inconclusive: MLX measures recon error relative to the DELTA norm (native uses the
   FULL-K/V norm incl. anchor), so the two numbers aren't comparable without re-instrumenting.
 
-**FIX DIRECTION (multi-factor, needs a decision):** (a) V-fidelity — give the V half its own rank
-budget / a V-aware basis so non-residual V drops below ~10% without exploding residuals (raising
-residuals to 256 works but is just "don't compress"); (b) decode-breadth — the remaining needle
-needs the decode-attention parity trace (why does perfect-recon native still miss 1 fact at 16k
-while MLX gets all 3). Both are real sub-projects. MLX handles multi-fact today.
+**BOTH FIX ATTEMPTS TRIED (2026-07-06) — CONCLUSION: no clean fix, it's a fundamental frontier.**
+- **(a) V-aware basis — DOESN'T WORK.** Implemented `DIFFKV_V_GAIN_MULT` (up-weight V in the joint
+  SVD beyond energy-parity so the shared basis serves V). Measured: at mult=16 the context V error
+  only drops 0.62→0.47 while K degrades 0.011→0.017, and multi-needle stays 1/3 (mult=4 and 16 both
+  1/3). The shared rank-16 U basis CANNOT represent V — K and V have genuinely different row-spaces,
+  so reweighting just trades K for V with no net gain. Reverted (the real fix would be SEPARATE
+  U_K/U_V bases = a decode-kernel rewrite, and even that is capped — see (b)).
+- **(b) Decode-breadth trace — it's KNIFE-EDGE, not fidelity.** `MAX_RESIDUAL=256` (perfect recon)
+  helps at 16k (1/3→2/3) but HURTS at 8k (2/3→1/3); attend-all + perfect-recon at 8k is also 1/3.
+  So which needles surface is a perturbation-dependent near-boundary outcome, NOT a monotonic
+  function of reconstruction quality. Native's diffuse-query decode attention lands on 1-2 needles
+  depending on epsilon-level recon changes; MLX robustly spreads over all 3. This is the same
+  knife-edge retrieval the HANDOFF documents for MLX >=16k (single-row perturbations flip a cell).
+- **Net:** the native multi-fact gap is a fundamental decode-attention-distribution difference, not a
+  bounded bug. It is NOT cleanly fixable via reconstruction fidelity or SVD reweighting (both
+  measured). Closing it would need native's decode attention to match MLX's diffuse-query breadth
+  robustly — a deep, uncertain rewrite. **MLX handles multi-fact 3/3 and is the recommended engine;
+  leaving native multi-fact as a documented frontier.** Single-needle native is 6/6 and unaffected.
 Reproduce: `make_multineedle_prompt.py 16000 > p.txt`; probe with `DIFFKV_DBG_RECON_POS=<pos>`.
 
 ## FOLLOW-UP 3 — Router uses a single MEAN-pooled query per chunk
