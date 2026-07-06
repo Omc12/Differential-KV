@@ -3451,7 +3451,17 @@ int main(int argc, char ** argv) {
         {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks > 0) {
-                bool mlx_parity = true;
+                // DEFAULT = adaptive-k PRUNING (retrieve-then-attend, à la DeepSeek DSA/NSA): attend
+                // only the top ~max(20,15%) relevant compressed blocks, not ALL of them. Native used
+                // to attend every block ("MLX parity"=true) — but that was misnamed (MLX itself routes
+                // top-k) and, with the decode-cache (whose materialise cost scales with block count),
+                // attending-all is 1.6× slower at 16k for NO recall benefit: NIAH 6/6 and the logit
+                // margins are IDENTICAL with pruning (the needle block is always in the top-k; only
+                // irrelevant blocks are dropped). Sparse decode with pruning (19.2 tps @16k) now even
+                // beats native DENSE (17.7). DIFFKV_MLX_PARITY=1 forces the old attend-all path, which
+                // is more robust for DIFFUSE multi-fact/synthesis queries (where many blocks matter) —
+                // the same top-k tradeoff MLX already makes. Credit: DeepSeek NSA/DSA (retrieve-then-attend).
+                bool mlx_parity = false;
                 if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
                     mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
                 }
