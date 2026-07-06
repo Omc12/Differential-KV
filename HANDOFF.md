@@ -156,14 +156,34 @@ compress, later chunks attend the compressed pool instead of full KV → O(L·K)
 project). Don't chase the 8% SVD. RAM is already good. The high-leverage lever is DECODE, which is
 now near the model's per-token MLP/proj floor after the cache.
 
-## §PERF — CROSS-RUNTIME comparison (14th pass, 2026-07-05, forced sparse, decode-cache ON)
+## §DSA — DeepSeek Sparse Attention lens (15th pass, 2026-07-06) — BIG native win
+DiffKV's decode is a **training-free NSA/DSA** (retrieve-then-attend). Mapping: NSA compressed-coarse
+= DiffKV low-rank block recon; NSA selected-fine = DiffKV residuals + top-K routing; NSA window =
+DiffKV recency window; DSA lightning indexer (trained) ≈ DiffKV Quest min/max router (training-free).
+**Finding that mattered:** native was attending ALL compressed blocks (`DIFFKV_MLX_PARITY` defaulted
+true — a MISNOMER; MLX itself routes top-k). With the decode-cache (materialise cost ∝ block count)
+that was 1.6× slower @16k for ZERO recall gain. **Flipped default → adaptive-k PRUNING** (top
+~max(20,15%) blocks, `d09fbf7`): NIAH 6/6, logit margins IDENTICAL (needle always in top-k), 16k
+decode **12.2→18.6 tps**. `DIFFKV_MLX_PARITY=1` restores attend-all (robust for DIFFUSE synthesis —
+the same top-k tradeoff MLX makes). **NEXT DSA lever = sparse PREFILL** (DiffKV prefill is still dense
+O(L²) = 92% of prefill; DSA/NSA make it O(Lk) via retrieve-then-attend on the compressed pool). Big,
+risky on a frozen (untrained-for-sparsity) model — own project; precedent = MInference/StreamingLLM
+(training-free sparse prefill). Credit DeepSeek NSA (arXiv 2502.11089) + DSA (V3.2-Exp).
+
+## §PERF — CROSS-RUNTIME comparison (14th–15th pass, 2026-07-06, forced sparse, decode-cache ON)
 Honest side-by-side decode tps (native q8 via DIFFKV_PROFILE; MLX 4-bit via niah_recall --bench):
 ```
- ctx     native q8    native q4    MLX 4-bit
- 2k       24.1         ~26          26.6
- 8k       16.1          —           21.2
- 16k      11.6         13.0         21.0
+ ctx     native q8(15th)  native q8(14th)  MLX 4-bit    native DENSE q8
+ 2k       24.1            24.1             26.6         ~44 (2k)
+ 8k       17.6            16.1             21.2          —
+ 16k      18.6            11.6             21.0         17.7 (16k)
 ```
+15th-pass native gains ALL from DSA-style pruning (§DSA): 16k 11.6→18.6 tps — native q8 sparse now
+~matches MLX 4-bit sparse (18.3) AND beats native dense (17.7), i.e. sparse decode is no longer a
+speed penalty at 16k. Note: DiffKV sparse < dense until dense OOMs (~32k on 8GB) is the general rule
+— sparse's win is MEMORY REACH; the pruning just closed the speed gap. Native's residual gap vs MLX
+is q8-vs-4bit forward (native q4 ≈ MLX). Session decode-tps trajectory @16k: CPU-op 1.27 → cache 4.79
+→ BLAS 11.6 → pruning 18.6 (14.6×).
 **Native no longer collapses (was 4.79 tps @16k pre-BLAS) but is still SLOWER than MLX at long
 ctx, opposite to the intuition that C++ "should" beat Python.** Why: MLX is NOT slow-Python — its
 compute is Metal, same as native's ggml-metal, so both are GPU-forward-bound. The residual native
