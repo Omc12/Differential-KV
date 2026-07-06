@@ -130,12 +130,42 @@ SIGMA-9923-BETA."` and stops — it KNOWS there are "three" but surfaces only th
   (grep found none). But a UNIFORM compressed boost wouldn't discriminate needle-vs-filler blocks,
   so SPARSE_BIAS alone is unlikely to be the whole fix.
 
-**Recommended next step (NOT a knob — a deep parity pass):** trace one multi-needle decode step in
-BOTH engines on the same compressed state and diff (a) the per-block attention scores the needle
-blocks receive, (b) the reconstructed needle-token keys, (c) the compressed-vs-dense-window LSE
-merge weights. The dilution pattern says native's needle blocks get too little attention mass at
-16k relative to MLX. Do NOT speculatively patch the bit-exact, 6/6-passing decode path — find the
-score/merge divergence first. This is the HANDOFF §D7 / HANDOFF_MLX_SYNTHESIS.md frontier.
+**ACTIVE vs NATIVE — the concrete differences (read both decode paths + A/B, this pass):**
+Native can retrieve EACH needle individually at 16k (single-needle depth 0.25 AND 0.75 both hit), so
+reconstruction/per-position retrieval is fine. The gap is attention BREADTH on a diffuse "list all
+three" query: native's first decode token commits SINGULAR ("...passcode **is** SIGMA") =
+winner-take-all; MLX goes PLURAL ("...passcode**s are:**\n1. …\n2. …\n3. …") = distributed. The
+structural differences that produce this (`compute_decode_attention_static` in mlx_diffkv_wrapper.py
+vs the decode-cache flash path + `materialize_routed_kv` in main.cpp):
+
+1. **Exact-residual placement — STRONGEST suspect.** MLX DROPS each exact-residual position from the
+   compressed SVD scores (`res_mask` → −inf, line ~375) and represents those tokens ONLY in the
+   **dense pool**, which is a SEPARATE, SMALL softmax (`scores_dense`, just window + routed residuals
+   ~ hundreds of keys). So the 3 needles' exact tokens each get HIGH relative weight → all surface.
+   NATIVE materializes residuals INTO the block buffer (`materialize_routed_kv`: anchor + U·V +
+   residuals) and attends everything in ONE unified `ggml_flash_attn_ext` over [all routed blocks ++
+   window ++ current] — thousands of keys — so the 3 needle tokens are DILUTED and the softmax picks
+   one winner (SIGMA, the middle/strongest). This matches every symptom: single needle fine (wins
+   dilution alone); 3 needles → 1 (must share); worse as ctx grows (more keys = more dilution).
+2. **Attention structure.** MLX = TWO softmaxes (compressed pool, dense window) + flash LSE merge, so
+   the exact-residual (dense) pool is normalized INDEPENDENTLY of the big compressed pool. Native =
+   ONE softmax over the concatenation → no independent normalization for the exact tokens.
+3. **Residual/KV precision.** MLX pool = fp16; native pool = **Q8_0** (`initialize(... kv_type=
+   GGML_TYPE_Q8_0)`) → native's "exact" residuals are 8-bit, slightly less exact.
+4. **Router signal.** MLX = per-token min/max **q·k** + a residual-token router that scores each block
+   by its exact residual tokens' q·k (`_block_relevance_residual`). Native = semantic-descriptor
+   search + lexical host_slots + anchor_screen (q·anchor). Different selection; not the sole cause
+   (attend-all `MLX_PARITY=1` is still 1/3) but affects which blocks get materialized.
+
+**RULED OUT as the cause:** SPARSE_BIAS (MLX is 3/3 even with `DIFFKV_SPARSE_BIAS=0`), routing
+coverage (attend-all still 1/3), compression fidelity (rank 32/48 + residuals 256 no change), model
+quant (q4==q8), sampler/rep-penalty, decode-cache on/off, re-route interval, per-needle
+reconstruction (each individually retrievable at 16k), generation (pure dense native = 3/3).
+
+**FIX DIRECTION (for a targeted pass, not done here):** give native decode a MLX-style separate
+small exact-residual pool with its own normalization (or up-weight exact-residual token scores) so a
+diffuse query can attend all of them instead of one — i.e. stop diluting the exact residuals in the
+unified flash. Verify the existing single-needle 6-cell 6/6 + conformance stay green.
 Reproduce: `diffkv_native/tests/make_multineedle_prompt.py 16000 > p.txt` then run the binary.
 
 ## FOLLOW-UP 3 — Router uses a single MEAN-pooled query per chunk
