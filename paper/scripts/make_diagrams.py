@@ -339,10 +339,12 @@ def f6_memory_3d():
 
     # ── limits & camera ──
     x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.6
+    
+    # Left margin at -2.2 gives perfect spacing for side-on view labels
     ax.set_xlim(-2.2, x_max)
     ax.set_ylim(-3.0, n_layers*slab_step + slab_d + 0.5)
     ax.set_zlim(0, z_lr+z_res+0.6)
-    ax.view_init(elev=25, azim=-52)
+    ax.view_init(elev=15, azim=-75)
     ax.set_axis_off()
     ax.set_box_aspect((14.0, 9.5, 4.8), zoom=1.20)
 
@@ -379,11 +381,11 @@ def f6_memory_3d():
     # "used blocks" label (centered over its bracket)
     fig.text(0.53, 0.765, "used blocks", ha="center", va="bottom", fontsize=7.3, color=BLACK)
     
-    # Bracket line for used blocks (spans 0.35 to 0.71 in horizontal fraction)
-    fig.add_artist(Line2D([0.35, 0.71], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    # Bracket line for used blocks (spans 0.38 to 0.80 horizontally)
+    fig.add_artist(Line2D([0.38, 0.80], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
     # Downward ticks on bracket ends
-    fig.add_artist(Line2D([0.35, 0.35], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
-    fig.add_artist(Line2D([0.71, 0.71], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([0.38, 0.38], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([0.80, 0.80], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
 
     # "free (zeroed)" — above ghost bars
     fig.text(0.88, 0.58, "free\n(zeroed)", ha="center", va="center",
@@ -392,23 +394,23 @@ def f6_memory_3d():
     draw_arrow((0.88, 0.53), target_free, color=GRAY_D)
 
     # 28-layer stack label
-    fig.text(0.11, 0.55, "28-layer stack\n(store replicated\nper layer)",
+    fig.text(0.10, 0.55, "28-layer stack\n(store replicated\nper layer)",
              ha="center", va="center", fontsize=8.2, color=BLACK, linespacing=1.4)
     # Arrow to stack target
-    draw_arrow((0.17, 0.55), target_stack)
+    draw_arrow((0.165, 0.55), target_stack)
 
     # layer 0 / layer 27 labels on the left
-    fig.text(0.20, 0.75, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.205, 0.75), target_layer_0)
+    fig.text(0.18, 0.74, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.185, 0.74), target_layer_0)
     
-    fig.text(0.20, 0.45, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.205, 0.45), target_layer_27)
+    fig.text(0.18, 0.45, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.185, 0.45), target_layer_27)
 
     # recency window label — below the slab
-    fig.text(0.585, 0.082, "dense recency window — 768 exact fp16 tokens",
+    fig.text(0.55, 0.12, "dense recency window — 768 exact fp16 tokens",
              ha="center", va="bottom", fontsize=8.1, color=BLACK)
     # Arrow to recency slab target
-    draw_arrow((0.585, 0.11), target_recency)
+    draw_arrow((0.55, 0.15), target_recency)
 
     # overflow label — completely clear of the window, on the bottom-left
     fig.text(0.15, 0.26, "overflow →\nflush + compress",
