@@ -242,64 +242,46 @@ def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int =
 def compress_mlx_block(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, float, int]:
     """Compress a block of KV delta vectors using randomised truncated SVD.
 
-    Runs entirely in NumPy (CPU) to avoid MLX GPU-op limitations:
-      - mx.linalg.qr  is GPU-only in current MLX builds
-      - mx.where(cond) single-arg (nonzero) form doesn't accept stream kwarg
-    NumPy SVD on a 255x512 block takes ~2 ms -- acceptable since compression
-    fires at most once every block_size (256) tokens.
+    Delegates to compress_mlx_block_batched with batch=1, keeping all computation
+    in the MLX/LAPACK unified path. This eliminates the prior mx.eval + np.array +
+    np.linalg.qr/svd + np.array→mx.array round-trip on every decode eviction.
+
+    mx.linalg.qr / svd use stream=mx.cpu internally (Apple LAPACK), so they do
+    not require an explicit np.array transfer — the data stays on unified memory.
+    The only CPU sync in the normal case is a single .item() for the scalar scale.
+
+    NaN guard replaces np.linalg.LinAlgError: MLX does not raise on SVD failure,
+    but the batched path pre-normalises by max-abs, so NaN only occurs on truly
+    degenerate (effectively zero) blocks. The check is skipped on normal blocks.
     """
     n, d = deltas.shape
     rank = min(rank, n, d)
     if rank < 1:
         return mx.zeros((n, 1), dtype=deltas.dtype), mx.zeros((1, d), dtype=deltas.dtype), 1.0, 1
 
-    # Materialise the MLX array into NumPy (unified memory, near zero-copy on Apple Silicon)
-    mx.eval(deltas)
-    x_np = np.array(deltas, copy=False).astype(np.float32)
+    # Expand to batch-of-1 and call the GPU/LAPACK batched path.
+    U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(
+        mx.expand_dims(deltas, 0), rank, n_oversamples, n_iter
+    )
+    U_k   = U_batch[0]    # [n, rank]
+    Vh_k  = Vh_batch[0]   # [rank, d]
+    # One sync for the scalar scale value — unavoidable to return a Python float.
+    scale = float(scales_batch[0].item())
 
-    scale = float(np.max(np.abs(x_np)))
-    if scale < 1e-9:
-        return mx.zeros((n, rank), dtype=deltas.dtype), mx.zeros((rank, d), dtype=deltas.dtype), 1.0, rank
+    # NaN guard: only fires on degenerate blocks (scale clamped to ≥1e-9 by the
+    # batched path, so NaN requires truly zero-energy data). Skipped on normal blocks
+    # to keep the normal-case sync count at exactly 1 (the scale .item() above).
+    if scale < 1e-6:
+        if bool(mx.any(mx.isnan(U_k)).item()):
+            k = min(rank, n, d)
+            return (
+                mx.zeros((n, k), dtype=deltas.dtype),
+                mx.zeros((k, d), dtype=deltas.dtype),
+                1.0, k,
+            )
 
-    x_np = x_np / scale
-
-    # Randomised range finder.
-    # Seed deterministically (env-overridable) so block compression is
-    # reproducible: an unseeded RNG made the SVD basis — and therefore decode
-    # output / needle recovery — vary run-to-run for the same prompt.
-    r_proj = min(rank + n_oversamples, n, d)
-    rng = np.random.default_rng(int(os.environ.get("DIFFKV_SVD_SEED", "1234")))
-    Omega = rng.standard_normal((d, r_proj)).astype(np.float32)
-    Y = x_np @ Omega
-    for _ in range(n_iter):
-        Y = x_np @ (x_np.T @ Y)
-
-    try:
-        # QR + projected SVD (all NumPy, always CPU)
-        Q, _ = np.linalg.qr(Y)
-        B = Q.T @ x_np
-        U_b, S, Vh = np.linalg.svd(B, full_matrices=False)
-        U = Q @ U_b
-
-        # Adaptive rank: keep components that explain 99.9% of energy
-        total_energy = float(np.sum(S ** 2))
-        k = rank
-        if total_energy > 1e-9:
-            cum = np.cumsum(S ** 2)
-            idx = np.where(cum >= 0.999 * total_energy)[0]
-            if len(idx) > 0:
-                k = max(4, min(int(idx[0]) + 1, rank))
-
-        U_k  = (U[:, :k] * S[:k]).astype(np.float16)
-        Vh_k = Vh[:k, :].astype(np.float16)
-        return mx.array(U_k), mx.array(Vh_k), scale, k
-
-    except np.linalg.LinAlgError:
-        # SVD did not converge (rare, numerically degenerate block) -- return identity-like
-        k = min(rank, n, d)
-        U_k  = np.zeros((n, k), dtype=np.float16)
-        Vh_k = np.zeros((k, d), dtype=np.float16)
-        return mx.array(U_k), mx.array(Vh_k), 1.0, k
+    k = min(rank, n, d)
+    return U_k.astype(deltas.dtype), Vh_k.astype(deltas.dtype), scale, k
 
 @mx.compile
 def compute_decode_attention_static(
@@ -1861,19 +1843,20 @@ class MLXKVBlockManager:
         deltas_k_2d = deltas_k.transpose(1, 0, 2).reshape(S_comp, -1)
         deltas_v_2d = deltas_v.transpose(1, 0, 2).reshape(S_comp, -1)
 
-        # V-side rebalancing for the joint K|V SVD
+        # V-side rebalancing for the joint K|V SVD.
+        # Keep v_gain computation entirely lazy in the MLX graph — one .item() sync
+        # at the end instead of the prior eK.item() + eV.item() (two syncs).
         v_scale_on = os.environ.get("DIFFKV_V_SCALE", "1") != "0"
         v_gain = 1.0
         if v_scale_on:
             eK = mx.sum(deltas_k_2d.astype(mx.float32)**2)
             eV = mx.sum(deltas_v_2d.astype(mx.float32)**2)
-            eK_val = eK.item()
-            eV_val = eV.item()
-            if eV_val > 1e-12 and eK_val > 1e-12:
-                import math
-                v_gain = math.sqrt(eK_val / eV_val)
-                v_gain = min(max(v_gain, 1.0), 10000.0)
+            both_ok  = mx.logical_and(eV > 1e-12, eK > 1e-12)
+            gain_raw = mx.sqrt(eK / mx.maximum(eV, mx.array(1e-12)))
+            gain_clamped = mx.minimum(mx.maximum(gain_raw, mx.array(1.0)), mx.array(10000.0))
+            v_gain = float(mx.where(both_ok, gain_clamped, mx.array(1.0)).item())  # 1 sync
 
+            if v_gain > 1.0:
                 deltas_v_2d_scaled = deltas_v_2d * v_gain
                 deltas_2d = mx.concatenate([deltas_k_2d, deltas_v_2d_scaled], axis=1)
             else:
@@ -1886,9 +1869,8 @@ class MLXKVBlockManager:
         deltas_normalized = deltas_2d / token_norms
 
         U_k, Vh_k, svd_scale, k_rank = compress_mlx_block(deltas_normalized, self.rank)
-        # token_norms is an MLX array; U_k is now a NumPy-backed mx.array.
-        # Materialise token_norms before the multiply to keep the graph small.
-        mx.eval(token_norms)
+        # mx.eval(token_norms) removed: U_k is now an MLX tensor (not NumPy-backed),
+        # so there is no graph boundary here. The multiply stays fully lazy.
         U_k = U_k * token_norms
 
         U_padded  = mx.pad(U_k,  [(0, 0), (0, self.rank - k_rank)])

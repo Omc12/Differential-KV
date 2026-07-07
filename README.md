@@ -30,13 +30,15 @@ extras (triton, cuSOLVER/cuBLAS) and the native `-DGGML_CUDA=ON` build (`make na
 | Backend (macOS) | MLX (Apple Silicon) | forked llama.cpp/ggml, Metal + CPU |
 | Backend (Linux) | PyTorch + Triton (CUDA) | CPU / CUDA |
 | Models | HuggingFace / mlx-community | GGUF |
-| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k; reaches 64k (needle recovered exactly; dense baseline OOMs) | Honest NIAH sweep 3/6; remaining gap is a decode logit-margin issue (see `PLAN_NEW_DIRECTIONS.md` §D7) |
+| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k; reaches 64k (needle recovered exactly; dense baseline OOMs) | Honest NIAH sweep 3/6; remaining gap is a decode logit-margin issue (native routing is exact on the same bytes, so the gap is native-decode-specific — see `git log --grep=D7`) |
 
-## Build & run
+## Build & run (Boosted Performance Paths)
 
-See **`BUILD.md`** for both engines (CPython extension build for ACTIVE_RUNTIME, CMake
-for the native engine, including restoring the vendored llama.cpp fused-op commits from
-`diffkv_native/third_party/diffkv-fused-op.bundle`).
+For optimal execution speed, DiffKV provides compiled C++ and hardware-accelerated paths:
+* **`ACTIVE_RUNTIME` C++ Extension (`diffkv_core`):** Boosts the Python/PyTorch runtime using Accelerate (macOS) or CUDA (Linux). Silently falls back to pure Python/MLX if not compiled.
+* **`diffkv_native` C++ Engine:** A high-performance standalone C++ implementation using a forked llama.cpp/ggml runtime.
+
+See **[BUILD.md](file:///Users/omchimurkar1/Desktop/Differential-KV/BUILD.md)** for detailed build and compilation instructions for both engines (including how to restore the vendored llama.cpp fused-op commits).
 
 ## Benchmarks / guardrails
 
@@ -74,9 +76,17 @@ Memory/perf claims: `paper/scripts/measure_active.py` (MLX) and
 | `DIFFKV_SVD_SEED` | `1234` | rSVD determinism — keep set or parity tests flake |
 | `DIFFKV_NATIVE_ATTN` | off | native fused ggml attention path (experimental, slower) |
 | `DIFFKV_CB_ROUTE_ALL` | on | native decode routes over all resident blocks (fix for the anchor_screen selection bug) |
-| `DIFFKV_FUSED_DECODE` | `0` (off) | EXPERIMENTAL Metal decode kernel (MLX). **Broken on the canonical bench as of 2026-07-03: garbage output at 9.8 tps — do not enable** (see AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md §3.3) |
+| `DIFFKV_FUSED_DECODE` | `0` (off) | EXPERIMENTAL Metal decode kernel (MLX). **Broken on the canonical bench as of 2026-07-03: garbage output at 9.8 tps — do not enable** |
 | `DIFFKV_CB_GQA_ROUTE` | on | GQA query head-averaging in the native routing loop (engages only when blocks > TOPK; accuracy-neutral in measured cells) |
 | `DIFFKV_PROFILE_CB` | `0` | Log layer-wise routing, readback, GPU, and total attention latency |
+| `DIFFKV_EARLY_LAYER_RANK_BOOST` | `0` (off) | Enable rank boosting (2x base rank) for early layers (first 15% of the network) to improve syntactic representation |
+| `DIFFKV_MAX_RANK_EARLY` | `0` (auto) | Cap for early-layer boosted rank (0 = auto-selects 2x base rank) |
+
+### Algorithmic Rank-Boosting Paths (Accuracy Protection)
+
+To preserve model accuracy under high compression, the Python active runtime supports two dynamic rank-boosting paths:
+1. **Early-Layer Rank Boosting:** Boosts SVD rank by up to 2× for the first 15% of layers in the network to safeguard syntax representation. Enable this by setting `DIFFKV_EARLY_LAYER_RANK_BOOST=1`.
+2. **Content-Based Rank Boosting:** Automatically detects if a 256-token KV-cache block contains digit patterns, mathematical formula markers (e.g., LaTeX tags like `$$`, `\sum`, `\sqrt`), or key definition patterns (e.g., "is defined as", "refers to"). If detected, the runtime dynamically boosts the SVD rank for that block by 1.5× to protect critical context.
 
 ## Measured Evaluation (from the Paper)
 
@@ -138,8 +148,8 @@ Below is the layout of one $B_s = 256$ token block in memory. The low-rank core 
 
 > ⚠️ **Audit note (2026-07-03, seventh pass):** the C1 numbers below did NOT reproduce on
 > the canonical `niah_recall.py --bench` harness — `DIFFKV_FUSED_DECODE=1` at 4k produced
-> garbage output at 9.8 tps (default path: exact recall at 19.4 tps). See
-> `AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md` §1/§3.3 before trusting this section.
+> garbage output at 9.8 tps (default path: exact recall at 19.4 tps). Treat C1 as historical
+> context only; the kernel stays disabled by default (`DIFFKV_FUSED_DECODE=0`).
 
 ### 1. Custom Metal Decode Kernel Parallelization (C1) — *claims not reproduced; kernel disabled by default*
 - **Design:** Redesigned the threadgroup layout to use exactly 256 threads (matching the 256 block size) and leveraged threadgroup-shared memory to store and project queries, intermediate weights, and outputs.
@@ -154,8 +164,7 @@ Below is the layout of one $B_s = 256$ token block in memory. The low-rank core 
 
 ## Where things stand / who to read next
 
-- `PLAN_FABLE5_OPTIMIZATION.md` — audited optimization plan with status tags.
-- `PLAN_NEW_DIRECTIONS.md` — current work plan; §D7 is the open native-accuracy frontier.
-- `SESSION_REPORT_FABLE5.md` — measured session logs (what was tried, what's rejected,
-  with numbers — check here before re-proposing an idea).
 - `docs/ANTIGRAVITY_LOG_2026-07.md` — the July 2026 Antigravity execution log.
+- Older plan/handoff/session-report docs were superseded and removed from the tree
+  (`git log --grep=handoff` / `--grep=D7` for that history); the open native-accuracy
+  frontier is the native NIAH sweep gap noted in the table above.

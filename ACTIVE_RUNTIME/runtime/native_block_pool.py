@@ -166,6 +166,11 @@ class NativeBlockPool:
         self._last_used        = [0.0] * n_blocks
         self.version           = [0] * n_blocks
 
+        # B1: Cached residual presence flag — updated at write_block time so that the
+        # decode loop can read a plain Python bool instead of calling .item() on a
+        # device tensor every layer every step (~4096 device→host syncs per generation).
+        self.has_any_residual: bool = False
+
         # Re-attach W_proj at the new size if it was already set
         if self.W_proj is not None and self.W_proj.device != torch.device("cpu"):
             pass  # W_proj is a [DESC_DIM, head_dim] matrix — shape is independent of n_blocks
@@ -436,6 +441,10 @@ class NativeBlockPool:
             n_res_k = min(residual_K_positions.numel(), self.max_residual_tokens)
             self.residual_K_positions[pool_idx, :n_res_k] = residual_K_positions[:n_res_k].to(torch.int16)
             self.residual_K_values[pool_idx, :n_res_k] = residual_K_values[:n_res_k].view(n_res_k, num_kv, h_dim).to(self.dtype)
+            # B1: update the cached flag — any valid residual position means True.
+            # This is a cheap CPU bool check (residual_K_positions is a small int16 tensor).
+            if not self.has_any_residual:
+                self.has_any_residual = bool((residual_K_positions >= 0).any().item())
 
         if residual_V_positions is not None and residual_V_positions.numel() > 0:
             n_res_v = min(residual_V_positions.numel(), self.max_residual_tokens)

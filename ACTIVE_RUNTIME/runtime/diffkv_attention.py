@@ -1328,7 +1328,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     
                                     has_residual = False
                                     if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
-                                        has_residual = (pool.residual_K_positions[block_indices] >= 0).any().item()
+                                        # B1: read the cached flag (set at write_block time) instead of
+                                        # calling .item() on a device tensor every layer every step.
+                                        has_residual = getattr(pool, "has_any_residual", False)
 
                                     _res_pos_K = pool.residual_K_positions if pool.residual_K_positions is not None else torch.empty(0, device=query_states.device, dtype=torch.int16)
                                     _res_val_K = pool.residual_K_values if pool.residual_K_values is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
@@ -1425,7 +1427,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     
                                     has_residual = False
                                     if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
-                                        has_residual = (pool.residual_K_positions[block_indices] >= 0).any().item()
+                                        # B1: same cached flag used in both branches.
+                                        has_residual = getattr(pool, "has_any_residual", False)
 
                                     _res_pos_K = pool.residual_K_positions if pool.residual_K_positions is not None else torch.empty(0, device=query_states.device, dtype=torch.int16)
                                     _res_val_K = pool.residual_K_values if pool.residual_K_values is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
@@ -1838,7 +1841,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         else:
                             cfg = getattr(kv_manager, "config", None)
                             _chunk_size = cfg.prefill_chunk_size if cfg is not None else 512
-                        _global_offset = position_ids[0, 0].item() if position_ids is not None else 0
+                        # B2: Pre-compute per-batch position offsets with a single .tolist()
+                        # sync so the inner chunk loop reads plain Python ints, not tensors.
+                        if position_ids is not None:
+                            _pos_ids_cpu = position_ids[:, 0].tolist()
+                        else:
+                            _pos_ids_cpu = [0] * bsz
+                        _global_offset = _pos_ids_cpu[0]
                         if q_len <= _chunk_size and _global_offset == 0:
                             # Standard single-pass prefill for small/medium inputs
                             attn_outputs = []
@@ -1894,7 +1903,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # 2. Path B: History Cross-Attention over blocks from chunks 0 to c-1
                                     out_hist_dense, lse_hist_dense = None, None
                                     out_hist_comp, lse_hist_comp   = None, None
-                                    global_offset = position_ids[b_idx, 0].item() if position_ids is not None else 0
+                                    # B2: use pre-computed per-batch offset (no .item() in the inner loop).
+                                    global_offset = _pos_ids_cpu[b_idx]
                                     K_b = global_offset + c_start
 
                                     if K_b > 0:
