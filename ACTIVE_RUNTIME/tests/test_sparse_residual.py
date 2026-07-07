@@ -179,6 +179,88 @@ def test_sparse_residual_correctness():
     assert diff_with_res < diff_no_res, "Residual correction should improve accuracy compared to compression-only"
 
 
+def test_triton_matches_reference_on_gpu():
+    """AUTHORITATIVE CUDA cert for the F1 residual-alignment fix (CUDA_TRITON_AUDIT.md).
+
+    Runs the REAL Triton kernel (native_triton_sparse_attn_decode) and asserts it
+    matches BOTH the PyTorch reference (_pytorch_vectorized_sparse_attn_decode) and
+    exact dense attention on a real compressed block with residuals. Skips on non-CUDA
+    (Triton is CUDA-only) — this is the check to run on the GPU box.
+    """
+    import pytest
+    from native_core.sparse_decode.triton_fused_decode import (
+        native_triton_sparse_attn_decode, HAS_TRITON,
+    )
+    if not (torch.cuda.is_available() and HAS_TRITON):
+        pytest.skip("Triton kernel requires CUDA; run this on the GPU box.")
+
+    device = "cuda"
+    num_kv_heads, head_dim, seq_len, rank = 4, 64, 8, 4
+    feat_dim = 2 * num_kv_heads * head_dim
+    num_kv_groups = 2
+    num_heads = num_kv_heads * num_kv_groups
+
+    torch.manual_seed(42)
+    deltas = torch.randn(seq_len, feat_dim, device=device, dtype=torch.float32) * 0.1
+    deltas[0] = 0.0
+    for idx in [1, 3, 5, 7]:                       # inject distinctive tokens
+        pattern = torch.zeros(feat_dim, device=device)
+        start = (idx * 32) % feat_dim
+        pattern[start:start + 64] = 5.0
+        deltas[idx] = pattern
+
+    lr = compress_lowrank(deltas, rank=rank, error_threshold=0.0, max_residual_frac=1.0)
+
+    pool = NativeBlockPool(max_blocks=10, num_kv_heads=num_kv_heads, head_dim=head_dim,
+                           rank=rank, max_seq_len=8, device=device, dtype=torch.float16,
+                           initial_blocks=2, num_layers=1, lazy=False)
+    pool_idx = pool.allocate_block()
+    aK = deltas[0, :num_kv_heads * head_dim].view(num_kv_heads, head_dim).to(torch.float16)
+    aV = deltas[0, num_kv_heads * head_dim:].view(num_kv_heads, head_dim).to(torch.float16)
+    pool.write_block(pool_idx=pool_idx, U=lr.U, V=lr.V, anchor_K=aK, anchor_V=aV,
+                     scale=lr.scale, seq_len=seq_len,
+                     residual_K_positions=lr.residual_K_positions,
+                     residual_K_values=lr.residual_K_values,
+                     residual_V_positions=lr.residual_V_positions,
+                     residual_V_values=lr.residual_V_values)
+
+    Q = torch.randn(1, num_heads, 1, head_dim, device=device, dtype=torch.float16)
+    block_indices = torch.tensor([pool_idx], device=device, dtype=torch.long)
+    anchor_indices = torch.tensor([0], device=device, dtype=torch.long)
+    kw = dict(q=Q, block_indices=block_indices, pool=pool, dense_blocks=[], active_k=None,
+              active_v=None, num_key_value_groups=num_kv_groups, R=rank, S_MAX=16,
+              anchor_indices=anchor_indices, cos=None, sin=None, total_seq_len=seq_len)
+
+    out_triton = native_triton_sparse_attn_decode(**kw)          # real @triton.jit kernel
+    out_ref = _pytorch_vectorized_sparse_attn_decode(**kw)       # reference of record
+
+    # Exact dense attention (duplicate-anchor formulation, matching the decoders)
+    Kd = torch.zeros(seq_len, num_kv_heads, head_dim, device=device, dtype=torch.float32)
+    Vd = torch.zeros(seq_len, num_kv_heads, head_dim, device=device, dtype=torch.float32)
+    Kd[0], Vd[0] = aK.float(), aV.float()
+    Kd[1:] = aK.float().unsqueeze(0) + deltas[1:, :num_kv_heads*head_dim].view(seq_len-1, num_kv_heads, head_dim)
+    Vd[1:] = aV.float().unsqueeze(0) + deltas[1:, num_kv_heads*head_dim:].view(seq_len-1, num_kv_heads, head_dim)
+    Kr = Kd.repeat_interleave(num_kv_groups, 1).permute(1, 0, 2)
+    Vr = Vd.repeat_interleave(num_kv_groups, 1).permute(1, 0, 2)
+    Qs = Q.view(num_heads, head_dim).float()
+    sd = torch.bmm(Qs.unsqueeze(1), Kr.transpose(1, 2)).squeeze(1) / math.sqrt(head_dim)
+    sd = torch.cat([sd[:, 0:1], sd], dim=-1)                     # duplicate anchor
+    pd = torch.softmax(sd, dim=-1)
+    O_dense = (pd[:, 0:1] + pd[:, 1:].sum(-1, keepdim=True)) * aV.float().repeat_interleave(num_kv_groups, 0)
+    dVr = (Vd[1:] - aV.float().unsqueeze(0)).repeat_interleave(num_kv_groups, 1).permute(1, 0, 2)
+    O_dense = O_dense + torch.bmm(pd[:, 2:].unsqueeze(1), dVr).squeeze(1)
+
+    t = out_triton.squeeze(0).squeeze(1).float()
+    r = out_ref.squeeze(0).squeeze(1).float()
+    d_tr = (t - r).abs().max().item()
+    d_td = (t - O_dense).abs().mean().item()
+    print(f"Triton vs reference max-diff = {d_tr:.6f}")
+    print(f"Triton vs dense    mean-diff = {d_td:.6f}")
+    assert d_tr < 1e-2, f"Triton kernel diverges from reference: {d_tr}"
+    assert d_td < 1e-2, f"Triton kernel diverges from exact dense: {d_td}"
+    print("Success! Triton fused decode aligned to Mac reference + dense truth.")
+
+
 def test_metal_residual_and_fact_parity():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     if device != "mps":

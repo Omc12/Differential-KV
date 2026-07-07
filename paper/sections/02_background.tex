@@ -1,67 +1,63 @@
 \section{Background and Motivation}
 \label{sec:background}
 
-\subsection{The KV cache and why it dominates}
-For a decoder layer with $\Hkv$ key/value heads of dimension $\dhead$, caching one token
-costs $2\Hkv\dhead$ scalars (keys and values). Over $L$ layers and a sequence of length $N$
-the cache holds $2LN\Hkv\dhead$ scalars; at fp16 this is $4LN\Hkv\dhead$ bytes. For the model
-we study ($L{=}28$, $\Hkv{=}2$, $\dhead{=}128$) the cache is $\approx\!28.7\,N$ KB, i.e.
-$\approx\!1.8$\,GB at $N{=}64$k---comparable to the quantized weights and, on an $8$\,GB
-shared device, decisive. Crucially the cost is \emph{linear in $N$ and unbounded}: no amount
-of constant-factor savings changes the asymptotics.
-
-Decode is also memory-bandwidth bound: each step streams the entire cache through the
-attention units to produce a single token, so a larger cache slows decode as well as
-enlarging it. Any method that shrinks the cache therefore has the potential to help on two
-axes at once---if it can do so without reintroducing the full cache during the attention
-computation.
+\subsection{The KV-cache memory arithmetic}
+Consider a decoder-only transformer~\cite{vaswani2017attention} with $L$ layers, $\Hkv$ key/value
+heads (grouped-query attention~\cite{ainslie2023gqa} shares each KV head across several query
+heads), and head dimension $\dhead$. Caching
+one token's keys \emph{and} values across all layers, in fp16, costs
+\begin{equation}
+  b_{\text{tok}} \;=\; 2 \cdot L \cdot \Hkv \cdot \dhead \cdot 2\ \text{bytes}.
+  \label{eq:tokbytes}
+\end{equation}
+For our evaluation model (Qwen2.5-1.5B: $L{=}28$, $\Hkv{=}2$, $\dhead{=}128$) this is
+$28{,}672$ bytes per token---about $28$\,KB. The cache for a sequence of length $N$ is therefore
+$N\cdot b_{\text{tok}}$ and grows without bound in $N$: $16$k tokens cost $0.47$\,GB, $32$k cost
+$0.94$\,GB, and $64$k cost $1.8$\,GB. Against $8.6$\,GB of unified memory shared with the weights
+($\approx 1$\,GB at int4), the OS, and transient prefill activations, the cache is the term that
+decides whether a long context fits.
 
 \subsection{The design space}
-Prior work clusters into four families.
-\textbf{(i) Quantization} stores KV in low precision---KIVI~\cite{liu2024kivi} and related
-schemes reach $2$--$4$ bits---cutting the cache by a constant factor while keeping it dense
-and linear.
-\textbf{(ii) Eviction / sparsification} keeps only a subset of tokens: attention-sink and
-sliding-window schemes (StreamingLLM~\cite{xiao2024streamingllm}), heavy-hitter oracles
-(H2O~\cite{zhang2023h2o}), persistence-of-importance (Scissorhands~\cite{liu2023scissorhands}),
-and prompt-time selection (SnapKV~\cite{li2024snapkv}). These bound memory but are lossy by
-construction: an evicted token is gone.
-\textbf{(iii) Architectural low-rank latents} fold a low-rank KV projection into the model
-itself---most prominently DeepSeek's Multi-head Latent Attention~\cite{deepseekv2}---which is
-highly effective but requires training the model that way.
-\textbf{(iv) Paging and systems-level management}, e.g. PagedAttention~\cite{kwon2023vllm},
-which makes the cache cheaper to \emph{allocate} without changing its size, and exact
-IO-aware kernels such as FlashAttention~\cite{dao2022flashattention,dao2023flashattention2}.
+Three broad families shrink the cache. \emph{Quantization} stores $K$/$V$ at lower precision
+(e.g.\ int4/int8, per-channel or per-token scales)~\cite{liu2024kivi}; it is simple and preserves
+every token, but uniformly low precision erodes the outlier tokens most. \emph{Eviction /
+selection} keeps only a subset of tokens---attention sinks~\cite{xiao2024streamingllm}, heavy
+hitters~\cite{zhang2023h2o}, persistence-of-importance~\cite{liu2023scissorhands}, prompt-aware
+selection~\cite{li2024snapkv}, or query-aware block retrieval~\cite{tang2024quest}; it can be very
+compact but risks discarding a token that a later query needed. \emph{Low-rank factorization}
+exploits redundancy across tokens or channels, replacing the cache with a small
+basis~\cite{deepseekv2,dong2024less}; it compresses the shared structure well but, by construction,
+discards the low-energy directions in which distinctive tokens live. Orthogonally, KV \emph{memory
+management} such as paged attention~\cite{kwon2023vllm} reduces fragmentation without shrinking the
+logical cache.
 
-\diffkv{} occupies a gap between (ii) and (iii): like eviction it bounds the cache and runs
-on a \emph{pretrained, unmodified} model; like a low-rank latent it keeps a compressed
-representation of \emph{all} tokens rather than discarding them. The compression is applied
-\emph{post hoc} to the KV a frozen model produces, using a randomized truncated
-SVD~\cite{halko2011randomized} per block, but it is deliberately \emph{hybrid}: alongside the
-low-rank term it keeps a small set of exact residual tokens, so the outliers a low-rank model
-discards---the very tokens eviction would also be most likely to drop---are retained losslessly.
-Its query-aware top-$K$ block selection is in the spirit of Quest~\cite{tang2024quest}, but routes
-on \emph{exact} residual keys rather than a min/max bound so a single distinctive token cannot be
-averaged away. Unlike a latent attention, the runtime must reconstruct attention from the factors
-at inference time, which is where the engineering lies (\S\ref{sec:decode}).
+The tension common to all three is that the tokens most expensive to keep---rare, high-entropy
+tokens such as identifiers, digits, and names---are exactly the tokens that verbatim recall
+needs, and exactly the tokens a shared low-rank or low-bit code represents worst. A method that
+only compresses the shared structure will paraphrase fluently and misquote the one fact that
+mattered.
+
+\subsection{Design principle: separate the smooth part from the outliers}
+\diffkv{} responds to that tension directly by splitting each block into two representations
+with complementary strengths. The bulk of a block---the smooth, correlated variation shared by
+its tokens---is captured by an anchor and a rank-\rank{} joint $K\!\mid\!V$ delta, which is cheap
+and reconstructs the shared structure at low error. The residual outliers---the handful of rows
+the low-rank basis reconstructs worst---are kept \emph{exact}. Because the residuals are chosen
+by measured reconstruction error rather than by a hand-picked token class, the mechanism is
+content- and model-agnostic: it keeps whatever a given block's distinctive tokens happen to be.
+The recent past is not compressed at all; it lives in a small exact recency window, so
+short-range attention is always faithful. \S\ref{sec:eval} shows that this split is what lets a
+buried passcode survive compression exactly (E5) while the low-rank part keeps the per-block
+budget small.
 
 \subsection{Unified memory and MLX}
-We target Apple Silicon, where the CPU and GPU share one physical memory pool. This changes
-the trade-offs in two ways relevant here. First, there is no host$\leftrightarrow$device copy:
-an array materialized for a NumPy SVD is the same memory the GPU kernels read, so doing the
-per-block factorization on the CPU costs only compute, not transfers. Second, ``GPU memory''
-and ``system memory'' are the same scarce resource, so the KV cache competes directly with
-the model weights and with every other process on the machine---making a \emph{bounded} cache
-especially valuable. We build on MLX~\cite{mlx2023}, whose lazy evaluation and
-\texttt{mx.compile} let us express the fused decode attention in Python while still emitting a
-single compiled Metal graph. Group-query attention~\cite{ainslie2023gqa} ($H{=}12$ query
-heads sharing $\Hkv{=}2$ KV heads) further shrinks the cache and is handled natively by our
-kernel.
-
-\begin{measbox}
-\textbf{Motivating arithmetic.} On the test device, the dense fp16 KV cache reaches
-$\approx\!0.47$\,GB at $16$k and $\approx\!1.8$\,GB at $64$k tokens (28 layers). \diffkv{}'s
-compressed store is a \emph{fixed} pre-allocated pool of $\approx\!0.2$\,GB plus a bounded
-recency window---it does not grow with context. The rest of this report is about making
-attention work, and work well enough to be useful, from that representation.
-\end{measbox}
+Our target is Apple silicon, where the CPU and GPU share one physical memory pool. This changes
+the accounting in two ways that shape the implementation. First, there is no host--device copy:
+a tensor produced on the GPU is visible to NumPy without a transfer, so the randomized SVD used
+during compression can run in NumPy on the CPU while the attention kernels run on the GPU, with
+no marshalling cost. Second, ``freeing'' memory means returning it to a single shared pool that
+the rest of the system is contending for, so bounding \emph{peak} allocation matters as much as
+bounding steady state. \diffkv{} is built on MLX: it monkey-patches the attention of an
+\texttt{mlx\_lm} model, keeps its compressed store in MLX fp16 arrays, compiles the decode kernel
+with \texttt{mx.compile}, and explicitly releases the prefill cache at the prefill$\to$decode
+boundary (\S\ref{sec:runtime}).

@@ -1,79 +1,78 @@
 \section{Introduction}
 \label{sec:intro}
 
-Autoregressive transformer inference caches the key and value projections of every past
-token so that each new token attends over history without recomputation. This KV cache is
-linear in sequence length, in the number of layers, and in the number of key/value heads.
-For a model the size of Qwen2.5-1.5B the per-token KV state is small, but it accumulates:
-at $64$k tokens the full-precision cache alone is larger than the model weights, and on a
-shared $8$\,GB device it is the first resource to run out. The practical question this work
-addresses is narrow and concrete: \emph{what does it take to run a long-context workload on
-the hardware people actually own}---a laptop with unified memory and no discrete GPU---
-rather than on a server with hundreds of gigabytes of HBM?
+Autoregressive transformer inference caches the key and value projections of every past token
+so that each new token attends over the whole context without recomputation. This KV cache is
+what makes decoding fast, but it is also what makes long context expensive: its size grows
+linearly with sequence length and with the number of layers, and for a small model on
+commodity hardware it overtakes the weights as the dominant consumer of memory. For
+Qwen2.5-1.5B the int4 weights occupy roughly a gigabyte, while a full fp16 KV cache costs about
+$28$\,KB per token across all layers---so a $64$k-token conversation asks for close to $1.8$\,GB
+of cache on top of the model, on a machine that may have only $8$\,GB of unified memory shared
+with the operating system, the display server, and every other process. The cache, not the
+model, is the wall.
 
-The standard answers each give up something. \emph{Quantizing} the cache to $4$ or $2$ bits
-shrinks it by a constant factor but still grows linearly and eventually loses fidelity on
-the tokens that matter. \emph{Evicting} tokens (keeping only ``heavy hitters'' or a sliding
-window) bounds the cache but discards information that a later query may need.
-\emph{Low-rank latent} caches change the model architecture and require retraining. We pursue
-a different point in the design space, motivated directly by the structure of the cache: KV
-vectors within a local block are highly correlated, so each block is well approximated by a
-single representative token plus a low-rank correction---\emph{except} for a few distinctive
-tokens whose detail a low-rank model discards but a later query may need verbatim. This is the
-central idea of \diffkv{}: store an \emph{anchor}, a \emph{differential} low-rank term, and a
-small set of \emph{exact residual tokens} per block, and never materialize the dense cache
-again---not even at attention time. The low-rank term gives the bounded memory; the residuals
-give back the exact recall that a pure low-rank scheme loses.
+A large body of work attacks this wall by making the cache smaller or sparser: low-bit
+quantization of $K$/$V$, eviction of tokens deemed unimportant, and low-rank factorization of
+the cache tensors. Each trades some fidelity for memory. The failure mode that matters in
+practice is not average perplexity but \emph{verbatim recall}: a summary that paraphrases the
+document is often acceptable, but a summary that reports the wrong passcode, account number, or
+name is not. Aggressive compression tends to destroy exactly the low-frequency, high-information
+tokens on which such recall depends, because those tokens are outliers that a shared low-rank or
+low-bit representation reconstructs worst.
 
-\paragraph{What \diffkv{} is.}
-\diffkv{} is a runtime, not a model change. It monkey-patches the attention of a stock
-quantized model and routes the two phases of inference differently. During \emph{prefill},
-it runs exact attention while streaming the produced KV into a compressed store: every
-$256$-token block is reduced to an anchor token, a rank-$16$ joint-SVD factorization of the
-per-token deltas, and the $64$ highest-reconstruction-error tokens kept exactly as residuals
-(\S\ref{sec:compression}). During \emph{decode}, a single fused, \texttt{mx.compile}-d kernel
-(\S\ref{sec:decode}) routes the query to the most relevant blocks by an exact residual-key
-score, evaluates those blocks \emph{in low-rank coordinates}---projecting the query through each
-block's $r$-dimensional basis rather than reconstructing $B{\times}d$ keys---attends their exact
-residuals alongside a small uncompressed recency window, and merges the low-rank and exact
-branches with a flash-style log-sum-exp. The compressed pool is pre-allocated and fixed in size,
-so the KV state is bounded regardless of how long the context grows (\S\ref{sec:runtime}). An
-adaptive policy decodes exactly at short context and engages the compressed kernel only when the
-cache is large enough to be the binding cost.
+\diffkv{} is a KV-cache compression runtime built around this observation. It keeps a bounded
+window of recent tokens exact, and compresses each older block of \bs${=}256$ tokens into three
+parts: an \emph{anchor} (the block's first token, kept exact and used as the baseline for the
+rest), a rank-\rank{} joint $K\!\mid\!V$ truncated-SVD \emph{delta} that captures the structure
+the block's tokens share, and a small budget of \emph{exact residual tokens}---selected as the
+rows with the largest reconstruction error, which are precisely the distinctive tokens the
+low-rank basis fails to represent. The anchor-plus-delta captures the smooth, shared part of the
+block cheaply; the residuals rescue the outliers exactly. Decode never materializes the full
+cache: a fused kernel scores the query against each block in the rank-\rank{} subspace, attends
+the exact residuals and the recency window directly, and combines the two contributions with a
+numerically stable log-sum-exp merge. A cheap per-block router restricts the expensive part of
+this computation to the top-\topk{} relevant blocks, so decode cost scales with \topk{} rather
+than with the context length.
 
-\paragraph{What we measure, and how honestly.}
-A central methodological commitment of this report is to attribute every number to the code
-path that actually produced it. In the course of this work we found that an earlier
-benchmark's headline throughput came from an \emph{exact} full-KV decode path, not from the
-compressed kernel; conflating the two would credit the compression with speed and accuracy
-it does not provide. We therefore report the compressed sparse decode as the primary result
-and keep the exact decode as an explicit \emph{upper-bound ablation} on the same store
-(\S\ref{sec:eval}). Likewise, because the global allocator peak is dominated by weights and
-the transient prefill activations, we make the bounded \emph{KV-state footprint} the
-headline memory metric---this is what the compression actually controls---and report the
-allocator peak alongside it.
+\paragraph{What this paper claims, and what it does not.}
+We are deliberate about the trade-off, because it is easy to overstate. On our host---an
+Apple~M3 with $8.6$\,GB of unified memory, running Qwen2.5-1.5B at int4---the dense full-KV cache
+\emph{fits and decodes faster than} \diffkv{} through $32$k tokens; \diffkv{} does not make this
+model decode faster where a dense cache still fits. But at $\reachK$k the dense cache exhausts the
+machine's memory and does not run at all, whereas \diffkv{} completes with the passcode intact.
+What \diffkv{} provides is therefore (i) a KV state that is bounded by a fixed block pool and is
+$\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, so the cache
+stops being the term that grows without limit and $\reachK$k becomes reachable where dense
+cannot; (ii) \emph{exact} recovery of a buried passcode at every context we tested, from $4$k to
+$\reachK$k, preserved by the residual mechanism; and (iii) a sparse prefill whose sub-quadratic
+cost lets long-context prefill overtake the dense baseline once the context is large enough. The
+price is per-token decode throughput \emph{in the regime where a dense cache still fits}. We
+report the full picture---including where \diffkv{} loses---and we treat the residual budget
+\maxres{} as an explicit dial between memory, accuracy, and speed.
 
 \paragraph{Contributions.}
-\begin{enumerate}[leftmargin=1.4em,itemsep=2pt]
-  \item \textbf{A differential-plus-residual block representation for KV} (anchor + rank-$r$
-  joint-SVD delta over normalized per-token residuals + the top-error tokens kept exact) that
-  reduces KV state by $\approx\!2.85\times$ per block at fp16 \emph{while preserving verbatim
-  recall of distinctive tokens}, with a closed-form storage budget (\S\ref{sec:compression}).
-  \item \textbf{A bounded-memory runtime} that streams compression during a chunked,
-  numerically exact prefill, releases the prefill activations at the prefill$\to$decode
-  boundary, serves decode entirely from a fixed-size compressed pool plus a recency window, and
-  adapts the decode path to context length so short requests never regress (\S\ref{sec:runtime}).
-  \item \textbf{A fused, routed decode-attention kernel} that selects the relevant blocks by an
-  exact residual-key score, computes their attention from the compressed factors without
-  decompression, attends the exact residuals and recency window, and merges the two branches
-  stably---so decode cost scales with the selection size, not context (\S\ref{sec:decode}).
-  \item \textbf{An honest, reproducible evaluation} on an $8.6$\,GB Apple~M3 that separates
-  the compressed path from an exact-decode upper bound, quantifies the memory/context-reach
-  benefit, the throughput cost, and the residual-budget/recall trade-off, and is structured so a
-  CUDA/Triton fused-decode path can be slotted in later (\S\ref{sec:eval}--\S\ref{sec:analysis}).
-\end{enumerate}
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt,topsep=2pt]
+  \item An \textbf{anchor + low-rank + exact-residual} block representation
+    (\S\ref{sec:compression}) that decouples the smooth, shared part of a KV block (compressed)
+    from its distinctive outlier tokens (kept exact), giving a tunable compression ratio while
+    preserving verbatim recall.
+  \item A \textbf{fused, routed decode kernel} (\S\ref{sec:decode}) that scores queries in the
+    low-rank subspace without decompressing $K$, attends residuals and recency exactly, and
+    merges the halves with a flash-style reduction---so decode cost scales with the routed block
+    count \topk{}, not the context length.
+  \item A \textbf{bounded-memory runtime} (\S\ref{sec:runtime}) with streaming prefill
+    compression, a fixed block pool, a prefill-to-decode memory release, and a training-free
+    block-sparse prefill, implemented entirely in MLX for Apple unified memory.
+  \item A \textbf{measured, self-consistent evaluation} (\S\ref{sec:eval}) against a dense
+    baseline on identical weights, reporting footprint, prefill, decode, and exact recall from
+    $4$k to $\reachK$k, with component ablations and a residual-budget sweep. We state the
+    decode-throughput cost plainly rather than hiding it.
+\end{itemize}
 
-\noindent
-We deliberately scope this report to the active (MLX) runtime. A separate C++/GGML
-reimplementation exists in the repository and is under active development; it is not the
-subject of this report and none of its numbers appear here.
+The rest of the paper follows the system's own execution order: background and the memory
+arithmetic that motivates the design (\S\ref{sec:background}), a component overview
+(\S\ref{sec:overview}), the compression pipeline (\S\ref{sec:compression}), the runtime and
+memory architecture (\S\ref{sec:runtime}), the fused decode kernel (\S\ref{sec:decode}),
+implementation notes (\S\ref{sec:impl}), evaluation (\S\ref{sec:eval}), analysis
+(\S\ref{sec:analysis}), and limitations (\S\ref{sec:limits}).

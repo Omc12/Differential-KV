@@ -1,52 +1,42 @@
 \section{Limitations and Future Work}
-\label{sec:limitations}
+\label{sec:limits}
 
-\paragraph{Decode throughput (primary).}
-The fused kernel is expressed as many small ops in a compiled graph and does not yet match native
-fused attention (\S\ref{sec:analysis}); the exact-decode ablation localizes the gap to the kernel
-dispatch, not the algorithm. A hand-written fused decode---a custom Metal op, or a CUDA/Triton
-kernel on NVIDIA hardware---is the natural path to closing it. We have deliberately structured the
-throughput figures and the main results table so that a future \textbf{CUDA/Triton fused-decode}
-measurement can be added as one more series without restructuring the evaluation; no such number is
-reported or estimated here, and the placeholder is labelled as future work. Until then, the
-adaptive policy keeps the cost off the short-context path entirely.
+We list the limitations plainly; several are direct consequences of the design choices above.
 
-\paragraph{Compression ratio and the residual memory ceiling.}
-Exact recall is bought with memory: at the default budget a quarter of every block is stored
-verbatim, so the per-block reduction is $\approx\!2.85\times$, not the order of magnitude a pure
-low-rank scheme suggests (\S\ref{sec:compression}). The residuals also set a scaling ceiling---at a
-million tokens the residual K/V alone would dominate the pool---so very long contexts need either a
-smaller budget (trading recall, per E6) or a two-stage router that gathers residuals only for
-selected blocks (which the runtime already does at decode, but the store still holds them). A
-budget that adapts to per-block content, rather than a fixed $\maxres$, is the natural refinement.
+\paragraph{Decode throughput.} The headline cost. \diffkv{} decode is slower than a dense cache
+that fits (\S\ref{sec:eval}, E4), and the E6 ablation localizes the gap to per-token
+reconstruction-and-merge overhead. The clearest remedy is a single fused decode kernel that does
+the routing, low-rank scoring, residual attention, and merge in one launch, rather than a sequence
+of MLX ops.
 
-\paragraph{Router cost.}
-The default residual-key router scores every block's anchor and top residual keys each step, an
-$O(nR\dhead)$ cost linear in context. It is cheap relative to the kernel at the scales we test, but
-at extreme context a cheap pre-filter feeding the exact rerank would be needed---taking care that
-the pre-filter cannot drop the needle's block, the failure mode that motivated the exact router in
-the first place.
+\paragraph{CUDA / Triton path (reserved, not evaluated).} A CUDA/Triton decode kernel exists in
+the repository, but the evaluation host has no NVIDIA GPU, so we report \emph{no} CUDA numbers and
+make \emph{no} CUDA claims. The decode design ports cleanly---reconstruct routed blocks into a
+buffer (a matmul), attend with a flash kernel, cache across a re-route interval---so we expect the
+gap in E4 to narrow on a GPU-native path, but that is a hypothesis to be measured, not a result.
+The figures and tables reserve space (a series slot in Figures~\ref{fig:g3}, a column convention in
+the results tables) so CUDA data can be inserted without restructuring the paper.
 
-\paragraph{Prefill cost and peak.}
-Prefill remains exact and therefore $O(N)$ in attention, with the per-block SVD and residual
-extraction added on top, making it the slowest phase and the dominant wall-time cost at large
-context. The global memory peak is also set during prefill (\S\ref{sec:analysis}); \diffkv{} does
-not reduce it. Compressed or sparse prefill is a known direction (prototyped in the repository) but
-is out of scope here.
+\paragraph{Single model, single host.} Every number here is Qwen2.5-1.5B (int4) on one Apple~M3.
+The residual budget and router settings are tuned for this model; larger models, different
+architectures, and non-Apple hardware are unvalidated. Two normalizations (the $V$-to-$K$ RMS
+rescale, the seeded rank) are model-sensitive and should be re-checked per model.
 
-\paragraph{Evaluation breadth.}
-We report one model (Qwen2.5-1.5B int4), one device (Apple~M3, $8.6$\,GB), and one probe
-(needle-in-a-haystack) with greedy decoding. Exact-string recall is a sharp but narrow correctness
-signal; broader claims require additional models and sizes, perplexity and downstream-quality
-metrics, multi-needle and varied-depth probes, and batched/multi-session throughput. The serving
-stack supports batching and multi-session residency; we did not exercise them here.
+\paragraph{Evaluation breadth.} Correctness here is exact single-needle recall plus fluent
+long-form generation. This is a strong, unambiguous signal for the fidelity claim, but it is not a
+substitute for standard long-context suites (RULER, LongBench), multi-needle and multi-hop recall,
+or comparisons against other cache-compression baselines (quantization, eviction, other low-rank
+methods). Diffuse multi-fact synthesis, where the top-\topk{} router must cover several regions at
+once, is a known weaker case that the single-needle metric does not probe; an optional log-sum-exp
+bias mitigates it but is not a full solution. Broadening the evaluation is the most important next
+step for external credibility.
 
-\paragraph{The grounding module.}
-The semantic-retrieval/factual-binding layer is inactive in the benchmarked runtime
-(\S\ref{sec:impl}). Whether it improves grounded long-context QA on top of the compressed cache
-is an open, separately evaluable question.
+\paragraph{Memory-pressure variance.} On an $8.6$\,GB host, absolute long-context prefill times for
+the dense baseline are sensitive to memory pressure (\S\ref{sec:eval}, E3). We report measured
+values and a confirming re-measurement, but a machine with more headroom would show a smaller (and
+more stable) absolute prefill gap; the robust claim is the quadratic-vs-sub-quadratic scaling, not
+the specific ratio.
 
-\paragraph{Portability.}
-The runtime is specialized to MLX and to the Qwen2 attention module it patches. A portable
-PyTorch/Triton backend and a C++/GGML reimplementation target the same design in the repository but
-are under active development and are not evaluated here.
+\paragraph{Bounded pool.} The fixed $256$-block pool caps compressed capacity at $65{,}536$ tokens.
+Beyond that, the oldest blocks must be dropped or the pool enlarged (trading memory). A capacity
+policy for contexts past the pool is future work.

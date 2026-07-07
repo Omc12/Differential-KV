@@ -1,16 +1,22 @@
 \begin{tabular}{lrr}
 \toprule
-Component & DiffKV block & Dense block \\
+Component & Bytes & Note \\
 \midrule
-$U$ coefficients $[255,16]$ fp16 & 8160 B & -- \\
-$V_K,V_V\ [2,16,128]$ fp16 & 16384 B & -- \\
-anchors $a_k,a_v\ [2,128]$ fp16 & 1024 B & -- \\
-key min/max $[2,128]$ fp16 (router) & 1024 B & -- \\
-scale + seq\_len & 8 B & -- \\
-\textbf{residual $K,V\ [64,2,128]$ fp16} & \textbf{65536 B} & -- \\
-full $K,V\ [256,2,128]$ fp16 & -- & 262144 B \\
+$U$ coefficients $[255,16]$ & 16320 & low-rank \\
+$V_K,V_V\ [2,16,128]$ & 32768 & low-rank \\
+anchors $a_k,a_v\ [2,128]$ & 1024 & exact \\
+key min/max $[2,128]$ & 1024 & router \\
+scale, seq\_len & 8 & scalar \\
 \midrule
-\textbf{Per 256-token block} & \textbf{90.0 KiB} & \textbf{256 KiB} \\
-Compression ratio & \multicolumn{2}{c}{$2.85\times$} \\
+\textbf{Low-rank core} & \textbf{51144} & (49.9 KiB) \\
+exact residuals $R{=}128$ & 131072 & (128.0 KiB) \\
+exact residuals $R{=}64$ & 65536 & (64.0 KiB) \\
+\midrule
+\textbf{DiffKV block} ($R{=}128$) & \textbf{182216} & \textbf{177.9 KiB} \\
+\textbf{DiffKV block} ($R{=}64$) & \textbf{116680} & \textbf{113.9 KiB} \\
+Dense block $[256,2,128]{\times}2$ & 262144 & 256.0 KiB \\
+\midrule
+Compression ratio ($R{=}128$) & \multicolumn{2}{r}{$1.44\times$} \\
+Compression ratio ($R{=}64$) & \multicolumn{2}{r}{$2.25\times$} \\
 \bottomrule
 \end{tabular}

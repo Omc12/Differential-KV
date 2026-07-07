@@ -5,64 +5,73 @@ All results were produced on a single machine, one engine per isolated subproces
 number measured (failed cells are reported as failures, never filled with estimates).
 
 \paragraph{Hardware.}
-Apple~M3, $8.59$\,GB unified memory (host \texttt{Oms-MacBook-Pro-2.local}), macOS (Darwin
-25.x). The device is shared with the OS and other applications, so absolute memory thresholds
-shift with machine load; the scaling slopes and engine ordering are the stable results.
+Apple~M3, $8.6$\,GB unified memory, macOS (Darwin~25.x). The device is shared with the OS and
+other applications, so absolute memory thresholds and long-context prefill times shift with
+machine load; the scaling slopes, engine ordering, and exact-recall results are the stable
+outcomes.
 
 \paragraph{Software.}
-Python (\texttt{diffkv\_venv}), MLX $0.31.2$, \texttt{mlx\_lm}, NumPy, PyTorch (used only for
-tensor plumbing in the wrapper, not for compute), \texttt{psutil}. Model:
+Python in \texttt{diffkv\_venv}, MLX $0.31.2$, \texttt{mlx\_lm}, NumPy $2.x$, PyTorch (used only
+for tensor plumbing in the wrapper, not for compute), \texttt{psutil}. Model:
 \texttt{mlx-community/Qwen2.5-1.5B-Instruct-4bit} (group size $64$, $4$-bit), $28$ layers,
-$12$ query heads, $2$ KV heads, head dim $128$, vocab $151{,}936$, trained context $32{,}768$,
-RoPE $\theta=10^6$.
+$12$ query heads, $2$ KV heads, head dim $128$, trained context $32{,}768$, RoPE $\theta=10^6$.
 
-\paragraph{Configuration.}
-\texttt{rank=16}, \texttt{block\_size=256}, \texttt{recency\_window=512} (dense buffer $768$),
-\texttt{max\_blocks=256}, \texttt{max\_residual=64}, top-$K{=}16$ routing with the
-\texttt{residual} router, \texttt{DIFFKV\_SVD\_SEED=1234} (deterministic), preset ``mid''. The
-shipped decode policy is \texttt{DIFFKV\_COMPRESSED\_DECODE=auto} (compressed at/above
-\texttt{DIFFKV\_COMPRESSED\_MIN\_CTX}$=16$k, else exact); for the ablation it is forced to
-$1$ (compressed, primary) or $0$ (exact, upper bound).
+\paragraph{Configuration (as measured).}
+preset \texttt{mid}, \texttt{serving\_mode=balanced}, \texttt{rank=32} (the ``mid'' preset default;
+only the ``low'' preset reduces it to $16$), \texttt{block\_size=256},
+\texttt{recency\_window=512} (dense buffer $768$), \texttt{max\_blocks=256},
+\texttt{max\_residual=128}, top-$K{=}16$ routing with the \texttt{residual} router,
+\texttt{DIFFKV\_SVD\_SEED=1234} (deterministic). The \diffkv{} engine runs in the active CLI's
+serving configuration with the sparse path forced on at every context:
+\texttt{DIFFKV\_COMPRESSED\_DECODE=1} (so DiffKV's compressed decode is what is measured at all
+lengths, not the adaptive dense-below-threshold policy), \texttt{DIFFKV\_DECODE\_CACHE=1}
+(decompress-and-cache; bit-exact), \texttt{DIFFKV\_SPARSE\_PREFILL=1} (block-sparse prefill),
+\texttt{DIFFKV\_SPARSE\_BIAS=auto} (adaptive merge bias, as the CLI ships). The
+dense baseline is \texttt{mlx\_lm} with a full KV cache on the same int4 weights. The residual
+sweep (E5) forces \texttt{DIFFKV\_COMPRESSED\_DECODE=1} and varies \texttt{DIFFKV\_MAX\_RESIDUAL};
+the decode-mode ablation (E6) toggles \texttt{DIFFKV\_COMPRESSED\_DECODE} between $1$ (compressed)
+and $0$ (exact upper bound) over the same store.
 
 \paragraph{Protocol.}
-A needle-in-a-haystack chat prompt is built once per context length from the Qwen2.5 tokenizer
-and fed verbatim (raw mode, no double chat-templating) to every configuration. The needle is a
-planted passcode (\texttt{OMEGA-7741-DELTA}); ``needle recovered'' means the generation
-reproduced it---a free correctness signal. Engines are warmed once (a $1$-token forward to
-compile kernels) before timing. Prefill is timed with \texttt{perf\_counter} around the chunked
-forward after \texttt{mx.eval}; decode is fixed-length greedy ($128$ tokens, EOS ignored) so
-throughput is directly comparable. Memory is read from MLX's allocator
-(\texttt{get\_peak\_memory}/\texttt{get\_active\_memory}); the decode-phase peak resets the peak
-counter at the prefill$\to$decode boundary to isolate steady-state decode memory. Analytic
-KV-state bytes are computed from the live store occupancy.
+A needle-in-a-haystack chat prompt is built once per context length from the Qwen2.5 tokenizer and
+fed verbatim (raw mode, no double chat-templating) to every configuration. The needle is a planted
+passcode (\texttt{OMEGA-7741-DELTA}); ``needle recovered'' means the generation reproduced it.
+Engines are warmed once (a $1$-token forward to compile kernels) before timing. Prefill is timed
+with \texttt{perf\_counter} around the chunked forward after \texttt{mx.eval}; decode is
+fixed-length greedy ($128$ tokens, EOS ignored) so throughput is directly comparable. Memory is
+read from MLX's allocator (\texttt{get\_peak\_memory}). Each \texttt{(engine, context)} cell runs
+in its own subprocess so memory is attributable and an out-of-memory event kills only that cell.
+The full primary sweep is a single back-to-back batch, so \diffkv{} and dense are measured under
+the same machine conditions; the volatile long-context dense cells were re-measured in isolation to
+confirm their regime.
 
 \paragraph{Commands.}
-The full measured dataset is produced by one clean, sequential batch (run with nothing else
-competing for CPU: the per-block NumPy SVD during prefill is CPU-bound, and concurrent processes
-inflate prefill time):
 \begin{quote}\small\ttfamily
-\# clean batch: decode-mode ablation (4k-32k) + 64k reach + residual sweep\\
-zsh paper/scripts/run\_paper\_measurements.sh\\[4pt]
-\# equivalently, the individual drivers it calls:\\
-diffkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
+\# fresh primary sweep (active vs dense, 4k--32k), isolated per cell\\
+CTXS="4096 8192 16384 32768" bash paper/scripts/measure\_sweep.sh\\[3pt]
+\# 64k reach point + long-context dense re-check\\
+bash paper/scripts/measure\_tail.sh\\[3pt]
+\# decode-mode ablation (compressed vs exact, same store)\\
+DIFFKV\_DECODE\_CACHE=1 diffkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
 \ \ --ctx 4096 8192 16384 32768 --modes compressed exact --gen 128 \textbackslash\\
-\ \ --out paper/generated/active\_modes\_sweep\_v2.json\\
+\ \ --out paper/generated/active\_modes\_fresh.json\\[3pt]
+\# residual-budget sweep at 16k\\
 diffkv\_venv/bin/python3 paper/scripts/measure\_residual\_sweep.py \textbackslash\\
-\ \ --ctx 16384 --residuals 0 8 16 32 64 --out paper/generated/residual\_sweep.json\\[4pt]
-\# dense full-KV baseline (same prompts, same memory metric)\\
-diffkv\_venv/bin/python3 benchmarks/run\_bench.py --engines dense \textbackslash\\
-\ \ --contexts 4096 8192 16384 32768 --gen 128 --ram-cap-gb 7.5\\[4pt]
-\# figures + tables from the measured JSON (no hand-typed numbers)\\
+\ \ --ctx 16384 --residuals 0 8 16 32 64 128 \textbackslash\\
+\ \ --out paper/generated/residual\_sweep\_fresh.json\\[3pt]
+\# facts, figures, and tables from the measured JSON (no hand-typed numbers)\\
+diffkv\_venv/bin/python3 paper/scripts/make\_facts.py\\
 diffkv\_venv/bin/python3 paper/scripts/make\_diagrams.py\\
 diffkv\_venv/bin/python3 paper/scripts/make\_graphs.py\\
 diffkv\_venv/bin/python3 paper/scripts/make\_tables.py
 \end{quote}
 
-\paragraph{Artifacts.}
-Measured JSON: \texttt{paper/generated/active\_modes\_sweep\_v2.json} (active ablation, both modes),
-\texttt{paper/generated/active\_modes\_sweep\_64k.json} (64k reach),
-\texttt{paper/generated/residual\_sweep.json} (residual-budget trade-off), and
-\texttt{benchmarks/results/PAPER\_dense\_sweep.json} (dense baseline). Figures are regenerated from
-these by the scripts above; tables are emitted to \texttt{paper/tables/}. The provenance, the
+\paragraph{Artifacts and provenance.}
+Primary measured JSON: \texttt{benchmarks/results/fresh\_\{active,dense\}\_\{ctx\}.json}. Ablations:
+\texttt{paper/generated/active\_modes\_fresh.json} (decode modes) and
+\texttt{paper/generated/residual\_sweep\_fresh.json} (residual budget). Every figure and table is
+regenerated from these by the scripts above; the body text's numbers are LaTeX macros emitted by
+\texttt{make\_facts.py}, so the prose cannot drift from the data. The dataset selection, the
 decode-path attribution that motivated this measurement design, and the corrected
-compression-ratio accounting are documented in \texttt{paper/notes/}.
+compression-ratio accounting are documented in \texttt{paper/notes/AUDIT\_2026-07-07.md} and the
+consistency report.

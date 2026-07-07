@@ -12,6 +12,17 @@ namespace diffkv {
 
 #if defined(GGML_USE_CUDA) || defined(USE_CUDA)
 
+// ── F7: checked CUDA calls — surface alloc/launch failures loudly instead of a
+// confusing async error much later. ────────────────────────────────────────────
+#define DIFFKV_CUDA_CHECK(call) do {                                              \
+    cudaError_t _e = (call);                                                      \
+    if (_e != cudaSuccess) {                                                      \
+        std::cerr << "[DiffKV CUDA] " << #call << " failed: "                     \
+                  << cudaGetErrorString(_e) << " at " << __FILE__ << ":"          \
+                  << __LINE__ << std::endl;                                       \
+    }                                                                             \
+} while (0)
+
 // ── Warp-level and block-level reductions in CUDA ───────────────────────────
 __device__ inline float warpReduceMax(float val) {
     for (int offset = 16; offset > 0; offset /= 2) {
@@ -60,7 +71,193 @@ __device__ inline SoftmaxState merge_softmax_states(SoftmaxState lhs, SoftmaxSta
     return { m_new, d_new };
 }
 
-// ── CUDA Attention Kernel ──────────────────────────────────────────────────
+// ── FULL DiffKV CUDA Attention Kernel (F10) ─────────────────────────────────
+// Mirrors execute_cpu_attention() (runtime/diffkv_attention.cpp), approximate_attn
+// path, for the native default POOL_ROT_ABS scheme (pool pre-rotated → has_rope=0,
+// no in-kernel RoPE). Per block: anchor + low-rank delta tokens (project-then-attend)
+// + exact residual corrections (K score & V output), online-softmax merged across
+// blocks and the dense window, split-K over blockIdx.y.
+//
+// Layouts (from the CPU indexing, verified against native_block_pool):
+//   Q            [n_q_heads, D]
+//   U_pool       int8  [n_slots, S_max, rank]              U[slot*S_max*rank + t*rank + r]
+//   U_row_scale  f16   [n_slots, S_max]                    per-token dequant  [slot*S_max + t]
+//   scales       f16   [n_slots]                           per-block scale blk_sc
+//   VK/VV_pool   f16   [n_slots, rank, n_kv_heads, D]      [slot*rank*Hkv*D + r*Hkv*D + kv*D + d]
+//   anchors_K/V  f16   [n_slots, n_kv_heads, D]            [slot*Hkv*D + kv*D + d]
+//   res_*_pos    i32   [n_slots, MR]                       [slot*MR + ri]  (−1 = empty)
+//   res_*_val    f16   [n_slots, MR, n_kv_heads, D]        (exact − recon) difference
+// One thread per output dim d = threadIdx.x (block = D threads). Fixes the old
+// block(64)-vs-D=128 bug (F11).
+__global__ void diffkv_full_decode_kernel(
+    const float* Q, const int8_t* U_pool, const half* VK_pool, const half* VV_pool,
+    const half* anchors_K, const half* anchors_V, const int32_t* seq_lens,
+    const int32_t* slot_indices, float* out_buf, float* lse_buf,
+    int32_t n_q_heads, int32_t n_kv_heads, int32_t rank, int32_t S_max, int32_t K, int32_t D,
+    float scale, const half* scales, const half* U_row_scale,
+    const int32_t* res_K_pos, const half* res_K_val,
+    const int32_t* res_V_pos, const half* res_V_val, int32_t MR,
+    const float* dense_K, const float* dense_V, const int32_t* dense_positions, int32_t T_dense,
+    float* split_out, float* split_m, float* split_d, int32_t S_split)
+{
+    const int h       = blockIdx.x;          // query head
+    const int split   = blockIdx.y;          // split-K index
+    const int d       = threadIdx.x;         // this thread owns output dim d
+    if (h >= n_q_heads) return;
+    const int g       = n_q_heads / n_kv_heads;
+    const int kv_head = h / g;
+
+    extern __shared__ float sh[];
+    float* q_sh    = sh;                 // [D]
+    float* qproj   = q_sh + D;           // [rank]
+    float* tscore  = qproj + rank;       // [S_max]  token scores, then reused for weights
+    float* wproj   = tscore + S_max;     // [rank]
+    float* red     = wproj + rank;       // [<=32] reduction scratch
+    __shared__ float sc_anc, sc_m, sc_l, sc_wtot;
+
+    q_sh[d] = Q[h * D + d];
+    __syncthreads();
+
+    // running online-softmax state + unnormalised output accumulator (this dim)
+    float m_i = -1e30f, l_i = 0.0f, O_d = 0.0f;
+
+    const int blocks_per_split = (K + S_split - 1) / S_split;
+    const int k0 = split * blocks_per_split;
+    const int k1 = min(k0 + blocks_per_split, K);
+
+    for (int k = k0; k < k1; ++k) {
+        const int slot = slot_indices[k];
+        const int slen = seq_lens[slot];
+        const float blk_sc = __half2float(scales[slot]);
+        const size_t vk_base = (size_t)slot * rank * n_kv_heads * D + (size_t)kv_head * D;
+        const size_t ak_base = (size_t)slot * n_kv_heads * D + (size_t)kv_head * D;
+
+        // 1) anchor score = q · anchor_K   (pool pre-rotated; no RoPE)
+        float pa = q_sh[d] * __half2float(anchors_K[ak_base + d]);
+        pa = blockReduceSum(pa, red);
+        if (d == 0) sc_anc = pa * scale;
+        __syncthreads();
+        const float score_anc = sc_anc;
+
+        // 2) q_proj[r] = q · VK[r]
+        for (int r = 0; r < rank; ++r) {
+            float p = q_sh[d] * __half2float(VK_pool[vk_base + (size_t)r * n_kv_heads * D + d]);
+            p = blockReduceSum(p, red);
+            if (d == 0) qproj[r] = p;
+            __syncthreads();
+        }
+
+        // 3) residual-K score corrections: add q·resK to the token at res_K_pos[ri]
+        //    (resK = exact−recon; correct-in-place, matches CPU + the ACTIVE Triton fix)
+        //    Store into tscore-shift buffer keyed by token; compute per residual then scatter.
+        //    We fold this into the per-token loop below via a small shared lookup.
+        // 4) token scores: delta = Σ_r U[t,r]·qproj[r]; score = (delta·rowscale·blk_sc + resK + anc)·scale
+        for (int t = d; t < slen; t += D) {
+            const int8_t* u_row = U_pool + ((size_t)slot * S_max + t) * rank;
+            float delta = 0.0f;
+            for (int r = 0; r < rank; ++r) delta += (float)u_row[r] * qproj[r];
+            float ku = __half2float(U_row_scale[(size_t)slot * S_max + t]);
+            // residual-K: does token t carry an exact K correction?
+            float res = 0.0f;
+            for (int ri = 0; ri < MR; ++ri) {
+                if (res_K_pos[(size_t)slot * MR + ri] == t) {
+                    const half* rk = res_K_val + (((size_t)slot * MR + ri) * n_kv_heads + kv_head) * D;
+                    for (int dd = 0; dd < D; ++dd) res += q_sh[dd] * __half2float(rk[dd]);
+                }
+            }
+            tscore[t] = (delta * ku * blk_sc + res) * scale + score_anc; // == (delta*ku*blk_sc + res + anc_raw)*scale
+        }
+        __syncthreads();
+
+        // 5) block max over anchor + tokens
+        float local = score_anc;
+        for (int t = d; t < slen; t += D) local = fmaxf(local, tscore[t]);
+        local = blockReduceMax(local, red);
+        if (d == 0) sc_m = local;
+        __syncthreads();
+        const float m_block = sc_m;
+
+        // 6) online-softmax merge of this block into (m_i, l_i, O_d)
+        const float m_new = fmaxf(m_i, m_block);
+        const float resc  = expf(m_i - m_new);
+        O_d *= resc;
+        l_i *= resc;
+
+        // weights (unnormalised) → reuse tscore as weights; accumulate l and w_proj
+        float w_anc = expf(score_anc - m_new);
+        // sum token weights + w_proj[r] = Σ_t w_t·U[t,r]·rowscale
+        for (int r = d; r < rank; r += D) wproj[r] = 0.0f;
+        if (d == 0) sc_l = 0.0f;
+        __syncthreads();
+        float l_part = 0.0f;
+        for (int t = d; t < slen; t += D) {
+            float w = expf(tscore[t] - m_new);
+            tscore[t] = w;                 // store weight in place
+            l_part += w;
+        }
+        l_part = blockReduceSum(l_part, red);
+        if (d == 0) sc_l = l_part;
+        __syncthreads();
+        // w_proj[r] computed by threads r<rank over all tokens (serial in t, small)
+        if (d < rank) {
+            float acc = 0.0f;
+            for (int t = 0; t < slen; ++t) {
+                const int8_t* u_row = U_pool + ((size_t)slot * S_max + t) * rank;
+                float ku = __half2float(U_row_scale[(size_t)slot * S_max + t]);
+                acc += tscore[t] * (float)u_row[d] * ku;
+            }
+            wproj[d] = acc;
+        }
+        if (d == 0) sc_wtot = w_anc + sc_l;
+        __syncthreads();
+
+        // 7) accumulate this block's V into O_d (dim d):
+        //    O_d += w_total·anchorV + Σ_r (wproj[r]·blk_sc)·VV[r][d] + Σ residualV
+        float o = sc_wtot * __half2float(anchors_V[ak_base + d]);
+        for (int r = 0; r < rank; ++r)
+            o += wproj[r] * blk_sc * __half2float(VV_pool[vk_base + (size_t)r * n_kv_heads * D + d]);
+        for (int ri = 0; ri < MR; ++ri) {
+            int p = res_V_pos[(size_t)slot * MR + ri];
+            if (p >= 0 && p < slen) {
+                const half* rv = res_V_val + (((size_t)slot * MR + ri) * n_kv_heads + kv_head) * D;
+                o += tscore[p] * __half2float(rv[d]);   // tscore[p] now holds w_p
+            }
+        }
+        O_d += o;
+        l_i  = l_i + sc_wtot;
+        m_i  = m_new;
+        __syncthreads();
+    }
+
+    // dense window (split 0 only) — exact tokens, online-merged
+    if (T_dense > 0 && split == 0) {
+        for (int t = 0; t < T_dense; ++t) {
+            int base_k = t * n_kv_heads * D + kv_head * D;
+            float s = q_sh[d] * dense_K[base_k + d];
+            s = blockReduceSum(s, red);
+            if (d == 0) sc_m = s * scale;
+            __syncthreads();
+            float sc = sc_m;
+            float m_new = fmaxf(m_i, sc);
+            float resc = expf(m_i - m_new);
+            float w = expf(sc - m_new);
+            O_d = O_d * resc + w * dense_V[t * n_kv_heads * D + kv_head * D + d];
+            l_i = l_i * resc + w;
+            m_i = m_new;
+            __syncthreads();
+        }
+    }
+
+    if (S_split == 1) {
+        out_buf[h * D + d] = O_d / fmaxf(l_i, 1e-9f);
+        if (d == 0 && lse_buf) lse_buf[h] = m_i + logf(fmaxf(l_i, 1e-9f));
+    } else {
+        split_out[(h * S_split + split) * D + d] = O_d;   // unnormalised; merge kernel divides
+        if (d == 0) { split_m[h * S_split + split] = m_i; split_d[h * S_split + split] = l_i; }
+    }
+}
+
+// ── CUDA Attention Kernel (legacy anchor+dense stub — kept for A/B) ──────────
 __global__ void decode_attention_cuda_kernel(
     const float*    Q,
     const int8_t*   U_pool,
@@ -303,6 +500,8 @@ __global__ void merge_split_k_cuda_kernel(
 static float* d_split_out = nullptr;
 static float* d_split_m = nullptr;
 static float* d_split_d = nullptr;
+static int    d_split_units = 0;   // capacity in (n_q_heads * S_split) units
+static int    d_split_D     = 0;   // head_dim the split_out buffer was sized for
 
 void execute_cuda_attention(
     struct ggml_tensor * dst,
@@ -328,11 +527,19 @@ void execute_cuda_attention(
     int has_rope = data->has_rope ? 1 : 0;
     float rope_freq_base = data->rope_freq_base;
 
-    // Allocate persistent scratch memory on CUDA device if needed
-    if (d_split_out == nullptr) {
-        cudaMalloc(&d_split_out, 64 * 8 * 128 * sizeof(float));
-        cudaMalloc(&d_split_m, 64 * 8 * sizeof(float));
-        cudaMalloc(&d_split_d, 64 * 8 * sizeof(float));
+    // F6/F7/F9: size split-K scratch from the ACTUAL model dims. Was hardcoded
+    // 64*8*128 → out-of-bounds writes for models with >64 query heads or head_dim
+    // >128. S_split is at most 4 (see below); size for that max, and reallocate
+    // (freeing the old buffers) whenever the model dims grow.
+    const int S_SPLIT_MAX = 4;
+    int needed_units = n_q_heads * S_SPLIT_MAX;
+    if (d_split_out == nullptr || d_split_units < needed_units || d_split_D != D) {
+        if (d_split_out) { cudaFree(d_split_out); cudaFree(d_split_m); cudaFree(d_split_d); }
+        DIFFKV_CUDA_CHECK(cudaMalloc(&d_split_out, (size_t)needed_units * D * sizeof(float)));
+        DIFFKV_CUDA_CHECK(cudaMalloc(&d_split_m,   (size_t)needed_units * sizeof(float)));
+        DIFFKV_CUDA_CHECK(cudaMalloc(&d_split_d,   (size_t)needed_units * sizeof(float)));
+        d_split_units = needed_units;
+        d_split_D = D;
     }
 
     // Allocate and copy slot indices to CUDA scratch memory
@@ -341,56 +548,67 @@ void execute_cuda_attention(
     if (K > 0 && slot_indices != nullptr) {
         if (d_slot_indices_scratch == nullptr || scratch_capacity < K) {
             if (d_slot_indices_scratch) cudaFree(d_slot_indices_scratch);
-            cudaMalloc(&d_slot_indices_scratch, std::max(256, K) * sizeof(int32_t));
+            DIFFKV_CUDA_CHECK(cudaMalloc(&d_slot_indices_scratch, std::max(256, K) * sizeof(int32_t)));
             scratch_capacity = std::max(256, K);
         }
-        cudaMemcpy(d_slot_indices_scratch, slot_indices, K * sizeof(int32_t), cudaMemcpyHostToDevice);
+        DIFFKV_CUDA_CHECK(cudaMemcpy(d_slot_indices_scratch, slot_indices, K * sizeof(int32_t), cudaMemcpyHostToDevice));
     }
 
     int S_split = (K >= 64) ? 4 : 1;
 
-    dim3 block(64, 1, 1);
     dim3 grid(n_q_heads, S_split, 1);
-    size_t shared_size = (D + 64 + D) * sizeof(float);
-
-    // Retrieve GPU pointer mappings from GGML structures
     const float* d_Q = (const float*)Q->data;
     float* d_out = (float*)dst->data;
 
-    // Launch main attention kernel
-    decode_attention_cuda_kernel<<<grid, block, shared_size>>>(
-        d_Q,
-        (const int8_t*)data->kv_engine->get_U_pool()->data,
-        (const float*)data->kv_engine->get_U_scale_pool()->data,
-        (const half*)data->kv_engine->get_VK()->data,
-        (const half*)data->kv_engine->get_VV()->data,
-        (const half*)data->kv_engine->get_anchors_K()->data,
-        (const half*)data->kv_engine->get_anchors_V()->data,
-        (const int32_t*)data->kv_engine->get_seq_lens()->data,
-        d_slot_indices_scratch,
-        d_out,
-        nullptr, // LSE is filled in merge pass
-        n_q_heads,
-        n_kv_heads,
-        rank,
-        S_max,
-        K,
-        D,
-        scale,
-        (const half*)data->kv_engine->get_scales()->data,
-        has_rope,
-        rope_freq_base,
-        (const int32_t*)data->kv_engine->get_anchor_positions()->data,
-        dense_k,
-        dense_v,
-        dense_pos,
-        T_dense,
-        data->approximate_attn ? 1 : 0,
-        d_split_out,
-        d_split_m,
-        d_split_d,
-        S_split
-    );
+    // F10: full DiffKV kernel (anchor + low-rank deltas + exact residuals + dense),
+    // one thread per output dim. Legacy anchor+dense stub via DIFFKV_CUDA_ANCHOR_ONLY=1
+    // for A/B. Correctness fallback is the CPU path (DIFFKV_FORCE_CPU_ATTN=1).
+    const char* anchor_only_env = std::getenv("DIFFKV_CUDA_ANCHOR_ONLY");
+    if (!(anchor_only_env && std::string(anchor_only_env) == "1")) {
+        dim3 block(D, 1, 1);
+        size_t shared_size = ((size_t)D + rank + S_max + rank + 32) * sizeof(float);
+        diffkv_full_decode_kernel<<<grid, block, shared_size>>>(
+            d_Q,
+            (const int8_t*)data->kv_engine->get_U_pool()->data,
+            (const half*)data->kv_engine->get_VK()->data,
+            (const half*)data->kv_engine->get_VV()->data,
+            (const half*)data->kv_engine->get_anchors_K()->data,
+            (const half*)data->kv_engine->get_anchors_V()->data,
+            (const int32_t*)data->kv_engine->get_seq_lens()->data,
+            d_slot_indices_scratch, d_out, nullptr,
+            n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
+            (const half*)data->kv_engine->get_scales()->data,
+            (const half*)data->kv_engine->get_U_row_scale()->data,
+            (const int32_t*)data->kv_engine->get_res_K_pos()->data,
+            (const half*)data->kv_engine->get_res_K_val()->data,
+            (const int32_t*)data->kv_engine->get_res_V_pos()->data,
+            (const half*)data->kv_engine->get_res_V_val()->data,
+            NativeBlockPool::MAX_RESIDUAL,
+            dense_k, dense_v, dense_pos, T_dense,
+            d_split_out, d_split_m, d_split_d, S_split);
+        DIFFKV_CUDA_CHECK(cudaGetLastError());
+    } else {
+        dim3 block(64, 1, 1);
+        size_t shared_size = (D + 64 + D) * sizeof(float);
+        decode_attention_cuda_kernel<<<grid, block, shared_size>>>(
+            d_Q,
+            (const int8_t*)data->kv_engine->get_U_pool()->data,
+            (const float*)data->kv_engine->get_U_scale_pool()->data,
+            (const half*)data->kv_engine->get_VK()->data,
+            (const half*)data->kv_engine->get_VV()->data,
+            (const half*)data->kv_engine->get_anchors_K()->data,
+            (const half*)data->kv_engine->get_anchors_V()->data,
+            (const int32_t*)data->kv_engine->get_seq_lens()->data,
+            d_slot_indices_scratch, d_out, nullptr,
+            n_q_heads, n_kv_heads, rank, S_max, K, D, scale,
+            (const half*)data->kv_engine->get_scales()->data,
+            has_rope, rope_freq_base,
+            (const int32_t*)data->kv_engine->get_anchor_positions()->data,
+            dense_k, dense_v, dense_pos, T_dense,
+            data->approximate_attn ? 1 : 0,
+            d_split_out, d_split_m, d_split_d, S_split);
+        DIFFKV_CUDA_CHECK(cudaGetLastError());
+    }
 
     if (S_split > 1) {
         // Launch merge pass
@@ -405,6 +623,7 @@ void execute_cuda_attention(
             S_split,
             D
         );
+        DIFFKV_CUDA_CHECK(cudaGetLastError());
     }
 
     // Sync stream or device to ensure output is ready for host

@@ -14,8 +14,8 @@ $\dhead$ & head dimension ($128$) \\
 $N$ & sequence length (tokens) \\
 $\bs$ & block size ($256$) \\
 $S=\bs-1$ & compressible tokens per block ($255$) \\
-$\rank$ & SVD target rank ($16$; adaptive in $[4,\rank]$) \\
-$\maxres$ & exact residual budget per block ($64$) \\
+$\rank$ & SVD target rank ($32$, ``mid'' preset; adaptive in $[4,\rank]$) \\
+$\maxres$ & exact residual budget per block ($128$ default; $64$ memory preset) \\
 $\topk$ & top-$K$ blocks routed at decode ($16$) \\
 $\dwin$ & dense recency window ($512$; buffer $\dwin{+}\bs=768$) \\
 $M$ & compressed-pool capacity ($256$ blocks) \\

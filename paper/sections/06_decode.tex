@@ -1,114 +1,104 @@
-\section{Fused Sparse Decode Attention}
+\section{Fused Routed Decode Attention}
 \label{sec:decode}
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/f5_decode_attention.png}
-  \caption{The decode path. A cheap router ranks compressed blocks by an exact query--key score
-  over each block's anchor and its top residual keys, and keeps the top $\topk{=}16$. Those
-  blocks' queries are scored \emph{in low-rank coordinates} (never reconstructing dense keys);
-  their exact residual tokens are concatenated with the dense recency window and attended
-  exactly. The low-rank and exact branches are merged by a numerically stable log-sum-exp inside
-  one \texttt{mx.compile}-d Metal graph.}
+  \includegraphics[width=\linewidth]{figures/f5_decode_attention.pdf}
+  \caption{The fused decode kernel. A cheap exact router keeps the top-\topk{} blocks. Their
+  contribution is computed in the rank-\rank{} subspace---anchor score plus a projected-query dot
+  with $U$---without ever forming $\hat K$. In parallel, the selected blocks' exact residuals and
+  the dense recency window are attended directly. The two halves are combined by a flash-style
+  log-sum-exp merge, guarded so an empty compressed set contributes exactly zero weight.}
   \label{fig:decode}
 \end{figure}
 
-Decode must produce the attention output a dense cache would, reading only the stored factors and
-residuals of \S\ref{sec:compression}. \diffkv{} does this in three stages---route to the relevant
-blocks, score/aggregate the low-rank term, and attend the exact residual+recency tokens---then
-merges the low-rank and exact branches. Let $q\in\R^{H\times\dhead}$ be the current query (group
-query attention replicates the $\Hkv$ KV heads to the $H$ query heads) and $\sigma$ the attention
-scale.
+Decode is where compression must pay off without materializing the cache. The kernel
+(Figure~\ref{fig:decode}; \texttt{compute\_decode\_attention\_static}, compiled with
+\texttt{mx.compile}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an attention output
+over the compressed pool and the dense window as two halves merged in log-space.
 
-\subsection{Top-$K$ block routing}
-\label{sec:routing}
-At large context the block count $n=N/\bs$ grows, but only a few blocks are relevant to any query.
-A router scores every block cheaply and selects the top $\topk$; the expensive low-rank
-aggregation and residual attention then run for $\topk$ blocks, not $n$, so decode cost scales with
-$\topk$ rather than context. The default \emph{residual-key} router ranks block $b$ by the largest
-\emph{exact} query--key score over its anchor and its top-$R$ residual keys,
+\subsection{Routing: bound the work, not the context}
+Attending and reconstructing every block would make decode scale with context. Instead a router
+scores all blocks cheaply and keeps the top $\topk{=}16$. The default router is \emph{exact}: it
+scores $q$ against each block's anchor key and its most distinctive residual keys, and ranks blocks
+by the largest true dot product,
 \begin{equation}
-\rho_b = \max\!\Big(\sigma\langle q,\anchork^{(b)}\rangle,\ \max_{j\le R}\sigma\langle q, R_{K,j}^{(b)}\rangle\Big),
-\label{eq:router}
+  \rho_b \;=\; \max\!\Big(\, q\cdot \anchork^{(b)},\ \max_{j\le \maxres} q\cdot R^{(b)}_{K,j} \,\Big)\cdot \text{scale}.
+  \label{eq:router}
 \end{equation}
-taken over query heads. Unlike a low-rank or min/max \emph{summary} score---both of which average
-away the single outlier token a needle is---the residuals \emph{are} the block's distinctive
-tokens, so Eq.~\ref{eq:router} is a tight, exact relevance signal that reliably keeps a
-needle-bearing block in the top-$\topk$ even at hundreds of blocks. Its cost is $O(nR\dhead)$,
-linear in context with a small constant. A cheaper Quest-style~\cite{tang2024quest} key min/max
-upper bound is available for short contexts where looseness is harmless; we use the residual
-router by default and quantify the difference in \S\ref{sec:eval}. When $n\le\topk$ all blocks are
-kept and routing is skipped.
+Because the residuals \emph{are} the block's outlier tokens, scoring them gives a tight relevance
+signal that reliably keeps a needle's block in the top-\topk{} even at large block counts---where a
+min/max box bound (also available, and cheaper, in the style of Quest~\cite{tang2024quest}) becomes
+too loose. Routing costs $O(\text{nb}\cdot
+\maxres\cdot\dhead)$ per token and is the dominant decode cost at long context, so the number of
+residuals \emph{scored} by the router is decoupled from the number \emph{stored}
+(\S\ref{sec:impl}).
 
-\subsection{Scoring and aggregating the low-rank term}
-For each selected block the score of $q$ against a reconstructed key (Eq.~\ref{eq:recon}) factors
-through the basis, so we never form the key:
-\begin{align}
-\text{(anchor)}\quad & s^{\text{anc}}_b = \sigma\, \langle q,\ \anchork^{(b)}\rangle,\\
-\text{(project)}\quad & \tilde q_b = \sigma\, q\, V_K^{(b)} \in\R^{\rank},\\
-\text{(deltas)}\quad & \delta s_b = s_b\,\big(\tilde q_b\, U_b^{\!\top}\big) + s^{\text{anc}}_b \in\R^{S}.
-\end{align}
-The middle step projects the query into the block's $\rank$-dimensional key subspace once; the
-third recovers the per-token delta scores by a single $\rank{\times}S$ product, at cost
-$O(\Hkv\rank\dhead + \rank S)$ per block---\emph{independent of reconstructing the $S{\times}\dhead$
-keys}. Tokens beyond a block's valid length are masked to $-\infty$. The per-block scores
-$[s^{\text{anc}}_b,\delta s_{b,1},\dots]$ over the selected blocks form one softmax, giving weights
-$w$ and a log-sum-exp $\ell^{\text{sp}}$. The output is assembled from the same factors,
+\subsection{Sparse half: scoring in the low-rank subspace}
+For each selected block the kernel scores $q$ against every token \emph{without reconstructing
+$K$}. Using Eq.~\eqref{eq:recon}, the score of token $i$ decomposes into an anchor term and a
+delta term:
 \begin{equation}
-O^{\text{sp}} = \underbrace{\sum_b \big(w^{\text{anc}}_b + \textstyle\sum_i w^{d}_{b,i}\big)\,\anchorv^{(b)}}_{\text{anchor value mass}}
- \;+\; \underbrace{\sum_b s_b\,\big(w^{d}_b\, U_b\big)\,V_V^{(b)}}_{\text{delta value mass}},
+  q\cdot \hat K_i \;=\; \underbrace{q\cdot \anchork}_{\text{anchor score}}
+  \;+\; s\,\big(\underbrace{q\, V_K^{\!\top}}_{\tilde q\,\in\,\R^{\rank}}\big)\cdot U_i .
+  \label{eq:lowrankscore}
 \end{equation}
-contracting the delta weights through the same $U$ and then the value basis $V_V$---again never
-forming dense values.
+The query is projected once into the rank-\rank{} subspace ($\tilde q = q V_K^{\!\top}$), and all
+$\bs{-}1$ token scores in a block are then a single $\tilde q\,U^{\!\top}$ product. This is
+$O(\topk(\Hkv \rank\dhead + \rank \bs))$ per token---linear in the rank and independent of $\dhead$
+in the inner loop---rather than the $O(\topk\,\bs\,\dhead)$ of decompress-then-score. The value
+side is symmetric: softmax weights are contracted with $U$ and then with $V_V$, plus the anchor
+contribution, giving the sparse output $O_{\text{sp}}$ and its log-sum-exp $\lse_{\text{sp}}$.
+Residual positions are masked out of this pool so their exact copies (below) are their sole
+representation.
 
-\subsection{Exact residual + recency branch}
-The selected blocks' exact residual tokens $\{R_K^{(b)},R_V^{(b)}\}$ are gathered and
-\emph{concatenated with the dense recency window} into an augmented exact set $(\tilde K,\tilde V)$,
-over which standard attention is computed to give $O^{\text{dn}}$ and $\ell^{\text{dn}}$. This is
-the branch that preserves verbatim detail: a needle token, captured as a residual during
-compression (\S\ref{sec:residuals}), is attended here at full fp16 precision rather than through
-the lossy low-rank term. The augmented width is padded to a bucketed capacity (multiples of $256$)
-so the compiled kernel recompiles only when crossing a bucket, while the attention width tracks the
-real token count rather than the worst-case $\maxres\cdot M$.
+\subsection{Exact half: residuals and recency}
+The selected blocks' exact residual keys/values are concatenated with the dense recency window and
+attended directly in fp16---an ordinary masked attention producing $O_{\text{dn}}$ and
+$\lse_{\text{dn}}$. This half is where a buried passcode is recovered verbatim: its token, being a
+high-error outlier, was kept exact as a residual, so the query attends to the true key and copies
+the true value.
 
-\subsection{Stable two-branch merge}
-The low-rank and exact branches are combined by a flash-style log-sum-exp reduction,
+\subsection{Flash-style merge}
+The two halves are combined by the standard online-softmax identity used by
+FlashAttention~\cite{dao2022flashattention}, in a numerically guarded form:
 \begin{equation}
-m=\max(\ell^{\text{sp}},\ell^{\text{dn}}),\quad
-O = \frac{e^{\ell^{\text{sp}}-m}O^{\text{sp}} + e^{\ell^{\text{dn}}-m}O^{\text{dn}}}
-        {e^{\ell^{\text{sp}}-m} + e^{\ell^{\text{dn}}-m}}.
+  m = \max(\lse_{\text{sp}}, \lse_{\text{dn}}),\qquad
+  o = \frac{e^{\lse_{\text{sp}}-m}\,O_{\text{sp}} + e^{\lse_{\text{dn}}-m}\,O_{\text{dn}}}
+           {e^{\lse_{\text{sp}}-m} + e^{\lse_{\text{dn}}-m}} .
+  \label{eq:merge}
 \end{equation}
-This is the standard log-sum-exp combination of two softmax partitions, correct only if a
-\emph{fully masked} branch contributes exactly zero weight. When there are no compressed blocks yet
-the kernel takes a dense-only fast path; otherwise it sanitizes each branch's log-sum-exp and output
-to a finite, fully-down-weighted value before the merge, so an empty compressed set cannot poison the
-result with NaNs---a guard the source documents as a real bug fix and we retain verbatim.
+NaN/inf guards make an empty compressed set contribute exactly zero weight, so the kernel degrades
+to pure dense-window attention with no special case. We keep the score and combine arithmetic in
+the precision the kernel was validated at (fp16 products with fp32 log-sum-exp accumulation);
+recasting the merge to fp32 was measured to perturb long-context retrieval and is avoided
+(\S\ref{sec:impl}). An optional additive bias on the compressed half's log-sum-exp corrects a
+systematic under-weighting of the low-rank pool for diffuse multi-fact queries; it defaults to a
+no-op and does not affect the exact single-needle recall reported here.
+
+\subsection{Decompress-and-cache}
+Reconstructing the routed blocks \emph{once} and reusing them across several decode steps trades a
+little memory for throughput. When enabled (the default in the serving configuration used for our
+measurements), the kernel materializes the selected blocks' $K$/$V$ into a contiguous buffer via
+Eq.~\eqref{eq:recon}, overwrites the residual rows with their exact copies, and attends
+$[\text{cached blocks}\,\|\,\text{window}]$ with a single fused attention; it re-routes and
+re-materializes every $N$ tokens (or whenever the block set changes). This is bit-exact to the
+per-token kernel and reduces per-token work, at the cost of a buffer bounded by \topk{} (not by
+context). Its effect on throughput is part of the measured decode numbers in \S\ref{sec:eval}.
 
 \begin{algorithm}[t]
-\caption{\textsc{FusedDecodeAttention} (one token, one layer)}
+\caption{Fused routed decode attention for query $q$ (one layer)}
 \label{alg:decode}
 \begin{algorithmic}[1]
-\Require query $q$; pool $\{U,V_K,V_V,\anchork,\anchorv,s,R_K,R_V\}_{1:n}$; window $K^{\text{win}},V^{\text{win}}$; top-$K$ $\topk$
-\State ingest current token's $(K,V)$ into the window \Comment{attend to self}
-\If{$n>\topk$} $\mathcal{S}\gets$ top-$\topk$ blocks by $\rho_b$ (Eq.~\ref{eq:router}) \Comment{router}
-\Else\ $\mathcal{S}\gets\{1{:}n\}$ \EndIf
-\For{each block $b\in\mathcal{S}$}
-  \State $s^{\text{anc}}_b\gets\sigma\langle q,\anchork^{(b)}\rangle$;\ \ $\tilde q_b\gets\sigma\,qV_K^{(b)}$;\ \ $\delta s_b\gets s_b(\tilde q_b U_b^{\!\top})+s^{\text{anc}}_b$
+\Require query $q$; pool $\{U,V_K,V_V,\anchork,\anchorv,s,R_K,R_V\}_{b}$; dense window $K_d,V_d$
+\State $\rho_b \gets \max(q\cdot\anchork^{(b)}, \max_j q\cdot R^{(b)}_{K,j})\cdot\text{scale}$ \Comment{Eq.~\eqref{eq:router}}
+\State $\mathcal S \gets$ top-\topk{} blocks by $\rho_b$
+\For{$b\in\mathcal S$}                                  \Comment{scored in rank space, no $\hat K$}
+  \State $\tilde q \gets q\,V_K^{(b)\top}$;\quad scores$_i \gets q\cdot\anchork^{(b)} + s\,\tilde q\cdot U^{(b)}_i$
+  \State mask residual positions to $-\infty$
 \EndFor
-\State $w,\ell^{\text{sp}}\gets\softmax,\lse$ over $\mathcal{S}$;\ \ $O^{\text{sp}}\gets$ anchor + delta value mass
-\State $(\tilde K,\tilde V)\gets \textsc{Concat}(\{R_K^{(b)},R_V^{(b)}\}_{b\in\mathcal{S}},\,K^{\text{win}},V^{\text{win}})$
-\State $O^{\text{dn}},\ell^{\text{dn}}\gets \textsc{ExactAttn}(q,\tilde K,\tilde V)$
-\State sanitize NaN/$\infty$;\ \ \Return flash-merge$(O^{\text{sp}},\ell^{\text{sp}},O^{\text{dn}},\ell^{\text{dn}})$
+\State $O_{\text{sp}},\lse_{\text{sp}} \gets$ softmax/combine over pooled block scores with $V$ side of Eq.~\eqref{eq:recon}
+\State $O_{\text{dn}},\lse_{\text{dn}} \gets$ exact attention over $[\,R_{K,\mathcal S}\,\|\,K_d\,],[\,R_{V,\mathcal S}\,\|\,V_d\,]$
+\State \Return flash-merge$(O_{\text{sp}},\lse_{\text{sp}},O_{\text{dn}},\lse_{\text{dn}})$ \Comment{Eq.~\eqref{eq:merge}}
 \end{algorithmic}
 \end{algorithm}
-
-\subsection{Compute profile}
-Per token the kernel does $O(nR\dhead)$ for routing, $O\!\big(\topk(\Hkv\rank\dhead+\rank\bs)\big)$
-for the low-rank term over the selected blocks, and $O(\Hkv(\topk\maxres+\dwin)\dhead)$ for the
-exact branch. With $\topk$ fixed, the low-rank and exact work are \emph{context-independent}; only
-the router is linear in context, with a small $R\dhead$ constant. The result is a decode cost that
-is nearly flat in context (\S\ref{sec:eval})---the asymptotically attractive property---but whose
-absolute throughput is set by the many small tensor ops the kernel issues inside one compiled
-graph. On the test hardware these do not yet match MLX's native fused attention over a contiguous
-cache; \S\ref{sec:eval} quantifies the gap and \S\ref{sec:limitations} discusses the hand-written
-fused kernel (a custom Metal op, or CUDA/Triton) that is the natural way to close it.

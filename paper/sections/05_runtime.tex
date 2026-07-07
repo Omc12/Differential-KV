@@ -3,92 +3,91 @@
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/f3_memory_layout.png}
-  \caption{Per-session KV store (one of $28$ layers). A fixed compressed pool of $M{=}256$
-  blocks (pre-allocated, zero-filled) plus a sliding dense recency window of capacity
-  $\dwin{+}\bs{=}768$ tokens. The pool's footprint is independent of context length; the
-  window is bounded. Overflowing the window compresses its oldest block into the pool.}
-  \label{fig:layout}
+  \includegraphics[width=0.96\linewidth]{figures/f6_memory_3d.pdf}
+  \caption{The per-session KV store in three dimensions. The store is replicated across all $28$
+  layers (left). Within a layer, the compressed pool is a bounded array of $M{=}256$ block slots;
+  each occupied slot holds a small low-rank core and---at the default budget---a much larger
+  block of exact residuals (residuals dominate the per-block bytes, cf.\ Table~\ref{tab:budget}).
+  The dense recency window (front) holds the newest $768$ tokens uncompressed; when it overflows,
+  its oldest block is flushed and compressed into a pool slot.}
+  \label{fig:mem3d}
 \end{figure}
 
-\subsection{Per-session state}
-For each session and layer the manager holds (Fig.~\ref{fig:layout}):
-a dense window $K^{\text{win}},V^{\text{win}}\in\R^{\Hkv\times 768\times\dhead}$ (fp16) with a
-fill counter; and a compressed pool of $M{=}256$ pre-allocated slots, each holding the low-rank
-factors $\{U,V_K,V_V,\anchork,\anchorv,s\}$, the $\maxres{=}64$ exact residual KV pairs
-$\{R_K,R_V\}$, and the router's key min/max $\{k^{\min},k^{\max}\}$ (\S\ref{sec:compression}).
-Pre-allocation matters: the pool occupies its full footprint from the start, so memory does not
-fragment or spike as blocks are added, and the store's size is a \emph{constant} of the
-configuration---$M\bs{=}65{,}536$ compressed tokens plus a $768$-token window, $\approx\!0.68$\,GB
-across all $28$ layers---not a function of $N$. This is exactly why the runtime can address a
-$64$k context: $65{,}536+768 \ge 65{,}615$, the largest prompt we test.
+The store's contents are defined by \S\ref{sec:compression}; this section defines its
+\emph{layout} and \emph{lifecycle}---what makes the runtime's memory bounded and its long-context
+prefill affordable.
 
-\subsection{Chunked, exact prefill with streaming compression}
-Prefill is processed in chunks of $512$ tokens (Alg.~\ref{alg:prefill}). Each chunk is a
-forward pass through the patched model using a \emph{native} MLX cache, so a chunk attends
-over all prior tokens and the hidden states are numerically exact---\diffkv{} introduces no
-approximation during prefill. After the exact attention, the chunk's rotated keys and values
-are captured token-by-token into the dense window; whenever the window would overflow its
-$768$-token capacity, the oldest $256$-token block is compressed out
-(Alg.~\ref{alg:compress}) and the remaining tokens slide forward. Compression is thus
-\emph{streamed} during prefill rather than deferred, bounding the window throughout.
+\subsection{Session state}
+Each session holds, per layer (Figure~\ref{fig:mem3d}): a dense recency window---fixed-capacity
+fp16 buffers $[\Hkv, \dwin{+}\bs, \dhead]$ for the newest $768$ tokens---and a compressed pool of
+$M{=}256$ block slots, pre-allocated for $U$, $V_K$, $V_V$, anchors, residuals $R_K,R_V$, key
+min/max, and per-block scalars. Because the pool is pre-allocated at its maximum size, the store's
+footprint is \emph{bounded and context-independent} up to the pool's capacity of
+$256\times256=65{,}536$ compressed tokens; adding context fills empty slots rather than growing the
+allocation. This is the structural source of the bounded-memory behavior in \S\ref{sec:eval}.
 
-\begin{algorithm}[t]
-\caption{Prefill (per chunk) and the prefill$\to$decode boundary}
-\label{alg:prefill}
-\begin{algorithmic}[1]
-\For{each $512$-token chunk}
-  \State exact SDPA over native cache (attends all prior tokens)
-  \For{each token $t$ in chunk, each layer $\ell$}
-    \State append $(K_t,V_t)$ to dense window of $\ell$
-    \If{window full} \textsc{CompressBlock} oldest $256$; slide window \EndIf
-  \EndFor
-\EndFor
-\State \textbf{boundary:} \texttt{mx.eval}; \texttt{mx.clear\_cache}; \texttt{gc}
-\State resolve decode policy (adaptive: compressed iff $N\!\ge\!16$k)
-\If{compressed} \textbf{drop native prefill cache} \Comment{decode reads the DiffKV store only} \EndIf
-\end{algorithmic}
-\end{algorithm}
+\subsection{Chunked, streaming prefill}
+Prefill consumes the prompt in fixed chunks (default $512$ tokens). Each chunk runs causal
+attention over the native MLX cache to produce correct hidden states, and its $K$/$V$ are captured
+into the store. After each chunk, \textsc{CompressDeferred} virtually concatenates the surviving
+dense tail with the newly captured tokens and compresses every full block that now clears the
+recency window, in a single SVD batched across all layers and blocks (Algorithm~\ref{alg:compress}
+applied in bulk). Streaming compression means peak uncompressed KV during prefill is bounded by
+roughly one window plus one chunk, not the whole prompt---the difference between fitting a $32$k+
+prefill in $8$\,GB and not.
 
-\subsection{The prefill$\to$decode boundary and the adaptive decode policy}
-\label{sec:autopolicy}
-At the first decode step the runtime flushes pending lazy work and calls
-\texttt{mx.clear\_cache()} and \texttt{gc.collect()} to return the peak GQA-expanded prefill
-activations to the OS. It then resolves, \emph{once}, which decode path to use, and stores the
-decision for the whole generation. The default policy is \emph{adaptive}: below a context
-threshold ($16$k tokens) it keeps the native full-KV cache and decodes exactly---faster, and
-memory-safe because the cache is still small---and at or above the threshold it
-\emph{drops the native prefill cache entirely} and serves decode from the compressed pool plus
-the recency window. The policy reflects the trade-off this paper quantifies: the compressed
-kernel's value is a bounded decode-time footprint at long context, exactly the regime where
-retaining a full cache through a long generation risks exhausting memory; at short context the
-fused full-KV path is both faster and safe, so decode never regresses for ordinary requests. The
-threshold and a force-on/force-off override are exposed as environment variables, and our
-evaluation reports both forced modes as well as this adaptive default. Dropping the cache is what
-makes decode-time memory reflect the compressed store rather than a retained full-context cache;
-it is also why, as \S\ref{sec:eval} shows, the global allocator peak (set during prefill) and the
-steady-state decode footprint differ.
+\paragraph{Block-sparse prefill.} By default, once a chunk is far enough into the prompt that
+there is prunable history, its attention is computed over a \emph{sparse} key set rather than the
+full past: leading attention-sink block(s), a set of top-$K$ routed history blocks (selected by a
+Quest-style min/max bound on the raw block keys), the recency window, and the current chunk itself,
+combined under one masked attention call. This is training-free block-sparse attention
+(attention sinks plus block retrieval) on a frozen model; it reduces prefill attention from
+$O(L^2)$ toward $O(L\cdot K)$ and is the mechanism behind the prefill crossover in
+\S\ref{sec:eval} (E3). It changes compute, not the stored state: every token's exact $K$/$V$ is
+still captured for later compression, so retrieval accuracy is unaffected.
 
-\subsection{Decode-step bookkeeping}
-Each decode step ingests the new token's rotated key and value into the dense window
-\emph{before} attention is computed (so the query can attend to itself), then compresses any
-block that pushes the window past $\dwin{+}\bs$. The fused attention
-(\S\ref{sec:decode}) then runs over the pool and the window. Figure~\ref{fig:lifecycle}
-summarizes the full lifecycle.
+\subsection{The prefill$\to$decode boundary}
+The transition from prefill to decode is where memory is reclaimed (Figure~\ref{fig:life}). At the
+first decode step the runtime resolves the decode policy once, flushes pending work with
+\texttt{mx.eval}, and calls \texttt{mx.clear\_cache} to return the peak GQA-expanded prefill
+activations to the shared pool. When decode will use the compressed path, it additionally
+\emph{drops the native prefill KV cache} entirely: decode runs solely on the compressed store plus
+the dense window, so decode-time memory reflects the \diffkv{} footprint and not a retained
+full-context cache.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/f4_lifecycle.png}
-  \caption{Cache lifecycle. Chunked exact prefill streams compression into the pool; the
-  prefill$\to$decode boundary releases the prefill activations and drops the native cache;
-  decode then ingests, compresses on overflow, and attends from the bounded store.}
-  \label{fig:lifecycle}
+  \includegraphics[width=\linewidth]{figures/f4_lifecycle.pdf}
+  \caption{Cache lifecycle. Prefill loops over chunks (attend, capture, flush-and-compress the
+  oldest block on overflow). At the prefill$\to$decode boundary the runtime evaluates pending
+  work, releases peak activations, and---on the compressed path---drops the native prefill cache.
+  Decode then loops per token: ingest the new token into the window, flush an eligible block, and
+  run the fused routed attention.}
+  \label{fig:life}
 \end{figure}
 
-\subsection{Session lifecycle}
-Beyond a single generation, the manager supports \texttt{init}/\texttt{clear},
-\texttt{clone} (copy-on-write of the store and the prompt cache), \texttt{snapshot}/
-\texttt{restore} (checkpointing), and \texttt{rollback} to a target length (discarding whole
-compressed blocks and trimming the window). These give the serving layer multi-turn and
-speculative-branching support; we list them for completeness as they define the store's
-mutation API but do not evaluate them here.
+\subsection{Decode ingestion and the sliding window}
+Each decode step appends the new token's $K$/$V$ to the dense window and, if the window has grown
+past $\dwin{+}\bs$, flushes and compresses its oldest block into the pool---the same streaming
+rule as prefill. The current token is always in the exact window, so a token attends to itself and
+its immediate neighbors exactly; only older context is served from the compressed pool. The
+attention itself is the subject of \S\ref{sec:decode}.
+
+\begin{algorithm}[t]
+\caption{Session lifecycle (one request)}
+\label{alg:runtime}
+\begin{algorithmic}[1]
+\State \textbf{init} session: pre-allocate dense window + pool of $M$ block slots (per layer)
+\For{each prefill chunk $c$}                       \Comment{$L{>}1$}
+  \State attend($c$) over native cache (block-sparse if enough history); capture $K,V$
+  \State \Call{CompressDeferred}{}: compress full blocks clearing the window (batched SVD)
+\EndFor
+\State \textbf{boundary}: resolve decode policy; \texttt{mx.eval}; \texttt{mx.clear\_cache}
+\If{compressed decode} drop native prefill KV cache \EndIf
+\For{each decode step}                              \Comment{$L{=}1$}
+  \State ingest new token $K,V$ into dense window; flush+compress oldest block if overflow
+  \State $o \gets$ \Call{FusedRoutedAttention}{store, $q$}   \Comment{Alg.~\ref{alg:decode}}
+  \State sample next token from logits
+\EndFor
+\end{algorithmic}
+\end{algorithm}

@@ -1,22 +1,16 @@
-\begin{tabular}{llrrrrrrl}
+\begin{tabular}{llrrrrl}
 \toprule
-Config & Ctx & Prefill (s) & Decode tok/s & MLX peak (GB) & Dec.\ peak (GB) & Store (GB) & Full KV (GB) & Needle \\
+Engine & Ctx & Prompt tok & Prefill (s) & Decode (tok/s) & MLX peak (GB) & Needle \\
 \midrule
-compressed & 4k & 9.4 & 16.9 & 2.15 & 1.82 & 0.054 & 0.117 & \cmark \\
-compressed & 8k & 20.7 & 10.8 & 2.27 & 1.79 & 0.096 & 0.235 & \cmark \\
-compressed & 16k & 47.1 & 9.3 & 2.51 & 2.03 & 0.181 & 0.473 & \cmark \\
-compressed & 32k & 118.9 & 6.8 & 2.98 & 2.50 & 0.346 & 0.942 & \cmark \\
-compressed & 64k & 432.5 & 3.9 & 3.91 & 3.44 & 0.676 & 1.881 & \cmark \\
+active & 4k & 4096 & 6.6 & 19.9 & 1.74 & \cmark \\
+active & 8k & 8192 & 13.6 & 18.4 & 1.89 & \cmark \\
+active & 16k & 16490 & 28.2 & 18.7 & 2.36 & \cmark \\
+active & 32k & 32865 & 58.5 & 17.0 & 3.12 & \cmark \\
+active & 64k & 65615 & 928.0 & 8.6 & 4.63 & \cmark \\
 \midrule
-exact & 4k & 9.6 & 38.0 & 2.15 & 1.75 & 0.054 & 0.117 & \cmark \\
-exact & 8k & 19.7 & 35.1 & 2.27 & 1.94 & 0.096 & 0.235 & \cmark \\
-exact & 16k & 45.9 & 31.5 & 2.51 & 2.04 & 0.181 & 0.473 & \cmark \\
-exact & 32k & 116.8 & 21.6 & 2.98 & 2.51 & 0.346 & 0.942 & \cmark \\
-exact & 64k & 449.6 & 8.6 & 3.91 & 3.45 & 0.676 & 1.881 & \cmark \\
-\midrule
-dense & 4k & 5.1 & 66.9 & 1.68 & -- & -- & -- & \cmark \\
-dense & 8k & 11.1 & 61.7 & 1.79 & -- & -- & -- & \cmark \\
-dense & 16k & 27.4 & 47.3 & 2.03 & -- & -- & -- & \cmark \\
-dense & 32k & 92.3 & 30.1 & 2.43 & -- & -- & -- & \cmark \\
+dense & 4k & 4096 & 5.1 & 65.7 & 1.68 & \cmark \\
+dense & 8k & 8192 & 11.8 & 55.3 & 1.79 & \cmark \\
+dense & 16k & 16490 & 27.8 & 47.0 & 2.03 & \cmark \\
+dense & 32k & 32865 & 77.9 & 35.7 & 2.45 & \cmark \\
 \bottomrule
 \end{tabular}

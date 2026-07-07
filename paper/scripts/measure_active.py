@@ -105,8 +105,8 @@ def run_cell(ctx, gen, prompt_text):
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
 
     _mx_reset_peak(mx)
-    cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
-           "micro_block_size": 256, "preset": "mid"}
+    cfg = {"quantization": "int4", "rank": 32, "block_size": 256,
+           "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
     w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
     w.ensure_loaded()
     tok, mgr, model = w.tokenizer, w.manager, w.model

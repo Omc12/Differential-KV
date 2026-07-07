@@ -1,11 +1,11 @@
-\begin{tabular}{rccrrr}
+\begin{tabular}{rccrr}
 \toprule
-$R$ & Needle & Decode tok/s & Store (GB) & Ratio vs dense & Per-block (KiB) \\
+$R$ & Needle & Decode (tok/s) & Store (GB) & Ratio vs dense \\
 \midrule
-0 & \xmark & 17.1 & 0.067 & 7.09$\times$ & 26.0 \\
-8 & \xmark & 14.9 & 0.081 & 5.85$\times$ & 34.0 \\
-16 & \xmark & 13.8 & 0.095 & 4.97$\times$ & 42.0 \\
-32 & \cmark & 10.4 & 0.124 & 3.83$\times$ & 58.0 \\
-64 & \cmark & 10.2 & 0.180 & 2.62$\times$ & 90.0 \\
+8 & \cmark & 21.4 & 0.124 & $3.80\times$ \\
+16 & \cmark & 21.1 & 0.139 & $3.41\times$ \\
+32 & \cmark & 20.5 & 0.167 & $2.83\times$ \\
+64 & \cmark & 21.5 & 0.224 & $2.11\times$ \\
+128 & \cmark & 19.6 & 0.338 & $1.40\times$ \\
 \bottomrule
 \end{tabular}

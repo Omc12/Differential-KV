@@ -1,19 +1,30 @@
 \section{Full Measured Results}
 \label{app:tables}
 
-Table~\ref{tab:detail} lists every measured cell from the instrumented sweep
-(\texttt{paper/scripts/measure\_active.py}) and the dense baseline
-(\texttt{benchmarks/run\_bench.py}). \emph{Decode-phase peak} resets the MLX peak counter at
-the prefill$\to$decode boundary to isolate steady-state decode memory; \emph{Store} is the
-analytic occupied KV-state footprint of the compressed pool plus recency window; \emph{Full KV}
-is the analytic dense-cache size for the same sequence length (all $28$ layers, fp16). Empty
-cells are measurements that do not apply to that configuration; failed cells (e.g.\ a dense
-out-of-memory at $64$k) are stated in the text, never given an invented value.
+Table~\ref{tab:detail} lists every cell of the fresh primary sweep
+(\texttt{paper/scripts/measure\_sweep.sh} and \texttt{measure\_tail.sh}) for both engines, exactly
+as recorded by the isolated workers. \emph{MLX peak} is the allocator peak
+(\texttt{get\_peak\_memory}) inside the worker process; \emph{Prompt tok} is the tokenizer count
+for the built NIAH prompt at that target. Empty cells are measurements that do not apply; failed
+cells would be stated as failures in the text, never given an invented value.
 
 \begin{table}[h]
 \centering
-\caption{Per-run detail: compressed decode (primary), exact decode (ablation), dense baseline.}
+\caption{Per-run detail for the primary sweep: \diffkv{} (active) and the dense baseline on
+identical int4 weights. All values measured.}
 \label{tab:detail}
 \small
 \input{tables/t5_detail}
+\end{table}
+
+\noindent The configuration table (Table~\ref{tab:config}) records the model and runtime
+parameters as read from the code, and Table~\ref{tab:budget} in \S\ref{sec:compression} derives the
+per-block byte budget from those same dimensions.
+
+\begin{table}[h]
+\centering
+\caption{Model and \diffkv{} configuration, as measured/loaded by the runtime.}
+\label{tab:config}
+\small
+\input{tables/t1_config}
 \end{table}

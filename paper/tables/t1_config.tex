@@ -1,0 +1,18 @@
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Model & Qwen2.5-1.5B-Instruct (int4) \\
+Transformer layers $L$ & 28 \\
+Query / KV heads (GQA) & 12 / 2 \\
+Head dimension $d$ & 128 \\
+Block size $B$ & 256 tokens \\
+SVD rank $r$ & 32 (adaptive $\le r$, 99.9\% energy) \\
+Recency window $W$ (+block) & 512 (+256 = 768 exact) \\
+Residual budget $R$ & 128 (default) / 64 (memory preset) \\
+Block pool $M$ & 256 blocks ($\le$ 65\,536 tokens) \\
+Top-$K$ routed blocks & 16 (residual-key router) \\
+Store dtype & fp16 \\
+SVD seed & 1234 (deterministic) \\
+\bottomrule
+\end{tabular}

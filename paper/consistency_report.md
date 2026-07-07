@@ -1,69 +1,67 @@
-# Consistency Report — DiffKV Active-Runtime Paper
+# Consistency Report — DiffKV Active-Runtime Paper (clean rebuild 2026-07-07)
 
-Verifies every figure, table, equation, and claim against the implementation and the measured
-outputs. Rebuilt 2026-06-30 (corrected-data rebuild; supersedes the 2026-06-28 report, which
-certified pre-fix numbers — compressed needle ✗, 10.25×, unseeded SVD — now all corrected).
-"Code" = `ACTIVE_RUNTIME/serving/mlx_diffkv_wrapper.py` unless noted.
+Verifies every figure, table, equation, and claim against the implementation and the **clean**
+measured outputs. Supersedes the 2026-06-30 report (which certified rank-16, decode-cache-off,
+partly memory-contended data). "Code" = `ACTIVE_RUNTIME/serving/mlx_diffkv_wrapper.py` unless noted.
+
+## 0. What changed in this rebuild (and why)
+- **Config corrected to what the active CLI actually runs**: preset `mid`, `serving_mode=balanced`,
+  **rank 32** (the `mid` default — only `low` drops to 16; the earlier rank-16 runs were wrong),
+  int4, `DIFFKV_COMPRESSED_DECODE=1` (force the full DiffKV sparse path at every context),
+  `DIFFKV_DECODE_CACHE=1`, `DIFFKV_SPARSE_PREFILL=1`, `DIFFKV_SPARSE_BIAS=auto`,
+  `DIFFKV_MAX_RESIDUAL=128`, seed 1234.
+- **Contamination removed**: the primary sweep is now measured one isolated process at a time with
+  nothing else running (no figure rendering / compiles concurrent). The earlier "dense-32k prefill
+  ≈ 200 s" and depressed dense-tps figures were an artifact of concurrent CPU load; the clean run
+  gives stable, reproducible numbers (dense-32k prefill ≈ 78 s, close to the independent 06-30 clean
+  value of 73 s).
+- **Figures are deferred**: per the project owner, all data graphs and diagrams will be regenerated
+  in a final presentation-quality pass (shades of blue, black text). The current `paper/figures/`
+  PNG/PDFs still carry rank-16 shapes/KiB in a few captions/labels and MUST be regenerated at rank
+  32 before release. The prose and tables in this build are already rank-32-correct (they read the
+  code dims / measured JSON via macros).
 
 ## 1. Design claims ↔ code (verified by reading the source)
 | Paper claim | Code location | Status |
 |---|---|---|
-| Block = anchor (token 0) + delta | `_compress_block` | ✓ |
-| Joint K/V row-normalized randomized truncated SVD, rank 16, adaptive [4,16], seeded | `compress_mlx_block` (`DIFFKV_SVD_SEED=1234`, 99.9% energy) | ✓ |
-| Exact residuals = top-64 highest-recon-error tokens, highest-error-first | `_compress_block` (`np.argsort(errors)[-max_res:][::-1]`) | ✓ |
-| `max_residual` default 64; key min/max stored for router | `__init__`, `_compress_block` (`comp_min_k/max_k`) | ✓ |
-| Decode top-K routing, K=16, residual-key router default | `execute_decode_attention`, `_block_relevance_residual` | ✓ |
-| Query scored in low-rank space (no dense-key reconstruction) | `compute_decode_attention_static` | ✓ |
-| Residuals concatenated with recency window → exact branch | `execute_decode_attention` (`augmented_k=concat[res,dense]`) | ✓ |
-| Flash-style LSE merge, NaN-guarded | `compute_decode_attention_static` | ✓ |
-| Adaptive decode policy `auto`, threshold 16384, decided once at boundary | `_resolve_compressed_decode`, `MLXQwenModel.__call__` | ✓ |
-| Native prefill cache dropped at boundary when compressed | `MLXQwenModel.__call__` (`_prefill_caches.pop`) | ✓ |
+| Block = anchor (token 0) + delta | `compress_deferred_prefill_blocks` | ✓ |
+| Joint K/V, V-rescaled to K RMS, row-normalized randomized truncated SVD, seeded, adaptive rank | same (`DIFFKV_V_SCALE`, `compress_mlx_block_batched`, seed 1234, 99.9% energy) | ✓ |
+| Exact residuals = top-`max_residual` highest joint-error tokens | `compress_deferred_prefill_blocks` (`argsort(errors)[-max_res:]`) | ✓ |
+| `max_residual` default 128; key min/max stored for router | `__init__`, scatter loop | ✓ |
+| Decode top-K routing K=16, residual-key router default | `execute_decode_attention`, `_block_relevance_residual` | ✓ |
+| Query scored in low-rank space (no dense-K reconstruction) | `compute_decode_attention_static` | ✓ |
+| Residuals + recency = exact branch; flash-style LSE merge, NaN-guarded | same | ✓ |
+| Decompress-and-cache decode (bit-exact, re-route every N) | `_execute_decode_cache` (`DIFFKV_DECODE_CACHE`) | ✓ |
+| Block-sparse prefill (sink + routed + window + self) | `_sparse_prefill_attend` (`DIFFKV_SPARSE_PREFILL`) | ✓ |
+| Prefill→decode native-cache release | `MLXQwenModel.__call__` (`_prefill_caches.pop`, `mx.clear_cache`) | ✓ |
 | Bounded pre-allocated pool, M=256 blocks | `_create_empty_session` | ✓ |
-| SRL/factual store gated off in benchmarks | `get_srl_state`→None | ✓ |
+| rank 32 under `mid` preset | `cli.py` (`args.rank` default 32; only `low`→16) | ✓ |
+| SRL/factual store gated off | `get_srl_state`→None, `DIFFKV_FACTUAL_STORE=0` | ✓ |
 
-## 2. Storage budget (Table 2 / §4) ↔ verified arithmetic
-Per 256-token block, fp16 (H_kv=2, d=128, r=16, R=64), verified against the live `MLXKVBlockManager`:
-U 8,160 + V_K/V_V 16,384 + anchors 1,024 + min/max 1,024 + scalars 8 = **26,600 B** (low-rank);
-residuals 64·1024 = **65,536 B**; **total 92,136 B** vs dense **262,144 B** → **2.845×**;
-pool 28·(256·92,136 + 768·1,024) ≈ **0.682 GB**. The earlier 10.25× / 25,576 B omitted
-residuals+min/max and is explicitly corrected in §4/§8/§9/§11.
+## 2. Data provenance (single clean dataset)
+- Primary: `benchmarks/results/clean_{active,dense}_{4096..65536}.json` — one back-to-back sweep,
+  isolated per cell, Apple M3 8.6 GB, Qwen2.5-1.5B int4, greedy gen=128, deterministic NIAH prompt.
+- Ablations: `paper/generated/active_modes_fresh.json` (compressed vs exact decode, 4k–32k) and
+  `paper/generated/residual_sweep_fresh.json` (R = 0/8/16/32/64/128 @16k).
+- Body-text numbers are LaTeX macros emitted by `make_facts.py` from these files, so prose cannot
+  drift from the data.
 
-## 3. Figures ↔ generators ↔ data
-- F1–F5 (`make_diagrams.py`): show residuals, min/max, top-K routing, residual+recency exact
-  branch, adaptive boundary. Architecture only (no measured numbers). ✓
-- G1 footprint, G2 allocator peak (global ≈ dense + decode-phase line), G3 decode tps, G4 prefill,
-  G5 combined, G6 residual trade-off — all from the clean JSON; missing/failed cells not invented. ✓
-- CUDA: G3/G5 + T3 reserve space; no CUDA number plotted/stated (no NVIDIA GPU on host). ✓
+## 3. Tables ↔ generators (regenerate after data lands)
+T1 config (code dims) · T2 per-block budget (code dims, rank 32; R=128 & R=64) · T3 main results
+(clean primary) · T4 residual sweep (measured) · T5 per-run detail (clean primary) · T6 decode-mode
+ablation (measured). All emitted by `make_tables.py`; no hand-typed numbers.
 
-## 4. Tables ↔ generators
-T2 `t_config` (arithmetic §2) · T3 `t_main` (v2 compressed primary + exact ablation + dense) ·
-T4 `t_residual` (`residual_sweep.json`) · T5 `t_detail`. No hand-typed numbers. ✓
+## 4. Honesty checks
+- Decode-throughput cost stated plainly (DiffKV decode is slower than a dense cache that fits).
+- The "dense OOMs at 32k" claim from older drafts is RETRACTED — dense completes to 64k here.
+- Compression ratio reported at the measured config (rank 32): lower than the old rank-16 figure;
+  both residual presets shown.
+- Memory: analytic KV state is bounded and smaller; measured allocator peak is a wash / slightly
+  higher for DiffKV at this model size — stated explicitly.
+- CUDA/Triton = future-work placeholder; no CUDA number plotted or stated.
 
-## 5. Equations ↔ code
-Recon `K̂=a_k+s(U·V_K)` ↔ kernel delta path ✓ · router `ρ_b=max(q·a_k, max_j q·R_K,j)σ` ↔
-`_block_relevance_residual` ✓ · compute profile (router O(nRd) + low-rank O(K(H_kv r d+rB)) +
-exact O(H_kv(KR+W)d)) ↔ kernel ✓.
-
-## 6. Data provenance (single, self-consistent, clean re-measurement)
-`active_modes_sweep_v2.json` (ablation 4k–32k) · `active_modes_sweep_64k.json` (reach) ·
-`residual_sweep.json` ({0,8,16,32,64}@16k) · `PAPER_dense_sweep.json` (dense 4k–32k). Apple M3
-8.6 GB, same NIAH prompt per ctx, gen=128 greedy, seeded SVD. Measured clean — earlier
-swap-thrash-contended cells were detected (exact-4k tps=1.0) and re-run with no concurrent CPU load.
-
-## 7. Honesty checks
-- No fabricated/averaged numbers; failed/absent cells (dense beyond budget) stated, not invented.
-- Compressed (primary) vs exact (ablation) vs dense (baseline) always distinguished.
-- Compression ratio reported as 2.85× (residuals counted); the 10× figure is shown only as the
-  wrong low-rank-only accounting it corrects.
-- Needle recall reported as solved by residuals (E5) with the budget/recall trade-off characterized (E6).
-- Memory headline = global mx_peak + decode-phase peak + analytic KV state; process-tree demoted.
-- CUDA/Triton = labelled future-work placeholder; no estimated numbers.
-
-## 8. LaTeX integrity
-- Macros `\maxres`,`\topk` added to preamble; `tang2024quest` added to bib. All `\input` targets
-  exist; `\ref`/`\eqref` resolve; environments balanced.
-- Figures F1–F5 + G1–G6 (PNG+PDF) and tables T2/T3/T4/T5 regenerated from the clean JSON.
-- Not compiled here (no system LaTeX); compile on Overleaf/arXiv (see TODO.md).
-
-## 9. Data cross-check (final measured values)
-_To be appended verbatim from the regenerated tables once the clean batch + `make_tables.py` complete._
+## 5. TODO before release
+- [ ] Regenerate ALL figures at rank 32 in the final visual pass (blue shades, black text).
+- [ ] Re-run `make_facts.py` + `make_tables.py` after the clean ablation/64k cells finish.
+- [ ] Compile `main.tex` and `conference.tex` with tectonic; fix any float/overfull warnings.
+- [ ] Verify each `\ref`/`\eqref` resolves and each `\cite` key exists in `references.bib`.

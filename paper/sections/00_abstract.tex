@@ -1,39 +1,29 @@
 \begin{abstract}
 \noindent
-The key--value (KV) cache is the dominant memory cost of long-context transformer inference: it
-grows linearly with sequence length and, on a single commodity device, becomes the binding
-constraint long before compute does. We present \diffkv{}, a KV-cache inference runtime that
-attacks this cost structurally rather than by eviction or quantization alone. \diffkv{} partitions
-the cache into fixed-size blocks and represents each block three ways at once: an \emph{anchor}
-token, a low-rank \emph{differential} term (a rank-$16$ joint randomized SVD of the per-token
-deviations from the anchor, shared across keys and values), and a small set of \emph{exact residual
-tokens}---the handful of tokens whose low-rank reconstruction error is largest, kept verbatim in
-fp16. The low-rank term captures a block's shared structure cheaply; the residuals restore the
-low-energy outliers (a rare entity, a buried passcode) that pure low-rank compression discards.
-A sliding dense \emph{recency window} keeps the most recent tokens uncompressed, and the whole
-store is a pre-allocated, fixed-size pool whose footprint is \emph{bounded and context-independent}
-($\approx\!0.68$\,GB across $28$ layers), while a dense full-KV cache grows without bound. At
-decode, a single fused, compiled kernel routes the query to the most relevant blocks by an
-\emph{exact} residual-key score, evaluates those blocks' attention \emph{directly in low-rank
-space}---never reconstructing dense keys or values---attends their exact residuals together with
-the recency window, and merges the two branches with a numerically stable log-sum-exp. An adaptive
-policy uses exact full-KV decode at short context and switches to the compressed kernel only once
-the cache is large enough to be the binding cost.
+The key--value (KV) cache is the memory wall of long-context transformer inference: its
+size grows linearly with sequence length, and on commodity hardware it, not the model
+weights, is what first exhausts memory. We present \diffkv{}, a KV-cache compression runtime
+that keeps recent tokens exact and compresses older ones. Each block of \bs${=}256$ tokens is
+reduced to an \emph{anchor} token (kept exact), a rank-\rank{} joint $K\!\mid\!V$ truncated-SVD
+\emph{delta} that captures the block's shared structure, and a budget of \maxres{} \emph{exact
+residual tokens}---the rows the low-rank basis reconstructs worst, which are precisely the
+distinctive tokens (digits, names, codes) that verbatim recall depends on. A bounded dense
+recency window holds the newest tokens uncompressed. At decode time a fused, \texttt{mx.compile}d
+kernel routes to the top-\topk{} relevant blocks, scores the query against them \emph{in
+low-rank space without ever decompressing $K$}, attends the residuals and recency window exactly,
+and merges the two halves with a flash-style log-sum-exp reduction. Prefill uses a
+training-free block-sparse attention so its cost grows sub-quadratically.
 
-We implement \diffkv{} on Apple's MLX framework and evaluate it on Qwen2.5-1.5B-Instruct (int4) on
-an $8.6$\,GB Apple~M3, with a needle-in-a-haystack protocol from $4$k to $64$k tokens. We report
-results honestly and separate the compressed sparse decode---the runtime's actual
-contribution---from an exact full-KV decode used as an upper-bound ablation on the same store.
-\diffkv{}'s compressed KV state is $\approx\!2.85\times$ smaller than the dense cache at equal
-precision and remains bounded as context grows, letting the model process a $64$k prompt on a
-device where the dense baseline exhausts memory by $32$k---and the residual mechanism makes the
-compressed decode recover the buried passcode \emph{exactly} at every tested context. These
-benefits come at measured costs we quantify rather than hide: the compressed decode is several
-times slower than dense decode (an implementation gap in the kernel dispatch, localized by the
-exact ablation), and the per-block SVD makes prefill the slowest phase. We characterize the central
-residual-budget trade-off---more exact residuals buy recall at the cost of compression---and design
-every figure and table so a future CUDA/Triton fused-decode implementation can be inserted without
-restructuring the evaluation. A full reproducibility appendix accompanies the report; all reported
-numbers are measured on the same machine, and no value is averaged across conflicting runs or
-fabricated.
+We implement \diffkv{} entirely in MLX and evaluate it on Qwen2.5-1.5B (int4) against a dense
+full-KV baseline on the \emph{same} weights, on an Apple~M3 with 8.6\,GB of unified memory.
+\diffkv{} holds a bounded KV state that is $\ratioDefault\times$--$\ratioPreset\times$ smaller
+per block than a dense cache (the residual budget \maxres{} is the knob), recovers a buried
+passcode \emph{exactly} at every context from $4$k to $\reachK$k, and reaches $\reachK$k---where
+the dense full-KV baseline runs out of memory on the same host---while its sparse prefill overtakes
+dense at long context. The cost is decode throughput: reconstructing and merging the sparse
+representation makes per-token decode slower than a dense cache while the dense cache still fits. We
+report this trade-off in full, isolate each component with ablations, and characterize the
+residual budget as an explicit accuracy--memory--speed dial. All numbers in this report are
+measured on the described host; none are estimated. A CUDA/Triton decode path exists in the
+codebase but is not evaluated here, and the report reserves space for it without restructuring.
 \end{abstract}

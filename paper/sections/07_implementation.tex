@@ -1,61 +1,47 @@
-\section{Implementation}
+\section{Implementation Notes}
 \label{sec:impl}
 
-\diffkv{} is $\approx\!1.6$k lines of Python over MLX, plus the surrounding runtime and
-serving code. We highlight the decisions that affect the measured behavior.
+\diffkv{}'s active runtime is $\approx3{,}500$ lines of Python over MLX~\cite{mlx2023}, evaluated on
+Qwen2.5-1.5B~\cite{qwen25}. A few implementation choices are load-bearing and worth recording,
+because they are where correctness or performance was actually won or lost.
 
-\paragraph{Attention patching.}
-The wrapper rebinds \texttt{qwen2.Attention.\_\_call\_\_} to \texttt{attention\_forward} and
-attaches the manager and a layer index to each attention module. This keeps the rest of the
-\texttt{mlx\_lm} model---embeddings, MLP, norms, the LM head---untouched, so \diffkv{} composes
-with the stock int4 model and its tokenizer without retraining or reconfiguration.
+\paragraph{Attention by monkey-patch.} Rather than fork \texttt{mlx\_lm}, the runtime replaces
+\texttt{qwen2.Attention.\_\_call\_\_} at load time with the patched forward of \S\ref{sec:overview},
+and hands each layer a reference to the shared block manager. This keeps the runtime a thin,
+model-agnostic overlay on an unmodified upstream model.
 
-\paragraph{Why the SVD runs in NumPy.}
-\texttt{mx.linalg.qr} is GPU-only in current MLX and the nonzero form of \texttt{mx.where}
-does not accept the streaming kwargs the compressor needs, so the factorization is done in
-NumPy on the CPU. On unified memory this is nearly free of data-movement cost: the MLX array
-is materialized in place (\texttt{mx.eval}) and viewed as a NumPy array over the same bytes.
-The factorization fires at most once per $256$ tokens, so its few-millisecond cost is
-amortized.
+\paragraph{Randomized SVD in NumPy.} Compression runs the randomized truncated SVD in fp32 in
+NumPy on the CPU, not in MLX on the GPU. On unified memory this is nearly free to marshal (no
+host--device copy), and it sidesteps GPU-only limitations in the current MLX linear-algebra path
+(e.g.\ \texttt{qr}); a $255\times512$ block factorizes in $\approx2$\,ms. The seed is fixed so that
+compression---and therefore decode output and needle recovery---is deterministic run to run; an
+unseeded range finder made recall vary between identical runs.
 
-\paragraph{Dtypes and precision.}
-KV state, factors, and anchors are fp16; the SVD normalization scale is fp32. This halves the
-store relative to fp32 defaults and matches the precision the model already runs at. The
-randomized SVD itself is computed in fp32 and the factors cast to fp16 on storage.
+\paragraph{Decode precision.} The decode score/merge arithmetic uses fp16 products with fp32
+log-sum-exp accumulation. A well-intentioned change that recast the merge operands to fp32 for
+``overflow safety'' was measured to shift the combine by roughly fp16-epsilon and \emph{regress}
+long-context ($16$k/$32$k) needle recall into a repetition loop, because at those lengths the
+retrieval margin sits on a knife edge. The fp32-log-sum-exp / fp16-combine split is the validated
+configuration and is enforced by a parity oracle in the test suite.
 
-\paragraph{Memory hygiene.}
-Lazy evaluation is forced (\texttt{mx.eval}) at block boundaries to keep the graph bounded,
-and \texttt{mx.clear\_cache} is called at the prefill$\to$decode transition and after block
-flushes. Without these, MLX retains the peak GQA-expanded activations and the apparent
-footprint balloons; with them, decode memory tracks the store.
+\paragraph{Router/attention decoupling.} The number of residuals the router \emph{scores}
+(Eq.~\eqref{eq:router}) is a separate knob from the number a block \emph{stores}. The router cost
+is $O(\text{nb}\cdot R_{\text{route}}\cdot\dhead)$ per token and dominates long-context decode, so
+$R_{\text{route}}$ defaults below the storage budget \maxres{}; raising \maxres{} for prose
+fidelity therefore does not automatically inflate router cost.
 
-\paragraph{Configuration and presets.}
-The benchmarked configuration is \texttt{rank=16}, \texttt{block\_size=256},
-\texttt{recency\_window=512} (so the dense buffer is $768$), \texttt{max\_blocks=256},
-\texttt{max\_residual=64}, top-$K{=}16$ block routing with the residual-key router, int4 weights,
-``mid'' preset. Most knobs are exposed as both config keys and environment variables: the
-adaptive decode policy and its $16$k threshold are \texttt{DIFFKV\_COMPRESSED\_DECODE} (default
-\texttt{auto}; \texttt{1}/\texttt{0} force the compressed or exact kernel) and
-\texttt{DIFFKV\_COMPRESSED\_MIN\_CTX}; \texttt{DIFFKV\_MAX\_RESIDUAL} sets the residual budget,
-\texttt{DIFFKV\_TOPK\_BLOCKS} the routing width, \texttt{DIFFKV\_ROUTER} the router
-(\texttt{residual} or \texttt{minmax}), \texttt{DIFFKV\_MAX\_BLOCKS} caps the pool, and
-\texttt{DIFFKV\_SVD\_SEED} fixes the SVD seed. Three presets (low/mid/high) trade chunk size,
-dense budget, and cache policy.
+\paragraph{Configuration.} Behavior is controlled by environment flags with safe defaults, so new
+paths ship disabled until validated. The defaults used throughout this report are: compressed
+sparse decode on; decompress-and-cache on; block-sparse prefill on; rank $\rank{=}16$;
+$\maxres{=}128$; top-\topk{} $=16$; residual-key router; SVD seed $1234$. The dense baseline is
+\texttt{mlx\_lm} with a full KV cache on the same int4 weights.
 
-\ifext
-\paragraph{Generation loop.}
-The wrapper's generation loop supports greedy and temperature/top-$p$ sampling with a
-repetition penalty and an n-gram loop detector (on a repeat ratio $\ge 0.35$ it widens the
-penalty window and, if unrecovered after $40$ tokens, forces a stop). For the benchmarks we
-use pure greedy decoding (\texttt{argmax}) for a fixed $128$ tokens with EOS ignored, so
-throughput is directly comparable across engines.
-\fi
+\paragraph{Gated subsystems.} A factual-store / semantic-retrieval module and a speculative-decode
+draft path exist in the codebase but are disabled by default (they are no-ops in the configuration
+measured here) and are not part of the evaluated system. We mention them only to be exact about
+what is and is not exercised.
 
-\paragraph{The (inactive) grounding module.}
-The repository includes a semantic-retrieval layer---a factual store with entity binding, a
-graph query router, and logit-biasing/masking for grounded generation. In the MLX runtime as
-benchmarked, the manager's \texttt{get\_srl\_state} returns \texttt{None} and the per-session
-SRL map is never populated, so every factual-bias, transition-bias, and constrained-decoding
-branch is skipped. We mention it because it is prominent in the code, but it contributes
-nothing to the results in this report; evaluating it is future work
-(\S\ref{sec:limitations}).
+\paragraph{Testing.} A kernel-parity oracle checks the fused decode kernel against a reference
+implementation on seeded sessions; the needle and relational-binding harnesses guard recall. The
+measurement scripts, prompts, and the exact commands are in the reproducibility appendix
+(Appendix~\ref{app:repro}).

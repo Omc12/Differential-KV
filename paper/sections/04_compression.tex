@@ -3,149 +3,113 @@
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/f2_compression.png}
-  \caption{Compressing one $256$-token block. The first token is the anchor; the remaining
-  $255$ tokens are represented as their deviations from it. Keys and values are stacked and
-  jointly factorized by a rank-$16$ randomized truncated SVD, yielding a shared per-token
-  coefficient matrix $U$ and separate key/value bases $V_K,V_V$. Crucially, the $\maxres{=}64$
-  tokens whose low-rank reconstruction error is largest are \emph{additionally} retained as
-  exact fp16 key/value pairs (residuals): SVD discards exactly the low-energy outliers that a
-  buried needle token is, so the residual set restores verbatim recall (\S\ref{sec:eval}).}
+  \includegraphics[width=\linewidth]{figures/f2_compression.pdf}
+  \caption{Compression of one $256$-token block. The anchor (token $0$) is subtracted to form
+  deltas; $V$ is rescaled to $K$'s RMS and the rows are $L_2$-normalized before a seeded
+  randomized truncated SVD produces $U$, $V_K$, $V_V$. In parallel, per-token joint reconstruction
+  error selects the top-\maxres{} rows, kept as \emph{exact} residuals $R_K,R_V$. Key min/max are
+  retained for the decode router. At the default $\maxres{=}128$ a block stores
+  $\approx\blkTotalDefault$\,KiB vs.\ $\blkDense$\,KiB dense ($\ratioDefault\times$); the
+  $\maxres{=}64$ preset stores $\approx\blkTotalPreset$\,KiB ($\ratioPreset\times$).}
   \label{fig:compress}
 \end{figure}
 
-A block of contiguous KV vectors is highly redundant---neighboring tokens share most of their
-representation---but it is not \emph{uniformly} redundant: a handful of tokens carry distinctive,
-low-energy detail (a rare entity, a passcode) that a pure low-rank model discards. \diffkv{}'s
-block representation reflects this directly: an anchor plus a low-rank differential captures the
-shared structure cheaply, and a small set of \emph{exact residual tokens} preserves the
-outliers the low-rank term cannot. Both parts are computed once per block during prefill.
+A block is $\bs{=}256$ consecutive tokens' keys and values, $K,V\in\R^{\Hkv\times \bs\times
+\dhead}$. Compression (Figure~\ref{fig:compress}) runs when a block leaves the recency window. It
+produces four things: an anchor, a low-rank delta basis, a set of exact residual tokens, and
+per-block router statistics.
 
-\subsection{Notation}
-Within one layer, a block of $\bs{=}256$ contiguous tokens has keys
-$K\in\R^{\Hkv\times \bs\times \dhead}$ and values $V$ of the same shape
-($\Hkv{=}2$, $\dhead{=}128$). We compress blocks independently and per layer.
+\subsection{Anchor and delta}
+Token $0$ of the block is the \emph{anchor} $\anchork,\anchorv\in\R^{\Hkv\times\dhead}$, stored
+exactly. Every other token is represented relative to it:
+\begin{equation}
+  \Delta K_i = K_i - \anchork, \qquad \Delta V_i = V_i - \anchorv,\qquad i=1,\dots,\bs-1 .
+\end{equation}
+Subtracting a within-block baseline concentrates the energy that the low-rank basis must capture,
+so a small rank suffices for the shared structure.
 
-\subsection{Anchor + differential representation}
-The first token of the block is the \emph{anchor}; per head $h$ we keep its key and value
-exactly:
-\begin{equation}
-\anchork^{(h)} = K^{(h)}_{0}, \qquad \anchorv^{(h)} = V^{(h)}_{0}.
-\end{equation}
-For the remaining $S{=}\bs-1$ tokens we form deltas against the anchor,
-\begin{equation}
-\Delta K^{(h)}_{i} = K^{(h)}_{i} - \anchork^{(h)}, \quad
-\Delta V^{(h)}_{i} = V^{(h)}_{i} - \anchorv^{(h)}, \quad i=1{\dots}S,
-\end{equation}
-and stack them across heads into a single matrix per modality. Concatenating keys and values
-gives the joint delta matrix
-\begin{equation}
-X = \big[\,\Delta K \;\big|\; \Delta V\,\big]\in\R^{S\times 2\Hkv\dhead},
-\label{eq:X}
-\end{equation}
-i.e. $X\in\R^{255\times 512}$ here. Joint factorization is deliberate: it forces keys and
-values of the same token to share one low-rank coefficient vector, halving the per-token
-coefficient storage relative to factorizing them separately.
+\subsection{Joint $K\!\mid\!V$ low-rank factorization}
+$K$ and $V$ are compressed \emph{jointly}: for each token we stack $[\Delta K_i \,\|\, \Delta V_i]$
+and factor the $(\bs{-}1)\times 2\Hkv\dhead$ delta matrix once, so a single set of coefficients
+$U$ drives both reconstructions. Two normalizations make the joint factorization well-posed. In
+Qwen2.5 the key norms dominate the value norms, so before factoring we rescale $V$'s deltas to
+$K$'s RMS energy (a per-block gain $g$, undone on the stored $V_V$); without this the SVD spends
+its budget on $K$ and the $V$ reconstruction is poor. We then $L_2$-normalize each token's stacked
+delta row so the factorization is not dominated by a few high-norm tokens, folding the norms back
+into $U$ afterwards.
 
-\subsection{Normalized randomized truncated SVD}
-Tokens within a block differ widely in delta magnitude, and an unnormalized SVD spends its
-budget on the largest-norm rows. We therefore $\ell_2$-normalize each row before
-factorization, storing the norms separately:
+The factorization is a \emph{randomized truncated SVD}~\cite{halko2011randomized} with a fixed
+seed (default $1234$): a Gaussian range finder with power iterations, a QR step, and a small dense
+SVD of the projected matrix, all in fp32 in NumPy (\S\ref{sec:impl} explains why NumPy). The rank is adaptive: it keeps
+the smallest number of components (at least $4$, at most \rank{}) that explain $99.9\%$ of the
+delta energy. The result, cast to fp16, is
 \begin{equation}
-n_i = \lVert X_i\rVert_2,\qquad \hat X_i = X_i / \max(n_i,\,\epsilon).
+  U\in\R^{(\bs-1)\times \rank},\quad V_K,V_V\in\R^{\Hkv\times \rank\times \dhead},
 \end{equation}
-$\hat X$ is then factorized by a randomized truncated SVD~\cite{halko2011randomized} at target
-rank $\rank{=}16$: a global scale $s=\max|\hat X|$ is divided out, an oversampled Gaussian
-range finder ($\rank{+}5$ columns) with two power iterations and a QR step yields an
-orthonormal basis $Q$, and a small projected SVD of $Q^{\!\top}\hat X$ gives
-$\hat X \approx U_k\Sigma_k V_k^{\!\top}$. An \emph{adaptive} rank keeps the fewest components
-explaining $99.9\%$ of the spectral energy, clamped to $[4,\rank]$. The Gaussian is drawn from
-a \emph{fixed seed}, so the factorization---and therefore decode output---is reproducible to the
-bit. The stored factors are
+so that the implicit reconstruction of any non-anchor token is
 \begin{equation}
-U = (U_k\Sigma_k)\odot n \in\R^{S\times \rank},\qquad
-V^{\!\top} = V_k^{\!\top}\in\R^{\rank\times 2\Hkv\dhead},
+  \hat K_i = \anchork + s\,(U_i V_K), \qquad
+  \hat V_i = \anchorv + s\,(U_i V_V),
+  \label{eq:recon}
 \end{equation}
-where the row-norms $n$ are re-applied to $U$ so that reconstruction recovers the true delta
-scale. $V^{\!\top}$ is split back into key and value bases $V_K,V_V\in\R^{\Hkv\times\rank\times\dhead}$.
-The implicit reconstruction of any token---never materialized in practice---is
-\begin{equation}
-\hat K^{(h)}_i \;\approx\; \anchork^{(h)} + s\,\big(U_i\, V_K^{(h)}\big),
-\label{eq:recon}
-\end{equation}
-and analogously for values. We run the SVD in NumPy: on unified memory the array is the same
-bytes the GPU uses, so the only cost is compute, and a $255{\times}512$ factorization is a few
-milliseconds---amortized over the $256$ tokens it represents.
+with $s$ the stored per-block scale. Crucially, decode never forms $\hat K_i$ explicitly
+(\S\ref{sec:decode}); Eq.~\eqref{eq:recon} is the semantics, not the runtime path.
 
-\subsection{Exact residual tokens: restoring the outliers SVD discards}
-\label{sec:residuals}
-A rank-$16$ factorization of a $255{\times}512$ block captures the dominant directions but
-truncates low-energy ones, and a single distinctive token (e.g.\ a buried passcode) is precisely
-a low-energy outlier: its delta is nearly orthogonal to the block's principal subspace, so its
-reconstruction error is large while its contribution to the spectrum is small. We therefore
-measure the per-token reconstruction error against the stored factors,
-\begin{equation}
-e_i = \big\lVert X_i - s\,(U_i V^{\!\top})\big\rVert_2, \qquad i=1{\dots}S,
-\end{equation}
-and keep the $\maxres{=}64$ highest-error tokens' \emph{exact} fp16 key/value pairs as
-\emph{residuals} $R_K, R_V\in\R^{\maxres\times\Hkv\times\dhead}$, stored highest-error-first.
-Top-by-error selection is deliberate: an earlier median/MAD outlier threshold regressed, because
-on-topic prose filler has a broad error spread that lifts the threshold above the needle's tokens
-and drops them. A buried needle can also span several mid-rank residuals, so the budget must be
-generous---at $\maxres{=}32$ the later tokens of a multi-token passcode were truncated and their
-values corrupted; $\maxres{=}64$ retains all of a content-dense block's distinctive tokens. At
-decode the residuals are attended \emph{exactly} (\S\ref{sec:decode}), so they recover verbatim
-detail that the low-rank term alone cannot---this is the mechanism behind \diffkv{}'s exact
-needle recall.
+\subsection{Exact residuals: rescuing the outliers}
+The low-rank basis reconstructs the shared structure well but, by construction, mis-reconstructs
+low-energy outliers---which are the distinctive tokens recall depends on. \diffkv{} measures this
+directly. For every token it computes the joint reconstruction error
+$e_i = \big\lVert \Delta K_i - \widehat{\Delta K}_i \big\rVert^2 + g^2\big\lVert \Delta V_i -
+\widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ used above), and
+keeps the \maxres{} highest-error tokens as \emph{exact} fp16 residuals $R_K,R_V\in\R^{\maxres
+\times\Hkv\times\dhead}$. Their low-rank twins are later excluded from the reconstruction pool so
+each such token is represented once, exactly (\S\ref{sec:decode}). Selecting by measured error,
+rather than by a token-type heuristic, is what makes the residual mechanism content- and
+model-agnostic. We validate empirically (\S\ref{sec:eval}, E5--E6) that (i) residuals are what
+make a buried passcode survive compression exactly, and (ii) the residual reconstruction \emph{K}
+must be stored exactly---using a low-rank-reconstructed key for a residual token was measured to
+break recall.
 
-We additionally store the element-wise key min and max over the block,
-$k^{\min}, k^{\max}\in\R^{\Hkv\times\dhead}$; these support an optional cheap block router
-(\S\ref{sec:decode}) and cost two anchor-sized tensors.
+\subsection{Router statistics}
+Two cheap summaries per block support decode-time routing (\S\ref{sec:decode}): the element-wise
+key min and max over the block, $k_{\min},k_{\max}\in\R^{\Hkv\times\dhead}$, which bound the best
+possible query--key score for a Quest-style relevance test.
 
-\begin{algorithm}[t]
-\caption{\textsc{CompressBlock} (one block, one layer)}
-\label{alg:compress}
-\begin{algorithmic}[1]
-\Require block keys $K$, values $V$ $\in\R^{\Hkv\times \bs\times \dhead}$; rank $\rank$; residual budget $\maxres$
-\State $\anchork \gets K_{:,0,:};\ \anchorv \gets V_{:,0,:}$
-\State $\Delta K \gets K_{:,1:,:}-\anchork;\quad \Delta V \gets V_{:,1:,:}-\anchorv$
-\State $X \gets \textsc{StackHeads}([\Delta K \mid \Delta V])$ \Comment{$\R^{S\times 2\Hkv\dhead}$}
-\State $n_i \gets \lVert X_i\rVert_2;\quad \hat X \gets X / n$ \Comment{row normalize}
-\State $U_k,\Sigma_k,V_k,s,k \gets \textsc{RandTruncSVD}(\hat X,\rank)$ \Comment{fixed seed; adaptive $k\le\rank$}
-\State $U \gets (U_k\Sigma_k)\odot n;\quad [V_K\mid V_V]\gets V_k^{\!\top}$
-\State $e_i \gets \lVert X_i - s\,(U_i V_k^{\!\top})\rVert_2$ \Comment{per-token recon.\ error}
-\State $\mathcal{T}\gets$ indices of the $\maxres$ largest $e_i$;\ \ $R_K,R_V \gets K_{:,\mathcal{T},:}, V_{:,\mathcal{T},:}$
-\State $k^{\min},k^{\max}\gets \min_i K_{:,i,:},\ \max_i K_{:,i,:}$
-\State \Return $(U,V_K,V_V,\anchork,\anchorv,s,\,R_K,R_V,\,k^{\min},k^{\max})$
-\end{algorithmic}
-\end{algorithm}
-
-\subsection{Storage budget and complexity}
-Table~\ref{tab:budget} gives the exact per-block byte budget. The compressed block stores the
-shared coefficients $U$ ($S\rank$), two bases $V_K,V_V$ ($2\Hkv\rank\dhead$), two anchors and the
-key min/max ($4\Hkv\dhead$), two scalars, \emph{and} the $\maxres$ exact residual KV pairs
-($\maxres\cdot 2\Hkv\dhead$). The residuals dominate the block---at $\maxres{=}64$ they are
-$65{,}536$ of the $92{,}136$ bytes---so they must be counted: the honest reduction at equal
-(fp16) precision is $262{,}144 / 92{,}136 = \mathbf{2.85\times}$ per block, not the
-$10\times$ the low-rank term alone would suggest. This is the price of exact recall, and
-\S\ref{sec:eval} quantifies the recall/footprint trade-off as $\maxres$ varies.
+\subsection{Byte budget and complexity}
+Table~\ref{tab:budget} accounts for one block exactly as it is laid out in the store. The low-rank
+core (coefficients, both bases, anchors, min/max, scalars) is a fixed $\approx\blkLowrank$\,KiB,
+independent of \maxres{}; the residuals add $\maxres\cdot\Hkv\cdot\dhead\cdot2\cdot2$ bytes. At the
+default $\maxres{=}128$ a block is $\blkTotalDefault$\,KiB versus $\blkDense$\,KiB dense
+($\ratioDefault\times$); at the $\maxres{=}64$ memory preset it is $\blkTotalPreset$\,KiB
+($\ratioPreset\times$). The residual budget therefore \emph{is} the compression dial, and the
+residual pool dominates the block at the default setting---a fact the memory layout makes visual
+(\S\ref{sec:runtime}). Compressing a block costs one randomized SVD of an $\approx255\times512$
+matrix ($\approx2$\,ms), amortized over $256$ tokens; \S\ref{sec:eval} shows compression is a
+single-digit percentage of prefill time.
 
 \begin{table}[t]
-\centering
-\caption{Per-$256$-token-block storage budget (one layer, fp16). Derived from the model
-dimensions ($\Hkv{=}2$, $\dhead{=}128$) and configuration ($\bs{=}256$, $\rank{=}16$,
-$\maxres{=}64$). The residual KV pairs dominate and account for the difference between the
-naive $10\times$ (low-rank only) and the true $2.85\times$.}
-\label{tab:budget}
-\small
-\input{tables/t2_block_budget}
+  \centering
+  \caption{Per-$256$-token-block storage, computed from the model dimensions and the store's fp16
+  layout. The low-rank core is fixed; the residual budget \maxres{} sets the ratio.}
+  \label{tab:budget}
+  \small
+  \input{tables/t2_block_budget}
 \end{table}
 
-\noindent
-Asymptotically, a compressed block costs $O(\bs\rank + \Hkv\rank\dhead + \maxres\Hkv\dhead)$
-versus the dense $O(\bs\Hkv\dhead)$. With the residual budget a fixed fraction
-$\maxres/\bs = 64/256$ of the block kept exact, the marginal per-token cost is a constant
-fraction of the dense cost plus an $O(\rank)$ low-rank term---bounded below dense but, unlike a
-pure low-rank scheme, not asymptotically vanishing. The factorization itself is
-$O(S\cdot 2\Hkv\dhead\cdot \rank)$ per block and fires once per $\bs$ tokens, so its amortized
-per-token compute is $O(\Hkv\dhead\rank)$---the prefill cost we quantify in \S\ref{sec:eval}.
+\begin{algorithm}[t]
+\caption{Compress one block (streaming, batched across layers in the implementation)}
+\label{alg:compress}
+\begin{algorithmic}[1]
+\Require block keys/values $K,V\in\R^{\Hkv\times \bs\times \dhead}$; rank \rank{}; residual budget \maxres{}
+\State $\anchork,\anchorv \gets K_0, V_0$ \Comment{anchor kept exact}
+\State $\Delta K \gets K_{1:}-\anchork$;\quad $\Delta V \gets V_{1:}-\anchorv$
+\State $g \gets \sqrt{\lVert\Delta K\rVert^2 / \lVert\Delta V\rVert^2}$ \Comment{rescale $V$ to $K$'s RMS}
+\State $D \gets \text{rownorm}\big([\,\Delta K \,\|\, g\,\Delta V\,]\big)$; keep norms in $U$
+\State $U, \Sigma, V^{\!\top} \gets \textsc{RandTruncSVD}(D,\ \rank,\ \text{seed}{=}1234,\ 99.9\%)$
+\State split $V^{\!\top}\!\to V_K, V_V$; undo $g$ on $V_V$; store scale $s$
+\State $e_i \gets \lVert\Delta K_i - \widehat{\Delta K}_i\rVert^2 + g^2\lVert\Delta V_i - \widehat{\Delta V}_i\rVert^2$ \Comment{joint error}
+\State $\mathcal{R}\gets$ indices of the \maxres{} largest $e_i$; $R_K,R_V \gets K_{\mathcal R}, V_{\mathcal R}$ \Comment{exact}
+\State $k_{\min},k_{\max}\gets \min_i K_i,\ \max_i K_i$ \Comment{router bounds}
+\State \Return $(\anchork,\anchorv,U,V_K,V_V,s,R_K,R_V,\mathcal R,k_{\min},k_{\max})$
+\end{algorithmic}
+\end{algorithm}
