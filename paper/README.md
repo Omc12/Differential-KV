@@ -1,5 +1,7 @@
 # DiffKV Paper Workspace
 
+**Author:** Om Chimurkar — <https://github.com/Omc12/Differential-KV>
+
 Implementation-driven technical report + conference paper for the **DiffKV active (MLX)
 runtime**. Everything regenerates from measured data; no number is hand-typed into the paper
 (body-text numbers are LaTeX macros emitted by `scripts/make_facts.py`).
