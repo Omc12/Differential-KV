@@ -17,6 +17,7 @@ block 256, window 768, pool 256, top-K 16).
 import os
 import sys
 import numpy as np
+import math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import style
@@ -53,10 +54,10 @@ def band(ax, x, y, w, h, fc=GRAY_XL, ec=LEGEND_EC, lw=0.8, ls="-", dashed=False)
     ax.add_patch(p)
 
 
-def arrow(ax, p0, p1, color=BLACK, lw=1.0, rad=0.0, ls="-", style_="-|>", z=2):
+def arrow(ax, p0, p1, color=BLACK, lw=1.0, rad=0.0, ls="-", style_="-|>", z=2, **kwargs):
     a = FancyArrowPatch(p0, p1, arrowstyle=style_, mutation_scale=10, color=color,
                         lw=lw, connectionstyle=f"arc3,rad={rad}", zorder=z,
-                        linestyle=ls)
+                        linestyle=ls, **kwargs)
     ax.add_patch(a)
 
 
@@ -146,24 +147,35 @@ def f2_compression():
     arrow(ax, (3.2, y + 0.31), (3.62, y + 0.31), lw=1.1)
     box(ax, 3.66, y - 0.06, 1.5, 0.74, "$\\Delta K = K - a_k$\n$\\Delta V = V - a_v$", fc=WHITE, fs=7.8)
     arrow(ax, (5.16, y + 0.31), (5.55, y + 0.31), lw=1.1)
-    box(ax, 5.6, y - 0.06, 1.75, 0.74, "rescale $V$ to $K$ RMS,\nrow-normalize, concat", fc=WHITE, fs=7.4)
+    box(ax, 5.6, y - 0.06, 1.75, 0.74, "rescale $V$ to $K$ RMS,\nrow-normalize, concat", fc=WHITE, fs=6.8)
     arrow(ax, (7.35, y + 0.31), (7.74, y + 0.31), lw=1.1)
-    box(ax, 7.78, y - 0.06, 1.7, 0.74, "randomized\ntruncated SVD\n(rank 32, seeded)", fc=BLUE, tc=WHITE, fs=7.4, bold=True)
+    box(ax, 7.82, y - 0.06, 1.7, 0.74, "randomized\ntruncated SVD\n(rank 32, seeded)", fc=BLUE, tc=WHITE, fs=6.8, bold=True)
 
-    # low-rank outputs
+    # low-rank outputs with a clean, orthogonal bus layout
     yo = 3.1
-    arrow(ax, (8.63, y - 0.06), (8.63, yo + 0.85), lw=1.1)
-    note(ax, 8.86, 4.35, "$U\\,\\Sigma\\,V^{\\top}$", fs=7.6, ha="left", style_="normal")
+    y_bus = 4.3
+    # Main trunk line going down from the SVD block to the bus level (aligned at x=8.67)
+    ax.plot([8.67, 8.67], [y - 0.06, y_bus], color=BLACK, lw=0.9, zorder=2)
+    # Label for the SVD output decomposition
+    note(ax, 8.90, 4.9, "$U\\,\\Sigma\\,V^{\\top}$", fs=7.6, ha="left", style_="normal")
+    
     outs = [("$U$  [255, 32]", "coefficients"),
             ("$V_K$  [2, 32, 128]", "key basis"),
             ("$V_V$  [2, 32, 128]", "value basis"),
             ("$a_k, a_v$", "anchors (exact)"),
             ("$k_{\\min}, k_{\\max}$", "router stats")]
     ox, cw = 0.45, 1.72
+    
+    # Draw horizontal bus line at y_bus
+    cx_first = ox + cw / 2
+    cx_last = ox + 4 * (cw + 0.12) + cw / 2
+    ax.plot([cx_first, cx_last], [y_bus, y_bus], color=BLACK, lw=0.9, zorder=2)
+    
     for i, (t, sub) in enumerate(outs):
+        cx_i = ox + i * (cw + 0.12) + cw / 2
         box(ax, ox + i * (cw + 0.12), yo, cw, 0.78, f"{t}\n{sub}", fc=BLUE_XL, fs=7.0)
-        arrow(ax, (8.63, yo + 0.9), (ox + i * (cw + 0.12) + cw / 2, yo + 0.80),
-              lw=0.7, style_="-")
+        # Vertical arrow dropping from the bus line down to the top of the box (no gaps)
+        arrow(ax, (cx_i, y_bus), (cx_i, yo + 0.78), lw=0.9, style_="-|>", shrinkA=0, shrinkB=0)
 
     # residual branch (EXACT path → emerald): the selection signal is the
     # reconstruction error of the low-rank factors, so the arrow leaves the
@@ -360,21 +372,33 @@ def f6_memory_3d():
         ax.plot([xs, xs], [win_y, win_y], [0.0, win_h], color=BLACK, lw=0.5, zorder=85)
         ax.plot([xs, xs], [win_y, win_y + 1.8], [win_h, win_h], color=BLACK, lw=0.5, zorder=85)
 
-    # ── 3. Flush & zoom connector lines ──
-    
-    # Draw a real 3D arrow for overflow/flush
-    arrow3d = Arrow3D([x0 + 1.0, x0 + 0.20], [win_y + 0.9, pool_y + 0.1], [win_h - 0.05, 0.7],
-                      mutation_scale=10, lw=1.5, arrowstyle="-|>", color=BLACK)
-    ax.add_artist(arrow3d)
+    # ── 3. Flush & zoom connector lines (entirely solid) ──
+    ax.plot([5.12, 2.6], [-1.3, -1.3], [0.9, 0.9], color=BLACK, lw=1.1, zorder=90)
+    ax.plot([2.6,  2.6], [-1.3,  0.8], [0.9, 0.9], color=BLACK, lw=1.1, zorder=90)
+    ax.plot([2.6,  2.9], [ 0.8,  0.8], [0.9, 0.9], color=BLACK, lw=1.1, zorder=90)
+    ax.plot([2.9,  4.7], [ 0.8,  0.8], [0.9, 0.9], color=BLACK, lw=1.1, zorder=90)
 
-    # Zoom-in dashed lines showing Slab 27 expanding into the detailed view
-    s27_tr = (slab_x + slab_w, slab_y + slab_d/2, slab_h/2)
-    s27_br = (slab_x + slab_w, slab_y, 0.0)
-    
-    ax.plot([s27_tr[0], x0], [s27_tr[1], pool_y + bdepth/2], [s27_tr[2], (z_lr+z_res)/2],
-            color=GRAY_D, lw=0.8, ls=":", zorder=5)
-    ax.plot([s27_br[0], x0], [s27_br[1], win_y + 0.9], [s27_br[2], win_h/2],
-            color=GRAY_D, lw=0.8, ls=":", zorder=5)
+
+
+
+
+
+
+    # Zoom-in connector lines: bound the expanded detail view from the layer stack.
+    # Both lines use the FRONT face (y = slab_y = pool_y = 0.8) so they stay on the
+    # viewer-facing side and are not occluded by the block geometry.
+    #   Top line:    top-front-right of TOP layer    → top-front-left of CBP
+    #   Bottom line: bottom-front-right of BOT layer → top-front-left of DRW
+    #                (DRW is the actual bottom of the expanded view)
+    stack_top_r = (slab_x + slab_w, slab_y, z_coords[-1] + slab_h)   # (2.9, 0.8, 4.62)
+    stack_bot_r = (slab_x + slab_w, slab_y, z_coords[0])              # (2.9, 0.8, 0.0)
+    cbp_top_l   = (x0,              pool_y,  z_lr + z_res)             # (5.2, 0.8, 5.4)
+    drw_top_l   = (x0,              win_y,   win_h)                    # (5.2,-2.2, 1.0)
+
+    ax.plot([stack_top_r[0], cbp_top_l[0]], [stack_top_r[1], cbp_top_l[1]], [stack_top_r[2], cbp_top_l[2]],
+            color=GRAY_D, lw=1.0, ls="--", zorder=6)
+    ax.plot([stack_bot_r[0], drw_top_l[0]], [stack_bot_r[1], drw_top_l[1]], [stack_bot_r[2], drw_top_l[2]],
+            color=GRAY_D, lw=1.0, ls="--", zorder=6)
 
     # ── limits & camera ──
     x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.5
@@ -383,7 +407,8 @@ def f6_memory_3d():
     ax.set_zlim(-0.2, z_lr+z_res+0.8)
     ax.view_init(elev=22, azim=-55)
     ax.set_axis_off()
-    ax.set_box_aspect((13.5, 9.0, 5.0), zoom=1.28)
+    ax.set_box_aspect((13.5, 9.0, 5.0), zoom=1.16)
+
 
     # Helper to project 3D point to 2D figure coordinates (0.0 to 1.0)
     def project_3d_to_fig(x, y, z):
@@ -392,15 +417,16 @@ def f6_memory_3d():
         fig_coord = fig.transFigure.inverted().transform(disp_coord)
         return fig_coord
 
+    # Helper to project 3D point to screen pixels
+    def project_3d_to_pixels(x, y, z):
+        x_p, y_p, _ = proj3d.proj_transform(x, y, z, ax.get_proj())
+        return ax.transData.transform((x_p, y_p))
+
     # Draw canvas to get projection matrices
     fig.canvas.draw()
 
     # Get target coordinates for arrows dynamically
-    target_layer_0   = project_3d_to_fig(slab_x + slab_w/2, slab_y + slab_d/2, z_coords[-1] + slab_h)
-    target_layer_27  = project_3d_to_fig(slab_x + slab_w/2, slab_y + slab_d/2, z_coords[0] + slab_h)
-    target_free      = project_3d_to_fig(x0 + (n_used)*(bw+gap) + bw/2, pool_y + bdepth/2, z_lr + z_res/2)
     target_recency   = project_3d_to_fig(x0 + win_w/2, win_y + 0.9, win_h/2)
-    target_zoom_in   = project_3d_to_fig(slab_x + slab_w, slab_y + slab_d/2, slab_h/2)
     target_overflow  = project_3d_to_fig(x0, win_y, 0.0) # bottom-left corner of the window block
 
     # Helper for 2D figure-level arrows
@@ -411,45 +437,99 @@ def f6_memory_3d():
 
     # ── 2D labels ──
 
-    # Pool title
-    fig.text(0.655, 0.907, "compressed block pool — 256 slots (bounded)",
-             ha="center", va="bottom", fontsize=8.8, color=BLACK, fontweight="bold")
+    # Project coordinates for CBP brackets
+    p_used_left = project_3d_to_fig(x0, pool_y + bdepth, z_lr + z_res)
+    p_used_right = project_3d_to_fig(x0 + n_used*(bw+gap) - gap, pool_y + bdepth, z_lr + z_res)
+    p_free_left = project_3d_to_fig(x0 + n_used*(bw+gap), pool_y + bdepth, z_lr + z_res)
+    p_free_right = project_3d_to_fig(x0 + (n_used+n_ghost)*(bw+gap) - gap, pool_y + bdepth, z_lr + z_res)
 
-    # "used blocks" label (centered over its bracket)
-    fig.text(0.53, 0.765, "used blocks", ha="center", va="bottom", fontsize=7.3, color=BLACK)
+    # Arrowhead for the DRW→CBP connector.
+    # The 3D line was stopped at (4.7, 0.8, 0.9); we project that point as the arrow tail
+    # and project the true target (5.10, 0.8, 0.9) as the arrow tip, so the triangle
+    # perfectly caps the line with the correct perspective-accurate direction.
+    p_line_end  = project_3d_to_fig(4.7,  0.8, 0.9)   # where the 3D line was stopped
+    p_arrow_tip = project_3d_to_fig(5.10, 0.8, 0.9)   # true CBP left-face target
+    arrow2d = FancyArrowPatch(p_line_end, p_arrow_tip, transform=fig.transFigure, arrowstyle="-|>",
+                              mutation_scale=8, color=BLACK, lw=1.1, zorder=99)
+    fig.add_artist(arrow2d)
+
+
+
+
+
     
-    # Bracket line for used blocks (spans 0.36 to 0.71 in horizontal fraction)
-    fig.add_artist(Line2D([0.36, 0.71], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
-    # Downward ticks on bracket ends
-    fig.add_artist(Line2D([0.36, 0.36], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
-    fig.add_artist(Line2D([0.71, 0.71], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    dy = 0.024
+    dt = 0.012
 
-    # "free (zeroed)" — above ghost bars
-    fig.text(0.88, 0.58, "free\n(zeroed)", ha="center", va="center",
-             fontsize=7.2, color=GRAY_D, linespacing=1.3)
-    draw_arrow((0.88, 0.53), target_free, color=GRAY_D)
+    # Calculate angles of the slanted brackets directly in display pixels
+    px_used_left = project_3d_to_pixels(x0, pool_y + bdepth, z_lr + z_res)
+    px_used_right = project_3d_to_pixels(x0 + n_used*(bw+gap) - gap, pool_y + bdepth, z_lr + z_res)
+    px_free_left = project_3d_to_pixels(x0 + n_used*(bw+gap), pool_y + bdepth, z_lr + z_res)
+    px_free_right = project_3d_to_pixels(x0 + (n_used+n_ghost)*(bw+gap) - gap, pool_y + bdepth, z_lr + z_res)
 
-    # 28-layer stack label (centered next to the stack)
-    fig.text(0.08, 0.50, "28-layer stack\n(KV store replicated\nper layer)",
-             ha="center", va="center", fontsize=8.2, color=BLACK, fontweight="bold", linespacing=1.4)
+    angle_used = math.degrees(math.atan2(px_used_right[1] - px_used_left[1], px_used_right[0] - px_used_left[0]))
+    angle_free = math.degrees(math.atan2(px_free_right[1] - px_free_left[1], px_free_right[0] - px_free_left[0]))
 
-    # layer 0 (top of the stack)
-    fig.text(0.12, 0.78, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.125, 0.78), target_layer_0)
+    # Pool title (centered dynamically above the pool and rotated parallel to brackets)
+    fig.text((p_used_left[0] + p_free_right[0])/2, (p_used_left[1] + p_free_right[1])/2 + dy + 0.038, "compressed block pool — 256 slots (bounded)",
+             ha="center", va="bottom", fontsize=8.8, color=BLACK,
+             rotation=angle_used, rotation_mode="anchor")
+
+
+    # used blocks bracket (slanted)
+    fig.add_artist(Line2D([p_used_left[0], p_used_right[0]], [p_used_left[1] + dy, p_used_right[1] + dy], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([p_used_left[0], p_used_left[0]], [p_used_left[1] + dy - dt, p_used_left[1] + dy], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([p_used_right[0], p_used_right[0]], [p_used_right[1] + dy - dt, p_used_right[1] + dy], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.text((p_used_left[0] + p_used_right[0])/2, (p_used_left[1] + p_used_right[1])/2 + dy + 0.008, "used", 
+             ha="center", va="bottom", fontsize=7.3, color=BLACK, rotation=angle_used, rotation_mode="anchor")
+
+    # free (zeroed) bracket (slanted)
+    fig.add_artist(Line2D([p_free_left[0], p_free_right[0]], [p_free_left[1] + dy, p_free_right[1] + dy], transform=fig.transFigure, color=GRAY_D, lw=0.85))
+    fig.add_artist(Line2D([p_free_left[0], p_free_left[0]], [p_free_left[1] + dy - dt, p_free_left[1] + dy], transform=fig.transFigure, color=GRAY_D, lw=0.85))
+    fig.add_artist(Line2D([p_free_right[0], p_free_right[0]], [p_free_right[1] + dy - dt, p_free_right[1] + dy], transform=fig.transFigure, color=GRAY_D, lw=0.85))
+    fig.text((p_free_left[0] + p_free_right[0])/2, (p_free_left[1] + p_free_right[1])/2 + dy + 0.008, "free (zeroed)", 
+             ha="center", va="bottom", fontsize=7.3, color=GRAY_D, rotation=angle_free, rotation_mode="anchor")
+
+    # Layers stack bracket on the left
+    target_stack_top = project_3d_to_fig(slab_x, slab_y + slab_d/2, z_coords[-1] + slab_h)
+    target_stack_bot = project_3d_to_fig(slab_x, slab_y + slab_d/2, z_coords[0])
+    bx_x = target_stack_bot[0] - 0.075
+
+    fig.add_artist(Line2D([bx_x, bx_x], [target_stack_bot[1], target_stack_top[1]], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([bx_x, bx_x + 0.015], [target_stack_top[1], target_stack_top[1]], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([bx_x, bx_x + 0.015], [target_stack_bot[1], target_stack_bot[1]], transform=fig.transFigure, color=BLACK, lw=0.85))
     
-    # layer 27 (bottom of stack, being magnified)
-    fig.text(0.12, 0.28, "layer 27\n(magnified to show\ndetails below)", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.125, 0.28), target_layer_27)
+    fig.text(bx_x - 0.015, (target_stack_bot[1] + target_stack_top[1])/2, "layers 0 to 27\n(replicated stack)",
+             ha="right", va="center", fontsize=8.0, color=BLACK, linespacing=1.2)
 
-    # recency window label — below the slab
-    fig.text(0.585, 0.082, "dense recency window — 768 exact fp16 tokens\n(acts as a sliding FIFO queue)",
+    # recency window label — below the slab; arrow ends at the bottom face of the DRW (z=0)
+    # to avoid piercing through the slab.
+    drw_bottom_center = project_3d_to_fig(x0 + win_w/2, win_y + 0.9, 0.0)
+    label_y_top = 0.135   # top of the label block (arrow tail starts here)
+    fig.text(target_recency[0], 0.065, "dense recency window — 768 exact fp16 tokens\n(acts as a sliding FIFO queue)",
              ha="center", va="bottom", fontsize=8.1, color=BLACK, linespacing=1.3)
-    draw_arrow((0.585, 0.138), target_recency)
+    draw_arrow((target_recency[0], label_y_top), (drw_bottom_center[0], drw_bottom_center[1] - 0.005))
 
-    # overflow label — completely clear of the window, on the bottom-left, pointing to the corner where overflow occurs
-    fig.text(0.18, 0.16, "overflow →\nflush + compress",
-             ha="center", va="center", fontsize=7.4, color=BLACK, linespacing=1.3)
-    draw_arrow((0.21, 0.19), target_overflow)
+    # overflow label — centered above its arrow, rotated to match the arrow angle
+    arrow_start_x = target_overflow[0] - 0.175
+    arrow_start_y = target_overflow[1] + 0.055
+    arrow_end_x   = target_overflow[0] - 0.012
+    arrow_end_y   = target_overflow[1] + 0.005
+    # Midpoint of the arrow (in figure coords) and angle for label rotation
+    mid_x = (arrow_start_x + arrow_end_x) / 2
+    mid_y = (arrow_start_y + arrow_end_y) / 2
+    # Convert figure-coord deltas to display pixels for angle calculation
+    px0 = fig.transFigure.transform((arrow_start_x, arrow_start_y))
+    px1 = fig.transFigure.transform((arrow_end_x, arrow_end_y))
+    arrow_angle = math.degrees(math.atan2(px1[1] - px0[1], px1[0] - px0[0]))
+    fig.text(mid_x, mid_y + 0.012, "overflow \u2192 flush + compress",
+             ha="center", va="bottom", fontsize=7.4, color=BLACK,
+             rotation=arrow_angle, rotation_mode="anchor")
+    draw_arrow((arrow_start_x, arrow_start_y), (arrow_end_x, arrow_end_y))
+
+    # Dummy spacer to force bbox_inches="tight" to add padding on the right edge of the cropped figure
+    fig.text(p_free_right[0] + 0.20, p_free_right[1], " ", transform=fig.transFigure)
+
 
     # ── legend (upper-left, vertical) ──
     leg = [

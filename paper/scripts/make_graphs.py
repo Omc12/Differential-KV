@@ -133,14 +133,13 @@ def g6_residual_tradeoff():
     x = np.arange(len(R))
 
     fig, ax = plt.subplots(figsize=(4.9, 3.05))
-    bars = ax.bar(x, ratio, 0.58, color=S.BLUE, edgecolor=S.BLACK, linewidth=0.7,
+    bars = ax.bar(x, ratio, 0.40, color=S.BLUE, edgecolor=S.BLACK, linewidth=0.7,
                   label="Compression ratio (left)")
-    # value labels INSIDE the bars (white, bold) — immune to line/legend collisions
+    # value labels INSIDE the bars (white, normal weight) — adjusted for thinner bars
     for r, v in zip(bars, ratio):
         ax.annotate(f"{v:.2f}$\\times$",
                     (r.get_x() + r.get_width() / 2, v - 0.07),
-                    ha="center", va="top", fontsize=7.6, color="white",
-                    fontweight="bold")
+                    ha="center", va="top", fontsize=6.6, color="white")
     ax.set_xticks(x)
     ax.set_xticklabels([str(r) for r in R])
     ax.set_xlabel("Residual budget $R$ (exact tokens per block)")
@@ -170,7 +169,7 @@ def g7_decode_ablation():
     ctx = [c for c in D.CONTEXTS if c in comp and c in exact]
     c_tps = [comp[c]["decode_tps"] for c in ctx]
     e_tps = [exact[c]["decode_tps"] for c in ctx]
-    x = np.arange(len(ctx)); w = 0.36
+    x = np.arange(len(ctx)); w = 0.26
 
     fig, ax = plt.subplots(figsize=(4.9, 2.95))
     b1 = ax.bar(x - w / 2, e_tps, w, color=S.BLUE_L, edgecolor=S.BLACK,

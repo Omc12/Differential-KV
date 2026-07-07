@@ -114,12 +114,12 @@ def legend(ax, **kw):
     return lg
 
 
-def bar_value_labels(ax, bars, fmt="{:.1f}", dy=2, fontsize=7.5):
+def bar_value_labels(ax, bars, fmt="{:.1f}", dy=2, fontsize=6.8):
     for r in bars:
         h = r.get_height()
         ax.annotate(fmt.format(h), (r.get_x() + r.get_width() / 2, h),
                     textcoords="offset points", xytext=(0, dy), ha="center",
-                    va="bottom", fontsize=fontsize, color=BLACK, fontweight="bold")
+                    va="bottom", fontsize=fontsize, color=BLACK)
 
 
 def context_ticks(ax, contexts, label="Context length (tokens)"):
