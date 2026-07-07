@@ -3,12 +3,7 @@
 A sparse KV-cache inference runtime for long-context LLM inference on constrained
 hardware (dev target: M3 Mac, 8 GB unified memory, Qwen2.5-1.5B-Instruct).
 
-**Core idea:** split the KV cache into fixed-size micro-blocks. Each block is compressed
-to an **anchor** token (kept exact) + a low-rank **SVD delta** (`U @ V.T`, rank 16, int8 U
-with per-row scales) + up to 64 exact **residual** rows (the tokens the SVD reconstructs
-worst, selected by boosted joint K/V error + IDF rarity). Decode attends
-anchors + deltas + residuals + a dense recency window instead of the full sequence,
-merging the sparse and dense halves with a logsumexp combine.
+**Core idea:** split the KV cache into fixed-size micro-blocks (size $B_s = 256$ tokens). Each block is compressed to an **anchor** token (kept exact) + a joint $K\!\mid\!V$ low-rank **SVD delta** (rank 32, fp16 coefficients $U$ and bases $V_K, V_V$) + up to 128 exact **residual** rows (the tokens the SVD reconstructs worst, selected by joint reconstruction error). Decode attends anchors + deltas + residuals + a dense recency window instead of the full sequence, scoring queries in the low-rank subspace and merging the sparse and dense halves with a flash-style logsumexp combine.
 
 ## Quickstart (macOS / Apple Silicon)
 
@@ -35,7 +30,7 @@ extras (triton, cuSOLVER/cuBLAS) and the native `-DGGML_CUDA=ON` build (`make na
 | Backend (macOS) | MLX (Apple Silicon) | forked llama.cpp/ggml, Metal + CPU |
 | Backend (Linux) | PyTorch + Triton (CUDA) | CPU / CUDA |
 | Models | HuggingFace / mlx-community | GGUF |
-| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k | Honest NIAH sweep 3/6; remaining gap is a decode logit-margin issue (see `PLAN_NEW_DIRECTIONS.md` §D7) |
+| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k; reaches 64k (needle recovered exactly; dense baseline OOMs) | Honest NIAH sweep 3/6; remaining gap is a decode logit-margin issue (see `PLAN_NEW_DIRECTIONS.md` §D7) |
 
 ## Build & run
 
@@ -72,16 +67,72 @@ Memory/perf claims: `paper/scripts/measure_active.py` (MLX) and
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DIFFKV_COMPRESSED_DECODE` | `auto` (engages ≥16k) | MLX sparse decode on/off/auto |
+| `DIFFKV_COMPRESSED_DECODE` | `auto` (engages ≥8k) | MLX sparse decode on/off/auto |
 | `DIFFKV_CACHE_LIMIT_GB` | `1` | MLX buffer-cache cap (halves long-prefill peak RAM) |
 | `DIFFKV_TOPK_BLOCKS` | `16` | blocks routed per decode step (both engines) |
-| `DIFFKV_MAX_RESIDUAL` | `64` | exact residual rows per block (native) |
+| `DIFFKV_MAX_RESIDUAL` | `128` | exact residual rows per block (default 128; knob for memory ↔ accuracy) |
 | `DIFFKV_SVD_SEED` | `1234` | rSVD determinism — keep set or parity tests flake |
 | `DIFFKV_NATIVE_ATTN` | off | native fused ggml attention path (experimental, slower) |
 | `DIFFKV_CB_ROUTE_ALL` | on | native decode routes over all resident blocks (fix for the anchor_screen selection bug) |
 | `DIFFKV_FUSED_DECODE` | `0` (off) | EXPERIMENTAL Metal decode kernel (MLX). **Broken on the canonical bench as of 2026-07-03: garbage output at 9.8 tps — do not enable** (see AUDIT_SEVENTH_PASS_AND_OPPORTUNITIES.md §3.3) |
 | `DIFFKV_CB_GQA_ROUTE` | on | GQA query head-averaging in the native routing loop (engages only when blocks > TOPK; accuracy-neutral in measured cells) |
 | `DIFFKV_PROFILE_CB` | `0` | Log layer-wise routing, readback, GPU, and total attention latency |
+
+## Measured Evaluation (from the Paper)
+
+All experimental numbers are measured on a single host: **Apple M3 with 8.6 GB of unified memory**, running **Qwen2.5-1.5B-Instruct at int4** via `mlx_lm`. DiffKV runs in its default serving configuration: compressed sparse decode, decompress-and-cache, block-sparse prefill, rank $r=32$, residual budget $R=128$, top-$K=16$, and residual-key router. 
+
+### 1. Main Results (DiffKV vs. Dense baseline)
+
+Comparing both engines on the **exact same quantized weights** creates a clean ablation of the cache representation:
+
+| Context Length | Runtime / Engine | Prefill Time (s) | Decode Speed (tok/s) | Peak Allocator Memory (GB) | Needle Recalled |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **4k** | **DiffKV (Compressed)** | 6.6s | 19.9 | 1.74 GB | **Yes** |
+| | Dense Baseline | 5.1s | 65.7 | 1.68 GB | **Yes** |
+| **8k** | **DiffKV (Compressed)** | 13.6s | 18.4 | 1.89 GB | **Yes** |
+| | Dense Baseline | 11.8s | 55.3 | 1.79 GB | **Yes** |
+| **16k** | **DiffKV (Compressed)** | 28.2s | 18.7 | 2.36 GB | **Yes** |
+| | Dense Baseline | 27.8s | 47.0 | 2.03 GB | **Yes** |
+| **32k** | **DiffKV (Compressed)** | 58.5s | 17.0 | 3.12 GB | **Yes** |
+| | Dense Baseline | 77.9s | 35.7 | 2.45 GB | **Yes** |
+| **64k** | **DiffKV (Compressed)** | 928s | 8.6 | 4.63 GB | **Yes** |
+| | Dense Baseline | *OOM* | *OOM* | *OOM* | *OOM* |
+
+> [!NOTE]
+> **Prefill Crossover:** DiffKV prefill scales sub-quadratically ($O(L \cdot K)$ vs. $O(L^2)$) due to block-sparse prefill. While streaming SVD compression adds a fixed overhead at short context, DiffKV prefill crossovers and beats the dense baseline at 32k ($1.33\times$ faster: 58.5s vs 77.9s).
+> 
+> **Reach Advantage:** At 64k context, the dense baseline runs out of memory (OOMs) during prefill on the 8.6 GB host. DiffKV completes successfully with the needle recovered exactly, demonstrating its memory-bounded pool advantage.
+
+### 2. Residual-Budget Sweep (at 16K context)
+
+The residual budget $R$ acts as an explicit memory-speed-accuracy dial. When $R$ is reduced, block store sizes fall (increasing the compression ratio), and decode speed rises, while passcode recall is preserved:
+
+| Residuals ($R$) | Needle Recall | Decode Speed (tok/s) | KV Cache Store Size (GB) | Block Compression vs. Dense |
+| :---: | :---: | :---: | :---: | :---: |
+| **8** | **Yes** | 21.4 | 0.124 GB | $3.80\times$ |
+| **16** | **Yes** | 21.1 | 0.139 GB | $3.41\times$ |
+| **32** | **Yes** | 20.5 | 0.167 GB | $2.83\times$ |
+| **64** | **Yes** | 21.5 | 0.224 GB | $2.11\times$ |
+| **128 (Default)** | **Yes** | 19.6 | 0.338 GB | $1.40\times$ |
+
+### 3. Per-Block Storage Budget (256-token block)
+
+Below is the layout of one $B_s = 256$ token block in memory. The low-rank core is fixed, while the residual budget $R$ controls the size of the block:
+
+| Component | Dimensions / Shape | Bytes | Note |
+| :--- | :--- | :--- | :--- |
+| **$U$ coefficients** | $[255, 16]$ | 16,320 B | Low-rank core |
+| **$V_K, V_V$ bases** | $[2, 16, 128]$ | 32,768 B | Low-rank core |
+| **Anchors $a_k, a_v$** | $[2, 128]$ | 1,024 B | Exact block reference |
+| **Key Min/Max** | $[2, 128]$ | 1,024 B | Decode router bounds |
+| **Scalars / Metadata** | scale, seq_len | 8 B | Per-block control |
+| **Low-Rank Core Total** | | **51,144 B** | **49.9 KiB (Fixed)** |
+| Exact residuals ($R=128$) | $[128, 2, 128]$ | 131,072 B | 128.0 KiB |
+| Exact residuals ($R=64$) | $[64, 2, 128]$ | 65,536 B | 64.0 KiB |
+| **DiffKV Block ($R=128$)** | | **182,216 B** | **177.9 KiB ($1.44\times$ compression)** |
+| **DiffKV Block ($R=64$)** | | **116,680 B** | **113.9 KiB ($2.25\times$ compression)** |
+| **Dense Block** | $[256, 2, 128] \times 2$ | **262,144 B** | **256.0 KiB ($1.00\times$)** |
 
 ## Optimization & Performance Milestones (July 2026)
 
