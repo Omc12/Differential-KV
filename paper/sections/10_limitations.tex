@@ -14,8 +14,8 @@ the repository, but the evaluation host has no NVIDIA GPU, so we report \emph{no
 make \emph{no} CUDA claims. The decode design ports cleanly---reconstruct routed blocks into a
 buffer (a matmul), attend with a flash kernel, cache across a re-route interval---so we expect the
 gap in E4 to narrow on a GPU-native path, but that is a hypothesis to be measured, not a result.
-The figures and tables reserve space (a series slot in Figures~\ref{fig:g3}, a column convention in
-the results tables) so CUDA data can be inserted without restructuring the paper.
+The figures and tables reserve space (a series slot in Figure~\ref{fig:perf}, a column convention
+in the results tables) so CUDA data can be inserted without restructuring the paper.
 
 \paragraph{Single model, single host.} Every number here is Qwen2.5-1.5B (int4) on one Apple~M3.
 The residual budget and router settings are tuned for this model; larger models, different
@@ -31,11 +31,12 @@ once, is a known weaker case that the single-needle metric does not probe; an op
 bias mitigates it but is not a full solution. Broadening the evaluation is the most important next
 step for external credibility.
 
-\paragraph{Memory-pressure variance.} On an $8.6$\,GB host, absolute long-context prefill times for
-the dense baseline are sensitive to memory pressure (\S\ref{sec:eval}, E3). We report measured
-values and a confirming re-measurement, but a machine with more headroom would show a smaller (and
-more stable) absolute prefill gap; the robust claim is the quadratic-vs-sub-quadratic scaling, not
-the specific ratio.
+\paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both engines are pushed to the
+machine's limit: \diffkv{}'s prefill completes but is heavily memory-bound (so its $64$k prefill
+\emph{time} is a reach indicator, not a clean measurement), and the dense baseline OOMs outright.
+A machine with more memory headroom would give cleaner absolute long-context timings and would move
+the dense OOM boundary further out; the robust claims are the sub-quadratic prefill scaling and the
+bounded KV state, not the specific $64$k prefill seconds.
 
 \paragraph{Bounded pool.} The fixed $256$-block pool caps compressed capacity at $65{,}536$ tokens.
 Beyond that, the oldest blocks must be dropped or the pool enlarged (trading memory). A capacity

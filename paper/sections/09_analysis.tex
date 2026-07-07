@@ -29,12 +29,14 @@ representation.
 \subsection{The memory story, stated carefully}
 We are deliberately careful about memory because it is the easiest claim to overstate. The
 \emph{analytic KV state} is unambiguously smaller and bounded (E1). The \emph{measured allocator
-peak}, however, is close between the two engines at this scale, and at long context \diffkv{}'s can
-exceed dense's, because the peak is set during prefill and by the pre-allocated pool rather than by
-steady-state decode. On a $1.5$B model in $8.6$\,GB, full KV is simply not large enough for the
-compression to dominate the peak. The honest memory claim is therefore about the \emph{growth and
-bound} of the KV state, not a smaller measured peak at this model size; the peak advantage appears
-when the dense cache is large enough to be the binding constraint.
+peak}, through $32$k, is close between the two engines, and \diffkv{}'s can even exceed dense's,
+because the peak there is set during prefill and by the pre-allocated pool rather than by
+steady-state decode; on a $1.5$B model at those lengths, full KV is simply not yet large enough for
+the compression to dominate the peak. The claim sharpens at the boundary: at $64$k the dense cache
+\emph{does} become the binding constraint and OOMs, while \diffkv{}'s bounded store completes. So
+the honest memory story has two parts---below the boundary, compression buys a smaller \emph{growth
+rate} but not a smaller measured peak; at and beyond the boundary, the bound is what makes the
+context runnable at all. The peak advantage is a reach advantage.
 
 \subsection{When does \diffkv{} win?}
 Synthesizing the results: \diffkv{} wins when (i) the KV cache, not the weights, is the memory

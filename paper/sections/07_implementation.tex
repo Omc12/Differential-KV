@@ -32,7 +32,7 @@ fidelity therefore does not automatically inflate router cost.
 
 \paragraph{Configuration.} Behavior is controlled by environment flags with safe defaults, so new
 paths ship disabled until validated. The defaults used throughout this report are: compressed
-sparse decode on; decompress-and-cache on; block-sparse prefill on; rank $\rank{=}16$;
+sparse decode on; decompress-and-cache on; block-sparse prefill on; rank $\rank{=}32$;
 $\maxres{=}128$; top-\topk{} $=16$; residual-key router; SVD seed $1234$. The dense baseline is
 \texttt{mlx\_lm} with a full KV cache on the same int4 weights.
 

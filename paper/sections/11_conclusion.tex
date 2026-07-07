@@ -9,9 +9,10 @@ recency window exactly, and merges the two in log-space; a training-free block-s
 long-context prefill sub-quadratic; and a fixed block pool bounds the memory. Implemented entirely
 in MLX and measured on Qwen2.5-1.5B (int4) on an $8.6$\,GB Apple~M3, \diffkv{} holds a bounded KV
 state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, recovers a
-buried passcode exactly from $4$k to $\reachK$k, and overtakes dense on long-context prefill---at a
-measured cost in decode throughput that we report in full and localize to reconstruction-and-merge
-overhead. The residual budget is an explicit dial between memory, accuracy, and speed. The most
+buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where the dense full-KV cache
+runs out of memory, and overtakes dense on long-context prefill---at a measured cost in decode
+throughput, in the regime where a dense cache still fits, that we report in full and localize to
+reconstruction-and-merge overhead. The residual budget is an explicit dial between memory, accuracy, and speed. The most
 promising next steps are a fused (and GPU-native) decode kernel to narrow the throughput gap, and a
 broader evaluation across models, hardware, and standard long-context suites. We have been careful
 to claim only what the measurements support: \diffkv{} is a memory-and-prefill instrument for

@@ -33,7 +33,7 @@ for Long-Context Inference on Commodity Unified-Memory Hardware\par}
 \vfill
 \begin{minipage}{0.86\textwidth}\small\color{muted}\centering
 A sparse KV-cache inference runtime that compresses each transformer KV block to an
-\emph{anchor token}, a rank-$16$ joint SVD \emph{delta}, and a set of \emph{exact residual
+\emph{anchor token}, a rank-$32$ joint SVD \emph{delta}, and a set of \emph{exact residual
 tokens}, paired with a bounded dense recency window and a fused, routed decode kernel that scores
 queries in low-rank space without ever decompressing the cache and attends the residuals exactly.
 The bounded store reaches $64$k context where a dense cache exhausts an 8.6\,GB Apple~M3, and the

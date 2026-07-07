@@ -15,11 +15,14 @@ partly memory-contended data). "Code" = `ACTIVE_RUNTIME/serving/mlx_diffkv_wrapp
   ≈ 200 s" and depressed dense-tps figures were an artifact of concurrent CPU load; the clean run
   gives stable, reproducible numbers (dense-32k prefill ≈ 78 s, close to the independent 06-30 clean
   value of 73 s).
-- **Figures are deferred**: per the project owner, all data graphs and diagrams will be regenerated
-  in a final presentation-quality pass (shades of blue, black text). The current `paper/figures/`
-  PNG/PDFs still carry rank-16 shapes/KiB in a few captions/labels and MUST be regenerated at rank
-  32 before release. The prose and tables in this build are already rank-32-correct (they read the
-  code dims / measured JSON via macros).
+- **Figures — correctness pass done, aesthetic pass pending.** All data graphs (G1–G7) and
+  architecture diagrams (F1–F6) have been regenerated from the CLEAN rank-32 data, so the embedded
+  figures now agree with the tables and prose (decode/prefill/footprint curves, block-budget
+  numbers 178 KiB / 1.44×, rank shapes [255,32] / [2,32,128], projected-query dim ℝ³²). What is
+  still owed is the *presentation-quality aesthetic* pass the project owner will drive via Fable
+  (industry-deck styling, specific shades of blue, body text always in black); the current figures
+  are functional but not that final styling. Data graphs cover the 4k–32k head-to-head range where
+  both engines run; the 64k reach (active-only, dense OOM) lives in Table~3 and the prose.
 
 ## 1. Design claims ↔ code (verified by reading the source)
 | Paper claim | Code location | Status |
@@ -60,8 +63,24 @@ ablation (measured). All emitted by `make_tables.py`; no hand-typed numbers.
   higher for DiffKV at this model size — stated explicitly.
 - CUDA/Triton = future-work placeholder; no CUDA number plotted or stated.
 
-## 5. TODO before release
-- [ ] Regenerate ALL figures at rank 32 in the final visual pass (blue shades, black text).
-- [ ] Re-run `make_facts.py` + `make_tables.py` after the clean ablation/64k cells finish.
-- [ ] Compile `main.tex` and `conference.tex` with tectonic; fix any float/overfull warnings.
-- [ ] Verify each `\ref`/`\eqref` resolves and each `\cite` key exists in `references.bib`.
+## 5. Status
+- [x] Clean rank-32 primary sweep (4k–32k) + 64k reach (active ✓ / dense OOM) measured.
+- [x] Clean decode-mode ablation (4k–32k) and residual-budget sweep (@16k) measured.
+- [x] `make_facts.py` + `make_tables.py` regenerated from the clean data.
+- [x] Figures regenerated at rank 32 (correctness); prose/tables/figures mutually consistent.
+- [x] `main.tex` (31 pp) and `conference.tex` compile with tectonic; no undefined refs/cites.
+- [ ] FINAL aesthetic figure pass (Fable): industry-deck styling, blue shades, black body text.
+- [ ] (Pre-camera-ready) verify arXiv ids in `references.bib`; broaden eval (RULER/LongBench,
+  multi-model, baselines) per §10 limitations.
+
+## 6. Headline measured numbers (clean, of record)
+Apple M3 / 8.6 GB, Qwen2.5-1.5B int4, mid/balanced/rank-32, COMPRESSED_DECODE=1, greedy gen=128:
+| ctx | DiffKV prefill s | DiffKV tok/s | dense prefill s | dense tok/s | needle |
+|----|----|----|----|----|----|
+| 4k | 6.6 | 19.9 | 5.1 | 65.7 | ✓/✓ |
+| 8k | 13.6 | 18.4 | 11.8 | 55.3 | ✓/✓ |
+| 16k | 28.2 | 18.7 | 27.8 | 47.0 | ✓/✓ |
+| 32k | 58.5 | 17.0 | 77.9 | 35.7 | ✓/✓ |
+| 64k | 928 | 8.6 | **OOM** | — | ✓ / n-a |
+Per-block compression (rank 32): R=128 → 1.44×, R=64 → 2.25×. Residual sweep @16k: needle ✓ for
+R=8..128, ratio 3.80×→1.40×. Decode ablation @16k: compressed 18.8 vs exact 30.3 tok/s (both ✓).

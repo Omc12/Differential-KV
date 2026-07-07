@@ -5,7 +5,7 @@
 All numbers are measured on one host: an Apple~M3 with $8.6$\,GB of unified memory, running
 Qwen2.5-1.5B at int4 via \texttt{mlx\_lm}. We compare two engines on the \emph{same} quantized
 weights: \textbf{\diffkv{}} (the active runtime in its default serving configuration---compressed
-sparse decode, decompress-and-cache, block-sparse prefill, $\rank{=}16$, $\maxres{=}128$,
+sparse decode, decompress-and-cache, block-sparse prefill, $\rank{=}32$, $\maxres{=}128$,
 $\topk{=}16$) and \textbf{dense} (\texttt{mlx\_lm} with a full KV cache). Running both on identical
 weights makes the comparison a clean ablation of the cache representation alone.
 
@@ -58,7 +58,7 @@ peak. This is the reach the bounded store buys: a context the dense cache cannot
 
 \subsection{E3 --- Prefill scaling and the crossover}
 \diffkv{}'s prefill does less attention work than dense (block-sparse, $O(L\cdot K)$ vs.\ $O(L^2)$),
-so its cost grows sub-quadratically while dense grows quadratically (Figure~\ref{fig:g4}). At short
+so its cost grows sub-quadratically while dense grows quadratically (Figure~\ref{fig:perf}a). At short
 context the fixed cost of streaming SVD compression makes \diffkv{} slightly slower
 ($\actPfFourK$\,s vs.\ $\dnPfFourK$\,s at $4$k); the two are essentially matched by $16$k
 ($\actPfSixteenK$\,s vs.\ $\dnPfSixteenK$\,s), and \diffkv{} pulls ahead by $32$k, prefilling in
@@ -71,18 +71,20 @@ does not complete at all---it exhausts memory during prefill (E2).
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.82\linewidth]{figures/g4_prefill.pdf}
-  \caption{Prefill time vs.\ context (log scale). Block-sparse prefill grows sub-quadratically and
-  overtakes the dense quadratic baseline at long context; the shaded band marks the region where
-  \diffkv{} prefill is faster.}
-  \label{fig:g4}
+  \includegraphics[width=\linewidth]{figures/g_perf.pdf}
+  \caption{Prefill and decode of \diffkv{} versus the dense full-KV baseline on identical int4
+  weights (Apple M3, $8.6$\,GB; greedy, $128$ decode tokens). (a)~Block-sparse prefill grows
+  sub-quadratically and overtakes the quadratic dense baseline by $32$K; at $64$K the dense
+  baseline runs out of memory during prefill, while \diffkv{} completes. (b)~\diffkv{} decode is
+  nearly flat in context but slower than dense wherever the dense cache still fits.}
+  \label{fig:perf}
 \end{figure}
 
 \subsection{E4 --- Decode throughput (the cost)}
 We state the cost of compression plainly. \diffkv{}'s decode reconstructs and merges a sparse
 representation every token, which a dense cache does not; where the dense cache still fits in
 memory---which, for this $1.5$B model on $8.6$\,GB, it does through $\reachK$k---dense decodes
-faster (Figure~\ref{fig:g3}, Table~\ref{tab:main}). With decompress-and-cache enabled, \diffkv{}
+faster (Figure~\ref{fig:perf}b, Table~\ref{tab:main}). With decompress-and-cache enabled, \diffkv{}
 decode is nearly \emph{flat} across context ($\actTpsFourK\to\actTpsThirtyTwoK$\,tok/s from $4$k to
 $32$k---the top-\topk{} routing bounds the per-token work independent of length), while dense
 declines steadily ($\dnTpsFourK\to\dnTpsThirtyTwoK$\,tok/s as its cache grows). The gap therefore
@@ -91,14 +93,6 @@ $32$k---but does not close within the range where the dense cache still fits. \d
 decode speed---and a faster decode path (a fused kernel; a CUDA/Triton port, \S\ref{sec:limits}) is
 the clearest avenue to narrow this gap further.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.82\linewidth]{figures/g3_decode_tps.pdf}
-  \caption{Decode throughput vs.\ context. Dense is faster wherever its cache fits; \diffkv{}'s
-  cached sparse decode is flatter but slower. The CUDA/Triton decode path is reserved for future
-  measurement (\S\ref{sec:limits}).}
-  \label{fig:g3}
-\end{figure}
 
 \subsection{E5 --- Residual budget: the accuracy/memory/speed dial}
 \maxres{} is the central design knob. Table~\ref{tab:residual} sweeps it at $16$k under forced
@@ -117,16 +111,17 @@ point---the method is defined for $\maxres{\ge}1$.)
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.82\linewidth]{figures/g6_residual_tradeoff.pdf}
-  \caption{Residual-budget sweep at $16$k (forced compressed decode). The compression ratio and
-  decode throughput both rise as \maxres{} falls, but below $\resThreshold$ residuals the needle is
-  lost (red region). The residual budget is an explicit accuracy--memory--speed dial.}
+  \caption{Residual-budget sweep at $16$K (forced compressed decode, rank-$32$ store). Bars:
+  compression ratio versus dense (left axis); line: decode throughput (right axis). The needle is
+  recovered exactly at every budget in this range (Table~\ref{tab:residual}), so \maxres{} acts as
+  a clean memory--speed dial, with the larger default retained for prose-fact fidelity.}
   \label{fig:g6}
 \end{figure}
 
 \begin{table}[t]
   \centering
-  \caption{Residual-budget sweep at $16$k. Store size and compression ratio are measured; the
-  needle transitions from lost to exact at $\maxres{=}\resThreshold$.}
+  \caption{Residual-budget sweep at $16$K (rank-$32$ store, forced compressed decode). Store size
+  and compression ratio are measured; the needle is recovered exactly at every budget shown.}
   \label{tab:residual}
   \small
   \input{tables/t4_residual}
