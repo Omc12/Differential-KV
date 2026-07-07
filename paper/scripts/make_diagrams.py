@@ -285,89 +285,123 @@ def f5_decode():
 def f6_memory_3d():
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
 
-    fig = plt.figure(figsize=(8.8, 5.4))
-    ax = fig.add_axes([0.0, -0.06, 1.0, 1.02], projection="3d")
+    fig = plt.figure(figsize=(9.0, 5.6))
+    ax  = fig.add_axes([0.0, 0.0, 1.0, 1.0], projection="3d")
     ax.set_proj_type("ortho")
 
     def cuboid(o, size, color, alpha=1.0, ec=BLACK, lw=0.5, z=1):
         x, y, zc = o; dx, dy, dz = size
-        pts = np.array([[x, y, zc], [x+dx, y, zc], [x+dx, y+dy, zc], [x, y+dy, zc],
-                        [x, y, zc+dz], [x+dx, y, zc+dz], [x+dx, y+dy, zc+dz], [x, y+dy, zc+dz]])
-        faces = [[pts[j] for j in f] for f in
-                 ([0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6],
-                  [1, 2, 6, 5], [0, 3, 7, 4])]
+        pts = np.array([
+            [x,    y,    zc],   [x+dx, y,    zc],
+            [x+dx, y+dy, zc],   [x,    y+dy, zc],
+            [x,    y,    zc+dz],[x+dx, y,    zc+dz],
+            [x+dx, y+dy, zc+dz],[x,    y+dy, zc+dz],
+        ])
+        faces = [[pts[j] for j in f] for f in (
+            [0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[1,2,6,5],[0,3,7,4])]
         pc = Poly3DCollection(faces, facecolors=color, edgecolors=ec,
                               linewidths=lw, alpha=alpha)
         pc.set_zsort("max"); pc.set_zorder(z)
         ax.add_collection3d(pc)
 
-    # layer stack (left, receding)
-    n_shown = 5
-    for i in range(n_shown):
-        yy = 3.1 * i
-        cuboid((0.0, yy, 0.0), (2.0, 2.4, 0.16), BLUE_XL, alpha=0.9,
-               ec=GRAY_D, lw=0.5, z=i)
-    # (layer labels are placed in 2D figure space below — 3D projection of text
-    #  anchors is unreliable across zoom changes)
+    # ── layer stack (left, receding) ──
+    n_layers  = 6
+    slab_w, slab_d, slab_h = 3.4, 3.0, 0.30
+    slab_step = 0.65
+    for i in range(n_layers):
+        cuboid((0.0, i*slab_step, 0.0), (slab_w, slab_d, slab_h),
+               BLUE_XL, alpha=0.86, ec=GRAY_D, lw=0.55, z=i)
 
-    # block pool (right): blue low-rank base + emerald residual cap
-    x0 = 5.0
-    z_lr, z_res = 1.7, 4.4
-    bw, gap, depth = 0.72, 0.30, 2.0
-    n_used, n_ghost = 8, 3
+    # ── block pool ──
+    x0 = 5.0; z_lr = 2.0; z_res = 4.0
+    bw = 0.72; gap = 0.26; bdepth = 2.6
+    n_used = 9; n_ghost = 3
     for b in range(n_used + n_ghost):
-        x = x0 + b * (bw + gap)
-        used = b < n_used
-        cuboid((x, 0.0, 0.0), (bw, depth, z_lr), BLUE,
-               alpha=(0.95 if used else 0.20), ec=(BLACK if used else GRAY_D), lw=0.6, z=30 + b)
-        cuboid((x, 0.0, z_lr), (bw, depth, z_res), EMERALD,
-               alpha=(0.80 if used else 0.16), ec=(BLACK if used else GRAY_D), lw=0.6, z=30 + b)
+        x = x0 + b*(bw+gap); used = b < n_used
+        al = 0.95 if used else 0.17
+        ag = 0.82 if used else 0.14
+        ec = BLACK if used else GRAY_D
+        lw = 0.65 if used else 0.38
+        cuboid((x,0.0,0.0),  (bw,bdepth,z_lr),  BLUE,
+               alpha=al, ec=ec, lw=lw, z=30+b)
+        cuboid((x,0.0,z_lr), (bw,bdepth,z_res),  EMERALD,
+               alpha=ag, ec=ec, lw=lw, z=30+b)
 
-    # dense recency window slab (front)
-    cuboid((x0, -3.0, 0.0), ((bw + gap) * 6.4, 1.7, 1.0), BLUE_L, alpha=0.95,
-           ec=BLACK, lw=0.7, z=80)
+    # ── recency window slab ──
+    win_w = (bw+gap)*7.0
+    cuboid((x0,-2.6,0.0), (win_w,1.8,1.2), BLUE_L, alpha=0.92, ec=BLACK, lw=0.75, z=80)
 
-    # flush line: window slab -> first pool block (kept off the bar faces)
-    ax.plot([x0 + 0.9, x0 + 0.35], [-1.3, -0.05], [0.75, 0.75], color=BLACK,
-            lw=1.3, zorder=90)
+    # flush arrow
+    ax.plot([x0+1.0, x0+0.36], [-0.8, 0.05], [0.9, 0.9], color=BLACK, lw=1.4, zorder=90)
 
-    ax.set_xlim(0, x0 + (n_used + n_ghost) * (bw + gap) + 0.4)
-    ax.set_ylim(-3.2, 3.1 * (n_shown - 1) + 2.5)
-    ax.set_zlim(0, z_lr + z_res + 0.4)
-    ax.view_init(elev=23, azim=-60)
+    # ── limits & camera ──
+    x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.6
+    ax.set_xlim(0, x_max)
+    ax.set_ylim(-3.0, n_layers*slab_step + slab_d + 0.5)
+    ax.set_zlim(0, z_lr+z_res+0.6)
+    ax.view_init(elev=25, azim=-52)
     ax.set_axis_off()
-    ax.set_box_aspect((12.5, 11.0, 4.0), zoom=1.52)
+    ax.set_box_aspect((13.5, 9.5, 4.8), zoom=1.46)
 
-    # callouts — all in 2D figure space, positions verified against the render
-    fig.text(0.085, 0.47, "28-layer stack\n(store replicated\nper layer)", ha="center",
-             va="center", fontsize=8.2, color=BLACK, linespacing=1.35)
-    fig.text(0.245, 0.615, "layer 0", ha="right", fontsize=7.5, color=BLACK)
-    fig.text(0.155, 0.335, "layer 27", ha="right", fontsize=7.5, color=BLACK)
-    fig.text(0.60, 0.775, "compressed block pool — 256 slots (bounded)", ha="center",
-             fontsize=8.6, color=BLACK)
-    fig.text(0.475, 0.695, "used blocks", ha="center", fontsize=7.5, color=BLACK)
-    fig.text(0.715, 0.585, "free (zeroed)", ha="center", fontsize=7.4, color=GRAY_D)
-    fig.text(0.50, 0.055, "dense recency window — 768 exact fp16 tokens", ha="center",
-             fontsize=8.2, color=BLACK)
-    fig.text(0.125, 0.245, "overflow →\nflush + compress", ha="center", fontsize=7.4,
-             color=BLACK, linespacing=1.3)
+    # ── 2D labels ──
 
-    # legend strip under the top edge
-    leg = [Patch(fc=BLUE, ec=BLACK, label="low-rank core  $U, V_K, V_V$, anchors, min/max  (≈50 KiB)"),
-           Patch(fc=EMERALD, ec=BLACK, label="exact residuals  $R_K, R_V$  (≈128 KiB, $R{=}128$)"),
-           Patch(fc=BLUE_L, ec=BLACK, label="dense recency window (fp16)")]
-    lg = fig.legend(handles=leg, loc="upper center", bbox_to_anchor=(0.5, 0.985),
-                    ncol=3, fontsize=7.2, frameon=True, columnspacing=1.2,
-                    handlelength=1.3, borderpad=0.5)
-    lg.get_frame().set_edgecolor(LEGEND_EC); lg.get_frame().set_linewidth(0.7)
+    # Pool title
+    fig.text(0.645, 0.907, "compressed block pool — 256 slots (bounded)",
+             ha="center", va="bottom", fontsize=8.8, color=BLACK, fontweight="bold")
 
-    fig.savefig(os.path.join(FIG, "f6_memory_3d.png"), dpi=300,
-                bbox_inches="tight", pad_inches=0.03)
-    fig.savefig(os.path.join(FIG, "f6_memory_3d.pdf"),
-                bbox_inches="tight", pad_inches=0.03)
+    # "used blocks" label (centered over its bracket)
+    fig.text(0.53, 0.765, "used blocks", ha="center", va="bottom", fontsize=7.3, color=BLACK)
+    
+    # Bracket line for used blocks (spans 0.35 to 0.71 in horizontal fraction)
+    fig.add_artist(Line2D([0.35, 0.71], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    # Downward ticks on bracket ends
+    fig.add_artist(Line2D([0.35, 0.35], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([0.71, 0.71], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+
+    # "free (zeroed)" — above ghost bars
+    fig.text(0.79, 0.58, "free\n(zeroed)", ha="center", va="center",
+             fontsize=7.2, color=GRAY_D, linespacing=1.3)
+
+    # 28-layer stack label
+    fig.text(0.095, 0.55, "28-layer stack\n(store replicated\nper layer)",
+             ha="center", va="center", fontsize=8.2, color=BLACK, linespacing=1.4)
+
+    # layer 0 / layer 27 labels on the left, with pointer lines to the actual slabs
+    fig.text(0.18, 0.72, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
+    fig.add_artist(Line2D([0.185, 0.28], [0.72, 0.69], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+    
+    fig.text(0.18, 0.42, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
+    fig.add_artist(Line2D([0.185, 0.26], [0.42, 0.42], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+
+    # recency window label — below the slab
+    fig.text(0.585, 0.082, "dense recency window — 768 exact fp16 tokens",
+             ha="center", va="bottom", fontsize=8.1, color=BLACK)
+
+    # overflow label — completely clear of the window, on the bottom-left, with a pointer line to the arrow
+    fig.text(0.15, 0.26, "overflow →\nflush + compress",
+             ha="center", va="center", fontsize=7.4, color=BLACK, linespacing=1.3)
+    fig.add_artist(Line2D([0.22, 0.35], [0.28, 0.35], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+
+    # ── legend (upper-left, vertical) ──
+    leg = [
+        Patch(fc=BLUE,    ec=BLACK, label=r"low-rank core  $U,V_K,V_V$, anchors, min/max  (≈50 KiB)"),
+        Patch(fc=EMERALD, ec=BLACK, label=r"exact residuals  $R_K,R_V$  (≈128 KiB,  $R{=}128$)"),
+        Patch(fc=BLUE_L,  ec=BLACK, label="dense recency window (fp16)"),
+    ]
+    lg = fig.legend(handles=leg, loc="upper left", bbox_to_anchor=(0.01, 0.995),
+                    ncol=1, fontsize=7.3, frameon=True,
+                    handlelength=1.4, borderpad=0.55, labelspacing=0.5)
+    lg.get_frame().set_edgecolor(LEGEND_EC)
+    lg.get_frame().set_linewidth(0.7)
+    lg.get_frame().set_alpha(0.93)
+
+    out = os.path.join(FIG, "f6_memory_3d")
+    fig.savefig(out+".png", dpi=300, bbox_inches="tight", pad_inches=0.04)
+    fig.savefig(out+".pdf",          bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
-    print("wrote", os.path.join(FIG, "f6_memory_3d.png"))
+    print("wrote", out+".png")
 
 
 if __name__ == "__main__":
