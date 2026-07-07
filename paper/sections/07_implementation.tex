@@ -5,17 +5,20 @@
 Qwen2.5-1.5B~\cite{qwen25}. A few implementation choices are load-bearing and worth recording,
 because they are where correctness or performance was actually won or lost.
 
-\paragraph{Attention by monkey-patch.} Rather than fork \texttt{mlx\_lm}, the runtime replaces
-\texttt{qwen2.Attention.\_\_call\_\_} at load time with the patched forward of \S\ref{sec:overview},
-and hands each layer a reference to the shared block manager. This keeps the runtime a thin,
-model-agnostic overlay on an unmodified upstream model.
+\begin{sloppypar}
+\paragraph{Attention by monkey-patch.} Rather than fork \texttt{mlx\_lm}, the runtime
+replaces \path{qwen2.Attention.__call__} at load time with the patched forward of
+\S\ref{sec:overview}, and hands each layer a reference to the shared block manager.
+This keeps the runtime a thin, model-agnostic overlay on an unmodified upstream model.
 
-\paragraph{Randomized SVD in NumPy.} Compression runs the randomized truncated SVD in fp32 in
-NumPy on the CPU, not in MLX on the GPU. On unified memory this is nearly free to marshal (no
-host--device copy), and it sidesteps GPU-only limitations in the current MLX linear-algebra path
-(e.g.\ \texttt{qr}); a $255\times512$ block factorizes in $\approx2$\,ms. The seed is fixed so that
-compression---and therefore decode output and needle recovery---is deterministic run to run; an
-unseeded range finder made recall vary between identical runs.
+\paragraph{Randomized SVD in NumPy.} Compression runs the randomized truncated SVD
+in fp32 in NumPy on the CPU, not in MLX on the GPU. On unified memory this is nearly
+free to marshal (no host--device copy), and it sidesteps GPU-only limitations in the
+current MLX linear-algebra path (e.g.\ \texttt{qr}); a $255\times512$ block factorizes
+in $\approx2$\,ms. The seed is fixed so that compression---and therefore decode output
+and needle recovery---is deterministic run to run; an unseeded range finder made recall
+vary between identical runs.
+\end{sloppypar}
 
 \paragraph{Decode precision.} The decode score/merge arithmetic uses fp16 products with fp32
 log-sum-exp accumulation. A well-intentioned change that recast the merge operands to fp32 for

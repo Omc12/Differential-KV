@@ -1,12 +1,15 @@
 \section{Full Measured Results}
 \label{app:tables}
 
+\begin{sloppypar}
 Table~\ref{tab:detail} lists every cell of the fresh primary sweep
-(\texttt{paper/scripts/measure\_sweep.sh} and \texttt{measure\_tail.sh}) for both engines, exactly
-as recorded by the isolated workers. \emph{MLX peak} is the allocator peak
-(\texttt{get\_peak\_memory}) inside the worker process; \emph{Prompt tok} is the tokenizer count
-for the built NIAH prompt at that target. Empty cells are measurements that do not apply; failed
-cells would be stated as failures in the text, never given an invented value.
+(\path{paper/scripts/measure_sweep.sh} and \path{measure_tail.sh}) for both engines,
+exactly as recorded by the isolated workers. \emph{MLX peak} is the allocator peak
+(\texttt{get\_peak\_memory}) inside the worker process; \emph{Prompt tok} is the
+tokenizer count for the built NIAH prompt at that context. Empty cells are measurements
+that do not apply; failed cells would be stated as failures in the text, never given an
+invented value.
+\end{sloppypar}
 
 \begin{table}[h]
 \centering
@@ -14,7 +17,7 @@ cells would be stated as failures in the text, never given an invented value.
 identical int4 weights. All values measured.}
 \label{tab:detail}
 \small
-\input{tables/t5_detail}
+\resizebox{\linewidth}{!}{\input{tables/t5_detail}}
 \end{table}
 
 \noindent The configuration table (Table~\ref{tab:config}) records the model and runtime

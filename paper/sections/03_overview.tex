@@ -4,13 +4,15 @@
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f1_architecture.pdf}
-  \caption{\diffkv{} active-runtime architecture. A serving stack (gateway, batching engine,
-  session manager) drives \texttt{MLXDiffKVWrapper}, which runs chunked prefill and a greedy or
-  sampled decode loop over \texttt{MLXQwenModel}. The model's attention layer is monkey-patched:
-  on prefill ($L{>}1$) it runs (block-sparse) causal attention over the native cache and captures
-  $K$/$V$ into the store; on decode ($L{=}1$) it ingests the current token and runs the fused
-  routed sparse attention. All state lives in the per-session \texttt{MLXKVBlockManager}: a dense
-  recency window plus a bounded compressed block pool.}
+  \caption[\diffkv{} active-runtime architecture: serving stack, monkey-patched attention,
+  and bounded block store.]{\diffkv{} active-runtime architecture. A serving stack (gateway,
+  batching engine, session manager) drives \texttt{MLXDiffKVWrapper}, which runs chunked
+  prefill and a greedy or sampled decode loop over \texttt{MLXQwenModel}. The model's
+  attention layer is monkey-patched: on prefill ($L{>}1$) it runs (block-sparse) causal
+  attention over the native cache and captures $K$/$V$ into the store; on decode ($L{=}1$)
+  it ingests the current token and runs the fused routed sparse attention. All state lives in
+  the per-session \texttt{MLXKVBlockManager}: a dense recency window plus a bounded compressed
+  block pool.}
   \label{fig:arch}
 \end{figure}
 

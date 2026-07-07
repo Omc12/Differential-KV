@@ -19,12 +19,12 @@ prefill affordable.
 
 \subsection{Session state}
 Each session holds, per layer (Figure~\ref{fig:mem3d}): a dense recency window---fixed-capacity
-fp16 buffers $[\Hkv, \dwin{+}\bs, \dhead]$ for the newest $768$ tokens---and a compressed pool of
-$M{=}256$ block slots, pre-allocated for $U$, $V_K$, $V_V$, anchors, residuals $R_K,R_V$, key
-min/max, and per-block scalars. Because the pool is pre-allocated at its maximum size, the store's
-footprint is \emph{bounded and context-independent} up to the pool's capacity of
-$256\times256=65{,}536$ compressed tokens; adding context fills empty slots rather than growing the
-allocation. This is the structural source of the bounded-memory behavior in \S\ref{sec:eval}.
+fp16 buffers $[\Hkv,\;\dwin{+}\bs,\;\dhead]$ for the newest $768$ tokens---and a compressed pool
+of $M{=}256$ block slots, pre-allocated for $U$, $V_K$, $V_V$, anchors, residuals $R_K,R_V$,
+key min/max, and per-block scalars. Because the pool is pre-allocated at its maximum size, the
+store's footprint is \emph{bounded and context-independent} up to the pool's capacity of
+$256\times256=65{,}536$ compressed tokens; adding context fills empty slots rather than growing
+the allocation. This is the structural source of the bounded-memory behavior in \S\ref{sec:eval}.
 
 \subsection{Chunked, streaming prefill}
 Prefill consumes the prompt in fixed chunks (default $512$ tokens). Each chunk runs causal
