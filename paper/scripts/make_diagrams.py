@@ -288,7 +288,19 @@ def f6_memory_3d():
     from matplotlib.patches import Patch, FancyArrowPatch
     from matplotlib.lines import Line2D
 
-    fig = plt.figure(figsize=(9.0, 5.6))
+    # 3D Arrow helper class for matplotlib 3D sorting compatibility
+    class Arrow3D(FancyArrowPatch):
+        def __init__(self, xs, ys, zs, *args, **kwargs):
+            super().__init__((0,0), (0,0), *args, **kwargs)
+            self._adds = (xs, ys, zs)
+
+        def do_3d_projection(self, renderer=None):
+            xs, ys, zs = self._adds
+            xs_2d, ys_2d, zs_2d = proj3d.proj_transform(xs, ys, zs, self.axes.get_proj())
+            self.set_positions((xs_2d[0], ys_2d[0]), (xs_2d[1], ys_2d[1]))
+            return np.min(zs_2d)
+
+    fig = plt.figure(figsize=(9.2, 5.8))
     ax  = fig.add_axes([0.0, 0.0, 1.0, 1.0], projection="3d")
     ax.set_proj_type("ortho")
 
@@ -307,46 +319,71 @@ def f6_memory_3d():
         pc.set_zsort("max"); pc.set_zorder(z)
         ax.add_collection3d(pc)
 
-    # ── layer stack (left, receding) ──
-    n_layers  = 6
-    slab_w, slab_d, slab_h = 3.4, 3.0, 0.30
-    slab_step = 0.65
-    for i in range(n_layers):
-        cuboid((0.0, i*slab_step, 0.0), (slab_w, slab_d, slab_h),
-               BLUE_XL, alpha=0.86, ec=GRAY_D, lw=0.55, z=i)
+    # ── 1. Vertical Layer Stack (Left side) ──
+    n_layers = 5
+    slab_w, slab_d, slab_h = 2.4, 2.2, 0.22
+    slab_x, slab_y = 0.5, 0.8
+    z_coords = [0.0, 1.1, 2.2, 3.3, 4.4]
 
-    # ── block pool ──
-    x0 = 5.0; z_lr = 2.0; z_res = 4.0
-    bw = 0.72; gap = 0.26; bdepth = 2.6
+    for i, z_val in enumerate(z_coords):
+        color = BLUE_XL if i < n_layers - 1 else BLUE_L
+        cuboid((slab_x, slab_y, z_val), (slab_w, slab_d, slab_h),
+               color, alpha=0.9, ec=GRAY_D, lw=0.6, z=10+i)
+
+    # ── 2. Detailed single-layer view (Right side) ──
+    x0 = 5.2
+    z_lr = 1.8; z_res = 3.6
+    bw = 0.65; gap = 0.25; bdepth = 2.2
     n_used = 9; n_ghost = 3
+    pool_y = 0.8
+
     for b in range(n_used + n_ghost):
         x = x0 + b*(bw+gap); used = b < n_used
-        al = 0.95 if used else 0.17
-        ag = 0.82 if used else 0.14
+        al = 0.95 if used else 0.16
+        ag = 0.82 if used else 0.12
         ec = BLACK if used else GRAY_D
-        lw = 0.65 if used else 0.38
-        cuboid((x,0.0,0.0),  (bw,bdepth,z_lr),  BLUE,
+        lw = 0.65 if used else 0.35
+        cuboid((x, pool_y, 0.0),  (bw, bdepth, z_lr),  BLUE,
                alpha=al, ec=ec, lw=lw, z=30+b)
-        cuboid((x,0.0,z_lr), (bw,bdepth,z_res),  EMERALD,
+        cuboid((x, pool_y, z_lr), (bw, bdepth, z_res), EMERALD,
                alpha=ag, ec=ec, lw=lw, z=30+b)
 
-    # ── recency window slab ──
+    # Dense recency window slab (front, segmented array)
+    win_y = -2.2
     win_w = (bw+gap)*7.0
-    cuboid((x0,-2.6,0.0), (win_w,1.8,1.2), BLUE_L, alpha=0.92, ec=BLACK, lw=0.75, z=80)
+    win_h = 1.0
+    cuboid((x0, win_y, 0.0), (win_w, 1.8, win_h), BLUE_L, alpha=0.92, ec=BLACK, lw=0.75, z=80)
+    
+    # Draw segments on the recency window to show it is a token buffer (array of blocks)
+    for seg_idx in range(1, 7):
+        xs = x0 + seg_idx * (win_w / 7.0)
+        ax.plot([xs, xs], [win_y, win_y], [0.0, win_h], color=BLACK, lw=0.5, zorder=85)
+        ax.plot([xs, xs], [win_y, win_y + 1.8], [win_h, win_h], color=BLACK, lw=0.5, zorder=85)
 
-    # flush arrow
-    ax.plot([x0+1.0, x0+0.36], [-0.8, 0.05], [0.9, 0.9], color=BLACK, lw=1.4, zorder=90)
+    # ── 3. Flush & zoom connector lines ──
+    
+    # Draw a real 3D arrow for overflow/flush
+    arrow3d = Arrow3D([x0 + 1.0, x0 + 0.20], [win_y + 0.9, pool_y + 0.1], [win_h - 0.05, 0.7],
+                      mutation_scale=10, lw=1.5, arrowstyle="-|>", color=BLACK)
+    ax.add_artist(arrow3d)
+
+    # Zoom-in dashed lines showing Slab 27 expanding into the detailed view
+    s27_tr = (slab_x + slab_w, slab_y + slab_d/2, slab_h/2)
+    s27_br = (slab_x + slab_w, slab_y, 0.0)
+    
+    ax.plot([s27_tr[0], x0], [s27_tr[1], pool_y + bdepth/2], [s27_tr[2], (z_lr+z_res)/2],
+            color=GRAY_D, lw=0.8, ls=":", zorder=5)
+    ax.plot([s27_br[0], x0], [s27_br[1], win_y + 0.9], [s27_br[2], win_h/2],
+            color=GRAY_D, lw=0.8, ls=":", zorder=5)
 
     # ── limits & camera ──
-    x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.6
-    
-    # Left margin at -2.2 gives perfect spacing for side-on view labels
-    ax.set_xlim(-2.2, x_max)
-    ax.set_ylim(-3.0, n_layers*slab_step + slab_d + 0.5)
-    ax.set_zlim(0, z_lr+z_res+0.6)
-    ax.view_init(elev=15, azim=-75)
+    x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.5
+    ax.set_xlim(-0.5, x_max)
+    ax.set_ylim(-2.8, 4.0)
+    ax.set_zlim(-0.2, z_lr+z_res+0.8)
+    ax.view_init(elev=22, azim=-55)
     ax.set_axis_off()
-    ax.set_box_aspect((14.0, 9.5, 4.8), zoom=1.20)
+    ax.set_box_aspect((13.5, 9.0, 5.0), zoom=1.28)
 
     # Helper to project 3D point to 2D figure coordinates (0.0 to 1.0)
     def project_3d_to_fig(x, y, z):
@@ -355,16 +392,16 @@ def f6_memory_3d():
         fig_coord = fig.transFigure.inverted().transform(disp_coord)
         return fig_coord
 
-    # Draw the scene to initialize projection matrices
+    # Draw canvas to get projection matrices
     fig.canvas.draw()
 
     # Get target coordinates for arrows dynamically
-    target_layer_0   = project_3d_to_fig(0.0, (n_layers-1)*slab_step, slab_h/2)
-    target_layer_27  = project_3d_to_fig(0.0, 0.0, slab_h/2)
-    target_stack     = project_3d_to_fig(0.0, (n_layers//2)*slab_step, slab_h/2)
-    target_overflow  = project_3d_to_fig(x0 + 0.36, -0.2, 0.9)
-    target_free      = project_3d_to_fig(x0 + (n_used)*(bw+gap) + bw/2, bdepth/2, z_lr + z_res/2)
-    target_recency   = project_3d_to_fig(x0 + win_w/2, -2.6, 0.0)
+    target_layer_0   = project_3d_to_fig(slab_x + slab_w/2, slab_y + slab_d/2, z_coords[-1] + slab_h)
+    target_layer_27  = project_3d_to_fig(slab_x + slab_w/2, slab_y + slab_d/2, z_coords[0] + slab_h)
+    target_free      = project_3d_to_fig(x0 + (n_used)*(bw+gap) + bw/2, pool_y + bdepth/2, z_lr + z_res/2)
+    target_recency   = project_3d_to_fig(x0 + win_w/2, win_y + 0.9, win_h/2)
+    target_zoom_in   = project_3d_to_fig(slab_x + slab_w, slab_y + slab_d/2, slab_h/2)
+    target_overflow  = project_3d_to_fig(x0, win_y, 0.0) # bottom-left corner of the window block
 
     # Helper for 2D figure-level arrows
     def draw_arrow(p0, p1, style="->", color=BLACK, lw=0.85):
@@ -375,48 +412,44 @@ def f6_memory_3d():
     # ── 2D labels ──
 
     # Pool title
-    fig.text(0.645, 0.907, "compressed block pool — 256 slots (bounded)",
+    fig.text(0.655, 0.907, "compressed block pool — 256 slots (bounded)",
              ha="center", va="bottom", fontsize=8.8, color=BLACK, fontweight="bold")
 
     # "used blocks" label (centered over its bracket)
     fig.text(0.53, 0.765, "used blocks", ha="center", va="bottom", fontsize=7.3, color=BLACK)
     
-    # Bracket line for used blocks (spans 0.38 to 0.80 horizontally)
-    fig.add_artist(Line2D([0.38, 0.80], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    # Bracket line for used blocks (spans 0.36 to 0.71 in horizontal fraction)
+    fig.add_artist(Line2D([0.36, 0.71], [0.75, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
     # Downward ticks on bracket ends
-    fig.add_artist(Line2D([0.38, 0.38], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
-    fig.add_artist(Line2D([0.80, 0.80], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([0.36, 0.36], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
+    fig.add_artist(Line2D([0.71, 0.71], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
 
     # "free (zeroed)" — above ghost bars
     fig.text(0.88, 0.58, "free\n(zeroed)", ha="center", va="center",
              fontsize=7.2, color=GRAY_D, linespacing=1.3)
-    # Arrow to ghost bars target
     draw_arrow((0.88, 0.53), target_free, color=GRAY_D)
 
-    # 28-layer stack label
-    fig.text(0.10, 0.55, "28-layer stack\n(store replicated\nper layer)",
-             ha="center", va="center", fontsize=8.2, color=BLACK, linespacing=1.4)
-    # Arrow to stack target
-    draw_arrow((0.165, 0.55), target_stack)
+    # 28-layer stack label (centered next to the stack)
+    fig.text(0.08, 0.50, "28-layer stack\n(KV store replicated\nper layer)",
+             ha="center", va="center", fontsize=8.2, color=BLACK, fontweight="bold", linespacing=1.4)
 
-    # layer 0 / layer 27 labels on the left
-    fig.text(0.18, 0.74, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.185, 0.74), target_layer_0)
+    # layer 0 (top of the stack)
+    fig.text(0.12, 0.78, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.125, 0.78), target_layer_0)
     
-    fig.text(0.18, 0.45, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
-    draw_arrow((0.185, 0.45), target_layer_27)
+    # layer 27 (bottom of stack, being magnified)
+    fig.text(0.12, 0.28, "layer 27\n(magnified to show\ndetails below)", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.125, 0.28), target_layer_27)
 
     # recency window label — below the slab
-    fig.text(0.55, 0.12, "dense recency window — 768 exact fp16 tokens",
-             ha="center", va="bottom", fontsize=8.1, color=BLACK)
-    # Arrow to recency slab target
-    draw_arrow((0.55, 0.15), target_recency)
+    fig.text(0.585, 0.082, "dense recency window — 768 exact fp16 tokens\n(acts as a sliding FIFO queue)",
+             ha="center", va="bottom", fontsize=8.1, color=BLACK, linespacing=1.3)
+    draw_arrow((0.585, 0.138), target_recency)
 
-    # overflow label — completely clear of the window, on the bottom-left
-    fig.text(0.15, 0.26, "overflow →\nflush + compress",
+    # overflow label — completely clear of the window, on the bottom-left, pointing to the corner where overflow occurs
+    fig.text(0.18, 0.16, "overflow →\nflush + compress",
              ha="center", va="center", fontsize=7.4, color=BLACK, linespacing=1.3)
-    # Arrow pointing to the flush arrow target
-    draw_arrow((0.21, 0.27), target_overflow)
+    draw_arrow((0.21, 0.19), target_overflow)
 
     # ── legend (upper-left, vertical) ──
     leg = [
@@ -436,6 +469,7 @@ def f6_memory_3d():
     fig.savefig(out+".pdf",          bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
     print("wrote", out+".png")
+
 
 
 if __name__ == "__main__":
