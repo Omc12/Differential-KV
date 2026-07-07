@@ -283,8 +283,9 @@ def f5_decode():
 
 # ── F6 · 3D memory architecture ──────────────────────────────────────────────
 def f6_memory_3d():
+    from mpl_toolkits.mplot3d import proj3d
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    from matplotlib.patches import Patch
+    from matplotlib.patches import Patch, FancyArrowPatch
     from matplotlib.lines import Line2D
 
     fig = plt.figure(figsize=(9.0, 5.6))
@@ -338,12 +339,36 @@ def f6_memory_3d():
 
     # ── limits & camera ──
     x_max = x0 + (n_used+n_ghost)*(bw+gap) + 0.6
-    ax.set_xlim(0, x_max)
+    ax.set_xlim(-2.2, x_max)
     ax.set_ylim(-3.0, n_layers*slab_step + slab_d + 0.5)
     ax.set_zlim(0, z_lr+z_res+0.6)
     ax.view_init(elev=25, azim=-52)
     ax.set_axis_off()
-    ax.set_box_aspect((13.5, 9.5, 4.8), zoom=1.46)
+    ax.set_box_aspect((14.0, 9.5, 4.8), zoom=1.20)
+
+    # Helper to project 3D point to 2D figure coordinates (0.0 to 1.0)
+    def project_3d_to_fig(x, y, z):
+        x_p, y_p, _ = proj3d.proj_transform(x, y, z, ax.get_proj())
+        disp_coord = ax.transData.transform((x_p, y_p))
+        fig_coord = fig.transFigure.inverted().transform(disp_coord)
+        return fig_coord
+
+    # Draw the scene to initialize projection matrices
+    fig.canvas.draw()
+
+    # Get target coordinates for arrows dynamically
+    target_layer_0   = project_3d_to_fig(0.0, (n_layers-1)*slab_step, slab_h/2)
+    target_layer_27  = project_3d_to_fig(0.0, 0.0, slab_h/2)
+    target_stack     = project_3d_to_fig(0.0, (n_layers//2)*slab_step, slab_h/2)
+    target_overflow  = project_3d_to_fig(x0 + 0.36, -0.2, 0.9)
+    target_free      = project_3d_to_fig(x0 + (n_used)*(bw+gap) + bw/2, bdepth/2, z_lr + z_res/2)
+    target_recency   = project_3d_to_fig(x0 + win_w/2, -2.6, 0.0)
+
+    # Helper for 2D figure-level arrows
+    def draw_arrow(p0, p1, style="->", color=BLACK, lw=0.85):
+        a = FancyArrowPatch(p0, p1, transform=fig.transFigure, arrowstyle=style,
+                            mutation_scale=8, color=color, lw=lw, zorder=99)
+        fig.add_artist(a)
 
     # ── 2D labels ──
 
@@ -361,28 +386,35 @@ def f6_memory_3d():
     fig.add_artist(Line2D([0.71, 0.71], [0.738, 0.75], transform=fig.transFigure, color=BLACK, lw=0.85))
 
     # "free (zeroed)" — above ghost bars
-    fig.text(0.79, 0.58, "free\n(zeroed)", ha="center", va="center",
+    fig.text(0.88, 0.58, "free\n(zeroed)", ha="center", va="center",
              fontsize=7.2, color=GRAY_D, linespacing=1.3)
+    # Arrow to ghost bars target
+    draw_arrow((0.88, 0.53), target_free, color=GRAY_D)
 
     # 28-layer stack label
-    fig.text(0.095, 0.55, "28-layer stack\n(store replicated\nper layer)",
+    fig.text(0.11, 0.55, "28-layer stack\n(store replicated\nper layer)",
              ha="center", va="center", fontsize=8.2, color=BLACK, linespacing=1.4)
+    # Arrow to stack target
+    draw_arrow((0.17, 0.55), target_stack)
 
-    # layer 0 / layer 27 labels on the left, with pointer lines to the actual slabs
-    fig.text(0.18, 0.72, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
-    fig.add_artist(Line2D([0.185, 0.28], [0.72, 0.69], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+    # layer 0 / layer 27 labels on the left
+    fig.text(0.20, 0.75, "layer 0", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.205, 0.75), target_layer_0)
     
-    fig.text(0.18, 0.42, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
-    fig.add_artist(Line2D([0.185, 0.26], [0.42, 0.42], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+    fig.text(0.20, 0.45, "layer 27", ha="right", va="center", fontsize=7.4, color=BLACK)
+    draw_arrow((0.205, 0.45), target_layer_27)
 
     # recency window label — below the slab
     fig.text(0.585, 0.082, "dense recency window — 768 exact fp16 tokens",
              ha="center", va="bottom", fontsize=8.1, color=BLACK)
+    # Arrow to recency slab target
+    draw_arrow((0.585, 0.11), target_recency)
 
-    # overflow label — completely clear of the window, on the bottom-left, with a pointer line to the arrow
+    # overflow label — completely clear of the window, on the bottom-left
     fig.text(0.15, 0.26, "overflow →\nflush + compress",
              ha="center", va="center", fontsize=7.4, color=BLACK, linespacing=1.3)
-    fig.add_artist(Line2D([0.22, 0.35], [0.28, 0.35], transform=fig.transFigure, color=GRAY_D, lw=0.6, ls="--"))
+    # Arrow pointing to the flush arrow target
+    draw_arrow((0.21, 0.27), target_overflow)
 
     # ── legend (upper-left, vertical) ──
     leg = [
