@@ -19,6 +19,7 @@ Pre-realloc gc.collect() prevents momentary 2x VRAM spike during pool growth.
 """
 
 import torch
+from typing import Optional, List, Union, Tuple
 
 # SRL descriptor dimension — must match native_core/srl/chunk_descriptor.py
 _SRL_DESC_DIM = 64
