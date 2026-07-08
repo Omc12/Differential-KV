@@ -23,6 +23,11 @@ Usage:
 """
 import os, sys, json, time, argparse, gc
 
+# Ensure user-site packages are in the python path for remote kernels
+USER_SITE = os.path.expanduser("~/.local/lib/python3.11/site-packages")
+if USER_SITE not in sys.path:
+    sys.path.insert(0, USER_SITE)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
@@ -223,6 +228,9 @@ def main():
         print("__CELL__ " + json.dumps(r))
         return
 
+    model_id = "Qwen/Qwen2.5-7B-Instruct"
+    print(f"\n=== Running benchmarks with model: {model_id} ===", flush=True)
+
     # driver: spawn one subprocess per cell for clean memory isolation
     import subprocess
     out_path = os.path.join(REPO, args.out) if not os.path.isabs(args.out) else args.out
@@ -230,7 +238,7 @@ def main():
     results = []
     for ctx in args.ctx:
         for mode in args.modes:
-            print(f">>> {mode} ctx={ctx}", flush=True)
+            print(f">>> {mode} ctx={ctx} (Model: {model_id})", flush=True)
             env = os.environ.copy()
             cmd = [sys.executable, os.path.abspath(__file__),
                    "--single", f"{mode},{ctx}", "--gen", str(args.gen),
