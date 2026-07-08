@@ -62,6 +62,46 @@ static bool is_native_attn_enabled() {
 // [routed-blocks ++ dense-window ++ current] with the SAME GPU ggml_flash_attn_ext the dense
 // path uses. No per-token reconstruction, no CPU-op-in-graph stall. Default OFF until the
 // 6-cell NIAH sweep is 6/6 and decode tps is measured to beat the CPU-op baseline.
+// ── Query-adaptive attend-all routing ─────────────────────────────────────
+// Top-K block pruning (the default below) is NIAH-safe (6/6, logit margins
+// identical to attend-all) because single-fact retrieval only needs the one
+// relevant block to land in the top-K. Real usage isn't all single-fact
+// retrieval: summarization, multi-turn recall, and "compare X and Y" / "list
+// every instance" style questions need to synthesize across SEVERAL scattered
+// blocks — exactly the case flagged above as needing DIFFKV_MLX_PARITY=1.
+// Rather than pick one global default and eat the downside for whichever
+// query type it's wrong for, classify the request and route broad/multi-fact
+// -looking queries to attend-all, keep pruning for everything else.
+// DIFFKV_MLX_PARITY, if set, still overrides this per-request classification
+// globally (useful for isolated benchmarking of either mode).
+static bool diffkv_detect_broad_query(const std::string & prompt_text) {
+    // Look at the last user turn only (chat template puts context/document
+    // first, the actual instruction last) so document body text can't trigger
+    // false positives just for containing e.g. the word "summarize" somewhere.
+    size_t marker_pos = prompt_text.rfind("<|im_start|>user");
+    std::string tail = (marker_pos != std::string::npos) ? prompt_text.substr(marker_pos) : prompt_text;
+    if (tail.size() > 2000) tail = tail.substr(tail.size() - 2000);
+    std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    static const std::vector<std::string> broad_triggers = {
+        "summarize", "summarise", "summary of", "tl;dr",
+        "compare", "comparison", "contrast",
+        "list all", "list every", "all instances", "all mentions", "everywhere",
+        "differences between", "similarities between",
+        "across the document", "across this document", "throughout the document",
+        "throughout this", "what are all", "how many times", "each section",
+        "every section", "overview of", "main points", "key points", "key themes",
+        "in general", "overall,",
+    };
+    for (const auto & trig : broad_triggers) {
+        if (tail.find(trig) != std::string::npos) return true;
+    }
+    // Multi-part question: 2+ question marks suggests several distinct asks
+    // that likely touch different parts of the context.
+    if (std::count(tail.begin(), tail.end(), '?') >= 2) return true;
+    return false;
+}
+
 static bool is_decode_cache_enabled() {
     // DEFAULT ON (14th pass): verified 6/6 NIAH sweep + conformance bit-exact + 2.4-5.3× faster
     // than the CPU-op sparse path. Only active when sparse decode engages (long ctx); dense/short
@@ -3591,8 +3631,9 @@ int main(int argc, char ** argv) {
                 // beats native DENSE (17.7). DIFFKV_MLX_PARITY=1 forces the old attend-all path, which
                 // is more robust for DIFFUSE multi-fact/synthesis queries (where many blocks matter) —
                 // the same top-k tradeoff MLX already makes. Credit: DeepSeek NSA/DSA (retrieve-then-attend).
-                bool mlx_parity = false;
+                bool mlx_parity = diffkv_detect_broad_query(prompt);
                 if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
+                    // Explicit env override always wins (isolated benchmarking of either mode).
                     mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
                 }
                 if (mlx_parity) {

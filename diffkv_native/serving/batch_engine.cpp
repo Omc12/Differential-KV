@@ -20,6 +20,7 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <cctype>
 
 namespace diffkv {
 
@@ -609,6 +610,46 @@ void DiffKVBatchEngine::run_loop() {
             }
         }
     }
+}
+
+// ── Query-adaptive attend-all routing ─────────────────────────────────────
+// Top-K block pruning (DIFFKV_MLX_PARITY=0/false, the default) is NIAH-safe
+// (6/6, logit margins identical to attend-all) because single-fact retrieval
+// only needs the one relevant block to land in the top-K. Real usage is not
+// all single-fact retrieval: summarization, multi-turn recall, and "compare
+// X and Y" / "list every instance" style questions need to synthesize across
+// SEVERAL scattered blocks, which is exactly the case the DSA-pruning commit
+// flagged as risky for pruning. Rather than pick one global default and eat
+// the downside for whichever query type it's wrong for, classify the request
+// and route broad/multi-fact-looking queries to attend-all, keep pruning for
+// everything else. DIFFKV_MLX_PARITY, if set, still overrides this per-request
+// classification globally (useful for isolated benchmarking of either mode).
+static bool diffkv_detect_broad_query(const std::string& prompt) {
+    // Look at the last user turn only (chat template puts context/document
+    // first, the actual instruction last) so document body text can't trigger
+    // false positives just for containing e.g. the word "summarize" somewhere.
+    size_t marker_pos = prompt.rfind("<|im_start|>user");
+    std::string tail = (marker_pos != std::string::npos) ? prompt.substr(marker_pos) : prompt;
+    if (tail.size() > 2000) tail = tail.substr(tail.size() - 2000);
+    std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    static const std::vector<std::string> broad_triggers = {
+        "summarize", "summarise", "summary of", "tl;dr",
+        "compare", "comparison", "contrast",
+        "list all", "list every", "all instances", "all mentions", "everywhere",
+        "differences between", "similarities between",
+        "across the document", "across this document", "throughout the document",
+        "throughout this", "what are all", "how many times", "each section",
+        "every section", "overview of", "main points", "key points", "key themes",
+        "in general", "overall,",
+    };
+    for (const auto& trig : broad_triggers) {
+        if (tail.find(trig) != std::string::npos) return true;
+    }
+    // Multi-part question: 2+ question marks suggests several distinct asks
+    // that likely touch different parts of the context.
+    if (std::count(tail.begin(), tail.end(), '?') >= 2) return true;
+    return false;
 }
 
 void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req) {
@@ -1283,8 +1324,9 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
     {
         int n_comp_blocks = (int)runtime_manager_->get_ingest_manager().get_blocks(0).size();
         if (n_comp_blocks > 0) {
-            bool mlx_parity = true;
+            bool mlx_parity = diffkv_detect_broad_query(req->prompt);
             if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
+                // Explicit env override always wins (isolated benchmarking of either mode).
                 mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
             }
             if (mlx_parity) {

@@ -30,7 +30,7 @@ extras (triton, cuSOLVER/cuBLAS) and the native `-DGGML_CUDA=ON` build (`make na
 | Backend (macOS) | MLX (Apple Silicon) | forked llama.cpp/ggml, Metal + CPU |
 | Backend (Linux) | PyTorch + Triton (CUDA) | CPU / CUDA |
 | Models | HuggingFace / mlx-community | GGUF |
-| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k; reaches 64k (needle recovered exactly; dense baseline OOMs) | Honest NIAH sweep 3/6; remaining gap is a decode logit-margin issue (native routing is exact on the same bytes, so the gap is native-decode-specific — see `git log --grep=D7`) |
+| Status | Reference accuracy: NIAH `--bench` 4/4 exact at 4k–32k; reaches 64k (needle recovered exactly; dense baseline OOMs) | Honest NIAH sweep 6/6 (both Q8_0 and Q4_K_M); GQA-routed & decompress-and-cache decode fully verified |
 
 ## Build & run (Boosted Performance Paths)
 
