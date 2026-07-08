@@ -1849,8 +1849,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                         k_dense_rot = (k_dense * cos_dense) + (rotate_half(k_dense)) * sin_dense
 
-                                        k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
-                                        v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
+                                        k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups).to(chunk_q.dtype)
+                                        v_dense_rep = repeat_kv(v_dense, num_key_value_groups).to(chunk_q.dtype)
 
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         scores_dense = torch.matmul(chunk_q * _scale, k_dense_rep.transpose(-2, -1))
