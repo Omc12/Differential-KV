@@ -131,7 +131,7 @@ def run_cell(ctx, gen, prompt_text):
     _reset_peak()
     cfg = {"quantization": "int4", "rank": 32, "block_size": 256,
            "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-7B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
+    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
     w.ensure_loaded()
     tok, mgr, model = w.tokenizer, w.manager, w.model
     ids = tok.encode(prompt_text)
@@ -228,7 +228,7 @@ def main():
         print("__CELL__ " + json.dumps(r))
         return
 
-    model_id = "Qwen/Qwen2.5-7B-Instruct"
+    model_id = "Qwen/Qwen2.5-1.5B-Instruct"
     print(f"\n=== Running benchmarks with model: {model_id} ===", flush=True)
 
     # driver: spawn one subprocess per cell for clean memory isolation
