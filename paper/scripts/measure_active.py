@@ -103,38 +103,47 @@ def run_cell(ctx, gen, prompt_text):
     import numpy as np, torch
     import mlx.core as mx
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    import os
+    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
 
     _mx_reset_peak(mx)
     cfg = {"quantization": "int4", "rank": 32, "block_size": 256,
            "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
+    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
     w.ensure_loaded()
     tok, mgr, model = w.tokenizer, w.manager, w.model
     ids = tok.encode(prompt_text)
 
+    dev = w.device
+
     # warmup (compile kernels)
     try:
+        if not hasattr(w, "_session_token_ids"):
+            w._session_token_ids = {}
         mgr.clear_session("warm"); w._session_token_ids["warm"] = []
         mgr.init_session("warm", prefill_len=1)
-        mgr.register_prefill_tokens("warm", torch.tensor([ids[0]], dtype=torch.long))
+        mgr.register_prefill_tokens("warm", torch.tensor([ids[0]], dtype=torch.long, device=dev))
         model._diffkv_session_ids = ["warm"]
-        _ = model(torch.tensor([[ids[0]]]), torch.tensor([[0]])).logits[0, -1].cpu().numpy()
+        _ = model(torch.tensor([[ids[0]]], device=dev), torch.tensor([[0]], device=dev)).logits[0, -1].float().cpu().numpy()
         mgr.clear_session("warm")
     except Exception:
         pass
 
-    sid = "bench"; mgr.clear_session(sid); w._session_token_ids[sid] = []
+    sid = "bench"; mgr.clear_session(sid)
+    if not hasattr(w, "_session_token_ids"):
+        w._session_token_ids = {}
+    w._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
-    mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
+    mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=dev))
     model._diffkv_session_ids = [sid]
 
     CH = 512; out = None
     t0 = time.perf_counter()
     for cs in range(0, len(ids), CH):
         ch = ids[cs:cs + CH]
-        out = model(torch.tensor([ch]), torch.tensor([list(range(cs, cs + len(ch)))]))
+        out = model(torch.tensor([ch], device=dev), torch.tensor([list(range(cs, cs + len(ch)))], device=dev))
         mgr.compress_deferred_prefill_blocks(sid)
-    logits = out.logits[0, -1].cpu().numpy()
+    logits = out.logits[0, -1].float().cpu().numpy()
     prefill_s = time.perf_counter() - t0
 
     mx_peak_prefill = _mx_peak(mx)
@@ -145,9 +154,9 @@ def run_cell(ctx, gen, prompt_text):
     t0 = time.perf_counter()
     for _ in range(gen):
         nid = int(np.argmax(logits)); gen_ids.append(nid)
-        mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long))
-        out = model(torch.tensor([[nid]]), torch.tensor([[cur]]))
-        logits = out.logits[0, -1].cpu().numpy(); cur += 1
+        mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=dev))
+        out = model(torch.tensor([[nid]], device=dev), torch.tensor([[cur]], device=dev))
+        logits = out.logits[0, -1].float().cpu().numpy(); cur += 1
     decode_s = time.perf_counter() - t0
 
     text = tok.decode(gen_ids)

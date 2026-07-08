@@ -63,18 +63,17 @@ static bool is_native_attn_enabled() {
 // path uses. No per-token reconstruction, no CPU-op-in-graph stall. Default OFF until the
 // 6-cell NIAH sweep is 6/6 and decode tps is measured to beat the CPU-op baseline.
 // ── Query-adaptive attend-all routing ─────────────────────────────────────
-// Top-K block pruning (the default below) is NIAH-safe (6/6, logit margins
-// identical to attend-all) because single-fact retrieval only needs the one
-// relevant block to land in the top-K. Real usage isn't all single-fact
-// retrieval: summarization, multi-turn recall, and "compare X and Y" / "list
-// every instance" style questions need to synthesize across SEVERAL scattered
-// blocks — exactly the case flagged above as needing DIFFKV_MLX_PARITY=1.
-// Rather than pick one global default and eat the downside for whichever
-// query type it's wrong for, classify the request and route broad/multi-fact
-// -looking queries to attend-all, keep pruning for everything else.
+// Top-K block pruning is NIAH-safe (6/6, logit margins identical to
+// attend-all) because single-fact retrieval only needs the one relevant
+// block to land in the top-K. But a keyword-based "does this look broad"
+// classifier can always miss a phrasing it wasn't taught — and a silently
+// dropped fact is a worse failure than a slower answer. So default SAFE
+// (attend-all) and only drop to pruning when the query confidently matches a
+// narrow single-fact-retrieval pattern; anything ambiguous or unrecognized
+// stays on attend-all rather than gambling on the fast path.
 // DIFFKV_MLX_PARITY, if set, still overrides this per-request classification
 // globally (useful for isolated benchmarking of either mode).
-static bool diffkv_detect_broad_query(const std::string & prompt_text) {
+static bool diffkv_detect_narrow_query(const std::string & prompt_text) {
     // Look at the last user turn only (chat template puts context/document
     // first, the actual instruction last) so document body text can't trigger
     // false positives just for containing e.g. the word "summarize" somewhere.
@@ -83,6 +82,7 @@ static bool diffkv_detect_broad_query(const std::string & prompt_text) {
     if (tail.size() > 2000) tail = tail.substr(tail.size() - 2000);
     std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) { return std::tolower(c); });
 
+    // Any broad signal vetoes narrow classification outright.
     static const std::vector<std::string> broad_triggers = {
         "summarize", "summarise", "summary of", "tl;dr",
         "compare", "comparison", "contrast",
@@ -91,15 +91,27 @@ static bool diffkv_detect_broad_query(const std::string & prompt_text) {
         "across the document", "across this document", "throughout the document",
         "throughout this", "what are all", "how many times", "each section",
         "every section", "overview of", "main points", "key points", "key themes",
-        "in general", "overall,",
+        "in general", "overall,", "and", ";",
     };
     for (const auto & trig : broad_triggers) {
+        if (tail.find(trig) != std::string::npos) return false;
+    }
+    // A direct single-fact question is exactly one '?'; 0 or 2+ isn't a clean
+    // narrow-retrieval shape (0 = statement/instruction, 2+ = multi-part ask).
+    if (std::count(tail.begin(), tail.end(), '?') != 1) return false;
+
+    // Require an explicit narrow-retrieval phrasing too — "one question mark"
+    // alone isn't enough signal to trust the fast path.
+    static const std::vector<std::string> narrow_triggers = {
+        "what is the", "what's the", "who is the", "who's the",
+        "when did", "when was", "where is", "where was",
+        "what was the", "what is my", "what's my", "repeat it", "repeat the",
+        "find the", "retrieve the",
+    };
+    for (const auto & trig : narrow_triggers) {
         if (tail.find(trig) != std::string::npos) return true;
     }
-    // Multi-part question: 2+ question marks suggests several distinct asks
-    // that likely touch different parts of the context.
-    if (std::count(tail.begin(), tail.end(), '?') >= 2) return true;
-    return false;
+    return false; // ambiguous -> not narrow -> stays on the safe default
 }
 
 static bool is_decode_cache_enabled() {
@@ -3631,7 +3643,7 @@ int main(int argc, char ** argv) {
                 // beats native DENSE (17.7). DIFFKV_MLX_PARITY=1 forces the old attend-all path, which
                 // is more robust for DIFFUSE multi-fact/synthesis queries (where many blocks matter) —
                 // the same top-k tradeoff MLX already makes. Credit: DeepSeek NSA/DSA (retrieve-then-attend).
-                bool mlx_parity = diffkv_detect_broad_query(prompt);
+                bool mlx_parity = !diffkv_detect_narrow_query(prompt);
                 if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
                     // Explicit env override always wins (isolated benchmarking of either mode).
                     mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);

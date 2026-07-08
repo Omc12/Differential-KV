@@ -1,6 +1,6 @@
 import sys
 import os
-if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1":
+if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1" and sys.platform != "darwin":
     sys.modules["diffkv_core"] = None
 import torch
 import torch.nn as nn
@@ -12,6 +12,7 @@ from typing import Optional, Tuple, Dict
 from native_core.sparse_decode.triton_fused_decode import (
     TritonDiffKV,
     native_triton_sparse_attn_decode,
+    native_triton_sparse_attn_decode_combined,
     _prefill_fused_history_attend,
     fused_decode_mps,
     HAS_TRITON,
@@ -46,7 +47,10 @@ try:
         _cpp_anchor_screen         = _dkv_core.anchor_screen
         _cpp_semantic_search       = _dkv_core.semantic_search_topk
         _cpp_query_desc            = _dkv_core.compute_query_desc
-except ImportError:
+except Exception as e:
+    print(f"[DiffKV DEBUG] Failed to import diffkv_core: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
     _DIFFKV_CORE_AVAILABLE    = False
     _DIFFKV_HAS_DECODE_ATTN   = False
     _DIFFKV_HAS_SRL_ROUTER    = False
@@ -1224,6 +1228,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
 
+                                _time_attn = os.environ.get("DIFFKV_TIME_ATTN") == "1"
+                                if _time_attn:
+                                    import time as _t_mod
+                                    if query_states.device.type == "mps":
+                                        torch.mps.synchronize()
+                                    _t_kernel_start = _t_mod.perf_counter()
                                 out_val = _dkv_core.fused_decode_attention_combined(
                                     _q_val,
                                     _dk,
@@ -1253,6 +1263,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     _fact_val_K.contiguous(),
                                     _fact_val_V.contiguous(),
                                 )
+                                if _time_attn:
+                                    if query_states.device.type == "mps":
+                                        torch.mps.synchronize()
+                                    _t_kernel_ms = (_t_mod.perf_counter() - _t_kernel_start) * 1000
+                                    print(f"[DIFFKV_TIME_ATTN] fused_kernel={_t_kernel_ms:.2f}ms", flush=True)
                                 attn_out_b = out_val.unsqueeze(0).unsqueeze(2)
                             else:
                                 # ── Separate Dense SDPA and Compressed fused_decode_mps combined via LSE ──
@@ -1410,6 +1425,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         query_states[b_idx:b_idx+1], k_rep, v_rep,
                                         is_causal=False,
                                     )  # [1, H_q, 1, D]
+                                    out_dense_hd = out_dense[0, :, 0, :].float()
 
                                     # 2. LSE for dense scores (in fp16 to avoid large fp32 promotions)
                                     _q = query_states[b_idx, :, 0, :]
@@ -1513,31 +1529,74 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     denom = w_dense + w_sparse
                                     denom_safe = torch.clamp(denom, min=1e-9)
 
+                                    out_sparse_fp32 = out_sparse.float()
                                     out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
                                                  out_sparse_fp32 * w_sparse.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
                                     attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
                         else:
-                            attn_out_b = native_triton_sparse_attn_decode(
-                                q=query_states[b_idx:b_idx+1],
-                                block_indices=block_indices,
-                                pool=pool,
-                                dense_blocks=dense_blocks,
-                                active_k=dense_k_assembled,
-                                active_v=dense_v_assembled,
-                                num_key_value_groups=num_key_value_groups,
-                                R=kv_manager.rank,
-                                S_MAX=session_mbs,
-                                anchor_indices=anchor_indices,
-                                cos=cos_all,
-                                sin=sin_all,
-                                total_seq_len=total_seq_len,
-                                max_valid_len=max_valid_len,
-                                cos_sliced=cos_sliced_arg,
-                                sin_sliced=sin_sliced_arg,
-                                session_id=sid,
-                                layer_idx=captured_layer_idx,
-                                decode_workspace=kv_manager.decode_workspace,
+                            # ── CUDA: use fused combined kernel (single dispatch for
+                            # compressed blocks + dense window) when Triton is available.
+                            # Falls back to native_triton_sparse_attn_decode (which does its
+                            # own inline dense LSE-merge) on non-CUDA or on kernel error.
+                            _use_combined = (
+                                HAS_TRITON
+                                and query_states.device.type == "cuda"
+                                and pool is not None
+                                and block_indices is not None
+                                and block_indices.numel() > 0
                             )
+                            if _use_combined:
+                                # Assemble dense_k/dense_v for the combined kernel.
+                                # The combined kernel expects [1, H_kv, L_dense, D]
+                                # pre-RoPE-rotated (same contract as the existing LSE path).
+                                _dk_parts, _dv_parts = [], []
+                                for _blk in (dense_blocks or []):
+                                    if _blk.anchor_kv is not None:
+                                        _dk_parts.append(_blk.anchor_kv[:, 0].unsqueeze(2))
+                                        _dv_parts.append(_blk.anchor_kv[:, 1].unsqueeze(2))
+                                    if _blk.active_k is not None and _blk.active_k.shape[2] > 0:
+                                        _dk_parts.append(_blk.active_k)
+                                        _dv_parts.append(_blk.active_v)
+                                if dense_k_assembled is not None and dense_k_assembled.shape[2] > 0:
+                                    _dk_parts.append(dense_k_assembled)
+                                    _dv_parts.append(dense_v_assembled)
+                                _dk_combined = torch.cat(_dk_parts, dim=2) if _dk_parts else None
+                                _dv_combined = torch.cat(_dv_parts, dim=2) if _dv_parts else None
+                                attn_out_b = native_triton_sparse_attn_decode_combined(
+                                    q=query_states[b_idx:b_idx+1],
+                                    block_indices=block_indices,
+                                    pool=pool,
+                                    dense_k=_dk_combined,
+                                    dense_v=_dv_combined,
+                                    num_key_value_groups=num_key_value_groups,
+                                    R=kv_manager.rank,
+                                    S_MAX=session_mbs,
+                                    anchor_indices=anchor_indices,
+                                    cos=cos_all,
+                                    sin=sin_all,
+                                )
+                            else:
+                                attn_out_b = native_triton_sparse_attn_decode(
+                                    q=query_states[b_idx:b_idx+1],
+                                    block_indices=block_indices,
+                                    pool=pool,
+                                    dense_blocks=dense_blocks,
+                                    active_k=dense_k_assembled,
+                                    active_v=dense_v_assembled,
+                                    num_key_value_groups=num_key_value_groups,
+                                    R=kv_manager.rank,
+                                    S_MAX=session_mbs,
+                                    anchor_indices=anchor_indices,
+                                    cos=cos_all,
+                                    sin=sin_all,
+                                    total_seq_len=total_seq_len,
+                                    max_valid_len=max_valid_len,
+                                    cos_sliced=cos_sliced_arg,
+                                    sin_sliced=sin_sliced_arg,
+                                    session_id=sid,
+                                    layer_idx=captured_layer_idx,
+                                    decode_workspace=kv_manager.decode_workspace,
+                                )
 
                         # ── Validation: compare SRL output vs. full-attention output ──
                         if _validate_this_step:

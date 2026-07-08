@@ -15,6 +15,19 @@ inline SoftmaxState merge_softmax_states(SoftmaxState a, SoftmaxState b) {
     }
 }
 
+struct AttentionParams {
+    int32_t n_q_heads;
+    int32_t n_kv_heads;
+    int32_t rank;
+    int32_t S_max;
+    int32_t K;
+    int32_t D;
+    float scale;
+    int32_t has_rope;
+    int32_t max_residual;
+    int32_t L_dense;
+};
+
 // Fused Project-Then-Attend Metal decode attention kernel.
 // Parallelized as 1 Threadgroup per Query Head.
 kernel void decode_attention_metal_kernel(
@@ -29,35 +42,40 @@ kernel void decode_attention_metal_kernel(
     device const int32_t* slot_indices [[buffer(8)]],    // [K]
     device half* out_buf [[buffer(9)]],                  // [H_q, D]
     device float* lse_buf [[buffer(10)]],                // [H_q]
-    
-    // Uniform configurations
-    device const int32_t& n_q_heads [[buffer(11)]],
-    device const int32_t& n_kv_heads [[buffer(12)]],
-    device const int32_t& rank [[buffer(13)]],
-    device const int32_t& S_max [[buffer(14)]],
-    device const int32_t& K [[buffer(15)]],
-    device const int32_t& D [[buffer(16)]],
-    device const float& scale [[buffer(17)]],
-    device const half* scales [[buffer(18)]],            // [N_pool]
-    // RoPE buffers: per-slot anchor cosine and sine [K, D] float32
-    device const float* cos_anc [[buffer(19)]],          // [K, D] float32
-    device const float* sin_anc [[buffer(20)]],          // [K, D] float32
-    device const int32_t& has_rope [[buffer(21)]],       // 1 if RoPE should be applied
+    device const AttentionParams& params [[buffer(11)]],
+    device const half* scales [[buffer(12)]],            // [N_pool]
+    device const float* cos_anc [[buffer(13)]],          // [K, D] float32
+    device const float* sin_anc [[buffer(14)]],          // [K, D] float32
     
     // Residual and Fact Anchor Override buffers (Track D)
-    device const int16_t* res_pos_K [[buffer(22)]],       // [N_pool, max_residual]
-    device const half* res_val_K [[buffer(23)]],          // [N_pool, max_residual, n_kv_heads, D]
-    device const int16_t* res_pos_V [[buffer(24)]],       // [N_pool, max_residual]
-    device const half* res_val_V [[buffer(25)]],          // [N_pool, max_residual, n_kv_heads, D]
-    device const int16_t* fact_pos [[buffer(26)]],        // [N_pool, 3]
-    device const half* fact_val_K [[buffer(27)]],         // [N_pool, 3, n_kv_heads, D]
-    device const half* fact_val_V [[buffer(28)]],         // [N_pool, 3, n_kv_heads, D]
-    device const int32_t& max_residual [[buffer(29)]],    // max residual count
+    device const int16_t* res_pos_K [[buffer(15)]],       // [N_pool, max_residual]
+    device const half* res_val_K [[buffer(16)]],          // [N_pool, max_residual, n_kv_heads, D]
+    device const int16_t* res_pos_V [[buffer(17)]],       // [N_pool, max_residual]
+    device const half* res_val_V [[buffer(18)]],          // [N_pool, max_residual, n_kv_heads, D]
+    device const int16_t* fact_pos [[buffer(19)]],        // [N_pool, 3]
+    device const half* fact_val_K [[buffer(20)]],         // [N_pool, 3, n_kv_heads, D]
+    device const half* fact_val_V [[buffer(21)]],         // [N_pool, 3, n_kv_heads, D]
+
+    // Dense window buffers
+    device const half* dense_K [[buffer(22)]],           // [H_kv, L_dense, D]
+    device const half* dense_V [[buffer(23)]],           // [H_kv, L_dense, D]
+    device const float* cos_dense [[buffer(24)]],        // [L_dense, D]
+    device const float* sin_dense [[buffer(25)]],        // [L_dense, D]
 
     uint tg_idx [[threadgroup_position_in_grid]],       // Query head index (0..H_q-1)
     uint tid [[thread_position_in_threadgroup]],        // Thread index within threadgroup
     uint t_per_tg [[threads_per_threadgroup]]           // Size of threadgroup
 ) {
+    const int32_t n_q_heads = params.n_q_heads;
+    const int32_t n_kv_heads = params.n_kv_heads;
+    const int32_t rank = params.rank;
+    const int32_t S_max = params.S_max;
+    const int32_t K = params.K;
+    const int32_t D = params.D;
+    const float scale = params.scale;
+    const int32_t has_rope = params.has_rope;
+    const int32_t max_residual = params.max_residual;
+    const int32_t L_dense = params.L_dense;
     // Return early if threadgroup is out of bounds
     if (tg_idx >= (uint)n_q_heads) return;
 
@@ -86,6 +104,16 @@ kernel void decode_attention_metal_kernel(
     threadgroup int16_t res_pos_V_shared[64];
     threadgroup int16_t fact_pos_shared[3];
     threadgroup float weights_shared[256];
+
+    // Shared buffer for normalized dense weights. Capped at 768 (matches the
+    // default DIFFKV_RECENCY_WINDOW=512 + block_size=256) rather than 2048:
+    // that pushed total threadgroup memory to 36876 bytes, over Metal's
+    // 32768-byte per-threadgroup hard limit (pipeline creation failed
+    // outright — not a wrong-answer bug, a can't-run-at-all bug). Loop bounds
+    // below clamp to this capacity; the global-buffer stride math still uses
+    // the true L_dense since that reflects the host-side tensor's actual layout.
+    const int32_t DIFFKV_MAX_DENSE_SHARED = 768;
+    threadgroup float dense_w_shared[768];
 
     // 1. Cache the query vector in shared memory
     for (int d = tid; d < D; d += t_per_tg) {
@@ -250,6 +278,30 @@ kernel void decode_attention_metal_kernel(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
+    // ── Process dense window tokens in PASS 1 ──
+    const int32_t L_dense_capped = min(L_dense, DIFFKV_MAX_DENSE_SHARED);
+    for (int t = tid; t < L_dense_capped; t += t_per_tg) {
+        float score = 0.0f;
+        int base_k = kv_head * L_dense * D + t * D;
+        for (int d = 0; d < D; ++d) {
+            float raw_k = (float)dense_K[base_k + d];
+            float k_rot = raw_k;
+            if (has_rope) {
+                float c = cos_dense[t * D + d];
+                float s = sin_dense[t * D + d];
+                int partner = (d < half_d) ? (d + half_d) : (d - half_d);
+                float raw_partner = (float)dense_K[base_k + partner];
+                float rot_partner_contrib = (d < half_d) ? -raw_partner : raw_partner;
+                k_rot = raw_k * c + rot_partner_contrib * s;
+            }
+            score += q_shared[d] * k_rot;
+        }
+        float t_score = score * scale;
+        sm_state = merge_softmax_states(sm_state, { t_score, 1.0f });
+        dense_w_shared[t] = t_score;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Reduce local softmax states of all threads in the threadgroup
     red_m[tid] = sm_state.m;
     red_d[tid] = sm_state.d;
@@ -273,6 +325,13 @@ kernel void decode_attention_metal_kernel(
     if (tid == 0) {
         lse_buf[tg_idx] = global_m + log(max(global_d, 1e-9f));
     }
+
+    // Normalize dense weights and cache them in shared memory
+    for (int t = tid; t < L_dense_capped; t += t_per_tg) {
+        float t_score = dense_w_shared[t];
+        dense_w_shared[t] = exp(t_score - global_m) / max(global_d, 1e-9f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ── PASS 2: Accumulate values ─────────────────────────────────────────────
     // Thread-local value accumulator
@@ -516,6 +575,17 @@ kernel void decode_attention_metal_kernel(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+
+    // ── Add dense window value contributions in PASS 2 ──
+    int base_v_head = kv_head * L_dense * D;
+    for (int d = tid; d < D; d += t_per_tg) {
+        float dense_accum = 0.0f;
+        for (int t = 0; t < L_dense_capped; ++t) {
+            dense_accum += dense_w_shared[t] * (float)dense_V[base_v_head + t * D + d];
+        }
+        thread_val[d] += dense_accum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Write final output values to out_buf
     for (int d = tid; d < D; d += t_per_tg) {

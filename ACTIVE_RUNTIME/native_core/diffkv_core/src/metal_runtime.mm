@@ -72,6 +72,19 @@ bool is_metal_available() {
     return MetalDecodePipeline::getInstance().initialized;
 }
 
+struct AttentionParams {
+    int32_t n_q_heads;
+    int32_t n_kv_heads;
+    int32_t rank;
+    int32_t S_max;
+    int32_t K;
+    int32_t D;
+    float scale;
+    int32_t has_rope;
+    int32_t max_residual;
+    int32_t L_dense;
+};
+
 std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     const torch::Tensor& Q,
     const torch::Tensor& U_pool,
@@ -96,7 +109,12 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     const torch::Tensor& res_val_V,
     const torch::Tensor& fact_pos,
     const torch::Tensor& fact_val_K,
-    const torch::Tensor& fact_val_V
+    const torch::Tensor& fact_val_V,
+    // Dense window buffers
+    const torch::Tensor& dense_K,
+    const torch::Tensor& dense_V,
+    const torch::Tensor& cos_dense,
+    const torch::Tensor& sin_dense
 ) {
     auto& mps_pipeline = MetalDecodePipeline::getInstance();
     if (!mps_pipeline.initialized) {
@@ -106,9 +124,10 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     const auto device = Q.device();
     const int D = Q.size(1);
     const int K_slots = slot_indices.size(0);
+    const int L_dense = (dense_K.defined() && dense_K.numel() > 0) ? dense_K.size(-2) : 0;
 
-    // If no slots are active, return zero outputs immediately
-    if (K_slots == 0) {
+    // If no slots are active and dense window is empty, return zero outputs immediately
+    if (K_slots == 0 && L_dense == 0) {
         auto out = torch::zeros({n_q_heads, D}, torch::TensorOptions().dtype(torch::kFloat16).device(device));
         auto lse = torch::full({n_q_heads}, -std::numeric_limits<float>::infinity(), torch::TensorOptions().dtype(torch::kFloat32).device(device));
         return {out, lse};
@@ -139,6 +158,18 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         auto sin_c = has_rope ? (sin_anc.is_contiguous() ? sin_anc : sin_anc.contiguous())
                               : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(Q.device()));
         int has_rope_flag = has_rope ? 1 : 0;
+
+        // Prepare contiguous tensors for dense window
+        bool has_dense = (dense_K.defined() && dense_K.numel() > 0 && dense_V.defined() && dense_V.numel() > 0);
+        auto dense_K_c = has_dense ? (dense_K.is_contiguous() ? dense_K : dense_K.contiguous())
+                                   : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+        auto dense_V_c = has_dense ? (dense_V.is_contiguous() ? dense_V : dense_V.contiguous())
+                                   : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat16).device(Q.device()));
+        bool has_dense_rope = has_dense && cos_dense.defined() && cos_dense.numel() > 0;
+        auto cos_dense_c = has_dense_rope ? (cos_dense.is_contiguous() ? cos_dense : cos_dense.contiguous())
+                                          : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(Q.device()));
+        auto sin_dense_c = has_dense_rope ? (sin_dense.is_contiguous() ? sin_dense : sin_dense.contiguous())
+                                          : torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(Q.device()));
 
         // Track D: Prepare contiguous tensors for Residual and Fact Overrides
         bool has_res = (res_pos_K.defined() && res_pos_K.numel() > 0 && res_val_K.defined() && res_val_K.numel() > 0);
@@ -175,6 +206,11 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         id<MTLBuffer> buf_cos = at::native::mps::getMTLBufferStorage(cos_c);
         id<MTLBuffer> buf_sin = at::native::mps::getMTLBufferStorage(sin_c);
 
+        id<MTLBuffer> buf_dense_k = at::native::mps::getMTLBufferStorage(dense_K_c);
+        id<MTLBuffer> buf_dense_v = at::native::mps::getMTLBufferStorage(dense_V_c);
+        id<MTLBuffer> buf_cos_dense = at::native::mps::getMTLBufferStorage(cos_dense_c);
+        id<MTLBuffer> buf_sin_dense = at::native::mps::getMTLBufferStorage(sin_dense_c);
+
         id<MTLBuffer> buf_res_pos_K = at::native::mps::getMTLBufferStorage(res_pos_K_c);
         id<MTLBuffer> buf_res_val_K = at::native::mps::getMTLBufferStorage(res_val_K_c);
         id<MTLBuffer> buf_res_pos_V = at::native::mps::getMTLBufferStorage(res_pos_V_c);
@@ -198,6 +234,11 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         size_t off_lse = lse.storage_offset() * lse.element_size();
         size_t off_cos = cos_c.storage_offset() * cos_c.element_size();
         size_t off_sin = sin_c.storage_offset() * sin_c.element_size();
+
+        size_t off_dense_k = dense_K_c.storage_offset() * dense_K_c.element_size();
+        size_t off_dense_v = dense_V_c.storage_offset() * dense_V_c.element_size();
+        size_t off_cos_dense = cos_dense_c.storage_offset() * cos_dense_c.element_size();
+        size_t off_sin_dense = sin_dense_c.storage_offset() * sin_dense_c.element_size();
 
         size_t off_res_pos_K = res_pos_K_c.storage_offset() * res_pos_K_c.element_size();
         size_t off_res_val_K = res_val_K_c.storage_offset() * res_val_K_c.element_size();
@@ -233,30 +274,41 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
         [encoder setBuffer:buf_out offset:off_out atIndex:9];
         [encoder setBuffer:buf_lse offset:off_lse atIndex:10];
 
-        // Bind uniform parameters directly as bytes
+        // Bind uniform parameters directly as bytes using AttentionParams struct
         int S_max = U_c.size(1);
-        [encoder setBytes:&n_q_heads length:sizeof(int) atIndex:11];
-        [encoder setBytes:&n_kv_heads length:sizeof(int) atIndex:12];
-        [encoder setBytes:&rank length:sizeof(int) atIndex:13];
-        [encoder setBytes:&S_max length:sizeof(int) atIndex:14];
-        [encoder setBytes:&K_slots length:sizeof(int) atIndex:15];
-        [encoder setBytes:&D length:sizeof(int) atIndex:16];
-        [encoder setBytes:&scale length:sizeof(float) atIndex:17];
-        [encoder setBuffer:buf_scales offset:off_scales atIndex:18];
+        AttentionParams params;
+        params.n_q_heads = n_q_heads;
+        params.n_kv_heads = n_kv_heads;
+        params.rank = rank;
+        params.S_max = S_max;
+        params.K = K_slots;
+        params.D = D;
+        params.scale = scale;
+        params.has_rope = has_rope_flag;
+        params.max_residual = max_res_val;
+        params.L_dense = L_dense;
+
+        [encoder setBytes:&params length:sizeof(AttentionParams) atIndex:11];
+        
+        [encoder setBuffer:buf_scales offset:off_scales atIndex:12];
         // RoPE buffers: cos_anc [K, D] float32 and sin_anc [K, D] float32
-        [encoder setBuffer:buf_cos offset:off_cos atIndex:19];
-        [encoder setBuffer:buf_sin offset:off_sin atIndex:20];
-        [encoder setBytes:&has_rope_flag length:sizeof(int) atIndex:21];
+        [encoder setBuffer:buf_cos offset:off_cos atIndex:13];
+        [encoder setBuffer:buf_sin offset:off_sin atIndex:14];
 
         // Bind Track D Residual and Fact Override Buffers
-        [encoder setBuffer:buf_res_pos_K offset:off_res_pos_K atIndex:22];
-        [encoder setBuffer:buf_res_val_K offset:off_res_val_K atIndex:23];
-        [encoder setBuffer:buf_res_pos_V offset:off_res_pos_V atIndex:24];
-        [encoder setBuffer:buf_res_val_V offset:off_res_val_V atIndex:25];
-        [encoder setBuffer:buf_fact_pos   offset:off_fact_pos   atIndex:26];
-        [encoder setBuffer:buf_fact_val_K offset:off_fact_val_K atIndex:27];
-        [encoder setBuffer:buf_fact_val_V offset:off_fact_val_V atIndex:28];
-        [encoder setBytes:&max_res_val length:sizeof(int) atIndex:29];
+        [encoder setBuffer:buf_res_pos_K offset:off_res_pos_K atIndex:15];
+        [encoder setBuffer:buf_res_val_K offset:off_res_val_K atIndex:16];
+        [encoder setBuffer:buf_res_pos_V offset:off_res_pos_V atIndex:17];
+        [encoder setBuffer:buf_res_val_V offset:off_res_val_V atIndex:18];
+        [encoder setBuffer:buf_fact_pos   offset:off_fact_pos   atIndex:19];
+        [encoder setBuffer:buf_fact_val_K offset:off_fact_val_K atIndex:20];
+        [encoder setBuffer:buf_fact_val_V offset:off_fact_val_V atIndex:21];
+
+        // Bind dense window buffers
+        [encoder setBuffer:buf_dense_k offset:off_dense_k atIndex:22];
+        [encoder setBuffer:buf_dense_v offset:off_dense_v atIndex:23];
+        [encoder setBuffer:buf_cos_dense offset:off_cos_dense atIndex:24];
+        [encoder setBuffer:buf_sin_dense offset:off_sin_dense atIndex:25];
 
         // Threadgroup grid: [n_q_heads, 1, 1] (1 threadgroup per head)
         MTLSize grid = MTLSizeMake(n_q_heads, 1, 1);

@@ -349,33 +349,29 @@ torch::Tensor fused_decode_attention_combined(
     const int H_kv = n_kv_heads;
     const int g = H_q / H_kv;
 
+#ifdef DIFFKV_APPLE
+    if (device.is_mps()) {
+        auto [out_final, lse_final] = decode_attention_metal(
+            Q, U_pool, U_scale_pool, VK_pool, VV_pool,
+            anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
+            scale, n_q_heads, n_kv_heads, rank,
+            res_pos_K, res_val_K, res_pos_V, res_val_V,
+            fact_pos, fact_val_K, fact_val_V,
+            dense_k, dense_v, cos_dense, sin_dense
+        );
+        return out_final;
+    }
+#endif
+
     // ── 1. Sparse Attention ──
     torch::Tensor out_sparse, lse_sparse;
     bool has_sparse = (slot_indices.defined() && slot_indices.numel() > 0);
     if (has_sparse) {
-#ifdef DIFFKV_APPLE
-        if (device.is_mps()) {
-            std::tie(out_sparse, lse_sparse) = decode_attention_metal(
-                Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-                anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
-                scale, n_q_heads, n_kv_heads, rank,
-                res_pos_K, res_val_K, res_pos_V, res_val_V,
-                fact_pos, fact_val_K, fact_val_V
-            );
-        } else {
-            std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
-                Q, U_pool, U_scale_pool, VK_pool, VV_pool,
-                anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
-                scale, n_q_heads, n_kv_heads, rank
-            );
-        }
-#else
         std::tie(out_sparse, lse_sparse) = decode_attention_aten_lse(
             Q, U_pool, U_scale_pool, VK_pool, VV_pool,
             anchors_K, anchors_V, seq_lens, scales, cos_anc, sin_anc, slot_indices,
             scale, n_q_heads, n_kv_heads, rank
         );
-#endif
     }
 
     // ── 2. Dense Attention ──

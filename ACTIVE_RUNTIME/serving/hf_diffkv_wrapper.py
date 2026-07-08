@@ -1,6 +1,6 @@
 import os
 import sys
-if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1":
+if os.environ.get("DIFFKV_FORCE_PYTORCH") == "1" and sys.platform != "darwin":
     sys.modules["diffkv_core"] = None
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 """
@@ -1097,6 +1097,15 @@ class PyTorchDiffKVHFWrapper:
                       (isinstance(self.device, torch.device) and self.device.type == "mps"))
             is_cuda = torch.cuda.is_available() and not is_mps
 
+            _time_token_start = None
+            _time_attn_flag = os.environ.get("DIFFKV_TIME_ATTN") == "1"
+            if _time_attn_flag:
+                import time as _tw
+                if is_mps:
+                    try: torch.mps.synchronize()
+                    except Exception: pass
+                _time_token_start = _tw.perf_counter()
+
             if is_mps and hasattr(torch, "mps") and hasattr(torch.mps, "capture_to_graph"):
                 # MPS path: Metal graph capture eliminates driver overhead
                 with torch.mps.capture_to_graph():
@@ -1155,6 +1164,13 @@ class PyTorchDiffKVHFWrapper:
                     past_key_values=past_kv,
                     use_cache=True,
                 )
+
+            if _time_attn_flag and _time_token_start is not None:
+                if self.device == "mps":
+                    try: torch.mps.synchronize()
+                    except Exception: pass
+                _token_ms = (_tw.perf_counter() - _time_token_start) * 1000
+                print(f"[DIFFKV_TIME_ATTN] total_token={_token_ms:.2f}ms", flush=True)
 
             logits = outputs.logits[:, -1, :]
             past_kv = outputs.past_key_values

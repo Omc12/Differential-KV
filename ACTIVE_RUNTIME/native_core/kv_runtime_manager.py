@@ -568,6 +568,7 @@ class KVRuntimeManager:
             min_blocks = 512  # Even smaller minimum for memory-constrained devices
         
         dynamic_max_blocks = max(min_blocks, min(65536, pool_budget_bytes // bytes_per_block))
+        self.max_blocks = dynamic_max_blocks
         
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
@@ -636,6 +637,9 @@ class KVRuntimeManager:
             self._streaming_mgr.manager = self
         else:
             self._streaming_mgr = None
+
+        self.max_dense_len = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")) + self.block_size
+        self.max_residual = self.native_pool.max_residual_tokens
 
         # Telemetry
         self.vram_saved_bytes   = 0
@@ -2867,6 +2871,38 @@ class KVRuntimeManager:
             "pager":                 pager_s,
             "async_compressor":      comp_s,
         }
+
+    @property
+    def sessions(self) -> dict:
+        sessions_dict = {}
+        for session_id in list(self.session_blocks.keys()):
+            num_blocks = [len(self.session_blocks[session_id][l]) for l in range(self.num_layers)]
+            seq_len = self.get_session_sequence_length(session_id)
+            recency = 512
+            if getattr(self, "_streaming_mgr", None) is not None:
+                recency = getattr(self._streaming_mgr, "recency_window", 512)
+            dense_len = min(seq_len, recency)
+            dense_lens = [dense_len] * self.num_layers
+
+            comp_res_n = []
+            for l in range(self.num_layers):
+                layer_res_n = []
+                for b in self.session_blocks[session_id][l]:
+                    slot_idx = getattr(b, "slot_idx", -1)
+                    if slot_idx >= 0 and self.native_pool is not None:
+                        res_pos = self.native_pool.residual_K_positions[slot_idx]
+                        n_valid = int((res_pos >= 0).sum().item())
+                        layer_res_n.append(n_valid)
+                    else:
+                        layer_res_n.append(0)
+                comp_res_n.append(layer_res_n)
+
+            sessions_dict[session_id] = {
+                "num_blocks": num_blocks,
+                "dense_lens": dense_lens,
+                "comp_res_n": comp_res_n,
+            }
+        return sessions_dict
 
     def close(self):
         """Explicitly break all circular references and release pool memory to prevent leaks."""

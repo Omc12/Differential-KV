@@ -1590,7 +1590,446 @@ def native_triton_sparse_attn_decode(
             session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
         )
 
+
+# ── 3b. Fused Combined Kernel: Compressed Blocks + Dense Window ───────────────
+#
+# Extends _fused_sparse_decode_kernel by iterating over dense window tokens in
+# the SAME online softmax accumulator, replacing the 3-step pattern:
+#   sparse Triton → dense SDPA → Python LSE-merge
+# with a single Triton dispatch.  Grid and chunk logic are identical to the
+# sparse-only kernel; dense tokens are processed after all sparse blocks in
+# each chunk's accumulator.
+#
+# Key design decisions:
+#   • Dense K/V are expected pre-RoPE-rotated by the caller (same as the
+#     existing Python LSE-merge path in native_triton_sparse_attn_decode).
+#   • L_dense is a tl.constexpr so the compiler elides the dense loop entirely
+#     when there are no dense tokens (L_dense == 0), keeping the sparse-only
+#     performance identical.
+#   • Dense tokens are chunked identically to blocks: each Triton program
+#     processes BLOCKS_PER_CHUNK sparse blocks followed by up to
+#     DENSE_PER_CHUNK dense tokens from the matching dense slice.
+
+if HAS_TRITON:
+    @triton.jit
+    def _fused_decode_combined_kernel(
+        # ── Sparse compressed-block inputs (identical to _fused_sparse_decode_kernel) ──
+        q_ptr, block_indices_ptr, pool_ak_ptr, pool_av_ptr, pool_vk_ptr, pool_vv_ptr,
+        pool_u_ptr, pool_u_scale_ptr, pool_scales_ptr, pool_seq_lens_ptr,
+        pool_res_k_ptr, pool_res_v_ptr, pool_res_pos_ptr, pool_res_pos_v_ptr, pool_res_n_ptr,
+        pool_fact_pos_ptr, pool_fact_ak_ptr, pool_fact_av_ptr,
+        # ── Dense window inputs (new) ──
+        dense_k_ptr,        # [H_kv, L_dense, D]  pre-RoPE-rotated
+        dense_v_ptr,        # [H_kv, L_dense, D]
+        L_dense,            # int  (total dense tokens, NOT constexpr — passed as a scalar)
+        # ── Strides for dense tensors ──
+        stride_dk_h, stride_dk_l, stride_dk_d,
+        stride_dv_h, stride_dv_l, stride_dv_d,
+        # ── Output buffers ──
+        out_ptr, m_ptr, l_ptr,
+        # ── Strides (sparse, identical ordering to _fused_sparse_decode_kernel) ──
+        stride_q_h, stride_q_d,
+        stride_ak_n, stride_ak_h, stride_ak_d,
+        stride_av_n, stride_av_h, stride_av_d,
+        stride_vk_n, stride_vk_r, stride_vk_h, stride_vk_d,
+        stride_vv_n, stride_vv_r, stride_vv_h, stride_vv_d,
+        stride_u_n, stride_u_s, stride_u_r,
+        stride_res_k_n, stride_res_k_s, stride_res_k_h, stride_res_k_d,
+        stride_res_v_n, stride_res_v_s, stride_res_v_h, stride_res_v_d,
+        stride_res_pos_n, stride_res_pos_v_n,
+        stride_fact_pos_n,
+        stride_fact_ak_n, stride_fact_ak_f, stride_fact_ak_h, stride_fact_ak_d,
+        stride_fact_av_n, stride_fact_av_f, stride_fact_av_h, stride_fact_av_d,
+        stride_out_h, stride_out_d,
+        # ── Constexpr shape/config ──
+        N: tl.constexpr, H_q: tl.constexpr, H_kv: tl.constexpr, KV_GRP: tl.constexpr, D: tl.constexpr,
+        R: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr,
+        BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
+        MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
+        HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
+        DENSE_PER_CHUNK: tl.constexpr,   # dense tokens each chunk processes (0 disables the loop)
+    ):
+        h_q = tl.program_id(0)
+        chunk_id = tl.program_id(1)
+        h_kv = h_q // KV_GRP
+
+        offs_d = tl.arange(0, D)
+        offs_r = tl.arange(0, R)
+        offs_s = tl.arange(0, S_MAX)
+
+        q_ptrs = q_ptr + h_q * stride_q_h + offs_d * stride_q_d
+        q = tl.load(q_ptrs).to(tl.float32)
+
+        m_i = -float("inf")
+        l_i = 0.0
+        O_i = tl.zeros([D], dtype=tl.float32)
+
+        # ── Sparse compressed-block loop (identical to _fused_sparse_decode_kernel) ──
+        start_block = chunk_id * BLOCKS_PER_CHUNK
+        end_block = start_block + BLOCKS_PER_CHUNK
+        if end_block > N:
+            end_block = N
+
+        for n in range(start_block, end_block):
+            pool_idx = tl.load(block_indices_ptr + n)
+            scale = tl.load(pool_scales_ptr + pool_idx).to(tl.float32)
+            actual_s = tl.load(pool_seq_lens_ptr + pool_idx)
+
+            ak_ptrs = pool_ak_ptr + pool_idx * stride_ak_n + h_kv * stride_ak_h + offs_d * stride_ak_d
+            av_ptrs = pool_av_ptr + pool_idx * stride_av_n + h_kv * stride_av_h + offs_d * stride_av_d
+            ak = tl.load(ak_ptrs).to(tl.float32)
+            av = tl.load(av_ptrs).to(tl.float32)
+
+            vk_ptrs = pool_vk_ptr + pool_idx * stride_vk_n + h_kv * stride_vk_h + offs_r[:, None] * stride_vk_r + offs_d[None, :] * stride_vk_d
+            vv_ptrs = pool_vv_ptr + pool_idx * stride_vv_n + h_kv * stride_vv_h + offs_r[:, None] * stride_vv_r + offs_d[None, :] * stride_vv_d
+            vk = tl.load(vk_ptrs).to(tl.float32)
+            vv = tl.load(vv_ptrs).to(tl.float32)
+
+            u_ptrs = pool_u_ptr + pool_idx * stride_u_n + offs_s[:, None] * stride_u_s + offs_r[None, :] * stride_u_r
+            s_mask = offs_s[:, None] < actual_s
+            u = tl.load(u_ptrs, mask=s_mask, other=0.0).to(tl.float32)
+            u_scale = tl.load(pool_u_scale_ptr + pool_idx)
+            u = u * u_scale
+
+            s_anchor = tl.sum(q * ak) * INV_SCALE
+            q_proj = tl.sum(q[None, :] * vk, axis=1) * INV_SCALE
+            delta_scores = tl.sum(u * q_proj[None, :], axis=1) * scale
+            s = s_anchor + delta_scores
+
+            if HAS_RESIDUAL:
+                for ri in range(MAX_RESIDUAL):
+                    r_pos_k = tl.load(pool_res_pos_ptr + pool_idx * stride_res_pos_n + ri)
+                    if r_pos_k >= 0:
+                        rk = tl.load(pool_res_k_ptr + pool_idx * stride_res_k_n +
+                                     ri * stride_res_k_s + h_kv * stride_res_k_h +
+                                     offs_d * stride_res_k_d).to(tl.float32)
+                        r_corr = tl.sum(q * rk) * INV_SCALE
+                        s = tl.where(offs_s == r_pos_k, s + r_corr, s)
+
+            if HAS_FACT:
+                for fi in range(MAX_FACT):
+                    fact_pos = tl.load(pool_fact_pos_ptr + pool_idx * stride_fact_pos_n + fi)
+                    if fact_pos >= 0:
+                        fact_k_ptrs = pool_fact_ak_ptr + pool_idx * stride_fact_ak_n + fi * stride_fact_ak_f + h_kv * stride_fact_ak_h + offs_d * stride_fact_ak_d
+                        fact_k = tl.load(fact_k_ptrs).to(tl.float32)
+                        fact_score = tl.sum(q * fact_k) * INV_SCALE
+                        replace_mask = offs_s == fact_pos
+                        s = tl.where(replace_mask, fact_score, s)
+
+            s = tl.where(offs_s < actual_s, s, -float("inf"))
+            m_b_delta = tl.max(s, axis=0)
+            m_b = tl.maximum(s_anchor, m_b_delta)
+
+            m_new = tl.maximum(m_i, m_b)
+            alpha = tl.exp(m_i - m_new)
+            p_anchor = tl.exp(s_anchor - m_new)
+            p_delta = tl.exp(s - m_new)
+            p_delta = tl.where(offs_s < actual_s, p_delta, 0.0)
+            p_delta_sum = tl.sum(p_delta, axis=0)
+
+            l_i = l_i * alpha + p_anchor + p_delta_sum
+
+            p_u = tl.sum(p_delta[:, None] * u, axis=0)
+            o_delta = tl.sum(p_u[:, None] * vv, axis=0) * scale
+
+            O_fact_corr = tl.zeros([D], dtype=tl.float32)
+            if HAS_FACT:
+                for fi in range(MAX_FACT):
+                    fact_pos = tl.load(pool_fact_pos_ptr + pool_idx * stride_fact_pos_n + fi)
+                    if fact_pos >= 0:
+                        replace_mask = offs_s == fact_pos
+                        p_fact = tl.sum(tl.where(replace_mask, p_delta, 0.0), axis=0)
+                        fact_v_ptrs = pool_fact_av_ptr + pool_idx * stride_fact_av_n + fi * stride_fact_av_f + h_kv * stride_fact_av_h + offs_d * stride_fact_av_d
+                        fact_v = tl.load(fact_v_ptrs).to(tl.float32)
+                        u_val_ptrs = pool_u_ptr + pool_idx * stride_u_n + fact_pos * stride_u_s + offs_r * stride_u_r
+                        u_val = tl.load(u_val_ptrs).to(tl.float32) * u_scale
+                        v_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale + av
+                        O_fact_corr += p_fact * (fact_v - v_recon)
+
+            O_res_corr = tl.zeros([D], dtype=tl.float32)
+            if HAS_RESIDUAL:
+                for ri in range(MAX_RESIDUAL):
+                    r_pos_v = tl.load(pool_res_pos_v_ptr + pool_idx * stride_res_pos_v_n + ri)
+                    if r_pos_v >= 0:
+                        p_at = tl.sum(tl.where(offs_s == r_pos_v, p_delta, 0.0), axis=0)
+                        rv = tl.load(pool_res_v_ptr + pool_idx * stride_res_v_n +
+                                     ri * stride_res_v_s + h_kv * stride_res_v_h +
+                                     offs_d * stride_res_v_d).to(tl.float32)
+                        O_res_corr += p_at * rv
+
+            O_i = O_i * alpha + (p_anchor + p_delta_sum) * av + o_delta + O_fact_corr + O_res_corr
+            m_i = m_new
+
+        # ── Dense window token loop (NEW — fused into the same online softmax) ──
+        # Each chunk processes a slice of dense tokens [dense_start, dense_end).
+        # dense_K/dense_V are [H_kv, L_dense, D] pre-RoPE-rotated by the caller.
+        # GQA: use h_kv for loading, same as the sparse branch above.
+        if DENSE_PER_CHUNK > 0:
+            dense_start = chunk_id * DENSE_PER_CHUNK
+            dense_end = dense_start + DENSE_PER_CHUNK
+            # Clamp: last chunk may own fewer tokens
+            if dense_end > L_dense:
+                dense_end = L_dense
+
+            for t in range(dense_start, dense_end):
+                dk_ptrs = dense_k_ptr + h_kv * stride_dk_h + t * stride_dk_l + offs_d * stride_dk_d
+                dv_ptrs = dense_v_ptr + h_kv * stride_dk_h + t * stride_dv_l + offs_d * stride_dv_d
+                dk = tl.load(dk_ptrs).to(tl.float32)
+                dv = tl.load(dv_ptrs).to(tl.float32)
+
+                score = tl.sum(q * dk) * INV_SCALE
+
+                m_new = tl.maximum(m_i, score)
+                alpha = tl.exp(m_i - m_new)
+                p = tl.exp(score - m_new)
+                l_i = l_i * alpha + p
+                O_i = O_i * alpha + p * dv
+                m_i = m_new
+
+        # ── Write partial outputs (identical epilogue to _fused_sparse_decode_kernel) ──
+        if NUM_CHUNKS == 1:
+            O_i = O_i / l_i
+            out_ptrs = out_ptr + h_q * stride_out_h + offs_d * stride_out_d
+            tl.store(out_ptrs, O_i)
+            if m_ptr is not None:
+                tl.store(m_ptr + h_q, m_i)
+            if l_ptr is not None:
+                tl.store(l_ptr + h_q, l_i)
+        else:
+            out_work_ptrs = out_ptr + h_q * (NUM_CHUNKS * D) + chunk_id * D + offs_d
+            tl.store(out_work_ptrs, O_i)
+            if m_ptr is not None:
+                tl.store(m_ptr + h_q * NUM_CHUNKS + chunk_id, m_i)
+            if l_ptr is not None:
+                tl.store(l_ptr + h_q * NUM_CHUNKS + chunk_id, l_i)
+
+
+def native_triton_sparse_attn_decode_combined(
+    q:                    torch.Tensor,       # [1, H_q, 1, D]
+    block_indices:        torch.Tensor,       # [N]  active compressed-block indices
+    pool:                 object,             # NativeBlockPool
+    dense_k:              Optional[torch.Tensor],  # [1, H_kv, L_dense, D] pre-RoPE-rotated; None if no dense
+    dense_v:              Optional[torch.Tensor],  # [1, H_kv, L_dense, D]
+    num_key_value_groups: int,
+    R:                    int = 16,
+    S_MAX:                int = 64,
+    anchor_indices:       Optional[torch.Tensor] = None,
+    cos:                  Optional[torch.Tensor] = None,
+    sin:                  Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Single-dispatch fused attention over both compressed blocks and dense window tokens.
+
+    Replaces the 3-step pattern used in native_triton_sparse_attn_decode:
+        sparse Triton → dense F.sdpa → Python LSE-merge
+    with one Triton kernel that processes both token classes in the same online softmax.
+
+    Falls back to native_triton_sparse_attn_decode (which does its own dense merge)
+    on any error or if HAS_TRITON is False.
+
+    Returns: [1, H_q, 1, D] in q.dtype.
+    """
+    if not HAS_TRITON:
+        # MPS / CPU: fall back to the existing separate-path wrapper
+        # (dense is handled by its own Python LSE merge inside that function)
+        return native_triton_sparse_attn_decode(
+            q, block_indices, pool, [], dense_k, dense_v,
+            num_key_value_groups, R, S_MAX,
+            anchor_indices=anchor_indices, cos=cos, sin=sin,
+        )
+
+    bsz, H_q, q_len, D = q.shape
+    assert bsz == 1 and q_len == 1
+
+    N = block_indices.shape[0] if block_indices is not None else 0
+    has_dense = dense_k is not None and dense_k.shape[2] > 0
+    L_dense = dense_k.shape[2] if has_dense else 0
+
+    # If nothing to attend to, return zeros
+    if N == 0 and L_dense == 0:
+        return torch.zeros((1, H_q, 1, D), device=q.device, dtype=q.dtype)
+
+    # If there are no compressed blocks, just run dense SDPA (fast path)
+    if N == 0 and has_dense:
+        H_kv = dense_k.shape[1]
+        n_rep = H_q // H_kv
+        q_sq = q[0, :, 0, :].float()
+        dk = dense_k[0].float()  # [H_kv, L_dense, D]
+        dv = dense_v[0].float()
+        q_r = q_sq.view(H_kv, n_rep, D)
+        s = torch.bmm(q_r, dk.permute(0, 2, 1)).view(H_q, L_dense) / math.sqrt(D)
+        w = torch.softmax(s, dim=-1)
+        w_r = w.view(H_kv, n_rep, L_dense)
+        out = torch.bmm(w_r, dv).view(H_q, D)
+        return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
+
+    try:
+        inv_scale = 1.0 / math.sqrt(D)
+        q_sq = q[0, :, 0, :]  # [H_q, D]
+
+        D_pad   = triton.next_power_of_2(D)
+        R_pad   = triton.next_power_of_2(R)
+        S_pad   = triton.next_power_of_2(S_MAX)
+
+        BLOCKS_PER_CHUNK = 16
+        num_chunks_sparse = max(1, (N + BLOCKS_PER_CHUNK - 1) // BLOCKS_PER_CHUNK)
+
+        # Distribute dense tokens across the same chunk grid so each program sees
+        # a balanced slice.  When L_dense == 0, DENSE_PER_CHUNK = 0 → loop elided.
+        if L_dense > 0:
+            DENSE_PER_CHUNK = max(1, (L_dense + num_chunks_sparse - 1) // num_chunks_sparse)
+            num_chunks = max(num_chunks_sparse,
+                             (L_dense + DENSE_PER_CHUNK - 1) // DENSE_PER_CHUNK)
+        else:
+            DENSE_PER_CHUNK = 0
+            num_chunks = num_chunks_sparse
+
+        grid = (H_q, num_chunks)
+
+        # Allocate output/workspace buffers
+        if num_chunks > 1:
+            cache_key = (H_q, num_chunks, D_pad, q.device)
+            if not hasattr(native_triton_sparse_attn_decode_combined, "_ws_cache"):
+                native_triton_sparse_attn_decode_combined._ws_cache = {}
+            ws = native_triton_sparse_attn_decode_combined._ws_cache.get(cache_key)
+            if ws is None:
+                ow = torch.empty((H_q, num_chunks, D_pad), device=q.device, dtype=torch.float32)
+                mw = torch.empty((H_q, num_chunks),        device=q.device, dtype=torch.float32)
+                lw = torch.empty((H_q, num_chunks),        device=q.device, dtype=torch.float32)
+                ws = (ow, mw, lw)
+                native_triton_sparse_attn_decode_combined._ws_cache[cache_key] = ws
+            out_workspace, m_workspace, l_workspace = ws
+            out   = torch.empty((H_q, D), device=q.device, dtype=torch.float32)
+            m_out = torch.empty((H_q,),   device=q.device, dtype=torch.float32)
+            l_out = torch.empty((H_q,),   device=q.device, dtype=torch.float32)
+        else:
+            out   = torch.empty((H_q, D), device=q.device, dtype=torch.float32)
+            m_out = torch.empty((H_q,),   device=q.device, dtype=torch.float32)
+            l_out = torch.empty((H_q,),   device=q.device, dtype=torch.float32)
+            out_workspace, m_workspace, l_workspace = out, m_out, l_out
+
+        # ── RoPE-rotate anchors and V_K (identical to native_triton_sparse_attn_decode) ──
+        anchors_K_rot = pool.anchors_K
+        V_K_rot       = pool.V_K
+
+        if anchor_indices is not None and cos is not None and sin is not None:
+            indices = block_indices.long()
+            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+            anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
+
+            cos_anc = cos_flat[anchor_indices_clamped].to(dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+            sin_anc = sin_flat[anchor_indices_clamped].to(dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+            cos_anc_2d = cos_flat[anchor_indices_clamped].to(dtype=pool.anchors_K.dtype).unsqueeze(1)
+            sin_anc_2d = sin_flat[anchor_indices_clamped].to(dtype=pool.anchors_K.dtype).unsqueeze(1)
+
+            anchors_K_rot = pool.anchors_K.clone()
+            V_K_rot       = pool.V_K.clone()
+            V_K_rot[indices]       = pool.V_K[indices]       * cos_anc + rotate_half(pool.V_K[indices])       * sin_anc
+            anchors_K_rot[indices] = pool.anchors_K[indices] * cos_anc_2d + rotate_half(pool.anchors_K[indices]) * sin_anc_2d
+
+        # ── Residual / fact fields (identical to native_triton_sparse_attn_decode) ──
+        res_k   = getattr(pool, "residual_K_values",    None)
+        res_v   = getattr(pool, "residual_V_values",    None)
+        res_pos = getattr(pool, "residual_K_positions", None)
+        res_pos_v = getattr(pool, "residual_V_positions", None)
+        has_res = (res_k is not None and res_v is not None and
+                   res_pos is not None and res_pos_v is not None)
+        if has_res:
+            res_n       = (res_pos >= 0).sum(dim=-1).to(torch.int32)
+            max_res_pad = res_pos.shape[1]
+            if anchor_indices is not None and cos is not None and sin is not None:
+                res_k = res_k.clone()
+                res_k[indices] = res_k[indices] * cos_anc + rotate_half(res_k[indices]) * sin_anc
+        else:
+            res_k     = torch.empty((0, 0, 0, 0), device=q.device)
+            res_v     = torch.empty((0, 0, 0, 0), device=q.device)
+            res_pos   = torch.empty((0, 0), device=q.device, dtype=torch.int16)
+            res_pos_v = torch.empty((0, 0), device=q.device, dtype=torch.int16)
+            res_n     = torch.zeros((pool.U.shape[0],), device=q.device, dtype=torch.int32)
+            max_res_pad = 1
+
+        fact_pos = getattr(pool, "fact_anchor_positions", None)
+        fact_ak  = getattr(pool, "fact_anchors_K",        None)
+        fact_av  = getattr(pool, "fact_anchors_V",        None)
+        has_fact = (fact_pos is not None and fact_ak is not None and fact_av is not None)
+        if has_fact:
+            max_fact = fact_pos.shape[1]
+        else:
+            fact_pos = torch.empty((0, 0),       device=q.device, dtype=torch.int16)
+            fact_ak  = torch.empty((0, 0, 0, 0), device=q.device)
+            fact_av  = torch.empty((0, 0, 0, 0), device=q.device)
+            max_fact = 1
+
+        # ── Dense window tensors ──
+        # Caller provides pre-RoPE-rotated dense_k/dense_v as [1, H_kv, L_dense, D].
+        # We need [H_kv, L_dense, D] contiguous for the kernel.
+        if has_dense:
+            dk_t = dense_k[0].contiguous().to(torch.float32)  # [H_kv, L_dense, D]
+            dv_t = dense_v[0].contiguous().to(torch.float32)
+        else:
+            dk_t = torch.empty((1, 0, D_pad), device=q.device, dtype=torch.float32)
+            dv_t = torch.empty((1, 0, D_pad), device=q.device, dtype=torch.float32)
+
+        # ── Kernel launch ──
+        _fused_decode_combined_kernel[grid](
+            q_sq, block_indices, anchors_K_rot, pool.anchors_V, V_K_rot, pool.V_V,
+            pool.U, pool.U_scale, pool.scales, pool.seq_lens,
+            res_k, res_v, res_pos, res_pos_v, res_n,
+            fact_pos, fact_ak, fact_av,
+            dk_t, dv_t, L_dense,
+            dk_t.stride(0), dk_t.stride(1), dk_t.stride(2),
+            dv_t.stride(0), dv_t.stride(1), dv_t.stride(2),
+            out_workspace, m_workspace, l_workspace,
+            q_sq.stride(0), q_sq.stride(1),
+            anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
+            pool.anchors_V.stride(0), pool.anchors_V.stride(1), pool.anchors_V.stride(2),
+            V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
+            pool.V_V.stride(0), pool.V_V.stride(1), pool.V_V.stride(2), pool.V_V.stride(3),
+            pool.U.stride(0), pool.U.stride(1), pool.U.stride(2),
+            res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
+            res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
+            res_pos.stride(0), res_pos_v.stride(0),
+            fact_pos.stride(0),
+            fact_ak.stride(0), fact_ak.stride(1), fact_ak.stride(2), fact_ak.stride(3),
+            fact_av.stride(0), fact_av.stride(1), fact_av.stride(2), fact_av.stride(3),
+            out_workspace.stride(0), out_workspace.stride(1),
+            N, H_q, anchors_K_rot.shape[1], num_key_value_groups, D_pad,
+            R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
+            MAX_RESIDUAL=max_res_pad, MAX_FACT=max_fact,
+            HAS_RESIDUAL=has_res, HAS_FACT=has_fact,
+            DENSE_PER_CHUNK=DENSE_PER_CHUNK,
+        )
+
+        if num_chunks > 1:
+            _fused_sparse_decode_reduction_kernel[(H_q,)](
+                out_workspace, m_workspace, l_workspace, out, m_out, l_out,
+                num_chunks, D_pad,
+            )
+
+        if not getattr(native_triton_sparse_attn_decode_combined, "_logged", False):
+            print("[DiffKV] Triton fused-decode COMBINED path ACTIVE (CUDA). "
+                  f"N_sparse={N}, L_dense={L_dense}")
+            native_triton_sparse_attn_decode_combined._logged = True
+
+        return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
+
+    except Exception as e:
+        if os.environ.get("DIFFKV_TRITON_STRICT") == "1":
+            raise
+        if not hasattr(native_triton_sparse_attn_decode_combined, "_fallback_warned"):
+            print(f"[DiffKV] WARNING: combined Triton kernel failed ({e}). "
+                  "Falling back to native_triton_sparse_attn_decode.")
+            native_triton_sparse_attn_decode_combined._fallback_warned = True
+        return native_triton_sparse_attn_decode(
+            q, block_indices, pool, [], dense_k, dense_v,
+            num_key_value_groups, R, S_MAX,
+            anchor_indices=anchor_indices, cos=cos, sin=sin,
+        )
+
+
 # ── 4. TritonDiffKV Low-Rank Reconstruction ───────────────────────────────────
+
 
 def triton_fused_reconstruct(
     U: torch.Tensor,

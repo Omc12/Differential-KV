@@ -374,6 +374,10 @@ Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, a
         py::arg("fact_pos"),
         py::arg("fact_val_K"),
         py::arg("fact_val_V"),
+        py::arg("dense_K"),
+        py::arg("dense_V"),
+        py::arg("cos_dense"),
+        py::arg("sin_dense"),
         R"doc(
 Launch custom Metal Compute Shader for fused Project-Then-Attend decode attention.
 )doc"

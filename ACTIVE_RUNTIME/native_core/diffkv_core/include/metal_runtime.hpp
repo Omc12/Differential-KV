@@ -31,7 +31,12 @@ std::tuple<torch::Tensor, torch::Tensor> decode_attention_metal(
     const torch::Tensor& res_val_V,
     const torch::Tensor& fact_pos,
     const torch::Tensor& fact_val_K,
-    const torch::Tensor& fact_val_V
+    const torch::Tensor& fact_val_V,
+    // Dense window buffers
+    const torch::Tensor& dense_K,
+    const torch::Tensor& dense_V,
+    const torch::Tensor& cos_dense,
+    const torch::Tensor& sin_dense
 );
 
 } // namespace diffkv
