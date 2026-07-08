@@ -219,10 +219,11 @@ def test_dense_only(device="cuda" if torch.cuda.is_available() else "cpu"):
     dense_v = torch.randn(1, H_kv, L_dense, D, device=device, dtype=torch.float16) * 0.1
 
     # Reference: pure SDPA
-    dk_r  = dense_k[0].float().unsqueeze(0).expand(H_q // H_kv, -1, -1, -1)
-    # easier: just use F.sdpa with repeat_kv
-    dk_rp = dense_k.repeat(1, H_q // H_kv, 1, 1).view(1, H_q, L_dense, D)
-    dv_rp = dense_v.repeat(1, H_q // H_kv, 1, 1).view(1, H_q, L_dense, D)
+    # Helper to repeat KV heads properly for GQA
+    bs, h, l, d = dense_k.shape
+    n_rep = H_q // H_kv
+    dk_rp = dense_k[:, :, None, :, :].expand(bs, h, n_rep, l, d).reshape(bs, h * n_rep, l, d)
+    dv_rp = dense_v[:, :, None, :, :].expand(bs, h, n_rep, l, d).reshape(bs, h * n_rep, l, d)
     ref = F.scaled_dot_product_attention(q.float(), dk_rp.float(), dv_rp.float())
     ref = ref.to(torch.float16)
 
