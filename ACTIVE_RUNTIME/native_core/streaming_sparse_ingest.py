@@ -114,7 +114,7 @@ _RE_ACRONYMS        = re.compile(r'\b[A-Z]{2,}\b')
 _RE_WORD_TOKENS     = re.compile(r'\b[a-z0-9]{2,}\b')
 
 
-@dataclass(slots=True)
+@dataclass
 class StreamingKVBlock:
     """
     A KV block with sparse-first lifecycle.
