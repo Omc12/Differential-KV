@@ -294,6 +294,8 @@ class AsyncCompressor:
                                 self.stats["completed"]    += len(items)
                                 self.stats["total_svd_ms"] += elapsed
                         except Exception as e:
+                            import traceback
+                            traceback.print_exc()
                             print(f"[AsyncCompressor] Batched SVD failed: {e}. Falling back to sequential.")
                             for item in items:
                                 self._run_item_sequential(item)

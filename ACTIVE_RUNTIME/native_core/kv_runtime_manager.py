@@ -2686,6 +2686,7 @@ class KVRuntimeManager:
                         # Clear local GPU tensors on block to prevent VRAM leak
                         block.U = None
                         block.V = None
+                        block.anchor_kv = None
                         block.U_sem_int4 = None
                         block.U_sem_scale = None
                         block.U_fact_fp16 = None
@@ -2771,8 +2772,8 @@ class KVRuntimeManager:
         if not preprocessed:
             return
 
-        deltas_list = [res[0] for res in preprocessed]
-        max_rank = max(res[3] for res in preprocessed)
+        deltas_list = [res[1] for res in preprocessed]
+        max_rank = max(res[4] for res in preprocessed)
         
         deltas_batch = torch.stack(deltas_list, dim=0)
         

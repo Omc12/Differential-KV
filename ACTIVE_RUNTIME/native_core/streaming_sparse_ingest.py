@@ -1126,10 +1126,8 @@ class StreamingSparseIngestManager:
                         if _immediate_prefill or (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
                             new_block.state = "SUBMITTED"
                             full_blocks_to_compress.append(new_block)
-                            # Free GPU anchor immediately — CPU copy already taken via stacked_anchors_cpu.
-                            # Keeping the GPU tensor wastes 1 token × heads × head_dim × FP16 per block per layer.
-                            # For 240 blocks × 28 layers this is ~100 MB of needless GPU resident memory.
-                            new_block.anchor_kv = None
+                            # Keep GPU anchor intact until compression completes so attention forward can read it
+                            pass
                         else:
                             new_block.state = "ACCUMULATING"
                     else:
