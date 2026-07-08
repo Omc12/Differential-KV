@@ -29,7 +29,7 @@ import torch
 import queue
 import threading
 import re
-from typing import Dict, List, Optional, Tuple, ClassVar
+from typing import Dict, List, Optional, Tuple, ClassVar, Any
 from dataclasses import dataclass, field
 
 try:
