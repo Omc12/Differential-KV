@@ -494,54 +494,8 @@ def _attend_and_reconstruct_v_compiled(
 
     return O_final
 
-_IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
-                     hasattr(torch.backends, "mps") and
-                     torch.backends.mps.is_available())
-_IS_CUDA_AVAILABLE = torch.cuda.is_available()
 
-use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
-if use_compile == "auto":
-    use_compile = "1" if _IS_CUDA_AVAILABLE else "0"
-elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
-    use_compile = "0"
-
-if use_compile == "1":
-    try:
-        _backend = "inductor"
-        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_mode} (dynamic=True) ...")
-        _reconstruct_and_score = torch.compile(
-            _reconstruct_and_score_compiled,
-            backend=_backend,
-            mode=_mode,
-            fullgraph=False,
-            dynamic=True,
-        )
-    except Exception as e:
-        print(f"[DiffKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
-        _reconstruct_and_score = _reconstruct_and_score_compiled
-        
-    try:
-        _backend = "inductor"
-        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_mode} (dynamic=True) ...")
-        _attend_and_reconstruct_v = torch.compile(
-            _attend_and_reconstruct_v_compiled,
-            backend=_backend,
-            mode=_mode,
-            fullgraph=False,
-            dynamic=True,
-        )
-    except Exception as e:
-        print(f"[DiffKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
-        _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
-else:
-    _reconstruct_and_score = _reconstruct_and_score_compiled
-    _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
-
-
-@torch.jit.script
-def _prefill_fused_history_attend(
+def _prefill_fused_history_attend_compiled(
     U: torch.Tensor,
     V_K: torch.Tensor,
     V_V: torch.Tensor,
@@ -645,6 +599,72 @@ def _prefill_fused_history_attend(
     lse_padded = lse_out.unsqueeze(-1).expand(1, H, Q, D)
     return torch.stack([out_hist, lse_padded], dim=0)
 
+
+_IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
+                     hasattr(torch.backends, "mps") and
+                     torch.backends.mps.is_available())
+_IS_CUDA_AVAILABLE = torch.cuda.is_available()
+
+use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+if use_compile == "auto":
+    use_compile = "1" if _IS_CUDA_AVAILABLE else "0"
+elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
+    use_compile = "0"
+
+if use_compile == "1":
+    try:
+        _backend = "inductor"
+        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        _reconstruct_and_score = torch.compile(
+            _reconstruct_and_score_compiled,
+            backend=_backend,
+            mode=_mode,
+            fullgraph=False,
+            dynamic=True,
+        )
+    except Exception as e:
+        print(f"[DiffKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
+        _reconstruct_and_score = _reconstruct_and_score_compiled
+        
+    try:
+        _backend = "inductor"
+        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        _attend_and_reconstruct_v = torch.compile(
+            _attend_and_reconstruct_v_compiled,
+            backend=_backend,
+            mode=_mode,
+            fullgraph=False,
+            dynamic=True,
+        )
+    except Exception as e:
+        print(f"[DiffKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
+        _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
+    try:
+        _backend = "inductor"
+        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+        print(f"[DiffKV JIT] Compiling _prefill_fused_history_attend with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        _prefill_fused_history_attend = torch.compile(
+            _prefill_fused_history_attend_compiled,
+            backend=_backend,
+            mode=_mode,
+            fullgraph=False,
+            dynamic=True,
+        )
+    except Exception as e:
+        print(f"[DiffKV JIT] torch.compile of _prefill_fused_history_attend failed ({e}). Falling back to JIT script.")
+        try:
+            _prefill_fused_history_attend = torch.jit.script(_prefill_fused_history_attend_compiled)
+        except Exception:
+            _prefill_fused_history_attend = _prefill_fused_history_attend_compiled
+else:
+    _reconstruct_and_score = _reconstruct_and_score_compiled
+    _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
+    try:
+        _prefill_fused_history_attend = torch.jit.script(_prefill_fused_history_attend_compiled)
+    except Exception:
+        _prefill_fused_history_attend = _prefill_fused_history_attend_compiled
 
 # ── 3. PyTorch fallbacks / MPS decoders ───────────────────────────────────────
 
@@ -1611,6 +1631,15 @@ def native_triton_sparse_attn_decode(
 #     DENSE_PER_CHUNK dense tokens from the matching dense slice.
 
 if HAS_TRITON:
+    @triton.autotune(
+        configs=[
+            triton.Config({'num_warps': 4, 'num_stages': 2}),
+            triton.Config({'num_warps': 4, 'num_stages': 4}),
+            triton.Config({'num_warps': 8, 'num_stages': 2}),
+            triton.Config({'num_warps': 8, 'num_stages': 4}),
+        ],
+        key=['N', 'L_dense']
+    )
     @triton.jit
     def _fused_decode_combined_kernel(
         # ── Sparse compressed-block inputs (identical to _fused_sparse_decode_kernel) ──
@@ -1648,6 +1677,7 @@ if HAS_TRITON:
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
         DENSE_PER_CHUNK: tl.constexpr,   # dense tokens each chunk processes (0 disables the loop)
+        BLOCK_SIZE_T: tl.constexpr = 64,  # Parallelize dense window loads in blocks of 64
     ):
         h_q = tl.program_id(0)
         chunk_id = tl.program_id(1)
@@ -1767,23 +1797,31 @@ if HAS_TRITON:
         if DENSE_PER_CHUNK > 0:
             dense_start = chunk_id * DENSE_PER_CHUNK
             dense_end = dense_start + DENSE_PER_CHUNK
-            # Clamp: last chunk may own fewer tokens
             if dense_end > L_dense:
                 dense_end = L_dense
 
-            for t in range(dense_start, dense_end):
-                dk_ptrs = dense_k_ptr + h_kv * stride_dk_h + t * stride_dk_l + offs_d * stride_dk_d
-                dv_ptrs = dense_v_ptr + h_kv * stride_dk_h + t * stride_dv_l + offs_d * stride_dv_d
-                dk = tl.load(dk_ptrs).to(tl.float32)
-                dv = tl.load(dv_ptrs).to(tl.float32)
+            for t_start in range(dense_start, dense_end, BLOCK_SIZE_T):
+                offs_t = t_start + tl.arange(0, BLOCK_SIZE_T)
+                mask_t = offs_t < dense_end
 
-                score = tl.sum(q * dk) * INV_SCALE
+                dk_ptrs = dense_k_ptr + h_kv * stride_dk_h + offs_t[:, None] * stride_dk_l + offs_d[None, :] * stride_dk_d
+                dk = tl.load(dk_ptrs, mask=mask_t[:, None], other=0.0).to(tl.float32)
 
-                m_new = tl.maximum(m_i, score)
+                score = tl.sum(q[None, :] * dk, axis=1) * INV_SCALE
+                score = tl.where(mask_t, score, -float("inf"))
+
+                mb = tl.max(score, axis=0)
+                m_new = tl.maximum(m_i, mb)
                 alpha = tl.exp(m_i - m_new)
                 p = tl.exp(score - m_new)
-                l_i = l_i * alpha + p
-                O_i = O_i * alpha + p * dv
+                p = tl.where(mask_t, p, 0.0)
+
+                l_i = l_i * alpha + tl.sum(p, axis=0)
+
+                dv_ptrs = dense_v_ptr + h_kv * stride_dv_h + offs_t[:, None] * stride_dv_l + offs_d[None, :] * stride_dv_d
+                dv = tl.load(dv_ptrs, mask=mask_t[:, None], other=0.0).to(tl.float32)
+
+                O_i = O_i * alpha + tl.sum(p[:, None] * dv, axis=0)
                 m_i = m_new
 
         # ── Write partial outputs (identical epilogue to _fused_sparse_decode_kernel) ──

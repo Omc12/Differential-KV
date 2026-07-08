@@ -30,27 +30,45 @@ BENCH = os.path.join(REPO, "benchmarks")
 NEEDLE = "OMEGA-7741-DELTA"
 
 
-def _mx_peak(mx):
-    for o, n in ((mx, "get_peak_memory"), (getattr(mx, "metal", None), "get_peak_memory")):
-        if o is not None and hasattr(o, n):
-            try: return float(getattr(o, n)()) / 1e9
-            except Exception: pass
-    return None
+import torch
+
+def _get_peak_gb():
+    if torch.cuda.is_available():
+        return torch.cuda.max_memory_allocated() / 1e9
+    try:
+        import mlx.core as mx
+        for o, n in ((mx, "get_peak_memory"), (getattr(mx, "metal", None), "get_peak_memory")):
+            if o is not None and hasattr(o, n):
+                return float(getattr(o, n)()) / 1e9
+    except Exception:
+        pass
+    return 0.0
 
 
-def _mx_reset_peak(mx):
-    for o, n in ((mx, "reset_peak_memory"), (getattr(mx, "metal", None), "reset_peak_memory")):
-        if o is not None and hasattr(o, n):
-            try: getattr(o, n)(); return
-            except Exception: pass
+def _reset_peak():
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    try:
+        import mlx.core as mx
+        for o, n in ((mx, "reset_peak_memory"), (getattr(mx, "metal", None), "reset_peak_memory")):
+            if o is not None and hasattr(o, n):
+                getattr(o, n)()
+                return
+    except Exception:
+        pass
 
 
-def _mx_active(mx):
-    for o, n in ((mx, "get_active_memory"), (getattr(mx, "metal", None), "get_active_memory")):
-        if o is not None and hasattr(o, n):
-            try: return float(getattr(o, n)()) / 1e9
-            except Exception: pass
-    return None
+def _get_active_gb():
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1e9
+    try:
+        import mlx.core as mx
+        for o, n in ((mx, "get_active_memory"), (getattr(mx, "metal", None), "get_active_memory")):
+            if o is not None and hasattr(o, n):
+                return float(getattr(o, n)()) / 1e9
+    except Exception:
+        pass
+    return 0.0
 
 
 def analytic_kv_bytes(mgr, seq_len):
@@ -101,12 +119,11 @@ def analytic_kv_bytes(mgr, seq_len):
 
 def run_cell(ctx, gen, prompt_text):
     import numpy as np, torch
-    import mlx.core as mx
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     import os
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
 
-    _mx_reset_peak(mx)
+    _reset_peak()
     cfg = {"quantization": "int4", "rank": 32, "block_size": 256,
            "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
     w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
@@ -146,9 +163,9 @@ def run_cell(ctx, gen, prompt_text):
     logits = out.logits[0, -1].float().cpu().numpy()
     prefill_s = time.perf_counter() - t0
 
-    mx_peak_prefill = _mx_peak(mx)
+    mx_peak_prefill = _get_peak_gb()
     # ── isolate decode-phase memory: reset peak at the boundary ──
-    mx.eval(); _mx_reset_peak(mx)
+    _reset_peak()
 
     cur = len(ids); gen_ids = []
     t0 = time.perf_counter()
@@ -166,15 +183,20 @@ def run_cell(ctx, gen, prompt_text):
         "prefill_s": prefill_s, "decode_s": decode_s,
         "decode_tps": len(gen_ids) / decode_s if decode_s > 0 else None,
         "mx_peak_gb": mx_peak_prefill,
-        "mx_decode_peak_gb": _mx_peak(mx),
-        "mx_active_end_gb": _mx_active(mx),
+        "mx_decode_peak_gb": _get_peak_gb(),
+        "mx_active_end_gb": _get_active_gb(),
         "needle_found": NEEDLE in text,
         "output_preview": text[:200],
         "kv": kv,
     }
     try: w.close()
     except Exception: pass
-    del w, model, mgr; gc.collect(); mx.clear_cache()
+    del w, model, mgr; gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
     return res
 
 
