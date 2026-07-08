@@ -129,7 +129,7 @@ def run_cell(ctx, gen, prompt_text):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
 
     _reset_peak()
-    cfg = {"quantization": "int4", "rank": 32, "block_size": 256,
+    cfg = {"quantization": "nf4", "rank": 32, "block_size": 256,
            "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
     w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
     w.ensure_loaded()
