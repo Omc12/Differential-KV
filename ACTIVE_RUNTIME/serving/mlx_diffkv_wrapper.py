@@ -909,13 +909,9 @@ class MLXKVBlockManager:
         # COST is ~25-30% slower decode (e.g. 16k: ~14→~10 tps) + 2× residual pool memory;
         # accepted deliberately (accuracy > short-context throughput). To trade back for speed
         # on retrieval-only workloads, set DIFFKV_MAX_RESIDUAL=64.
-        # NOTE: reduced from 128 to 32 to prevent session pre-allocation from consuming
-        # 800+ MB on 8 GB devices. The adaptive residual budget (OPT-A) already caps
-        # easy blocks to 8 and medium blocks to 16; 32 is the ceiling for hard (needle)
-        # blocks only. Accuracy impact is minimal: the low-rank reconstruction handles
-        # the bulk of the representation; residuals fix the worst outliers.
-        # To restore the 128-residual behavior: DIFFKV_MAX_RESIDUAL=128
-        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "32"))
+        # Restore default to 128 for full correctness and to prevent repetitive loops.
+        # Users can override this to 32 or 64 via DIFFKV_MAX_RESIDUAL if needed.
+        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "128"))
         # Top-K block routing: when >0 and the live block count exceeds it, decode
         # scores all blocks cheaply (Quest-style key min/max upper bound) but runs
         # the expensive value reconstruction + exact-residual attention only for the
@@ -3045,7 +3041,9 @@ class MLXQwenModel:
             #    4 = 4-bit QuantizedKVCache  (~350 MB — saves 1.05 GB, slightly lossy)
             # Dequantization is done transparently by _cache_fetch() in attention_forward
             # so all downstream code sees plain float16 mx.array tensors as before.
-            _cache_bits = int(os.environ.get("DIFFKV_PREFILL_CACHE_BITS", "8"))
+            # Restore default to 16 (float16) for full precision and to prevent loops.
+            # Users can override this to 8 or 4 via DIFFKV_PREFILL_CACHE_BITS if needed.
+            _cache_bits = int(os.environ.get("DIFFKV_PREFILL_CACHE_BITS", "16"))
             if _cache_bits in (4, 8):
                 cache_list = [
                     QuantizedKVCache(group_size=64, bits=_cache_bits)
