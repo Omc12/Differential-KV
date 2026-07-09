@@ -377,6 +377,48 @@ if HAS_TRITON:
         if l_final_ptr is not None:
             tl.store(l_final_ptr + h_q, l_i)
 
+    # OPT-E: Pairwise-merge kernel — one pass of a binary tree reduction.
+    # Each program merges a (left, right) chunk pair: accumulator at slot `left`
+    # absorbs slot `right` using the standard online-softmax (LSE-safe) formula.
+    # Launch ceil(NUM_ACTIVE / 2) programs along axis-1 to run all pairs in parallel.
+    # After ceil(log2(NUM_CHUNKS)) such passes only slot 0 remains, which is the
+    # final normalised output.  Only used when num_chunks >= 8 (see _dispatch_reduction
+    # below); the sequential kernel is faster at smaller chunk counts.
+    @triton.jit
+    def _fused_reduction_pairwise_kernel(
+        workspace_ptr,   # [H_q, NUM_CHUNKS_PAD, D]  in-place
+        m_ptr,           # [H_q, NUM_CHUNKS_PAD]      in-place
+        l_ptr,           # [H_q, NUM_CHUNKS_PAD]      in-place
+        STRIDE: tl.constexpr,   # distance between left and right slot (1, 2, 4, …)
+        NUM_CHUNKS: tl.constexpr,
+        D: tl.constexpr,
+    ):
+        h_q   = tl.program_id(0)
+        pair  = tl.program_id(1)
+        left  = pair * 2 * STRIDE
+        right = left + STRIDE
+        if right >= NUM_CHUNKS:
+            return
+
+        offs_d = tl.arange(0, D)
+
+        m_l = tl.load(m_ptr + h_q * NUM_CHUNKS + left)
+        m_r = tl.load(m_ptr + h_q * NUM_CHUNKS + right)
+        l_l = tl.load(l_ptr + h_q * NUM_CHUNKS + left)
+        l_r = tl.load(l_ptr + h_q * NUM_CHUNKS + right)
+        O_l = tl.load(workspace_ptr + h_q * NUM_CHUNKS * D + left  * D + offs_d).to(tl.float32)
+        O_r = tl.load(workspace_ptr + h_q * NUM_CHUNKS * D + right * D + offs_d).to(tl.float32)
+
+        m_new = tl.maximum(m_l, m_r)
+        alpha = tl.exp(m_l - m_new)
+        beta  = tl.exp(m_r - m_new)
+        l_new = l_l * alpha + l_r * beta
+        O_new = O_l * alpha + O_r * beta
+
+        tl.store(m_ptr + h_q * NUM_CHUNKS + left, m_new)
+        tl.store(l_ptr + h_q * NUM_CHUNKS + left, l_new)
+        tl.store(workspace_ptr + h_q * NUM_CHUNKS * D + left * D + offs_d, O_new)
+
     @triton.jit
     def lowrank_recon_kernel(
         U_ptr, V_ptr, anchor_ptr, out_ptr,
@@ -421,7 +463,76 @@ if HAS_TRITON:
         tl.store(out_ptrs, acc, mask=mask_n[:, None] & mask_d[None, :])
 
 
-# ── 2. PyTorch JIT Helpers for Compilation ─────────────────────────────────────
+# ── OPT-E: Reduction dispatcher \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+def _dispatch_reduction(
+    out_workspace: "torch.Tensor",
+    m_workspace:   "torch.Tensor",
+    l_workspace:   "torch.Tensor",
+    out:           "torch.Tensor",
+    m_out:         "torch.Tensor",
+    l_out:         "torch.Tensor",
+    num_chunks:    int,
+    D:             int,
+    H_q:           int,
+) -> None:
+    """
+    Dispatch the multi-chunk LSE-safe reduction to either:
+      - Sequential kernel   when num_chunks < 8  (low launch overhead dominates)
+      - Parallel tree       when num_chunks >= 8  (ceil(log2(C)) passes, each parallel)
+
+    The parallel tree pads num_chunks to the next power of 2 and runs one
+    pairwise-merge Triton kernel per level.  After the last pass, slot 0 of the
+    workspace holds the un-normalised merged accumulator; we copy it to `out` and
+    divide by l.  Levels where a right-hand partner is out of range are no-ops
+    (guarded inside _fused_reduction_pairwise_kernel by the `right >= NUM_CHUNKS`
+    early-exit).
+    """
+    if not HAS_TRITON:
+        return  # caller handles the no-Triton path
+
+    PARALLEL_THRESHOLD = 8  # Q3 answer: >= 8 chunks use parallel tree
+
+    if num_chunks < PARALLEL_THRESHOLD:
+        # ── Sequential path (existing kernel) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        _fused_sparse_decode_reduction_kernel[(H_q,)](
+            out_workspace, m_workspace, l_workspace, out, m_out, l_out,
+            num_chunks, D,
+        )
+    else:
+        # ── Parallel tree-reduction path \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        import math as _math
+        # Pad to next power of 2 so every level has even pair counts.
+        nc_pad = 1 << _math.ceil(_math.log2(num_chunks))
+        n_levels = _math.ceil(_math.log2(nc_pad))
+
+        stride = 1
+        for _ in range(n_levels):
+            n_pairs = nc_pad // (2 * stride)
+            if n_pairs == 0:
+                break
+            grid_pw = (H_q, n_pairs)
+            _fused_reduction_pairwise_kernel[grid_pw](
+                out_workspace, m_workspace, l_workspace,
+                STRIDE=stride, NUM_CHUNKS=num_chunks, D=D,
+            )
+            stride *= 2
+
+        # After all passes, slot 0 holds the merged (unnormalised) accumulator.
+        import torch as _torch
+        m_final = m_workspace[:, 0]               # [H_q]
+        l_final = l_workspace[:, 0]               # [H_q]
+        O_final = out_workspace[:, 0, :].float()  # [H_q, D]
+
+        # The pairwise kernel does NOT divide by l — do it here.
+        out_f = O_final / l_final.unsqueeze(-1).clamp(min=1e-9)
+        out.copy_(out_f)
+        if m_out is not None:
+            m_out.copy_(m_final)
+        if l_out is not None:
+            l_out.copy_(l_final)
+
+
+# ── 2. PyTorch JIT Helpers for Compilation \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 def _reconstruct_and_score_compiled(
     U: torch.Tensor,
@@ -697,6 +808,16 @@ class _StratifiedUProxy:
         return getattr(object.__getattribute__(self, "_pool"), name)
 
 
+# ── OPT-D: Generation-keyed module-level U proxy cache ────────────────────────
+# Maps (pool_id, pool_generation, active_key_tuple) → _StratifiedUProxy.
+# Invalidated automatically when pool._stratified_generation increments
+# (NativeBlockPool.write_block does this on every pool write).
+# Cache is intentionally small: a new pool_id is rare (one per session) and each
+# generation evicts all prior entries, so the dict stays bounded at O(1) entries
+# per active pool across typical single-session inference.
+_stratified_proxy_cache: dict = {}
+
+
 def _build_stratified_U_for_triton(
     pool,
     block_indices: torch.Tensor,
@@ -725,6 +846,20 @@ def _build_stratified_U_for_triton(
             u = u * u_scale
         becomes a no-op and the fp16 values are used exactly.
 
+    OPT-C — Active-only reconstruction:
+        Previous code called reconstruct_batch_U(pool, all_idx) where all_idx
+        covered every slot in the pool (up to 256+), running the expensive
+        int4-unpack Python loop for all of them even if only 16 are active.
+        Now we do a cheap int8 dequant broadcast for all slots and then overwrite
+        only the active slots with accurate stratified reconstruction — cutting the
+        expensive loop from N_pool to N_active iterations (typically 16×).
+
+    OPT-D — Generation-keyed cache:
+        If the pool has not been written to (same _stratified_generation) and the
+        same set of active block indices is requested, return the cached proxy
+        immediately without any tensor allocation or reconstruction. Generation
+        increments in NativeBlockPool.write_block on every pool update.
+
     Returns (proxy_or_pool, used_stratified).
     If the pool has no stratified components (n_semantic all-zero) the original
     pool is returned unchanged to avoid a pointless VRAM allocation.
@@ -734,10 +869,42 @@ def _build_stratified_U_for_triton(
     if n_sem_attr is None or (n_sem_attr == 0).all().item():
         return pool, False
 
-    # Reconstruct fp16 U for the entire pool (reconstruct_batch_U handles int4/fp16 split)
-    all_idx = torch.arange(pool.U.shape[0], device=pool.U.device, dtype=torch.long)
-    U_full = reconstruct_batch_U(pool, all_idx)          # [n_blocks, S, R] fp16
-    proxy  = _StratifiedUProxy(pool, U_full)
+    active_idx = block_indices.long()
+
+    # ── OPT-D: Cache lookup ────────────────────────────────────────────────────
+    pool_id  = id(pool)
+    pool_gen = getattr(pool, "_stratified_generation", -1)
+    # Sort for stable key; routing order may differ but the block set is what matters.
+    # tolist() is O(N_active), acceptable for N_active ≤ 256.
+    active_key = tuple(sorted(active_idx.tolist()))
+    cache_key  = (pool_id, pool_gen, active_key)
+
+    cached = _stratified_proxy_cache.get(cache_key)
+    if cached is not None:
+        return cached, True   # ── Cache HIT: skip all tensor work ──
+
+    # Evict all stale entries for this pool_id (keeps dict bounded at O(1) entries).
+    stale = [k for k in _stratified_proxy_cache if k[0] == pool_id]
+    for k in stale:
+        del _stratified_proxy_cache[k]
+
+    # ── OPT-C: Reconstruct only active slots ─────────────────────────────────
+    # 1. Fast int8 dequant broadcast as the baseline for ALL pool slots (single
+    #    GPU multiply — no Python loop). Active-slot overwrite follows.
+    U_full = (pool.U.to(pool.dtype)
+              * pool.U_scale.view(-1, 1, 1).to(pool.dtype))  # [n_pool, S, R]
+    U_full = U_full.clone()  # detach from pool view before scatter-write
+
+    # 2. Accurate int4/fp16 stratified reconstruction for the N_active slots only.
+    #    reconstruct_batch_U loops over idx — now N_active (≤ 16 typical) instead
+    #    of N_pool (up to 256+), giving ≥16× speedup on the hot per-decode call.
+    U_active = reconstruct_batch_U(pool, active_idx)   # [N_active, S, R] fp16
+    U_full[active_idx] = U_active
+
+    proxy = _StratifiedUProxy(pool, U_full)
+
+    # ── OPT-D: Populate cache ─────────────────────────────────────────────────
+    _stratified_proxy_cache[cache_key] = proxy
     return proxy, True
 
 
@@ -1588,10 +1755,10 @@ def native_triton_sparse_attn_decode(
             )
             
             if num_chunks > 1:
-                grid_reduction = (H_q,)
-                _fused_sparse_decode_reduction_kernel[grid_reduction](
+                # OPT-E: dispatches sequential vs. parallel tree reduction based on num_chunks
+                _dispatch_reduction(
                     out_workspace, m_workspace, l_workspace, out, m_out, l_out,
-                    num_chunks, D_pad
+                    num_chunks, D_pad, H_q,
                 )
             
             if dense_blocks or (active_k is not None and active_k.shape[2] > 0):
@@ -2105,9 +2272,10 @@ def native_triton_sparse_attn_decode_combined(
         )
 
         if num_chunks > 1:
-            _fused_sparse_decode_reduction_kernel[(H_q,)](
+            # OPT-E: dispatches sequential vs. parallel tree reduction based on num_chunks
+            _dispatch_reduction(
                 out_workspace, m_workspace, l_workspace, out, m_out, l_out,
-                num_chunks, D_pad,
+                num_chunks, D_pad, H_q,
             )
 
         if not getattr(native_triton_sparse_attn_decode_combined, "_logged", False):

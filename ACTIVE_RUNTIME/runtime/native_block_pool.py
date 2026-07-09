@@ -99,6 +99,11 @@ class NativeBlockPool:
         # Random projection matrix — set by KVRuntimeManager after construction
         self.W_proj: torch.Tensor = None  # type: ignore[assignment]
 
+        # OPT-D: Generation counter for the stratified U proxy cache in
+        # triton_fused_decode.py.  Incremented on every write_block call so
+        # the decode-side cache knows when stratified U data has changed.
+        self._stratified_generation: int = 0
+
         self.lazy = lazy
         if not lazy:
             self._allocate_tensors(initial_blocks)
@@ -499,6 +504,11 @@ class NativeBlockPool:
             except Exception:
                 pass  # Descriptor failure is non-fatal — SRL routing degrades gracefully
 
+        # OPT-D: Notify the stratified U proxy cache that pool data has changed.
+        # Incrementing this counter causes _build_stratified_U_for_triton to
+        # skip the cached proxy and reconstruct fresh fp16 U for the new data.
+        self._stratified_generation += 1
+
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
         # Free old tensors before re-allocating
@@ -519,6 +529,9 @@ class NativeBlockPool:
         self._ref_counts       = []
         self._last_used        = []
         self.version           = []
+        # OPT-D: Bump generation so any proxy cached against the pre-reset data
+        # is automatically evicted on the next decode call.
+        self._stratified_generation = getattr(self, "_stratified_generation", 0) + 1
 
         if not self.lazy:
             self._allocate_tensors(self.initial_blocks)

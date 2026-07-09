@@ -18,7 +18,7 @@ CTX="${1:-2000}"; MAX_GEN="${2:-150}"; shift 2 2>/dev/null || true
 for kv in "$@"; do export "$kv"; done
 
 BINARY="diffkv_native/build/diffkv_native"
-MODEL="diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+MODEL="diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 QUESTION="Ignore the text above. Write an extremely long and detailed essay about the history, present, and future of artificial intelligence. Write at least 600 words and do not stop early."
 NEEDLE="(background note) the field has many subfields."
 

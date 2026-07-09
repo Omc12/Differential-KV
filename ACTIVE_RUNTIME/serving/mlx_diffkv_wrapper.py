@@ -1697,14 +1697,36 @@ class MLXKVBlockManager:
             boost_mx = mx.array(boost_np).astype(joint_errors.dtype)
             joint_errors = joint_errors * boost_mx
             
-        max_res = self.max_residual
+        # OPT-A: Adaptive residual budget — MLX prefill port.
+        batch_norms_k = mx.linalg.norm(batch_deltas_k, axis=-1)
+        batch_norms_v = mx.linalg.norm(batch_deltas_v, axis=-1)
+        rel_error_k = errors_k / mx.maximum(batch_norms_k, 1e-8)
+        rel_error_v = errors_v / mx.maximum(batch_norms_v, 1e-8)
+
+        # MLX lacks batched mx.median; sort and retrieve the middle element per block.
+        sorted_k = mx.sort(rel_error_k, axis=-1)
+        sorted_v = mx.sort(rel_error_v, axis=-1)
+        med_k = sorted_k[:, S_comp // 2]
+        med_v = sorted_v[:, S_comp // 2]
+        max_med_err = mx.maximum(med_k, med_v).tolist()
+
+        n_res_batch = []
+        for val in max_med_err:
+            val = float(val)
+            b_res = self.max_residual
+            if val < 0.05:
+                b_res = min(8, b_res)
+            elif val < 0.15:
+                b_res = min(16, b_res)
+            n_res_batch.append(b_res)
+
         res_v_only, cov_frac = _capture_policy_env()
-        if max_res > 0:
+        if self.max_residual > 0:
             capture_scores = joint_errors
-            cov_bonus = _coverage_bonus(S_comp, max_res, cov_frac)
+            cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
             if cov_bonus is not None:
                 capture_scores = capture_scores.astype(mx.float32) + cov_bonus
-            top_k = mx.argsort(capture_scores, axis=-1)[:, -max_res:][:, ::-1]
+            top_k = mx.argsort(capture_scores, axis=-1)[:, -self.max_residual:][:, ::-1]
             indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
             batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
             batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
@@ -1719,13 +1741,24 @@ class MLXKVBlockManager:
                 idx_recon = mx.expand_dims(mx.expand_dims(top_k, -1), -1)
                 res_k_padded = mx.take_along_axis(recon_k_rows, idx_recon, axis=1).astype(res_v_padded.dtype)
 
-            # Construct res mask
+            # Build active mask to zero out inactive slots and keep static self.max_residual shape intact
+            active_mask_np = np.zeros((B_batch, self.max_residual), dtype=np.bool_)
+            for b in range(B_batch):
+                active_mask_np[b, :n_res_batch[b]] = True
+            active_mask = mx.array(active_mask_np)
+
+            # Zero out capped slots
+            res_k_padded = res_k_padded * mx.expand_dims(mx.expand_dims(active_mask, -1), -1)
+            res_v_padded = res_v_padded * mx.expand_dims(mx.expand_dims(active_mask, -1), -1)
+
+            # Construct res mask using only active indices
             match = (top_k[:, :, None] == mx.arange(S_comp)[None, None, :])
+            match = match & mx.expand_dims(active_mask, -1)
             res_mask = mx.any(match, axis=1)
         else:
             top_k = None
-            res_k_padded = mx.zeros((B_batch, max_res, self.kv_heads, self.head_dim), dtype=batch_blocks_k.dtype)
-            res_v_padded = mx.zeros((B_batch, max_res, self.kv_heads, self.head_dim), dtype=batch_blocks_v.dtype)
+            res_k_padded = mx.zeros((B_batch, self.max_residual, self.kv_heads, self.head_dim), dtype=batch_blocks_k.dtype)
+            res_v_padded = mx.zeros((B_batch, self.max_residual, self.kv_heads, self.head_dim), dtype=batch_blocks_v.dtype)
             res_mask = mx.zeros((B_batch, S_comp), dtype=mx.bool_)
             
         # 7. Scatter back to session layers
@@ -1746,7 +1779,7 @@ class MLXKVBlockManager:
             session["comp_res_k"][l][start_idx:start_idx+num_blocks] = res_k_padded[l_slice]
             session["comp_res_v"][l][start_idx:start_idx+num_blocks] = res_v_padded[l_slice]
             for b_idx in range(num_blocks):
-                session["comp_res_n"][l][start_idx + b_idx] = max_res
+                session["comp_res_n"][l][start_idx + b_idx] = n_res_batch[l * num_blocks + b_idx]
             if "comp_res_mask" in session:
                 session["comp_res_mask"][l][start_idx:start_idx+num_blocks] = res_mask[l_slice]
                 
@@ -1984,28 +2017,62 @@ class MLXKVBlockManager:
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
                 joint_errors = joint_errors * boost_arr
 
-        max_res = self.max_residual
+        # OPT-A: Adaptive residual budget — MLX/Python wrapper port.
+        norms_k = mx.linalg.norm(deltas_k_2d, axis=-1)
+        norms_v = mx.linalg.norm(deltas_v_2d, axis=-1)
+        rel_error_k = errors_k / mx.maximum(norms_k, 1e-8)
+        rel_error_v = errors_v / mx.maximum(norms_v, 1e-8)
+
+        # MLX lacks mx.median; sort and retrieve the middle element.
+        sorted_k = mx.sort(rel_error_k)
+        sorted_v = mx.sort(rel_error_v)
+        median_err_k = float(sorted_k[S_comp // 2].item())
+        median_err_v = float(sorted_v[S_comp // 2].item())
+        max_median_err = max(median_err_k, median_err_v)
+
+        n_res = self.max_residual
+        if max_median_err < 0.05:
+            # Easy block (prose filler): cap at 8 residuals
+            n_res = min(8, n_res)
+        elif max_median_err < 0.15:
+            # Medium block: cap at 16 residuals
+            n_res = min(16, n_res)
+
         res_v_only, cov_frac = _capture_policy_env()
-        if max_res > 0:
+        if self.max_residual > 0:
             capture_scores = joint_errors
-            cov_bonus = _coverage_bonus(S_comp, max_res, cov_frac)
+            cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
             if cov_bonus is not None:
                 capture_scores = capture_scores.astype(mx.float32) + cov_bonus
-            top_k = mx.argsort(capture_scores)[-max_res:][::-1]
+            # Select the top n_res elements
+            top_k_indices = mx.argsort(capture_scores)[-n_res:][::-1]
+            top_k = top_k_indices  # compatibility alias for mask writing below
+
             block_k_t = block_k.transpose(1, 0, 2)
             block_v_t = block_v.transpose(1, 0, 2)
-            res_k_padded = mx.take(block_k_t, top_k + 1, axis=0)
-            res_v_padded = mx.take(block_v_t, top_k + 1, axis=0)
+            res_k_active = mx.take(block_k_t, top_k_indices + 1, axis=0)
+            res_v_active = mx.take(block_v_t, top_k_indices + 1, axis=0)
             if res_v_only:
                 recon_k_rows = (recon_delta_k.reshape(S_comp, self.kv_heads, self.head_dim)
                                 + mx.expand_dims(anchor_k, 0))
-                res_k_padded = mx.take(recon_k_rows, top_k, axis=0).astype(res_v_padded.dtype)
-            n_res = max_res
+                res_k_active = mx.take(recon_k_rows, top_k_indices, axis=0).astype(res_v_active.dtype)
+
+            # Pad active residuals with zeros to keep static self.max_residual shape intact
+            pad_len = self.max_residual - n_res
+            if pad_len > 0:
+                zero_k = mx.zeros((pad_len, self.kv_heads, self.head_dim), dtype=res_k_active.dtype)
+                zero_v = mx.zeros((pad_len, self.kv_heads, self.head_dim), dtype=res_v_active.dtype)
+                res_k_padded = mx.concatenate([res_k_active, zero_k], axis=0)
+                res_v_padded = mx.concatenate([res_v_active, zero_v], axis=0)
+            else:
+                res_k_padded = res_k_active
+                res_v_padded = res_v_active
         else:
             top_k = None
-            res_k_padded = mx.zeros((max_res, self.kv_heads, self.head_dim), dtype=block_k.dtype)
-            res_v_padded = mx.zeros((max_res, self.kv_heads, self.head_dim), dtype=block_v.dtype)
+            res_k_padded = mx.zeros((self.max_residual, self.kv_heads, self.head_dim), dtype=block_k.dtype)
+            res_v_padded = mx.zeros((self.max_residual, self.kv_heads, self.head_dim), dtype=block_v.dtype)
             n_res = 0
+
 
         session["comp_U"][layer_idx][num_blocks]     = U_padded
         session["comp_VK"][layer_idx][num_blocks]    = VK

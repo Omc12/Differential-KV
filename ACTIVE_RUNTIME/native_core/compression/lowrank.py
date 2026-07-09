@@ -593,6 +593,44 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         Vh_fp16 = torch.nan_to_num(Vh_fp16, nan=0.0, posinf=0.0, neginf=0.0)
 
     pool = getattr(manager, "native_pool", None) if manager is not None else None
+
+    # OPT-B: Hoist coverage-bonus statics out of the per-block loop — reading
+    # the env var and defining the helper once is enough for the whole batch.
+    import os as _os_b
+    _cov_frac_batch = 0.0
+    try:
+        _cov_frac_batch = float(_os_b.environ.get("DIFFKV_RESIDUAL_COVERAGE_FRAC", "0"))
+    except ValueError:
+        pass
+    from collections import namedtuple as _namedtuple
+    _TopKCov = _namedtuple("_TopKCov", ["indices", "values"])
+
+    def _topk_with_coverage(rel_err_vec, n_budget, cov_frac):
+        """topk with optional stride-stratified coverage bonus (GPU tensors)."""
+        if cov_frac <= 0.0 or n_budget <= 0:
+            return torch.topk(rel_err_vec, k=min(n_budget, rel_err_vec.shape[0]))
+        import numpy as _np
+        n_cov = min(n_budget, max(1, int(round(cov_frac * n_budget))))
+        n_rank = max(0, n_budget - n_cov)
+        T = rel_err_vec.shape[0]
+        # Stride-sampled coverage indices (CPU arithmetic only, no GPU sync)
+        cov_idx_np = _np.unique(_np.round(_np.linspace(0, T - 1, n_cov)).astype(int))
+        cov_idx = torch.from_numpy(cov_idx_np).long().to(rel_err_vec.device)
+        # Exclude coverage positions from the error-ranked selection
+        errs_for_rank = rel_err_vec.clone()
+        errs_for_rank[cov_idx] = -1.0
+        if n_rank > 0:
+            ranked = torch.topk(errs_for_rank, k=min(n_rank, T))
+            valid_rank = ranked.indices[ranked.values > 0.0]
+            combined = torch.cat([cov_idx, valid_rank])
+        else:
+            combined = cov_idx
+        combined = torch.unique(combined)
+        vals = rel_err_vec[combined]
+        order = torch.argsort(vals, descending=True)
+        combined = combined[order]
+        return _TopKCov(indices=combined, values=vals[order])
+
     for i, block in enumerate(blocks_list):
         k = ranks[i]
         u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)  # [T_active, k]
@@ -644,30 +682,43 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         rel_error_K = error_K / norm_K
         rel_error_V = error_V / norm_V
 
+        # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
+        # Mirrors compress_lowrank() CPU path (lines 304-315). Easy prose blocks waste far fewer
+        # residual slots; hard factual/code blocks keep the full budget.
         n_max_residual = int(T_active * 0.15)
-        
+        median_err_K = float(torch.median(rel_error_K).item()) if rel_error_K.numel() > 0 else 0.0
+        median_err_V = float(torch.median(rel_error_V).item()) if rel_error_V.numel() > 0 else 0.0
+        max_median_err = max(median_err_K, median_err_V)
+        if max_median_err < 0.05:
+            # Easy block (prose filler / repeated text): cap at 8 residuals.
+            n_max_residual = min(8, n_max_residual)
+        elif max_median_err < 0.15:
+            # Medium complexity: cap at 16 residuals.
+            n_max_residual = min(16, n_max_residual)
+        # Hard block (factual / code / numbers): keep full budget unchanged.
+
         fact_positions_K = None
         residual_K_vals = None
         fact_positions_V = None
         residual_V_vals = None
 
         if T_active > 0 and n_max_residual > 0:
-            top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, T_active))
-            top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, T_active))
-            
+            top_k_K = _topk_with_coverage(rel_error_K, n_max_residual, _cov_frac_batch)
+            top_k_V = _topk_with_coverage(rel_error_V, n_max_residual, _cov_frac_batch)
+
             mask_K = (top_k_K.values > 0.08) & (error_K[top_k_K.indices] > 1e-4)
             fact_positions_K = top_k_K.indices[mask_K]
-            
+
             mask_V = (top_k_V.values > 0.08) & (error_V[top_k_V.indices] > 1e-4)
             fact_positions_V = top_k_V.indices[mask_V]
-            
+
             if fact_positions_K.numel() > 0:
                 residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)
                 fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_K = None
                 residual_K_vals = None
-                
+
             if fact_positions_V.numel() > 0:
                 residual_V_vals = (delta_V - recon_V)[fact_positions_V].to(torch.float16).to(gpu_device)
                 fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
