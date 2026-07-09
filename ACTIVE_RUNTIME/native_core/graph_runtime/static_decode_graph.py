@@ -21,6 +21,7 @@ Architecture:
 """
 
 import torch
+import os
 from typing import Dict, Optional
 
 
@@ -59,7 +60,7 @@ class CUDAGraphDecodeRunner:
         self._static_output_logits   = None   # [B, V] float — static output
         self._captured_shape_sig     = None   # (batch, seq) shape for invalidation
         self._model_ref              = None   # weak ref to the model (non-owning)
-        self._capture_enabled        = _is_cuda_available()
+        self._capture_enabled        = _is_cuda_available() and os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "0") != "1"
         self._num_warmup             = 3
 
     def is_captured(self) -> bool:
