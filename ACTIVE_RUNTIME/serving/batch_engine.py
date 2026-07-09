@@ -147,26 +147,35 @@ _LOOP_NGRAM_WINDOW = 80
 def _detect_repetition_loop(generated_ids: List[int]) -> bool:
     """Return True if the recent token stream shows a repetition loop.
 
-    We extract all n-grams from the tail of the generated sequence and
-    flag a loop when a single n-gram dominates ≥35 % of the window.  This
-    is robust against:
+    Robust against:
       - exact token-level loops (e.g. ero ero ero ...)
-      - near-repeating patterns with slight variation
+      - long exact repeats (e.g. duplicate markdown table rows of period 10-120)
+      - near-repeating patterns with slight variation (e.g. incrementing indices)
     """
     n = len(generated_ids)
-    if n < _LOOP_CHECK_MIN_TOKENS:
+    if n < 30:
         return False
-    window = generated_ids[-_LOOP_NGRAM_WINDOW:]
-    if len(window) < _LOOP_NGRAM_N + 1:
-        return False
-    ngrams = [
-        tuple(window[i:i + _LOOP_NGRAM_N])
-        for i in range(len(window) - _LOOP_NGRAM_N + 1)
-    ]
-    counts = Counter(ngrams)
-    most_common_count = counts.most_common(1)[0][1]
-    ratio = most_common_count / len(ngrams)
-    return ratio >= _LOOP_NGRAM_THRESHOLD
+    
+    # 1. Exact match check for period K (10 to 120)
+    # Catches exact structural repetitions (like identical rows) instantly
+    for K in range(10, min(120, n // 2)):
+        if generated_ids[-K:] == generated_ids[-2*K:-K]:
+            return True
+            
+    # 2. Unique N-gram ratio check over a wider window (up to 256 tokens)
+    # Catches near-repeats (like rows with changing counts/index numbers)
+    window_size = min(256, n)
+    window = generated_ids[-window_size:]
+    ng = 5
+    if len(window) >= ng + 1:
+        ngrams = [tuple(window[i:i + ng]) for i in range(len(window) - ng + 1)]
+        counts = Counter(ngrams)
+        unique_ratio = len(counts) / len(ngrams)
+        if unique_ratio < 0.40:
+            return True
+            
+    return False
+
 
 
 @torch.jit.script

@@ -3413,20 +3413,34 @@ class MLXDiffKVWrapper:
             _loop_idx = getattr(self, "_mlx_loop_idx", None)
 
             if not _loop_detected and _n_new >= 30 and _n_new % 10 == 0:
-                _window = _new_tokens[-80:]
+                # 1. Exact match check for period K (10 to 120)
+                _exact_loop = False
+                for K in range(10, min(120, len(_new_tokens) // 2)):
+                    if _new_tokens[-K:] == _new_tokens[-2*K:-K]:
+                        _exact_loop = True
+                        break
+                
+                # 2. Unique N-gram ratio check over a wider window (up to 256 tokens)
+                _ratio_loop = False
+                _window_size = min(256, len(_new_tokens))
+                _window = _new_tokens[-_window_size:]
                 _ng = 5
                 if len(_window) >= _ng + 1:
                     _ngrams = [tuple(_window[i:i + _ng]) for i in range(len(_window) - _ng + 1)]
-                    _top = Counter(_ngrams).most_common(1)[0][1]
-                    if _top / len(_ngrams) >= 0.35:
-                        _loop_detected = True
-                        self._mlx_loop_detected = True
-                        self._mlx_loop_idx = _n_new
-                        print(
-                            f"[DiffKV MLX] WARNING: repetition loop detected at token "
-                            f"{_n_new}. Escalating penalty window to 256 tokens and strength to 1.3x.",
-                            file=sys.stderr
-                        )
+                    _counts = Counter(_ngrams)
+                    _unique_ratio = len(_counts) / len(_ngrams)
+                    if _unique_ratio < 0.40:
+                        _ratio_loop = True
+                
+                if _exact_loop or _ratio_loop:
+                    _loop_detected = True
+                    self._mlx_loop_detected = True
+                    self._mlx_loop_idx = _n_new
+                    print(
+                        f"[DiffKV MLX] WARNING: repetition loop detected at token "
+                        f"{_n_new}. Escalating penalty window to 256 tokens and strength to 1.3x.",
+                        file=sys.stderr
+                    )
 
             if _loop_detected:
                 if _loop_idx is None:
