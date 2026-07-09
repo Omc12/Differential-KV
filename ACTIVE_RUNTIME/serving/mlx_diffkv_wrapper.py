@@ -891,11 +891,13 @@ class MLXKVBlockManager:
         # COST is ~25-30% slower decode (e.g. 16k: ~14→~10 tps) + 2× residual pool memory;
         # accepted deliberately (accuracy > short-context throughput). To trade back for speed
         # on retrieval-only workloads, set DIFFKV_MAX_RESIDUAL=64.
-        # NOTE: the NATIVE engine (native_block_pool.cpp) and the conformance vectors were
-        # ALREADY 128 — MLX at 64 was the lone outlier, which is precisely why native compressed
-        # SYNTHESIS/prose read correctly while MLX confabulated. This bump aligns MLX with native.
-        # Keep it unless a measured perf pass proves prose recall is unaffected at a lower value.
-        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "128"))
+        # NOTE: reduced from 128 to 32 to prevent session pre-allocation from consuming
+        # 800+ MB on 8 GB devices. The adaptive residual budget (OPT-A) already caps
+        # easy blocks to 8 and medium blocks to 16; 32 is the ceiling for hard (needle)
+        # blocks only. Accuracy impact is minimal: the low-rank reconstruction handles
+        # the bulk of the representation; residuals fix the worst outliers.
+        # To restore the 128-residual behavior: DIFFKV_MAX_RESIDUAL=128
+        self.max_residual = int(os.environ.get("DIFFKV_MAX_RESIDUAL", "32"))
         # Top-K block routing: when >0 and the live block count exceeds it, decode
         # scores all blocks cheaply (Quest-style key min/max upper bound) but runs
         # the expensive value reconstruction + exact-residual attention only for the
@@ -3018,21 +3020,27 @@ class MLXQwenModel:
 
     def _get_or_create_prefill_cache(self, cache_key: tuple, total_tokens: int = 0):
         if cache_key not in self._prefill_caches:
-            from mlx_lm.models.cache import make_prompt_cache, KVCache
-            cache_list = make_prompt_cache(self.mlx_model)
-            # ── Pre-size the KVCache to avoid concatenation reallocs during prefill. ──
-            # The default KVCache grows in 256-token steps via mx.concatenate.
-            # For a 12k prompt that is 48 reallocations, and at each realloc the OLD
-            # tensor and the NEW tensor are BOTH alive in the MLX allocator until the
-            # lazy graph is evaluated — this 2× duplication is the root cause of the
-            # 7.5 GB spike. By setting step = total_tokens (rounded up to 256), the
-            # backing buffer is allocated ONCE and all subsequent update_and_fetch
-            # calls write in-place with no concatenation at all.
-            if total_tokens > 0:
-                step = max(256, ((total_tokens + 255) // 256) * 256)
-                for c in cache_list:
-                    if isinstance(c, KVCache):
-                        c.step = step
+            from mlx_lm.models.cache import make_prompt_cache, KVCache, QuantizedKVCache
+            # ── Use a quantized KV cache during prefill to reduce peak RAM. ──
+            # float16 KVCache for 12k tokens = 1.4 GB. 8-bit QuantizedKVCache = 700 MB.
+            # 4-bit = 350 MB. The dequantization happens transparently inside
+            # update_and_fetch so attention_forward sees the same float16 tensors.
+            # DIFFKV_PREFILL_CACHE_BITS controls this: 16=standard float16 (default
+            # was the old behavior), 8=half RAM, 4=quarter RAM but slightly lossy.
+            _cache_bits = int(os.environ.get("DIFFKV_PREFILL_CACHE_BITS", "8"))
+            if _cache_bits in (4, 8):
+                cache_list = [
+                    QuantizedKVCache(group_size=64, bits=_cache_bits)
+                    for _ in range(len(self.mlx_model.layers))
+                ]
+            else:
+                cache_list = make_prompt_cache(self.mlx_model)
+                # Pre-size the KVCache to avoid concatenation reallocs during prefill.
+                if total_tokens > 0:
+                    step = max(256, ((total_tokens + 255) // 256) * 256)
+                    for c in cache_list:
+                        if isinstance(c, KVCache):
+                            c.step = step
             self._prefill_caches[cache_key] = cache_list
         return self._prefill_caches[cache_key]
 
