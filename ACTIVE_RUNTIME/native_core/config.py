@@ -29,6 +29,7 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "q4_0"
             self.max_active_dense_tokens = 1024
+            self.max_residual_tokens = 8
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -41,6 +42,8 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "f16"
             self.max_active_dense_tokens = 4096
+            # On CUDA, allow more residuals for better correction at high quality
+            self.max_residual_tokens = 8 if is_macos else 16
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
@@ -53,6 +56,7 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
+            self.max_residual_tokens = 8
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -87,6 +91,12 @@ class DiffKVConfig:
         )
         self.max_active_dense_tokens = self._get_int(
             "max_active_dense_tokens", "DIFFKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
+        )
+        # Issue 10: max_residual_tokens — configurable upper bound on correction slots per block.
+        # NativeBlockPool reads DIFFKV_MAX_RESIDUAL_TOKENS directly for backward-compat;
+        # DiffKVConfig surfaces it here for callers that pass config objects.
+        self.max_residual_tokens = self._get_int(
+            "max_residual_tokens", "DIFFKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
         )
 
         # 3. Per-layer rank options

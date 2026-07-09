@@ -1210,7 +1210,15 @@ class KVRuntimeManager:
                   f"(was pending={_pending_before})")
 
     def clear_session(self, session_id: str):
-        # Invalidate GPU block indices cache and workspaces
+        # Issue 6 fix: Invalidate the gather-KV workspace cache for this session
+        # by bumping routing_version BEFORE freeing blocks.  Any in-flight decode
+        # step that checks cached_val[0] == current_version will see a mismatch
+        # and re-gather fresh tensors rather than using stale ones from freed slots.
+        if hasattr(self, 'decode_workspace') and session_id in self.decode_workspace:
+            ws = self.decode_workspace[session_id]
+            if isinstance(ws, dict):
+                ws["routing_version"] = ws.get("routing_version", 0) + 1
+        # Now fully clear the workspace entry
         if hasattr(self, 'decode_workspace'):
             self.decode_workspace.pop(session_id, None)
 
@@ -1586,6 +1594,13 @@ class KVRuntimeManager:
             for layer_idx, blocks in checkpoint["blocks"].items():
                 for b in blocks:
                     if getattr(b, "pool_idx", None) is not None:
+                        # Issue 6 fix: invalidate any cached gather-KV tensors that
+                        # reference this checkpoint's pool slots before freeing.
+                        session_id = checkpoint.get("session_id") or checkpoint_id
+                        if hasattr(self, 'decode_workspace') and session_id in self.decode_workspace:
+                            ws = self.decode_workspace[session_id]
+                            if isinstance(ws, dict):
+                                ws["routing_version"] = ws.get("routing_version", 0) + 1
                         self.native_pool.free_block(b.pool_idx)
         del self._session_checkpoints[checkpoint_id]
 

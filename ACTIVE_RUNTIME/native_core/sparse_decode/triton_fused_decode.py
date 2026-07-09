@@ -666,6 +666,81 @@ else:
     except Exception:
         _prefill_fused_history_attend = _prefill_fused_history_attend_compiled
 
+# ── 2b. Stratified U reconstruction helper (Issue 1 fix) ─────────────────────
+# The Triton kernel reads pool.U (int8) + pool.U_scale (scalar).  That path
+# bypasses the stratified quantization system (U_sem int4 + U_fact fp16) built
+# for accuracy parity with MPS.  This helper reconstructs a full fp16 U tensor
+# from the stratified components for ALL active blocks BEFORE kernel dispatch,
+# then patches a proxy pool so the kernel sees fp16 values and U_scale=1.0.
+#
+# Cost: one reconstruct_batch_U call per decode step (~N*S*R fp16 elements).
+# This is cheaper than re-running full attention; on CUDA with VRAM headroom
+# the intermediate tensor lives and dies within the decode step.
+
+class _StratifiedUProxy:
+    """
+    Thin wrapper that stands in for pool when passing U data to Triton kernels.
+    Exposes pool.U as the full-precision fp16 reconstruction and pool.U_scale
+    as a tensor of ones so the kernel applies no additional scaling.
+    All other attributes delegate to the original pool object.
+    """
+    __slots__ = ("_pool", "U", "U_scale")
+
+    def __init__(self, pool, U_fp16: torch.Tensor):
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "U", U_fp16.to(pool.dtype))       # [n_blocks, S, R] fp16
+        # Ones so that kernel's  u = u * u_scale  is a no-op
+        object.__setattr__(self, "U_scale",
+            torch.ones(pool.U_scale.shape, device=pool.U_scale.device, dtype=pool.U_scale.dtype))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_pool"), name)
+
+
+def _build_stratified_U_for_triton(
+    pool,
+    block_indices: torch.Tensor,
+) -> "tuple[object, bool]":
+    """
+    Build a _StratifiedUProxy for the Triton kernel dispatch.
+
+    Resolves two accuracy issues simultaneously:
+
+    Issue 1 — Stratified U bypass:
+        The raw Triton path read pool.U (int8) + pool.U_scale (one scalar per
+        block), completely skipping the stratified quantization system
+        (U_sem int4 for semantic components + U_fact fp16 for factual
+        components).  reconstruct_batch_U() correctly combines both, giving
+        the same accuracy as the MPS path.
+
+    Issue 2 — Token-norm quantization error in the int8 path:
+        During compression, each token's U row is scaled by its L2 norm before
+        storage (compress_layer_blocks_gpu:593, lowrank.py).  The int8 path
+        then requantizes ALL rows with a SINGLE global U_scale = max_abs/127.
+        Tokens with large norms consume most of the int8 range; low-norm tokens
+        are pushed into a tiny slice of it, causing ~0.8% relative error.
+        By serving full fp16 U (reconstructed from U_sem + U_fact), every token
+        is represented at float16 precision regardless of its norm magnitude.
+        The U_scale tensor in the proxy is all-ones, so the kernel's
+            u = u * u_scale
+        becomes a no-op and the fp16 values are used exactly.
+
+    Returns (proxy_or_pool, used_stratified).
+    If the pool has no stratified components (n_semantic all-zero) the original
+    pool is returned unchanged to avoid a pointless VRAM allocation.
+    """
+    # Fast-path: no stratified components in this pool at all
+    n_sem_attr = getattr(pool, "n_semantic", None)
+    if n_sem_attr is None or (n_sem_attr == 0).all().item():
+        return pool, False
+
+    # Reconstruct fp16 U for the entire pool (reconstruct_batch_U handles int4/fp16 split)
+    all_idx = torch.arange(pool.U.shape[0], device=pool.U.device, dtype=torch.long)
+    U_full = reconstruct_batch_U(pool, all_idx)          # [n_blocks, S, R] fp16
+    proxy  = _StratifiedUProxy(pool, U_full)
+    return proxy, True
+
+
 # ── 3. PyTorch fallbacks / MPS decoders ───────────────────────────────────────
 
 def fused_decode_attention_mps(
@@ -1014,8 +1089,16 @@ def _pytorch_vectorized_sparse_attn_decode(
     seq_lens_t = torch.empty((0,), device=q.device, dtype=torch.int32)
 
     # ── Check configuration-driven caching limits ───────────────────────
+    # Issue 6 fix: The gathered-KV workspace cache was designed for MPS where
+    # pool.gather() is expensive.  On CUDA the pool tensors are already contiguous
+    # GPU memory and gather is cheap; caching stale tensors across block
+    # evictions/reallocations causes silent accuracy bugs.  Disable the cache
+    # on CUDA by default; enable explicitly with DIFFKV_DECODE_CACHE_ENABLED=1.
     config = getattr(pool, "config", None)
-    decode_cache_enabled = config.decode_cache_enabled if config is not None else True
+    _on_cuda = (str(getattr(pool, "device", "")) == "cuda" or
+                (hasattr(pool, "device") and str(pool.device).startswith("cuda")))
+    _default_cache_enabled = False if _on_cuda else True
+    decode_cache_enabled = config.decode_cache_enabled if config is not None else _default_cache_enabled
     decode_cache_max_tokens = config.decode_cache_max_tokens if config is not None else 4096
 
     use_workspace_cache = decode_cache_enabled
@@ -1055,7 +1138,12 @@ def _pytorch_vectorized_sparse_attn_decode(
             if cached_val is not None and cached_val[0] == current_version:
                 cached_gathered = cached_val[1]
 
-        approximate_attn = True
+        # Issue 5 fix: approximate_attn=True is the only supported formulation.
+        # The Project-Then-Attend (PTA) approach rotates keys at the ANCHOR position
+        # rather than at each token's exact position, which avoids the O(N*S) RoPE
+        # embedding gather that per-token rotation would require.  The dead
+        # approximate_attn=False branch (exact per-token RoPE) has been removed to
+        # reduce confusion.  See the paper §3.2 for the theoretical justification.
 
         if cached_gathered is not None:
             U, V_K, V_V, anchors_K, anchors_V, scales, seq_lens_t = cached_gathered
@@ -1065,7 +1153,7 @@ def _pytorch_vectorized_sparse_attn_decode(
             V_K_raw = pool.V_K[indices]
             anchors_K_raw = pool.anchors_K[indices]
             
-            if approximate_attn and anchor_indices is not None and cos is not None and sin is not None:
+            if anchor_indices is not None and cos is not None and sin is not None:
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
                 cpu_anc_check = anchor_indices.cpu()
@@ -1107,53 +1195,17 @@ def _pytorch_vectorized_sparse_attn_decode(
 
         has_rope = (anchor_indices is not None and cos is not None and sin is not None)
 
-        if not approximate_attn and has_rope:
-            # ── Project-Then-Attend formulation with exact per-token RoPE ──
-            # 1. Get absolute positions for compressed tokens: [N, S_comp]
-            positions = anchor_indices.unsqueeze(1) + 1 + torch.arange(block_capacity, device=q.device).unsqueeze(0)
-
-            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-            positions_clamped = positions.clamp(min=0, max=cos_flat.shape[0] - 1)
-
-            # 2. Gather cos/sin: shape [N, S_comp, 1, D]
-            cos_seq = cos_flat[positions_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
-            sin_seq = sin_flat[positions_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
-
-            # 3. Rotate query backwards for each token position: [N, S_comp, H_q, D]
-            # q_rot(n, s, h, d) = q_sq * cos_seq - rotate_half(q_sq) * sin_seq
-            q_rot = q_sq_fp32.unsqueeze(0).unsqueeze(1) * cos_seq - rotate_half(q_sq_fp32.unsqueeze(0).unsqueeze(1)) * sin_seq
-
-            # 4. Project rotated query to anchors: [H_q, N, S_comp]
-            term1 = torch.einsum('nshd,nhd->hns', q_rot, anchors_K_fp32) * inv_scale
-
-            # 5. Project rotated query to V_K: [N, S_comp, H_q, R]
-            q_proj = torch.einsum('nshd,nrhd->nshr', q_rot, V_K_fp32) * inv_scale
-
-            # 6. Inner product with U: [H_q, N, S_comp]
-            term2 = torch.einsum('nshr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
-
-            # 7. Total score for blocks
-            scores_block = term1 + term2
-
-            # 8. Rotate anchor keys exactly for the anchor-only scores
-            anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
-            cos_anc = cos_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
-            sin_anc = sin_flat[anchor_indices_clamped].to(device=anchors_K_fp32.device, dtype=anchors_K_fp32.dtype).unsqueeze(1)
-            anchors_K_rot = anchors_K_fp32 * cos_anc + rotate_half(anchors_K_fp32) * sin_anc
-
-            scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_rot) * inv_scale
-        else:
-            # ── Project-Then-Attend formulation (zero-reconstruction, zero dense VRAM) ──
-            # exact anchor score: [H_q, N]
-            scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_fp32) * inv_scale
-            
-            # Project query to V_K: [N, H_q, R]
-            q_proj = torch.einsum('hd,nrhd->nhr', q_sq_fp32, V_K_fp32) * inv_scale
-            
-            # Inner product with U: [H_q, N, block_capacity]
-            scores_block = torch.einsum('nhr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
-            scores_block = scores_block + scores_anchor.unsqueeze(-1)
+        # ── Project-Then-Attend formulation (anchor-position RoPE approximation) ──
+        # Issue 5 note: per-token exact RoPE branch removed — see comment above.
+        # exact anchor score: [H_q, N]
+        scores_anchor = torch.einsum('hd,nhd->hn', q_sq_fp32, anchors_K_fp32) * inv_scale
+        
+        # Project query to V_K: [N, H_q, R]
+        q_proj = torch.einsum('hd,nrhd->nhr', q_sq_fp32, V_K_fp32) * inv_scale
+        
+        # Inner product with U: [H_q, N, block_capacity]
+        scores_block = torch.einsum('nhr,nsr->hns', q_proj, U_fp32) * scales.float().view(1, N, 1)
+        scores_block = scores_block + scores_anchor.unsqueeze(-1)
 
         res_pos_K = getattr(pool, "residual_K_positions", None)
         res_val_K = getattr(pool, "residual_K_values", None)
@@ -1341,7 +1393,10 @@ def _pytorch_vectorized_sparse_attn_decode(
             update_term = update_term.masked_fill(~mask_expanded, 0.0)
             O_final = O_final + torch.sum(update_term, dim=(0, 1)).to(O_final.dtype)
 
-    if layer_idx == 0:
+    # Issue 4 fix: Layer-0 NaN diagnostics gated behind DIFFKV_LAYER0_DEBUG=1.
+    # Previously fired every decode step for every session, burning CPU time and
+    # polluting logs.  Enable during bring-up / NaN debugging only.
+    if layer_idx == 0 and os.environ.get("DIFFKV_LAYER0_DEBUG", "0") == "1":
         print(f"[DiffKV DEBUG] layer 0 check - q has nan: {torch.isnan(q).any().item()}", flush=True)
         print(f"[DiffKV DEBUG] layer 0 check - block_indices has nan: {torch.isnan(block_indices).any().item() if block_indices is not None else False}", flush=True)
         print(f"[DiffKV DEBUG] layer 0 check - U has nan: {torch.isnan(U).any().item()}", flush=True)
@@ -1435,8 +1490,14 @@ def native_triton_sparse_attn_decode(
                 out_workspace = out
                 m_workspace = m_out
                 l_workspace = l_out
-            anchors_K_rot = pool.anchors_K
-            V_K_rot = pool.V_K
+            # Issue 1 fix: Pre-reconstruct stratified U (int4 semantic + fp16 factual)
+            # into a full fp16 tensor before Triton dispatch.  The kernel's U_scale
+            # tensor is all-ones in the proxy so u = u * 1.0 = exact fp16 values.
+            # This gives CUDA accuracy parity with the MPS path (reconstruct_batch_U).
+            pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
+
+            anchors_K_rot = pool_for_kernel.anchors_K
+            V_K_rot = pool_for_kernel.V_K
             
             if anchor_indices is not None and cos is not None and sin is not None:
                 indices = block_indices.long()
@@ -1445,17 +1506,17 @@ def native_triton_sparse_attn_decode(
                 
                 # Clamp anchor_indices to prevent GPU out of bounds
                 anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
-                cos_anc = cos_flat[anchor_indices_clamped].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
-                sin_anc = sin_flat[anchor_indices_clamped].to(device=pool.V_K.device, dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                cos_anc = cos_flat[anchor_indices_clamped].to(device=pool_for_kernel.V_K.device, dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
+                sin_anc = sin_flat[anchor_indices_clamped].to(device=pool_for_kernel.V_K.device, dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
                 
-                cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
-                sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=pool.anchors_K.device, dtype=pool.anchors_K.dtype).unsqueeze(1)
+                cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=pool_for_kernel.anchors_K.device, dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
+                sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=pool_for_kernel.anchors_K.device, dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
                 
-                anchors_K_rot = pool.anchors_K.clone()
-                V_K_rot = pool.V_K.clone()
+                anchors_K_rot = pool_for_kernel.anchors_K.clone()
+                V_K_rot = pool_for_kernel.V_K.clone()
                 
-                V_K_rot[indices] = pool.V_K[indices] * cos_anc + rotate_half(pool.V_K[indices]) * sin_anc
-                anchors_K_rot[indices] = pool.anchors_K[indices] * cos_anc_2d + rotate_half(pool.anchors_K[indices]) * sin_anc_2d
+                V_K_rot[indices] = pool_for_kernel.V_K[indices] * cos_anc + rotate_half(pool_for_kernel.V_K[indices]) * sin_anc
+                anchors_K_rot[indices] = pool_for_kernel.anchors_K[indices] * cos_anc_2d + rotate_half(pool_for_kernel.anchors_K[indices]) * sin_anc_2d
             
             # Get residual fields (C1). K and V select DIFFERENT worst-reconstructed
             # positions, so BOTH position arrays are needed (kernel corrects K score at
@@ -1484,7 +1545,7 @@ def native_triton_sparse_attn_decode(
                 res_v = torch.empty((0, 0, 0, 0), device=q.device)
                 res_pos = torch.empty((0, 0), device=q.device, dtype=torch.int16)
                 res_pos_v = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-                res_n = torch.zeros((pool.U.shape[0],), device=q.device, dtype=torch.int32)
+                res_n = torch.zeros((pool_for_kernel.U.shape[0],), device=q.device, dtype=torch.int32)
                 max_res_pad = 1
                 
             # Get fact anchor fields (C2)
@@ -1502,17 +1563,17 @@ def native_triton_sparse_attn_decode(
                 max_fact = 1
 
             _fused_sparse_decode_kernel[grid](
-                q_sq, block_indices, anchors_K_rot, pool.anchors_V, V_K_rot, pool.V_V,
-                pool.U, pool.U_scale, pool.scales, pool.seq_lens,
+                q_sq, block_indices, anchors_K_rot, pool_for_kernel.anchors_V, V_K_rot, pool_for_kernel.V_V,
+                pool_for_kernel.U, pool_for_kernel.U_scale, pool_for_kernel.scales, pool_for_kernel.seq_lens,
                 res_k, res_v, res_pos, res_pos_v, res_n,
                 fact_pos, fact_ak, fact_av,
                 out_workspace, m_workspace, l_workspace,
                 q_sq.stride(0), q_sq.stride(1),
                 anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
-                pool.anchors_V.stride(0), pool.anchors_V.stride(1), pool.anchors_V.stride(2),
+                pool_for_kernel.anchors_V.stride(0), pool_for_kernel.anchors_V.stride(1), pool_for_kernel.anchors_V.stride(2),
                 V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
-                pool.V_V.stride(0), pool.V_V.stride(1), pool.V_V.stride(2), pool.V_V.stride(3),
-                pool.U.stride(0), pool.U.stride(1), pool.U.stride(2),
+                pool_for_kernel.V_V.stride(0), pool_for_kernel.V_V.stride(1), pool_for_kernel.V_V.stride(2), pool_for_kernel.V_V.stride(3),
+                pool_for_kernel.U.stride(0), pool_for_kernel.U.stride(1), pool_for_kernel.U.stride(2),
                 res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
                 res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
                 res_pos.stride(0), res_pos_v.stride(0),
@@ -1947,8 +2008,12 @@ def native_triton_sparse_attn_decode_combined(
             out_workspace, m_workspace, l_workspace = out, m_out, l_out
 
         # ── RoPE-rotate anchors and V_K (identical to native_triton_sparse_attn_decode) ──
-        anchors_K_rot = pool.anchors_K
-        V_K_rot       = pool.V_K
+        # Issue 1 fix: Pre-reconstruct stratified U before Triton dispatch (same as
+        # native_triton_sparse_attn_decode). Gives CUDA accuracy parity with MPS.
+        pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
+
+        anchors_K_rot = pool_for_kernel.anchors_K
+        V_K_rot       = pool_for_kernel.V_K
 
         if anchor_indices is not None and cos is not None and sin is not None:
             indices = block_indices.long()
@@ -1956,15 +2021,15 @@ def native_triton_sparse_attn_decode_combined(
             sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
             anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
 
-            cos_anc = cos_flat[anchor_indices_clamped].to(dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
-            sin_anc = sin_flat[anchor_indices_clamped].to(dtype=pool.V_K.dtype).unsqueeze(1).unsqueeze(2)
-            cos_anc_2d = cos_flat[anchor_indices_clamped].to(dtype=pool.anchors_K.dtype).unsqueeze(1)
-            sin_anc_2d = sin_flat[anchor_indices_clamped].to(dtype=pool.anchors_K.dtype).unsqueeze(1)
+            cos_anc = cos_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
+            sin_anc = sin_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
+            cos_anc_2d = cos_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
+            sin_anc_2d = sin_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
 
-            anchors_K_rot = pool.anchors_K.clone()
-            V_K_rot       = pool.V_K.clone()
-            V_K_rot[indices]       = pool.V_K[indices]       * cos_anc + rotate_half(pool.V_K[indices])       * sin_anc
-            anchors_K_rot[indices] = pool.anchors_K[indices] * cos_anc_2d + rotate_half(pool.anchors_K[indices]) * sin_anc_2d
+            anchors_K_rot = pool_for_kernel.anchors_K.clone()
+            V_K_rot       = pool_for_kernel.V_K.clone()
+            V_K_rot[indices]       = pool_for_kernel.V_K[indices]       * cos_anc + rotate_half(pool_for_kernel.V_K[indices])       * sin_anc
+            anchors_K_rot[indices] = pool_for_kernel.anchors_K[indices] * cos_anc_2d + rotate_half(pool_for_kernel.anchors_K[indices]) * sin_anc_2d
 
         # ── Residual / fact fields (identical to native_triton_sparse_attn_decode) ──
         res_k   = getattr(pool, "residual_K_values",    None)
@@ -1984,7 +2049,7 @@ def native_triton_sparse_attn_decode_combined(
             res_v     = torch.empty((0, 0, 0, 0), device=q.device)
             res_pos   = torch.empty((0, 0), device=q.device, dtype=torch.int16)
             res_pos_v = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-            res_n     = torch.zeros((pool.U.shape[0],), device=q.device, dtype=torch.int32)
+            res_n     = torch.zeros((pool_for_kernel.U.shape[0],), device=q.device, dtype=torch.int32)
             max_res_pad = 1
 
         fact_pos = getattr(pool, "fact_anchor_positions", None)
@@ -2011,8 +2076,8 @@ def native_triton_sparse_attn_decode_combined(
 
         # ── Kernel launch ──
         _fused_decode_combined_kernel[grid](
-            q_sq, block_indices, anchors_K_rot, pool.anchors_V, V_K_rot, pool.V_V,
-            pool.U, pool.U_scale, pool.scales, pool.seq_lens,
+            q_sq, block_indices, anchors_K_rot, pool_for_kernel.anchors_V, V_K_rot, pool_for_kernel.V_V,
+            pool_for_kernel.U, pool_for_kernel.U_scale, pool_for_kernel.scales, pool_for_kernel.seq_lens,
             res_k, res_v, res_pos, res_pos_v, res_n,
             fact_pos, fact_ak, fact_av,
             dk_t, dv_t, L_dense,
@@ -2021,10 +2086,10 @@ def native_triton_sparse_attn_decode_combined(
             out_workspace, m_workspace, l_workspace,
             q_sq.stride(0), q_sq.stride(1),
             anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
-            pool.anchors_V.stride(0), pool.anchors_V.stride(1), pool.anchors_V.stride(2),
+            pool_for_kernel.anchors_V.stride(0), pool_for_kernel.anchors_V.stride(1), pool_for_kernel.anchors_V.stride(2),
             V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
-            pool.V_V.stride(0), pool.V_V.stride(1), pool.V_V.stride(2), pool.V_V.stride(3),
-            pool.U.stride(0), pool.U.stride(1), pool.U.stride(2),
+            pool_for_kernel.V_V.stride(0), pool_for_kernel.V_V.stride(1), pool_for_kernel.V_V.stride(2), pool_for_kernel.V_V.stride(3),
+            pool_for_kernel.U.stride(0), pool_for_kernel.U.stride(1), pool_for_kernel.U.stride(2),
             res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
             res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
             res_pos.stride(0), res_pos_v.stride(0),

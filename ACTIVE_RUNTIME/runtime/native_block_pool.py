@@ -59,7 +59,9 @@ class NativeBlockPool:
         self.dtype           = dtype
         self.initial_blocks  = initial_blocks
         self.num_layers      = num_layers
-        self.max_residual_tokens = 8
+        import os as _os
+        _env_max_res = _os.environ.get("DIFFKV_MAX_RESIDUAL_TOKENS")
+        self.max_residual_tokens = int(_env_max_res) if _env_max_res and _env_max_res.isdigit() else 8
 
         _is_mps = (str(device) == "mps" or
                    (isinstance(device, torch.device) and device.type == "mps"))
