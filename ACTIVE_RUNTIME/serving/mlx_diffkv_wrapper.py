@@ -957,13 +957,12 @@ class MLXKVBlockManager:
         self.max_dense_len = self.recency_window + self.block_size
         self._comp_res_n_const = mx.full((self.max_blocks,), self.max_residual, dtype=mx.int32)
 
-        # DIFFKV_DECODE_CACHE=1 — "decompress-and-cache" decode (HANDOFF.md §BIG-WIN).
-        # Instead of reconstructing the low-rank pool EVERY token, route + MATERIALISE the
-        # selected blocks' exact-ish K/V once every DIFFKV_DECODE_CACHE_INTERVAL tokens, cache
-        # it, and attend with ONE fused SDPA over [cached blocks + exact residuals + dense
-        # window]. Bit-exact to compute_decode_attention_static (POC cosine 1.0) but ~3-10x
-        # faster at long ctx. Default OFF until fully guardrail-verified.
-        self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "1") == "1"
+        # Revert default to 0 (disabled) to guarantee full routing correctness at every
+        # token step. Leaving it enabled by default causes stale block routing over the
+        # cache interval (16 tokens), which degrades factual table/structure extraction
+        # accuracy and triggers repetitive loops.
+        # To restore the decode cache speedup: DIFFKV_DECODE_CACHE=1
+        self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "0") == "1"
         # Re-route + re-materialise every N tokens. Higher N = faster (less materialisation) but
         # staler block selection. Measured @32k: N=8→18, 16→20, 32→23 tps; NIAH exact + synthesis
         # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
