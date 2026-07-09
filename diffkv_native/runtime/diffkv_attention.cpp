@@ -777,33 +777,16 @@ void custom_attention_op_callback(
     const int D = data->D;
     const int F_kv = n_kv_heads * D;
 
-    int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
-    std::vector<int32_t> slot_indices_cpu(actual_K, 0);
-    if (actual_K > 0 && slot_indices) {
-        auto t_r0 = std::chrono::high_resolution_clock::now();
-        ggml_backend_tensor_get(slot_indices, slot_indices_cpu.data(), 0, actual_K * sizeof(int32_t));
-        auto t_r1 = std::chrono::high_resolution_clock::now();
-        t_readback_ms += std::chrono::duration<double, std::milli>(t_r1 - t_r0).count();
-    }
-
-    // ── Route over ALL resident blocks, ignoring the in-graph selection ──────
-    // The in-graph anchor_screen emits a polluted MULTISET: the sem∪host candidate
-    // concat duplicates every real block, and the host-side padding fills unused
-    // candidate slots with copies of one valid slot. Measured at 4k/0.5 NIAH
-    // (2026-07-03): selected_slots = [6 6 11 11 3 3 9 9 1 1 1 1 1 1 1 1] — only
-    // 5 of 12 resident blocks attended, needle block 7 dropped, retrieval
-    // impossible even though the needle rows were captured exactly. Build the
-    // candidate list host-side from the state table instead (each resident block
-    // exactly once — the MLX router semantics); the residual-key top-K below
-    // prunes when there are more than DIFFKV_TOPK_BLOCKS candidates.
-    // DIFFKV_CB_ROUTE_ALL=0 restores the old in-graph selection.
     static const bool route_all_resident = []() {
         const char* e = std::getenv("DIFFKV_CB_ROUTE_ALL");
         return !(e && std::string(e) == "0");
     }();
-    CustomAttnUserData* data_early = static_cast<CustomAttnUserData*>(userdata);
-    if (route_all_resident && actual_K > 0 && data_early->kv_engine != nullptr) {
-        NativeBlockPool* pool_rt = data_early->kv_engine;
+
+    int actual_K = (slot_indices != nullptr) ? (int)slot_indices->ne[0] : 0;
+    std::vector<int32_t> slot_indices_cpu;
+
+    if (route_all_resident && actual_K > 0 && data->kv_engine != nullptr) {
+        NativeBlockPool* pool_rt = data->kv_engine;
         int n_slots_rt = (int)pool_rt->get_seq_lens()->ne[0];
         std::vector<int32_t> resident;
         resident.reserve(n_slots_rt);
@@ -816,7 +799,14 @@ void custom_attention_op_callback(
             slot_indices_cpu = std::move(resident);
             actual_K = (int)slot_indices_cpu.size();
         }
+    } else if (actual_K > 0 && slot_indices) {
+        slot_indices_cpu.resize(actual_K, 0);
+        auto t_r0 = std::chrono::high_resolution_clock::now();
+        ggml_backend_tensor_get(slot_indices, slot_indices_cpu.data(), 0, actual_K * sizeof(int32_t));
+        auto t_r1 = std::chrono::high_resolution_clock::now();
+        t_readback_ms += std::chrono::duration<double, std::milli>(t_r1 - t_r0).count();
     }
+
 
     bool all_reused = false;
     bool cache_active = (get_global_attn_cache().threshold <= 1.0f);

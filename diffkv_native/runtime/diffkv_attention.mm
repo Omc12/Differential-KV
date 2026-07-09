@@ -185,7 +185,7 @@ static void init_metal_runtime() {
 
 // Wrap a GGML tensor's backing memory as a Metal shared buffer (zero-copy when page-aligned).
 static id<MTLBuffer> wrap_tensor(struct ggml_tensor* tensor) {
-    if (!tensor || !tensor->data) return nil;
+    if (!tensor || !tensor->data) return g_dummy_rope_buf;
     size_t bytes = ggml_nbytes(tensor);
     size_t aligned_len = (bytes + 4095) & ~4095;
     if (((uintptr_t)tensor->data % 4096) == 0) {
@@ -552,6 +552,12 @@ void execute_metal_attention(
     const int rank          = data->rank;
     const int S_max         = data->S_max;
     const int D             = data->D;
+
+    const int layer_idx = data->layer_idx;
+    ensure_layer_sems(MAX_LAYERS);
+    dispatch_semaphore_wait(g_layer_sems[layer_idx], DISPATCH_TIME_FOREVER);
+    std::cerr << "[DBG_M_1]" << std::endl;
+
     const float scale       = data->scale;
     const bool has_rope     = data->has_rope;
     const float rope_freq   = data->rope_freq_base;
@@ -574,6 +580,7 @@ void execute_metal_attention(
         }
     }
     const int active_K = (int)unique_slots.size();
+    std::cerr << "[DBG_M_2] active_K=" << active_K << " T_dense=" << T_dense << std::endl;
 
     // Nothing to do?  Write zeros and return.
     if (active_K == 0 && T_dense == 0) {
@@ -585,6 +592,7 @@ void execute_metal_attention(
     }
 
     @autoreleasepool {
+        std::cerr << "[DBG_M_3]" << std::endl;
         // ── Build sparse slot-indices Metal buffer ─────────────────────────────
         id<MTLBuffer> slot_indices_buf = nil;
         if (active_K > 0) {
@@ -610,6 +618,7 @@ void execute_metal_attention(
             slot_indices_buf = g_dummy_rope_buf;
         }
 
+        std::cerr << "[DBG_M_4]" << std::endl;
         // ── Dense window Metal buffers (zero-copy when page-aligned) ───────────
         const int   F_kv        = n_kv_heads * D;
         const int   T_clamped   = T_dense;
@@ -667,6 +676,7 @@ void execute_metal_attention(
             dense_pos_buf = g_dummy_rope_buf;
         }
 
+        std::cerr << "[DBG_M_5]" << std::endl;
         // ── Output and LSE buffers ────────────────────────────────────────────
         void* temp_out_ptr = nullptr;
         id<MTLBuffer> out_buf  = nil;
@@ -745,6 +755,7 @@ void execute_metal_attention(
             res_v_val_buf = pb.res_v_val;
         }
 
+        std::cerr << "[DBG_M_6]" << std::endl;
         // ── Encode and dispatch ───────────────────────────────────────────────
         id<MTLCommandBuffer>        commandBuffer = [g_queue commandBuffer];
         id<MTLComputeCommandEncoder> encoder      = [commandBuffer computeCommandEncoder];
@@ -803,6 +814,7 @@ void execute_metal_attention(
         [encoder setBuffer:res_v_val_buf offset:0 atIndex:23];
 
 
+        std::cerr << "[DBG_M_7]" << std::endl;
         MTLSize threadsPerTG    = MTLSizeMake(64, 1, 1);
         MTLSize numThreadgroups = MTLSizeMake(n_q_heads, S_split_i32, 1);
         [encoder dispatchThreadgroups:numThreadgroups threadsPerThreadgroup:threadsPerTG];
@@ -821,27 +833,25 @@ void execute_metal_attention(
             [encoder dispatchThreadgroups:numThreadgroupsMerge threadsPerThreadgroup:threadsPerTG];
         }
         [encoder endEncoding];
-        auto t_k0 = std::chrono::high_resolution_clock::now();
+
+        void* dst_data_captured = dst->data;
+        size_t nbytes_captured = ggml_nbytes(dst);
+        float* lse_out_captured = lse_out;
+        void* lse_buf_contents_captured = lse_buf.contents;
+
+        std::cerr << "[DBG_M_8]" << std::endl;
+        [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            std::cerr << "[DBG_M_COMP] status=" << (int)cb.status << std::endl;
+            if (temp_out_ptr != nullptr) {
+                std::memcpy(dst_data_captured, temp_out_ptr, nbytes_captured);
+            }
+            if (lse_out_captured) {
+                std::memcpy(lse_out_captured, lse_buf_contents_captured, n_q_heads * sizeof(float));
+            }
+            dispatch_semaphore_signal(g_layer_sems[layer_idx]);
+        }];
         [commandBuffer commit];
-
-        // ── Spin-wait: correct + fast for our tiny (~0.05ms) sparse kernel ────
-        // waitUntilCompleted incurs ~2-3ms sleep/wake overhead per call on macOS.
-        // 28 layers × 2-3ms = ~56-84ms wasted per token — the dominant TPS cost.
-        // Spin-polling costs only the true kernel time (~0.05ms × 28 = ~1.4ms).
-        // We MUST wait here: ggml reads dst->data immediately after this returns.
-        while ([commandBuffer status] < MTLCommandBufferStatusCompleted) {
-            // tiny spin — kernel finishes in microseconds
-        }
-        auto t_spin_end = std::chrono::high_resolution_clock::now();
-        g_accumulated_wait_ms += std::chrono::duration<double, std::milli>(t_spin_end - t_k0).count();
-
-        // Copy temp output back if dst wasn't page-aligned (rare path)
-        if (temp_out_ptr != nullptr) {
-            memcpy(dst->data, temp_out_ptr, ggml_nbytes(dst));
-        }
-        if (lse_out) {
-            memcpy(lse_out, lse_buf.contents, n_q_heads * sizeof(float));
-        }
+        [commandBuffer waitUntilCompleted];
     }
 }
 

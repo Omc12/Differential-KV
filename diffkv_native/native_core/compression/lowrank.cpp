@@ -839,6 +839,29 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             rel_V[s] = aerr_V[s] / std::max(std::sqrt(nV), 1e-8f);
         }
 
+        // OPT-A: Adaptive residual budget — C++ port.
+        // Classifies each block's complexity using the median of rel_K and rel_V.
+        float median_err_K = 0.0f;
+        float median_err_V = 0.0f;
+        if (S_deltas > 0) {
+            std::vector<float> temp_K = rel_K;
+            std::vector<float> temp_V = rel_V;
+            size_t mid = S_deltas / 2;
+            std::nth_element(temp_K.begin(), temp_K.begin() + mid, temp_K.end());
+            median_err_K = temp_K[mid];
+            std::nth_element(temp_V.begin(), temp_V.begin() + mid, temp_V.end());
+            median_err_V = temp_V[mid];
+        }
+        float max_median_err = std::max(median_err_K, median_err_V);
+        int adaptive_MR = MR;
+        if (max_median_err < 0.05f) {
+            // Easy block (prose filler): cap at 8 residuals
+            adaptive_MR = std::min(8, adaptive_MR);
+        } else if (max_median_err < 0.15f) {
+            // Medium block: cap at 16 residuals
+            adaptive_MR = std::min(16, adaptive_MR);
+        }
+
         std::vector<float> joint_err(S_deltas);
         for (int s = 0; s < S_deltas; ++s) {
             // Rank residual candidates in the BALANCED space: an unscaled absolute error
@@ -857,8 +880,8 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             if (e) { try { return std::stof(e); } catch (...) {} }
             return 0.0f;
         }();
-        if (cov_frac > 0.0f && MR > 0) {
-            int n_cov = std::min(MR, std::max(1, (int)std::round(cov_frac * MR)));
+        if (cov_frac > 0.0f && adaptive_MR > 0) {
+            int n_cov = std::min(adaptive_MR, std::max(1, (int)std::round(cov_frac * adaptive_MR)));
             std::vector<int> cols;
             for (int i = 0; i < n_cov; ++i) {
                 float val = 0.0f;
@@ -1071,7 +1094,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             }
         }
 
-        int n_max = std::min(S_deltas, MR);
+        int n_max = std::min(S_deltas, adaptive_MR);
         std::vector<int> idx(S_deltas);
         for (int i = 0; i < S_deltas; ++i) idx[i] = i;
         std::sort(idx.begin(), idx.end(), [&](int a, int b) { return joint_err[a] > joint_err[b]; });
