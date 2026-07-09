@@ -849,19 +849,25 @@ struct ggml_cgraph * build_decode_graph(
                 // Reshape Q: [896, 1] -> [head_dim, n_head] = [64, 14]
                 struct ggml_tensor * Q = ggml_reshape_2d(ctx, q, head_dim, config.n_head);
 
-                // Compute query descriptor: [desc_dim, 1]
-                struct ggml_tensor * q_desc = compute_query_desc(ctx, Q, W_proj);
 
-                // Semantic search topk: [srl_k_semantic, 1]
-                struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
-                struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, sem_slots->ne[0]);
 
-                // Concatenate semantic and host slots
-                struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
-
-                // Anchor screening: [srl_k_keep]
                 float scale = 1.0f / std::sqrt((float)head_dim);
-                selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, slots_mask, scale, srl_k_keep));
+                if (native_attn_slots) {
+                    selected_slots = native_attn_slots;
+                } else {
+                    // Compute query descriptor: [desc_dim, 1]
+                    struct ggml_tensor * q_desc = compute_query_desc(ctx, Q, W_proj);
+
+                    // Semantic search topk: [srl_k_semantic, 1]
+                    struct ggml_tensor * sem_slots = semantic_search_topk(ctx, q_desc, desc_matrix, slots_mask, srl_k_semantic);
+                    struct ggml_tensor * sem_slots_1d = ggml_reshape_1d(ctx, sem_slots, sem_slots->ne[0]);
+
+                    // Concatenate semantic and host slots
+                    struct ggml_tensor * candidate_slots = ggml_concat(ctx, sem_slots_1d, host_slots, 0);
+
+                    // Anchor screening: [srl_k_keep]
+                    selected_slots = ggml_cont(ctx, anchor_screen(ctx, Q, anchors_K, candidate_slots, slots_mask, scale, srl_k_keep));
+                }
 
                 // Save selected slots to out parameter
                 if (out_selected_slots) {
@@ -887,7 +893,7 @@ struct ggml_cgraph * build_decode_graph(
             if (userdata && userdata[l].srl_state) {
                 factual_empty = static_cast<diffkv::SessionSRLState*>(userdata[l].srl_state)->factual_store.entries.empty();
             }
-            bool use_native_attn = native_attn_env && factual_empty &&
+            bool use_native_attn = native_attn_env &&
                                    userdata && userdata[l].kv_engine &&
                                    userdata[l].kv_engine->native_attn_enabled();
 
@@ -3882,14 +3888,31 @@ int main(int argc, char ** argv) {
             ggml_set_input(native_attn_slots);
         }
         ggml_backend_buffer_t dense_past_buffer = ggml_backend_alloc_ctx_tensors(dense_past_ctx, backend);
+
+        std::cerr << "[DBG_ALLOC] dense_past_buffer=" << dense_past_buffer << std::endl;
+        for (struct ggml_tensor * t = ggml_get_first_tensor(dense_past_ctx); t != nullptr; t = ggml_get_next_tensor(dense_past_ctx, t)) {
+            std::cerr << "  Tensor: name=" << (t->name ? t->name : "unnamed") 
+                      << " type=" << ggml_type_name(t->type) 
+                      << " size=" << ggml_nbytes(t) 
+                      << " dims=[" << t->ne[0] << "," << t->ne[1] << "," << t->ne[2] << "]" 
+                      << " buffer=" << (t->buffer ? "ok" : "NULL") << std::endl;
+        }
         if (!decode_use_sparse) {
             std::vector<ggml_fp16_t> zeros(required_dense_cap * F_test, ggml_fp32_to_fp16(0.0f));
             for (int l = 0; l < n_layers; ++l) {
-                ggml_backend_tensor_set(dense_k_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
-                ggml_backend_tensor_set(dense_v_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+                if (dense_k_past_inputs[l] && dense_k_past_inputs[l]->buffer) {
+                    ggml_backend_tensor_set(dense_k_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+                }
+                if (dense_v_past_inputs[l] && dense_v_past_inputs[l]->buffer) {
+                    ggml_backend_tensor_set(dense_v_past_inputs[l], zeros.data(), 0, zeros.size() * sizeof(ggml_fp16_t));
+                }
 
-                ggml_backend_tensor_set(dense_k_past_inputs[l], k_rotated_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
-                ggml_backend_tensor_set(dense_v_past_inputs[l], v_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
+                if (dense_k_past_inputs[l] && dense_k_past_inputs[l]->buffer) {
+                    ggml_backend_tensor_set(dense_k_past_inputs[l], k_rotated_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
+                }
+                if (dense_v_past_inputs[l] && dense_v_past_inputs[l]->buffer) {
+                    ggml_backend_tensor_set(dense_v_past_inputs[l], v_activations[l].data(), 0, L * F_test * sizeof(ggml_fp16_t));
+                }
                 // Free k_rotated_activations now since it is uploaded to GPU
                 std::vector<ggml_fp16_t>().swap(k_rotated_activations[l]);
             }
@@ -3900,11 +3923,15 @@ int main(int argc, char ** argv) {
             for (int k = 0; k < srl_k_keep; ++k)
                 for (int j = 0; j < k; ++j)
                     tri[(size_t)j + (size_t)k * srl_k_keep] = 1.0f;
-            ggml_backend_tensor_set(native_dup_tri, tri.data(), 0, tri.size() * sizeof(float));
+            if (native_dup_tri && native_dup_tri->buffer) {
+                ggml_backend_tensor_set(native_dup_tri, tri.data(), 0, tri.size() * sizeof(float));
+            }
             float halfv = 0.5f;
-            ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
+            if (native_half && native_half->buffer) {
+                ggml_backend_tensor_set(native_half, &halfv, 0, sizeof(float));
+            }
             // Initialize native_attn_slots to all-invalid; filled each decode step.
-            if (native_attn_slots) {
+            if (native_attn_slots && native_attn_slots->buffer) {
                 std::vector<int32_t> invalid(srl_k_keep, -1);
                 ggml_backend_tensor_set(native_attn_slots, invalid.data(), 0, (size_t)srl_k_keep * sizeof(int32_t));
             }
@@ -3988,7 +4015,7 @@ int main(int argc, char ** argv) {
             ggml_free(decode_ctx);
             if (!interactive) break; else continue;
         }
-        if (decode_use_sparse) {
+        if (decode_use_sparse && W_proj_decode && W_proj_decode->buffer) {
             ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
         }
         if (std::getenv("DIFFKV_VERBOSE") && std::string(std::getenv("DIFFKV_VERBOSE")) == "1") {
@@ -4350,6 +4377,8 @@ int main(int argc, char ** argv) {
             std::cerr << "[DiffKV] Prefill activations memory reclaimed early.\n";
         }
 
+        bool cache_persistent_initialized = false;
+
         for (int step = 0; step < max_generate; ++step) {
             auto t_step_start = std::chrono::high_resolution_clock::now();
 
@@ -4398,6 +4427,7 @@ int main(int argc, char ** argv) {
             bool pool_version_changed = (kv_engines[0]->get_pool_version() != last_pool_version);
             bool rebuild_needed = (step_use_sparse != decode_use_sparse) || pool_grew;
             if (rebuild_needed) {
+                cache_persistent_initialized = false;
                 decode_use_sparse = step_use_sparse;
                 if (pool_grew) {
                     n_slots = kv_engines[0]->get_n_slots();
@@ -4412,6 +4442,13 @@ int main(int argc, char ** argv) {
                             active_k_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
                             active_k_dense_rotated[l].resize((size_t)required_dense_cap * F_test, 0.0f);
                             active_v_dense[l].resize((size_t)required_dense_cap * F_test, 0.0f);
+                        }
+                        if (step > 0 && native_dense_kr[l] && native_dense_v[l]) {
+                            const int c2 = std::min(total_dense_tokens[l], required_dense_cap);
+                            if (c2 > 0) {
+                                ggml_backend_tensor_get(native_dense_kr[l], active_k_dense_rotated[l].data(), 0, c2 * F_test * sizeof(float));
+                                ggml_backend_tensor_get(native_dense_v[l], active_v_dense[l].data(), 0, c2 * F_test * sizeof(float));
+                            }
                         }
                     }
                     std::cerr << "[DEBUG_RESIZE_AFTER] active_k_dense[0].size()=" << active_k_dense[0].size() << std::endl;
@@ -4504,15 +4541,19 @@ int main(int argc, char ** argv) {
                     std::cerr << "Error: Decode graph reallocation failed" << std::endl;
                     break;
                 }
-                if (decode_use_sparse) {
+                if (decode_use_sparse && W_proj_decode && W_proj_decode->buffer) {
                     ggml_backend_tensor_set(W_proj_decode, W_proj_host.data(), 0, W_proj_host.size() * sizeof(float));
                 }
             }
 
-            ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
-            ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
+            if (input_token_decode && input_token_decode->buffer) {
+                ggml_backend_tensor_set(input_token_decode, &last_token, 0, sizeof(last_token));
+            }
+            if (position_decode && position_decode->buffer) {
+                ggml_backend_tensor_set(position_decode, &current_pos, 0, sizeof(current_pos));
+            }
 
-            if (!decode_use_sparse) {
+            if (!decode_use_sparse && dense_attn_mask_decode && dense_attn_mask_decode->buffer) {
                 // Past-KV cache is already initialized on the GPU, and new tokens are uploaded incrementally.
                 std::vector<ggml_fp16_t> dense_mask_host(required_dense_cap + 1);
                 for (int i = 0; i < required_dense_cap + 1; ++i) {
@@ -4616,10 +4657,12 @@ int main(int argc, char ** argv) {
                 if (n_valid_compressed == 0) {
                     std::fill(filtered_candidates.begin(), filtered_candidates.end(), 0);
                 }
-                ggml_backend_tensor_set(host_slots_decode, filtered_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+                if (host_slots_decode && host_slots_decode->buffer) {
+                    ggml_backend_tensor_set(host_slots_decode, filtered_candidates.data(), 0, srl_k_host * sizeof(int32_t));
+                }
                 // Also upload to native_attn_slots (host-controlled, srl_k_keep wide).
                 // Pad with -1 if needed, as the Metal kernel supports negative IDs natively.
-                if (native_attn_on && native_attn_slots) {
+                if (native_attn_on && native_attn_slots && native_attn_slots->buffer) {
                     std::vector<int32_t> nat_slots(srl_k_keep, -1);
                     int copy_n = std::min((int)physical_candidates.size(), srl_k_keep);
                     for (int i = 0; i < copy_n; ++i) {
@@ -4664,7 +4707,7 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
-            if (decode_use_sparse) {
+            if (decode_use_sparse && slots_mask_decode && slots_mask_decode->buffer) {
                 ggml_backend_tensor_set(slots_mask_decode, slots_mask_host.data(), 0, n_slots * sizeof(float));
             }
 
@@ -4703,7 +4746,7 @@ int main(int argc, char ** argv) {
             // ═══════════════════════════════════════════════════════════════════════════
             double step_sync_upload_ms = 0.0;
             auto t_sync_up_start = std::chrono::high_resolution_clock::now();
-            if (native_attn_on && decode_use_sparse) {
+            if (graph_is_native) {
                 const int cnt0 = std::min(total_dense_tokens[0], native_maxd);
                 
                 // ─────────────────────────────────────────────────────────────────────
@@ -4812,6 +4855,11 @@ int main(int argc, char ** argv) {
                                 F_test * sizeof(float)
                             );
                         }
+                        std::cerr << "[DBG_UPLOAD_LOOP] l=" << l 
+                                  << " kr=" << native_dense_kr[l] 
+                                  << " kr_buf=" << (native_dense_kr[l] ? native_dense_kr[l]->buffer : nullptr)
+                                  << " v=" << native_dense_v[l]
+                                  << " v_buf=" << (native_dense_v[l] ? native_dense_v[l]->buffer : nullptr) << std::endl;
                         ggml_backend_tensor_set(native_dense_kr[l], flat_k.data(), 0, flat_k.size() * sizeof(float));
                         ggml_backend_tensor_set(native_dense_v[l], flat_v.data(), 0, flat_v.size() * sizeof(float));
                     }
@@ -5018,75 +5066,80 @@ int main(int argc, char ** argv) {
                 }
 
                 auto t_m1 = std::chrono::high_resolution_clock::now();
-
-                // (2) Dense window: rotate raw K at abs position + F16-convert (parallel), upload (serial).
-                if (n_window > 0) {
-                    const int half = head_dim / 2;
-                    const float fb = model.get_config().rope_freq_base;
-                    std::vector<float> cosw((size_t)n_window * half), sinw((size_t)n_window * half);
-                    for (int t = 0; t < n_window; ++t) {
-                        int pos = active_positions_dense[t];
-                        for (int i = 0; i < half; ++i) {
-                            float th = (float)pos / std::pow(fb, (float)(2 * i) / head_dim);
-                            cosw[(size_t)t * half + i] = std::cos(th);
-                            sinw[(size_t)t * half + i] = std::sin(th);
-                        }
-                    }
-                    dispatch([&](int lo, int hi) {
-                        std::vector<float> rot((size_t)n_window * F);
-                        for (int l = lo; l < hi; ++l) {
-                            if ((int)host_win_k[l].size() < n_window * F) {
-                                host_win_k[l].resize((size_t)n_window * F);
-                                host_win_v[l].resize((size_t)n_window * F);
-                            }
-                            apply_rope_neox_cpu_fast(active_k_dense[l].data(), rot.data(),
-                                                     cosw.data(), sinw.data(), n_window, kv_heads, head_dim);
-                            // active_k_dense holds RAW K for PREFILL tokens (pos < L) but
-                            // ALREADY-ROTATED K for DECODE-appended tokens (pos >= L; decode_k is
-                            // the in-graph rope output — see the window-append at the else-branch).
-                            // Re-rotating the decode tokens would DOUBLE-rotate them and corrupt
-                            // generation after the first few tokens. Overwrite those rows with the
-                            // stored (already-rotated) value.
-                            for (int t = 0; t < n_window; ++t) {
-                                if (active_positions_dense[t] >= L) {
-                                    std::memcpy(rot.data() + (size_t)t * F,
-                                                active_k_dense[l].data() + (size_t)t * F,
-                                                (size_t)F * sizeof(float));
-                                }
-                            }
-                            for (size_t i = 0; i < (size_t)n_window * F; ++i) {
-                                host_win_k[l][i] = ggml_fp32_to_fp16(rot[i]);
-                                host_win_v[l][i] = ggml_fp32_to_fp16(active_v_dense[l][i]);
-                            }
-                        }
-                    });
-                    const size_t off = (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t);
-                    for (int l = 0; l < n_layers; ++l) {
-                        ggml_backend_tensor_set(cache_k[l], host_win_k[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
-                        ggml_backend_tensor_set(cache_v[l], host_win_v[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
-                    }
-                }
-
-                auto t_m2 = std::chrono::high_resolution_clock::now();
-                if (t_fill && !is_warmup_run) {
-                    t_remat_ms += std::chrono::duration<double,std::milli>(t_m1 - t_m0).count();
-                    t_win_ms   += std::chrono::duration<double,std::milli>(t_m2 - t_m1).count();
-                    if (++t_fill_n % 40 == 0)
-                        std::cerr << "[FILL_TIME] avg over " << t_fill_n << ": materialize+routed-upload="
-                                  << (t_remat_ms/t_fill_n) << "ms window(rotate+conv+upload)="
-                                  << (t_win_ms/t_fill_n) << "ms\n";
-                }
-
-                // (3) Validity mask: 0 for routed [0,n_routed) + window [routed_cap,+n_window) +
-                // current (index cache_cap); -65500 (fp16 -inf) elsewhere.
-                // DIFFKV_DBG_CACHE_WINONLY / _ROUTEDONLY isolate the two halves for debugging.
                 static const bool winonly    = (std::getenv("DIFFKV_DBG_CACHE_WINONLY") != nullptr);
                 static const bool routedonly = (std::getenv("DIFFKV_DBG_CACHE_ROUTEDONLY") != nullptr);
-                std::vector<ggml_fp16_t> cmask((size_t)cache_cap + 1, ggml_fp32_to_fp16(-65500.0f));
-                if (!winonly) for (int j = 0; j < cache_n_routed && j < cache_routed_cap; ++j) cmask[j] = ggml_fp32_to_fp16(0.0f);
-                if (!routedonly) for (int j = 0; j < n_window; ++j) cmask[cache_routed_cap + j] = ggml_fp32_to_fp16(0.0f);
-                cmask[cache_cap] = ggml_fp32_to_fp16(0.0f);
-                ggml_backend_tensor_set(cache_mask, cmask.data(), 0, (size_t)(cache_cap + 1) * sizeof(ggml_fp16_t));
+
+                // (2) Dense window upload: full upload on first step (or after a slide),
+                // incremental thereafter.
+                // All tokens in the dense window are decode tokens (position >= L), so
+                // active_k_dense_rotated[l] always holds the correct pre-rotated keys.
+                // There is no need to recompute RoPE here.
+                if (n_window > 0) {
+                    if (!cache_persistent_initialized) {
+                        dispatch([&](int lo, int hi) {
+                            for (int l = lo; l < hi; ++l) {
+                                if ((int)host_win_k[l].size() < n_window * F) {
+                                    host_win_k[l].resize((size_t)n_window * F);
+                                    host_win_v[l].resize((size_t)n_window * F);
+                                }
+                                // Directly use the already-rotated keys; no redundant RoPE pass.
+                                for (size_t i = 0; i < (size_t)n_window * F; ++i) {
+                                    host_win_k[l][i] = ggml_fp32_to_fp16(active_k_dense_rotated[l][i]);
+                                    host_win_v[l][i] = ggml_fp32_to_fp16(active_v_dense[l][i]);
+                                }
+                            }
+                        });
+                        const size_t off = (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t);
+                        for (int l = 0; l < n_layers; ++l) {
+                            ggml_backend_tensor_set(cache_k[l], host_win_k[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
+                            ggml_backend_tensor_set(cache_v[l], host_win_v[l].data(), off, (size_t)n_window * F * sizeof(ggml_fp16_t));
+                        }
+
+                        // Full validity mask upload.
+                        std::vector<ggml_fp16_t> cmask((size_t)cache_cap + 1, ggml_fp32_to_fp16(-65500.0f));
+                        if (!winonly)   for (int j = 0; j < cache_n_routed && j < cache_routed_cap; ++j) cmask[j] = ggml_fp32_to_fp16(0.0f);
+                        if (!routedonly) for (int j = 0; j < n_window; ++j) cmask[cache_routed_cap + j] = ggml_fp32_to_fp16(0.0f);
+                        cmask[cache_cap] = ggml_fp32_to_fp16(0.0f);
+                        ggml_backend_tensor_set(cache_mask, cmask.data(), 0, (size_t)(cache_cap + 1) * sizeof(ggml_fp16_t));
+
+                        cache_persistent_initialized = true;
+                    } else {
+                        // INCREMENTAL UPDATE: Upload ONLY the new token appended at end of
+                        // previous step (step-1). Its ring position matches the host ring.
+                        // Use (total_positions-1) instead of (step-1): after a slide,
+                        // total_positions is corrected but step is not, so step-based
+                        // ring indices diverge from the host buffer layout.
+                        const int ring_pos = (total_positions - 1) % required_dense_cap;
+                        const size_t off = (size_t)(cache_routed_cap + ring_pos) * F * sizeof(ggml_fp16_t);
+
+                        for (int l = 0; l < n_layers; ++l) {
+                            std::vector<ggml_fp16_t> single_k(F);
+                            std::vector<ggml_fp16_t> single_v(F);
+                            const float* src_k = active_k_dense_rotated[l].data() + (size_t)ring_pos * F;
+                            const float* src_v = active_v_dense[l].data() + (size_t)ring_pos * F;
+                            for (int i = 0; i < F; ++i) {
+                                single_k[i] = ggml_fp32_to_fp16(src_k[i]);
+                                single_v[i] = ggml_fp32_to_fp16(src_v[i]);
+                            }
+                            ggml_backend_tensor_set(cache_k[l], single_k.data(), off, F * sizeof(ggml_fp16_t));
+                            ggml_backend_tensor_set(cache_v[l], single_v.data(), off, F * sizeof(ggml_fp16_t));
+                        }
+
+                        // Update mask for the newly occupied ring slot.
+                        ggml_fp16_t val = ggml_fp32_to_fp16(0.0f);
+                        ggml_backend_tensor_set(cache_mask, &val, (size_t)(cache_routed_cap + ring_pos) * sizeof(ggml_fp16_t), sizeof(ggml_fp16_t));
+
+                        // If remat occurred this step, re-upload the routed section of the mask.
+                        if (remat) {
+                            std::vector<ggml_fp16_t> cmask_routed((size_t)cache_routed_cap, ggml_fp32_to_fp16(-65500.0f));
+                            if (!winonly) {
+                                for (int j = 0; j < cache_n_routed && j < cache_routed_cap; ++j)
+                                    cmask_routed[j] = ggml_fp32_to_fp16(0.0f);
+                            }
+                            ggml_backend_tensor_set(cache_mask, cmask_routed.data(), 0, (size_t)cache_routed_cap * sizeof(ggml_fp16_t));
+                        }
+                    }
+                }
 
                 if (std::getenv("DIFFKV_DBG_CACHE") && step < 3 && !is_warmup_run) {
                     auto nrm = [&](const ggml_fp16_t* p){ double s=0; for(int i=0;i<F;++i){float x=ggml_fp16_to_fp32(p[i]); s+=(double)x*x;} return std::sqrt(s); };
@@ -5377,14 +5430,17 @@ int main(int argc, char ** argv) {
                     std::memcpy(decode_v[l].data(), userdata[l].captured_kv.data() + F_test, F_test * sizeof(float));
                 }
             } else if (decode_concat_k && decode_concat_v) {
-                // Bulk read: read all layers contiguously in one go to avoid driver sync latency
-                std::vector<float> flat_k(n_layers * F_test);
-                std::vector<float> flat_v(n_layers * F_test);
-                ggml_backend_tensor_get(decode_concat_k, flat_k.data(), 0, n_layers * F_test * sizeof(float));
-                ggml_backend_tensor_get(decode_concat_v, flat_v.data(), 0, n_layers * F_test * sizeof(float));
-                for (int l = 0; l < n_layers; ++l) {
-                    std::memcpy(decode_k[l].data(), flat_k.data() + (size_t)l * F_test, F_test * sizeof(float));
-                    std::memcpy(decode_v[l].data(), flat_v.data() + (size_t)l * F_test, F_test * sizeof(float));
+                if (decode_use_sparse) {
+                    ggml_backend_tensor_get(decode_concat_k, decode_k[0].data(), 0, F_test * sizeof(float));
+                } else {
+                    std::vector<float> flat_k(n_layers * F_test);
+                    std::vector<float> flat_v(n_layers * F_test);
+                    ggml_backend_tensor_get(decode_concat_k, flat_k.data(), 0, n_layers * F_test * sizeof(float));
+                    ggml_backend_tensor_get(decode_concat_v, flat_v.data(), 0, n_layers * F_test * sizeof(float));
+                    for (int l = 0; l < n_layers; ++l) {
+                        std::memcpy(decode_k[l].data(), flat_k.data() + (size_t)l * F_test, F_test * sizeof(float));
+                        std::memcpy(decode_v[l].data(), flat_v.data() + (size_t)l * F_test, F_test * sizeof(float));
+                    }
                 }
                 any_from_gpu = true;
             }
@@ -5470,7 +5526,9 @@ int main(int argc, char ** argv) {
                     // we store into the *rotated* buffer only and leave the raw slot zero, which
                     // the CPU/Metal kernels don't read for these positions unless a flip happens
                     // (pre-existing edge case, documented in SESSION_REPORT).
-                    int offset = total_dense_tokens[l] * F_test;
+                    // Use total_positions as the ring index so K/V and position metadata
+                    // always land in the same slot, even after a slide resets total_positions.
+                    int offset = (total_positions % required_dense_cap) * F_test;
                     if (!active_k_dense_rotated[l].empty() &&
                         offset + F_test <= (int)active_k_dense_rotated[l].size()) {
                         std::memcpy(active_k_dense_rotated[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
@@ -5479,14 +5537,20 @@ int main(int argc, char ** argv) {
                     }
                     total_dense_tokens[l]++;
                 }
-                if (total_positions < (int)active_positions_dense.size()) {
-                    active_positions_dense[total_positions++] = current_pos;
-                }
+                active_positions_dense[total_positions % required_dense_cap] = current_pos;
+                total_positions++;
             } else {
-                // Manual append newly ingested token to host-side dense resident buffers
-                for (int l = 0; l < n_layers; ++l) {
-                    int offset = total_dense_tokens[l] * F_test;
-                    if (offset + F_test <= (int)active_k_dense[l].size()) {
+                bool skip_cpu_append = (decode_concat_k && decode_concat_v);
+                if (skip_cpu_append) {
+                    for (int l = 0; l < n_layers; ++l) {
+                        total_dense_tokens[l]++;
+                    }
+                } else {
+                    for (int l = 0; l < n_layers; ++l) {
+                        // Use total_positions (not step) as the ring index — both are identical
+                        // until a slide fires, after which total_positions is corrected while
+                        // step keeps counting up. This unifies K/V and position ring slots.
+                        int offset = (total_positions % required_dense_cap) * F_test;
                         std::memcpy(active_k_dense[l].data() + offset, decode_k[l].data(), F_test * sizeof(float));
                         std::memcpy(active_v_dense[l].data() + offset, decode_v[l].data(), F_test * sizeof(float));
 
@@ -5501,9 +5565,8 @@ int main(int argc, char ** argv) {
                         total_dense_tokens[l]++;
                     }
                 }
-                if (total_positions < (int)active_positions_dense.size()) {
-                    active_positions_dense[total_positions++] = current_pos;
-                }
+                active_positions_dense[total_positions % required_dense_cap] = current_pos;
+                total_positions++;
             }
             if (std::getenv("DIFFKV_DBG_WINDOW") && step < 4 && !is_warmup_run) {
                 std::cerr << "[DBG_WINDOW] step=" << step << " after-append: total_dense_tokens[0]="
@@ -5536,11 +5599,11 @@ int main(int argc, char ** argv) {
                 } else {
                     total_positions = 0;
                 }
-                // The native fused path keeps its OWN device dense buffer that's filled
-                // INCREMENTALLY (append new token). A slide shifts active_k_dense out from under
-                // it, so force a full re-fill next step (otherwise native_dense_kr goes stale →
-                // gradual degradation into repetition loops). No-op for the custom-op path.
+                // After a slide the host ring buffers are fully shifted. Both the native_attn
+                // device buffer and the decode_cache GPU window are now stale and must be
+                // re-uploaded in full on the next step.
                 full_upload_needed = true;
+                cache_persistent_initialized = false; // decode_cache window is stale after slide
             }
             t_dense_append_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_dense_append_start).count();
             auto t_step_end = std::chrono::high_resolution_clock::now();
