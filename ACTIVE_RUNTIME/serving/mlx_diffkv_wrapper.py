@@ -726,6 +726,24 @@ def _block_relevance_residual(
     return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
 
 
+
+def _cache_fetch(cache, keys, values):
+    """Call cache.update_and_fetch and dequantize if the cache is quantized.
+
+    KVCache returns plain mx.array tensors.
+    QuantizedKVCache returns a tuple-of-tuples (w, scales, biases) per K/V.
+    We transparently dequantize so callers always get mx.array back.
+    """
+    raw_k, raw_v = cache.update_and_fetch(keys, values)
+    if isinstance(raw_k, (list, tuple)):
+        # QuantizedKVCache: raw_k = (w, scales, biases)
+        gs  = getattr(cache, "group_size", 64)
+        bits = getattr(cache, "bits", 8)
+        raw_k = mx.dequantize(raw_k[0], raw_k[1], raw_k[2], gs, bits)
+        raw_v = mx.dequantize(raw_v[0], raw_v[1], raw_v[2], gs, bits)
+    return raw_k, raw_v
+
+
 def _sparse_prefill_attend(
     q_rot: mx.array,       # [1, H_q, L, D]   rotated queries for the current chunk
     all_k: mx.array,       # [1, H_kv, T, D]  rotated keys, ALL tokens so far (T = cur_start + L)
@@ -2920,8 +2938,8 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 if sid == "dummy_session":
                     # No DiffKV state for this element — fall back to exact attention.
                     if cache is not None:
-                        ak, av = cache.update_and_fetch(
-                            keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1])
+                        ak, av = _cache_fetch(
+                            cache, keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1])
                     else:
                         ak, av = keys_rot[b_idx:b_idx + 1], values[b_idx:b_idx + 1]
                     outs.append(mx.fast.scaled_dot_product_attention(
@@ -2934,7 +2952,7 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
             out_b = mx.concatenate(outs, axis=0)
         else:
             if cache is not None:
-                all_k, all_v = cache.update_and_fetch(keys_rot, values)
+                all_k, all_v = _cache_fetch(cache, keys_rot, values)
             else:
                 all_k, all_v = keys_rot, values
             out_b = mx.fast.scaled_dot_product_attention(
@@ -2955,7 +2973,7 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         # the full [1, kv_heads, total_seq_len, head_dim] tensor, so every
         # chunk attends over ALL previous tokens correctly.
         if cache is not None:
-            all_k, all_v = cache.update_and_fetch(keys_rot, values)
+            all_k, all_v = _cache_fetch(cache, keys_rot, values)
         else:
             all_k, all_v = keys_rot, values
 
@@ -3020,23 +3038,27 @@ class MLXQwenModel:
 
     def _get_or_create_prefill_cache(self, cache_key: tuple, total_tokens: int = 0):
         if cache_key not in self._prefill_caches:
-            from mlx_lm.models.cache import make_prompt_cache, KVCache
-            cache_list = make_prompt_cache(self.mlx_model)
-            # Pre-size KVCache to avoid concatenation reallocs during prefill.
-            # Default KVCache grows via mx.concatenate every 256 tokens. For 12k
-            # tokens that is 48 reallocs; at each one the OLD and NEW backing tensors
-            # are both alive in the MLX lazy graph until mx.eval() — a transient 2x
-            # peak. Setting step=total_tokens allocates the full buffer once so all
-            # chunks write in-place.
-            # NOTE: QuantizedKVCache is incompatible here — our patched
-            # attention_forward calls cache.update_and_fetch() directly and then
-            # accesses all_k.shape[2]. QuantizedKVCache returns tuple-of-tuples,
-            # not an mx.array, so that access crashes with AttributeError.
-            if total_tokens > 0:
-                step = max(256, ((total_tokens + 255) // 256) * 256)
-                for c in cache_list:
-                    if isinstance(c, KVCache):
-                        c.step = step
+            from mlx_lm.models.cache import make_prompt_cache, KVCache, QuantizedKVCache
+            # DIFFKV_PREFILL_CACHE_BITS: bit-width for the prompt KV cache during prefill.
+            #   16 = standard float16 KVCache (1.4 GB at 12k for 3B model)
+            #    8 = 8-bit QuantizedKVCache  (~700 MB — DEFAULT, saves 700 MB)
+            #    4 = 4-bit QuantizedKVCache  (~350 MB — saves 1.05 GB, slightly lossy)
+            # Dequantization is done transparently by _cache_fetch() in attention_forward
+            # so all downstream code sees plain float16 mx.array tensors as before.
+            _cache_bits = int(os.environ.get("DIFFKV_PREFILL_CACHE_BITS", "8"))
+            if _cache_bits in (4, 8):
+                cache_list = [
+                    QuantizedKVCache(group_size=64, bits=_cache_bits)
+                    for _ in range(len(self.mlx_model.layers))
+                ]
+            else:
+                # float16 — pre-size to avoid concatenation reallocs.
+                cache_list = make_prompt_cache(self.mlx_model)
+                if total_tokens > 0:
+                    step = max(256, ((total_tokens + 255) // 256) * 256)
+                    for c in cache_list:
+                        if isinstance(c, KVCache):
+                            c.step = step
             self._prefill_caches[cache_key] = cache_list
         return self._prefill_caches[cache_key]
 
