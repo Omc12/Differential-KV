@@ -3020,27 +3020,23 @@ class MLXQwenModel:
 
     def _get_or_create_prefill_cache(self, cache_key: tuple, total_tokens: int = 0):
         if cache_key not in self._prefill_caches:
-            from mlx_lm.models.cache import make_prompt_cache, KVCache, QuantizedKVCache
-            # ── Use a quantized KV cache during prefill to reduce peak RAM. ──
-            # float16 KVCache for 12k tokens = 1.4 GB. 8-bit QuantizedKVCache = 700 MB.
-            # 4-bit = 350 MB. The dequantization happens transparently inside
-            # update_and_fetch so attention_forward sees the same float16 tensors.
-            # DIFFKV_PREFILL_CACHE_BITS controls this: 16=standard float16 (default
-            # was the old behavior), 8=half RAM, 4=quarter RAM but slightly lossy.
-            _cache_bits = int(os.environ.get("DIFFKV_PREFILL_CACHE_BITS", "8"))
-            if _cache_bits in (4, 8):
-                cache_list = [
-                    QuantizedKVCache(group_size=64, bits=_cache_bits)
-                    for _ in range(len(self.mlx_model.layers))
-                ]
-            else:
-                cache_list = make_prompt_cache(self.mlx_model)
-                # Pre-size the KVCache to avoid concatenation reallocs during prefill.
-                if total_tokens > 0:
-                    step = max(256, ((total_tokens + 255) // 256) * 256)
-                    for c in cache_list:
-                        if isinstance(c, KVCache):
-                            c.step = step
+            from mlx_lm.models.cache import make_prompt_cache, KVCache
+            cache_list = make_prompt_cache(self.mlx_model)
+            # Pre-size KVCache to avoid concatenation reallocs during prefill.
+            # Default KVCache grows via mx.concatenate every 256 tokens. For 12k
+            # tokens that is 48 reallocs; at each one the OLD and NEW backing tensors
+            # are both alive in the MLX lazy graph until mx.eval() — a transient 2x
+            # peak. Setting step=total_tokens allocates the full buffer once so all
+            # chunks write in-place.
+            # NOTE: QuantizedKVCache is incompatible here — our patched
+            # attention_forward calls cache.update_and_fetch() directly and then
+            # accesses all_k.shape[2]. QuantizedKVCache returns tuple-of-tuples,
+            # not an mx.array, so that access crashes with AttributeError.
+            if total_tokens > 0:
+                step = max(256, ((total_tokens + 255) // 256) * 256)
+                for c in cache_list:
+                    if isinstance(c, KVCache):
+                        c.step = step
             self._prefill_caches[cache_key] = cache_list
         return self._prefill_caches[cache_key]
 
