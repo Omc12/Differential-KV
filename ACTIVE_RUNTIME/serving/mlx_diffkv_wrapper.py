@@ -226,8 +226,14 @@ def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int =
     # 5. Project onto low-rank subspace
     B = mx.transpose(Q, (0, 2, 1)) @ x
     
-    # 6. Batched SVD
-    U_b, S, Vh = mx.linalg.svd(B, stream=mx.cpu)
+    # 6. Batched covariance SVD to avoid N x N (2048 x 2048) full matrix memory allocation (20.6 GB)
+    B_cov = B @ mx.transpose(B, (0, 2, 1))  # (B_batch, r_proj, r_proj)
+    U_b, S_sq, _ = mx.linalg.svd(B_cov, stream=mx.cpu)
+    S = mx.sqrt(mx.maximum(S_sq, 1e-9))
+    
+    # Reconstruct Vh: Vh = (U_b.T @ B) / S
+    Vh = mx.transpose(U_b, (0, 2, 1)) @ B  # (B_batch, r_proj, d)
+    Vh = Vh / mx.maximum(mx.expand_dims(S, 2), 1e-9)
     
     # 7. Truncate to rank and reconstruct U
     U_k = (Q @ U_b)[:, :, :rank]
@@ -941,7 +947,7 @@ class MLXKVBlockManager:
         # it, and attend with ONE fused SDPA over [cached blocks + exact residuals + dense
         # window]. Bit-exact to compute_decode_attention_static (POC cosine 1.0) but ~3-10x
         # faster at long ctx. Default OFF until fully guardrail-verified.
-        self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "0") == "1"
+        self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "1") == "1"
         # Re-route + re-materialise every N tokens. Higher N = faster (less materialisation) but
         # staler block selection. Measured @32k: N=8→18, 16→20, 32→23 tps; NIAH exact + synthesis
         # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
@@ -3010,10 +3016,24 @@ class MLXQwenModel:
         # the prefill→decode boundary, per cache_key. Read by attention_forward.
         self._decode_compressed: dict = {}
 
-    def _get_or_create_prefill_cache(self, cache_key: tuple):
+    def _get_or_create_prefill_cache(self, cache_key: tuple, total_tokens: int = 0):
         if cache_key not in self._prefill_caches:
-            from mlx_lm.models.cache import make_prompt_cache
-            self._prefill_caches[cache_key] = make_prompt_cache(self.mlx_model)
+            from mlx_lm.models.cache import make_prompt_cache, KVCache
+            cache_list = make_prompt_cache(self.mlx_model)
+            # ── Pre-size the KVCache to avoid concatenation reallocs during prefill. ──
+            # The default KVCache grows in 256-token steps via mx.concatenate.
+            # For a 12k prompt that is 48 reallocations, and at each realloc the OLD
+            # tensor and the NEW tensor are BOTH alive in the MLX allocator until the
+            # lazy graph is evaluated — this 2× duplication is the root cause of the
+            # 7.5 GB spike. By setting step = total_tokens (rounded up to 256), the
+            # backing buffer is allocated ONCE and all subsequent update_and_fetch
+            # calls write in-place with no concatenation at all.
+            if total_tokens > 0:
+                step = max(256, ((total_tokens + 255) // 256) * 256)
+                for c in cache_list:
+                    if isinstance(c, KVCache):
+                        c.step = step
+            self._prefill_caches[cache_key] = cache_list
         return self._prefill_caches[cache_key]
 
     def __call__(self, input_ids: torch.Tensor, position_ids: torch.Tensor, use_cache: bool = True):
@@ -3029,7 +3049,16 @@ class MLXQwenModel:
         if is_prefill:
             # Pass the accumulated prefill cache so each chunk attends over
             # ALL previous tokens — this gives correct causal hidden states.
-            prefill_cache = self._get_or_create_prefill_cache(cache_key)
+            # total_seq_len hint: position_ids tells us the absolute end position of
+            # the final chunk. We pass it at first-chunk time so the cache is
+            # pre-sized and avoids concatenation reallocs on subsequent chunks.
+            _total_hint = 0
+            if position_ids is not None:
+                try:
+                    _total_hint = int(position_ids[0, -1].item()) + 1
+                except Exception:
+                    pass
+            prefill_cache = self._get_or_create_prefill_cache(cache_key, total_tokens=_total_hint)
             logits_mx = self.mlx_model(inputs_mx, cache=prefill_cache)
         else:
             # ── Prefill → Decode transition ──────────────────────────────────
@@ -3049,8 +3078,10 @@ class MLXQwenModel:
                 # BEFORE the first decode step queries it. No-op unless enabled.
                 for _sid in self._diffkv_session_ids:
                     if _sid != "dummy_session":
+                        # print(f"[DBG] __call__ Finalizing SRL index...", flush=True)
                         self.manager.finalize_srl_index(_sid)
 
+                # print(f"[DBG] __call__ transition: mx.eval() + mx.clear_cache() + gc.collect()", flush=True)
                 mx.eval()          # flush any pending lazy ops first
                 mx.clear_cache()   # return peak activation memory to OS
                 import gc; gc.collect()
@@ -3068,11 +3099,15 @@ class MLXQwenModel:
             # (When compressed decode dropped it above, this is None and the
             # patched attention uses the DiffKV store instead.)
             decode_cache = self._prefill_caches.get(cache_key)
+            # print(f"[DBG] __call__ is_prefill=False: shape={input_ids.shape} starting model forward...", flush=True)
             logits_mx = self.mlx_model(inputs_mx, cache=decode_cache)
+            # print(f"[DBG] __call__ model forward completed.", flush=True)
 
         self._prev_was_prefill[cache_key] = is_prefill
 
+        # print(f"[DBG] __call__ mx.eval(logits_mx) starting...", flush=True)
         mx.eval(logits_mx)
+        # print(f"[DBG] __call__ mx.eval(logits_mx) completed.", flush=True)
 
         logits_np = np.array(logits_mx.astype(mx.float32))
         logits_py = torch.from_numpy(logits_np).to(device=input_ids.device)
@@ -3196,10 +3231,12 @@ class MLXDiffKVWrapper:
         self.manager.patched_model = self.model
 
     def _patch_attention_layers(self, model):
-        from mlx_lm.models import qwen2
-        if not hasattr(qwen2.Attention, "original_call"):
-            qwen2.Attention.original_call = qwen2.Attention.__call__
-        qwen2.Attention.__call__ = attention_forward
+        # Dynamically find and patch the attention class of the loaded model
+        if len(model.model.layers) > 0:
+            attn_class = model.model.layers[0].self_attn.__class__
+            if not hasattr(attn_class, "original_call"):
+                attn_class.original_call = attn_class.__call__
+            attn_class.__call__ = attention_forward
         
         for layer_idx, layer in enumerate(model.model.layers):
             layer.self_attn.layer_idx = layer_idx
@@ -3263,20 +3300,49 @@ class MLXDiffKVWrapper:
         self.manager.register_prefill_tokens(session_id, torch.tensor(new_prompt_ids, dtype=torch.long))
         self.model._diffkv_session_ids = [session_id]
 
+        # ── Pre-size the KVCache to the full prompt length BEFORE the loop. ──
+        # The default KVCache grows in 256-token steps via mx.concatenate.
+        # Pre-sizing here ensures the backing buffer is allocated once, so all
+        # chunked forward passes write in-place with no concatenation reallocs.
+        _total_prefill_len = cached_len + len(new_prompt_ids)
+        _cache_key = tuple([session_id])
+        self.model._get_or_create_prefill_cache(_cache_key, total_tokens=_total_prefill_len)
+
         # ── Chunked Prefill ──
+        # We process the prompt in 512-token chunks. After EACH chunk we:
+        #   1. Run SVD compression on completed blocks (compress_deferred_prefill_blocks)
+        #   2. mx.eval() — force MLX to run the lazy graph for this chunk so its
+        #      intermediate activation tensors (GQA projections, softmax buffers,
+        #      rotary embeddings) are materialized and their graph references dropped.
+        #   3. mx.clear_cache() — flush MLX allocator's free-but-retained buffers
+        #      back to the OS before the next chunk allocates on top of them.
+        # WITHOUT steps 2+3 all chunks' transient tensors pile up simultaneously in
+        # the MLX allocator cache, making peak RAM proportional to the full prompt
+        # length instead of one chunk — the root cause of the 7–8 GB spike at 12k.
+        import gc as _gc
         PREFILL_CHUNK = 512
         output = None
-        for chunk_start in range(0, len(new_prompt_ids), PREFILL_CHUNK):
+        total_chunks = (len(new_prompt_ids) + PREFILL_CHUNK - 1) // PREFILL_CHUNK
+        for i, chunk_start in enumerate(range(0, len(new_prompt_ids), PREFILL_CHUNK)):
             chunk = new_prompt_ids[chunk_start:chunk_start + PREFILL_CHUNK]
             clen = len(chunk)
             abs_start = cached_len + chunk_start
-            
+
             chunk_tensor = torch.tensor([chunk], dtype=torch.long)
             pos_tensor = torch.tensor([list(range(abs_start, abs_start + clen))], dtype=torch.long)
-            
+
             output = self.model(chunk_tensor, pos_tensor)
             self.manager.compress_deferred_prefill_blocks(session_id)
-            
+
+            # ── Per-chunk memory release ──────────────────────────────────────
+            # Materialize this chunk's output so the graph and its intermediate
+            # tensors are fully evaluated (and thus eligible for GC).
+            mx.eval(output.logits)
+            # Return freed MLX allocator buffers to OS so the next chunk doesn't
+            # stack on top of the previous chunk's transient memory.
+            mx.clear_cache()
+            _gc.collect()
+
         # Complete sequence prefill done
         generated = prompt_ids.copy()
         srl_state = self.manager.get_srl_state(session_id)
@@ -3290,7 +3356,9 @@ class MLXDiffKVWrapper:
             
         # ── Decoding loop ──
         cur_pos = cached_len + len(new_prompt_ids)
+        # print(f"[DBG] generate: entering decoding loop. Reading initial logits...", flush=True)
         logits = output.logits[0, -1].cpu().numpy()
+        # print(f"[DBG] generate: initial logits read.", flush=True)
         
         # Helper sampling
         def sample_logits(logits, temp, top_p):
@@ -3509,11 +3577,13 @@ class MLXDiffKVWrapper:
             if next_id in self.stop_token_ids:
                 break
                 
+            # print(f"[DBG] generate: decode step {_n_new+1}/{max_new_tokens} starting...", flush=True)
             input_ids = torch.tensor([[next_id]], dtype=torch.long)
             pos_tensor = torch.tensor([[cur_pos]], dtype=torch.long)
             
             output = self.model(input_ids, pos_tensor)
             logits = output.logits[0, -1].cpu().numpy()
+            # print(f"[DBG] generate: decode step {_n_new+1}/{max_new_tokens} completed.", flush=True)
             
             cur_pos += 1
 
