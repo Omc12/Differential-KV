@@ -12,7 +12,7 @@ export DIFFKV_GPU_BUDGET_GB=1.5       # Budget GPU VRAM to prevent allocator han
 export DIFFKV_VERBOSE=0
 
 # Define context lengths
-contexts=(4096 8192 16384 32768)
+contexts=(4096 8192 16384)
 
 # Log file headers
 echo "Context | TTFT (ms) | Speed (tok/s) | Duration (s)" > summary.txt
@@ -44,8 +44,8 @@ do
     echo "$ctx | $ttft ms | $speed tok/s | $duration s" >> summary.txt
     echo "Done. TTFT: $ttft ms | Speed: $speed tok/s | Duration: $duration s"
     
-    # Clean up intermediate logs
-    rm -f run_native_$ctx.log
+    # Keep intermediate logs for debugging
+    # rm -f run_native_$ctx.log
 done
 
 # Clean up temp prompt
@@ -58,4 +58,5 @@ echo "==========================================================================
 cat summary.txt
 echo "================================================================================"
 
-rm -f summary.txt
+# Keep summary.txt
+# rm -f summary.txt

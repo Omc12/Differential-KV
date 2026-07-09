@@ -3800,6 +3800,7 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * decode_selected_slots = nullptr;
         struct ggml_tensor * decode_concat_k = nullptr;
         struct ggml_tensor * decode_concat_v = nullptr;
+        struct ggml_tensor * decode_argmax = nullptr;
         struct ggml_tensor * dbg_anc = nullptr;
 
         struct ggml_init_params dense_past_params = {
@@ -5375,9 +5376,20 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            std::vector<float> output_logits(n_vocab);
-            ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+            std::vector<float> output_logits;
+            int32_t next_token_from_gpu = -1;
+            bool read_gpu_argmax = (decode_argmax != nullptr) && (step >= 20);
             auto t_after_logits = std::chrono::high_resolution_clock::now();
+            if (read_gpu_argmax) {
+                int32_t argmax_val = 0;
+                ggml_backend_tensor_get(decode_argmax, &argmax_val, 0, sizeof(int32_t));
+                next_token_from_gpu = argmax_val;
+                t_after_logits = std::chrono::high_resolution_clock::now();
+            } else {
+                output_logits.resize(n_vocab);
+                ggml_backend_tensor_get(decode_logits, output_logits.data(), 0, n_vocab * sizeof(float));
+                t_after_logits = std::chrono::high_resolution_clock::now();
+            }
 
             // DIFFKV_DBG_STEP_LOGITS: top-5 logits for the first few decode steps —
             // lets a sparse-mode run be diffed against a bypass (all-dense) run on the
@@ -5612,112 +5624,114 @@ int main(int argc, char ** argv) {
             const auto& entity_ids = srl_state.current_step_sequence_entity_ids;
             const auto& is_prime_list = srl_state.current_step_sequence_is_prime;
 
-            // +7.0 factual token bias (raised from +3)
-            if (!srl_state.current_step_factual_tokens.empty()) {
-                if (current_entity != -1) {
-                    std::unordered_set<int32_t> entity_factual_tokens;
-                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
-                        int32_t seq_eid = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                        bool seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
-                        if (seq_eid == -1 || seq_eid == current_entity || seq_is_prime) {
-                            entity_factual_tokens.insert(srl_state.current_step_factual_sequences[i].begin(),
-                                                         srl_state.current_step_factual_sequences[i].end());
-                        }
-                    }
-                    for (int32_t tok_id : entity_factual_tokens) {
-                        if (tok_id >= 0 && tok_id < n_vocab) {
-                            output_logits[tok_id] += 7.0f;
-                        }
-                    }
-                } else {
-                    std::unordered_set<int32_t> non_system_tokens;
-                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
-                        const auto& seq = srl_state.current_step_factual_sequences[i];
-                        bool belongs_to_system_prompt = false;
-                        auto it = srl_state.entries_by_tokens_map.find(seq);
-                        if (it != srl_state.entries_by_tokens_map.end()) {
-                            const auto* fe = it->second;
-                            for (int32_t slot : fe->slot_ids) {
-                                if (slot == 0) {
-                                    belongs_to_system_prompt = true;
-                                    break;
-                                }
+            if (!read_gpu_argmax) {
+                // +7.0 factual token bias (raised from +3)
+                if (!srl_state.current_step_factual_tokens.empty()) {
+                    if (current_entity != -1) {
+                        std::unordered_set<int32_t> entity_factual_tokens;
+                        for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                            int32_t seq_eid = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                            bool seq_is_prime = (i < is_prime_list.size()) ? is_prime_list[i] : false;
+                            if (seq_eid == -1 || seq_eid == current_entity || seq_is_prime) {
+                                entity_factual_tokens.insert(srl_state.current_step_factual_sequences[i].begin(),
+                                                             srl_state.current_step_factual_sequences[i].end());
                             }
                         }
-                        if (!belongs_to_system_prompt) {
-                            non_system_tokens.insert(seq.begin(), seq.end());
+                        for (int32_t tok_id : entity_factual_tokens) {
+                            if (tok_id >= 0 && tok_id < n_vocab) {
+                                output_logits[tok_id] += 7.0f;
+                            }
                         }
-                    }
-                    for (int32_t tok_id : non_system_tokens) {
-                        if (tok_id >= 0 && tok_id < n_vocab) {
-                            output_logits[tok_id] += 7.0f;
-                        }
-                    }
-                }
-            }
-
-            // RC8 — disabled: the HF reference has NO foreign-entity penalty, and on
-            // multi-character literary prompts (Pride & Prejudice: Elizabeth, Darcy, Bingley,
-            // Wickham, …) this aggressively suppresses legitimate tokens from "other"
-            // characters. Bug 🅗 from NATIVE_VS_ACTIVE_BUGS.md.
-            // if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
-            //     std::unordered_set<int32_t> licensed, foreign;
-            //     diffkv::compute_entity_token_license(
-            //         srl_state.current_step_factual_sequences,
-            //         entity_ids, is_prime_list, current_entity, licensed, foreign);
-            //     float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
-            //     for (int32_t tok_id : foreign) {
-            //         if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
-            //     }
-            // }
-
-            // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
-            // exact next token is confirmed. Give it a decisive advantage.
-            for (const auto& suffix : srl_state.vsl_active_candidates) {
-                if (!suffix.empty() && suffix[0] >= 0 && suffix[0] < n_vocab) {
-                    output_logits[suffix[0]] += 7.0f;
-                }
-            }
-
-            // -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4 to match
-            // mlx_diffkv_wrapper.py ("threshold lowered 0.55→0.4").
-            // Bug 🅖 fix.
-            if (srl_state.current_step_max_similarity >= 0.4f &&
-                !srl_state.dual_entity_mode &&
-                !srl_state.current_step_factual_tokens.empty()) {
-                const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(model);
-                for (int i = 0; i < n_vocab; ++i) {
-                    if (srl_state.current_step_factual_tokens.count(i) == 0 &&
-                        helper_ids_penalty.count(i) == 0) {
-                        output_logits[i] -= 3.5f;
-                    }
-                }
-            }
-
-            // +10.0 transition bias — applied unconditionally (no helper-word gate)
-            // to match mlx_diffkv_wrapper.py which has no such guard.
-            // Bug 🅘 fix.
-            if (last_token >= 0 && alnum_cache[last_token] && !srl_state.current_step_factual_sequences.empty()) {
-                const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
-                if (helper_ids_trans.count(last_token) == 0) {
-                    std::unordered_set<int32_t> transition_candidates;
-                    for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
-                        int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
-                        if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
-                            continue; // skip cross-entity transitions
-                        }
-                        const auto& seq = srl_state.current_step_factual_sequences[i];
-                        if (seq.size() > 1) {
-                            for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
-                                if (seq[idx] == last_token) {
-                                    transition_candidates.insert(seq[idx + 1]);
+                    } else {
+                        std::unordered_set<int32_t> non_system_tokens;
+                        for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                            const auto& seq = srl_state.current_step_factual_sequences[i];
+                            bool belongs_to_system_prompt = false;
+                            auto it = srl_state.entries_by_tokens_map.find(seq);
+                            if (it != srl_state.entries_by_tokens_map.end()) {
+                                const auto* fe = it->second;
+                                for (int32_t slot : fe->slot_ids) {
+                                    if (slot == 0) {
+                                        belongs_to_system_prompt = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if (!belongs_to_system_prompt) {
+                                non_system_tokens.insert(seq.begin(), seq.end());
+                            }
+                        }
+                        for (int32_t tok_id : non_system_tokens) {
+                            if (tok_id >= 0 && tok_id < n_vocab) {
+                                output_logits[tok_id] += 7.0f;
                             }
                         }
                     }
-                    for (int32_t tok_id : transition_candidates) {
-                        if (tok_id >= 0 && tok_id < n_vocab) {
-                            output_logits[tok_id] += 10.0f;
+                }
+
+                // RC8 — disabled: the HF reference has NO foreign-entity penalty, and on
+                // multi-character literary prompts (Pride & Prejudice: Elizabeth, Darcy, Bingley,
+                // Wickham, …) this aggressively suppresses legitimate tokens from "other"
+                // characters. Bug 🅗 from NATIVE_VS_ACTIVE_BUGS.md.
+                // if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
+                //     std::unordered_set<int32_t> licensed, foreign;
+                //     diffkv::compute_entity_token_license(
+                //         srl_state.current_step_factual_sequences,
+                //         entity_ids, is_prime_list, current_entity, licensed, foreign);
+                //     float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
+                //     for (int32_t tok_id : foreign) {
+                //         if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
+                //     }
+                // }
+
+                // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
+                // exact next token is confirmed. Give it a decisive advantage.
+                for (const auto& suffix : srl_state.vsl_active_candidates) {
+                    if (!suffix.empty() && suffix[0] >= 0 && suffix[0] < n_vocab) {
+                        output_logits[suffix[0]] += 7.0f;
+                    }
+                }
+
+                // -3.5 anti-hallucination penalty — threshold lowered 0.55→0.4 to match
+                // mlx_diffkv_wrapper.py ("threshold lowered 0.55→0.4").
+                // Bug 🅖 fix.
+                if (srl_state.current_step_max_similarity >= 0.4f &&
+                    !srl_state.dual_entity_mode &&
+                    !srl_state.current_step_factual_tokens.empty()) {
+                    const auto& helper_ids_penalty = diffkv::get_helper_token_ids_cpp(model);
+                    for (int i = 0; i < n_vocab; ++i) {
+                        if (srl_state.current_step_factual_tokens.count(i) == 0 &&
+                            helper_ids_penalty.count(i) == 0) {
+                            output_logits[i] -= 3.5f;
+                        }
+                    }
+                }
+
+                // +10.0 transition bias — applied unconditionally (no helper-word gate)
+                // to match mlx_diffkv_wrapper.py which has no such guard.
+                // Bug 🅘 fix.
+                if (last_token >= 0 && alnum_cache[last_token] && !srl_state.current_step_factual_sequences.empty()) {
+                    const auto& helper_ids_trans = diffkv::get_helper_token_ids_cpp(model);
+                    if (helper_ids_trans.count(last_token) == 0) {
+                        std::unordered_set<int32_t> transition_candidates;
+                        for (size_t i = 0; i < srl_state.current_step_factual_sequences.size(); ++i) {
+                            int32_t seq_entity = (i < entity_ids.size()) ? entity_ids[i] : -1;
+                            if (current_entity != -1 && seq_entity != -1 && seq_entity != current_entity) {
+                                continue; // skip cross-entity transitions
+                            }
+                            const auto& seq = srl_state.current_step_factual_sequences[i];
+                            if (seq.size() > 1) {
+                                for (size_t idx = 0; idx < seq.size() - 1; ++idx) {
+                                    if (seq[idx] == last_token) {
+                                        transition_candidates.insert(seq[idx + 1]);
+                                    }
+                                }
+                            }
+                        }
+                        for (int32_t tok_id : transition_candidates) {
+                            if (tok_id >= 0 && tok_id < n_vocab) {
+                                output_logits[tok_id] += 10.0f;
+                            }
                         }
                     }
                 }
@@ -5759,113 +5773,119 @@ int main(int argc, char ** argv) {
                 break;
             }
 
-            // §3.7 fix: Skip non-alphanumeric tokens in rep penalty to match HF reference.
-            // HF: hf_diffkv_wrapper.py:904-912 skips tokens with no alphanumeric characters
-            // to avoid suppressing list/format punctuation (bullets, periods, newlines).
-            // HF stays coherent through coverage+grounding (§3.1/§3.2), not by penalizing punct.
-            // Previously matched MLX which penalizes ALL tokens — but MLX was not the live reference.
-            float rep_penalty = loop_detected ? std::max(repetition_penalty, 1.3f) : repetition_penalty;
-            int rep_window    = loop_detected ? 256 : 64;
+            if (!read_gpu_argmax) {
+                // §3.7 fix: Skip non-alphanumeric tokens in rep penalty to match HF reference.
+                // HF: hf_diffkv_wrapper.py:904-912 skips tokens with no alphanumeric characters
+                // to avoid suppressing list/format punctuation (bullets, periods, newlines).
+                // HF stays coherent through coverage+grounding (§3.1/§3.2), not by penalizing punct.
+                // Previously matched MLX which penalizes ALL tokens — but MLX was not the live reference.
+                float rep_penalty = loop_detected ? std::max(repetition_penalty, 1.3f) : repetition_penalty;
+                int rep_window    = loop_detected ? 256 : 64;
 
-            std::unordered_set<int32_t> unique_penalized;
-            int combined_start = std::max(0, (int)all_tokens.size() - rep_window);
-            for (size_t i = combined_start; i < all_tokens.size(); ++i) {
-                int32_t tok = all_tokens[i];
-                if (tok >= 0 && tok < n_vocab) unique_penalized.insert(tok);
-            }
-            if (last_token >= 0 && last_token < n_vocab) unique_penalized.insert(last_token);
-
-            for (int32_t tok : unique_penalized) {
-                if (tok >= 0 && tok < n_vocab) {
-                    // MLX aligns with penalizing all repeated tokens including punctuation to prevent periods/spaces loops.
-                    float& l = output_logits[tok];
-                    l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
+                std::unordered_set<int32_t> unique_penalized;
+                int combined_start = std::max(0, (int)all_tokens.size() - rep_window);
+                for (size_t i = combined_start; i < all_tokens.size(); ++i) {
+                    int32_t tok = all_tokens[i];
+                    if (tok >= 0 && tok < n_vocab) unique_penalized.insert(tok);
                 }
-            }
+                if (last_token >= 0 && last_token < n_vocab) unique_penalized.insert(last_token);
 
-
-            // F22 fix: drop factual sequences that are a strict PREFIX of another
-            // surfaced sequence (the 20-token chunker can leave a fragment like
-            // "84729" beside the full span "847291…"; the fragment lets the VSL
-            // "complete" early and truncate). The longer sequence covers the shorter.
-            {
-                auto& seqs = srl_state.current_step_factual_sequences;
-                if (seqs.size() > 1) {
-                    std::vector<bool> drop(seqs.size(), false);
-                    for (size_t a = 0; a < seqs.size(); ++a) {
-                        for (size_t b = 0; b < seqs.size(); ++b) {
-                            if (a == b || drop[b]) continue;
-                            if (seqs[a].size() > seqs[b].size()) continue;
-                            if (seqs[a].size() == seqs[b].size() && a < b) continue;
-                            if (std::equal(seqs[a].begin(), seqs[a].end(), seqs[b].begin())) { drop[a] = true; break; }
-                        }
+                for (int32_t tok : unique_penalized) {
+                    if (tok >= 0 && tok < n_vocab) {
+                        // MLX aligns with penalizing all repeated tokens including punctuation to prevent periods/spaces loops.
+                        float& l = output_logits[tok];
+                        l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
                     }
-                    std::vector<std::vector<int32_t>> kept;
-                    for (size_t i = 0; i < seqs.size(); ++i) if (!drop[i]) kept.push_back(std::move(seqs[i]));
-                    seqs.swap(kept);
                 }
-            }
 
-            bool disable_vsl = false;
-            if (const char* env_vsl = std::getenv("DIFFKV_DISABLE_VSL")) {
-                disable_vsl = (std::string(env_vsl) == "1");
-            }
-            sfa_active = !disable_vsl && (srl_state.current_step_max_similarity >= 0.40f &&
-                          !srl_state.current_step_factual_sequences.empty());
 
-            // LM-VSL (Logit Masking) — graduated by retrieval confidence.
-            // sim 0.40–0.69 → soft (-7): model can escape if LM distribution is strong.
-            // sim ≥ 0.70    → hard (-1e10): verbatim extraction — with sequence-start-only
-            //   fallback in get_allowed_tokens_vsl_cpp, the model must enter factual sequences
-            //   from their first token and advance in order, fixing entity binding failure.
-            if (sfa_active && !srl_state.current_step_factual_sequences.empty()) {
-                const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
-                const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(model);
-                auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
-                    srl_state, helper_ids, &structural_ids, /*sfa_active=*/true, model);
-                // Bug 🅔 fix: restore F25 factual-token exemption.
-                // factual tokens (mid-sequence content) are exempt from masking, so the
-                // model can emit them even when VSL is active. This was the documented fix
-                // that made NIAH pass (0/5 → pass). Removing it collapses output to
-                // helpers + sequence-starts only (the entity/period soup symptom).
-                float max_sim = srl_state.current_step_max_similarity;
-                for (int i = 0; i < n_vocab; ++i) {
-                    if (allowed.count(i) == 0 && srl_state.current_step_factual_tokens.count(i) == 0) {
-                        if (max_sim >= 0.70f) {
-                            output_logits[i] = -1e10f;   // hard: verbatim
-                        } else {
-                            output_logits[i] -= 7.0f;    // soft: guided
+                // F22 fix: drop factual sequences that are a strict PREFIX of another
+                // surfaced sequence (the 20-token chunker can leave a fragment like
+                // "84729" beside the full span "847291…"; the fragment lets the VSL
+                // "complete" early and truncate). The longer sequence covers the shorter.
+                {
+                    auto& seqs = srl_state.current_step_factual_sequences;
+                    if (seqs.size() > 1) {
+                        std::vector<bool> drop(seqs.size(), false);
+                        for (size_t a = 0; a < seqs.size(); ++a) {
+                            for (size_t b = 0; b < seqs.size(); ++b) {
+                                if (a == b || drop[b]) continue;
+                                if (seqs[a].size() > seqs[b].size()) continue;
+                                if (seqs[a].size() == seqs[b].size() && a < b) continue;
+                                if (std::equal(seqs[a].begin(), seqs[a].end(), seqs[b].begin())) { drop[a] = true; break; }
+                            }
+                        }
+                        std::vector<std::vector<int32_t>> kept;
+                        for (size_t i = 0; i < seqs.size(); ++i) if (!drop[i]) kept.push_back(std::move(seqs[i]));
+                        seqs.swap(kept);
+                    }
+                }
+
+                bool disable_vsl = false;
+                if (const char* env_vsl = std::getenv("DIFFKV_DISABLE_VSL")) {
+                    disable_vsl = (std::string(env_vsl) == "1");
+                }
+                sfa_active = !disable_vsl && (srl_state.current_step_max_similarity >= 0.40f &&
+                              !srl_state.current_step_factual_sequences.empty());
+
+                // LM-VSL (Logit Masking) — graduated by retrieval confidence.
+                // sim 0.40–0.69 → soft (-7): model can escape if LM distribution is strong.
+                // sim ≥ 0.70    → hard (-1e10): verbatim extraction — with sequence-start-only
+                //   fallback in get_allowed_tokens_vsl_cpp, the model must enter factual sequences
+                //   from their first token and advance in order, fixing entity binding failure.
+                if (sfa_active && !srl_state.current_step_factual_sequences.empty()) {
+                    const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
+                    const auto& structural_ids = diffkv::get_structural_helper_token_ids_cpp(model);
+                    auto allowed = diffkv::get_allowed_tokens_vsl_cpp(
+                        srl_state, helper_ids, &structural_ids, /*sfa_active=*/true, model);
+                    // Bug 🅔 fix: restore F25 factual-token exemption.
+                    // factual tokens (mid-sequence content) are exempt from masking, so the
+                    // model can emit them even when VSL is active. This was the documented fix
+                    // that made NIAH pass (0/5 → pass). Removing it collapses output to
+                    // helpers + sequence-starts only (the entity/period soup symptom).
+                    float max_sim = srl_state.current_step_max_similarity;
+                    for (int i = 0; i < n_vocab; ++i) {
+                        if (allowed.count(i) == 0 && srl_state.current_step_factual_tokens.count(i) == 0) {
+                            if (max_sim >= 0.70f) {
+                                output_logits[i] = -1e10f;   // hard: verbatim
+                            } else {
+                                output_logits[i] -= 7.0f;    // soft: guided
+                            }
                         }
                     }
                 }
             }
 
             int32_t next_token = 0;
-            std::vector<std::pair<float, int>> logits_sorted;
-            logits_sorted.reserve(n_vocab);
-            for (int i = 0; i < n_vocab; ++i) {
-                logits_sorted.push_back({output_logits[i], i});
-            }
-            std::partial_sort(logits_sorted.begin(), logits_sorted.begin() + 5, logits_sorted.end(),
-                              [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
-                return a.first > b.first;
-            });
-            next_token = logits_sorted[0].second;
-
-            if (step < 20 || !interactive) {
-                std::cerr << "\n[Step " << step << " Top predictions]:\n";
-                for (int i = 0; i < std::min(5, n_vocab); ++i) {
-                    std::cerr << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].second) << "\" (id: " << logits_sorted[i].second << ", logit: " << logits_sorted[i].first << ")\n";
+            if (next_token_from_gpu != -1) {
+                next_token = next_token_from_gpu;
+            } else {
+                std::vector<std::pair<float, int>> logits_sorted;
+                logits_sorted.reserve(n_vocab);
+                for (int i = 0; i < n_vocab; ++i) {
+                    logits_sorted.push_back({output_logits[i], i});
                 }
-            }
+                std::partial_sort(logits_sorted.begin(), logits_sorted.begin() + 5, logits_sorted.end(),
+                                  [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                    return a.first > b.first;
+                });
+                next_token = logits_sorted[0].second;
 
-            if (interactive) {
-                float effective_temperature = temperature;
-                // Dynamic temperature threshold raised 0.3→0.40 to match tighter SFA bar.
-                if (srl_state.current_step_max_similarity >= 0.40f) {
-                    effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.95f);
+                if (step < 20 || !interactive) {
+                    std::cerr << "\n[Step " << step << " Top predictions]:\n";
+                    for (int i = 0; i < std::min(5, n_vocab); ++i) {
+                        std::cerr << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].second) << "\" (id: " << logits_sorted[i].second << ", logit: " << logits_sorted[i].first << ")\n";
+                    }
                 }
-                next_token = sample_logits(output_logits, effective_temperature, top_p, sample_rng);
+
+                if (interactive) {
+                    float effective_temperature = temperature;
+                    // Dynamic temperature threshold raised 0.3→0.40 to match tighter SFA bar.
+                    if (srl_state.current_step_max_similarity >= 0.40f) {
+                        effective_temperature = temperature * (1.0f - srl_state.current_step_max_similarity * 0.95f);
+                    }
+                    next_token = sample_logits(output_logits, effective_temperature, top_p, sample_rng);
+                }
             }
 
             if (model.is_eog_token(next_token) || next_token == model.token_eos()) {
