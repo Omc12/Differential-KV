@@ -963,6 +963,13 @@ class MLXKVBlockManager:
         # accuracy and triggers repetitive loops.
         # To restore the decode cache speedup: DIFFKV_DECODE_CACHE=1
         self._decode_cache = os.environ.get("DIFFKV_DECODE_CACHE", "0") == "1"
+        # DIFFKV_DECODE_FUSED=1 (default): single-SDPA-launch per layer per token over a
+        # persistent fused buffer (blocks+residuals+dense window written once per route
+        # interval, one-row in-place append per token). Removes the 2× per-token concat
+        # + per-token mask build of the legacy decode-cache path. See
+        # _execute_decode_cache for the buffer-dtype dial (DIFFKV_DECODE_FUSED_FP32).
+        # =0 restores the old concat-per-token path bit-for-bit.
+        self._decode_fused = os.environ.get("DIFFKV_DECODE_FUSED", "1") != "0"
         # Re-route + re-materialise every N tokens. Higher N = faster (less materialisation) but
         # staler block selection. Measured @32k: N=8→18, 16→20, 32→23 tps; NIAH exact + synthesis
         # reads paper at all three. 16 balances speed vs staleness for varied (chat) generation;
@@ -1322,9 +1329,14 @@ class MLXKVBlockManager:
         if session is None:
             return
 
-        # Block set is about to change — drop the cached residual gather.
+        # Block set is about to change — drop the cached residual gather AND the
+        # decode-cache (materialised fused buffers). Without this, a rollback that
+        # lands on the SAME block count would keep serving the stale pre-rollback
+        # cache for up to a full route interval.
         if "_res_cache" in session:
             session["_res_cache"].clear()
+        if "_cache_kv" in session:
+            session["_cache_kv"].clear()
 
         for layer_idx in range(self.num_layers):
             num_blocks = session["num_blocks"][layer_idx]
@@ -1447,7 +1459,7 @@ class MLXKVBlockManager:
         return comp_len + dense_len
 
     def register_prefill_tokens(self, session_id: str, token_ids: torch.Tensor):
-        session = self.sessions.setdefault(session_id, self._create_empty_session())
+        session = self._get_or_create_session(session_id)
         tids_list = token_ids.cpu().tolist()
         session["token_ids"].extend(tids_list)
         if "token_counts" not in session or session["token_counts"] is None:
@@ -1842,9 +1854,19 @@ class MLXKVBlockManager:
                 eval_targets.append(session["comp_res_mask"][l])
         mx.eval(*eval_targets)
 
+    def _get_or_create_session(self, session_id: str):
+        """dict.get + create-on-miss. NOT sessions.setdefault(_create_empty_session()):
+        setdefault evaluates its default EAGERLY, so the old form built a complete
+        empty session (hundreds of mx.zeros tensors) on EVERY call — 28×/decode-token
+        of pure allocation churn (~6.5 ms/token host-side, measured 2026-07-10)."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = self.sessions[session_id] = self._create_empty_session()
+        return session
+
     def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array):
         """Write incoming prefill KV chunk into the stashed lists for deferred compression."""
-        session = self.sessions.setdefault(session_id, self._create_empty_session())
+        session = self._get_or_create_session(session_id)
         session["prefill_K_chunks"][layer_idx].append(K)
         session["prefill_V_chunks"][layer_idx].append(V)
 
@@ -1852,7 +1874,7 @@ class MLXKVBlockManager:
         pass
 
     def ingest_streaming(self, session_id: str, layer_idx: int, k: mx.array, v: mx.array):
-        session = self.sessions.setdefault(session_id, self._create_empty_session())
+        session = self._get_or_create_session(session_id)
         dense_len = session["dense_lens"][layer_idx]
         
         session["dense_keys"][layer_idx][0, :, dense_len:dense_len + 1] = k.squeeze(0)
@@ -2124,6 +2146,13 @@ class MLXKVBlockManager:
         rc = session.get("_res_cache")
         if rc is not None:
             rc.pop(layer_idx, None)
+        # Same for the decode-cache. Normally redundant (num_blocks changed → the
+        # nb check re-routes), but at the max_blocks cap the shift above changes
+        # block CONTENTS while nb stays constant — without this pop the decode
+        # cache would keep attending the pre-shift blocks for a full interval.
+        ck = session.get("_cache_kv")
+        if ck is not None:
+            ck.pop(layer_idx, None)
 
     def _flush_oldest_block(self, session: Dict, layer_idx: int):
         """Compress the oldest block_size tokens from the dense buffer and
@@ -2156,11 +2185,29 @@ class MLXKVBlockManager:
     def _execute_decode_cache(self, session, layer_idx, q, dense_k, dense_v, dense_len, scale, gpk):
         """Decompress-and-cache decode (see DIFFKV_DECODE_CACHE). Materialises the routed blocks'
         K/V from the low-rank pool once per interval, caches it, and attends [cached blocks +
-        exact residuals + dense window] with a single masked SDPA. Bit-exact to
-        compute_decode_attention_static (POC cosine 1.0). Returns out [H_q, D]."""
+        exact residuals + dense window] with a single masked SDPA. Returns out [H_q, D].
+
+        FUSED per-token path (DIFFKV_DECODE_FUSED=1, default ON, 2026-07-10): at route time the
+        materialised blocks AND the dense window are written once into a persistent fused buffer
+        [kv_heads, Lm + max_dense_len, D] with a static additive mask. Each subsequent token then
+        only (a) appends its single freshly-ingested dense row into the buffer (an in-place
+        one-row slice_update) and (b) runs ONE mx.fast.scaled_dot_product_attention launch over
+        an exact-length view — no per-token concatenation, no per-token mask construction.
+        Verified vs the legacy path: NIAH bench 4/4 (4k-32k), depths 3/3, multi-needle 1/1,
+        synthetic parity (tests/test_decode_cache_fused_parity.py).
+        Numerics notes:
+          - Buffer dtype defaults to fp32 (DIFFKV_DECODE_FUSED_FP32, see the dial comment
+            below): identical score arithmetic to the legacy path, which also ran fp32 —
+            not by design but because comp_scale (an fp32 array) silently promoted the
+            whole materialised cache. fp16 storage (=0) is ~3 ms/token faster but flipped
+            the multi-needle case format, so it is opt-in.
+          - Mask floor is -3e4 (fp16-safe) instead of -1e9; exp(-3e4 - lse) underflows to 0
+            identically, and no row is ever fully masked (the current token is always live).
+        DIFFKV_DECODE_FUSED=0 restores the old concat-per-token behavior exactly."""
         nb = session["num_blocks"][layer_idx]
         kv_heads, D, bs = self.kv_heads, self.head_dim, self.block_size
         S_comp = bs - 1
+        fused = self._decode_fused
         NEGf = mx.array(-1e9, dtype=mx.float32)
         ZEROf = mx.array(0.0, dtype=mx.float32)
         cache = session.setdefault("_cache_kv", {})
@@ -2224,12 +2271,74 @@ class MLXKVBlockManager:
             block_add = mx.where(block_valid, mx.array(_bias, dtype=mx.float32), NEGf)
             res_add   = mx.where(res_valid, ZEROf, NEGf)
             block_add_mask = mx.concatenate([block_add, res_add])
-            mx.eval(mk, mv, block_add_mask)                       # materialise the cache now
-            ent = {"mk": mk, "mv": mv, "mask": block_add_mask, "steps": 0, "nb": nb}
+            if fused:
+                # Persistent fused buffer: [materialised blocks + residuals | dense window slots].
+                # Stored in the activation dtype; reconstruction above stays fp32, only the
+                # STORAGE is cast. The mask's dense segment is all-zeros because per-token
+                # attention slices to the EXACT live length (no padding is ever visible).
+                # DIFFKV_DECODE_FUSED_FP32 — buffer dtype dial (default "1" = fp32):
+                #   "1" → K/V fp32, the legacy score arithmetic. REQUIRED for the exact
+                #         multi-needle gate: full-fp16 storage flipped its case format
+                #         (fp16-epsilon butterfly; bisected 2026-07-10 — the structural
+                #         fused path with fp32 storage matches the legacy gate exactly).
+                #   "0" → K/V fp16. ~7 ms/token faster (measured 35→48 tps @8k, 36→45 @32k,
+                #         clean cells, compacted pool) and passes single-needle bench 4/4 +
+                #         depths 3/3, but multi-needle returned 'OMEGA-7741-Delta' (content
+                #         right, case flipped). Retrieval-speed dial only.
+                # (K-fp32/V-fp16 mixed was tried and REJECTED: MLX SDPA drops to a
+                # fallback kernel and it's slower than full fp32.)
+                _fp16_buf = os.environ.get("DIFFKV_DECODE_FUSED_FP32", "1").strip().lower() in ("0", "off", "false")
+                _fdt = q.dtype if _fp16_buf else mx.float32
+                # COMPACTION: drop rows whose mask is -1e9 (padding + the masked SVD twins
+                # of exact residuals — with max_residual=128 that is ~30% of the pool).
+                # Their softmax weight is exactly 0, so removing them is EXACT; it just
+                # stops the per-token SDPA from reading dead rows. One small host sync
+                # (K*bs+K*R bools) per route interval, amortized.
+                valid_np = np.array(mx.concatenate([block_valid, res_valid]))
+                if not valid_np.all():
+                    keep = mx.array(np.nonzero(valid_np)[0].astype(np.uint32))
+                    mk = mx.take(mk, keep, axis=1)
+                    mv = mx.take(mv, keep, axis=1)
+                    block_add_mask = mx.take(block_add_mask, keep)
+                mk = mk.astype(_fdt)
+                mv = mv.astype(_fdt)
+                am_static = mx.maximum(block_add_mask, -3e4).astype(_fdt)
+                Lm = mk.shape[1]
+                fk = mx.concatenate([mk, dense_k.astype(_fdt)], axis=1)
+                fv = mx.concatenate([mv, dense_v.astype(_fdt)], axis=1)
+                am = mx.concatenate([am_static, mx.zeros((dense_k.shape[1],), dtype=_fdt)])
+                # Eager eval is deliberate: deferring materialisation to the token's
+                # end-of-step eval was A/B'd (2026-07-10) and is WORSE (mean 26.2 vs
+                # 23.9 ms/tok @8k) — the mega-graph on route tokens serializes badly.
+                mx.eval(fk, fv, am)                               # materialise the cache now
+                ent = {"fk": fk, "fv": fv, "am": am, "Lm": Lm, "steps": 0, "nb": nb,
+                       "dl_synced": session["dense_lens"][layer_idx]}
+            else:
+                mx.eval(mk, mv, block_add_mask)                   # materialise the cache now
+                ent = {"mk": mk, "mv": mv, "mask": block_add_mask, "steps": 0, "nb": nb}
             cache[layer_idx] = ent
 
-        mk, mv, block_add_mask = ent["mk"], ent["mv"], ent["mask"]
         ent["steps"] += 1
+
+        if fused:
+            fk, fv, am, Lm = ent["fk"], ent["fv"], ent["am"], ent["Lm"]
+            dl = session["dense_lens"][layer_idx]     # Python int — exact live length
+            ds = ent["dl_synced"]
+            if dl > ds:
+                # Copy the row(s) ingested since the last sync (normally exactly 1: this
+                # token) into the fused buffer. In-place one-row update, not a concat.
+                fk[:, Lm + ds:Lm + dl, :] = dense_k[:, ds:dl, :]
+                fv[:, Lm + ds:Lm + dl, :] = dense_v[:, ds:dl, :]
+                ent["dl_synced"] = dl
+            L = Lm + dl
+            out = mx.fast.scaled_dot_product_attention(
+                q.reshape(1, self.heads, 1, D),
+                fk[:, :L].reshape(1, kv_heads, L, D),
+                fv[:, :L].reshape(1, kv_heads, L, D),
+                scale=scale, mask=am[:L].reshape(1, 1, 1, L))
+            return out[0, :, 0, :]
+
+        mk, mv, block_add_mask = ent["mk"], ent["mv"], ent["mask"]
 
         # Append the CURRENT dense window (changes every token) + its validity mask.
         fk = mx.concatenate([mk, dense_k], axis=1)
@@ -2584,15 +2693,22 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
     keys    = keys.reshape(   B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
     values  = values.reshape( B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
 
-    queries_rot_list = []
-    keys_rot_list    = []
-    for b_idx in range(B):
-        offset = mx.array(position_ids[b_idx, 0]) if position_ids is not None else mx.array(0)
-        queries_rot_list.append(self.rope(queries[b_idx:b_idx+1], offset=offset))
-        keys_rot_list.append(  self.rope(keys[   b_idx:b_idx+1], offset=offset))
+    if B == 1:
+        # Fast path: plain int offset (no per-layer mx.array creation) and no
+        # single-element concatenate — decode calls this 28×/token.
+        offset0 = int(position_ids[0, 0]) if position_ids is not None else 0
+        queries_rot = self.rope(queries, offset=offset0)    # [1, H_q, L, D]
+        keys_rot    = self.rope(keys,    offset=offset0)    # [1, H_kv, L, D]
+    else:
+        queries_rot_list = []
+        keys_rot_list    = []
+        for b_idx in range(B):
+            offset = int(position_ids[b_idx, 0]) if position_ids is not None else 0
+            queries_rot_list.append(self.rope(queries[b_idx:b_idx+1], offset=offset))
+            keys_rot_list.append(  self.rope(keys[   b_idx:b_idx+1], offset=offset))
 
-    queries_rot = mx.concatenate(queries_rot_list, axis=0)  # [B, H_q, L, D]
-    keys_rot    = mx.concatenate(keys_rot_list,    axis=0)  # [B, H_kv, L, D]
+        queries_rot = mx.concatenate(queries_rot_list, axis=0)  # [B, H_q, L, D]
+        keys_rot    = mx.concatenate(keys_rot_list,    axis=0)  # [B, H_kv, L, D]
 
     is_decode = (L == 1)
 
