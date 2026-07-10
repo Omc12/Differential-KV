@@ -369,8 +369,14 @@ def test_metal_residual_and_fact_parity():
         _fact_pos.contiguous(),
         _fact_val_K.contiguous(),
         _fact_val_V.contiguous(),
+        # Trailing dense-window args (dense_K/V + cos/sin_dense) were added to the
+        # binding after this test was written; empties → the impl skips the dense loop.
+        torch.empty(0, device=device, dtype=torch.float16),
+        torch.empty(0, device=device, dtype=torch.float16),
+        torch.empty(0, device=device, dtype=torch.float16),
+        torch.empty(0, device=device, dtype=torch.float16),
     )
-    
+
     # 2. Run Python/MPS reference fallback (fused_decode_mps)
     out_ref, lse_ref = fused_decode_mps(
         Q=Q,

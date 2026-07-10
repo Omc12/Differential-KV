@@ -626,8 +626,14 @@ void execute_cuda_attention(
         DIFFKV_CUDA_CHECK(cudaGetLastError());
     }
 
-    // Sync stream or device to ensure output is ready for host
-    cudaDeviceSynchronize();
+    // F8: the host reads d_out immediately after this call, so a sync is required —
+    // but only for OUR work. All launches above go to the legacy default stream, so
+    // cudaStreamSynchronize(0) is the minimal correct barrier; the previous
+    // cudaDeviceSynchronize() stalled EVERY stream on the device once per decode
+    // token (a full device barrier per token — audit finding F8). Going fully async
+    // (sync only when the caller consumes dst) needs the ggml-stream integration and
+    // is out of scope for a blind fix; see CUDA_TRITON_AUDIT.md checklist C5.
+    DIFFKV_CUDA_CHECK(cudaStreamSynchronize(0));
 }
 
 #endif

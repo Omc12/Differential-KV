@@ -908,6 +908,125 @@ def _build_stratified_U_for_triton(
     return proxy, True
 
 
+# ── F2: routed-row gather + anchor-RoPE rotation, cached per routing interval ──
+# The Triton kernels address EVERY per-block tensor through block_indices, so they
+# only ever read the N routed rows — yet the dispatchers used to `.clone()` the
+# ENTIRE pool (anchors_K, V_K, res_k) on EVERY decode token just to scatter N
+# rotated rows into it: O(pool_size) memory traffic per token on the exact path
+# being optimized (audit finding F2). This helper instead gathers the N routed
+# rows, rotates those, and hands the kernel compact [N]-row tensors with
+# block_indices remapped to arange(N) — bit-identical kernel inputs (equivalence
+# certified on CPU by tests/test_triton_gather_equiv.py).
+#
+# The gathered set depends only on (pool contents, routing order, anchor
+# positions), NOT on q, so it is cached keyed on (pool id, pool generation,
+# exact index order) — the same route-interval reuse that made the MLX fused
+# decode fast (per-token work O(1), per-route work O(N)). pool generation is
+# NativeBlockPool._stratified_generation, bumped on every write_block/reset;
+# if the attribute is missing the cache is skipped (gather still wins vs clone).
+# NOTE: the block_indices.tolist() key costs one small D2H sync per call — the
+# stratified-U cache above already pays an identical sync per call, so this adds
+# no NEW sync point on CUDA.
+_gathered_rot_cache: dict = {}
+
+
+def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indices, cos, sin):
+    """Gather the [N] routed rows of every per-block tensor the Triton kernels
+    read, pre-rotating the K-side rows (anchors_K, V_K, res_k) by each block
+    anchor's RoPE when rotation inputs are provided. Returns a dict of compact
+    tensors plus `idx` = arange(N) to pass as the kernel's block_indices."""
+    N = block_indices.shape[0]
+    device = block_indices.device
+    base_pool = object.__getattribute__(pool_for_kernel, "_pool") \
+        if isinstance(pool_for_kernel, _StratifiedUProxy) else pool_for_kernel
+    pool_gen = getattr(base_pool, "_stratified_generation", None)
+    cache_key = None
+    if pool_gen is not None:
+        cache_key = (id(base_pool), pool_gen, tuple(block_indices.tolist()))
+        got = _gathered_rot_cache.get(cache_key)
+        if got is not None:
+            return got
+
+    indices = block_indices.long()
+    g = {}
+    g["idx"] = torch.arange(N, device=device, dtype=block_indices.dtype)
+
+    anchors_K = pool_for_kernel.anchors_K[indices]      # [N, H_kv, D]
+    V_K       = pool_for_kernel.V_K[indices]            # [N, R, H_kv, D]
+    g["anchors_V"] = pool_for_kernel.anchors_V[indices]
+    g["V_V"]       = pool_for_kernel.V_V[indices]
+    g["U"]         = pool_for_kernel.U[indices]
+    g["U_scale"]   = pool_for_kernel.U_scale[indices]
+    g["scales"]    = pool_for_kernel.scales[indices]
+    g["seq_lens"]  = pool_for_kernel.seq_lens[indices]
+
+    do_rot = (anchor_indices is not None and cos is not None and sin is not None)
+    cos_anc = sin_anc = None
+    if do_rot:
+        cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
+        sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
+        anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
+        cos_anc = cos_flat[anchor_indices_clamped].to(device=V_K.device, dtype=V_K.dtype).unsqueeze(1).unsqueeze(2)
+        sin_anc = sin_flat[anchor_indices_clamped].to(device=V_K.device, dtype=V_K.dtype).unsqueeze(1).unsqueeze(2)
+        cos_anc_2d = cos_anc.squeeze(2)                 # [N, 1, D] for [N, H_kv, D] tensors
+        sin_anc_2d = sin_anc.squeeze(2)
+        V_K       = V_K * cos_anc + rotate_half(V_K) * sin_anc
+        anchors_K = anchors_K * cos_anc_2d + rotate_half(anchors_K) * sin_anc_2d
+    g["anchors_K"] = anchors_K
+    g["V_K"]       = V_K
+
+    res_k   = getattr(base_pool, "residual_K_values",    None)
+    res_v   = getattr(base_pool, "residual_V_values",    None)
+    res_pos = getattr(base_pool, "residual_K_positions", None)
+    res_pos_v = getattr(base_pool, "residual_V_positions", None)
+    g["has_res"] = (res_k is not None and res_v is not None and
+                    res_pos is not None and res_pos_v is not None)
+    if g["has_res"]:
+        res_k_g = res_k[indices]                        # [N, MAX_RES, H_kv, D]
+        if do_rot:
+            # Pre-rotate residual K by the block anchor's RoPE, exactly like V_K
+            # (reference rotates res_val_K identically). res_v is never rotated.
+            res_k_g = res_k_g * cos_anc + rotate_half(res_k_g) * sin_anc
+        g["res_k"]     = res_k_g
+        g["res_v"]     = res_v[indices]
+        g["res_pos"]   = res_pos[indices]
+        g["res_pos_v"] = res_pos_v[indices]
+        g["res_n"]     = (g["res_pos"] >= 0).sum(dim=-1).to(torch.int32)
+        g["max_res_pad"] = res_pos.shape[1]
+    else:
+        g["res_k"]     = torch.empty((0, 0, 0, 0), device=device)
+        g["res_v"]     = torch.empty((0, 0, 0, 0), device=device)
+        g["res_pos"]   = torch.empty((0, 0), device=device, dtype=torch.int16)
+        g["res_pos_v"] = torch.empty((0, 0), device=device, dtype=torch.int16)
+        g["res_n"]     = torch.zeros((N,), device=device, dtype=torch.int32)
+        g["max_res_pad"] = 1
+
+    fact_pos = getattr(base_pool, "fact_anchor_positions", None)
+    fact_ak  = getattr(base_pool, "fact_anchors_K",        None)
+    fact_av  = getattr(base_pool, "fact_anchors_V",        None)
+    g["has_fact"] = (fact_pos is not None and fact_ak is not None and fact_av is not None)
+    if g["has_fact"]:
+        g["fact_pos"] = fact_pos[indices]
+        g["fact_ak"]  = fact_ak[indices]
+        g["fact_av"]  = fact_av[indices]
+        g["max_fact"] = fact_pos.shape[1]
+    else:
+        g["fact_pos"] = torch.empty((0, 0),       device=device, dtype=torch.int16)
+        g["fact_ak"]  = torch.empty((0, 0, 0, 0), device=device)
+        g["fact_av"]  = torch.empty((0, 0, 0, 0), device=device)
+        g["max_fact"] = 1
+
+    if cache_key is not None:
+        # Evict stale entries for this pool (older generation or routing) so the
+        # cache stays O(1) entries per live pool.
+        stale = [k for k in _gathered_rot_cache
+                 if k[0] == cache_key[0] and k != cache_key]
+        for k in stale:
+            del _gathered_rot_cache[k]
+        _gathered_rot_cache[cache_key] = g
+    return g
+
+
 # ── 3. PyTorch fallbacks / MPS decoders ───────────────────────────────────────
 
 def fused_decode_attention_mps(
@@ -1663,95 +1782,36 @@ def native_triton_sparse_attn_decode(
             # This gives CUDA accuracy parity with the MPS path (reconstruct_batch_U).
             pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
 
-            anchors_K_rot = pool_for_kernel.anchors_K
-            V_K_rot = pool_for_kernel.V_K
-            
-            if anchor_indices is not None and cos is not None and sin is not None:
-                indices = block_indices.long()
-                cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-                sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                
-                # Clamp anchor_indices to prevent GPU out of bounds
-                anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
-                cos_anc = cos_flat[anchor_indices_clamped].to(device=pool_for_kernel.V_K.device, dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
-                sin_anc = sin_flat[anchor_indices_clamped].to(device=pool_for_kernel.V_K.device, dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
-                
-                cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=pool_for_kernel.anchors_K.device, dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
-                sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=pool_for_kernel.anchors_K.device, dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
-                
-                anchors_K_rot = pool_for_kernel.anchors_K.clone()
-                V_K_rot = pool_for_kernel.V_K.clone()
-                
-                V_K_rot[indices] = pool_for_kernel.V_K[indices] * cos_anc + rotate_half(pool_for_kernel.V_K[indices]) * sin_anc
-                anchors_K_rot[indices] = pool_for_kernel.anchors_K[indices] * cos_anc_2d + rotate_half(pool_for_kernel.anchors_K[indices]) * sin_anc_2d
-            
-            # Get residual fields (C1). K and V select DIFFERENT worst-reconstructed
-            # positions, so BOTH position arrays are needed (kernel corrects K score at
-            # res_pos, V output at res_pos_v).
-            res_k = getattr(pool, "residual_K_values", None)
-            res_v = getattr(pool, "residual_V_values", None)
-            res_pos = getattr(pool, "residual_K_positions", None)
-            res_pos_v = getattr(pool, "residual_V_positions", None)
-
-            has_res = (res_k is not None and res_v is not None and
-                       res_pos is not None and res_pos_v is not None)
-            if has_res:
-                res_n = (res_pos >= 0).sum(dim=-1).to(torch.int32)
-                # Kernel now uses an unrolled scalar loop over residual columns (not a
-                # padded tl.arange), so pass the ACTUAL column count — never read past
-                # res_pos / res_pos_v.
-                max_res_pad = res_pos.shape[1]
-                # Pre-rotate residual K by the block anchor's RoPE, exactly like V_K
-                # above (reference rotates res_val_K identically, line 1154). res_v is
-                # never rotated (V carries no RoPE).
-                if anchor_indices is not None and cos is not None and sin is not None:
-                    res_k = res_k.clone()
-                    res_k[indices] = res_k[indices] * cos_anc + rotate_half(res_k[indices]) * sin_anc
-            else:
-                res_k = torch.empty((0, 0, 0, 0), device=q.device)
-                res_v = torch.empty((0, 0, 0, 0), device=q.device)
-                res_pos = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-                res_pos_v = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-                res_n = torch.zeros((pool_for_kernel.U.shape[0],), device=q.device, dtype=torch.int32)
-                max_res_pad = 1
-                
-            # Get fact anchor fields (C2)
-            fact_pos = getattr(pool, "fact_anchor_positions", None)
-            fact_ak = getattr(pool, "fact_anchors_K", None)
-            fact_av = getattr(pool, "fact_anchors_V", None)
-            
-            has_fact = (fact_pos is not None and fact_ak is not None and fact_av is not None)
-            if has_fact:
-                max_fact = fact_pos.shape[1]
-            else:
-                fact_pos = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-                fact_ak = torch.empty((0, 0, 0, 0), device=q.device)
-                fact_av = torch.empty((0, 0, 0, 0), device=q.device)
-                max_fact = 1
+            # F2 fix: gather + rotate ONLY the N routed rows (cached per routing
+            # interval) instead of cloning the whole pool per token; the kernel
+            # gets compact [N]-row tensors with block_indices remapped to
+            # arange(N) — bit-identical inputs, O(pool)→O(N) per-token traffic.
+            g = _gather_routed_blocks_for_kernel(
+                pool_for_kernel, block_indices, anchor_indices, cos, sin)
 
             _fused_sparse_decode_kernel[grid](
-                q_sq, block_indices, anchors_K_rot, pool_for_kernel.anchors_V, V_K_rot, pool_for_kernel.V_V,
-                pool_for_kernel.U, pool_for_kernel.U_scale, pool_for_kernel.scales, pool_for_kernel.seq_lens,
-                res_k, res_v, res_pos, res_pos_v, res_n,
-                fact_pos, fact_ak, fact_av,
+                q_sq, g["idx"], g["anchors_K"], g["anchors_V"], g["V_K"], g["V_V"],
+                g["U"], g["U_scale"], g["scales"], g["seq_lens"],
+                g["res_k"], g["res_v"], g["res_pos"], g["res_pos_v"], g["res_n"],
+                g["fact_pos"], g["fact_ak"], g["fact_av"],
                 out_workspace, m_workspace, l_workspace,
                 q_sq.stride(0), q_sq.stride(1),
-                anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
-                pool_for_kernel.anchors_V.stride(0), pool_for_kernel.anchors_V.stride(1), pool_for_kernel.anchors_V.stride(2),
-                V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
-                pool_for_kernel.V_V.stride(0), pool_for_kernel.V_V.stride(1), pool_for_kernel.V_V.stride(2), pool_for_kernel.V_V.stride(3),
-                pool_for_kernel.U.stride(0), pool_for_kernel.U.stride(1), pool_for_kernel.U.stride(2),
-                res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
-                res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
-                res_pos.stride(0), res_pos_v.stride(0),
-                fact_pos.stride(0),
-                fact_ak.stride(0), fact_ak.stride(1), fact_ak.stride(2), fact_ak.stride(3),
-                fact_av.stride(0), fact_av.stride(1), fact_av.stride(2), fact_av.stride(3),
+                g["anchors_K"].stride(0), g["anchors_K"].stride(1), g["anchors_K"].stride(2),
+                g["anchors_V"].stride(0), g["anchors_V"].stride(1), g["anchors_V"].stride(2),
+                g["V_K"].stride(0), g["V_K"].stride(1), g["V_K"].stride(2), g["V_K"].stride(3),
+                g["V_V"].stride(0), g["V_V"].stride(1), g["V_V"].stride(2), g["V_V"].stride(3),
+                g["U"].stride(0), g["U"].stride(1), g["U"].stride(2),
+                g["res_k"].stride(0), g["res_k"].stride(1), g["res_k"].stride(2), g["res_k"].stride(3),
+                g["res_v"].stride(0), g["res_v"].stride(1), g["res_v"].stride(2), g["res_v"].stride(3),
+                g["res_pos"].stride(0), g["res_pos_v"].stride(0),
+                g["fact_pos"].stride(0),
+                g["fact_ak"].stride(0), g["fact_ak"].stride(1), g["fact_ak"].stride(2), g["fact_ak"].stride(3),
+                g["fact_av"].stride(0), g["fact_av"].stride(1), g["fact_av"].stride(2), g["fact_av"].stride(3),
                 out_workspace.stride(0), out_workspace.stride(1),
-                N, H_q, anchors_K_rot.shape[1], num_key_value_groups, D_pad,
+                N, H_q, g["anchors_K"].shape[1], num_key_value_groups, D_pad,
                 R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
-                MAX_RESIDUAL=max_res_pad, MAX_FACT=max_fact,
-                HAS_RESIDUAL=has_res, HAS_FACT=has_fact
+                MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
+                HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"]
             )
             
             if num_chunks > 1:
@@ -2174,62 +2234,12 @@ def native_triton_sparse_attn_decode_combined(
             l_out = torch.empty((H_q,),   device=q.device, dtype=torch.float32)
             out_workspace, m_workspace, l_workspace = out, m_out, l_out
 
-        # ── RoPE-rotate anchors and V_K (identical to native_triton_sparse_attn_decode) ──
-        # Issue 1 fix: Pre-reconstruct stratified U before Triton dispatch (same as
-        # native_triton_sparse_attn_decode). Gives CUDA accuracy parity with MPS.
+        # ── Gather + rotate the N routed rows (identical semantics to
+        # native_triton_sparse_attn_decode; see F2 helper). Issue 1 fix included:
+        # stratified U is pre-reconstructed before dispatch for CUDA/MPS parity.
         pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
-
-        anchors_K_rot = pool_for_kernel.anchors_K
-        V_K_rot       = pool_for_kernel.V_K
-
-        if anchor_indices is not None and cos is not None and sin is not None:
-            indices = block_indices.long()
-            cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
-            sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-            anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
-
-            cos_anc = cos_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
-            sin_anc = sin_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.V_K.dtype).unsqueeze(1).unsqueeze(2)
-            cos_anc_2d = cos_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
-            sin_anc_2d = sin_flat[anchor_indices_clamped].to(dtype=pool_for_kernel.anchors_K.dtype).unsqueeze(1)
-
-            anchors_K_rot = pool_for_kernel.anchors_K.clone()
-            V_K_rot       = pool_for_kernel.V_K.clone()
-            V_K_rot[indices]       = pool_for_kernel.V_K[indices]       * cos_anc + rotate_half(pool_for_kernel.V_K[indices])       * sin_anc
-            anchors_K_rot[indices] = pool_for_kernel.anchors_K[indices] * cos_anc_2d + rotate_half(pool_for_kernel.anchors_K[indices]) * sin_anc_2d
-
-        # ── Residual / fact fields (identical to native_triton_sparse_attn_decode) ──
-        res_k   = getattr(pool, "residual_K_values",    None)
-        res_v   = getattr(pool, "residual_V_values",    None)
-        res_pos = getattr(pool, "residual_K_positions", None)
-        res_pos_v = getattr(pool, "residual_V_positions", None)
-        has_res = (res_k is not None and res_v is not None and
-                   res_pos is not None and res_pos_v is not None)
-        if has_res:
-            res_n       = (res_pos >= 0).sum(dim=-1).to(torch.int32)
-            max_res_pad = res_pos.shape[1]
-            if anchor_indices is not None and cos is not None and sin is not None:
-                res_k = res_k.clone()
-                res_k[indices] = res_k[indices] * cos_anc + rotate_half(res_k[indices]) * sin_anc
-        else:
-            res_k     = torch.empty((0, 0, 0, 0), device=q.device)
-            res_v     = torch.empty((0, 0, 0, 0), device=q.device)
-            res_pos   = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-            res_pos_v = torch.empty((0, 0), device=q.device, dtype=torch.int16)
-            res_n     = torch.zeros((pool_for_kernel.U.shape[0],), device=q.device, dtype=torch.int32)
-            max_res_pad = 1
-
-        fact_pos = getattr(pool, "fact_anchor_positions", None)
-        fact_ak  = getattr(pool, "fact_anchors_K",        None)
-        fact_av  = getattr(pool, "fact_anchors_V",        None)
-        has_fact = (fact_pos is not None and fact_ak is not None and fact_av is not None)
-        if has_fact:
-            max_fact = fact_pos.shape[1]
-        else:
-            fact_pos = torch.empty((0, 0),       device=q.device, dtype=torch.int16)
-            fact_ak  = torch.empty((0, 0, 0, 0), device=q.device)
-            fact_av  = torch.empty((0, 0, 0, 0), device=q.device)
-            max_fact = 1
+        g = _gather_routed_blocks_for_kernel(
+            pool_for_kernel, block_indices, anchor_indices, cos, sin)
 
         # ── Dense window tensors ──
         # Caller provides pre-RoPE-rotated dense_k/dense_v as [1, H_kv, L_dense, D].
@@ -2243,31 +2253,31 @@ def native_triton_sparse_attn_decode_combined(
 
         # ── Kernel launch ──
         _fused_decode_combined_kernel[grid](
-            q_sq, block_indices, anchors_K_rot, pool_for_kernel.anchors_V, V_K_rot, pool_for_kernel.V_V,
-            pool_for_kernel.U, pool_for_kernel.U_scale, pool_for_kernel.scales, pool_for_kernel.seq_lens,
-            res_k, res_v, res_pos, res_pos_v, res_n,
-            fact_pos, fact_ak, fact_av,
+            q_sq, g["idx"], g["anchors_K"], g["anchors_V"], g["V_K"], g["V_V"],
+            g["U"], g["U_scale"], g["scales"], g["seq_lens"],
+            g["res_k"], g["res_v"], g["res_pos"], g["res_pos_v"], g["res_n"],
+            g["fact_pos"], g["fact_ak"], g["fact_av"],
             dk_t, dv_t, L_dense,
             dk_t.stride(0), dk_t.stride(1), dk_t.stride(2),
             dv_t.stride(0), dv_t.stride(1), dv_t.stride(2),
             out_workspace, m_workspace, l_workspace,
             q_sq.stride(0), q_sq.stride(1),
-            anchors_K_rot.stride(0), anchors_K_rot.stride(1), anchors_K_rot.stride(2),
-            pool_for_kernel.anchors_V.stride(0), pool_for_kernel.anchors_V.stride(1), pool_for_kernel.anchors_V.stride(2),
-            V_K_rot.stride(0), V_K_rot.stride(1), V_K_rot.stride(2), V_K_rot.stride(3),
-            pool_for_kernel.V_V.stride(0), pool_for_kernel.V_V.stride(1), pool_for_kernel.V_V.stride(2), pool_for_kernel.V_V.stride(3),
-            pool_for_kernel.U.stride(0), pool_for_kernel.U.stride(1), pool_for_kernel.U.stride(2),
-            res_k.stride(0), res_k.stride(1), res_k.stride(2), res_k.stride(3),
-            res_v.stride(0), res_v.stride(1), res_v.stride(2), res_v.stride(3),
-            res_pos.stride(0), res_pos_v.stride(0),
-            fact_pos.stride(0),
-            fact_ak.stride(0), fact_ak.stride(1), fact_ak.stride(2), fact_ak.stride(3),
-            fact_av.stride(0), fact_av.stride(1), fact_av.stride(2), fact_av.stride(3),
+            g["anchors_K"].stride(0), g["anchors_K"].stride(1), g["anchors_K"].stride(2),
+            g["anchors_V"].stride(0), g["anchors_V"].stride(1), g["anchors_V"].stride(2),
+            g["V_K"].stride(0), g["V_K"].stride(1), g["V_K"].stride(2), g["V_K"].stride(3),
+            g["V_V"].stride(0), g["V_V"].stride(1), g["V_V"].stride(2), g["V_V"].stride(3),
+            g["U"].stride(0), g["U"].stride(1), g["U"].stride(2),
+            g["res_k"].stride(0), g["res_k"].stride(1), g["res_k"].stride(2), g["res_k"].stride(3),
+            g["res_v"].stride(0), g["res_v"].stride(1), g["res_v"].stride(2), g["res_v"].stride(3),
+            g["res_pos"].stride(0), g["res_pos_v"].stride(0),
+            g["fact_pos"].stride(0),
+            g["fact_ak"].stride(0), g["fact_ak"].stride(1), g["fact_ak"].stride(2), g["fact_ak"].stride(3),
+            g["fact_av"].stride(0), g["fact_av"].stride(1), g["fact_av"].stride(2), g["fact_av"].stride(3),
             out_workspace.stride(0), out_workspace.stride(1),
-            N, H_q, anchors_K_rot.shape[1], num_key_value_groups, D_pad,
+            N, H_q, g["anchors_K"].shape[1], num_key_value_groups, D_pad,
             R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
-            MAX_RESIDUAL=max_res_pad, MAX_FACT=max_fact,
-            HAS_RESIDUAL=has_res, HAS_FACT=has_fact,
+            MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
+            HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"],
             DENSE_PER_CHUNK=DENSE_PER_CHUNK,
         )
 

@@ -1357,6 +1357,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                     if _DIFFKV_HAS_METAL_ATTN and pool is not None:
                                         _scale = 1.0 / math.sqrt(head_dim)
+                                        # Binding grew 4 trailing dense-window args (dense_K/V +
+                                        # cos/sin_dense); this caller merges dense separately, so
+                                        # pass empties (numel==0 → impl skips the dense loop).
+                                        _ed = torch.empty(0, device=_Q_sq.device, dtype=_Q_sq.dtype)
                                         out_sparse, _ = _decode_attention_metal(
                                             _Q_sq.contiguous(),
                                             pool.U.contiguous(),
@@ -1381,6 +1385,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             _fact_pos.contiguous(),
                                             _fact_val_K.contiguous(),
                                             _fact_val_V.contiguous(),
+                                            _ed, _ed, _ed, _ed,
                                         )
                                     elif _DIFFKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
@@ -1456,6 +1461,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                     if _DIFFKV_HAS_METAL_ATTN and pool is not None:
                                         _scale = 1.0 / math.sqrt(head_dim)
+                                        # Same 4 trailing dense-window args as above: dense is
+                                        # merged separately here, pass empties to skip it.
+                                        _ed = torch.empty(0, device=_Q_sq.device, dtype=_Q_sq.dtype)
                                         out_sparse, lse_sparse = _decode_attention_metal(
                                             _Q_sq.contiguous(),
                                             pool.U.contiguous(),
@@ -1480,6 +1488,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             _fact_pos.contiguous(),
                                             _fact_val_K.contiguous(),
                                             _fact_val_V.contiguous(),
+                                            _ed, _ed, _ed, _ed,
                                         )
                                     elif _DIFFKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
