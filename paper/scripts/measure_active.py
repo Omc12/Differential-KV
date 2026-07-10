@@ -144,7 +144,7 @@ def run_cell(ctx, gen, prompt_text, model_id):
         from serving.hf_diffkv_wrapper import DiffKVHFWrapper
         cfg = {"quantization": None, "rank": 32, "block_size": 256,
                "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-        w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.bfloat16)
+        w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.float16)
         w.ensure_loaded()
         tok, mgr, model = w.tokenizer, w.manager, w.model
         dev = w.device
@@ -189,14 +189,14 @@ def run_cell(ctx, gen, prompt_text, model_id):
             quantization_config = _BnBConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_use_double_quant=True,
             )
 
         tok = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
             device_map="auto",
             quantization_config=quantization_config,
             trust_remote_code=True
