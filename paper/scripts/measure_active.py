@@ -34,6 +34,15 @@ ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
 BENCH = os.path.join(REPO, "benchmarks")
 NEEDLE = "OMEGA-7741-DELTA"
 
+# Add paths to sys.path so subprocesses can find everything (including compiled C++ modules)
+if ACTIVE not in sys.path:
+    sys.path.insert(0, ACTIVE)
+if BENCH not in sys.path:
+    sys.path.insert(0, BENCH)
+diffkv_core_path = os.path.join(ACTIVE, "native_core", "diffkv_core")
+if diffkv_core_path not in sys.path:
+    sys.path.insert(0, diffkv_core_path)
+
 
 import torch
 
@@ -124,7 +133,6 @@ def analytic_kv_bytes(mgr, seq_len):
 
 def run_cell(ctx, gen, prompt_text, model_id):
     import numpy as np, torch
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import os
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
@@ -133,6 +141,7 @@ def run_cell(ctx, gen, prompt_text, model_id):
     _reset_peak()
 
     if is_compressed:
+        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
         cfg = {"quantization": None, "rank": 32, "block_size": 256,
                "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
         w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.bfloat16)
@@ -291,7 +300,6 @@ def main():
     ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     args = ap.parse_args()
 
-    sys.path.insert(0, ACTIVE); sys.path.insert(0, BENCH)
     os.chdir(ACTIVE)
     from bench_common import build_niah_prompt, _load_ref_tokenizer  # noqa
     tok = _load_ref_tokenizer()
