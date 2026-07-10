@@ -194,14 +194,23 @@ def run_cell(ctx, gen, prompt_text, model_id):
             )
 
         tok = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            quantization_config=quantization_config,
-            trust_remote_code=True
-        )
-        dev = next(model.parameters()).device
+        if quantization_config is not None:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                device_map="cuda:0",
+                quantization_config=quantization_config,
+                trust_remote_code=True
+            )
+            dev = torch.device("cuda:0")
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                trust_remote_code=True
+            )
+            dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            model = model.to(dev)
         mgr = None
 
         ids = tok.encode(prompt_text)
