@@ -125,48 +125,89 @@ def analytic_kv_bytes(mgr, seq_len):
 def run_cell(ctx, gen, prompt_text, model_id):
     import numpy as np, torch
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from transformers import AutoTokenizer, AutoModelForCausalLM
     import os
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
 
+    is_compressed = os.environ.get("DIFFKV_COMPRESSED_DECODE", "1") != "0"
     _reset_peak()
-    cfg = {"quantization": None, "rank": 32, "block_size": 256,
-           "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-    w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.bfloat16)
-    w.ensure_loaded()
-    tok, mgr, model = w.tokenizer, w.manager, w.model
-    ids = tok.encode(prompt_text)
 
-    dev = w.device
+    if is_compressed:
+        cfg = {"quantization": None, "rank": 32, "block_size": 256,
+               "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
+        w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.bfloat16)
+        w.ensure_loaded()
+        tok, mgr, model = w.tokenizer, w.manager, w.model
+        dev = w.device
 
-    # warmup (compile kernels)
-    try:
+        ids = tok.encode(prompt_text)
+
+        # warmup (compile kernels)
+        try:
+            if not hasattr(w, "_session_token_ids"):
+                w._session_token_ids = {}
+            mgr.clear_session("warm"); w._session_token_ids["warm"] = []
+            mgr.init_session("warm", prefill_len=1)
+            mgr.register_prefill_tokens("warm", torch.tensor([ids[0]], dtype=torch.long, device=dev))
+            model._diffkv_session_ids = ["warm"]
+            _ = model(torch.tensor([[ids[0]]], device=dev), torch.tensor([[0]], device=dev)).logits[0, -1].float().cpu().numpy()
+            mgr.clear_session("warm")
+        except Exception:
+            pass
+
+        sid = "bench"; mgr.clear_session(sid)
         if not hasattr(w, "_session_token_ids"):
             w._session_token_ids = {}
-        mgr.clear_session("warm"); w._session_token_ids["warm"] = []
-        mgr.init_session("warm", prefill_len=1)
-        mgr.register_prefill_tokens("warm", torch.tensor([ids[0]], dtype=torch.long, device=dev))
-        model._diffkv_session_ids = ["warm"]
-        _ = model(torch.tensor([[ids[0]]], device=dev), torch.tensor([[0]], device=dev)).logits[0, -1].float().cpu().numpy()
-        mgr.clear_session("warm")
-    except Exception:
-        pass
+        w._session_token_ids[sid] = []
+        mgr.init_session(sid, prefill_len=len(ids))
+        mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=dev))
+        model._diffkv_session_ids = [sid]
 
-    sid = "bench"; mgr.clear_session(sid)
-    if not hasattr(w, "_session_token_ids"):
-        w._session_token_ids = {}
-    w._session_token_ids[sid] = []
-    mgr.init_session(sid, prefill_len=len(ids))
-    mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=dev))
-    model._diffkv_session_ids = [sid]
+        CH = 512; out = None
+        t0 = time.perf_counter()
+        for cs in range(0, len(ids), CH):
+            ch = ids[cs:cs + CH]
+            out = model(torch.tensor([ch], device=dev), torch.tensor([list(range(cs, cs + len(ch)))], device=dev))
+            mgr.compress_deferred_prefill_blocks(sid)
+        logits = out.logits[0, -1].float().cpu().numpy()
+        prefill_s = time.perf_counter() - t0
+    else:
+        # Load standard un-patched Transformers model
+        from transformers import BitsAndBytesConfig as _BnBConfig
+        quantization_config = None
+        _quant = os.environ.get("DIFFKV_QUANTIZATION")
+        if _quant == "nf4":
+            quantization_config = _BnBConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
 
-    CH = 512; out = None
-    t0 = time.perf_counter()
-    for cs in range(0, len(ids), CH):
-        ch = ids[cs:cs + CH]
-        out = model(torch.tensor([ch], device=dev), torch.tensor([list(range(cs, cs + len(ch)))], device=dev))
-        mgr.compress_deferred_prefill_blocks(sid)
-    logits = out.logits[0, -1].float().cpu().numpy()
-    prefill_s = time.perf_counter() - t0
+        tok = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            quantization_config=quantization_config,
+            trust_remote_code=True
+        )
+        dev = next(model.parameters()).device
+        mgr = None
+
+        ids = tok.encode(prompt_text)
+
+        # Standard PyTorch eager baseline
+        t0 = time.perf_counter()
+        past_key_values = None
+        CH = 512; out = None
+        for cs in range(0, len(ids), CH):
+            ch = ids[cs:cs + CH]
+            pos = torch.tensor([list(range(cs, cs + len(ch)))], device=dev)
+            out = model(torch.tensor([ch], device=dev), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+            past_key_values = out.past_key_values
+        logits = out.logits[0, -1].float().cpu().numpy()
+        prefill_s = time.perf_counter() - t0
 
     mx_peak_prefill = _get_peak_gb()
     # ── isolate decode-phase memory: reset peak at the boundary ──
@@ -174,15 +215,45 @@ def run_cell(ctx, gen, prompt_text, model_id):
 
     cur = len(ids); gen_ids = []
     t0 = time.perf_counter()
-    for _ in range(gen):
-        nid = int(np.argmax(logits)); gen_ids.append(nid)
-        mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=dev))
-        out = model(torch.tensor([[nid]], device=dev), torch.tensor([[cur]], device=dev))
-        logits = out.logits[0, -1].float().cpu().numpy(); cur += 1
+    if is_compressed:
+        for _ in range(gen):
+            nid = int(np.argmax(logits)); gen_ids.append(nid)
+            mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=dev))
+            out = model(torch.tensor([[nid]], device=dev), torch.tensor([[cur]], device=dev))
+            logits = out.logits[0, -1].float().cpu().numpy(); cur += 1
+    else:
+        for _ in range(gen):
+            nid = int(np.argmax(logits)); gen_ids.append(nid)
+            pos = torch.tensor([[cur]], device=dev)
+            out = model(torch.tensor([[nid]], device=dev), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+            past_key_values = out.past_key_values
+            logits = out.logits[0, -1].float().cpu().numpy(); cur += 1
     decode_s = time.perf_counter() - t0
 
     text = tok.decode(gen_ids)
-    kv = analytic_kv_bytes(mgr, len(ids))
+
+    if is_compressed:
+        kv = analytic_kv_bytes(mgr, len(ids))
+    else:
+        L = model.config.num_hidden_layers
+        Hkv = getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
+        d = model.config.hidden_size // model.config.num_attention_heads
+        fp16 = 2
+        kv_tok = Hkv * d * fp16 * 2
+        dense_full = L * len(ids) * kv_tok
+        kv = {
+            "per_block_bytes": 0,
+            "lowrank_block_bytes": 0,
+            "residual_block_bytes_max": 0,
+            "store_alloc_bytes": dense_full,
+            "store_used_bytes": dense_full,
+            "dense_full_bytes": dense_full,
+            "num_blocks_layer0": 0,
+            "dense_len_layer0": len(ids),
+            "res_tokens_layer0": 0,
+            "ratio_used_vs_dense": 1.0,
+        }
+
     res = {
         "prompt_tokens": len(ids), "gen_tokens": len(gen_ids),
         "prefill_s": prefill_s, "decode_s": decode_s,
@@ -194,9 +265,14 @@ def run_cell(ctx, gen, prompt_text, model_id):
         "output_preview": text[:200],
         "kv": kv,
     }
-    try: w.close()
-    except Exception: pass
-    del w, model, mgr; gc.collect()
+
+    if is_compressed:
+        try: w.close()
+        except Exception: pass
+        del w, model, mgr; gc.collect()
+    else:
+        del model; gc.collect()
+
     try:
         import mlx.core as mx
         mx.clear_cache()
