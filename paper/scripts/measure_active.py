@@ -122,7 +122,7 @@ def analytic_kv_bytes(mgr, seq_len):
     }
 
 
-def run_cell(ctx, gen, prompt_text):
+def run_cell(ctx, gen, prompt_text, model_id):
     import numpy as np, torch
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     import os
@@ -131,7 +131,7 @@ def run_cell(ctx, gen, prompt_text):
     _reset_peak()
     cfg = {"quantization": None, "rank": 32, "block_size": 256,
            "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-7B-Instruct", config=cfg, torch_dtype=torch.bfloat16)
+    w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.bfloat16)
     w.ensure_loaded()
     tok, mgr, model = w.tokenizer, w.manager, w.model
     ids = tok.encode(prompt_text)
@@ -212,6 +212,7 @@ def main():
     ap.add_argument("--gen", type=int, default=128)
     ap.add_argument("--out", required=True)
     ap.add_argument("--single", help="run ONE cell: mode,ctx (used by subprocess driver)")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     args = ap.parse_args()
 
     sys.path.insert(0, ACTIVE); sys.path.insert(0, BENCH)
@@ -223,12 +224,12 @@ def main():
         mode, ctx = args.single.split(","); ctx = int(ctx)
         os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if mode == "compressed" else "0"
         text, _ = build_niah_prompt(ctx, tok)
-        r = run_cell(ctx, args.gen, text)
+        r = run_cell(ctx, args.gen, text, args.model)
         r.update({"mode": mode, "ctx": ctx})
         print("__CELL__ " + json.dumps(r))
         return
 
-    model_id = "Qwen/Qwen2.5-7B-Instruct"
+    model_id = args.model
     print(f"\n=== Running benchmarks with model: {model_id} ===", flush=True)
 
     # driver: spawn one subprocess per cell for clean memory isolation
@@ -242,7 +243,7 @@ def main():
             env = os.environ.copy()
             cmd = [sys.executable, os.path.abspath(__file__),
                    "--single", f"{mode},{ctx}", "--gen", str(args.gen),
-                   "--ctx", str(ctx), "--out", out_path]
+                   "--ctx", str(ctx), "--out", out_path, "--model", model_id]
             p = subprocess.run(cmd, capture_output=True, text=True, env=env)
             line = [l for l in p.stdout.splitlines() if l.startswith("__CELL__")]
             if line:
