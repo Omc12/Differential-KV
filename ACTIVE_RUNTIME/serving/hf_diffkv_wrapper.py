@@ -445,7 +445,7 @@ class PyTorchDiffKVHFWrapper:
                 print("[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
 
         # ── 4-bit NF4 loading (BitsAndBytes) ──────────────────────────────────
-        _quant_type_early = config.get("quantization", os.environ.get("DIFFKV_QUANTIZATION", ""))
+        _quant_type_early = config.get("quantization") or os.environ.get("DIFFKV_QUANTIZATION", "")
         if (quantization_config is None
                 and _quant_type_early == "nf4"
                 and _has_cuda()):
@@ -508,7 +508,7 @@ class PyTorchDiffKVHFWrapper:
         if is_quantized:
             print("[DiffKV] Auto-detected already quantized model. Skipping torchao post-quantization.")
         else:
-            quant_type = config.get("quantization", os.environ.get("DIFFKV_QUANTIZATION"))
+            quant_type = config.get("quantization") or os.environ.get("DIFFKV_QUANTIZATION")
             if quant_type in ["int8", "int4"]:
                 if not _has_cuda() and not _has_mps():
                     print(f"[DiffKV] torchao {quant_type} quantization skipped on CPU.")
