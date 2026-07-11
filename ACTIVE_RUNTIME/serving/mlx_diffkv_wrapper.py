@@ -1248,9 +1248,18 @@ class MLXKVBlockManager:
         # blocks exist beyond the sinks, and (c) the TOTAL prompt will use compressed
         # decode (otherwise dense decode would need the full cache we stopped keeping).
         # Once engaged it is sticky for the session and the raw prompt cache is dropped.
-        # Accuracy risk mirrors sparse prefill (approx rows instead of exact routed raw
-        # rows) — default OFF until the NIAH/synthesis guardrails pass lego-ON.
-        self._lego_prefill = os.environ.get("DIFFKV_LEGO_PREFILL", "0") == "1"
+        # DEFAULT ON (2026-07-12): guardrails passed lego-ON (NIAH bench 4/4 4k-32k,
+        # depths 8/9 — same single knife-edge cell sparse prefill also has, multi-needle
+        # exact, synthesis identical to lego-OFF, relational/cross-item binding identical
+        # on/off). Studs-only far blocks (exact residual rows, no reconstruction — the
+        # accuracy risk this note used to warn about doesn't apply to the shipped
+        # default) plus fp16 SDPA (no fp32 casts) and a shared per-chunk mask keep the
+        # accuracy AND memory profile of the validated sparse-prefill path while cutting
+        # prefill peak further: measured -10%/-19%/-31% at 16k/32k/64k vs lego-OFF (which
+        # already beats dense at every size), with decode tps flat-to-better (less
+        # memory pressure carries into decode: 64k 21.4->25.5 tps). DIFFKV_LEGO_PREFILL=0
+        # restores the pre-lego sparse-prefill-only path.
+        self._lego_prefill = os.environ.get("DIFFKV_LEGO_PREFILL", "1") == "1"
         self._lego_min_ctx = int(os.environ.get("DIFFKV_LEGO_MIN_CTX", str(self._sp_min_ctx)))
         self._lego_kmin = int(os.environ.get("DIFFKV_LEGO_KMIN", str(self._sp_kmin)))
         self._lego_frac = float(os.environ.get("DIFFKV_LEGO_FRAC", str(self._sp_frac)))
