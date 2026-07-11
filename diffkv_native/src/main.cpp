@@ -412,9 +412,22 @@ struct ggml_cgraph * build_prefill_ctx_graph(
     std::vector<struct ggml_tensor *> * persistent_v_cache = nullptr,
     int pos_start = 0,
     // DIFFKV_SPARSE_PREFILL (HANDOFF §SPARSE-PREFILL): when non-empty, k_ctx/v_ctx attend only
-    // these absolute [start,len) ranges of the persistent cache (sink + recency window + current
+    // these [start,len) ranges of the persistent cache (sink + recency window + current
     // chunk) instead of the full [0, ctx_len) view — training-free StreamingLLM sparse prefill.
-    const std::vector<std::pair<int,int>>* sp_ranges = nullptr
+    // Offsets are BUFFER offsets: identical to absolute positions in the legacy full-length
+    // cache; ring-mapped by the caller under DIFFKV_LEGO_PREFILL.
+    const std::vector<std::pair<int,int>>* sp_ranges = nullptr,
+    // DIFFKV_LEGO_PREFILL: buffer spans to write the current chunk into (the ring write may
+    // wrap, splitting into <=2 spans; a straddle of the identity zone adds one more). Lengths
+    // sum to chunk_len. nullptr = legacy single write at pos_start.
+    const std::vector<std::pair<int,int>>* chunk_write_spans = nullptr,
+    // DIFFKV_LEGO_PREFILL: per-layer device tensors holding the routed FAR blocks' rows
+    // (rotated K / raw V), uploaded host-side each chunk from the raw activation mirrors.
+    // The first n_far rows are concatenated BEFORE the sp_ranges views (the caller's mask
+    // walks far rows first, then ranges).
+    std::vector<struct ggml_tensor *>* far_k_layers = nullptr,
+    std::vector<struct ggml_tensor *>* far_v_layers = nullptr,
+    int n_far = 0
 ) {
     const auto & config = model.get_config();
     // Use ggml_new_graph_custom with a larger node budget (32768) since SPARSE_PREFILL
@@ -479,27 +492,63 @@ struct ggml_cgraph * build_prefill_ctx_graph(
             struct ggml_tensor * pk = (*persistent_k_cache)[l];
             struct ggml_tensor * pv = (*persistent_v_cache)[l];
 
-            struct ggml_tensor * dest_k = ggml_view_3d(ctx, pk, 
-                head_dim, config.n_head_kv, k_rope_f16->ne[2],
-                pk->nb[1], pk->nb[2],
-                pos_start * pk->nb[2]);
-            struct ggml_tensor * dest_v = ggml_view_3d(ctx, pv,
-                head_dim, config.n_head_kv, v_reshaped_f16->ne[2],
-                pv->nb[1], pv->nb[2],
-                pos_start * pv->nb[2]);
+            if (chunk_write_spans && !chunk_write_spans->empty()) {
+                // LEGO ring write: the chunk lands at ring-mapped buffer offsets,
+                // possibly split across a wrap (<=3 spans). Views into the just-
+                // computed chunk tensors are cpy'd span by span.
+                int chunk_off = 0;
+                for (const auto & w : *chunk_write_spans) {
+                    struct ggml_tensor * src_k = ggml_view_3d(ctx, k_rope_f16,
+                        head_dim, config.n_head_kv, w.second,
+                        k_rope_f16->nb[1], k_rope_f16->nb[2],
+                        (size_t)chunk_off * k_rope_f16->nb[2]);
+                    struct ggml_tensor * src_v = ggml_view_3d(ctx, v_reshaped_f16,
+                        head_dim, config.n_head_kv, w.second,
+                        v_reshaped_f16->nb[1], v_reshaped_f16->nb[2],
+                        (size_t)chunk_off * v_reshaped_f16->nb[2]);
+                    struct ggml_tensor * dst_k = ggml_view_3d(ctx, pk,
+                        head_dim, config.n_head_kv, w.second,
+                        pk->nb[1], pk->nb[2], (size_t)w.first * pk->nb[2]);
+                    struct ggml_tensor * dst_v = ggml_view_3d(ctx, pv,
+                        head_dim, config.n_head_kv, w.second,
+                        pv->nb[1], pv->nb[2], (size_t)w.first * pv->nb[2]);
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, src_k, dst_k));
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, src_v, dst_v));
+                    chunk_off += w.second;
+                }
+            } else {
+                struct ggml_tensor * dest_k = ggml_view_3d(ctx, pk,
+                    head_dim, config.n_head_kv, k_rope_f16->ne[2],
+                    pk->nb[1], pk->nb[2],
+                    pos_start * pk->nb[2]);
+                struct ggml_tensor * dest_v = ggml_view_3d(ctx, pv,
+                    head_dim, config.n_head_kv, v_reshaped_f16->ne[2],
+                    pv->nb[1], pv->nb[2],
+                    pos_start * pv->nb[2]);
 
-            struct ggml_tensor * copy_k = ggml_cpy(ctx, k_rope_f16, dest_k);
-            struct ggml_tensor * copy_v = ggml_cpy(ctx, v_reshaped_f16, dest_v);
+                struct ggml_tensor * copy_k = ggml_cpy(ctx, k_rope_f16, dest_k);
+                struct ggml_tensor * copy_v = ggml_cpy(ctx, v_reshaped_f16, dest_v);
 
-            ggml_build_forward_expand(gf, copy_k);
-            ggml_build_forward_expand(gf, copy_v);
+                ggml_build_forward_expand(gf, copy_k);
+                ggml_build_forward_expand(gf, copy_v);
+            }
 
             if (sp_ranges && !sp_ranges->empty()) {
-                // Sparse prefill: attend only [sink | recency window | current chunk] — each a
-                // contiguous absolute range of the cache. The current chunk was just cpy'd into
-                // pk/pv at pos_start, so the window range (which covers it) reads it back.
+                // Sparse prefill: attend only [far blocks | sink | recency window | current
+                // chunk]. The far segment (lego mode) is a separate device tensor uploaded
+                // host-side; the remaining ranges are contiguous views of the cache. The
+                // current chunk was just cpy'd into pk/pv, so the window range (which covers
+                // it) reads it back.
                 struct ggml_tensor * kacc = nullptr;
                 struct ggml_tensor * vacc = nullptr;
+                if (far_k_layers && far_v_layers && n_far > 0) {
+                    struct ggml_tensor * fk = (*far_k_layers)[l];
+                    struct ggml_tensor * fv = (*far_v_layers)[l];
+                    kacc = ggml_view_3d(ctx, fk, head_dim, config.n_head_kv, n_far,
+                        fk->nb[1], fk->nb[2], 0);
+                    vacc = ggml_view_3d(ctx, fv, head_dim, config.n_head_kv, n_far,
+                        fv->nb[1], fv->nb[2], 0);
+                }
                 for (const auto & r : *sp_ranges) {
                     int rs = r.first, rl = r.second;
                     struct ggml_tensor * kv = ggml_view_3d(ctx, pk, head_dim, config.n_head_kv, rl,
@@ -2847,6 +2896,88 @@ int main(int argc, char ** argv) {
             if (!interactive) break; else continue;
         }
 
+        // ── DIFFKV_SPARSE_PREFILL knobs (hoisted above the cache allocation: the LEGO
+        // ring geometry below derives from them). See the block comment at the old
+        // location for the full design notes. ──
+        bool sp_enabled = true;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL")) { try { sp_enabled = (std::stoi(e) != 0); } catch (...) {} }
+        int sp_window = 1024, sp_sink_blocks = 1, sp_min = 2048;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_WINDOW")) { try { sp_window = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS")) { try { sp_sink_blocks = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MIN")) { try { sp_min = std::stoi(e); } catch (...) {} }
+        const int sp_sink_end = sp_sink_blocks * micro_block_size;
+        int sp_kmin = 8; float sp_frac = 0.05f; int sp_max_occ = 8;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_KMIN")) { try { sp_kmin = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_FRAC")) { try { sp_frac = std::stof(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MAX_OCC")) { try { sp_max_occ = std::stoi(e); } catch (...) {} }
+
+        // ── DIFFKV_LEGO_PREFILL (port of the MLX lego streaming prefill; see
+        // docs/NATIVE_LEGO_PORT_PLAN.md and the MLX flag notes). ──────────────────
+        // The persistent prefill KV cache is normally FULL-LENGTH [L] per layer
+        // (F16 K+V x n_layers — ~470 MB @16k on a 1.5B model) even though sparse
+        // prefill only ever attends [sinks | routed blocks | window | chunk].
+        // Lego mode ring-sizes it:
+        //   [0, base_end)            identity zone — sinks + everything below the
+        //                            sparse-engage point (pre-engage chunks attend
+        //                            the full dense context, so this stays resident)
+        //   [base_end, +wnd_cap)     modular ring for the recency window + chunk
+        // Routed blocks BELOW base_end are viewed in place (identity); routed blocks
+        // above it are no longer device-resident, so their rows are gathered from
+        // the raw host mirrors (k_activations rotated on the fly + v_activations —
+        // EXACT raw rows, the same bytes the legacy path attends) and uploaded into
+        // a per-layer FAR tensor each chunk. Attention math is unchanged; only where
+        // the bytes live changes.
+        // Requires sparse decode (dense decode re-reads the full-length rotated
+        // mirrors, not this cache — but only sparse decode frees them) and a fresh
+        // prompt (cached_len == 0). DIFFKV_LEGO_PREFILL=0 (default) = legacy.
+        bool lego_on = false;
+        if (const char* e = std::getenv("DIFFKV_LEGO_PREFILL")) {
+            try { lego_on = (std::stoi(e) != 0); } catch (...) {}
+        }
+        lego_on = lego_on && sp_enabled && decode_use_sparse && cached_len == 0;
+        int lego_base_end = 0, lego_wnd_cap = 0, lego_far_rows = 0;
+        int lego_buf_rows = L;
+        if (lego_on) {
+            lego_base_end = std::max(sp_min, sp_sink_end + sp_window);
+            // Round up to a chunk boundary so every pre-engage chunk (which attends
+            // the full dense context) lies wholly inside the identity zone.
+            lego_base_end = ((lego_base_end + chunk_size - 1) / chunk_size) * chunk_size;
+            // Window + current chunk, plus one chunk of slack so the ring never
+            // overwrites rows the current chunk still attends.
+            lego_wnd_cap = sp_window + 2 * chunk_size;
+            int lego_first_blk = (sp_sink_end + micro_block_size - 1) / micro_block_size;
+            int lego_nb_max = std::max(0, (L - sp_window) / micro_block_size - lego_first_blk);
+            int lego_k_max = std::max(sp_kmin, (int)std::ceil(sp_frac * lego_nb_max));
+            lego_far_rows = lego_k_max * micro_block_size;
+            lego_buf_rows = lego_base_end + lego_wnd_cap;
+            if (lego_buf_rows + lego_far_rows >= L) {
+                lego_on = false;   // short prompt — ring would not shrink anything
+                lego_buf_rows = L;
+                lego_far_rows = 0;
+            } else {
+                std::cerr << "[DiffKV] LEGO_PREFILL on: base_end=" << lego_base_end
+                          << " wnd_cap=" << lego_wnd_cap << " far_rows=" << lego_far_rows
+                          << " device rows " << lego_buf_rows << "+" << lego_far_rows
+                          << " vs full " << L << std::endl;
+            }
+        }
+        // Split an absolute [start, start+len) span into <=3 contiguous buffer spans
+        // (identity below base_end; modular ring above it).
+        auto lego_map_span = [&](int abs_start, int len, std::vector<std::pair<int,int>>& out) {
+            if (!lego_on) { out.push_back({abs_start, len}); return; }
+            if (abs_start < lego_base_end) {
+                int l0 = std::min(len, lego_base_end - abs_start);
+                out.push_back({abs_start, l0});
+                abs_start += l0; len -= l0;
+            }
+            while (len > 0) {
+                int off = lego_base_end + (abs_start - lego_base_end) % lego_wnd_cap;
+                int l0 = std::min(len, lego_base_end + lego_wnd_cap - off);
+                out.push_back({off, l0});
+                abs_start += l0; len -= l0;
+            }
+        };
+
         // Initialize persistent prefill cache context and tensors on Metal/GPU
         struct ggml_init_params cache_params = {
             /*.mem_size   =*/ 1 * 1024 * 1024, // 1MB metadata context
@@ -2856,9 +2987,15 @@ int main(int argc, char ** argv) {
         struct ggml_context * prefill_cache_ctx = ggml_init(cache_params);
         std::vector<struct ggml_tensor *> persistent_k_cache(n_layers, nullptr);
         std::vector<struct ggml_tensor *> persistent_v_cache(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> lego_far_k(n_layers, nullptr);
+        std::vector<struct ggml_tensor *> lego_far_v(n_layers, nullptr);
         for (int l = 0; l < n_layers; ++l) {
-            persistent_k_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, L);
-            persistent_v_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, L);
+            persistent_k_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, lego_buf_rows);
+            persistent_v_cache[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, lego_buf_rows);
+            if (lego_on && lego_far_rows > 0) {
+                lego_far_k[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, lego_far_rows);
+                lego_far_v[l] = ggml_new_tensor_3d(prefill_cache_ctx, GGML_TYPE_F16, head_dim, kv_heads, lego_far_rows);
+            }
         }
         struct ggml_backend_buffer * prefill_cache_buffer = ggml_backend_alloc_ctx_tensors(prefill_cache_ctx, backend);
 
@@ -2885,27 +3022,15 @@ int main(int argc, char ** argv) {
         // ── DIFFKV_SPARSE_PREFILL (HANDOFF §SPARSE-PREFILL) ──────────────────────────────
         // Training-free StreamingLLM sparse prefill: a chunk far enough in attends only
         // [sink blocks | recency window | current chunk] instead of the full prior context,
-        // dropping prefill attention from O(L^2) to O(L·(sink+window)). Default OFF. Single-needle
-        // retrieval is preserved (recall is a DECODE-time job); multi-fact needs routing (parked —
-        // see diffkv_on_the_fly_bugs.md FOLLOW-UP 4).
+        // dropping prefill attention from O(L^2) to O(L·(sink+window)). Single-needle
+        // retrieval is preserved (recall is a DECODE-time job).
         // DEFAULT ON (16th pass): flipped after 6-cell 6/6 + conformance PASS + margins unchanged
         // (12.6/14.3) + multi-needle no-regression vs dense, all with sparse-ON. Reversible:
         // DIFFKV_SPARSE_PREFILL=0. Only engages above sp_min tokens, no-op below.
-        bool sp_enabled = true;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL")) { try { sp_enabled = (std::stoi(e) != 0); } catch (...) {} }
-        int sp_window = 1024, sp_sink_blocks = 1, sp_min = 2048;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_WINDOW")) { try { sp_window = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS")) { try { sp_sink_blocks = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MIN")) { try { sp_min = std::stoi(e); } catch (...) {} }
-        const int sp_sink_end = sp_sink_blocks * micro_block_size;
-        // Stage B — lexical routing knobs. A chunk far enough in also attends the top-K prior
-        // blocks that share the most DISTINCTIVE (rare, count<=MAX_OCC) tokens with it. The whole
-        // prompt is known on the host, so this needs no query/graph/readback (the current chunk's
-        // K/Q aren't available pre-graph, but its token IDs are). K=0 recovers pure StreamingLLM.
-        int sp_kmin = 8; float sp_frac = 0.05f; int sp_max_occ = 8;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_KMIN")) { try { sp_kmin = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_FRAC")) { try { sp_frac = std::stof(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MAX_OCC")) { try { sp_max_occ = std::stoi(e); } catch (...) {} }
+        // Stage B — lexical routing: a chunk also attends the top-K prior blocks that share the
+        // most DISTINCTIVE (rare, count<=MAX_OCC) tokens with it; host-side, no readback.
+        // (Knobs are hoisted above the persistent-cache allocation — the LEGO ring geometry
+        // derives from them.)
         std::map<int32_t,int> sp_tok_count;                       // token id -> total count in prompt
         std::vector<std::unordered_set<int32_t>> sp_block_tokens; // per aligned block: unique token ids
         if (sp_enabled) {
@@ -2936,7 +3061,15 @@ int main(int argc, char ** argv) {
 
             // Sparse-prefill key ranges for THIS chunk (empty = dense full context). Engage only
             // once there is prunable history beyond the sink + window.
-            std::vector<std::pair<int,int>> sp_ranges;
+            // sp_ranges_abs — absolute [start,len) spans, drives the MASK.
+            // sp_ranges_buf — the same spans as BUFFER offsets, drives the graph views
+            //                 (identical to abs when lego is off; ring-mapped when on).
+            // lego_far_blocks — routed blocks that are no longer device-resident under
+            //                 lego (above the identity zone); gathered from the raw host
+            //                 mirrors and uploaded into the FAR tensors below.
+            std::vector<std::pair<int,int>> sp_ranges_abs;
+            std::vector<std::pair<int,int>> sp_ranges_buf;
+            std::vector<int> lego_far_blocks;
             bool use_sp = sp_enabled && pos_start >= sp_min && pos_start > sp_sink_end + sp_window;
             int sp_win_start = 0;
             if (use_sp) {
@@ -2970,13 +3103,83 @@ int main(int argc, char ** argv) {
                         std::sort(selected.begin(), selected.end());
                     }
                 }
-                sp_ranges.push_back({0, sp_sink_end});                                // attention sink
-                for (int b : selected) sp_ranges.push_back({b * micro_block_size, micro_block_size});
-                sp_ranges.push_back({sp_win_start, ctx_len - sp_win_start});          // window + current chunk
+                // Far blocks FIRST (they are concatenated before the ranges in the graph,
+                // so the mask walk must see them first — handled via lego_far_blocks).
+                if (lego_on) {
+                    for (int b : selected) {
+                        if ((b + 1) * micro_block_size > lego_base_end) lego_far_blocks.push_back(b);
+                    }
+                }
+                sp_ranges_abs.push_back({0, sp_sink_end});                            // attention sink
+                for (int b : selected) {
+                    if (lego_on && (b + 1) * micro_block_size > lego_base_end) continue; // far — via upload
+                    sp_ranges_abs.push_back({b * micro_block_size, micro_block_size});
+                }
+                sp_ranges_abs.push_back({sp_win_start, ctx_len - sp_win_start});      // window + current chunk
+                for (const auto & r : sp_ranges_abs) lego_map_span(r.first, r.second, sp_ranges_buf);
+            }
+            int lego_n_far = (int)lego_far_blocks.size() * micro_block_size;
+            if (lego_n_far > lego_far_rows) {
+                // Cap guard (routing K can exceed the sizing estimate only if knobs were
+                // changed mid-run — never in practice). Drop the lowest-priority extras.
+                lego_far_blocks.resize(lego_far_rows / micro_block_size);
+                lego_n_far = (int)lego_far_blocks.size() * micro_block_size;
             }
             int sp_klen = 0;
-            if (use_sp) { for (const auto& r : sp_ranges) sp_klen += r.second; }
+            if (use_sp) { sp_klen = lego_n_far; for (const auto& r : sp_ranges_abs) sp_klen += r.second; }
             else        { sp_klen = ctx_len; }
+
+            // Ring write spans for the current chunk (identity single-span when lego off).
+            std::vector<std::pair<int,int>> chunk_write_spans;
+            if (lego_on) lego_map_span(pos_start, chunk_len, chunk_write_spans);
+
+            // ── LEGO far gather: rotate the routed far blocks' raw K at their absolute
+            // positions (same math as the legacy per-chunk rotation) and copy raw V, then
+            // upload into the per-layer FAR tensors. These are EXACT raw rows — identical
+            // bytes to what the legacy path attends via device views; only the residence
+            // differs. Shared cos/sin tables across layers.
+            if (lego_on && lego_n_far > 0) {
+                const int half_dim = head_dim / 2;
+                std::vector<float> inv_freq(half_dim);
+                for (int i = 0; i < half_dim; ++i) {
+                    inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+                }
+                std::vector<float> far_cos((size_t)lego_n_far * half_dim);
+                std::vector<float> far_sin((size_t)lego_n_far * half_dim);
+                for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
+                    int base = lego_far_blocks[fi] * micro_block_size;
+                    for (int t = 0; t < micro_block_size; ++t) {
+                        float pos = (float)(base + t);
+                        size_t row = (size_t)(fi * micro_block_size + t);
+                        for (int i = 0; i < half_dim; ++i) {
+                            float theta = pos * inv_freq[i];
+                            far_cos[row * half_dim + i] = std::cos(theta);
+                            far_sin[row * half_dim + i] = std::sin(theta);
+                        }
+                    }
+                }
+                std::vector<ggml_fp16_t> far_stage_k((size_t)lego_n_far * F_test);
+                for (int l = 0; l < n_layers; ++l) {
+                    for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
+                        int base = lego_far_blocks[fi] * micro_block_size;
+                        apply_rope_neox_cpu_fast(
+                            k_activations[l].data() + (size_t)base * F_test,
+                            far_stage_k.data() + (size_t)fi * micro_block_size * F_test,
+                            far_cos.data() + (size_t)fi * micro_block_size * half_dim,
+                            far_sin.data() + (size_t)fi * micro_block_size * half_dim,
+                            micro_block_size, kv_heads, head_dim);
+                    }
+                    ggml_backend_tensor_set(lego_far_k[l], far_stage_k.data(), 0,
+                                            (size_t)lego_n_far * F_test * sizeof(ggml_fp16_t));
+                    for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
+                        int base = lego_far_blocks[fi] * micro_block_size;
+                        ggml_backend_tensor_set(lego_far_v[l],
+                                                v_activations[l].data() + (size_t)base * F_test,
+                                                (size_t)fi * micro_block_size * F_test * sizeof(ggml_fp16_t),
+                                                (size_t)micro_block_size * F_test * sizeof(ggml_fp16_t));
+                    }
+                }
+            }
 
             // Recreate the scheduler at each chunk iteration to prevent memory accumulation in the scheduler pool.
             {
@@ -3022,7 +3225,11 @@ int main(int argc, char ** argv) {
                 &persistent_k_cache,
                 &persistent_v_cache,
                 pos_start,
-                use_sp ? &sp_ranges : nullptr
+                use_sp ? &sp_ranges_buf : nullptr,
+                lego_on ? &chunk_write_spans : nullptr,
+                (lego_on && lego_n_far > 0) ? &lego_far_k : nullptr,
+                (lego_on && lego_n_far > 0) ? &lego_far_v : nullptr,
+                lego_n_far
             );
             if (is_last_chunk && prefill_logits) {
                 ggml_set_output(prefill_logits);
@@ -3044,13 +3251,14 @@ int main(int argc, char ** argv) {
             // Build the mask, matching the K/V layout the graph attends.
             std::vector<ggml_fp16_t> mask_host;
             if (use_sp) {
-                // Range-driven mask: walk sp_ranges in order (matches the ggml_concat key layout);
-                // each key slot's abs pos = range.start + offset. History keys (abs < pos_start)
-                // are always visible; current-chunk keys are causal.
+                // Range-driven mask, matching the graph's key layout: the FAR segment first
+                // (lego uploads; all history → always visible → stays zero), then the
+                // ABSOLUTE ranges in order. Each range slot's abs pos = range.start + offset.
+                // History keys (abs < pos_start) are always visible; current-chunk keys causal.
                 mask_host.assign((size_t)chunk_len * sp_klen, ggml_fp32_to_fp16(0.0f));
                 for (int qi = 0; qi < chunk_len; ++qi) {
-                    int slot = 0;
-                    for (const auto& r : sp_ranges) {
+                    int slot = lego_n_far;
+                    for (const auto& r : sp_ranges_abs) {
                         for (int j = 0; j < r.second; ++j, ++slot) {
                             int chunk_j = (r.first + j) - pos_start;   // >=0 only for current-chunk keys
                             if (chunk_j > qi) {
@@ -3192,7 +3400,7 @@ int main(int argc, char ** argv) {
         // rotated K cache (feeds ggml flash decode — the known-good path). For sampled
         // positions: rotate raw K at its position and diff vs the persistent cache.
         // Large diffs pinpoint which chunks' exports are corrupted (buffer reuse etc.).
-        if (std::getenv("DIFFKV_DBG_EXPORT_CHECK") && !is_warmup_run && persistent_k_cache[0]) {
+        if (std::getenv("DIFFKV_DBG_EXPORT_CHECK") && !is_warmup_run && persistent_k_cache[0] && !lego_on) {
             const int half_dim = head_dim / 2;
             const float freq_base = model.get_config().rope_freq_base;
             for (int pos = 64; pos < L; pos += 256) {

@@ -1,5 +1,36 @@
 # Native (C++) port plan: pool right-sizing + lego streaming prefill
 
+## STAGE 1 LANDED (2026-07-12) — correctness ✓, measured RAM win ✗ (see findings)
+
+`DIFFKV_LEGO_PREFILL=1` (native, default OFF) implements the ring:
+identity zone `[0, base_end=max(sp_min, sink+window))` + modular window zone
+(`wnd_cap = window + 2·chunk`) for the persistent device prefill cache; routed
+far blocks are gathered from the raw host mirrors (k_activations rotated
+on-the-fly + v_activations — EXACT raw rows) into per-layer FAR tensors and
+concatenated ahead of the range views. Gated on sparse decode + cached_len==0;
+auto-disables when the ring wouldn't shrink anything (short prompts).
+
+**Validated**: needle 3/3 (4k/8k/16k, 128-token decode, DIFFKV_ENGAGE_THRESHOLD=4096),
+prefill time within noise of baseline, engages as designed (32k: 6144+2048
+device rows vs 32865 — 81% device-cache reduction), zero stderr errors.
+
+**FINDING — the device ring does NOT move the process peak**: prefill-only
+phys_footprint A/B at 16k (4.085 vs 4.053 GB) and 32k (5.908 vs 5.916 GB) is
+flat despite the cache being ~750 MB smaller at 32k. The native peak is set by
+something else — candidates: full-length host mirrors (k_activations +
+v_activations, ~940 MB @32k), engine slot storage, ggml scheduler/galloc
+reserves, or Metal page-touch accounting. Decomposing this needs an
+allocation-profiling session (phase-tagged footprint sampling) BEFORE building
+stage 2 — do not assume mirror-ringing alone will surface the win either.
+
+## STAGE 2 (open): host mirrors + far gather from the engine
+
+Ring `k_activations`/`v_activations` the same way and source the far gather
+from the ENGINE instead (the cached_len decompression code at main.cpp ~2600
+shows the per-block engine→raw read incl. residency handling). Consumers to
+re-audit first: decode window seeding, SRL/factual builds, RECON_POS debug.
+Only worthwhile after the peak composition above is understood.
+
 Status: PLAN (2026-07-11). The MLX reference implementation landed in
 `ACTIVE_RUNTIME/serving/mlx_diffkv_wrapper.py` (`DIFFKV_LEGO_PREFILL`); this doc
 maps it onto `diffkv_native/src/main.cpp`. Read the MLX flag comments first —
