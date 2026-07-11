@@ -1,7 +1,7 @@
 [DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
 [DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 66576.25it/s]
-[DiffKV MLX] Loaded model in 1.32s
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 106936.93it/s]
+[DiffKV MLX] Loaded model in 1.11s
 
-__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 128, "prefill_s": 29.948619000031613, "decode_s": 4.505292957997881, "decode_tps": 28.41102702828059, "ttft_s": null, "mx_peak_gb": 2.074011992, "output_preview": "The secret passcode hidden in the document is **\"OMEGA-7741-DELTA**\". This code is a combination of alphanumeric characters that appears to be a unique identifier or reference number used by the docum", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 16384, "gen_target": 128, "worker_wall_s": 38.936377125035506}
+__BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 128, "prefill_s": 21.606002458999683, "decode_s": 4.179556290999699, "decode_tps": 30.625260455430777, "ttft_s": null, "mx_peak_gb": 2.1639903, "output_preview": "The secret passcode hidden in the document is **\"OMEGA-7741-DELTA**\". This code is a unique identifier used by the system to ensure the integrity and security of the document.\n\n### Consistency Models ", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 16384, "gen_target": 128, "worker_wall_s": 29.7106221250001}
