@@ -2176,12 +2176,26 @@ int main(int argc, char ** argv) {
             prompt = argv[2];
         }
 
-        // Unescape \\n sequences back to real newlines (encoded by gateway for single-line stdin or passed via argv)
+        // Unescape the single-line stdin encoding back to the original text. Every
+        // Python sender (serving cli.py, gateway, bench_worker, remote_cuda_benchmark)
+        // encodes with: prompt.replace("\\", "\\\\").replace("\n", "\\n") — so BOTH
+        // escapes must be decoded here, backslash first. The old loop only decoded
+        // \n and left \\ untouched, which corrupted any prompt containing real
+        // backslashes: every '\' the model saw was doubled, and text like the LaTeX
+        // '\nabla' (sent as '\\nabla') decoded to '\' + NEWLINE + 'abla' — hundreds
+        // of mid-text corruptions on a real research paper, i.e. the "12k paper →
+        // near-garbage output" bug (found 2026-07-11). NIAH never caught it because
+        // its filler contains no backslashes.
+        // (argv[2] prompts go through the same decoder, so backslashes there must be
+        // escaped the same way.)
         {
             std::string unescaped;
             unescaped.reserve(prompt.size());
             for (size_t ui = 0; ui < prompt.size(); ++ui) {
-                if (ui + 1 < prompt.size() && prompt[ui] == '\\' && prompt[ui+1] == 'n') {
+                if (ui + 1 < prompt.size() && prompt[ui] == '\\' && prompt[ui+1] == '\\') {
+                    unescaped += '\\';
+                    ++ui;
+                } else if (ui + 1 < prompt.size() && prompt[ui] == '\\' && prompt[ui+1] == 'n') {
                     unescaped += '\n';
                     ++ui;
                 } else {
