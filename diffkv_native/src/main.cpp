@@ -4070,6 +4070,12 @@ int main(int argc, char ** argv) {
         std::vector<std::vector<ggml_fp16_t>> host_win_v(decode_cache_on ? n_layers : 0);
         int cache_n_routed = -1;
         int cache_last_remat_version = -1;
+        // Routed candidate set used at the last materialization. The re-route interval (32) is
+        // longer than the remat interval (16), so periodic remats often reconstruct an IDENTICAL
+        // routed set → redundant CPU recon + serial upload (the dominant sparse-fill cost). We
+        // skip the materialize when this set and the pool version are both unchanged: the device
+        // cache already holds the exact same bytes, so recall is provably identical.
+        std::vector<int32_t> cache_last_materialized_cands;
 
         std::vector<int> dense_start_positions(n_layers, 0);
         std::vector<int> total_dense_tokens(n_layers, 0);
@@ -4334,6 +4340,10 @@ int main(int argc, char ** argv) {
         double sum_attn_ms = 0.0;
         double sum_sampling_ms = 0.0;
         double sum_other_ms = 0.0;
+        // Real fill/graph split (the old attn-vs-other split was a hardcoded base_graph_ms=15
+        // estimate that hid the sparse cache-fill cost inside the "graph" bucket entirely).
+        double sum_fill_ms = 0.0;       // CPU cache fill (materialize routed + rotate/upload window)
+        double sum_graph_gpu_ms = 0.0;  // pure GPU graph compute (flash + forward), fill excluded
         int profile_steps = 0;
 
         std::thread svd_thread;
@@ -4915,6 +4925,10 @@ int main(int argc, char ** argv) {
             step_sync_upload_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_sync_up_start).count();
 
             auto t_before_compute = std::chrono::high_resolution_clock::now();
+            // Marks the boundary between CPU cache-fill and the GPU graph compute. Defaults to
+            // t_before_compute so the dense path (no fill) reports fill_ms=0. Set just before
+            // ggml_backend_graph_compute below, after the fill block runs.
+            auto t_fill_end = t_before_compute;
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<8)
                 std::cerr << "[DBG_COMPUTE] step o=" << o << " decode_use_sparse=" << decode_use_sparse
                           << " current_pos=" << current_pos << " native_attn_on=" << native_attn_on << "\n"; }
@@ -4989,9 +5003,19 @@ int main(int argc, char ** argv) {
                 const bool t_fill = (std::getenv("DIFFKV_DBG_FILL_TIME") != nullptr);
                 auto t_m0 = std::chrono::high_resolution_clock::now();
 
-                // (1) (Re)materialize routed blocks every N tokens (or on reroute / pool growth).
+                // (1) (Re)materialize routed blocks only when the reconstruction would differ.
+                // The materialized bytes are a pure function of (routed candidate set, pool
+                // contents). filtered_candidates captures the routed set AND per-slot residency
+                // (non-CompressedResident slots are already folded to fallback_sid above), so a
+                // change in either shows up here; pool_ver captures in-place pool mutation. When
+                // both are unchanged the device cache is already correct → skip recon + upload.
+                // DIFFKV_DECODE_CACHE_ALWAYS_REMAT=1 restores the old unconditional periodic remat.
+                static const bool force_periodic_remat =
+                    (std::getenv("DIFFKV_DECODE_CACHE_ALWAYS_REMAT") != nullptr);
+                bool cands_changed = (filtered_candidates != cache_last_materialized_cands);
                 bool remat = (cache_n_routed < 0) || (pool_ver != cache_last_remat_version) ||
-                             (step % decode_cache_N == 0);
+                             cands_changed ||
+                             (force_periodic_remat && (step % decode_cache_N == 0));
                 if (remat) {
                     std::vector<int> nwritten(n_layers, 0);
                     dispatch_n(mat_threads, [&](int lo, int hi) {
@@ -5012,6 +5036,7 @@ int main(int argc, char ** argv) {
                     });
                     cache_n_routed = nwritten[0];
                     cache_last_remat_version = pool_ver;
+                    cache_last_materialized_cands = filtered_candidates;
                     for (int l = 0; l < n_layers; ++l) {
                         ggml_backend_tensor_set(cache_k[l], host_routed_k[l].data(), 0, (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t));
                         ggml_backend_tensor_set(cache_v[l], host_routed_v[l].data(), 0, (size_t)cache_routed_cap * F * sizeof(ggml_fp16_t));
@@ -5100,6 +5125,8 @@ int main(int argc, char ** argv) {
                               << " winonly=" << (int)winonly << " routedonly=" << (int)routedonly << "\n";
                 }
             }
+
+            t_fill_end = std::chrono::high_resolution_clock::now();  // CPU fill done; GPU graph next
 
             ggml_status decode_st = graph_is_native
                 ? ggml_backend_graph_compute(backend, decode_graph)
@@ -6493,15 +6520,23 @@ int main(int argc, char ** argv) {
             double step_recon_ms = t_ingest_dec_ms + t_dense_append_ms + step_recon_index_ms;
             
             double step_graph_total_ms = std::chrono::duration<double, std::milli>(t_after_compute - t_before_compute).count();
-            double base_graph_ms = 15.0; // non-attention layer compute
+            // Real split: CPU cache-fill (t_before_compute→t_fill_end) vs pure GPU graph
+            // (t_fill_end→t_after_compute). On the dense path t_fill_end==t_before_compute so
+            // step_fill_ms=0 and step_graph_gpu_ms==step_graph_total_ms.
+            double step_fill_ms = std::chrono::duration<double, std::milli>(t_fill_end - t_before_compute).count();
+            double step_graph_gpu_ms = std::chrono::duration<double, std::milli>(t_after_compute - t_fill_end).count();
+            // Back-compat attention/other estimate (still a heuristic — a single cgraph can't be
+            // split into flash-vs-forward without per-node timing; use step_graph_gpu_ms, not the
+            // old fill-polluted total). base_graph_ms ≈ non-attention layer compute for Qwen-1.5B.
+            double base_graph_ms = 15.0;
             double step_attn_ms = 0.0;
-            double step_graph_other_ms = step_graph_total_ms;
-            if (step_graph_total_ms > base_graph_ms) {
-                step_attn_ms = step_graph_total_ms - base_graph_ms;
+            double step_graph_other_ms = step_graph_gpu_ms;
+            if (step_graph_gpu_ms > base_graph_ms) {
+                step_attn_ms = step_graph_gpu_ms - base_graph_ms;
                 step_graph_other_ms = base_graph_ms;
             } else {
-                step_attn_ms = step_graph_total_ms * 0.40;
-                step_graph_other_ms = step_graph_total_ms * 0.60;
+                step_attn_ms = step_graph_gpu_ms * 0.40;
+                step_graph_other_ms = step_graph_gpu_ms * 0.60;
             }
             
             double retrieval_ms = std::chrono::duration<double, std::milli>(t_after_retrieval - t_before_retrieval).count();
@@ -6518,6 +6553,8 @@ int main(int argc, char ** argv) {
             sum_graph_other_ms += step_graph_other_ms;
             sum_sampling_ms += step_sample_ms;
             sum_other_ms += step_other_ms;
+            sum_fill_ms += step_fill_ms;
+            sum_graph_gpu_ms += step_graph_gpu_ms;
             profile_steps++;
         }
 
@@ -6536,16 +6573,19 @@ int main(int argc, char ** argv) {
         if (profile_steps > 0 && std::getenv("DIFFKV_PROFILE") && std::string(std::getenv("DIFFKV_PROFILE")) == "1") {
             double total_profile_ms = sum_sync_ms + sum_recon_ms + sum_attn_ms + sum_graph_other_ms + sum_sampling_ms + sum_other_ms;
             std::cerr << "\n==================================================\n";
-            std::cerr << "       DIFFKV NATIVE PROFILE BREAKDOWN (64K)\n";
+            std::cerr << "       DIFFKV NATIVE PROFILE BREAKDOWN\n";
             std::cerr << "       Averaged over " << profile_steps << " decode tokens\n";
             std::cerr << "==================================================\n";
-            std::cerr << "  Attention:                " << std::fixed << std::setprecision(2)
+            std::cerr << "  Attention (est.):         " << std::fixed << std::setprecision(2)
                       << (sum_attn_ms / profile_steps) << " ms (" << (sum_attn_ms / total_profile_ms * 100.0) << "%)\n";
             std::cerr << "  Reconstruction:           " << (sum_recon_ms / profile_steps) << " ms (" << (sum_recon_ms / total_profile_ms * 100.0) << "%)\n";
             std::cerr << "  Backend synchronization:  " << (sum_sync_ms / profile_steps) << " ms (" << (sum_sync_ms / total_profile_ms * 100.0) << "%)\n";
-            std::cerr << "  Graph execution (Other):  " << (sum_graph_other_ms / profile_steps) << " ms (" << (sum_graph_other_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "  Graph execution (est.):   " << (sum_graph_other_ms / profile_steps) << " ms (" << (sum_graph_other_ms / total_profile_ms * 100.0) << "%)\n";
             std::cerr << "  Sampling:                 " << (sum_sampling_ms / profile_steps) << " ms (" << (sum_sampling_ms / total_profile_ms * 100.0) << "%)\n";
             std::cerr << "  Other:                    " << (sum_other_ms / profile_steps) << " ms (" << (sum_other_ms / total_profile_ms * 100.0) << "%)\n";
+            std::cerr << "--------------------------------------------------\n";
+            std::cerr << "  [MEASURED] CPU cache fill:  " << (sum_fill_ms / profile_steps) << " ms\n";
+            std::cerr << "  [MEASURED] GPU graph:       " << (sum_graph_gpu_ms / profile_steps) << " ms  (flash+forward, fill excluded)\n";
             std::cerr << "--------------------------------------------------\n";
             std::cerr << "  Total Step Time:          " << (total_profile_ms / profile_steps) << " ms\n";
             std::cerr << "==================================================\n\n";
