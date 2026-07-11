@@ -83,6 +83,14 @@ static bool diffkv_detect_narrow_query(const std::string & prompt_text) {
     std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) { return std::tolower(c); });
 
     // Any broad signal vetoes narrow classification outright.
+    // NOTE (2026-07-12 fix): the multi-part markers "and"/";" used to live in
+    // this list and were matched against the WHOLE tail — but the tail of a
+    // real prompt is document text (the user turn embeds the document), and
+    // "and" appears in virtually any document, so EVERY document-bearing
+    // prompt was vetoed to attend-all: +1.2 GB decode-cache spike at 16k and
+    // 1.6x slower decode, even for plain single-fact retrieval. Profiled and
+    // root-caused 2026-07-12. Multi-part detection now applies to the QUESTION
+    // SENTENCE only (below).
     static const std::vector<std::string> broad_triggers = {
         "summarize", "summarise", "summary of", "tl;dr",
         "compare", "comparison", "contrast",
@@ -91,7 +99,7 @@ static bool diffkv_detect_narrow_query(const std::string & prompt_text) {
         "across the document", "across this document", "throughout the document",
         "throughout this", "what are all", "how many times", "each section",
         "every section", "overview of", "main points", "key points", "key themes",
-        "in general", "overall,", "and", ";",
+        "in general", "overall,",
     };
     for (const auto & trig : broad_triggers) {
         if (tail.find(trig) != std::string::npos) return false;
@@ -99,6 +107,18 @@ static bool diffkv_detect_narrow_query(const std::string & prompt_text) {
     // A direct single-fact question is exactly one '?'; 0 or 2+ isn't a clean
     // narrow-retrieval shape (0 = statement/instruction, 2+ = multi-part ask).
     if (std::count(tail.begin(), tail.end(), '?') != 1) return false;
+
+    // Multi-part markers, scoped to the question sentence (from the last
+    // sentence delimiter before the '?' to the '?').
+    size_t qpos = tail.rfind('?');
+    if (qpos != std::string::npos) {
+        size_t sstart = tail.find_last_of(".!\n", qpos == 0 ? 0 : qpos - 1);
+        std::string qsent = tail.substr(sstart == std::string::npos ? 0 : sstart + 1,
+                                        qpos - (sstart == std::string::npos ? 0 : sstart + 1) + 1);
+        if (qsent.find(" and ") != std::string::npos || qsent.find(';') != std::string::npos) {
+            return false;
+        }
+    }
 
     // Require an explicit narrow-retrieval phrasing too — "one question mark"
     // alone isn't enough signal to trust the fast path.
