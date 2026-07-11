@@ -417,7 +417,9 @@ struct ggml_cgraph * build_prefill_ctx_graph(
     const std::vector<std::pair<int,int>>* sp_ranges = nullptr
 ) {
     const auto & config = model.get_config();
-    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    // Use ggml_new_graph_custom with a larger node budget (32768) since SPARSE_PREFILL
+    // introduces multiple concatenations and views per layer, exceeding the 2048 default.
+    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 32768, false);
 
     // 1. Embedding lookup
     struct ggml_tensor * cur = ggml_get_rows(ctx, model.get_token_embd(), input_tokens);
