@@ -276,3 +276,23 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
   and the `res_k` I added). Rotate only the `[indices]` rows into small scratch. Perf only.
 - F6 scratch parameterization, F7 CUDA_CHECK, F8 sync reduction, F9 free-on-growth (`.cu`) —
   cannot compile-verify on Mac; propose applying together behind a single GPU build+memcheck pass.
+
+**C9 — LEGO prefill port (torch/CUDA path) — design notes, 2026-07-12**
+The MLX reference (`mlx_diffkv_wrapper.py`, `DIFFKV_LEGO_PREFILL`) and native C++
+stage 1 (`main.cpp`, same flag) both exist; see `docs/NATIVE_LEGO_PORT_PLAN.md`.
+Before porting to the torch path, note what the two implementations taught us:
+- The torch `KVRuntimeManager` already right-sizes its pool from a memory budget
+  (`dynamic_max_blocks`) — the MLX pool-growth fix has no CUDA equivalent to port.
+- The HF wrapper's prefill retains full `past_key_values` (raw) alongside the
+  DiffKV store — the same duplication MLX had. A lego port = windowed
+  `past_key_values` + far blocks materialised from the manager's pool (the
+  torch equivalent of `materialize_routed_kv` already exists in the decode fill).
+- NATIVE STAGE-1 LESSON (2026-07-12): shrinking ONE raw copy may not move the
+  process peak — decompose the peak (phase-tagged footprint sampling) BEFORE
+  building, or the port can be correctness-perfect and win nothing. On the Mac
+  native build the ring cut the device cache 81% at 32k with zero footprint
+  change (peak set by host mirrors / engine slots / allocator reserves).
+- CPU-runnable pre-checks stay green after the 2026-07-12 changes:
+  `test_triton_gather_equiv.py` PASS, `test_sparse_residual.py` 2 passed/1 GPU-skipped.
+- [ ] On the GPU box: profile prefill peak composition FIRST (torch.cuda.memory_summary
+      per phase), then port lego only if `past_key_values` actually dominates.
