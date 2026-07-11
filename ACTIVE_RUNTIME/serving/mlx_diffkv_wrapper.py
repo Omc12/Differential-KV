@@ -847,6 +847,34 @@ def _sparse_prefill_attend(
     return out
 
 
+_LEGO_MASK_CACHE: Dict[Tuple[int, int, Any], mx.array] = {}
+
+
+def _lego_uniform_mask(L: int, S_hist: int, dt) -> mx.array:
+    """[zeros(L,S_hist) | causal(L,L)] additive mask, cached.
+
+    In the uniform-studs case every attended history row is valid (anchors,
+    full residual sets, sinks, ring), so the mask depends only on (L, S_hist).
+    Building it per layer materialised ~12 MB of transients per layer per chunk
+    at 16k — cached, it is built once per (chunk shape) and shared by all 28
+    layers and by later chunks with the same shape."""
+    key = (L, S_hist, dt)
+    m = _LEGO_MASK_CACHE.get(key)
+    if m is None:
+        if len(_LEGO_MASK_CACHE) > 64:
+            _LEGO_MASK_CACHE.clear()
+        neg_inf = mx.array(-float("inf"), dtype=dt)
+        zero = mx.array(0.0, dtype=dt)
+        hist = mx.broadcast_to(zero, (L, S_hist))
+        ii = mx.arange(L).reshape(L, 1)
+        jj = mx.arange(L).reshape(1, L)
+        cur = mx.where(jj <= ii, zero, neg_inf)
+        m = mx.concatenate([hist, cur], axis=1).reshape(1, 1, L, S_hist + L)
+        mx.eval(m)
+        _LEGO_MASK_CACHE[key] = m
+    return m
+
+
 def _lego_prefill_attend(
     manager,
     session: Dict,
@@ -885,15 +913,20 @@ def _lego_prefill_attend(
     nb = session["num_blocks"][layer_idx]
     sb = min(manager._sp_sink_blocks, nb)
     R = manager.max_residual
-    # DIFFKV_LEGO_FP32 (default 1): run the chunk SDPA with fp32 K/V/mask —
-    # mirrors the fused-decode buffer dial (DIFFKV_DECODE_FUSED_FP32), whose fp32
-    # storage was required for the exact multi-needle gate. Measured 2026-07-11:
-    # fp32 does NOT by itself decide the knife-edge 16k/0.1 case flip (that cell
-    # is margin-limited either way — shadow parity shows lego is CLOSER to exact
-    # dense than the validated sparse prefill at every layer/chunk), but it keeps
-    # lego's score arithmetic in lockstep with the decode path at minor cost.
-    # =0 restores fp16 rows for speed.
-    _fdt = mx.float32 if os.environ.get("DIFFKV_LEGO_FP32", "1") != "0" else q_rot.dtype
+    # DIFFKV_LEGO_FP32 — SDPA dtype dial. Default now FOLLOWS THE ROW SOURCE:
+    # in studs mode (the default) every attended row is an EXACT fp16 tensor
+    # (sinks/ring/residuals/anchors are stored fp16), so fp16 SDPA is the same
+    # arithmetic the validated sparse prefill runs — and skipping the fp32 casts
+    # removes ~8 MB/layer/chunk of transient copies (the ring recast alone was
+    # ~224 MB per 512-token chunk across 28 layers — the "lego RAM spikes"
+    # report, 2026-07-12). Recon mode keeps fp32 (reconstruction noise sits on
+    # a knife-edge; mirrors DIFFKV_DECODE_FUSED_FP32). Explicit env overrides both.
+    _fp32_env = os.environ.get("DIFFKV_LEGO_FP32")
+    _use_recon = os.environ.get("DIFFKV_LEGO_RECON", "0") == "1"
+    if _fp32_env is not None:
+        _fdt = mx.float32 if _fp32_env != "0" else q_rot.dtype
+    else:
+        _fdt = mx.float32 if _use_recon else q_rot.dtype
     neg_inf = mx.array(-float("inf"), dtype=_fdt)
     zero = mx.array(0.0, dtype=_fdt)
 
@@ -909,7 +942,7 @@ def _lego_prefill_attend(
         sel_abs = mx.arange(sb, far_nb, dtype=mx.int32)
         K_route = nb_routable
     else:
-        if R > 0:
+        if R > 0 and manager._lego_router != "minmax":
             R_route = min(manager.route_residuals, R)
             rk_all = session["comp_res_k"][layer_idx][sb:far_nb, :R_route]  # [nb_r, R_route, H_kv, D]
             res_n_np = np.asarray(session["comp_res_n"][layer_idx][sb:far_nb], dtype=np.int32)
@@ -938,8 +971,7 @@ def _lego_prefill_attend(
     #   not shippable) · STUDS 10.0@8k/6.7@16k — Pareto-best, and beats the
     #   no-lego baseline at 16k (3.3). It is also ~3x fewer block rows per chunk.
     # =1 re-enables recon rows (pair with DIFFKV_LEGO_BIAS to counter their
-    # systematic under-scoring).
-    _use_recon = os.environ.get("DIFFKV_LEGO_RECON", "0") == "1"
+    # systematic under-scoring). (_use_recon is resolved above with the dtype dial.)
     ak_e = mx.expand_dims(ak, 2)
     av_e = mx.expand_dims(av, 2)
     if _use_recon:
@@ -1007,19 +1039,29 @@ def _lego_prefill_attend(
     v_all = mx.concatenate(parts_v, axis=1)
     S_hist = int(k_all.shape[1]) - L
 
-    hist_add = mx.concatenate(mask_parts)                        # [S_hist]
-    hist_mask = mx.broadcast_to(hist_add.reshape(1, S_hist), (L, S_hist))
-    ii = mx.arange(L).reshape(L, 1)
-    jj = mx.arange(L).reshape(1, L)
-    cur_mask = mx.where(jj <= ii, zero, neg_inf)                 # [L, L]
-    mask = mx.concatenate([hist_mask, cur_mask], axis=1)         # [L, S]
+    # Uniform-studs fast path: every history row valid → the mask is a pure
+    # function of (L, S_hist) and comes from the shared cache (built once per
+    # chunk shape instead of once per layer). Uniformity check is host-only:
+    # prefill blocks always carry full residual sets.
+    _res_n_list = session["comp_res_n"][layer_idx]
+    _studs_uniform = (not _use_recon) and (
+        R == 0 or min(_res_n_list[sb:far_nb]) == R)
+    if _studs_uniform:
+        mask = _lego_uniform_mask(L, S_hist, _fdt)
+    else:
+        hist_add = mx.concatenate(mask_parts)                    # [S_hist]
+        hist_mask = mx.broadcast_to(hist_add.reshape(1, S_hist), (L, S_hist))
+        ii = mx.arange(L).reshape(L, 1)
+        jj = mx.arange(L).reshape(1, L)
+        cur_mask = mx.where(jj <= ii, zero, neg_inf)             # [L, L]
+        mask = mx.concatenate([hist_mask, cur_mask], axis=1).reshape(1, 1, L, S_hist + L)
 
     out = mx.fast.scaled_dot_product_attention(
         q_rot.astype(_fdt),
         mx.expand_dims(k_all, 0),
         mx.expand_dims(v_all, 0),
         scale=scale,
-        mask=mask.reshape(1, 1, L, S_hist + L)).astype(q_rot.dtype)
+        mask=mask).astype(q_rot.dtype)
     if dbg:
         T = cur_start + L
         print(f"[LEGO] cur_start={cur_start} L={L} far_nb={far_nb}/{nb} K={K_route} "
@@ -1212,6 +1254,14 @@ class MLXKVBlockManager:
         self._lego_min_ctx = int(os.environ.get("DIFFKV_LEGO_MIN_CTX", str(self._sp_min_ctx)))
         self._lego_kmin = int(os.environ.get("DIFFKV_LEGO_KMIN", str(self._sp_kmin)))
         self._lego_frac = float(os.environ.get("DIFFKV_LEGO_FRAC", str(self._sp_frac)))
+        # Router for the far-block selection: "minmax" (DEFAULT) is the Quest key
+        # min/max bound over the stored block summaries — O(nb·D) per layer per
+        # chunk, the same signal the validated sparse prefill routed with;
+        # "residual" scores anchor + top-R exact residual keys per block
+        # (decode-grade, O(nb·R·D) — ~64x the routing cost). A/B 2026-07-12: for
+        # the POOLED chunk query the cheap bound is quality-identical (synthesis
+        # 10.0/6.7 both, NIAH bench + multi-needle + depths same profile).
+        self._lego_router = os.environ.get("DIFFKV_LEGO_ROUTER", "minmax").strip().lower()
         # Raw recency RING (tokens): the last RING tokens are kept raw (rolling,
         # block-aligned) and attended EXACTLY; lego pieces cover only the far field
         # beyond it. The ring is the prefill-memory dial: peak raw KV is O(RING),
@@ -2200,7 +2250,11 @@ class MLXKVBlockManager:
             bufs = session["lego_ring_bufs"] = {}
         st = bufs.get(layer_idx)
         if st is None:
-            cap = 2 * self._lego_ring + L
+            # ring + 4 chunks of slack: compaction every ~3 chunks. (Was 2*ring —
+            # ~74 MB more resident across 28 layers at ring 4096 for no benefit:
+            # MLX __setitem__ is functional, the RHS slice reads the pre-update
+            # array, so the self-copy below is safe even when src/dst overlap.)
+            cap = self._lego_ring + 4 * L
             st = bufs[layer_idx] = {
                 "k": mx.zeros((self.kv_heads, cap, self.head_dim), dtype=K.dtype),
                 "v": mx.zeros((self.kv_heads, cap, self.head_dim), dtype=V.dtype),
@@ -2211,15 +2265,15 @@ class MLXKVBlockManager:
             if span + L > st["cap"]:
                 # A later caller raised the chunk size past what the buffer was
                 # sized for — reallocate (rare; buffers are sized off chunk 0).
-                new_cap = 2 * self._lego_ring + L
+                new_cap = self._lego_ring + 4 * L
                 nk = mx.zeros((self.kv_heads, new_cap, self.head_dim), dtype=K.dtype)
                 nv = mx.zeros((self.kv_heads, new_cap, self.head_dim), dtype=V.dtype)
                 nk[:, :span, :] = st["k"][:, st["front"]:st["n"], :]
                 nv[:, :span, :] = st["v"][:, st["front"]:st["n"], :]
                 st["k"], st["v"], st["cap"] = nk, nv, new_cap
             else:
-                # Compact: move the live span to the buffer front. front >= span
-                # here (span <= ring < cap/2 <= front), so src/dst never overlap.
+                # Compact: move the live span to the buffer front (functional
+                # __setitem__ — overlap-safe, see the sizing note above).
                 st["k"][:, :span, :] = st["k"][:, st["front"]:st["n"], :]
                 st["v"][:, :span, :] = st["v"][:, st["front"]:st["n"], :]
             st["front"], st["n"] = 0, span
