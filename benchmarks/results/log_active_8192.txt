@@ -1,7 +1,7 @@
 [DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
 [DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 122960.05it/s]
-[DiffKV MLX] Loaded model in 0.97s
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 136277.03it/s]
+[DiffKV MLX] Loaded model in 1.28s
 
-__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 12.981580291998398, "decode_s": 10.861832292001054, "decode_tps": 11.784383753951223, "ttft_s": null, "mx_peak_gb": 1.961510556, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, the **consistency** of data is crucial for maintaining the i", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 27.598300958998152}
+__BENCH_RESULT__ {"prompt_tokens": 8192, "gen_tokens": 128, "prefill_s": 13.26819216599688, "decode_s": 4.2272666249773465, "decode_tps": 30.279613602722762, "ttft_s": null, "mx_peak_gb": 1.900874526, "output_preview": "The secret passcode hidden in the document is **\"OMEGA-7741-DELTA**\".\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, consistency is a critical aspect of ensuring data integrit", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 8192, "gen_target": 128, "worker_wall_s": 21.59760154201649}

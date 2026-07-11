@@ -38,6 +38,10 @@ def build_synthetic_session(mgr: MLXKVBlockManager, nb: int, dense_len: int, see
     sid = f"parity_{nb}_{dense_len}_{seed}"
     mgr.sessions.pop(sid, None)
     sess = mgr._get_or_create_session(sid)
+    # The hint-less fallback session now starts SMALL (16 blocks) and relies on
+    # geometric growth; this test writes `nb` blocks directly, so request the
+    # capacity through the same growth path production uses.
+    mgr._ensure_block_capacity(sess, nb)
     l = 0
     H, D, bs, R_ = mgr.kv_heads, mgr.head_dim, mgr.block_size, mgr.max_residual
     S_comp = bs - 1

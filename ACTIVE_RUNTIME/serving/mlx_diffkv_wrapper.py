@@ -847,6 +847,187 @@ def _sparse_prefill_attend(
     return out
 
 
+def _lego_prefill_attend(
+    manager,
+    session: Dict,
+    layer_idx: int,
+    q_rot: mx.array,       # [1, H_q, L, D]  rotated queries for the current chunk
+    k_rot: mx.array,       # [1, H_kv, L, D] rotated keys of the current chunk
+    v_cur: mx.array,       # [1, H_kv, L, D]
+    cur_start: int,        # absolute position of the first query in this chunk
+    scale: float,
+    gpk: int,
+    dbg: bool = False,
+):
+    """LEGO streaming-prefill attention (DIFFKV_LEGO_PREFILL — see the flag note
+    in MLXKVBlockManager.__init__).
+
+    Attends the current chunk against
+        [ raw sinks | top-K routed COMPRESSED far blocks (materialised) | raw recency RING | self(causal) ]
+    built entirely from the DiffKV session state — the raw prompt KV cache is
+    never consulted, so prefill peak raw KV is O(sinks + ring + chunk), not O(T).
+    The ring (last ~DIFFKV_LEGO_RING tokens, raw and exact) is the chunk's local
+    neighborhood; lego pieces cover only whole blocks below the ring.
+
+    Block routing uses the stored per-block summaries (anchor + exact residual
+    keys — the same residual router decode uses), and materialisation is the same
+    math as the decode route step: recon[t>0] = anchor + scale·(U[t]·V), position 0
+    = anchor, exact residual rows appended and their lossy low-rank twins masked.
+    Unlike decode, no sparse bias is applied (prefill hidden states should stay as
+    close to the exact computation as possible) and invalid rows are masked with
+    -inf rather than compacted (a per-layer host sync per chunk isn't worth ~30%
+    fewer key rows at chunk granularity). Returns [1, H_q, L, D].
+    """
+    _, H_q, L, D = q_rot.shape
+    H_kv = manager.kv_heads
+    bs = manager.block_size
+    S_comp = bs - 1
+    nb = session["num_blocks"][layer_idx]
+    sb = min(manager._sp_sink_blocks, nb)
+    R = manager.max_residual
+    # DIFFKV_LEGO_FP32 (default 1): run the chunk SDPA with fp32 K/V/mask —
+    # mirrors the fused-decode buffer dial (DIFFKV_DECODE_FUSED_FP32), whose fp32
+    # storage was required for the exact multi-needle gate. Measured 2026-07-11:
+    # fp32 does NOT by itself decide the knife-edge 16k/0.1 case flip (that cell
+    # is margin-limited either way — shadow parity shows lego is CLOSER to exact
+    # dense than the validated sparse prefill at every layer/chunk), but it keeps
+    # lego's score arithmetic in lockstep with the decode path at minor cost.
+    # =0 restores fp16 rows for speed.
+    _fdt = mx.float32 if os.environ.get("DIFFKV_LEGO_FP32", "1") != "0" else q_rot.dtype
+    neg_inf = mx.array(-float("inf"), dtype=_fdt)
+    zero = mx.array(0.0, dtype=_fdt)
+
+    # ── 1. Route the compressed FAR blocks (whole blocks below the ring) ────
+    ring_start = session["lego_ring_start"][layer_idx]      # block-aligned, absolute
+    far_nb = min(nb, ring_start // bs)
+    nb_routable = far_nb - sb
+    q_rep = mx.mean(q_rot[0], axis=1)                       # [H_q, D]
+    ak_all = session["comp_anc_k"][layer_idx][sb:far_nb]    # [nb_r, H_kv, D]
+    K_route = min(nb_routable, max(manager._lego_kmin,
+                                   int(math.ceil(manager._lego_frac * nb_routable))))
+    if K_route >= nb_routable:
+        sel_abs = mx.arange(sb, far_nb, dtype=mx.int32)
+        K_route = nb_routable
+    else:
+        if R > 0:
+            R_route = min(manager.route_residuals, R)
+            rk_all = session["comp_res_k"][layer_idx][sb:far_nb, :R_route]  # [nb_r, R_route, H_kv, D]
+            res_n_np = np.asarray(session["comp_res_n"][layer_idx][sb:far_nb], dtype=np.int32)
+            rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(
+                mx.minimum(mx.array(res_n_np), R_route), 1)
+            rel = _block_relevance_residual(q_rep, ak_all, rk_all, rvld, scale, gpk)
+        else:
+            rel = _block_relevance_minmax(
+                q_rep,
+                session["comp_min_k"][layer_idx][sb:far_nb],
+                session["comp_max_k"][layer_idx][sb:far_nb],
+                scale, gpk)
+        sel_abs = (mx.argpartition(-rel, K_route)[:K_route] + sb).astype(mx.int32)
+
+    # ── 2. Materialise the selected blocks (same math as the decode route) ──
+    ak  = mx.take(session["comp_anc_k"][layer_idx], sel_abs, 0)   # [K, H_kv, D]
+    av  = mx.take(session["comp_anc_v"][layer_idx], sel_abs, 0)
+
+    # DIFFKV_LEGO_RECON (default 0 — studs-only): whether routed blocks contribute
+    # their RECONSTRUCTED low-rank rows to the chunk attention, or only their
+    # exact rows (anchor + residual "studs"). Studs-only is pure omission — zero
+    # reconstruction noise; the residuals are each block's highest-error (most
+    # distinctive) half, so what is omitted is exactly the well-approximated
+    # low-information half. A/B on real-paper synthesis (2026-07-11, Qwen-1.5B):
+    #   recon+bias0 3.3@8k/6.7@16k · recon+bias2 10.0@8k/0.0@16k (ctx-dependent,
+    #   not shippable) · STUDS 10.0@8k/6.7@16k — Pareto-best, and beats the
+    #   no-lego baseline at 16k (3.3). It is also ~3x fewer block rows per chunk.
+    # =1 re-enables recon rows (pair with DIFFKV_LEGO_BIAS to counter their
+    # systematic under-scoring).
+    _use_recon = os.environ.get("DIFFKV_LEGO_RECON", "0") == "1"
+    ak_e = mx.expand_dims(ak, 2)
+    av_e = mx.expand_dims(av, 2)
+    if _use_recon:
+        U   = mx.take(session["comp_U"][layer_idx],     sel_abs, 0)   # [K, S_comp, rank]
+        VK  = mx.take(session["comp_VK"][layer_idx],    sel_abs, 0)
+        VV  = mx.take(session["comp_VV"][layer_idx],    sel_abs, 0)
+        sc  = mx.take(session["comp_scale"][layer_idx], sel_abs, 0)   # [K] fp32
+        csl = mx.take(session["comp_seq_len"][layer_idx], sel_abs, 0) # [K]
+        rmask = mx.take(session["comp_res_mask"][layer_idx], sel_abs, 0)  # [K, S_comp]
+        delta_k = mx.einsum("bsr,bhrd->bhsd", U, VK) * sc.reshape(K_route, 1, 1, 1)
+        delta_v = mx.einsum("bsr,bhrd->bhsd", U, VV) * sc.reshape(K_route, 1, 1, 1)
+        blk_k = mx.concatenate([ak_e, ak_e + delta_k], axis=2) \
+                  .transpose(1, 0, 2, 3).reshape(H_kv, K_route * bs, D).astype(_fdt)
+        blk_v = mx.concatenate([av_e, av_e + delta_v], axis=2) \
+                  .transpose(1, 0, 2, 3).reshape(H_kv, K_route * bs, D).astype(_fdt)
+
+        # Validity: padded positions of partial blocks + the low-rank twins of exact
+        # residual rows are masked out (their exact copies are the residual rows below).
+        pos = mx.arange(S_comp).reshape(1, S_comp)
+        recon_valid = (pos < csl.reshape(K_route, 1)) & (~rmask)
+        blk_valid = mx.concatenate(
+            [mx.ones((K_route, 1), dtype=mx.bool_), recon_valid], axis=1).reshape(K_route * bs)
+        # DIFFKV_LEGO_BIAS — additive score bias (nats) on the RECON block rows only
+        # (not residuals, not sinks/ring), the same correction the decode paths apply
+        # (see DIFFKV_SPARSE_BIAS at module top): low-rank reconstruction
+        # systematically UNDER-scores, so without it chunks under-attend the far
+        # field relative to the exact ring. Default 0.0 (no correction).
+        try:
+            _lego_bias = float(os.environ.get("DIFFKV_LEGO_BIAS", "0"))
+        except ValueError:
+            _lego_bias = 0.0
+        blk_add = mx.where(blk_valid, mx.array(_lego_bias, dtype=_fdt), neg_inf)  # [K*bs]
+    else:
+        # Anchors only; the blocks' exact residual rows are appended below.
+        blk_k = ak_e.transpose(1, 0, 2, 3).reshape(H_kv, K_route, D).astype(_fdt)
+        blk_v = av_e.transpose(1, 0, 2, 3).reshape(H_kv, K_route, D).astype(_fdt)
+        blk_add = mx.broadcast_to(zero, (K_route,))
+
+    parts_k = [session["lego_sink_k"][layer_idx].astype(_fdt), blk_k]
+    parts_v = [session["lego_sink_v"][layer_idx].astype(_fdt), blk_v]
+    S0 = int(parts_k[0].shape[1])
+    mask_parts = [mx.broadcast_to(zero, (S0,)), blk_add]
+
+    if R > 0:
+        rk = mx.take(session["comp_res_k"][layer_idx], sel_abs, 0)   # [K, R, H_kv, D]
+        rv = mx.take(session["comp_res_v"][layer_idx], sel_abs, 0)
+        res_n_all = mx.array(np.asarray(session["comp_res_n"][layer_idx], dtype=np.int32))
+        res_n_sel = mx.take(res_n_all, sel_abs)
+        res_valid = (mx.arange(R).reshape(1, R) < res_n_sel.reshape(K_route, 1)).reshape(K_route * R)
+        parts_k.append(rk.transpose(2, 0, 1, 3).reshape(H_kv, K_route * R, D).astype(_fdt))
+        parts_v.append(rv.transpose(2, 0, 1, 3).reshape(H_kv, K_route * R, D).astype(_fdt))
+        mask_parts.append(mx.where(res_valid, zero, neg_inf))
+
+    # ── 3. Raw recency ring (exact local neighborhood) + current chunk ──────
+    ring_k = session["lego_ring_k"][layer_idx]              # covers [ring_start, cur_start)
+    n_ring = int(ring_k.shape[1])
+    if n_ring > 0:
+        parts_k.append(ring_k.astype(_fdt))
+        parts_v.append(session["lego_ring_v"][layer_idx].astype(_fdt))
+        mask_parts.append(mx.broadcast_to(zero, (n_ring,)))
+    parts_k.append(k_rot[0].astype(_fdt))
+    parts_v.append(v_cur[0].astype(_fdt))
+
+    k_all = mx.concatenate(parts_k, axis=1)                      # [H_kv, S, D]
+    v_all = mx.concatenate(parts_v, axis=1)
+    S_hist = int(k_all.shape[1]) - L
+
+    hist_add = mx.concatenate(mask_parts)                        # [S_hist]
+    hist_mask = mx.broadcast_to(hist_add.reshape(1, S_hist), (L, S_hist))
+    ii = mx.arange(L).reshape(L, 1)
+    jj = mx.arange(L).reshape(1, L)
+    cur_mask = mx.where(jj <= ii, zero, neg_inf)                 # [L, L]
+    mask = mx.concatenate([hist_mask, cur_mask], axis=1)         # [L, S]
+
+    out = mx.fast.scaled_dot_product_attention(
+        q_rot.astype(_fdt),
+        mx.expand_dims(k_all, 0),
+        mx.expand_dims(v_all, 0),
+        scale=scale,
+        mask=mask.reshape(1, 1, L, S_hist + L)).astype(q_rot.dtype)
+    if dbg:
+        T = cur_start + L
+        print(f"[LEGO] cur_start={cur_start} L={L} far_nb={far_nb}/{nb} K={K_route} "
+              f"ring={n_ring} rows={S_hist + L} (raw would be {T}; "
+              f"{100.0 * (S_hist + L) / max(1, T):.0f}%)", flush=True)
+    return out
+
+
 class DummyMLXPool:
     def __init__(self, manager):
         self.manager = manager
@@ -1007,6 +1188,43 @@ class MLXKVBlockManager:
         self._sp_kmin = int(os.environ.get("DIFFKV_SPARSE_PREFILL_KMIN", "8"))
         self._sp_frac = float(os.environ.get("DIFFKV_SPARSE_PREFILL_FRAC", "0.05"))
         self._sp_dbg = os.environ.get("DIFFKV_SPARSE_PREFILL_DBG", "0") == "1"
+
+        # ── DIFFKV_LEGO_PREFILL=1 — streaming "lego-block" prefill (memory follow-up to
+        # sparse prefill; see the note above about dropping compressed blocks' raw KV). ──
+        # Sparse prefill prunes COMPUTE but still retains the full raw prompt KV cache
+        # (routing reads raw keys), so prefill peak memory stays O(T) — and DiffKV holds
+        # the compressed pool ON TOP of it, which is why prefill peak exceeds dense.
+        # Lego mode instead builds the context like lego bricks: each finished block is
+        # compressed on the fly (the existing per-chunk flush) into a self-contained
+        # piece [anchor + low-rank deltas + exact residual "studs" + key min/max summary],
+        # its raw KV is dropped, and every NEW chunk connects only to the top-K pieces
+        # whose summaries score highest for its pooled query (the same residual router
+        # decode uses). Chunk attention runs over
+        #   [raw sink tokens | materialised top-K compressed blocks | raw recency RING | self(causal)]
+        # so raw KV is bounded by O(sinks + ring + chunk) instead of O(T).
+        # Engages only when (a) the chunk start is past LEGO_MIN_CTX, (b) compressed
+        # blocks exist beyond the sinks, and (c) the TOTAL prompt will use compressed
+        # decode (otherwise dense decode would need the full cache we stopped keeping).
+        # Once engaged it is sticky for the session and the raw prompt cache is dropped.
+        # Accuracy risk mirrors sparse prefill (approx rows instead of exact routed raw
+        # rows) — default OFF until the NIAH/synthesis guardrails pass lego-ON.
+        self._lego_prefill = os.environ.get("DIFFKV_LEGO_PREFILL", "0") == "1"
+        self._lego_min_ctx = int(os.environ.get("DIFFKV_LEGO_MIN_CTX", str(self._sp_min_ctx)))
+        self._lego_kmin = int(os.environ.get("DIFFKV_LEGO_KMIN", str(self._sp_kmin)))
+        self._lego_frac = float(os.environ.get("DIFFKV_LEGO_FRAC", str(self._sp_frac)))
+        # Raw recency RING (tokens): the last RING tokens are kept raw (rolling,
+        # block-aligned) and attended EXACTLY; lego pieces cover only the far field
+        # beyond it. The ring is the prefill-memory dial: peak raw KV is O(RING),
+        # not O(T). Fidelity note (2026-07-11): shadow parity shows lego attention
+        # is CLOSER to exact dense than the validated sparse prefill at every
+        # layer/chunk (16k, layer 27 final chunk: cos 0.9953 vs 0.9904), with or
+        # without the ring dial — one knife-edge NIAH cell (16k/0.1) case-flips
+        # ('DELTA'→'Delta', content correct) under any variant of this path; it is
+        # margin-limited, not a content bug.
+        _ring = int(os.environ.get("DIFFKV_LEGO_RING", "4096"))
+        # Ring must cover at least the flush tail (recency_window + block) so the
+        # exact region is contiguous up to the current chunk.
+        self._lego_ring = max(_ring, self.recency_window + 2 * self.block_size)
 
         self.sessions = {}
         self.active_session_ids = ["default"]
@@ -1186,6 +1404,43 @@ class MLXKVBlockManager:
             needed_blocks = math.ceil(expected_total_len / self.block_size)
             sess_max_blocks = min(self.max_blocks, max(1, needed_blocks))
             self.sessions[session_id] = self._create_empty_session(sess_max_blocks)
+
+    def _ensure_block_capacity(self, session: Dict, need_blocks: int) -> int:
+        """Grow the per-layer comp_* pools so the session can hold `need_blocks`
+        compressed blocks. Sessions are created right-sized from the prefill-length
+        hint; growth covers hint misses (generations longer than the hint, reused
+        sessions) that previously either clamped the flush — silently dropping
+        compression — or evicted the oldest block. Doubles capacity (amortized O(1)
+        copies), capped at the global self.max_blocks. Returns the new capacity."""
+        cur = session.get("max_blocks", self.max_blocks)
+        if need_blocks <= cur or cur >= self.max_blocks:
+            return cur
+        new_cap = min(self.max_blocks, max(need_blocks, cur * 2))
+        grow = new_cap - cur
+        f16 = mx.float16
+        grown_tails = {
+            "comp_U":       ((self.block_size - 1, self.rank), f16),
+            "comp_VK":      ((self.kv_heads, self.rank, self.head_dim), f16),
+            "comp_VV":      ((self.kv_heads, self.rank, self.head_dim), f16),
+            "comp_anc_k":   ((self.kv_heads, self.head_dim), f16),
+            "comp_anc_v":   ((self.kv_heads, self.head_dim), f16),
+            "comp_min_k":   ((self.kv_heads, self.head_dim), f16),
+            "comp_max_k":   ((self.kv_heads, self.head_dim), f16),
+            "comp_scale":   ((), mx.float32),
+            "comp_seq_len": ((), mx.int32),
+            "comp_res_k":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
+            "comp_res_v":   ((self.max_residual, self.kv_heads, self.head_dim), f16),
+            "comp_res_mask": ((self.block_size - 1,), mx.bool_),
+        }
+        for l in range(self.num_layers):
+            for key, (tail, dt) in grown_tails.items():
+                if key not in session:
+                    continue
+                pad = mx.zeros((grow,) + tail, dtype=dt)
+                session[key][l] = mx.concatenate([session[key][l], pad], axis=0)
+            session["comp_res_n"][l] = session["comp_res_n"][l] + [0] * grow
+        session["max_blocks"] = new_cap
+        return new_cap
 
     def clear_session(self, session_id: str):
         if hasattr(self, "manager") and self.manager is not None:
@@ -1516,9 +1771,11 @@ class MLXKVBlockManager:
         num_blocks = (L - self.recency_window) // self.block_size
 
         # Session pool capacity guard (reused sessions can outgrow their
-        # allocation): clamp and keep the newest tokens dense.
+        # allocation): grow the pools first; clamp only at the global cap.
         max_b = session.get("max_blocks", self.max_blocks)
         start_blocks = session["num_blocks"][0]
+        if num_blocks > 0 and start_blocks + num_blocks > max_b:
+            max_b = self._ensure_block_capacity(session, start_blocks + num_blocks)
         if num_blocks > 0 and start_blocks + num_blocks > max_b:
             print(f"[DiffKV MLX] WARNING: session '{session_id}' block pool full "
                   f"({start_blocks}+{num_blocks} > {max_b}); clamping flush.")
@@ -1861,7 +2118,13 @@ class MLXKVBlockManager:
         of pure allocation churn (~6.5 ms/token host-side, measured 2026-07-10)."""
         session = self.sessions.get(session_id)
         if session is None:
-            session = self.sessions[session_id] = self._create_empty_session()
+            # No prefill-length hint (init_session wasn't called): start SMALL and rely
+            # on _ensure_block_capacity growth. The old fallback allocated the full
+            # max_blocks=256 pool (~46 MB/layer with max_residual=128 — >1.3 GB on a
+            # 28-layer model) even for a 1-token session.
+            init_blocks = min(self.max_blocks,
+                              max(1, int(os.environ.get("DIFFKV_INIT_BLOCKS", "16"))))
+            session = self.sessions[session_id] = self._create_empty_session(init_blocks)
         return session
 
     def capture_prefill_kv(self, session_id: str, layer_idx: int, K: mx.array, V: mx.array):
@@ -1869,6 +2132,137 @@ class MLXKVBlockManager:
         session = self._get_or_create_session(session_id)
         session["prefill_K_chunks"][layer_idx].append(K)
         session["prefill_V_chunks"][layer_idx].append(V)
+        if self._lego_prefill:
+            self._lego_capture_stream(session, layer_idx, K, V)
+
+    def _lego_capture_stream(self, session: Dict, layer_idx: int, K: mx.array, V: mx.array):
+        """Maintain the lego raw state per layer as prefill chunks stream in:
+
+        * SINKS — a raw copy of the first sink_blocks*block_size tokens. The flush
+          compresses block 0 like every other block, but StreamingLLM sinks must
+          stay exact (attended by every chunk).
+        * RING — a rolling raw copy of the LAST ~_lego_ring tokens, trimmed from
+          the front in block_size multiples so its start stays block-aligned
+          (far blocks = whole blocks below ring_start). This is the chunk's exact
+          local neighborhood; everything older is attended via lego pieces.
+
+        Chunks arrive in position order within a session lifetime (clear_session
+        wipes this state), so appending until full / rolling forward is correct."""
+        lens = session.get("lego_sink_len")
+        if lens is None:
+            # Record where this capture stream begins. A cached-prefix
+            # continuation re-initialises lego state mid-sequence (the decode
+            # boundary freed it); its first rows are NOT position 0, so they must
+            # never be treated as sinks — leaving the sinks unfilled keeps
+            # _lego_session_ready() False and the continuation on the raw path
+            # (matching existing continuation behavior). ring_start likewise
+            # starts at the stream's absolute position so block alignment holds.
+            first_abs = 0
+            if self.position_ids is not None:
+                try:
+                    first_abs = int(self.position_ids[0, 0])
+                except Exception:
+                    first_abs = 0
+            session["lego_stream_start"] = first_abs
+            lens = session["lego_sink_len"] = [0] * self.num_layers
+            session["lego_sink_k"] = [None] * self.num_layers
+            session["lego_sink_v"] = [None] * self.num_layers
+            session["lego_ring_k"] = [None] * self.num_layers
+            session["lego_ring_v"] = [None] * self.num_layers
+            session["lego_ring_start"] = [first_abs] * self.num_layers
+        L = int(K.shape[2])
+        # 1. Sinks (only for streams that begin at position 0)
+        target = self._sp_sink_blocks * self.block_size
+        cur = lens[layer_idx]
+        if cur < target and session.get("lego_stream_start", 0) == 0:
+            take = min(target - cur, L)
+            k_slice = K[0, :, :take, :]   # [H_kv, take, D]
+            v_slice = V[0, :, :take, :]
+            if session["lego_sink_k"][layer_idx] is None:
+                session["lego_sink_k"][layer_idx] = k_slice
+                session["lego_sink_v"][layer_idx] = v_slice
+            else:
+                session["lego_sink_k"][layer_idx] = mx.concatenate(
+                    [session["lego_sink_k"][layer_idx], k_slice], axis=1)
+                session["lego_sink_v"][layer_idx] = mx.concatenate(
+                    [session["lego_sink_v"][layer_idx], v_slice], axis=1)
+            lens[layer_idx] = cur + take
+        # 2. Ring: preallocated [H_kv, 2*ring, D] buffer, appended IN PLACE per
+        # chunk (mx.array __setitem__ — the same proven pattern as the dense
+        # window and the fused decode buffer). The logical ring is
+        # buf[:, front:n]; trimming just advances `front` (no copy), and only
+        # when the write head reaches capacity is the live span copied back to
+        # the buffer front — one ring-sized copy per ring-worth of tokens,
+        # instead of the initial per-chunk full concat (~8x less traffic at
+        # chunk 512 / ring 4096, which showed up as +8% on 16k prefill).
+        bufs = session.get("lego_ring_bufs")
+        if bufs is None:
+            bufs = session["lego_ring_bufs"] = {}
+        st = bufs.get(layer_idx)
+        if st is None:
+            cap = 2 * self._lego_ring + L
+            st = bufs[layer_idx] = {
+                "k": mx.zeros((self.kv_heads, cap, self.head_dim), dtype=K.dtype),
+                "v": mx.zeros((self.kv_heads, cap, self.head_dim), dtype=V.dtype),
+                "front": 0, "n": 0, "cap": cap,
+            }
+        if st["n"] + L > st["cap"]:
+            span = st["n"] - st["front"]
+            if span + L > st["cap"]:
+                # A later caller raised the chunk size past what the buffer was
+                # sized for — reallocate (rare; buffers are sized off chunk 0).
+                new_cap = 2 * self._lego_ring + L
+                nk = mx.zeros((self.kv_heads, new_cap, self.head_dim), dtype=K.dtype)
+                nv = mx.zeros((self.kv_heads, new_cap, self.head_dim), dtype=V.dtype)
+                nk[:, :span, :] = st["k"][:, st["front"]:st["n"], :]
+                nv[:, :span, :] = st["v"][:, st["front"]:st["n"], :]
+                st["k"], st["v"], st["cap"] = nk, nv, new_cap
+            else:
+                # Compact: move the live span to the buffer front. front >= span
+                # here (span <= ring < cap/2 <= front), so src/dst never overlap.
+                st["k"][:, :span, :] = st["k"][:, st["front"]:st["n"], :]
+                st["v"][:, :span, :] = st["v"][:, st["front"]:st["n"], :]
+            st["front"], st["n"] = 0, span
+        st["k"][:, st["n"]:st["n"] + L, :] = K[0]
+        st["v"][:, st["n"]:st["n"] + L, :] = V[0]
+        st["n"] += L
+        overflow = (st["n"] - st["front"]) - self._lego_ring
+        if overflow > 0:
+            trim = min(((overflow + self.block_size - 1) // self.block_size) * self.block_size,
+                       st["n"] - st["front"])
+            st["front"] += trim
+            session["lego_ring_start"][layer_idx] += trim
+        session["lego_ring_k"][layer_idx] = st["k"][:, st["front"]:st["n"], :]
+        session["lego_ring_v"][layer_idx] = st["v"][:, st["front"]:st["n"], :]
+
+    def _lego_session_ready(self, session: Dict, layer_idx: int, cur_start: int) -> bool:
+        """Whether this chunk should take the lego prefill path (see the flag note
+        in __init__). Sticky once engaged — after the raw prompt cache is dropped
+        there is no falling back to a raw-history path."""
+        if session.get("lego_engaged"):
+            return True
+        if cur_start < self._lego_min_ctx:
+            return False
+        lens = session.get("lego_sink_len")
+        if lens is None or lens[layer_idx] < self._sp_sink_blocks * self.block_size:
+            return False
+        # Engage only when at least one whole COMPRESSED block lies below the ring
+        # (the far field lego actually covers); before that, raw attention is both
+        # exact and no more expensive.
+        far_nb = session["lego_ring_start"][layer_idx] // self.block_size
+        if far_nb <= self._sp_sink_blocks:
+            return False
+        if session["num_blocks"][layer_idx] < far_nb:
+            return False
+        ok = session.get("_lego_ok")
+        if ok is None:
+            # Engage only when the FULL prompt (registered up front by
+            # register_prefill_tokens) will decode compressed — dense decode
+            # reads the raw prompt cache that lego stops maintaining.
+            total = len(session.get("token_ids") or [])
+            ok = total > 0 and _resolve_compressed_decode(total)
+            session["_lego_ok"] = ok
+        return bool(ok)
 
     def compress_prefill_kv(self, session_id: str):
         pass
@@ -1890,6 +2284,9 @@ class MLXKVBlockManager:
         and store its low-rank representation in the compressed arrays."""
         num_blocks = session["num_blocks"][layer_idx]
         max_b = session.get("max_blocks", self.max_blocks)
+        if num_blocks >= max_b:
+            # Try growing the pools first (hint miss); only evict at the global cap.
+            max_b = self._ensure_block_capacity(session, num_blocks + 1)
         if num_blocks >= max_b:
             # Safety: drop oldest compressed block by shifting (rare)
             session["comp_U"][layer_idx][:-1]     = session["comp_U"][layer_idx][1:]
@@ -3083,32 +3480,82 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
         # update_and_fetch accumulates all past KV into the cache and returns
         # the full [1, kv_heads, total_seq_len, head_dim] tensor, so every
         # chunk attends over ALL previous tokens correctly.
-        if cache is not None:
-            all_k, all_v = _cache_fetch(cache, keys_rot, values)
-        else:
-            all_k, all_v = keys_rot, values
 
-        # ── DSA/NSA-style sparse prefill (DIFFKV_SPARSE_PREFILL) ──
-        # Attend to [sink blocks + top-K routed history blocks + recency window + self]
-        # instead of the full accumulated KV, once the chunk is far enough in that there
-        # is prunable history. Default OFF; verified via niah_recall before any default flip.
-        _T = all_k.shape[2]
-        _cur_start = _T - L
-        if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
-            out_b = _sparse_prefill_attend(
-                queries_rot, all_k, all_v, _cur_start,
-                self.scale, self.n_heads // self.n_kv_heads,
-                manager.block_size, manager._sp_window, manager._sp_sink_blocks,
-                manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
-            )
+        # ── LEGO streaming prefill (DIFFKV_LEGO_PREFILL) ──
+        # Once engaged, the chunk attends [raw sinks | routed compressed far blocks |
+        # raw recency ring | self] entirely from the session state; the raw prompt
+        # cache is NOT updated (and is dropped by MLXQwenModel.__call__), bounding
+        # prefill raw KV by O(sinks + ring + chunk) instead of O(T).
+        _lego_out = None
+        if manager._lego_prefill and B == 1 and session_ids[0] != "dummy_session":
+            _lego_sess = manager.sessions.get(session_ids[0])
+            _cur_start_lego = int(position_ids[0, 0]) if position_ids is not None else 0
+            if _lego_sess is not None and manager._lego_session_ready(
+                    _lego_sess, layer_idx, _cur_start_lego):
+                if layer_idx == 0:
+                    _lego_sess["lego_engaged"] = True
+                _lego_out = _lego_prefill_attend(
+                    manager, _lego_sess, layer_idx,
+                    queries_rot, keys_rot, values, _cur_start_lego,
+                    self.scale, self.n_heads // self.n_kv_heads, manager._sp_dbg,
+                )
+
+        # DIFFKV_LEGO_SHADOW=1 — parity diagnostic: compute the lego attention but
+        # USE the raw path's output (cache keeps updating), printing lego-vs-exact
+        # error per layer with identical inputs. Isolates attend-time bugs from
+        # compounding capture drift.
+        _lego_shadow = _lego_out is not None and os.environ.get("DIFFKV_LEGO_SHADOW", "0") == "1"
+        if _lego_out is not None and not _lego_shadow:
+            out_b = _lego_out
         else:
-            out_b = mx.fast.scaled_dot_product_attention(
-                queries_rot,
-                all_k,
-                all_v,
-                scale=self.scale,
-                mask=mask
-            )
+            if cache is not None:
+                all_k, all_v = _cache_fetch(cache, keys_rot, values)
+            else:
+                all_k, all_v = keys_rot, values
+            if _lego_shadow:
+                _a = _lego_out.astype(mx.float32).reshape(-1)
+                _ref = mx.fast.scaled_dot_product_attention(
+                    queries_rot, all_k, all_v, scale=self.scale, mask=mask)
+                _b = _ref.astype(mx.float32).reshape(-1)
+                _cos = mx.sum(_a * _b) / (mx.sqrt(mx.sum(_a * _a)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
+                _md = mx.max(mx.abs(_a - _b))
+                if layer_idx in (0, 13, 27):
+                    # Also profile the VALIDATED sparse prefill against the same
+                    # dense reference — the acceptance bar for lego's error.
+                    _cur0 = int(position_ids[0, 0])
+                    _sp = _sparse_prefill_attend(
+                        queries_rot, all_k, all_v, _cur0,
+                        self.scale, self.n_heads // self.n_kv_heads,
+                        manager.block_size, manager._sp_window, manager._sp_sink_blocks,
+                        manager._sp_kmin, manager._sp_frac, False)
+                    _c = _sp.astype(mx.float32).reshape(-1)
+                    _cos_sp = mx.sum(_c * _b) / (mx.sqrt(mx.sum(_c * _c)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
+                    _md_sp = mx.max(mx.abs(_c - _b))
+                    print(f"[LEGO-PAR] cur={_cur0} l={layer_idx} "
+                          f"lego: cos={float(_cos):.6f} max|d|={float(_md):.4f}  "
+                          f"sparse: cos={float(_cos_sp):.6f} max|d|={float(_md_sp):.4f}", flush=True)
+
+            # ── DSA/NSA-style sparse prefill (DIFFKV_SPARSE_PREFILL) ──
+            # Attend to [sink blocks + top-K routed history blocks + recency window + self]
+            # instead of the full accumulated KV, once the chunk is far enough in that there
+            # is prunable history. Default OFF; verified via niah_recall before any default flip.
+            _T = all_k.shape[2]
+            _cur_start = _T - L
+            if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
+                out_b = _sparse_prefill_attend(
+                    queries_rot, all_k, all_v, _cur_start,
+                    self.scale, self.n_heads // self.n_kv_heads,
+                    manager.block_size, manager._sp_window, manager._sp_sink_blocks,
+                    manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
+                )
+            else:
+                out_b = mx.fast.scaled_dot_product_attention(
+                    queries_rot,
+                    all_k,
+                    all_v,
+                    scale=self.scale,
+                    mask=mask
+                )
 
         # 2. Capture ONLY the current chunk's K/V into DiffKV store
         #    (all_k/all_v grow with every chunk; we store incrementally)
@@ -3146,6 +3593,34 @@ class MLXQwenModel:
         # Decode path decision (compressed sparse vs exact dense) resolved once at
         # the prefill→decode boundary, per cache_key. Read by attention_forward.
         self._decode_compressed: dict = {}
+
+    def _prefill_forward_last_only(self, inputs_mx: mx.array, prefill_cache):
+        """Prefill forward that computes the LM head for the LAST position only.
+
+        The stock model call applies lm_head to every position of the chunk —
+        a [L, vocab] matmul (512×151936 ≈ 16% of total prefill FLOPs at 1.5B)
+        whose result is then round-tripped to fp32 numpy/torch (~600 MB of
+        transient host memory per 512-token chunk). During prefill only the
+        final position's logits are ever consumed, so run the backbone for the
+        full chunk (KV capture needs every position) but the head on hidden[-1:]
+        only. Bit-identical to slicing the full logits afterwards.
+
+        Speculative decoding is the one consumer of full multi-token logits
+        (draft verification); it sets keep_prefill_cache, which routes back to
+        the stock full-logits call.
+        """
+        m = self.mlx_model
+        backbone = getattr(m, "model", None)
+        if getattr(self, "keep_prefill_cache", False) or backbone is None:
+            return m(inputs_mx, cache=prefill_cache)
+        hidden = backbone(inputs_mx, cache=prefill_cache)   # [1, L, H]
+        last = hidden[:, -1:, :]
+        if getattr(getattr(m, "args", None), "tie_word_embeddings", False):
+            return backbone.embed_tokens.as_linear(last)
+        lm_head = getattr(m, "lm_head", None)
+        if lm_head is not None:
+            return lm_head(last)
+        return backbone.embed_tokens.as_linear(last)
 
     def _get_or_create_prefill_cache(self, cache_key: tuple, total_tokens: int = 0):
         if cache_key not in self._prefill_caches:
@@ -3198,7 +3673,24 @@ class MLXQwenModel:
                 except Exception:
                     pass
             prefill_cache = self._get_or_create_prefill_cache(cache_key, total_tokens=_total_hint)
-            logits_mx = self.mlx_model(inputs_mx, cache=prefill_cache)
+            logits_mx = self._prefill_forward_last_only(inputs_mx, prefill_cache)
+
+            # ── LEGO prefill: the raw prompt cache is dead weight once engaged ──
+            # Engaged chunks attend the DiffKV session state only (sinks + compressed
+            # blocks + dense tail) and never update the cache, so drop it now instead
+            # of carrying a full-context raw copy to the decode boundary. This is THE
+            # memory win of lego mode: prefill raw KV stops growing with T.
+            if (self.manager._lego_prefill
+                    and os.environ.get("DIFFKV_LEGO_SHADOW", "0") != "1"
+                    and not getattr(self, "keep_prefill_cache", False)
+                    and cache_key in self._prefill_caches):
+                for _sid in self._diffkv_session_ids:
+                    _s = self.manager.sessions.get(_sid)
+                    if _s is not None and _s.get("lego_engaged"):
+                        mx.eval(logits_mx)
+                        self._prefill_caches.pop(cache_key, None)
+                        mx.clear_cache()
+                        break
         else:
             # ── Prefill → Decode transition ──────────────────────────────────
             # MLX's allocator holds onto the peak GQA-expanded K/V tensors from
@@ -3231,6 +3723,21 @@ class MLXQwenModel:
                     # decode-time memory reflects the DiffKV footprint, not a
                     # retained full-context cache.
                     self._prefill_caches.pop(cache_key, None)
+                    # Lego prefill state (raw sinks + recency-ring buffers, up to
+                    # ~250 MB at ring 4096 on a 28-layer model) is prefill-only —
+                    # decode attends the compressed store. Free it, and clear the
+                    # engaged flag so a later cached-prefix continuation doesn't
+                    # try to attend freed buffers (it falls back to the raw path,
+                    # matching the existing continuation behavior).
+                    for _sid in self._diffkv_session_ids:
+                        _s = self.manager.sessions.get(_sid)
+                        if _s is not None and _s.get("lego_engaged"):
+                            for _k in ("lego_ring_bufs", "lego_ring_k", "lego_ring_v",
+                                       "lego_sink_k", "lego_sink_v", "lego_sink_len",
+                                       "lego_ring_start"):
+                                _s.pop(_k, None)
+                            _s["lego_engaged"] = False
+                            _s.pop("_lego_ok", None)
                     mx.clear_cache(); gc.collect()
 
             # Decode: keep the same cache alive so decode tokens attend over
