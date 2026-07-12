@@ -81,13 +81,17 @@ def build_prompt(tokenizer, ctx, question):
     ids = sys_ids + body_ids + q_ids
     return tokenizer.decode(ids)
 
+def _name_pat(name):
+    # tolerate plural/possessive surface artifacts ("Meridians", "Okazakis")
+    return r"\b" + re.escape(name.lower()) + r"s?\b"
+
 def classify(answer, expect, others):
     """correct / swap (another planted item) / miss."""
     a = answer.lower()
-    if re.search(r"\b" + re.escape(expect.lower()) + r"\b", a):
+    if re.search(_name_pat(expect), a):
         return "correct"
     for o in others:
-        if re.search(r"\b" + re.escape(o.lower()) + r"\b", a):
+        if re.search(_name_pat(o), a):
             return "swap"
     return "miss"
 
@@ -100,7 +104,7 @@ def score_list_all(text):
     for name, val in ENTITIES:
         verdict = "miss"
         for ln in lines:
-            if re.search(r"\b" + name.lower() + r"\b", ln):
+            if re.search(_name_pat(name), ln):
                 nums = set(re.findall(r"\d[\d,]*", ln))
                 nums = {n.replace(",", "") for n in nums}
                 planted = nums & values

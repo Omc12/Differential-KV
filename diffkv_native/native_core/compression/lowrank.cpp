@@ -885,28 +885,42 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             joint_err[s] = std::sqrt(aerr_K[s] * aerr_K[s] + ev_bal * ev_bal);
         }
 
-        // ── Stride-stratified residual coverage bonus ────────────────────────────
+        // ── Stride-stratified residual coverage (APPENDED, not score-boosted) ───
+        // Coverage rows give the block a positional scaffold through filler —
+        // measured: they fix compressed enumeration-order transposition (binding
+        // list-all 3/6→6/6 at frac 0.5). CRITICAL ordering constraint learned the
+        // hard way (multi-needle 3/3→0/3 when coverage was a +1e12 score bonus):
+        // the residual arrays DOUBLE as the block's ROUTING signature — decode
+        // relevance reads the FIRST route_residuals rows — so coverage rows must
+        // sit AFTER the ranked (distinctive) rows, never ahead of them. The cols
+        // are collected here and appended in the selection phase below; the quota
+        // is a fraction of the FINAL block budget (n_max, post-floor), matching
+        // the MLX wrapper.
+        // Default 0.25 (native): the measured Pareto point. Sweep 2026-07-12,
+        // q8, binding list-all / multi-needle 16k: frac 0 = 3/6 + 3/3 (order
+        // transposed), 0.125 = 4/6 + 3/3, 0.25 = 5/6 + 3/3, 0.5 = 6/6 + 0/3
+        // (needle SUFFIX displacement — "OMEGA-7741-BETA"). 0.25 also restores
+        // the owner-capture synthesis/margin costs to baseline (26.7/26.7,
+        // margins 12.48/14.26) with NIAH 6/6. MLX keeps default 0 — its
+        // enumeration was already 6/6 without the scaffold; flip only with
+        // fresh measurements there.
         static const float cov_frac = []() {
             const char* e = std::getenv("DIFFKV_RESIDUAL_COVERAGE_FRAC");
             if (e) { try { return std::stof(e); } catch (...) {} }
-            return 0.0f;
+            return 0.25f;
         }();
+        std::vector<int> cov_cols;
         if (cov_frac > 0.0f && adaptive_MR > 0) {
-            int n_cov = std::min(adaptive_MR, std::max(1, (int)std::round(cov_frac * adaptive_MR)));
-            std::vector<int> cols;
+            int n_cov = std::min(MR, std::max(1, (int)std::round(cov_frac * MR)));
             for (int i = 0; i < n_cov; ++i) {
                 float val = 0.0f;
                 if (n_cov > 1) {
                     val = (float)i * (S_deltas - 1) / (n_cov - 1);
                 }
                 int col = (int)std::round(val);
-                if (std::find(cols.begin(), cols.end(), col) == cols.end()) {
-                    cols.push_back(col);
-                }
-            }
-            for (int col : cols) {
-                if (col >= 0 && col < S_deltas) {
-                    joint_err[col] += 1e12f;
+                if (col >= 0 && col < S_deltas &&
+                    std::find(cov_cols.begin(), cov_cols.end(), col) == cov_cols.end()) {
+                    cov_cols.push_back(col);
                 }
             }
         }
@@ -1125,6 +1139,20 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                         size_t e = s.find_last_not_of(" \t\n\r");
                         return s.substr(b, e - b + 1);
                     };
+                    // Uppercase check accepts ASCII A-Z plus the Latin-1
+                    // supplement capitals (À-Þ, UTF-8 lead 0xC3 + 0x80-0x9E) so
+                    // accented entity names behave like the Python isupper()
+                    // in the MLX reference (parity; full Unicode is out of scope).
+                    auto is_upper_start = [](const std::string& s) {
+                        if (s.empty()) return false;
+                        unsigned char c0 = (unsigned char)s[0];
+                        if (c0 >= 'A' && c0 <= 'Z') return true;
+                        if (c0 == 0xC3 && s.size() >= 2) {
+                            unsigned char c1 = (unsigned char)s[1];
+                            return c1 >= 0x80 && c1 <= 0x9E && c1 != 0x97; // À-Þ minus ×
+                        }
+                        return false;
+                    };
                     if (owner_on) {
                         for (const auto& seg : segment_indices) {
                             bool has_core = false;
@@ -1134,7 +1162,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                             int j = seg[0] - 1, steps = 0;
                             while (j >= 0 && steps < owner_dist) {
                                 std::string sc = strip_of(tok_strs[j]);
-                                if (!sc.empty() && sc[0] >= 'A' && sc[0] <= 'Z' &&
+                                if (is_upper_start(sc) &&
                                     owner_stop.find(lower_of(sc)) == owner_stop.end()) {
                                     run_end = j;
                                     break;
@@ -1164,7 +1192,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                                 const std::string& prv = tok_strs[k_lo - 1];
                                 std::string pc = strip_of(prv);
                                 if (!prv.empty() && (prv[0] == ' ' || prv[0] == '\n') &&
-                                    !pc.empty() && pc[0] >= 'A' && pc[0] <= 'Z' &&
+                                    is_upper_start(pc) &&
                                     owner_stop.find(lower_of(pc)) == owner_stop.end()) {
                                     --k_lo;
                                 } else break;
@@ -1207,19 +1235,57 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         // Budget floor for boosted rows: a fact block's boosted set (value +
         // owner + window glue) exceeds the easy-block cap of 8 — without this
         // floor the adaptive budget silently evicts the owner the capture just
-        // fought for (mirrors the MLX wrapper's floor).
+        // fought for (mirrors the MLX wrapper's floor). Coverage-aware: the
+        // stride-stratified coverage quota takes cov_frac of the budget with a
+        // +1e12 bonus, so the ranked (boosted) rows only get the remaining
+        // (1-cov_frac) share — divide the requirement through, or enabling
+        // coverage would silently evict the very rows the boosts protect.
+        // Margin env: DIFFKV_RESIDUAL_FLOOR_MARGIN (default 4).
+        static const int floor_margin = []() {
+            const char* e = std::getenv("DIFFKV_RESIDUAL_FLOOR_MARGIN");
+            if (e) { try { return std::stoi(e); } catch (...) {} }
+            return 4;
+        }();
         if (lr_boosted_rows > 0) {
-            adaptive_MR = std::max(adaptive_MR, std::min(MR, lr_boosted_rows + 4));
+            int need = lr_boosted_rows + floor_margin;
+            if (cov_frac > 0.0f && cov_frac < 1.0f) {
+                need = (int)std::ceil((float)need / (1.0f - cov_frac));
+            }
+            adaptive_MR = std::max(adaptive_MR, std::min(MR, need));
         }
         int n_max = std::min(S_deltas, adaptive_MR);
         std::vector<int> idx(S_deltas);
         for (int i = 0; i < S_deltas; ++i) idx[i] = i;
         std::sort(idx.begin(), idx.end(), [&](int a, int b) { return joint_err[a] > joint_err[b]; });
 
+        // Two-phase selection: ranked (distinctive) rows FIRST — they are the
+        // routing signature — then the coverage scaffold appended in whatever
+        // budget remains (see the coverage note above).
+        int n_cov_eff = 0;
+        if (!cov_cols.empty() && n_max > 0) {
+            n_cov_eff = std::min((int)cov_cols.size(),
+                                 std::max(1, (int)std::round(cov_frac * n_max)));
+        }
+        const int n_ranked = std::max(0, n_max - n_cov_eff);
+        std::vector<char> res_taken(S_deltas, 0);
         int written = 0;
-        for (int ii = 0; ii < S_deltas && written < n_max; ++ii) {
+        for (int ii = 0; ii < S_deltas && written < n_ranked; ++ii) {
             int s = idx[ii];
             if (joint_err[s] <= 1e-4f) continue;
+            res_taken[s] = 1;
+            params.out_res_K_pos[written] = s;
+            params.out_res_V_pos[written] = s;
+            for (int f = 0; f < F; ++f) {
+                params.out_res_K_val[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + f]);
+                params.out_res_V_val[(size_t)written * F + f] = ggml_fp32_to_fp16(resid[(size_t)s * joint_F + F + f]);
+            }
+            written++;
+        }
+        for (size_t ci = 0; ci < cov_cols.size() && written < n_max; ++ci) {
+            int s = cov_cols[ci];
+            if (s < 0 || s >= S_deltas || res_taken[s]) continue;
+            if (joint_err[s] <= 1e-4f) continue;   // already effectively exact
+            res_taken[s] = 1;
             params.out_res_K_pos[written] = s;
             params.out_res_V_pos[written] = s;
             for (int f = 0; f < F; ++f) {

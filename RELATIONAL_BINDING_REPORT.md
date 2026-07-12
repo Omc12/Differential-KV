@@ -37,3 +37,40 @@ decoder's own binding limit — RC5/RC8 generation-path territory (or
 neighborhood co-retrieval), NOT capture. The torch/CUDA path lacks the boost
 machinery entirely and still has the layer-1 disease — see CUDA_TRITON_AUDIT.md
 C10.
+
+## 2026-07-12 (later) — Layer 2: enumeration-order association, coverage scaffold
+
+With owner-capture in, the cross-runtime probe found the next layer precisely:
+- Native retrieval binding is EXACT in both directions (fwd 3/3, rev 3/3 —
+  native rev beats MLX, whose rev swaps 2/4 even DENSE → that residue is the
+  4-bit model's own margin, not DiffKV).
+- But native list-all ENUMERATION transposed adjacent names (3/6; values walked
+  document order, names didn't) — dense native enumerates correctly, so the
+  compressed context was missing the positional scaffold through filler that
+  ordered scanning needs.
+
+Fix: stride-stratified residual coverage (existing knob) — measured dose-response
+(binding list-all / multi-needle 16k): 0 → 3/6 + 3/3; 0.125 → 4/6 + 3/3;
+**0.25 → 5/6 + 3/3 (native default now)**; 0.5 → 6/6 + 0/3 (multi-needle
+suffix displacement: "OMEGA-7741-BETA" — needle stems exact, Greek suffixes
+scrambled). Two structural bugs found and fixed on the way:
+1. **Coverage rows were ordered FIRST in the residual arrays** (+1e12 selection
+   bonus) — but the residual head doubles as the block's ROUTING signature
+   (decode relevance reads the first route_residuals rows). Coverage now gets
+   selected but APPENDED after the ranked rows, both runtimes.
+2. **Coverage-vs-floor eviction**: the boosted-row budget floor now reserves
+   room for the scaffold too (need/(1-cov_frac); margin env
+   DIFFKV_RESIDUAL_FLOOR_MARGIN, default 4). Also aligned the quota semantics
+   (fraction of block budget) across runtimes, ASCII→Latin-1 uppercase parity
+   in the C++ owner walk.
+
+Final native default config (owner ON + coverage 0.25): NIAH 6/6, multi-needle
+3/3, margins 12.48/14.26 (baseline 12.62/14.32), synthesis **26.7/26.7 = full
+baseline both ctx** (the owner-capture 16k cost is erased), binding list-all
+5/6 (from 3/6), zero name corruption. MLX default coverage stays 0 (its
+enumeration was already 6/6; flip only with fresh MLX measurements).
+
+Remaining layer-2 tail: one association slot (Ellsworth took Halvorsen's value
+at 8k list-all) and the 4-bit MLX rev-lookup swaps — both are the decoder's own
+capability envelope (dense exhibits the same class). Next lever if pursued:
+RC5/RC8 end-to-end validation or neighborhood co-retrieval at decode.

@@ -2163,10 +2163,23 @@ class MLXKVBlockManager:
         # Budget floor for boosted rows: a fact block's boosted set (value +
         # owner + window glue, ~11-15 rows) exceeds the easy-block cap of 8 —
         # without this floor the adaptive budget silently evicts the owner the
-        # capture just fought for. Floor = boosted_count + 4, ≤ max_residual.
+        # capture just fought for. Coverage-aware: MLX's coverage quota is
+        # n_cov = cov_frac*max_residual columns with a +1e12 bonus (NOTE: the
+        # native port derives its quota from the BLOCK budget instead — smaller;
+        # align before enabling coverage by default here), and those columns
+        # outrank every boosted row, so the ranked rows must fit in what's left.
+        # Floor = boosted + n_cov + margin (DIFFKV_RESIDUAL_FLOOR_MARGIN, def 4).
+        res_v_only, cov_frac = _capture_policy_env()
         if boost_rows:
+            try:
+                _floor_margin = int(os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+            except ValueError:
+                _floor_margin = 4
+            _n_cov = 0
+            if cov_frac > 0.0 and self.max_residual > 0:
+                _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
             floors = [
-                min(self.max_residual, sum(1 for m in row if m > 1.0) + 4)
+                min(self.max_residual, sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
                 if any(m > 1.0 for m in row) else 0
                 for row in boost_rows
             ]
@@ -2174,14 +2187,36 @@ class MLXKVBlockManager:
                 nb_ = len(boost_rows)
                 n_res_batch = [max(n_res_batch[i], floors[i % nb_])
                                for i in range(len(n_res_batch))]
-
-        res_v_only, cov_frac = _capture_policy_env()
         if self.max_residual > 0:
             capture_scores = joint_errors
             cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
             if cov_bonus is not None:
                 capture_scores = capture_scores.astype(mx.float32) + cov_bonus
             top_k = mx.argsort(capture_scores, axis=-1)[:, -self.max_residual:][:, ::-1]
+            if cov_bonus is not None:
+                # Ranked (distinctive) rows FIRST, coverage scaffold APPENDED
+                # within a budget-based quota. The residual arrays double as the
+                # block's ROUTING signature (decode relevance reads the first
+                # route_residuals rows) — coverage-first ordering blinded the
+                # router (native multi-needle 3/3→0/3). Mirrors lowrank.cpp.
+                tk = np.asarray(top_k)
+                cov_set = np.zeros(S_comp, dtype=bool)
+                cov_set[np.asarray(cov_bonus) > 0] = True
+                out_rows = np.empty_like(tk)
+                for r in range(tk.shape[0]):
+                    row = tk[r]
+                    m = cov_set[row]
+                    ranked, covs = row[~m], row[m]
+                    n_res_r = int(n_res_batch[r])
+                    n_cov_r = 0
+                    if covs.size and n_res_r > 0 and cov_frac > 0.0:
+                        n_cov_r = int(min(covs.size, max(1, round(cov_frac * n_res_r))))
+                    n_rank_r = max(0, n_res_r - n_cov_r)
+                    out_rows[r] = np.concatenate([
+                        ranked[:n_rank_r], covs[:n_cov_r],
+                        ranked[n_rank_r:], covs[n_cov_r:],
+                    ])[:tk.shape[1]]
+                top_k = mx.array(out_rows)
             indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
             batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
             batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
@@ -2654,11 +2689,17 @@ class MLXKVBlockManager:
             # Medium block: cap at 16 residuals
             n_res = min(16, n_res)
         # Budget floor for boosted rows (value + owner + window glue must all
-        # fit — see the prefill-path comment).
-        if n_boosted_rows:
-            n_res = max(n_res, min(self.max_residual, n_boosted_rows + 4))
-
+        # fit — coverage-aware, see the prefill-path comment).
         res_v_only, cov_frac = _capture_policy_env()
+        if n_boosted_rows:
+            try:
+                _floor_margin = int(os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+            except ValueError:
+                _floor_margin = 4
+            _n_cov = 0
+            if cov_frac > 0.0 and self.max_residual > 0:
+                _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
+            n_res = max(n_res, min(self.max_residual, n_boosted_rows + _n_cov + _floor_margin))
         if self.max_residual > 0:
             capture_scores = joint_errors
             cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
@@ -2666,6 +2707,22 @@ class MLXKVBlockManager:
                 capture_scores = capture_scores.astype(mx.float32) + cov_bonus
             # Select the top n_res elements
             top_k_indices = mx.argsort(capture_scores)[-n_res:][::-1]
+            if cov_bonus is not None:
+                # Ranked rows FIRST, coverage appended (budget-based quota) —
+                # the residual head is the block's routing signature; see the
+                # prefill-path comment / lowrank.cpp coverage note.
+                row = np.asarray(top_k_indices)
+                cov_set = np.zeros(S_comp, dtype=bool)
+                cov_set[np.asarray(cov_bonus) > 0] = True
+                m = cov_set[row]
+                ranked, covs = row[~m], row[m]
+                n_cov_r = 0
+                if covs.size and n_res > 0 and cov_frac > 0.0:
+                    n_cov_r = int(min(covs.size, max(1, round(cov_frac * n_res))))
+                n_rank_r = max(0, n_res - n_cov_r)
+                row = np.concatenate([ranked[:n_rank_r], covs[:n_cov_r],
+                                      ranked[n_rank_r:], covs[n_cov_r:]])[:n_res]
+                top_k_indices = mx.array(row)
             top_k = top_k_indices  # compatibility alias for mask writing below
 
             block_k_t = block_k.transpose(1, 0, 2)
