@@ -854,12 +854,23 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         }
         float max_median_err = std::max(median_err_K, median_err_V);
         int adaptive_MR = MR;
-        if (max_median_err < 0.05f) {
-            // Easy block (prose filler): cap at 8 residuals
-            adaptive_MR = std::min(8, adaptive_MR);
-        } else if (max_median_err < 0.15f) {
-            // Medium block: cap at 16 residuals
-            adaptive_MR = std::min(16, adaptive_MR);
+        // DIFFKV_RESIDUAL_UNIFORM=1 (set by the native LEGO prefill, studs far
+        // mode): skip the adaptive cap so every full prefill block carries the
+        // full MAX_RESIDUAL set. Stud row counts must be uniform across layers
+        // and blocks (the shared prefill mask cannot express per-layer counts;
+        // the adaptive cap keys off per-LAYER error medians). Matches MLX, whose
+        // prefill blocks always carry full residual sets. Pool residual tensors
+        // are pre-allocated at MAX_RESIDUAL per slot, so this costs no memory.
+        const char* res_uni_env = std::getenv("DIFFKV_RESIDUAL_UNIFORM");
+        const bool res_uniform = (res_uni_env && res_uni_env[0] == '1');
+        if (!res_uniform) {
+            if (max_median_err < 0.05f) {
+                // Easy block (prose filler): cap at 8 residuals
+                adaptive_MR = std::min(8, adaptive_MR);
+            } else if (max_median_err < 0.15f) {
+                // Medium block: cap at 16 residuals
+                adaptive_MR = std::min(16, adaptive_MR);
+            }
         }
 
         std::vector<float> joint_err(S_deltas);

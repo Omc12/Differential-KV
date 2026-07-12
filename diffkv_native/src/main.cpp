@@ -814,6 +814,212 @@ static int materialize_routed_kv(
     return written;
 }
 
+// ── DIFFKV_LEGO_PREFILL stage-2: single-block far emit from the compressed pool ──
+// Reconstructs ONE known-CompressedResident slot into contiguous K/V staging rows
+// (anchor first, then the slen delta rows) with EXACTLY the materialize_routed_kv
+// math: rec = anchor + U·V·row_scale·blk_scale (+ exact residual corrections).
+// K rows come out PRE-ROTATED at their absolute positions (POOL_ROT_ABS — the pool
+// stores rotated K), V raw — both drop straight into the prefill FAR tensors with
+// no host RoPE. Row ORDER within the far segment is irrelevant (every far row is
+// unconditionally-visible history in the mask), only the row SET matters, so the
+// landmark swap needs no position bookkeeping here.
+// Returns rows written (1 + slen) or -1 if the slot's host mirrors are missing.
+static int lego_emit_block_from_pool(
+    diffkv::NativeBlockPool* pool, int slot, int F,
+    ggml_fp16_t* out_k, ggml_fp16_t* out_v)
+{
+    const int R  = pool->get_rank();
+    const int MR = diffkv::NativeBlockPool::MAX_RESIDUAL;
+    const int8_t*      U    = pool->get_host_U(slot);
+    const ggml_fp16_t* rowsc= pool->get_host_U_row_scale(slot);
+    const ggml_fp16_t* VK   = pool->get_host_VK(slot);
+    const ggml_fp16_t* VV   = pool->get_host_VV(slot);
+    const ggml_fp16_t* ancK = pool->get_host_anchors_K(slot);
+    const ggml_fp16_t* ancV = pool->get_host_anchors_V(slot);
+    const ggml_fp16_t* resKv= pool->get_host_res_K_val(slot);
+    const int32_t*     resKp= pool->get_host_res_K_pos(slot);
+    const ggml_fp16_t* resVv= pool->get_host_res_V_val(slot);
+    const int32_t*     resVp= pool->get_host_res_V_pos(slot);
+    if (!U || !VK || !VV || !ancK || !ancV || !rowsc) return -1;
+    const float bsc  = ggml_fp16_to_fp32(pool->get_host_scales()[slot]);
+    const int   slen = pool->get_host_seq_lens()[slot];
+
+    for (int f = 0; f < F; ++f) { out_k[f] = ancK[f]; out_v[f] = ancV[f]; }
+    if (slen <= 0) return 1;
+
+    std::vector<float> U_scaled((size_t)slen * R);
+    for (int t = 0; t < slen; ++t) {
+        const float s = ggml_fp16_to_fp32(rowsc[t]) * bsc;
+        const int8_t* ur = U + (size_t)t * R;
+        float* us = U_scaled.data() + (size_t)t * R;
+        for (int r = 0; r < R; ++r) us[r] = (float)ur[r] * s;
+    }
+    std::vector<float> VKf((size_t)R * F), VVf((size_t)R * F);
+    for (size_t i = 0; i < (size_t)R * F; ++i) {
+        VKf[i] = ggml_fp16_to_fp32(VK[i]);
+        VVf[i] = ggml_fp16_to_fp32(VV[i]);
+    }
+    std::vector<float> dK((size_t)slen * F), dV((size_t)slen * F);
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, slen, F, R, 1.0f,
+                U_scaled.data(), R, VKf.data(), F, 0.0f, dK.data(), F);
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, slen, F, R, 1.0f,
+                U_scaled.data(), R, VVf.data(), F, 0.0f, dV.data(), F);
+#else
+    for (int t = 0; t < slen; ++t) {
+        float* dk = dK.data() + (size_t)t * F;
+        float* dv = dV.data() + (size_t)t * F;
+        std::memset(dk, 0, F * sizeof(float));
+        std::memset(dv, 0, F * sizeof(float));
+        const float* us = U_scaled.data() + (size_t)t * R;
+        for (int r = 0; r < R; ++r) {
+            const float u = us[r];
+            const float* vk = VKf.data() + (size_t)r * F;
+            const float* vv = VVf.data() + (size_t)r * F;
+            for (int f = 0; f < F; ++f) { dk[f] += u * vk[f]; dv[f] += u * vv[f]; }
+        }
+    }
+#endif
+
+    for (int t = 0; t < slen; ++t) {
+        int rik = -1, riv = -1;
+        if (resKp) for (int r = 0; r < MR; ++r) if (resKp[r] == t) { rik = r; break; }
+        if (resVp) for (int r = 0; r < MR; ++r) if (resVp[r] == t) { riv = r; break; }
+        ggml_fp16_t* ok = out_k + (size_t)(1 + t) * F;
+        ggml_fp16_t* ov = out_v + (size_t)(1 + t) * F;
+        const float* dk = dK.data() + (size_t)t * F;
+        const float* dv = dV.data() + (size_t)t * F;
+        const ggml_fp16_t* rkres = (rik >= 0 && resKv) ? resKv + (size_t)rik * F : nullptr;
+        const ggml_fp16_t* rvres = (riv >= 0 && resVv) ? resVv + (size_t)riv * F : nullptr;
+        for (int f = 0; f < F; ++f) {
+            float rk = ggml_fp16_to_fp32(ancK[f]) + dk[f];
+            float rv = ggml_fp16_to_fp32(ancV[f]) + dv[f];
+            if (rkres) rk += ggml_fp16_to_fp32(rkres[f]);
+            if (rvres) rv += ggml_fp16_to_fp32(rvres[f]);
+            ok[f] = ggml_fp32_to_fp16(rk);
+            ov[f] = ggml_fp32_to_fp16(rv);
+        }
+    }
+    return 1 + slen;
+}
+
+// ── LEGO far mode "studs" (default): anchor + the block's exact residual rows ──
+// The MLX studs-only finding, made portable: emit ONLY rows that come out EXACT —
+// the anchor plus the residual-corrected rows (residual = raw − anchor − recon by
+// construction, so anchor + recon + residual reproduces the raw row up to fp16
+// rounding). The well-approximated low-information rows are omitted, not
+// reconstructed — zero low-rank noise enters the prefill far field. Uniform row
+// count (1 + mr_target) is guaranteed by DIFFKV_RESIDUAL_UNIFORM=1 at compression
+// (full residual sets); if a block is still under-full (joint_err ≤ 1e-4 skips —
+// essentially never), deterministic lowest-index recon rows pad to the target so
+// the shared mask/klen stays uniform across layers. K pre-rotated (POOL_ROT_ABS),
+// V raw. Returns rows written (always 1 + mr_target when slen ≥ mr_target) or -1
+// if host mirrors are missing.
+static int lego_emit_block_studs(
+    diffkv::NativeBlockPool* pool, int slot, int F, int mr_target,
+    ggml_fp16_t* out_k, ggml_fp16_t* out_v)
+{
+    const int R  = pool->get_rank();
+    const int MR = diffkv::NativeBlockPool::MAX_RESIDUAL;
+    const int8_t*      U    = pool->get_host_U(slot);
+    const ggml_fp16_t* rowsc= pool->get_host_U_row_scale(slot);
+    const ggml_fp16_t* VK   = pool->get_host_VK(slot);
+    const ggml_fp16_t* VV   = pool->get_host_VV(slot);
+    const ggml_fp16_t* ancK = pool->get_host_anchors_K(slot);
+    const ggml_fp16_t* ancV = pool->get_host_anchors_V(slot);
+    const ggml_fp16_t* resKv= pool->get_host_res_K_val(slot);
+    const int32_t*     resKp= pool->get_host_res_K_pos(slot);
+    const ggml_fp16_t* resVv= pool->get_host_res_V_val(slot);
+    const int32_t*     resVp= pool->get_host_res_V_pos(slot);
+    if (!U || !VK || !VV || !ancK || !ancV || !rowsc) return -1;
+    const float bsc  = ggml_fp16_to_fp32(pool->get_host_scales()[slot]);
+    const int   slen = pool->get_host_seq_lens()[slot];
+
+    for (int f = 0; f < F; ++f) { out_k[f] = ancK[f]; out_v[f] = ancV[f]; }
+    if (slen <= 0 || mr_target <= 0) return 1;
+
+    // Selected delta rows: residual positions first (exact), then deterministic
+    // filler (recon-only) if under-full. res_K_pos == res_V_pos by construction
+    // (lowrank.cpp writes the same s to both).
+    std::vector<int> spos;   spos.reserve(mr_target);
+    std::vector<int> sres;   sres.reserve(mr_target);   // residual slot per row, -1 = filler
+    for (int r = 0; r < MR && (int)spos.size() < mr_target; ++r) {
+        int s = resKp ? resKp[r] : -1;
+        if (s >= 0 && s < slen) { spos.push_back(s); sres.push_back(r); }
+    }
+    if ((int)spos.size() < std::min(mr_target, slen)) {
+        std::vector<char> used(slen, 0);
+        for (int s : spos) used[s] = 1;
+        for (int s = 0; s < slen && (int)spos.size() < mr_target; ++s) {
+            if (!used[s]) { spos.push_back(s); sres.push_back(-1); }
+        }
+    }
+    const int n = (int)spos.size();
+    if (n == 0) return 1;
+
+    // Recon deltas for ONLY the selected rows: U_scaled[n,R] @ V[R,F].
+    std::vector<float> U_scaled((size_t)n * R);
+    for (int i = 0; i < n; ++i) {
+        const int t = spos[i];
+        const float s = ggml_fp16_to_fp32(rowsc[t]) * bsc;
+        const int8_t* ur = U + (size_t)t * R;
+        float* us = U_scaled.data() + (size_t)i * R;
+        for (int r = 0; r < R; ++r) us[r] = (float)ur[r] * s;
+    }
+    std::vector<float> VKf((size_t)R * F), VVf((size_t)R * F);
+    for (size_t i = 0; i < (size_t)R * F; ++i) {
+        VKf[i] = ggml_fp16_to_fp32(VK[i]);
+        VVf[i] = ggml_fp16_to_fp32(VV[i]);
+    }
+    std::vector<float> dK((size_t)n * F), dV((size_t)n * F);
+#ifdef __APPLE__
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, F, R, 1.0f,
+                U_scaled.data(), R, VKf.data(), F, 0.0f, dK.data(), F);
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, F, R, 1.0f,
+                U_scaled.data(), R, VVf.data(), F, 0.0f, dV.data(), F);
+#else
+    for (int i = 0; i < n; ++i) {
+        float* dk = dK.data() + (size_t)i * F;
+        float* dv = dV.data() + (size_t)i * F;
+        std::memset(dk, 0, F * sizeof(float));
+        std::memset(dv, 0, F * sizeof(float));
+        const float* us = U_scaled.data() + (size_t)i * R;
+        for (int r = 0; r < R; ++r) {
+            const float u = us[r];
+            const float* vk = VKf.data() + (size_t)r * F;
+            const float* vv = VVf.data() + (size_t)r * F;
+            for (int f = 0; f < F; ++f) { dk[f] += u * vk[f]; dv[f] += u * vv[f]; }
+        }
+    }
+#endif
+
+    for (int i = 0; i < n; ++i) {
+        ggml_fp16_t* ok = out_k + (size_t)(1 + i) * F;
+        ggml_fp16_t* ov = out_v + (size_t)(1 + i) * F;
+        const float* dk = dK.data() + (size_t)i * F;
+        const float* dv = dV.data() + (size_t)i * F;
+        const int r = sres[i];
+        // V residual slot may differ from K's index for the same s in principle;
+        // look it up independently when this row is residual-backed.
+        int rv_slot = -1;
+        if (r >= 0 && resVp) {
+            const int t = spos[i];
+            for (int rr = 0; rr < MR; ++rr) if (resVp[rr] == t) { rv_slot = rr; break; }
+        }
+        const ggml_fp16_t* rkres = (r >= 0 && resKv) ? resKv + (size_t)r * F : nullptr;
+        const ggml_fp16_t* rvres = (rv_slot >= 0 && resVv) ? resVv + (size_t)rv_slot * F : nullptr;
+        for (int f = 0; f < F; ++f) {
+            float rk = ggml_fp16_to_fp32(ancK[f]) + dk[f];
+            float rv = ggml_fp16_to_fp32(ancV[f]) + dv[f];
+            if (rkres) rk += ggml_fp16_to_fp32(rkres[f]);
+            if (rvres) rv += ggml_fp16_to_fp32(rvres[f]);
+            ok[f] = ggml_fp32_to_fp16(rk);
+            ov[f] = ggml_fp32_to_fp16(rv);
+        }
+    }
+    return 1 + n;
+}
+
 // Helper to build the Qwen 2.5 sparse decode forward pass graph with SRL routing and custom Metal attention
 struct ggml_cgraph * build_decode_graph(
     struct ggml_context * ctx,
@@ -2631,27 +2837,6 @@ int main(int argc, char ** argv) {
             std::cerr << "[DiffKV Native] Running Prefill phase in chunks..." << std::endl;
         }
 
-        // Local per-turn raw K/V activation buffers.
-        // For continuation turns (cached_len > 0), we only fill offsets [cached_len..L-1]
-        // and upload the already-stored prefix K/V from the prior chunk's data (if pos_start > cached_len).
-        // This matches ACTIVE_RUNTIME: full prompt is sent, only new tokens are prefilled.
-        // ── fp16 KV storage (RAM fix, mirrors MLX which keeps dense KV in float16) ──
-        // These three full-length host buffers are the single biggest native-vs-MLX RAM
-        // overhead (3 × L × F × 4 bytes × n_layers ≈ 2 GB at 24k/1.5B). MLX stores the
-        // equivalent in float16 (mlx_diffkv_wrapper.py:345 "float16 explicitly to halve RAM").
-        // Stored as ggml_fp16_t; every consumer converts at its boundary (ggml_fp16_to_fp32
-        // on read, ggml_fp32_to_fp16 on write). The fp32 MATH is unchanged — only storage
-        // halves. The GPU prior tensors + prefill flash-attn are F16 to match (no fp32 temp).
-        std::vector<std::vector<ggml_fp16_t>> k_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
-        std::vector<std::vector<ggml_fp16_t>> k_rotated_activations(n_layers);
-        if (!decode_use_sparse) {
-            for (int l = 0; l < n_layers; ++l) {
-                k_rotated_activations[l].resize((size_t)L * F_test, ggml_fp32_to_fp16(0.0f));
-            }
-        }
-        std::vector<std::vector<ggml_fp16_t>> v_activations(n_layers, std::vector<ggml_fp16_t>(L * F_test, 0));
-        std::vector<float> prefill_output_logits(n_vocab);
-
         int chunk_size = 512; // Default to balanced preset size
         if (const char* env_preset = std::getenv("DIFFKV_PRESET")) {
             std::string p(env_preset);
@@ -2665,6 +2850,160 @@ int main(int argc, char ** argv) {
         if (const char* env_pcs = std::getenv("DIFFKV_PREFILL_CHUNK_SIZE")) {
             try { chunk_size = std::stoi(env_pcs); } catch (...) {}
         }
+
+        // ── DIFFKV_SPARSE_PREFILL knobs (hoisted above the host-mirror allocation:
+        // both the LEGO ring geometry AND the mirror sizes below derive from them). ──
+        bool sp_enabled = true;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL")) { try { sp_enabled = (std::stoi(e) != 0); } catch (...) {} }
+        int sp_window = 1024, sp_sink_blocks = 1, sp_min = 2048;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_WINDOW")) { try { sp_window = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS")) { try { sp_sink_blocks = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MIN")) { try { sp_min = std::stoi(e); } catch (...) {} }
+        const int sp_sink_end = sp_sink_blocks * micro_block_size;
+        int sp_kmin = 8; float sp_frac = 0.05f; int sp_max_occ = 8;
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_KMIN")) { try { sp_kmin = std::stoi(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_FRAC")) { try { sp_frac = std::stof(e); } catch (...) {} }
+        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MAX_OCC")) { try { sp_max_occ = std::stoi(e); } catch (...) {} }
+
+        // ── DIFFKV_LEGO_PREFILL (port of the MLX lego streaming prefill; see
+        // docs/NATIVE_LEGO_PORT_PLAN.md and the MLX flag notes). ──────────────────
+        // STAGE 1 (device): the persistent prefill KV cache is ring-sized:
+        //   [0, base_end)            identity zone — sinks + everything below the
+        //                            sparse-engage point (pre-engage chunks attend
+        //                            the full dense context, so this stays resident)
+        //   [base_end, +wnd_cap)     modular ring for the recency window + chunk
+        // STAGE 2 (host): the raw host mirrors (k_activations / v_activations) use
+        // the SAME ring layout — they are the plain-RAM buffers that actually show
+        // up in phys_footprint (Metal buffer bytes don't; that was stage 1's "no
+        // measured win" finding). Routed far blocks are no longer read from the
+        // mirrors: they are re-materialised from the COMPRESSED pool per chunk
+        // (lego_emit_block_from_pool — anchor + U·V + exact residuals, K pre-rotated
+        // per POOL_ROT_ABS), with a raw fallback for blocks the async compressor
+        // hasn't finished yet. NOTE this deviates from the MLX studs-only default
+        // deliberately: native's adaptive residual budget is layer-dependent, so
+        // stud row counts differ per layer, which the single shared prefill mask
+        // cannot express — full-block materialisation keeps the row count uniform
+        // (mbs+1 per block) and is exactly the representation the sparse DECODE
+        // path already validated (NIAH 6/6, margins ≈ dense).
+        // Requires sparse decode (dense decode re-reads the full-length rotated
+        // mirrors, not this cache — but only sparse decode frees them) and a fresh
+        // prompt (cached_len == 0). DIFFKV_LEGO_PREFILL=0 (default) = legacy.
+        bool lego_on = false;
+        if (const char* e = std::getenv("DIFFKV_LEGO_PREFILL")) {
+            try { lego_on = (std::stoi(e) != 0); } catch (...) {}
+        }
+        lego_on = lego_on && sp_enabled && decode_use_sparse && cached_len == 0;
+        // ── DIFFKV_LEGO_FAR: far-field mode under lego (all measured 2026-07-12,
+        // q8 native; synthesis = real-paper 8k/16k, margins = needle-digit nats).
+        // "studs" (DEFAULT) — the MLX studs-only port: far blocks contribute ONLY
+        //   rows that come out EXACT (anchor + residual-corrected rows, 1+128 per
+        //   block); the well-approximated rows are omitted, not reconstructed.
+        //   Requires uniform residual sets (DIFFKV_RESIDUAL_UNIFORM=1 is set
+        //   below) because stud counts must match across layers for the shared
+        //   prefill mask. Rationale: the two extremes both fail one gate —
+        //     "recon": full-block pool recon → synthesis COLLAPSES 26.7→10.0@8k /
+        //       26.7→3.3@16k (low-rank noise poisons the far field; MLX saw the
+        //       same) though margins 11.6/12.5 and needles hold;
+        //     "off" (pure omission): synthesis holds 26.7/23.3 but margins drop
+        //       12.6/14.3→7.4/7.6 and multi-needle REFUSES (0/3) — the prefill
+        //       hidden states lose the far field entirely.
+        //   Studs = exact-only coverage, the middle both gates accept.
+        // "off" / "recon" — kept for A/B.
+        int lego_far_mode = 1;   // 0=off, 1=studs, 2=recon
+        if (const char* e = std::getenv("DIFFKV_LEGO_FAR")) {
+            std::string m(e);
+            if (m == "off") lego_far_mode = 0;
+            else if (m == "recon") lego_far_mode = 2;
+            else lego_far_mode = 1;
+        }
+        const int lego_mr_studs = std::min(diffkv::NativeBlockPool::MAX_RESIDUAL, micro_block_size);
+        int lego_base_end = 0, lego_wnd_cap = 0, lego_far_rows = 0;
+        int lego_buf_rows = L;
+        const int lego_bstride = micro_block_size + 1;  // ingest-block stride (anchor + mbs rows)
+        if (lego_on) {
+            lego_base_end = std::max(sp_min, sp_sink_end + sp_window);
+            // Round up to a chunk boundary so every pre-engage chunk (which attends
+            // the full dense context) lies wholly inside the identity zone.
+            lego_base_end = ((lego_base_end + chunk_size - 1) / chunk_size) * chunk_size;
+            // Window + current chunk, plus one chunk of slack so the ring never
+            // overwrites rows the current chunk still attends.
+            lego_wnd_cap = sp_window + 2 * chunk_size;
+            // Far capacity: stage 2 routes INGEST blocks (stride mbs+1), not the
+            // aligned grid — candidates are whole pool blocks below the window.
+            // Rows per far block: studs = 1+MR exact rows; recon = whole block;
+            // off = no far tensors at all.
+            if (lego_far_mode != 0) {
+                int lego_first_blk = (sp_sink_end + lego_bstride - 1) / lego_bstride;
+                int lego_nb_max = std::max(0, (L - sp_window) / lego_bstride - lego_first_blk);
+                int lego_k_max = std::max(sp_kmin, (int)std::ceil(sp_frac * lego_nb_max));
+                lego_far_rows = lego_k_max * (lego_far_mode == 1 ? (1 + lego_mr_studs) : lego_bstride);
+            } else {
+                lego_far_rows = 0;
+            }
+            lego_buf_rows = lego_base_end + lego_wnd_cap;
+            if (lego_buf_rows + lego_far_rows >= L) {
+                lego_on = false;   // short prompt — ring would not shrink anything
+                lego_buf_rows = L;
+                lego_far_rows = 0;
+            } else {
+                if (lego_far_mode == 1) {
+                    // Studs need uniform residual sets across layers/blocks (see the
+                    // DIFFKV_LEGO_FAR note). Set BEFORE any of this prompt's blocks
+                    // are submitted for compression; the compressor is idle here.
+                    setenv("DIFFKV_RESIDUAL_UNIFORM", "1", 1);
+                }
+                std::cerr << "[DiffKV] LEGO_PREFILL on: base_end=" << lego_base_end
+                          << " wnd_cap=" << lego_wnd_cap
+                          << " far=" << (lego_far_mode == 1 ? "studs" : lego_far_mode == 2 ? "recon" : "off")
+                          << " far_rows=" << lego_far_rows
+                          << " device+host rows " << lego_buf_rows << "+" << lego_far_rows
+                          << " vs full " << L << " (stage 2: host mirrors ringed too)" << std::endl;
+            }
+        }
+        // Split an absolute [start, start+len) span into <=3 contiguous buffer spans
+        // (identity below base_end; modular ring above it). Buffer-agnostic: the same
+        // mapping addresses the device cache AND the host mirrors (stage 2).
+        auto lego_map_span = [&](int abs_start, int len, std::vector<std::pair<int,int>>& out) {
+            if (!lego_on) { out.push_back({abs_start, len}); return; }
+            if (abs_start < lego_base_end) {
+                int l0 = std::min(len, lego_base_end - abs_start);
+                out.push_back({abs_start, l0});
+                abs_start += l0; len -= l0;
+            }
+            while (len > 0) {
+                int off = lego_base_end + (abs_start - lego_base_end) % lego_wnd_cap;
+                int l0 = std::min(len, lego_base_end + lego_wnd_cap - off);
+                out.push_back({off, l0});
+                abs_start += l0; len -= l0;
+            }
+        };
+
+        // Local per-turn raw K/V activation buffers.
+        // For continuation turns (cached_len > 0), we only fill offsets [cached_len..L-1]
+        // and upload the already-stored prefix K/V from the prior chunk's data (if pos_start > cached_len).
+        // This matches ACTIVE_RUNTIME: full prompt is sent, only new tokens are prefilled.
+        // ── fp16 KV storage (RAM fix, mirrors MLX which keeps dense KV in float16) ──
+        // These full-length host buffers are the single biggest native-vs-MLX RAM
+        // overhead (3 × L × F × 4 bytes × n_layers ≈ 2 GB at 24k/1.5B). MLX stores the
+        // equivalent in float16 (mlx_diffkv_wrapper.py:345 "float16 explicitly to halve RAM").
+        // Stored as ggml_fp16_t; every consumer converts at its boundary (ggml_fp16_to_fp32
+        // on read, ggml_fp32_to_fp16 on write). The fp32 MATH is unchanged — only storage
+        // halves. The GPU prior tensors + prefill flash-attn are F16 to match (no fp32 temp).
+        // ── LEGO stage 2: under the ring, the mirrors hold only [identity | window ring]
+        // (lego_buf_rows rows, addressed through lego_map_span) instead of the full [L].
+        // Consumers that survive the ring: chunk writes (ring-mapped spans), the
+        // decode-boundary dense-window seeding (reads the tail, always ring-resident).
+        // Far-block reads moved to the compressed pool; debug probes gated off.
+        const int lego_host_rows = lego_on ? lego_buf_rows : L;
+        std::vector<std::vector<ggml_fp16_t>> k_activations(n_layers, std::vector<ggml_fp16_t>((size_t)lego_host_rows * F_test, 0));
+        std::vector<std::vector<ggml_fp16_t>> k_rotated_activations(n_layers);
+        if (!decode_use_sparse) {
+            for (int l = 0; l < n_layers; ++l) {
+                k_rotated_activations[l].resize((size_t)L * F_test, ggml_fp32_to_fp16(0.0f));
+            }
+        }
+        std::vector<std::vector<ggml_fp16_t>> v_activations(n_layers, std::vector<ggml_fp16_t>((size_t)lego_host_rows * F_test, 0));
+        std::vector<float> prefill_output_logits(n_vocab);
         // Decompress prefix blocks from turn 1 if cached_len > 0
         if (cached_len > 0) {
             for (int l = 0; l < n_layers; ++l) {
@@ -2916,88 +3255,6 @@ int main(int argc, char ** argv) {
             if (!interactive) break; else continue;
         }
 
-        // ── DIFFKV_SPARSE_PREFILL knobs (hoisted above the cache allocation: the LEGO
-        // ring geometry below derives from them). See the block comment at the old
-        // location for the full design notes. ──
-        bool sp_enabled = true;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL")) { try { sp_enabled = (std::stoi(e) != 0); } catch (...) {} }
-        int sp_window = 1024, sp_sink_blocks = 1, sp_min = 2048;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_WINDOW")) { try { sp_window = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_SINK_BLOCKS")) { try { sp_sink_blocks = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MIN")) { try { sp_min = std::stoi(e); } catch (...) {} }
-        const int sp_sink_end = sp_sink_blocks * micro_block_size;
-        int sp_kmin = 8; float sp_frac = 0.05f; int sp_max_occ = 8;
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_KMIN")) { try { sp_kmin = std::stoi(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_FRAC")) { try { sp_frac = std::stof(e); } catch (...) {} }
-        if (const char* e = std::getenv("DIFFKV_SPARSE_PREFILL_MAX_OCC")) { try { sp_max_occ = std::stoi(e); } catch (...) {} }
-
-        // ── DIFFKV_LEGO_PREFILL (port of the MLX lego streaming prefill; see
-        // docs/NATIVE_LEGO_PORT_PLAN.md and the MLX flag notes). ──────────────────
-        // The persistent prefill KV cache is normally FULL-LENGTH [L] per layer
-        // (F16 K+V x n_layers — ~470 MB @16k on a 1.5B model) even though sparse
-        // prefill only ever attends [sinks | routed blocks | window | chunk].
-        // Lego mode ring-sizes it:
-        //   [0, base_end)            identity zone — sinks + everything below the
-        //                            sparse-engage point (pre-engage chunks attend
-        //                            the full dense context, so this stays resident)
-        //   [base_end, +wnd_cap)     modular ring for the recency window + chunk
-        // Routed blocks BELOW base_end are viewed in place (identity); routed blocks
-        // above it are no longer device-resident, so their rows are gathered from
-        // the raw host mirrors (k_activations rotated on the fly + v_activations —
-        // EXACT raw rows, the same bytes the legacy path attends) and uploaded into
-        // a per-layer FAR tensor each chunk. Attention math is unchanged; only where
-        // the bytes live changes.
-        // Requires sparse decode (dense decode re-reads the full-length rotated
-        // mirrors, not this cache — but only sparse decode frees them) and a fresh
-        // prompt (cached_len == 0). DIFFKV_LEGO_PREFILL=0 (default) = legacy.
-        bool lego_on = false;
-        if (const char* e = std::getenv("DIFFKV_LEGO_PREFILL")) {
-            try { lego_on = (std::stoi(e) != 0); } catch (...) {}
-        }
-        lego_on = lego_on && sp_enabled && decode_use_sparse && cached_len == 0;
-        int lego_base_end = 0, lego_wnd_cap = 0, lego_far_rows = 0;
-        int lego_buf_rows = L;
-        if (lego_on) {
-            lego_base_end = std::max(sp_min, sp_sink_end + sp_window);
-            // Round up to a chunk boundary so every pre-engage chunk (which attends
-            // the full dense context) lies wholly inside the identity zone.
-            lego_base_end = ((lego_base_end + chunk_size - 1) / chunk_size) * chunk_size;
-            // Window + current chunk, plus one chunk of slack so the ring never
-            // overwrites rows the current chunk still attends.
-            lego_wnd_cap = sp_window + 2 * chunk_size;
-            int lego_first_blk = (sp_sink_end + micro_block_size - 1) / micro_block_size;
-            int lego_nb_max = std::max(0, (L - sp_window) / micro_block_size - lego_first_blk);
-            int lego_k_max = std::max(sp_kmin, (int)std::ceil(sp_frac * lego_nb_max));
-            lego_far_rows = lego_k_max * micro_block_size;
-            lego_buf_rows = lego_base_end + lego_wnd_cap;
-            if (lego_buf_rows + lego_far_rows >= L) {
-                lego_on = false;   // short prompt — ring would not shrink anything
-                lego_buf_rows = L;
-                lego_far_rows = 0;
-            } else {
-                std::cerr << "[DiffKV] LEGO_PREFILL on: base_end=" << lego_base_end
-                          << " wnd_cap=" << lego_wnd_cap << " far_rows=" << lego_far_rows
-                          << " device rows " << lego_buf_rows << "+" << lego_far_rows
-                          << " vs full " << L << std::endl;
-            }
-        }
-        // Split an absolute [start, start+len) span into <=3 contiguous buffer spans
-        // (identity below base_end; modular ring above it).
-        auto lego_map_span = [&](int abs_start, int len, std::vector<std::pair<int,int>>& out) {
-            if (!lego_on) { out.push_back({abs_start, len}); return; }
-            if (abs_start < lego_base_end) {
-                int l0 = std::min(len, lego_base_end - abs_start);
-                out.push_back({abs_start, l0});
-                abs_start += l0; len -= l0;
-            }
-            while (len > 0) {
-                int off = lego_base_end + (abs_start - lego_base_end) % lego_wnd_cap;
-                int l0 = std::min(len, lego_base_end + lego_wnd_cap - off);
-                out.push_back({off, l0});
-                abs_start += l0; len -= l0;
-            }
-        };
-
         // Initialize persistent prefill cache context and tensors on Metal/GPU
         struct ggml_init_params cache_params = {
             /*.mem_size   =*/ 1 * 1024 * 1024, // 1MB metadata context
@@ -3053,6 +3310,7 @@ int main(int argc, char ** argv) {
         // derives from them.)
         std::map<int32_t,int> sp_tok_count;                       // token id -> total count in prompt
         std::vector<std::unordered_set<int32_t>> sp_block_tokens; // per aligned block: unique token ids
+        std::vector<std::unordered_set<int32_t>> lego_block_tokens; // per INGEST block (stride mbs+1), lego only
         if (sp_enabled) {
             for (int32_t t : prompt_tokens) sp_tok_count[t]++;
             int nblk = (L + micro_block_size - 1) / micro_block_size;
@@ -3060,6 +3318,19 @@ int main(int argc, char ** argv) {
             for (int b = 0; b < nblk; ++b) {
                 int s = b * micro_block_size, e = std::min(L, s + micro_block_size);
                 for (int i = s; i < e; ++i) sp_block_tokens[b].insert(prompt_tokens[i]);
+            }
+            if (lego_on) {
+                // LEGO stage 2 routes whole INGEST blocks (anchor + mbs rows, stride
+                // mbs+1) — the pool's unit of compression — so a routed far block maps
+                // 1:1 onto a pool slot and can be re-materialised without straddling
+                // block boundaries. (Blocks tile from position 0 on a fresh prompt, so
+                // ingest block b covers [b*(mbs+1), (b+1)*(mbs+1)).)
+                int nlb = (L + lego_bstride - 1) / lego_bstride;
+                lego_block_tokens.resize(nlb);
+                for (int b = 0; b < nlb; ++b) {
+                    int s = b * lego_bstride, e = std::min(L, s + lego_bstride);
+                    for (int i = s; i < e; ++i) lego_block_tokens[b].insert(prompt_tokens[i]);
+                }
             }
             std::cerr << "[DiffKV] SPARSE_PREFILL on: sink_end=" << sp_sink_end
                       << " window=" << sp_window << " min=" << sp_min
@@ -3084,9 +3355,9 @@ int main(int argc, char ** argv) {
             // sp_ranges_abs — absolute [start,len) spans, drives the MASK.
             // sp_ranges_buf — the same spans as BUFFER offsets, drives the graph views
             //                 (identical to abs when lego is off; ring-mapped when on).
-            // lego_far_blocks — routed blocks that are no longer device-resident under
-            //                 lego (above the identity zone); gathered from the raw host
-            //                 mirrors and uploaded into the FAR tensors below.
+            // lego_far_blocks — routed INGEST-block indices that are above the identity
+            //                 zone under lego; re-materialised from the compressed pool
+            //                 (stage 2) and uploaded into the FAR tensors below.
             std::vector<std::pair<int,int>> sp_ranges_abs;
             std::vector<std::pair<int,int>> sp_ranges_buf;
             std::vector<int> lego_far_blocks;
@@ -3097,8 +3368,12 @@ int main(int argc, char ** argv) {
                 // ── Stage B lexical routing: pick the prior blocks that share the most
                 //    distinctive tokens with the current chunk (top-K), so multi-fact prompts
                 //    keep the needle blocks. Filler chunks match nothing → pure StreamingLLM.
-                int first_blk = (sp_sink_end + micro_block_size - 1) / micro_block_size;
-                int last_blk  = sp_win_start / micro_block_size;               // blocks fully below window
+                //    Lego routes INGEST blocks (stride mbs+1, pool-aligned); legacy routes
+                //    the aligned mbs grid. Same scoring either way.
+                const int r_stride = lego_on ? lego_bstride : micro_block_size;
+                const auto & r_tokens = lego_on ? lego_block_tokens : sp_block_tokens;
+                int first_blk = (sp_sink_end + r_stride - 1) / r_stride;
+                int last_blk  = sp_win_start / r_stride;               // blocks fully below window
                 int nb = last_blk - first_blk;
                 std::vector<int> selected;
                 if (nb > 0 && (sp_kmin > 0 || sp_frac > 0.0f)) {
@@ -3111,7 +3386,7 @@ int main(int argc, char ** argv) {
                     std::vector<std::pair<int,int>> scored;   // (overlap score, abs block idx)
                     for (int b = first_blk; b < last_blk; ++b) {
                         int sc = 0;
-                        for (int32_t t : sp_block_tokens[b]) if (distinct.count(t)) sc++;
+                        for (int32_t t : r_tokens[b]) if (distinct.count(t)) sc++;
                         if (sc > 0) scored.push_back({sc, b});
                     }
                     int K = std::max(sp_kmin, (int)std::ceil(sp_frac * nb));
@@ -3125,25 +3400,29 @@ int main(int argc, char ** argv) {
                 }
                 // Far blocks FIRST (they are concatenated before the ranges in the graph,
                 // so the mask walk must see them first — handled via lego_far_blocks).
-                if (lego_on) {
+                // Far mode "off": blocks above the identity zone are simply omitted
+                // (see the DIFFKV_LEGO_FAR note at the lego config).
+                if (lego_on && lego_far_mode != 0) {
                     for (int b : selected) {
-                        if ((b + 1) * micro_block_size > lego_base_end) lego_far_blocks.push_back(b);
+                        if ((b + 1) * r_stride > lego_base_end) lego_far_blocks.push_back(b);
                     }
                 }
                 sp_ranges_abs.push_back({0, sp_sink_end});                            // attention sink
                 for (int b : selected) {
-                    if (lego_on && (b + 1) * micro_block_size > lego_base_end) continue; // far — via upload
-                    sp_ranges_abs.push_back({b * micro_block_size, micro_block_size});
+                    if (lego_on && (b + 1) * r_stride > lego_base_end) continue; // far — via upload
+                    sp_ranges_abs.push_back({b * r_stride, r_stride});
                 }
                 sp_ranges_abs.push_back({sp_win_start, ctx_len - sp_win_start});      // window + current chunk
                 for (const auto & r : sp_ranges_abs) lego_map_span(r.first, r.second, sp_ranges_buf);
             }
-            int lego_n_far = (int)lego_far_blocks.size() * micro_block_size;
+            // Rows per far block: studs = anchor + MR exact rows; recon = whole block.
+            const int lego_far_bpr = (lego_far_mode == 1) ? (1 + lego_mr_studs) : lego_bstride;
+            int lego_n_far = (int)lego_far_blocks.size() * lego_far_bpr;
             if (lego_n_far > lego_far_rows) {
                 // Cap guard (routing K can exceed the sizing estimate only if knobs were
                 // changed mid-run — never in practice). Drop the lowest-priority extras.
-                lego_far_blocks.resize(lego_far_rows / micro_block_size);
-                lego_n_far = (int)lego_far_blocks.size() * micro_block_size;
+                lego_far_blocks.resize(lego_far_rows / lego_far_bpr);
+                lego_n_far = (int)lego_far_blocks.size() * lego_far_bpr;
             }
             int sp_klen = 0;
             if (use_sp) { sp_klen = lego_n_far; for (const auto& r : sp_ranges_abs) sp_klen += r.second; }
@@ -3153,51 +3432,114 @@ int main(int argc, char ** argv) {
             std::vector<std::pair<int,int>> chunk_write_spans;
             if (lego_on) lego_map_span(pos_start, chunk_len, chunk_write_spans);
 
-            // ── LEGO far gather: rotate the routed far blocks' raw K at their absolute
-            // positions (same math as the legacy per-chunk rotation) and copy raw V, then
-            // upload into the per-layer FAR tensors. These are EXACT raw rows — identical
-            // bytes to what the legacy path attends via device views; only the residence
-            // differs. Shared cos/sin tables across layers.
+            // ── LEGO far gather (stage 2): routed far blocks are re-materialised from
+            // the COMPRESSED pool — anchor + U·V·row_scale·blk_scale + exact residual
+            // corrections, K PRE-ROTATED at absolute positions (POOL_ROT_ABS), V raw —
+            // and uploaded into the per-layer FAR tensors. This is the representation
+            // the sparse DECODE path already attends (materialize_routed_kv), so no new
+            // fidelity surface is introduced beyond what decode validated. Blocks the
+            // async compressor hasn't finished in a given layer fall back to that
+            // layer's raw fp32 rows (exact; rotated here like the legacy path). Row
+            // order inside the far segment is free — every far row is always-visible
+            // history in the mask — so no position bookkeeping is needed.
             if (lego_on && lego_n_far > 0) {
+                auto & lg_ingest = runtime_manager.get_ingest_manager();
+                auto & lg_engines = runtime_manager.get_engines();
                 const int half_dim = head_dim / 2;
-                std::vector<float> inv_freq(half_dim);
-                for (int i = 0; i < half_dim; ++i) {
-                    inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
-                }
-                std::vector<float> far_cos((size_t)lego_n_far * half_dim);
-                std::vector<float> far_sin((size_t)lego_n_far * half_dim);
-                for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
-                    int base = lego_far_blocks[fi] * micro_block_size;
-                    for (int t = 0; t < micro_block_size; ++t) {
-                        float pos = (float)(base + t);
-                        size_t row = (size_t)(fi * micro_block_size + t);
-                        for (int i = 0; i < half_dim; ++i) {
-                            float theta = pos * inv_freq[i];
-                            far_cos[row * half_dim + i] = std::cos(theta);
-                            far_sin[row * half_dim + i] = std::sin(theta);
-                        }
-                    }
-                }
+                // Lazy per-block cos/sin tables: only raw-fallback blocks need them, and
+                // absolute positions are layer-independent, so build once per block.
+                std::vector<std::vector<float>> far_cos(lego_far_blocks.size());
+                std::vector<std::vector<float>> far_sin(lego_far_blocks.size());
+                std::vector<float> lg_inv_freq;
                 std::vector<ggml_fp16_t> far_stage_k((size_t)lego_n_far * F_test);
+                std::vector<ggml_fp16_t> far_stage_v((size_t)lego_n_far * F_test);
+                std::vector<ggml_fp16_t> lg_raw_rows;
                 for (int l = 0; l < n_layers; ++l) {
+                    auto & lg_blocks = lg_ingest.get_blocks(l);
+                    diffkv::NativeBlockPool* lg_pool = lg_engines[l].get();
                     for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
-                        int base = lego_far_blocks[fi] * micro_block_size;
-                        apply_rope_neox_cpu_fast(
-                            k_activations[l].data() + (size_t)base * F_test,
-                            far_stage_k.data() + (size_t)fi * micro_block_size * F_test,
-                            far_cos.data() + (size_t)fi * micro_block_size * half_dim,
-                            far_sin.data() + (size_t)fi * micro_block_size * half_dim,
-                            micro_block_size, kv_heads, head_dim);
+                        const int bi = lego_far_blocks[fi];
+                        ggml_fp16_t* out_k = far_stage_k.data() + (size_t)fi * lego_far_bpr * F_test;
+                        ggml_fp16_t* out_v = far_stage_v.data() + (size_t)fi * lego_far_bpr * F_test;
+                        diffkv::StreamingKVBlock* blk =
+                            (bi < (int)lg_blocks.size()) ? lg_blocks[bi].get() : nullptr;
+                        bool emitted = false;
+                        if (blk && blk->pool_idx >= 0) {
+                            diffkv::BlockState st = lg_pool->get_state_table().get(blk->pool_idx);
+                            if (st == diffkv::BlockState::CPUResident) {
+                                runtime_manager.get_pager().touch(blk, lg_engines);
+                                st = lg_pool->get_state_table().get(blk->pool_idx);
+                            }
+                            if (st == diffkv::BlockState::CompressedResident) {
+                                int rows = (lego_far_mode == 1)
+                                    ? lego_emit_block_studs(lg_pool, blk->pool_idx, F_test, lego_mr_studs, out_k, out_v)
+                                    : lego_emit_block_from_pool(lg_pool, blk->pool_idx, F_test, out_k, out_v);
+                                emitted = (rows == lego_far_bpr);
+                            }
+                        }
+                        if (!emitted && blk && blk->anchor_idx == bi * lego_bstride &&
+                            (int)blk->active_k.size() == (lego_bstride - 1) * F_test &&
+                            blk->active_v.size() == blk->active_k.size() &&
+                            (int)blk->anchor_k.size() == F_test) {
+                            // Raw fallback: anchor + active rows are still resident for this
+                            // layer (compressor not done yet) — exact rows, rotate K here.
+                            // Studs mode emits anchor + the LAST mr_studs raw rows (residual
+                            // positions aren't known pre-compression; any exact-row subset is
+                            // valid coverage — same omission philosophy).
+                            const int s0 = (lego_far_mode == 1) ? (lego_bstride - 1 - lego_mr_studs) : 0;
+                            if (far_cos[fi].empty()) {
+                                if (lg_inv_freq.empty()) {
+                                    lg_inv_freq.resize(half_dim);
+                                    for (int i = 0; i < half_dim; ++i) {
+                                        lg_inv_freq[i] = 1.0f / std::pow(model.get_config().rope_freq_base, 2.0f * i / head_dim);
+                                    }
+                                }
+                                far_cos[fi].resize((size_t)lego_far_bpr * half_dim);
+                                far_sin[fi].resize((size_t)lego_far_bpr * half_dim);
+                                for (int t = 0; t < lego_far_bpr; ++t) {
+                                    float pos = (float)((t == 0) ? blk->anchor_idx
+                                                                 : blk->anchor_idx + 1 + s0 + (t - 1));
+                                    for (int i = 0; i < half_dim; ++i) {
+                                        float theta = pos * lg_inv_freq[i];
+                                        far_cos[fi][(size_t)t * half_dim + i] = std::cos(theta);
+                                        far_sin[fi][(size_t)t * half_dim + i] = std::sin(theta);
+                                    }
+                                }
+                            }
+                            lg_raw_rows.resize((size_t)lego_far_bpr * F_test);
+                            for (int f = 0; f < F_test; ++f) lg_raw_rows[f] = ggml_fp32_to_fp16(blk->anchor_k[f]);
+                            for (int t = 1; t < lego_far_bpr; ++t) {
+                                const float* src = blk->active_k.data() + (size_t)(s0 + t - 1) * F_test;
+                                for (int f = 0; f < F_test; ++f) {
+                                    lg_raw_rows[(size_t)t * F_test + f] = ggml_fp32_to_fp16(src[f]);
+                                }
+                            }
+                            apply_rope_neox_cpu_fast(lg_raw_rows.data(), out_k,
+                                                     far_cos[fi].data(), far_sin[fi].data(),
+                                                     lego_far_bpr, kv_heads, head_dim);
+                            for (int f = 0; f < F_test; ++f) out_v[f] = ggml_fp32_to_fp16(blk->anchor_v[f]);
+                            for (int t = 1; t < lego_far_bpr; ++t) {
+                                const float* src = blk->active_v.data() + (size_t)(s0 + t - 1) * F_test;
+                                for (int f = 0; f < F_test; ++f) {
+                                    out_v[(size_t)t * F_test + f] = ggml_fp32_to_fp16(src[f]);
+                                }
+                            }
+                            emitted = true;
+                        }
+                        if (!emitted) {
+                            // Unreachable by the block state machine (raw is freed only after
+                            // CompressedResident); zero rows + loud error beats silent garbage.
+                            std::cerr << "[DiffKV] LEGO FATAL: far block " << bi << " layer " << l
+                                      << " has neither compressed pool data nor raw rows — emitting zeros."
+                                      << std::endl;
+                            std::memset(out_k, 0, (size_t)lego_far_bpr * F_test * sizeof(ggml_fp16_t));
+                            std::memset(out_v, 0, (size_t)lego_far_bpr * F_test * sizeof(ggml_fp16_t));
+                        }
                     }
                     ggml_backend_tensor_set(lego_far_k[l], far_stage_k.data(), 0,
                                             (size_t)lego_n_far * F_test * sizeof(ggml_fp16_t));
-                    for (int fi = 0; fi < (int)lego_far_blocks.size(); ++fi) {
-                        int base = lego_far_blocks[fi] * micro_block_size;
-                        ggml_backend_tensor_set(lego_far_v[l],
-                                                v_activations[l].data() + (size_t)base * F_test,
-                                                (size_t)fi * micro_block_size * F_test * sizeof(ggml_fp16_t),
-                                                (size_t)micro_block_size * F_test * sizeof(ggml_fp16_t));
-                    }
+                    ggml_backend_tensor_set(lego_far_v[l], far_stage_v.data(), 0,
+                                            (size_t)lego_n_far * F_test * sizeof(ggml_fp16_t));
                 }
             }
 
@@ -3321,8 +3663,12 @@ int main(int argc, char ** argv) {
             // For next chunk's prior context, apply_rope_neox_cpu will rotate it at upload time.
             std::vector<std::vector<float>> chunk_k(n_layers, std::vector<float>(chunk_len * F_test));
             std::vector<std::vector<float>> chunk_v(n_layers, std::vector<float>(chunk_len * F_test));
-            // Store raw K/V at pos_start offset in k_activations
-            int local_offset = pos_start;
+            // Store raw K/V into the host mirrors. LEGO stage 2: writes go through the
+            // SAME ring spans the device cache write uses (chunk_write_spans; identity
+            // single-span [pos_start, chunk_len) when lego is off).
+            std::vector<std::pair<int,int>> mirror_write_spans;
+            if (lego_on) mirror_write_spans = chunk_write_spans;
+            else         mirror_write_spans.push_back({pos_start, chunk_len});
             for (int l = 0; l < n_layers; ++l) {
                 if (prefill_k_layers[l]->type == GGML_TYPE_F16) {
                     std::vector<ggml_fp16_t> temp_k_f16(chunk_len * F_test);
@@ -3332,15 +3678,31 @@ int main(int argc, char ** argv) {
                     for (int i = 0; i < chunk_len * F_test; ++i) {
                         chunk_k[l][i] = ggml_fp16_to_fp32(temp_k_f16[i]);
                         chunk_v[l][i] = ggml_fp16_to_fp32(temp_v_f16[i]);
-                        k_activations[l][local_offset * F_test + i] = temp_k_f16[i];
-                        v_activations[l][local_offset * F_test + i] = temp_v_f16[i];
+                    }
+                    int src_row = 0;
+                    for (const auto & w : mirror_write_spans) {
+                        std::memcpy(&k_activations[l][(size_t)w.first * F_test],
+                                    temp_k_f16.data() + (size_t)src_row * F_test,
+                                    (size_t)w.second * F_test * sizeof(ggml_fp16_t));
+                        std::memcpy(&v_activations[l][(size_t)w.first * F_test],
+                                    temp_v_f16.data() + (size_t)src_row * F_test,
+                                    (size_t)w.second * F_test * sizeof(ggml_fp16_t));
+                        src_row += w.second;
                     }
                 } else {
                     ggml_backend_tensor_get(prefill_k_layers[l], chunk_k[l].data(), 0, chunk_len * F_test * sizeof(float));
                     ggml_backend_tensor_get(prefill_v_layers[l], chunk_v[l].data(), 0, chunk_len * F_test * sizeof(float));
-                    for (int i = 0; i < chunk_len * F_test; ++i) {
-                        k_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_k[l][i]);
-                        v_activations[l][local_offset * F_test + i] = ggml_fp32_to_fp16(chunk_v[l][i]);
+                    int src_row = 0;
+                    for (const auto & w : mirror_write_spans) {
+                        for (int rr = 0; rr < w.second; ++rr) {
+                            const size_t so = (size_t)(src_row + rr) * F_test;
+                            const size_t dofs = (size_t)(w.first + rr) * F_test;
+                            for (int f = 0; f < F_test; ++f) {
+                                k_activations[l][dofs + f] = ggml_fp32_to_fp16(chunk_k[l][so + f]);
+                                v_activations[l][dofs + f] = ggml_fp32_to_fp16(chunk_v[l][so + f]);
+                            }
+                        }
+                        src_row += w.second;
                     }
                 }
                 
@@ -3479,7 +3841,10 @@ int main(int argc, char ** argv) {
         // + residual correction) and compare against ground truth (k_activations rotated at
         // the row's absolute position under POOL_ROT_ABS). Prints per-row relative error for
         // rows near <pos>. Separates capture-side corruption from decode-side bugs.
-        if (const char* env_rp = std::getenv("DIFFKV_DBG_RECON_POS")) {
+        if (const char* env_rp = (lego_on ? nullptr : std::getenv("DIFFKV_DBG_RECON_POS"))) {
+            // (gated off under LEGO stage 2: the probe's ground truth reads
+            // k_activations at arbitrary absolute positions, which the ring no
+            // longer holds.)
             int want_pos = std::stoi(env_rp);
             runtime_manager.wait_for_compressor();
             // Scan the POOL directly by slot (older blocks are flushed from the ingest
@@ -3775,6 +4140,13 @@ int main(int argc, char ** argv) {
                 );
 
                 bool disable_factual = !g_diffkv_enable_factual.load();
+                if (lego_on && !disable_factual) {
+                    // LEGO stage 2: factual_store.build reads the raw mirrors at
+                    // arbitrary absolute positions — data the ring no longer holds.
+                    std::cerr << "[DiffKV] Factual store forced OFF under DIFFKV_LEGO_PREFILL "
+                                 "(reads ring-evicted raw activations).\n";
+                    disable_factual = true;
+                }
                 try {
                   if (disable_factual) {
                     std::cerr << "[DiffKV] Factual store off (MLX turn-1 parity; DIFFKV_ENABLE_FACTUAL=1 to build).\n";
@@ -3843,6 +4215,22 @@ int main(int argc, char ** argv) {
                 // recency window ≥ prompt), we fall back to dense decode here — which uploads
                 // k_rotated_activations. Without this backfill those buffers are all-zero and
                 // dense decode attends garbage keys (observed: wrong needle digits).
+                if (lego_on) {
+                    // LEGO stage 2: the mirrors are ring-sized — a full-length backfill is
+                    // impossible (far rows were dropped from host RAM). Unreachable in
+                    // practice (lego requires sparse decode, and a ≥engage-threshold prefill
+                    // always creates blocks), but if it ever fires, failing loudly beats
+                    // decoding from a zero/garbled dense cache.
+                    std::cerr << "[DiffKV] LEGO FATAL: sparse→dense fallback requested but the "
+                                 "host mirrors are ring-sized (DIFFKV_LEGO_PREFILL). Aborting "
+                                 "this generation.\n";
+                    if (interactive) {
+                        std::cout << "__RESPONSE__" << std::endl;
+                        std::cout << "[Error: lego prefill cannot fall back to dense decode]" << std::flush;
+                        std::cout << "\n__FINISH__" << std::endl;
+                    }
+                    if (!interactive) break; else continue;
+                }
                 if (L >= engage_threshold) {
                     std::cerr << "[DiffKV] sparse→dense fallback (0 compressed blocks): backfilling "
                                  "k_rotated_activations for " << L << " tokens\n";
@@ -4476,10 +4864,22 @@ int main(int argc, char ** argv) {
             int mlx_dense   = std::min(L, cfg_recency_window + micro_block_size);  // MLX max_dense_len
             int dense_win   = std::min(mlx_dense, dense_cap);
             int dense_start = std::max(0, L - dense_win);
+            // LEGO stage 2: the mirror tail lives at ring-mapped offsets. The window
+            // ring capacity (sp_window + 2·chunk ≥ 2048) always covers dense_win
+            // (recency_window + mbs ≤ 768 by default), so every row is resident;
+            // lego_map_span is the identity when lego is off.
+            std::vector<std::pair<int,int>> dense_seed_spans;
+            lego_map_span(dense_start, dense_win, dense_seed_spans);
             for (int l = 0; l < n_layers; ++l) {
-                for (int i = 0; i < dense_win * F_test; ++i) {
-                    active_k_dense[l][i] = ggml_fp16_to_fp32(k_activations[l][(size_t)dense_start * F_test + i]);
-                    active_v_dense[l][i] = ggml_fp16_to_fp32(v_activations[l][(size_t)dense_start * F_test + i]);
+                size_t di = 0;
+                for (const auto & w : dense_seed_spans) {
+                    const size_t so = (size_t)w.first * F_test;
+                    const size_t n  = (size_t)w.second * F_test;
+                    for (size_t i = 0; i < n; ++i) {
+                        active_k_dense[l][di + i] = ggml_fp16_to_fp32(k_activations[l][so + i]);
+                        active_v_dense[l][di + i] = ggml_fp16_to_fp32(v_activations[l][so + i]);
+                    }
+                    di += n;
                 }
                 total_dense_tokens[l]    = dense_win;
                 dense_start_positions[l] = dense_start;

@@ -1,5 +1,102 @@
 # Native (C++) port plan: pool right-sizing + lego streaming prefill
 
+## STAGE 2 LANDED (2026-07-12) — host mirrors ringed, far blocks pool-sourced
+
+Everything below this section is kept as historical planning context; this section
+is the current state.
+
+**What landed** (all inside `DIFFKV_LEGO_PREFILL=1`, still default OFF):
+- `k_activations`/`v_activations` are allocated at `lego_buf_rows` (identity zone +
+  window ring, same `lego_map_span` geometry as the stage-1 device ring) instead of
+  full `[L]`. Chunk captures write through the SAME ring spans the device cache
+  uses; the decode-boundary dense-window seeding reads the tail through
+  `lego_map_span` (window ring capacity ≥ 2048 always covers the 768-row dense
+  window). `k_rotated_activations` was ALREADY skipped under sparse decode
+  (allocation gated `!decode_use_sparse`) — plan step 1 was free, verify-only.
+- **Far field default = STUDS (`DIFFKV_LEGO_FAR=studs`)** — the MLX studs-only
+  port, made possible by forcing UNIFORM residual sets: routed far blocks
+  contribute ONLY rows that come out EXACT — the anchor + the block's
+  residual-corrected rows (1 + 128 per block; `lego_emit_block_studs`, recon
+  computed only AT residual positions so anchor+recon+residual reproduces the raw
+  row). Routing selects whole INGEST blocks (stride mbs+1 = 257, 1:1 with pool
+  slots, `lego_block_tokens` table); K comes out PRE-ROTATED per POOL_ROT_ABS
+  (zero host RoPE on the pool path), V raw. Not-yet-compressed layers fall back
+  to exact raw rows (anchor + last-128); "neither" is unreachable and zero-fills
+  with a loud `LEGO FATAL`.
+- **Why studs, measured (q8 native)** — both extremes fail one gate:
+  - `recon` (full-block pool recon): synthesis COLLAPSES 26.7→10.0@8k /
+    26.7→3.3@16k (low-rank noise poisons the far field — MLX saw the same);
+    margins 11.6/12.5, NIAH 6/6, multi-needle 3/3.
+  - `off` (pure omission, no far at all): synthesis holds 26.7/23.3 but margins
+    drop 12.6/14.3 → **7.4/7.6** and multi-needle REFUSES (0/3) — prefill hidden
+    states lose the far field entirely. (Factual-off confound ruled out: this
+    cell also ran factual-off and synthesis matched baseline.)
+  - `studs` = exact-only coverage, the middle. Gate numbers in the results block.
+- **The uniform-residual unlock**: MLX studs-only looked unportable because
+  native's adaptive residual budget (lowrank.cpp OPT-A) is LAYER-dependent
+  (per-layer error medians) → per-layer stud counts, which the single shared
+  prefill mask/klen cannot express. Resolution: under lego studs the native
+  runtime sets `DIFFKV_RESIDUAL_UNIFORM=1`, which skips the adaptive cap so every
+  full prefill block carries the full MAX_RESIDUAL=128 set (uniform across layers
+  AND blocks). This is MLX parity ("prefill blocks always carry full residual
+  sets") and costs no memory — pool residual tensors are pre-allocated at
+  MAX_RESIDUAL per slot. It also makes decode materialisation strictly MORE
+  exact for easy blocks.
+- Consumers gated: `factual_store.build` force-disabled under lego (reads
+  ring-evicted mirror positions; it is net-negative and default-off anyway),
+  `DIFFKV_DBG_RECON_POS` gated off under lego (`DBG_EXPORT_CHECK` already was),
+  the sparse→dense 0-blocks fallback hard-aborts under lego instead of backfilling
+  from mirrors that no longer hold the data.
+
+**Gates (2026-07-12, q8_0, ENGAGE=1024)** — the far-mode A/B that picked studs:
+- NIAH 6-cell sweep: **6/6 in every mode tried** (recon, off) and 6/6 lego=0
+  (refactor no-regression). The 4k cells auto-disable lego (ring wouldn't shrink)
+  — they exercise the legacy path. Single-needle recall is decode-time and never
+  moved.
+- Multi-needle 16k: far=recon **3/3** (reverse listing order), lego=0 3/3 (in
+  order), far=off **0/3** (refusal — rejected).
+- Margins (8k/16k, depth 0.5): lego=0 12.62/14.32; far=recon 11.60/12.47;
+  far=off **7.45/7.62** (rejected).
+- Synthesis (native compressed 8k/16k): lego=0 **26.7/26.7**; far=recon
+  **10.0/3.3** (rejected); far-omission 26.7/23.3.
+- Conformance: PASS (1.19e-07).
+
+**FINAL STUDS-DEFAULT RESULTS (2026-07-12, q8_0, ENGAGE=1024, new binary)**:
+- NIAH 6-cell: **6/6**. Multi-needle 16k: **3/3**. Margins 8k/16k:
+  **11.73 / 12.38** (baseline 12.62/14.32 — within ~1-2 nats, healthy).
+- Synthesis (native compressed 8k/16k): **16.7 / 6.7** vs baseline 26.7/26.7.
+  At 8k all 5 facts are retained (only the linkage is lost); at 16k 3 facts drop.
+  This is the documented cost of the opt-in flag — the same trade MLX shipped as
+  its studs default (MLX: 10.0/6.7 vs its 23.3/3.3 baseline). No far mode
+  dominates: off wins synthesis but breaks margins/multi-needle; recon is
+  strictly worse than studs on synthesis for the same margins.
+- **Memory (the gate stage 1 failed) — the peak MOVES**
+  (`benchmarks/native_mem_profile.py`, phase-tagged phys_footprint, MAX_TOKENS=8):
+  - 16k: **3.477 GB vs 4.053 GB** lego-off → **−576 MB (−14.2%)**
+  - 32k: **4.760 GB vs 5.716 GB** lego-off → **−957 MB (−16.7%)**
+  - Prefill-end footprint: 2.50 vs 2.88 GB @16k; 2.80 vs 3.63 GB @32k (the ring).
+    The 32k baseline's post-prefill spike (3.63→5.72 during factual build +
+    decode setup while the full mirrors were still alive) is gone under lego
+    (mirrors ringed + factual forced off). 32k run also ~10s faster end-to-end.
+- Operational note: the native binary has a PRE-EXISTING intermittent
+  hang-at-exit (full output produced, process never exits; observed on decode
+  runs both before and after these changes) — spun off as its own task. Harness
+  runs that wait on child exit should use a watchdog until it's fixed.
+
+Status: **STAGE 2 DONE** — remaining follow-ups: CUDA port (below, unchanged),
+exit-hang fix (separate task), optional deeper look at recovering the 16k
+synthesis facts under studs (e.g. residual selection tuned for linkage tokens).
+
+**Memory decomposition (native_mem_profile.py, the step stage 1 skipped)**:
+- Baseline 16k: peak 4.04 GB (lego stage-1) vs 4.06 (off) — flat, and the peak is
+  in DECODE SETUP (attend-all materialisation + Metal pipeline compile), AFTER the
+  mirrors are freed. Prefill-end footprint ~2.86 GB both ways.
+- Baseline 32k: peak 4.92 GB; prefill-end 3.64; the SRL/factual phase (mirrors
+  still alive, factual reading them) adds +1.19 GB — THIS is what stage 2 removes.
+- Block raw fp32 (`active_k/v`+`svd_k/v`) was ALREADY freed per-chunk during
+  prefill (`ingest_prefill` lines ~238-261) — the "engine slot storage" suspect
+  from stage 1 was innocent.
+
 ## STAGE 1 LANDED (2026-07-12) — correctness ✓, measured RAM win ✗ (see findings)
 
 `DIFFKV_LEGO_PREFILL=1` (native, default OFF) implements the ring:
