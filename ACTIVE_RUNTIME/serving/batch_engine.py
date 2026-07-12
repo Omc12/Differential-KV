@@ -1500,8 +1500,21 @@ class ContinuousBatchEngine:
             # the heart of failures 2, 8, 12.  Unlike the old DX2 this ALSO fires
             # in comparison mode, because RC5 now locks one entity per block, and
             # it escalates to a near-hard penalty once retrieval is confident.
+            #
+            # DIFFKV_RC8_LICENSE gate (default OFF) UNIFIES this with the native
+            # path (main.cpp), where RC8 was dead-commented while it ran here —
+            # the cross-runtime divergence found in the 2026-07-12 audit. Default
+            # OFF is safe here: this block only ever fired when the (default-OFF,
+            # net-negative) factual store populated current_step_factual_sequences,
+            # so the standard config was already a no-op. The measured evidence
+            # for keeping it opt-in lives in the native comment + the binding
+            # report: RC8's targets are already handled by the capture-layer
+            # fixes, and the remaining REV swaps are a base-model limit (identical
+            # in dense). Set DIFFKV_RC8_LICENSE=1 to A/B on comparison workloads.
+            import os as _os
+            _rc8_on = _os.environ.get("DIFFKV_RC8_LICENSE", "0") == "1"
             current_entity_dx2 = getattr(srl_state, "current_entity_id", -1)
-            if (current_entity_dx2 != -1
+            if (_rc8_on and current_entity_dx2 != -1
                     and getattr(srl_state, "current_step_factual_sequences", None)):
                 from native_core.srl.factual_alignment import compute_entity_token_license
                 _licensed, _foreign = compute_entity_token_license(

@@ -74,3 +74,56 @@ Remaining layer-2 tail: one association slot (Ellsworth took Halvorsen's value
 at 8k list-all) and the 4-bit MLX rev-lookup swaps — both are the decoder's own
 capability envelope (dense exhibits the same class). Next lever if pursued:
 RC5/RC8 end-to-end validation or neighborhood co-retrieval at decode.
+
+## 2026-07-12 (later) — RC5/RC8 end-to-end validation: the honest verdict
+
+The RC1-RC8 program's generation-path validators (RC5 comparison sequencing,
+RC8 foreign-token license) were "implemented, never validated end-to-end." Done
+now, with a comparison/REV probe (`benchmarks/binding_probe.py` cmp_q/rev_q) and
+a DENSE control. Findings:
+
+1. **The probes never exercised RC5/RC8.** The binding/synthesis harnesses do
+   raw `np.argmax(output.logits)` (MLX) or the native CLI. RC8's logit license
+   lives in `batch_engine._sample` (MLX) — bypassed by argmax — and was
+   dead-commented in native (main.cpp). The whole RC stack is gated on the
+   factual store (`current_step_factual_sequences`), default OFF. So every prior
+   binding number was measured on a path where RC5/RC8 are inert. The "remaining
+   tail = decoder envelope" claim was therefore unproven — until now.
+
+2. **RC5/RC8 target failures that are already fixed.** 2-entity comparisons
+   (RC5's design target — the swap-prone Okazaki/Halvorsen pair) and forward
+   lookups bind CORRECTLY on the default path (owner-capture + coverage-0.25),
+   in dense, compressed, AND compressed+factual. There is no interleave
+   inversion left for RC5 to sequence away.
+
+3. **The live remaining failure is value→entity REV, and it is a BASE-MODEL
+   limit.** REV ("which facility processes 4382?") is 3/6 on the compressed
+   default (swaps collapse to a neighbor/attractor: 4382→Okazaki, 8617→
+   Halvorsen, 5248→Halvorsen). **DENSE is byte-identical — same 3/6, same three
+   swaps.** Compression is bit-faithful to the model here; there is nothing in
+   the KV/compression/routing/capture layer to fix. RC8 does not target REV
+   anyway (no entity is locked when the entity is the unknown answer).
+
+4. **RC5/RC8's prerequisite is net-negative and makes output worse.** Turning
+   the factual store on (to feed RC5/RC8) derails multi-entity generation into
+   filler-copying ("…10s with massive datasets and GPU compute. The history of
+   artificial intelligence…"), and REV factual-on stays 3/6 but adds derail.
+   RC8=1 live reproduces the original disable reason (Bug 🅗): on the
+   Okazaki/Halvorsen comparison it SUPPRESSED "Halvorsen" (foreign while locked
+   to Okazaki) → "Okazaki processes 7156. The facility processes 2903." — the
+   second entity's own name licensed away.
+
+**Decision (evidence-directed): RC5/RC8 stay OPT-IN, and the cross-runtime
+divergence is resolved.** RC8 is unified behind `DIFFKV_RC8_LICENSE` (default
+OFF) in BOTH runtimes — uncommented+gated in native (main.cpp), wrapped in MLX
+(batch_engine.py). Default OFF changes nothing (it only ever fired under the
+default-OFF factual store) and is now consistent + runnable for anyone A/B-ing
+comparison-heavy factual workloads. RC5's comparison lock is already inert by
+default (needs the factual store). Verified: RC5/RC8 unit suite 22/22, native
+default list-all unchanged 5/6, recall gates green.
+
+Bottom line for the "which noun owned which number" thesis: retention and the
+capture-layer binding are SOLVED (owner-capture + coverage). The residual
+value→entity swaps are Qwen2.5-1.5B's own reverse-lookup ceiling, proven by the
+dense control — not something DiffKV can or should paper over with generation
+gates that regress other cases.

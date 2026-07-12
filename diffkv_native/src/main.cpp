@@ -6277,20 +6277,46 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                // RC8 — disabled: the HF reference has NO foreign-entity penalty, and on
-                // multi-character literary prompts (Pride & Prejudice: Elizabeth, Darcy, Bingley,
-                // Wickham, …) this aggressively suppresses legitimate tokens from "other"
-                // characters. Bug 🅗 from NATIVE_VS_ACTIVE_BUGS.md.
-                // if (current_entity != -1 && !srl_state.current_step_factual_sequences.empty()) {
-                //     std::unordered_set<int32_t> licensed, foreign;
-                //     diffkv::compute_entity_token_license(
-                //         srl_state.current_step_factual_sequences,
-                //         entity_ids, is_prime_list, current_entity, licensed, foreign);
-                //     float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
-                //     for (int32_t tok_id : foreign) {
-                //         if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
-                //     }
-                // }
+                // RC8 — generation-time binding validator (foreign-entity token
+                // license). Default OFF, gated by DIFFKV_RC8_LICENSE, and now
+                // UNIFIED with the MLX serving path (batch_engine.py), which
+                // wraps its RC8 behind the same env — resolving the cross-runtime
+                // divergence where this was dead-commented in native but active
+                // in MLX (2026-07-12 audit).
+                //
+                // WHY DEFAULT OFF (measured, not inherited):
+                //  - It targets comparison-interleave / "EP2 has codimension 3"
+                //    inversions, which the capture-layer fixes (owner-capture +
+                //    coverage-0.25) already resolve on the default path: 2-entity
+                //    comparisons and forward lookups bind correctly without it.
+                //  - The remaining live binding failure (value→entity REV: 3/6)
+                //    is IDENTICAL in DENSE (proven by control) → base 1.5B-model
+                //    limit, not a compression/routing artifact RC8 could touch;
+                //    and RC8 doesn't target REV anyway (there is no locked entity
+                //    to license against when the entity IS the answer).
+                //  - It requires the factual store (its sequence source), which
+                //    is net-negative and derails multi-entity generation into
+                //    filler-copying (measured this session).
+                //  - Original disable reason still stands: on multi-character
+                //    literary prompts it suppresses legitimate other-character
+                //    tokens (Bug 🅗, NATIVE_VS_ACTIVE_BUGS.md).
+                // Kept runnable (not deleted) so comparison-heavy factual
+                // workloads can A/B it: DIFFKV_RC8_LICENSE=1.
+                static const bool rc8_license_on = []() {
+                    const char* e = std::getenv("DIFFKV_RC8_LICENSE");
+                    return e && (std::string(e) == "1" || std::string(e) == "true" || std::string(e) == "on");
+                }();
+                if (rc8_license_on && current_entity != -1 &&
+                        !srl_state.current_step_factual_sequences.empty()) {
+                    std::unordered_set<int32_t> licensed, foreign;
+                    diffkv::compute_entity_token_license(
+                        srl_state.current_step_factual_sequences,
+                        entity_ids, is_prime_list, current_entity, licensed, foreign);
+                    float pen = (srl_state.current_step_max_similarity >= 0.70f) ? 12.0f : 4.0f;
+                    for (int32_t tok_id : foreign) {
+                        if (tok_id >= 0 && tok_id < n_vocab) output_logits[tok_id] -= pen;
+                    }
+                }
 
                 // +7.0 VSL active-candidate boost: when VSL is tracking a suffix, the
                 // exact next token is confirmed. Give it a decisive advantage.

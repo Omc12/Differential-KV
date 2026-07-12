@@ -60,6 +60,36 @@ def rev_q(value):
     return (f"According to the facility reports above, which facility processes "
             f"{value} samples per day? Answer with only the facility name.")
 
+# Comparison question — RC5/RC8's actual design target: two entities whose
+# property values can interleave/invert. A binding failure here emits e.g.
+# "Okazaki processes 2903" (Halvorsen's value) — the relationship inversion.
+def cmp_q(a, b):
+    return (f"According to the facility reports above, compare the {a} and {b} "
+            f"facilities. State each facility's exact daily sample count, one "
+            f"per line as 'Name: number'.")
+
+def score_cmp(text, a, b):
+    """Per named entity: correct / swap / miss (same logic as list-all but only
+    for the two compared entities)."""
+    vals = dict(ENTITIES)
+    lines = text.lower().splitlines()
+    allvals = {v for _, v in ENTITIES}
+    out = {}
+    for name in (a, b):
+        val = vals[name]
+        verdict = "miss"
+        for ln in lines:
+            if re.search(_name_pat(name), ln):
+                nums = {n.replace(",", "") for n in re.findall(r"\d[\d,]*", ln)}
+                planted = nums & allvals
+                if val in planted:
+                    verdict = "correct"
+                elif planted:
+                    verdict = "swap"
+                break
+        out[name] = verdict
+    return out
+
 def build_prompt(tokenizer, ctx, question):
     sents = [f"The {n} facility processes {v} samples per day." for n, v in ENTITIES]
     sys_ids = tokenizer.encode(SYSTEM_PART, add_special_tokens=False)
