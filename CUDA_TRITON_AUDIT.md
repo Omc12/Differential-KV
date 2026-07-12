@@ -296,3 +296,22 @@ Before porting to the torch path, note what the two implementations taught us:
   `test_triton_gather_equiv.py` PASS, `test_sparse_residual.py` 2 passed/1 GPU-skipped.
 - [ ] On the GPU box: profile prefill peak composition FIRST (torch.cuda.memory_summary
       per phase), then port lego only if `past_key_values` actually dominates.
+
+**C10 — Owner-capture residual selection (torch path) — design note, 2026-07-12**
+MLX + native C++ now boost the OWNER of a fact into the exact-residual set
+(`DIFFKV_RESIDUAL_OWNER_CAPTURE`, default ON; `_apply_owner_capture` in
+`mlx_diffkv_wrapper.py`, mirrored block in `lowrank.cpp`). Root cause it fixes:
+values (digits) were captured exactly while entity names (title-case → is_prose)
+survived only as rank-r recon — the MLX binding probe (`benchmarks/binding_probe.py`)
+showed compressed list-all 1/6 vs dense 5/6 with real values bound to CORRUPTED
+names ("Okazaki"→"Okinawa"); owner capture takes it to 6/6 with zero recall
+regression (NIAH 4k-32k exact incl. 16k/0.9, multi-needle 3/3, native 6-cell
+sweep + margins re-run).
+The torch `lowrank.py` path CANNOT take this port directly: it has NO
+content-aware boost machinery at all (no token ids plumbed into
+`compress_lowrank_block`, K/V residuals ranked separately by rel-error only) —
+so it also still has the ORIGINAL failure this fixed, plus the digit-boost gap.
+- [ ] On the GPU box: reproduce the binding failure on the torch path first
+      (binding_probe pattern), then plumb token ids into the torch compressor
+      and port the boost + owner-capture + budget-floor block as one unit
+      (default OFF until the probe passes there).

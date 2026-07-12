@@ -189,6 +189,91 @@ def _coverage_bonus(S_comp: int, max_res: int, cov_frac: float) -> Optional[mx.a
     return got
 
 
+# Sentence-initial capitalized function words that must never be mistaken for an
+# entity name by the owner-capture walk.
+_OWNER_STOPWORDS = {
+    "the", "a", "an", "this", "that", "these", "those", "its", "their",
+    "his", "her", "our", "your", "my", "it", "he", "she", "they", "we",
+    "in", "on", "at", "of", "for", "and", "but", "or", "if", "as", "by",
+    "with", "from", "to", "is", "are", "was", "were", "there", "here",
+}
+
+
+def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
+                         tids, counts, total_tokens, tok_boost):
+    """Relational-locality capture (DIFFKV_RESIDUAL_OWNER_CAPTURE, default ON).
+
+    A fact's exact residuals preserve its VALUE — digits/identifiers are
+    is_core and win boosted slots — but not its OWNER: entity names are
+    title-case, classified is_prose, and never boosted, so they survive only
+    as rank-r reconstruction. The binding probe (2026-07-12, 8k, 6 planted
+    entity→value pairs) showed the consequence: dense list-all 5/6 correct vs
+    compressed 1/6, with real planted VALUES bound to CORRUPTED names
+    ("Okazaki"→"Okinawa"/"Okapi", "Brancusi"→"Bruckner", value→entity 1/4 and
+    0/4) while entity→value stayed 4/4 — the values are exact, the owners are
+    smeared, and the association dies with the owner's surface form.
+
+    Fix: for every core segment, walk LEFT up to DIFFKV_RESIDUAL_OWNER_DIST
+    (default 12) tokens to the nearest capitalized word that isn't a
+    sentence-initial function word, then expand it to the full surface run —
+    its subword continuations to the right (Qwen BPE: continuations lack the
+    leading space) and any preceding capitalized words of a multi-word name —
+    and give those rows the same idf-weighted boost the fact rows get. The
+    owner then competes for exact-residual slots alongside its value.
+    Returns the number of newly boosted rows."""
+    import math
+    if os.environ.get("DIFFKV_RESIDUAL_OWNER_CAPTURE", "1") != "1":
+        return 0
+    try:
+        owner_dist = int(os.environ.get("DIFFKV_RESIDUAL_OWNER_DIST", "12"))
+    except ValueError:
+        owner_dist = 12
+    S = len(tok_strs)
+    n_boosted = 0
+    for seg in segment_indices:
+        if not any(is_core[i] for i in seg):
+            continue
+        j = seg[0] - 1
+        steps = 0
+        run_end = -1
+        while j >= 0 and steps < owner_dist:
+            sc = tok_strs[j].strip()
+            if sc and sc[0].isupper() and sc.lower() not in _OWNER_STOPWORDS:
+                run_end = j
+                break
+            j -= 1
+            steps += 1
+        if run_end < 0:
+            continue
+        # Right: subword continuations complete the surface form (an exact
+        # " Ok" next to a lossy "az"+"aki" still decodes as garbage).
+        k_hi = run_end
+        while k_hi + 1 < S:
+            nxt = tok_strs[k_hi + 1]
+            if nxt and not nxt[0].isspace() and nxt.strip().isalpha():
+                k_hi += 1
+            else:
+                break
+        # Left: preceding capitalized words of a multi-word name.
+        k_lo = run_end
+        while k_lo - 1 >= 0:
+            prv = tok_strs[k_lo - 1]
+            pc = prv.strip()
+            if prv[:1].isspace() and pc and pc[0].isupper() and pc.lower() not in _OWNER_STOPWORDS:
+                k_lo -= 1
+            else:
+                break
+        for i in range(k_lo, k_hi + 1):
+            if boost_multipliers[i] > 1.0:
+                continue
+            count = counts.get(tids[i], 1)
+            idf = math.log(max(total_tokens, 2) / (count + 0.1))
+            rarity_weight = max(1.0, min(idf, 6.0))
+            boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+            n_boosted += 1
+    return n_boosted
+
+
 def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, mx.array]:
     """Compress a batch of KV delta vectors using randomised truncated SVD on GPU in parallel.
     
@@ -1963,6 +2048,7 @@ class MLXKVBlockManager:
             except ValueError:
                 pass
                 
+        boost_rows = []   # per-block final boost multipliers (also feeds the budget floor)
         if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
             # Boosts depend only on token ids, so compute once per BLOCK and
             # tile across layers (28x less work), with a persistent per-token
@@ -2032,6 +2118,11 @@ class MLXKVBlockManager:
                                 rarity_weight = max(1.0, min(idf, 6.0))
                                 boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
 
+                    # Owner capture: the fact's entity name gets the same
+                    # exact-residual treatment as its value (see helper doc).
+                    _apply_owner_capture(boost_multipliers, segment_indices, is_core,
+                                         tok_strs, tids, counts, total_tokens, tok_boost)
+
                     # Apply window boost (Phase 2: contiguous runs)
                     final_boosts = list(boost_multipliers)
                     W = 2
@@ -2068,6 +2159,21 @@ class MLXKVBlockManager:
             elif val < 0.15:
                 b_res = min(16, b_res)
             n_res_batch.append(b_res)
+
+        # Budget floor for boosted rows: a fact block's boosted set (value +
+        # owner + window glue, ~11-15 rows) exceeds the easy-block cap of 8 —
+        # without this floor the adaptive budget silently evicts the owner the
+        # capture just fought for. Floor = boosted_count + 4, ≤ max_residual.
+        if boost_rows:
+            floors = [
+                min(self.max_residual, sum(1 for m in row if m > 1.0) + 4)
+                if any(m > 1.0 for m in row) else 0
+                for row in boost_rows
+            ]
+            if any(floors):
+                nb_ = len(boost_rows)
+                n_res_batch = [max(n_res_batch[i], floors[i % nb_])
+                               for i in range(len(n_res_batch))]
 
         res_v_only, cov_frac = _capture_policy_env()
         if self.max_residual > 0:
@@ -2447,6 +2553,7 @@ class MLXKVBlockManager:
             except ValueError:
                 pass
 
+        n_boosted_rows = 0
         if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
             abs_start = num_blocks * self.block_size
             tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
@@ -2507,7 +2614,12 @@ class MLXKVBlockManager:
                             idf = math.log(max(total_tokens, 2) / (count + 0.1))
                             rarity_weight = max(1.0, min(idf, 6.0))
                             boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
-                
+
+                # Owner capture: the fact's entity name gets the same
+                # exact-residual treatment as its value (see helper doc).
+                _apply_owner_capture(boost_multipliers, segment_indices, is_core,
+                                     tok_strs, tids, counts, total_tokens, tok_boost)
+
                 # Apply window boost (Phase 2: contiguous runs)
                 final_boosts = list(boost_multipliers)
                 W = 2
@@ -2516,6 +2628,7 @@ class MLXKVBlockManager:
                         for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                             final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                 boost_multipliers = final_boosts
+                n_boosted_rows = sum(1 for m in boost_multipliers if m > 1.0)
 
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
                 joint_errors = joint_errors * boost_arr
@@ -2540,6 +2653,10 @@ class MLXKVBlockManager:
         elif max_median_err < 0.15:
             # Medium block: cap at 16 residuals
             n_res = min(16, n_res)
+        # Budget floor for boosted rows (value + owner + window glue must all
+        # fit — see the prefill-path comment).
+        if n_boosted_rows:
+            n_res = max(n_res, min(self.max_residual, n_boosted_rows + 4))
 
         res_v_only, cov_frac = _capture_policy_env()
         if self.max_residual > 0:

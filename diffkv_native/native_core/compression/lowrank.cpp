@@ -921,6 +921,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         // actually produced by Qwen ('0'..'9' = 15..24; the older landmark boost checked
         // ids 48-57, which are NOT digits in this vocab). DIFFKV_RESIDUAL_TOKEN_BOOST=0
         // disables; value tunable (default 8×).
+        int lr_boosted_rows = 0;   // rows carrying a boost after the window pass (feeds the budget floor)
         if (params.token_ids) {
             static const float tok_boost = []() {
                 const char* e = std::getenv("DIFFKV_RESIDUAL_TOKEN_BOOST");
@@ -1085,6 +1086,103 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     }
                 }
 
+                // ── Owner capture (relational locality; port of the MLX
+                // _apply_owner_capture, DIFFKV_RESIDUAL_OWNER_CAPTURE default ON).
+                // A fact's exact residuals preserve its VALUE (digits are is_core)
+                // but not its OWNER — entity names are title-case → is_prose →
+                // never boosted, so they survive only as rank-r recon and decode
+                // as corrupted neighbors ("Okazaki"→"Okinawa") while the value is
+                // emitted exactly (MLX binding probe 2026-07-12: compressed
+                // list-all 1/6 → 6/6 with this fix; value→entity corruption
+                // eliminated). For each core segment, walk LEFT up to OWNER_DIST
+                // tokens to the nearest capitalized non-function word, expand to
+                // the full surface run (subword continuations right, multi-word
+                // name left), and boost those rows with the same idf weight.
+                {
+                    static const bool owner_on = []() {
+                        const char* e = std::getenv("DIFFKV_RESIDUAL_OWNER_CAPTURE");
+                        return !(e && std::string(e) == "0");
+                    }();
+                    static const int owner_dist = []() {
+                        const char* e = std::getenv("DIFFKV_RESIDUAL_OWNER_DIST");
+                        if (e) { try { return std::stoi(e); } catch (...) {} }
+                        return 12;
+                    }();
+                    static const std::unordered_set<std::string> owner_stop = {
+                        "the", "a", "an", "this", "that", "these", "those", "its",
+                        "their", "his", "her", "our", "your", "my", "it", "he",
+                        "she", "they", "we", "in", "on", "at", "of", "for", "and",
+                        "but", "or", "if", "as", "by", "with", "from", "to", "is",
+                        "are", "was", "were", "there", "here",
+                    };
+                    auto lower_of = [](std::string s) {
+                        for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c));
+                        return s;
+                    };
+                    auto strip_of = [](const std::string& s) {
+                        size_t b = s.find_first_not_of(" \t\n\r");
+                        if (b == std::string::npos) return std::string();
+                        size_t e = s.find_last_not_of(" \t\n\r");
+                        return s.substr(b, e - b + 1);
+                    };
+                    if (owner_on) {
+                        for (const auto& seg : segment_indices) {
+                            bool has_core = false;
+                            for (int i2 : seg) if (is_core[i2]) { has_core = true; break; }
+                            if (!has_core || seg.empty()) continue;
+                            int run_end = -1;
+                            int j = seg[0] - 1, steps = 0;
+                            while (j >= 0 && steps < owner_dist) {
+                                std::string sc = strip_of(tok_strs[j]);
+                                if (!sc.empty() && sc[0] >= 'A' && sc[0] <= 'Z' &&
+                                    owner_stop.find(lower_of(sc)) == owner_stop.end()) {
+                                    run_end = j;
+                                    break;
+                                }
+                                --j; ++steps;
+                            }
+                            if (run_end < 0) continue;
+                            // right: subword continuations (no leading space, alphabetic)
+                            auto is_alpha_str2 = [](const std::string& s) {
+                                if (s.empty()) return false;
+                                for (char c : s) {
+                                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+                                }
+                                return true;
+                            };
+                            int k_hi = run_end;
+                            while (k_hi + 1 < S_deltas) {
+                                const std::string& nxt = tok_strs[k_hi + 1];
+                                if (!nxt.empty() && nxt[0] != ' ' && nxt[0] != '\n' &&
+                                    is_alpha_str2(strip_of(nxt))) {
+                                    ++k_hi;
+                                } else break;
+                            }
+                            // left: preceding capitalized words of a multi-word name
+                            int k_lo = run_end;
+                            while (k_lo - 1 >= 0) {
+                                const std::string& prv = tok_strs[k_lo - 1];
+                                std::string pc = strip_of(prv);
+                                if (!prv.empty() && (prv[0] == ' ' || prv[0] == '\n') &&
+                                    !pc.empty() && pc[0] >= 'A' && pc[0] <= 'Z' &&
+                                    owner_stop.find(lower_of(pc)) == owner_stop.end()) {
+                                    --k_lo;
+                                } else break;
+                            }
+                            for (int i2 = k_lo; i2 <= k_hi && i2 < S_deltas; ++i2) {
+                                if (boost_multipliers[i2] > 1.0f) continue;
+                                int32_t tid = params.token_ids[i2 + 1];
+                                int count = 1;
+                                auto it = token_counts.find(tid);
+                                if (it != token_counts.end()) count = it->second;
+                                float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
+                                float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
+                                boost_multipliers[i2] = tok_boost * (rarity_weight / 2.0f);
+                            }
+                        }
+                    }
+                }
+
                 // Apply window boost (Phase 2: contiguous runs)
                 std::vector<float> final_boosts = boost_multipliers;
                 const int W = 2;
@@ -1101,10 +1199,18 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
 
                 for (int s = 0; s < S_deltas; ++s) {
                     joint_err[s] *= boost_multipliers[s];
+                    if (boost_multipliers[s] > 1.0f) lr_boosted_rows++;
                 }
             }
         }
 
+        // Budget floor for boosted rows: a fact block's boosted set (value +
+        // owner + window glue) exceeds the easy-block cap of 8 — without this
+        // floor the adaptive budget silently evicts the owner the capture just
+        // fought for (mirrors the MLX wrapper's floor).
+        if (lr_boosted_rows > 0) {
+            adaptive_MR = std::max(adaptive_MR, std::min(MR, lr_boosted_rows + 4));
+        }
         int n_max = std::min(S_deltas, adaptive_MR);
         std::vector<int> idx(S_deltas);
         for (int i = 0; i < S_deltas; ++i) idx[i] = i;
