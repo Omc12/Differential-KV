@@ -1333,18 +1333,20 @@ class MLXKVBlockManager:
         # blocks exist beyond the sinks, and (c) the TOTAL prompt will use compressed
         # decode (otherwise dense decode would need the full cache we stopped keeping).
         # Once engaged it is sticky for the session and the raw prompt cache is dropped.
-        # DEFAULT ON (2026-07-12): guardrails passed lego-ON (NIAH bench 4/4 4k-32k,
-        # depths 8/9 — same single knife-edge cell sparse prefill also has, multi-needle
-        # exact, synthesis identical to lego-OFF, relational/cross-item binding identical
-        # on/off). Studs-only far blocks (exact residual rows, no reconstruction — the
-        # accuracy risk this note used to warn about doesn't apply to the shipped
-        # default) plus fp16 SDPA (no fp32 casts) and a shared per-chunk mask keep the
-        # accuracy AND memory profile of the validated sparse-prefill path while cutting
-        # prefill peak further: measured -10%/-19%/-31% at 16k/32k/64k vs lego-OFF (which
-        # already beats dense at every size), with decode tps flat-to-better (less
-        # memory pressure carries into decode: 64k 21.4->25.5 tps). DIFFKV_LEGO_PREFILL=0
-        # restores the pre-lego sparse-prefill-only path.
-        self._lego_prefill = os.environ.get("DIFFKV_LEGO_PREFILL", "1") == "1"
+        # DEFAULT OFF (flipped back 2026-07-12, reversing the earlier "synthesis
+        # identical to lego-OFF" default-ON call above — that measurement predates
+        # owner-capture/coverage residual selection and no longer holds). Re-measured
+        # with CURRENT defaults (owner-capture + coverage residual selection): NIAH
+        # 6/6 and multi-needle both identical lego ON/OFF (recall genuinely
+        # unaffected — the claim above WAS right about that), but synthesis is NOT
+        # identical: lego=1 scores 0.0/100 @8k vs lego=0's 6.7/100 (real-paper
+        # linkage task; native shows the same pattern — margins/synthesis both cost
+        # ~1 unit while memory drops 14-17%). This is a genuine memory-for-fidelity
+        # trade, not a strict improvement, so it stays opt-in like native
+        # (docs/NATIVE_LEGO_PORT_PLAN.md): DIFFKV_LEGO_PREFILL=1 for memory-
+        # constrained long-context runs where the prefill-peak win (still real —
+        # see the mechanism notes above) outweighs the synthesis cost.
+        self._lego_prefill = os.environ.get("DIFFKV_LEGO_PREFILL", "0") == "1"
         self._lego_min_ctx = int(os.environ.get("DIFFKV_LEGO_MIN_CTX", str(self._sp_min_ctx)))
         self._lego_kmin = int(os.environ.get("DIFFKV_LEGO_KMIN", str(self._sp_kmin)))
         self._lego_frac = float(os.environ.get("DIFFKV_LEGO_FRAC", str(self._sp_frac)))

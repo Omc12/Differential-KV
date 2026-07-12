@@ -238,4 +238,46 @@ this Mac. Port ONLY behind default-OFF env gates and add cert items to
 `CUDA_TRITON_AUDIT.md`'s GPU checklist. The MLX session-pool growth
 (`_ensure_block_capacity`) has a direct torch analogue if the HF wrapper's
 session store pre-allocates (check `DiffKVHFWrapper` before porting — on Mac it
-aliases to MLX, so the torch store is only exercised on CUDA machines).
+aliases to MLX, so the torch store is only exercised on CUDA machines). Lego is
+NOT implemented on the torch/CUDA path at all (design notes only, C9 in
+`CUDA_TRITON_AUDIT.md`) — nothing to default there yet.
+
+## FINAL DEFAULT DECISION (2026-07-12): lego is opt-in on BOTH runtimes
+
+Clean A/B under the CURRENT residual-selection defaults (owner-capture +
+coverage-0.25 native / owner-capture native-coverage-0 MLX — see
+`RELATIONAL_BINDING_REPORT.md`), which supersedes every earlier lego
+measurement (all pre-dated owner-capture and are not a fair comparison):
+
+| | NIAH | multi-needle | binding list-all | margins (8k/16k) | synthesis (8k/16k) | peak mem |
+|---|---|---|---|---|---|---|
+| native lego=1 vs 0 | 6/6 both | 3/3 both | 5/6 both, identical failure | 11.55/13.13 vs **12.48/14.26** | 16.7/23.3 vs **26.7/26.7** | **-13.9%/-17.5%** (16k/32k) |
+| MLX lego=1 vs 0 | 6/6 both | 1/1 both | 6/6 both, identical | — | 0.0/6.7 vs **6.7/6.7** | savings (mechanism unchanged; see notes above) |
+
+Recall/binding are genuinely unaffected by lego either way — the earlier
+"synthesis identical" MLX claim was true at the time but does NOT survive
+owner-capture (which changes which rows the residual set — and therefore the
+mask/attended set under lego — actually contains). The remaining cost lands
+entirely on synthesis (real-paper narrative fidelity) and, on native, margins
+by ~1 unit. This is a genuine memory-for-fidelity trade, not a strict
+improvement in either direction.
+
+**Decision: `DIFFKV_LEGO_PREFILL` defaults to OFF on both runtimes** (native
+already was; MLX flipped back — see `mlx_diffkv_wrapper.py` comment at
+`self._lego_prefill`). Quality-by-default; opt in explicitly
+(`DIFFKV_LEGO_PREFILL=1`) for memory-constrained long-context runs where the
+prefill-peak reduction is worth the documented synthesis/margin cost. Don't
+re-flip either default without a fresh A/B — residual-selection changes (like
+owner-capture) can silently invalidate a prior lego measurement, as happened
+here.
+
+**RC8 default (both runtimes) — already resolved, restated for completeness**:
+`DIFFKV_RC8_LICENSE` stays OFF on both. Validated end-to-end this session
+(commit `fe30621`, AFTER coverage-0.25 became the native default, so the
+verdict already reflects current residual-selection defaults — no re-test
+needed): RC5/RC8 target comparison-interleave inversions already fixed by
+owner-capture/coverage; the one live failure (value→entity REV swaps) is
+byte-identical in DENSE (base-model limit, not ours to fix); RC8's factual-store
+prerequisite is net-negative; RC8=1 live reproduces its own original disable
+reason (drops a locked-out entity's own name). Full writeup:
+`RELATIONAL_BINDING_REPORT.md`.
