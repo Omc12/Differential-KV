@@ -1416,6 +1416,14 @@ class MLXKVBlockManager:
         # topk_blocks=0 disables routing entirely (attend every block).
         self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
         self.topk_frac   = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
+        # High-Quality Mode (cross-runtime toggle, mirrors native src/main.cpp):
+        #   DIFFKV_HIGH_QUALITY_ROUTING = 1 -> attend ALL compressed blocks at decode
+        #     (max synthesis fidelity, cost scales with full context).
+        #   unset/0/auto -> fast bounded-K routing (default; MLX already routes top-K,
+        #     which is the whole reason its decode is flat-tps). MLX has no per-query
+        #     detector, so "auto" resolves to fast here.
+        _hq = os.environ.get("DIFFKV_HIGH_QUALITY_ROUTING", "0").strip().lower()
+        self._high_quality_routing = _hq not in ("0", "", "false", "off", "auto")
         # Router for top-K selection:
         #   "residual" (default) — rank blocks by exact q·k over each block's anchor
         #     + its R most-distinctive residual keys. Tight and content/model-agnostic;
@@ -3253,7 +3261,9 @@ class MLXKVBlockManager:
         k_eff = self.topk_blocks
         if self.topk_blocks > 0 and self.topk_frac > 0.0:
             k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
-        use_topk = (self.topk_blocks > 0 and nb > k_eff)
+        # High-Quality Mode forces attend-all (no top-K prune) — the direct analog
+        # of native's DIFFKV_HIGH_QUALITY_ROUTING attend-all path.
+        use_topk = (self.topk_blocks > 0 and nb > k_eff) and not self._high_quality_routing
 
         # Host-cheap uniformity check (Python list, no GPU sync): blocks are only
         # ever compressed at exactly block_size, so n_res ≡ max_residual for all of

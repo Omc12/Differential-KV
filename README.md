@@ -70,8 +70,11 @@ Memory/perf claims: `paper/scripts/measure_active.py` (MLX) and
 | Var | Default | Meaning |
 |---|---|---|
 | `DIFFKV_COMPRESSED_DECODE` | `auto` (engages ≥8k) | MLX sparse decode on/off/auto |
+| `DIFFKV_ENGAGE_THRESHOLD` | `~8k` (min of 8192 and the memory-budget cap) | native: context length at which sparse decode engages (was a ~75k memory gate; lowered now that fast routing makes sparse flat-tps). Raise to prefer dense throughput at 8–16k |
+| `DIFFKV_HIGH_QUALITY_ROUTING` | `0` (fast bounded-K) | **cross-runtime** (native + MLX + CUDA). `0`/unset = fast bounded-K pruning: attend the top relevant compressed blocks only — context-independent (~flat tps), ≈2× dense at 32k, NIAH 6/6 + 3/3 multi-fact validated. `1` = High-Quality: attend all blocks (native/MLX) + dynamic 2-hop graph candidate routing — best diffuse multi-fact/synthesis fidelity, cost scales with context |
 | `DIFFKV_CACHE_LIMIT_GB` | `1` | MLX buffer-cache cap (halves long-prefill peak RAM) |
 | `DIFFKV_TOPK_BLOCKS` | `16` | blocks routed per decode step (both engines) |
+| `DIFFKV_MLX_PARITY` | off | native low-level attend-all override (isolated A/B benchmarking; `DIFFKV_HIGH_QUALITY_ROUTING` is the user-facing toggle) |
 | `DIFFKV_MAX_RESIDUAL` | `128` | exact residual rows per block (default 128; knob for memory ↔ accuracy) |
 | `DIFFKV_SVD_SEED` | `1234` | rSVD determinism — keep set or parity tests flake |
 | `DIFFKV_NATIVE_ATTN` | off | native fused ggml attention path (experimental, slower) |

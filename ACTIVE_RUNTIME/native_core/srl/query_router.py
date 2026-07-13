@@ -43,6 +43,17 @@ _LEX_FRAC          = float(os.environ.get("DIFFKV_SRL_LEX_FRAC",  "0.15"))
 _GRAPH_FRAC        = float(os.environ.get("DIFFKV_SRL_GRAPH_FRAC", "0.15"))
 _RECENCY_FRAC      = float(os.environ.get("DIFFKV_SRL_REC_FRAC",  "0.20"))
 _ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "50"))
+# High-Quality Mode (cross-runtime toggle; mirrors native src/main.cpp +
+# mlx_diffkv_wrapper.py). When OFF (default = fast bounded-K), the router keeps
+# only the semantic + lexical + recency + sink channels — the same channels that
+# preserved NIAH 6/6 + multi-fact recall in native & MLX fast mode. When ON, it
+# also runs the dynamic graph routing: 2-hop chunk-graph expansion + dynamic /
+# prompt anchor neighborhood expansion (best synthesis fidelity). CUDA decode is
+# already bounded-K (adaptive_k 20..200), so this toggle controls the graph
+# channels, not an attend-all switch. NOTE: this path is GPU-only and could not be
+# validated on the Mac dev machine — see CUDA_TRITON_AUDIT.md GPU cert checklist.
+_HIGH_QUALITY_ROUTING = os.environ.get(
+    "DIFFKV_HIGH_QUALITY_ROUTING", "0").strip().lower() not in ("0", "", "false", "off", "auto")
 # Topic-switch: if the best semantic match falls below this cosine similarity,
 # the query is treated as a new topic and stale rare-lexical seeds are suppressed.
 _TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DIFFKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.30"))
@@ -711,6 +722,17 @@ def route_query(
                 prompt_anchor_slots.append(srl_state.ordered_slot_ids[block_idx])
         if prompt_anchor_slots:
             prompt_routed_slots = list(srl_state.expand_neighborhood(set(prompt_anchor_slots)))
+
+    # ── High-Quality Mode gate ────────────────────────────────────────────
+    # The 2-hop chunk-graph expansion + dynamic/prompt anchor neighborhood
+    # expansion are the "dynamic graph routing" — HQ-only, mirroring native's
+    # route_decode_slots sections 3–4.5. In fast bounded-K mode (default) drop
+    # them; semantic + lexical + recency + sink remain (recall-validated on
+    # native & MLX). Cross-runtime toggle: DIFFKV_HIGH_QUALITY_ROUTING=1.
+    if not _HIGH_QUALITY_ROUTING:
+        graph_slots = []
+        dynamic_routed_slots = []
+        prompt_routed_slots = []
 
     combined = list(dict.fromkeys(
         sink + semantic_slots + rare_lex_slots + graph_slots + lexical_slots + recent_slots + dynamic_routed_slots + prompt_routed_slots

@@ -349,3 +349,18 @@ skips the coverage quota for saturated table blocks. Measured (16k straddled
 table, temp 0): MLX list-all 3/6 → 6/6 == dense; native 4/6 (row-shift swap
 + missing row) → 6/6. Recall gates unchanged both runtimes (NIAH incl.
 16k/0.9, MN 3/3, synthesis == same-day controls, native margins 12.48/14.26).
+
+**C12 — 🔴 certify CUDA High-Quality-Routing gate (2026-07-13) on GPU**
+Cross-runtime `DIFFKV_HIGH_QUALITY_ROUTING` toggle added: fast bounded-K
+pruning is now the DEFAULT, dynamic graph routing is opt-in. Native (C++) and
+MLX are implemented + Mac-validated (native NIAH 6/6 @4/8/16k×depth 0.5/0.9 +
+3/3 multi-fact, sparse now engages ~8k, 2.2× dense @32k; MLX default fast /
+HQ attend-all both recall Y). The CUDA/PyTorch path is `route_query`
+(`ACTIVE_RUNTIME/native_core/srl/query_router.py`): in fast mode (default) the
+2-hop chunk-graph + dynamic/prompt anchor channels are dropped from the merge
+(semantic+lexical+recency+sink remain); CUDA decode is already bounded-K
+(adaptive_k 20..200), so this changes the graph *channel*, not an attend-all
+switch. **Implemented + syntax/import-verified only — NOT run on GPU.** Cert:
+run the NIAH + multi-fact suite on a CUDA box in both modes (default fast must
+hold recall; `=1` restores graph). If fast-default regresses CUDA recall,
+flip the CUDA default to graph-on (keep the flag) — native/MLX are unaffected.
