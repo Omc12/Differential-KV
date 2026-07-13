@@ -2717,26 +2717,29 @@ int main(int argc, char ** argv) {
                 ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
                 : 65536;
 
-            // Engage sparse only when dense KV would exhaust the memory budget —
-            // i.e. a memory-reach gate, NOT a speed gate.
+            // Default engage point ~8k (matching MLX). auto_thresh (the memory
+            // budget) stays as the UPPER cap so a tight device engages even earlier.
             //
-            // A ~8k default was tried (2026-07-13) on the theory that fast bounded-K
-            // pruning made sparse a flat-tps win. It REGRESSED real use: on a ~12k
-            // paper paste (verbatim reproduction / continue-the-document — a diffuse
-            // task that needs faithful FULL context), native sparse decode degenerates
-            // into sentence loops + trips the VSL "[uncertain]" stop, in BOTH fast and
-            // HQ routing (so it is a sparse-decode fidelity gap, not a routing-mode
-            // issue). Dense on the identical paste is clean AND faster: dense 44.7 tps
-            // vs sparse 38 @12k. Sparse's throughput win only appears past ~24-32k
-            // where dense attention decays; below that dense wins on BOTH axes. Needle/
-            // multi-fact RETRIEVAL survives pruning (few blocks), but REPRODUCTION does
-            // not — and we can't tell the task apart up front. So the safe default is
-            // dense until memory forces sparse. auto_thresh already does exactly that.
-            // Opt into early sparse (memory reach / >32k throughput, accepting the
-            // reproduction-fidelity caveat) with DIFFKV_ENGAGE_THRESHOLD=8192.
-            engage_threshold = std::max(4096, auto_thresh);
+            // History: a first ~8k attempt (2026-07-13) REGRESSED real use — on a
+            // ~12k paper paste (verbatim reproduction), native sparse decode
+            // degenerated into sentence / "2 2 2" loops and tripped the VSL
+            // "[uncertain]" stop. Root cause found: NOT pruning (attend-all HQ failed
+            // too), but the sparse exact-recency window START landing MID-BLOCK, so
+            // the straddling block's tail tokens were attended TWICE — as exact fp16
+            // rows AND as their lossy reconstructed-compressed rows (two values for
+            // one position). Fixed by aligning dense_start to the micro-block grid
+            // (see the sparse-window setup below). With that fix, the identical paste
+            // at the DEFAULT recency (512) reproduces the paper cleanly, temp 0.7,
+            // and NIAH stays 6/6 (4/8/16k × depth 0.5/0.9). So ~8k is now safe.
+            // Trade at 8-16k vs dense is small (~8% tps, dense still a touch faster
+            // there); sparse wins ~2x by 32k and frees the dense KV window every step.
+            // DIFFKV_ENGAGE_THRESHOLD raises it back toward dense; the alignment fix
+            // is unconditional (helps whenever sparse runs).
+            const int kDefaultEngage = 8192;
+            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
             std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (mem-gate; free_mem=" << free_mem / (1 << 20) << "MB"
+                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
+                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
                       << ", bytes_per_tok=" << bytes_per_token
                       << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
         }
@@ -4929,6 +4932,24 @@ int main(int argc, char ** argv) {
             int mlx_dense   = std::min(L, cfg_recency_window + micro_block_size);  // MLX max_dense_len
             int dense_win   = std::min(mlx_dense, dense_cap);
             int dense_start = std::max(0, L - dense_win);
+            // Align the exact-window start DOWN to a micro-block boundary.
+            // Otherwise dense_start lands mid-block and the straddling block's tail
+            // tokens are attended TWICE — once as exact fp16 window rows and again
+            // (if that block is routed) as their lossy reconstructed-compressed rows,
+            // two different values for the same position. That double-count is the
+            // seam behind the non-monotonic recency fragility (temp 0, real paper:
+            // recency 512/2048/6144 → sentence/'2 2 2' loops; 1024/4096 coherent).
+            // Aligning to the block grid removes the partial-block overlap; the
+            // window only grows (toward the block edge), still < dense_cap
+            // (recency + 2·mbs + 512), so the decode-append headroom is preserved.
+            if (micro_block_size > 0 && dense_start > 0) {
+                int aligned_start = (dense_start / micro_block_size) * micro_block_size;
+                int grow = dense_start - aligned_start;
+                if (grow > 0 && dense_win + grow <= dense_cap) {
+                    dense_start = aligned_start;
+                    dense_win  += grow;
+                }
+            }
             // LEGO stage 2: the mirror tail lives at ring-mapped offsets. The window
             // ring capacity (sp_window + 2·chunk ≥ 2048) always covers dense_win
             // (recency_window + mbs ≤ 768 by default), so every row is resident;
@@ -6472,6 +6493,29 @@ int main(int argc, char ** argv) {
                         }
                     }
                     if (eq) { exact_loop = true; break; }
+                }
+
+                // 1b. SHORT-period tight loop (period 1..9) — e.g. "0 0 0 0 0",
+                // "= = =", a single token spammed. The K>=10 check above and the
+                // 256-window unique-ratio check both miss these until ~100 garbage
+                // tokens have printed, and DIGIT loops are additionally shielded from
+                // the rep penalty by the numeric exemption — so a decode that slips
+                // into "000000..." runs unbounded and tanks tps (observed: 7 tps on a
+                // real-paper paste). Require >= 6 consecutive periods so legitimate
+                // short repeats (list bullets, "| | |" table glue) don't trip it;
+                // firing sets loop_detected, which suspends the numeric exemption and
+                // escalates the penalty, then force-EOS after 40 tokens if unbroken.
+                for (int K = 1; K < 10 && !exact_loop; ++K) {
+                    const int span = 6 * K;                 // >= 6 repetitions of the period
+                    if (gsz < span) continue;
+                    bool periodic = true;
+                    for (int j = 0; j < span - K; ++j) {
+                        if (generated_tokens[gsz - 1 - j] != generated_tokens[gsz - 1 - j - K]) {
+                            periodic = false;
+                            break;
+                        }
+                    }
+                    if (periodic) { exact_loop = true; break; }
                 }
 
                 // 2. Unique-5-gram ratio over the trailing 256-token window.
