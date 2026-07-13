@@ -936,6 +936,7 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
         // ids 48-57, which are NOT digits in this vocab). DIFFKV_RESIDUAL_TOKEN_BOOST=0
         // disables; value tunable (default 8×).
         int lr_boosted_rows = 0;   // rows carrying a boost after the window pass (feeds the budget floor)
+        int lr_table_rows = 0;     // rows on table-like lines (drives the coverage skip below)
         if (params.token_ids) {
             static const float tok_boost = []() {
                 const char* e = std::getenv("DIFFKV_RESIDUAL_TOKEN_BOOST");
@@ -1211,6 +1212,87 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     }
                 }
 
+                // ── Table capture (structured-data lines; port of the MLX
+                // _apply_table_capture, DIFFKV_RESIDUAL_TABLE_CAPTURE).
+                // Tables break both capture rules at once: (1) the digit cells
+                // are all is_core, so a block holding a table plus technical
+                // filler carries MORE boosted rows than MAX_RESIDUAL slots
+                // (measured 2026-07-13: 181 boosted / 128 slots on a NAT-style
+                // table straddling a block boundary in paper text) and the
+                // err-ranked cut drops table fragments structure-blind — the
+                // decoder reassembles a plausible-but-wrong table (values
+                // migrate rows); (2) header/unit cells ('Kernel', 'imgs',
+                // '/sec') are prose/core-less → never boosted → rank-r smear —
+                // real units come back fabricated ('G/s'). Fix: every token on
+                // a table-like LINE (>=2 '|' or '&' separators among >=3
+                // tokens) gets the core boost × DIFFKV_RESIDUAL_TABLE_PRIORITY
+                // (default 4) so err×boost keeps whole table lines ahead of
+                // ordinary boosted segments; the regular low-error rows
+                // (separator dashes, pipes) degrade first under saturation.
+                {
+                    static const bool table_on = []() {
+                        // Default ON (measured 2026-07-13: MLX 16k straddled-table
+                        // list-all 3/6 → 6/6 == dense with recall gates green;
+                        // native A/B in benchmarks/table_probe_native.py).
+                        const char* e = std::getenv("DIFFKV_RESIDUAL_TABLE_CAPTURE");
+                        return !(e && std::string(e) == "0");
+                    }();
+                    static const float table_priority = []() {
+                        const char* e = std::getenv("DIFFKV_RESIDUAL_TABLE_PRIORITY");
+                        if (e) { try { return std::stof(e); } catch (...) {} }
+                        return 4.0f;
+                    }();
+                    if (table_on) {
+                        std::vector<int> line;
+                        auto strip_ws = [](const std::string& s) {
+                            size_t b = s.find_first_not_of(" \t\n\r");
+                            if (b == std::string::npos) return std::string();
+                            size_t e = s.find_last_not_of(" \t\n\r");
+                            return s.substr(b, e - b + 1);
+                        };
+                        // Standalone separators only + shape guard (start-of-line
+                        // separator, or density >= 1/12 with >= 3 separators):
+                        // prose with inline math (|x−y|) has standalone pipes
+                        // too, and a paragraph-long 'line' with two of those
+                        // must not mark the whole block (it would also clear
+                        // the coverage scaffold below). Mirrors the MLX
+                        // _detect_table_rows.
+                        auto flush_line = [&](const std::vector<int>& ln) {
+                            if ((int)ln.size() < 3) return;
+                            int seps = 0;
+                            for (int i2 : ln) {
+                                std::string st = strip_ws(tok_strs[i2]);
+                                if (st == "|" || st == "&") ++seps;
+                            }
+                            if (seps < 2) return;
+                            std::string first = strip_ws(tok_strs[ln[0]]);
+                            bool starts_sep = !first.empty() && (first[0] == '|' || first[0] == '&');
+                            bool latex_term = tok_strs[ln.back()].find("\\\\") != std::string::npos;
+                            if (!starts_sep && !latex_term &&
+                                !(seps >= 3 && seps * 12 >= (int)ln.size())) return;
+                            for (int i2 : ln) {
+                                int32_t tid = params.token_ids[i2 + 1];
+                                int count = 1;
+                                auto it = token_counts.find(tid);
+                                if (it != token_counts.end()) count = it->second;
+                                float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
+                                float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
+                                float b = tok_boost * (rarity_weight / 2.0f) * table_priority;
+                                boost_multipliers[i2] = std::max(boost_multipliers[i2], b);
+                                ++lr_table_rows;
+                            }
+                        };
+                        for (int i = 0; i < S_deltas; ++i) {
+                            line.push_back(i);
+                            if (tok_strs[i].find('\n') != std::string::npos) {
+                                flush_line(line);
+                                line.clear();
+                            }
+                        }
+                        flush_line(line);
+                    }
+                }
+
                 // Apply window boost (Phase 2: contiguous runs)
                 std::vector<float> final_boosts = boost_multipliers;
                 const int W = 2;
@@ -1230,6 +1312,17 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                     if (boost_multipliers[s] > 1.0f) lr_boosted_rows++;
                 }
             }
+        }
+
+        // Saturated table block: a block whose table lines + other boosted rows
+        // outnumber the slots left after the coverage quota must spend EVERY
+        // slot on ranked rows — the table IS the block's content, a stride
+        // scaffold through it is redundant, and each coverage slot evicts one
+        // exact table cell. (Coverage keeps its role in prose blocks; this
+        // only fires when table rows were actually marked.)
+        if (lr_table_rows > 0 && !cov_cols.empty() &&
+            lr_boosted_rows + (int)cov_cols.size() > MR) {
+            cov_cols.clear();
         }
 
         // Budget floor for boosted rows: a fact block's boosted set (value +

@@ -274,6 +274,92 @@ def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
     return n_boosted
 
 
+def _detect_table_rows(tok_strs):
+    """Mark tokens that sit on TABLE-LIKE lines. A line = tokens up to and
+    including a newline-bearing token. Table-like requires >= 2 STANDALONE
+    cell-separator tokens (strip == '|' markdown / '&' LaTeX) among >= 3
+    tokens, AND table shape: the line starts with a separator (markdown data
+    row) or has separator density >= 1 per 12 tokens with >= 3 separators.
+    The density guard matters: prose paragraphs with inline math (|x−y|
+    norms) tokenize with standalone pipes too, and one 200-token paragraph
+    'line' with two of those would otherwise mark the whole block (measured:
+    19 of 22 flagged blocks in a real-paper prompt were such false positives
+    — harmless on MLX but they'd clear native's coverage scaffold).
+    Returns a per-token bool list."""
+    S = len(tok_strs)
+    marked = [False] * S
+    line = []
+
+    def _flush():
+        if len(line) < 3:
+            return
+        seps = sum(1 for i in line if tok_strs[i].strip() in ('|', '&'))
+        if seps < 2:
+            return
+        first = tok_strs[line[0]].strip()
+        if not (first.startswith('|') or first.startswith('&')
+                or '\\\\' in tok_strs[line[-1]]          # LaTeX row terminator
+                or (seps >= 3 and seps * 12 >= len(line))):
+            return
+        for i in line:
+            marked[i] = True
+
+    for i in range(S):
+        line.append(i)
+        if '\n' in tok_strs[i]:
+            _flush()
+            line = []
+    _flush()
+    return marked
+
+
+def _apply_table_capture(boost_multipliers, tok_strs, tids, counts,
+                         total_tokens, tok_boost):
+    """Structured-data capture (DIFFKV_RESIDUAL_TABLE_CAPTURE, default ON).
+
+    Tables break both existing capture rules at once. (1) A table row's cells
+    are digits (is_core) so the whole body is boosted — but a block holding a
+    table plus real technical filler carries MORE boosted rows than
+    max_residual slots (measured 2026-07-13, NAT-style 6x4 table straddling a
+    block boundary in paper text: 181 boosted for 128 slots), and which rows
+    go lossy is decided by SVD error — structure-blind, so fragments of
+    different rows survive and the decoder reassembles a plausible-but-wrong
+    table (83.2 migrating from 7x7 to 3x3, fabricated 4x4 rows). (2) Header
+    and unit cells ('Kernel', 'imgs', '/sec', 'Swin') are prose/core-less →
+    never boosted → survive only as rank-r smear — which is how real imgs/sec
+    throughputs come back as invented 'G/s' numbers.
+
+    Fix: every token on a table-like line (pipes/ampersands — including the
+    alpha header, unit, and row-name cells) gets the core boost multiplied by
+    DIFFKV_RESIDUAL_TABLE_PRIORITY (default 4). Under saturation the err×boost
+    ranking then keeps table rows ahead of ordinary boosted segments, and the
+    lowest-information table rows (separator dashes, pipes — highly regular,
+    near-zero SVD error) degrade first. The existing boosted-row budget floor
+    picks these rows up automatically. Returns the number of marked rows."""
+    # Default ON (measured 2026-07-13, 16k straddled-table probe, MLX:
+    # list-all 3/6 → 6/6 == dense; NIAH 16k d0.5+d0.9 exact, MN 3/3,
+    # synthesis 8k 6.7 == same-day capture-off control 6.7).
+    if os.environ.get("DIFFKV_RESIDUAL_TABLE_CAPTURE", "1") != "1":
+        return 0
+    import math
+    try:
+        priority = float(os.environ.get("DIFFKV_RESIDUAL_TABLE_PRIORITY", "4.0"))
+    except ValueError:
+        priority = 4.0
+    marked = _detect_table_rows(tok_strs)
+    n_marked = 0
+    for i, m in enumerate(marked):
+        if not m:
+            continue
+        count = counts.get(tids[i], 1)
+        idf = math.log(max(total_tokens, 2) / (count + 0.1))
+        rarity_weight = max(1.0, min(idf, 6.0))
+        boost_multipliers[i] = max(boost_multipliers[i],
+                                   tok_boost * (rarity_weight / 2.0) * priority)
+        n_marked += 1
+    return n_marked
+
+
 def compress_mlx_block_batched(deltas: mx.array, rank: int, n_oversamples: int = 5, n_iter: int = 2) -> Tuple[mx.array, mx.array, mx.array]:
     """Compress a batch of KV delta vectors using randomised truncated SVD on GPU in parallel.
     
@@ -2051,6 +2137,12 @@ class MLXKVBlockManager:
                 pass
                 
         boost_rows = []   # per-block final boost multipliers (also feeds the budget floor)
+        if os.environ.get("DIFFKV_DBG_TABLE") == "1":
+            print(f"[DBG_TABLE/gate-batched] tok_boost={tok_boost} "
+                  f"has_token_ids={'token_ids' in session} "
+                  f"len={len(session.get('token_ids', []))} "
+                  f"num_blocks={num_blocks} start_blocks={start_blocks} S_comp={S_comp}",
+                  flush=True)
         if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
             # Boosts depend only on token ids, so compute once per BLOCK and
             # tile across layers (28x less work), with a persistent per-token
@@ -2124,6 +2216,21 @@ class MLXKVBlockManager:
                     # exact-residual treatment as its value (see helper doc).
                     _apply_owner_capture(boost_multipliers, segment_indices, is_core,
                                          tok_strs, tids, counts, total_tokens, tok_boost)
+
+                    # Table capture: whole table-like lines (incl. header/unit
+                    # cells) enter the exact set with priority (see helper doc).
+                    n_tab = _apply_table_capture(boost_multipliers, tok_strs, tids,
+                                                 counts, total_tokens, tok_boost)
+                    if os.environ.get("DIFFKV_DBG_TABLE") == "1":
+                        if n_tab:
+                            if not hasattr(self, "_dbg_table_blocks"):
+                                self._dbg_table_blocks = {}
+                            self._dbg_table_blocks[start_blocks + block_idx] = \
+                                _detect_table_rows(tok_strs)
+                        if any('|' in s for s in tok_strs):
+                            _joined = "".join(tok_strs)
+                            print(f"[DBG_TABLE/content] block {start_blocks + block_idx} "
+                                  f"n_tab={n_tab} text={_joined[:180]!r}", flush=True)
 
                     # Apply window boost (Phase 2: contiguous runs)
                     final_boosts = list(boost_multipliers)
@@ -2219,6 +2326,25 @@ class MLXKVBlockManager:
                         ranked[n_rank_r:], covs[n_cov_r:],
                     ])[:tk.shape[1]]
                 top_k = mx.array(out_rows)
+            if os.environ.get("DIFFKV_DBG_TABLE") == "1" and getattr(self, "_dbg_table_blocks", None):
+                tk_dbg = np.asarray(top_k)
+                for _bi in range(num_blocks):
+                    _g = start_blocks + _bi
+                    _marked = self._dbg_table_blocks.get(_g)
+                    if _marked is None:
+                        continue
+                    _midx = {i for i, m in enumerate(_marked) if m}
+                    _hits = []
+                    for _ly in range(self.num_layers):
+                        _b = _ly * num_blocks + _bi
+                        _nr = int(n_res_batch[_b])
+                        _hits.append(len(_midx & set(tk_dbg[_b, :_nr].tolist())))
+                    _nb = sum(1 for m in boost_rows[_bi] if m > 1.0) if boost_rows else -1
+                    _hs = sorted(_hits)
+                    print(f"[DBG_TABLE] block {_g}: marked={len(_midx)} boosted={_nb} "
+                          f"n_res_l0={int(n_res_batch[_bi])} kept_marked "
+                          f"min/med/max={_hs[0]}/{_hs[len(_hs)//2]}/{_hs[-1]}",
+                          flush=True)
             indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
             batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
             batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
@@ -2591,6 +2717,11 @@ class MLXKVBlockManager:
                 pass
 
         n_boosted_rows = 0
+        if os.environ.get("DIFFKV_DBG_TABLE") == "1":
+            print(f"[DBG_TABLE/gate-stream] tok_boost={tok_boost} "
+                  f"has_token_ids={'token_ids' in session} "
+                  f"len={len(session.get('token_ids', []))} "
+                  f"num_blocks={num_blocks} S_comp={S_comp}", flush=True)
         if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
             abs_start = num_blocks * self.block_size
             tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
@@ -2656,6 +2787,14 @@ class MLXKVBlockManager:
                 # exact-residual treatment as its value (see helper doc).
                 _apply_owner_capture(boost_multipliers, segment_indices, is_core,
                                      tok_strs, tids, counts, total_tokens, tok_boost)
+
+                # Table capture: whole table-like lines (incl. header/unit
+                # cells) enter the exact set with priority (see helper doc).
+                _n_tab_stream = _apply_table_capture(boost_multipliers, tok_strs, tids,
+                                                     counts, total_tokens, tok_boost)
+                if _n_tab_stream and os.environ.get("DIFFKV_DBG_TABLE") == "1":
+                    print(f"[DBG_TABLE/stream] block {num_blocks}: marked={_n_tab_stream}",
+                          flush=True)
 
                 # Apply window boost (Phase 2: contiguous runs)
                 final_boosts = list(boost_multipliers)
@@ -4319,7 +4458,60 @@ class MLXDiffKVWrapper:
             _pen_window = 256 if _loop_detected else 64
             _pen_val = max(repetition_penalty, 1.3) if _loop_detected else repetition_penalty
             if _pen_val != 1.0:
+                # Numeric/separator exemption (2026-07-13): digits carry
+                # semantics, not fluency — penalizing them corrupts faithful
+                # reproduction of numeric content. Measured (CLI direct mode,
+                # 12k paper + planted 6-row table, temp 0): at the default
+                # 1.15 every digit is argmax-suppressed after the first row —
+                # the reply is a header plus EMPTY cells and the model claims
+                # the table "is not provided in your original document" —
+                # while --repetition-penalty 1.0 reads the identical
+                # compressed state 5-6/6. THIS loop is the live sampler on
+                # macOS (the engine delegates decode here); mirrors
+                # _filter_penalty_ids (batch_engine), the hf wrapper loop, and
+                # rep_exempt_cache (native main.cpp). Suspended during loop
+                # recovery so the escalated penalty still breaks digit loops.
+                # DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0 restores.
+                _protect_numeric = (not _loop_detected and
+                                    os.environ.get("DIFFKV_REP_PENALTY_PROTECT_NUMERIC", "1") == "1")
+                # Table-line suspension (mirror of batch_engine._in_table_line):
+                # while the current output line (plus the line above — row
+                # starts count) is table-like, suspend the penalty entirely;
+                # verbatim table rows can't survive ANY penalized token
+                # (measured: empty '| | | |' cells with digits exempt but
+                # glue penalized). Loop recovery overrides.
+                if _protect_numeric and generated:
+                    if not hasattr(self, "_rep_decode_strs"):
+                        self._rep_decode_strs = {}
+                    _seps = _nl = _n = 0
+                    for _tid in reversed(generated):
+                        _n += 1
+                        if _n > 64:
+                            break
+                        _s = self._rep_decode_strs.get(_tid)
+                        if _s is None:
+                            _s = self._rep_decode_strs[_tid] = self.tokenizer.decode([_tid])
+                        if "\n" in _s:
+                            _nl += 1
+                            if _nl >= 2:
+                                break
+                            continue
+                        if _s.strip() in ("|", "&"):
+                            _seps += 1
+                            if _seps >= 2:
+                                _pen_val = 1.0
+                                break
+                if not hasattr(self, "_rep_exempt_tokens"):
+                    self._rep_exempt_tokens = {}
                 for tok_id in set(generated[-_pen_window:]):
+                    if _protect_numeric:
+                        _ex = self._rep_exempt_tokens.get(tok_id)
+                        if _ex is None:
+                            _txt = self.tokenizer.decode([tok_id])
+                            _ex = any(c.isdigit() for c in _txt) or _txt.strip() in ("|", "&")
+                            self._rep_exempt_tokens[tok_id] = _ex
+                        if _ex:
+                            continue
                     if logits[tok_id] > 0:
                         logits[tok_id] /= _pen_val
                     else:

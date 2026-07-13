@@ -682,9 +682,17 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         rel_error_K = error_K / norm_K
         rel_error_V = error_V / norm_V
 
+        # Content-aware residual capture (C10 remediation): the same token
+        # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
+        # apply, so the CUDA path stops selecting residuals blind. Boosts
+        # multiply the rel-error ranking; under the pool's max_residual_tokens
+        # truncation the boosted (value/owner/table) rows sort first and are
+        # what survives. Requires the tokenizer + session ids already fetched
+        # above for the block-rank heuristic; silently skipped when absent.
         # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
         # Mirrors compress_lowrank() CPU path (lines 304-315). Easy prose blocks waste far fewer
         # residual slots; hard factual/code blocks keep the full budget.
+        # (Medians read the UNBOOSTED rel errors, matching the MLX wrapper.)
         n_max_residual = int(T_active * 0.15)
         median_err_K = float(torch.median(rel_error_K).item()) if rel_error_K.numel() > 0 else 0.0
         median_err_V = float(torch.median(rel_error_V).item()) if rel_error_V.numel() > 0 else 0.0
@@ -696,6 +704,60 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
             # Medium complexity: cap at 16 residuals.
             n_max_residual = min(16, n_max_residual)
         # Hard block (factual / code / numbers): keep full budget unchanged.
+
+        # Content-aware residual capture (C10 remediation): the same token
+        # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
+        # apply, so the CUDA path stops selecting residuals blind. Boosts
+        # multiply the rel-error RANKING (after the tier medians above);
+        # under the pool's max_residual_tokens truncation the boosted
+        # (value/owner/table) rows sort first and are what survives. Budget
+        # floor mirrors the other impls: boosted rows + margin, capped at
+        # T_active. Requires the tokenizer + session ids already fetched for
+        # the block-rank heuristic; silently skipped when absent.
+        if block_token_ids and getattr(manager, "tokenizer", None) is not None \
+                and len(block_token_ids) == T_active:
+            try:
+                from native_core.compression.residual_capture import compute_boost_multipliers
+                _tok = manager.tokenizer
+                _cache = getattr(manager, "_res_capture_decode_cache", None)
+                if _cache is None:
+                    _cache = manager._res_capture_decode_cache = {}
+                tok_strs = []
+                for _tid in block_token_ids:
+                    _s = _cache.get(_tid)
+                    if _s is None:
+                        _s = _cache[_tid] = _tok.decode([_tid])
+                    tok_strs.append(_s)
+                _sid = getattr(block, "session_id", None)
+                _all = manager._session_token_ids.get(_sid) if getattr(
+                    manager, "_session_token_ids", None) is not None else None
+                _total = int(_all.numel()) if _all is not None else len(block_token_ids)
+                _ckey = (_sid, _total)
+                _counts_cache = getattr(manager, "_res_capture_counts", None)
+                if _counts_cache is None:
+                    _counts_cache = manager._res_capture_counts = {}
+                _counts = _counts_cache.get(_ckey)
+                if _counts is None and _all is not None:
+                    _counts = {}
+                    for _t in _all.tolist():
+                        _counts[_t] = _counts.get(_t, 0) + 1
+                    _counts_cache.clear()   # keep only the latest session state
+                    _counts_cache[_ckey] = _counts
+                boost_row, n_boosted = compute_boost_multipliers(
+                    tok_strs, block_token_ids, _counts or {}, _total)
+                if boost_row is not None and n_boosted > 0:
+                    _bt = torch.tensor(boost_row, device=rel_error_K.device,
+                                       dtype=rel_error_K.dtype)
+                    rel_error_K = rel_error_K * _bt
+                    rel_error_V = rel_error_V * _bt
+                    try:
+                        _margin = int(os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+                    except ValueError:
+                        _margin = 4
+                    n_max_residual = max(n_max_residual,
+                                         min(T_active, n_boosted + _margin))
+            except Exception:
+                pass
 
         fact_positions_K = None
         residual_K_vals = None
