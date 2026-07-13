@@ -338,7 +338,8 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
     int srl_k_lexical,
     int srl_k_graph,
     int srl_k_host,
-    int active_slot
+    int active_slot,
+    bool high_quality
 ) const {
     std::vector<int32_t> host_candidates;
     std::unordered_set<int32_t> seen;
@@ -414,6 +415,12 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             }
         }
 
+        // Sections 3–4.5 (chunk-graph 2-hop + anchor-neighborhood expansion) are
+        // the "dynamic graph routing" — best synthesis fidelity but they balloon
+        // the candidate pool on uniform docs. HIGH-QUALITY ONLY. In fast bounded-K
+        // mode the pool stays at sink + recency + lexical, so materialization is
+        // cheap and query-independent (mirrors MLX's decode router).
+        if (high_quality) {
         // 3. Chunk Graph Adjacency / 2-hop neighborhood expansion
         const ChunkGraph& g = srl_state.chunk_graph;
         int N = g.N;
@@ -502,6 +509,7 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
                 }
             }
         }
+        } // if (high_quality) — end dynamic graph routing (sections 3–4.5)
     }
 
     // 5. Structured Attention Segmenting filtering

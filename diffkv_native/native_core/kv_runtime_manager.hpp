@@ -61,7 +61,13 @@ public:
     // Dynamic per-layer adaptive SVD rank schedule
     int get_layer_rank(int layer_idx) const;
 
-    // SRL Routing slot selection
+    // SRL Routing slot selection.
+    // high_quality: when true, expand the candidate pool with the dynamic 2-hop
+    //   chunk-graph propagation + anchor-neighborhood expansion (best synthesis
+    //   fidelity, but the candidate pool balloons on uniform docs). When false
+    //   (fast bounded-K default), skip the graph — recency + lexical only — so
+    //   the pool stays small and materialization is cheap. Gated by
+    //   DIFFKV_HIGH_QUALITY_ROUTING (see src/main.cpp).
     std::vector<int32_t> route_decode_slots(
         int current_pos,
         const std::vector<int32_t>& token_ids,
@@ -71,7 +77,8 @@ public:
         int srl_k_lexical,
         int srl_k_graph,
         int srl_k_host,
-        int active_slot
+        int active_slot,
+        bool high_quality = true
     ) const;
 
     // Update semantic descriptor matrix

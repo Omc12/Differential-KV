@@ -2717,9 +2717,31 @@ int main(int argc, char ** argv) {
                 ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
                 : 65536;
 
-            engage_threshold = std::max(4096, auto_thresh);
+            // The memory-budget value (auto_thresh) is now only an UPPER bound —
+            // "engage before dense KV would exhaust the budget." The DEFAULT engage
+            // point is ~8k, matching MLX. This is viable only because decode routing
+            // now defaults to fast bounded-K PRUNING (not attend-all), which makes
+            // sparse decode context-INDEPENDENT (~flat tps). Measured 2026-07-13
+            // (1.5B-q4, clean same-session A/B):
+            //   ctx   sparse(fast)   dense
+            //   8k    36 tps         39 tps    ← dense ~8% faster
+            //   16k   35 tps         39 tps    ← dense ~8% faster
+            //   32k   43 tps         19 tps    ← SPARSE 2.2x faster (dense decays)
+            // So this is a deliberate trade: a small (~8%) decode cost at 8-16k in
+            // exchange for (a) a >2x speedup by 32k as dense attention decays, and
+            // (b) freeing the full dense KV window (~0.5 GB at 16k) every step —
+            // the DiffKV thesis (long-context memory efficiency), and it matters on
+            // memory-tight Metal. Recall validated identical to attend-all: NIAH 6/6
+            // (4/8/16k × depth 0.5/0.9) + 3/3 multi-fact synthesis. min() keeps the
+            // memory cap so a tight device (auto_thresh < 8192) engages even earlier
+            // to avoid OOM. DIFFKV_ENGAGE_THRESHOLD overrides (raise it to prefer
+            // dense throughput at 8-16k); DIFFKV_HIGH_QUALITY_ROUTING=1 restores
+            // attend-all + 2-hop graph routing for max synthesis fidelity.
+            const int kDefaultEngage = 8192;
+            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
             std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (free_mem=" << free_mem / (1 << 20) << "MB"
+                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
+                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
                       << ", bytes_per_tok=" << bytes_per_token
                       << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
         }
@@ -4286,22 +4308,46 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // Routing mode for this turn (hoisted to turn scope so the decode loop can
+        // pass it into route_decode_slots — the 2-hop graph expansion is HQ-only).
+        bool high_quality_routing = false;   // default: fast bounded-K pruning
         {
             int n_comp_blocks = (int)runtime_manager.get_ingest_manager().get_blocks(0).size();
             if (n_comp_blocks > 0) {
-                // DEFAULT = adaptive-k PRUNING (retrieve-then-attend, à la DeepSeek DSA/NSA): attend
-                // only the top ~max(20,15%) relevant compressed blocks, not ALL of them. Native used
-                // to attend every block ("MLX parity"=true) — but that was misnamed (MLX itself routes
-                // top-k) and, with the decode-cache (whose materialise cost scales with block count),
-                // attending-all is 1.6× slower at 16k for NO recall benefit: NIAH 6/6 and the logit
-                // margins are IDENTICAL with pruning (the needle block is always in the top-k; only
-                // irrelevant blocks are dropped). Sparse decode with pruning (19.2 tps @16k) now even
-                // beats native DENSE (17.7). DIFFKV_MLX_PARITY=1 forces the old attend-all path, which
-                // is more robust for DIFFUSE multi-fact/synthesis queries (where many blocks matter) —
-                // the same top-k tradeoff MLX already makes. Credit: DeepSeek NSA/DSA (retrieve-then-attend).
-                bool mlx_parity = !diffkv_detect_narrow_query(prompt);
+                // ── Routing mode: fast bounded-K pruning (DEFAULT) vs High-Quality ──
+                // FAST (default): adaptive-k PRUNING (retrieve-then-attend, à la DeepSeek
+                //   DSA/NSA) — attend only the top ~max(20,15%) relevant compressed blocks.
+                //   This is what MLX's decode router already does (GPU argpartition top-K).
+                //   The decode-cache materialise cost scales with the attended block count,
+                //   so attending-all is ~1.6× slower at 16k; pruning keeps NIAH 6/6 and
+                //   identical logit margins for narrow queries (the needle block is always
+                //   in the top-k). Being query-independent, it makes sparse cheap enough to
+                //   engage early (the whole point of lowering the engage threshold).
+                // HIGH QUALITY (opt-in): attend ALL compressed blocks + the dynamic 2-hop
+                //   graph candidate routing — more robust for DIFFUSE multi-fact/synthesis
+                //   queries where many blocks matter. This is the old default.
+                //   Credit: DeepSeek NSA/DSA (retrieve-then-attend).
+                //
+                // Toggle: DIFFKV_HIGH_QUALITY_ROUTING = 1 → HQ (attend-all + graph)
+                //                                        0 / unset → fast pruning (DEFAULT)
+                //                                        auto → per-query heuristic (old behaviour:
+                //                                               HQ for diffuse, fast for narrow)
+                // DIFFKV_MLX_PARITY stays as the low-level attend-all override for isolated
+                // A/B benchmarking; it wins over the high-level toggle when set.
+                // high_quality_routing is also passed to route_decode_slots so the 2-hop
+                // graph expansion (the candidate-pool balloon) is HQ-only.
+                if (const char* e = std::getenv("DIFFKV_HIGH_QUALITY_ROUTING")) {
+                    if (std::strcmp(e, "auto") == 0) {
+                        high_quality_routing = !diffkv_detect_narrow_query(prompt);
+                    } else {
+                        high_quality_routing = (std::strcmp(e, "0") != 0 &&
+                                                std::strcmp(e, "false") != 0 &&
+                                                std::strcmp(e, "off") != 0);
+                    }
+                }
+                bool mlx_parity = high_quality_routing;
                 if (const char* env_mp = std::getenv("DIFFKV_MLX_PARITY")) {
-                    // Explicit env override always wins (isolated benchmarking of either mode).
+                    // Explicit low-level override always wins (isolated benchmarking of either mode).
                     mlx_parity = (std::strcmp(env_mp, "0") != 0 && std::strcmp(env_mp, "false") != 0 && std::strcmp(env_mp, "off") != 0);
                 }
                 if (mlx_parity) {
@@ -5218,7 +5264,8 @@ int main(int argc, char ** argv) {
                     srl_k_lexical,
                     srl_k_graph,
                     srl_k_host,
-                    active_slot
+                    active_slot,
+                    high_quality_routing   // 2-hop graph expansion is HQ-only (fast bounded-K default)
                 );
                 last_retrieval_step = step;
                 last_retrieval_active_slot = active_slot;
