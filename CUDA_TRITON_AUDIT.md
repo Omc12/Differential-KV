@@ -311,7 +311,41 @@ The torch `lowrank.py` path CANNOT take this port directly: it has NO
 content-aware boost machinery at all (no token ids plumbed into
 `compress_lowrank_block`, K/V residuals ranked separately by rel-error only) —
 so it also still has the ORIGINAL failure this fixed, plus the digit-boost gap.
-- [ ] On the GPU box: reproduce the binding failure on the torch path first
-      (binding_probe pattern), then plumb token ids into the torch compressor
-      and port the boost + owner-capture + budget-floor block as one unit
-      (default OFF until the probe passes there).
+- [x] REMEDIATED 2026-07-13 (CPU-verified; GPU cert still owed): the batched
+      GPU path `compress_layer_blocks_gpu` (the path CUDA serving actually
+      uses — it already fetches block token ids + tokenizer for its
+      block-rank heuristic) now applies the full capture stack via the new
+      shared module `native_core/compression/residual_capture.py` (token
+      boost + owner capture + TABLE capture + window pass; keep in sync with
+      `mlx_diffkv_wrapper.py` helpers and `lowrank.cpp`). Boosts multiply the
+      rel-error ranking AFTER the tier medians (parity with MLX), budget
+      floor = boosted+margin capped at T_active; the pool's
+      `max_residual_tokens` truncation (default 8, `DIFFKV_MAX_RESIDUAL_TOKENS`)
+      keeps the highest-ranked rows, so boosted value/owner/table rows are
+      what survives. CPU tests: `tests/test_residual_capture.py` (11 pass,
+      incl. an end-to-end `compress_layer_blocks_gpu` CPU integration test).
+      NOTE: the single-block CPU `compress_lowrank` path is still unported.
+- [ ] On the GPU box: run the binding_probe + table_probe2 patterns against
+      the torch path end-to-end; table fidelity needs
+      DIFFKV_MAX_RESIDUAL_TOKENS raised toward the table span size (8 slots
+      cannot hold a table row set — see table-capture notes in
+      RELATIONAL_BINDING_REPORT.md).
+
+**C11 — Table capture (layer 3) — 2026-07-13**
+Tables lose value→owner binding under compression two ways at once:
+(1) whole table bodies are is_core (digits) so a block holding a table +
+technical filler carries MORE boosted rows than residual slots (measured 181
+boosted / 128 slots, NAT-style table straddling a block boundary in real
+paper text) and the err-ranked cut drops table fragments structure-blind —
+values migrate across rows/tables when the decoder reassembles; (2)
+header/unit/row-name cells ('Kernel', 'imgs', '/sec', 'Swin-T baseline') are
+prose → never boosted → rank-r smear (fabricated units, lost row names).
+Fix (`DIFFKV_RESIDUAL_TABLE_CAPTURE`, default ON all three impls;
+`DIFFKV_RESIDUAL_TABLE_PRIORITY` default 4): tokens on table-like LINES
+(>= 2 standalone '|'/'&' separators + shape guard: line-initial separator,
+LaTeX `\\` terminator, or separator density >= 1/12 — the guard rejects
+prose with inline |x−y| math) get the core boost × priority; native also
+skips the coverage quota for saturated table blocks. Measured (16k straddled
+table, temp 0): MLX list-all 3/6 → 6/6 == dense; native 4/6 (row-shift swap
++ missing row) → 6/6. Recall gates unchanged both runtimes (NIAH incl.
+16k/0.9, MN 3/3, synthesis == same-day controls, native margins 12.48/14.26).

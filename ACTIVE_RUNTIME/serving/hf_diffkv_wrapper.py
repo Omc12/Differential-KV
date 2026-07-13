@@ -904,6 +904,46 @@ class PyTorchDiffKVHFWrapper:
             _pen_window = 256 if _loop_detected else 64
             _pen_val = max(repetition_penalty, 1.3) if _loop_detected else repetition_penalty
             if _pen_val != 1.0:
+                # Numeric exemption (2026-07-13): digits carry semantics, not
+                # fluency — penalizing them corrupts faithful reproduction of
+                # numeric content (measured: CLI 12k table reproduction emitted
+                # header + EMPTY cells, every digit argmax-suppressed at the
+                # default 1.15, while the raw-argmax probe read the identical
+                # compressed state 6/6). Suspended during loop recovery so the
+                # escalated penalty still breaks digit loops. Mirrors
+                # _filter_penalty_ids (batch_engine.py) and rep_exempt_cache
+                # (native main.cpp). DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0 restores.
+                _protect_numeric = (not _loop_detected and
+                                    os.environ.get("DIFFKV_REP_PENALTY_PROTECT_NUMERIC", "1") == "1")
+                # Table-line suspension (mirror of batch_engine._in_table_line):
+                # while the current output line (plus the line above — row
+                # starts count) is table-like, suspend the penalty entirely;
+                # verbatim table rows can't survive ANY penalized token
+                # (measured: empty '| | | |' cells with digits exempt but
+                # glue penalized). Loop recovery overrides.
+                if _protect_numeric and generated:
+                    if not hasattr(self, "_rep_decode_strs"):
+                        self._rep_decode_strs = {}
+                    _seps = _nl = _n = 0
+                    for _tid in reversed(generated):
+                        _n += 1
+                        if _n > 64:
+                            break
+                        _s = self._rep_decode_strs.get(_tid)
+                        if _s is None:
+                            _s = self._rep_decode_strs[_tid] = self.tokenizer.decode([_tid])
+                        if "\n" in _s:
+                            _nl += 1
+                            if _nl >= 2:
+                                break
+                            continue
+                        if _s.strip() in ("|", "&"):
+                            _seps += 1
+                            if _seps >= 2:
+                                _pen_val = 1.0
+                                break
+                if not hasattr(self, "_rep_exempt_tokens"):
+                    self._rep_exempt_tokens = {}
                 for tok_id in set(generated[-_pen_window:]):
                     if tok_id < logits.shape[-1]:
                         # Skip punctuation/newlines/whitespace to avoid suppressing lists/bullets/formatting
@@ -915,6 +955,15 @@ class PyTorchDiffKVHFWrapper:
 
                         if not is_alnum:
                             continue
+
+                        if _protect_numeric:
+                            _ex = self._rep_exempt_tokens.get(tok_id)
+                            if _ex is None:
+                                _txt = self.tokenizer.decode([tok_id], skip_special_tokens=True)
+                                _ex = any(c.isdigit() for c in _txt)
+                                self._rep_exempt_tokens[tok_id] = _ex
+                            if _ex:
+                                continue
 
                         if logits[0, tok_id] > 0:
                             logits[0, tok_id] /= _pen_val

@@ -178,6 +178,84 @@ def _detect_repetition_loop(generated_ids: List[int]) -> bool:
 
 
 
+_REP_EXEMPT_CACHE = {}
+_REP_DECODE_CACHE = {}
+
+
+def _in_table_line(generated_ids, tokenizer, max_walk=64):
+    """True when the CURRENT output line (tokens since the last newline) looks
+    like a table row: >= 2 standalone '|'/'&' separator tokens. While that
+    holds, the caller suspends the repetition penalty entirely — reproducing
+    a table row is VERBATIM output, and any penalized token (digit, space,
+    cell word) just slides the argmax to the nearest unpenalized neighbor
+    (measured 2026-07-13: header + EMPTY '| | | |' rows with digits exempted
+    but glue still penalized; full rows only at penalty 1.0). Generation-side
+    mirror of the capture-side _detect_table_rows rule; loop recovery is
+    unaffected (caller checks loop_detected first)."""
+    seps = 0
+    n = 0
+    lines_seen = 0
+    cache = _REP_DECODE_CACHE
+    for tid in reversed(generated_ids):
+        n += 1
+        if n > max_walk:
+            break
+        s = cache.get(tid)
+        if s is None:
+            try:
+                s = tokenizer.decode([tid])
+            except Exception:
+                s = ""
+            cache[tid] = s
+        if "\n" in s:
+            # A row START (before its 2nd separator) must also count as table
+            # context or the row-key tokens stay penalized and the model
+            # derails at every new row (measured: '| KxK: | 78.6 ...' —
+            # Table B's values pouring into Table A's shape). Tables are
+            # multi-line: keep walking into the PREVIOUS line; a separator
+            # count reached across the boundary still means we're inside a
+            # table body.
+            lines_seen += 1
+            if lines_seen >= 2:
+                break
+            continue
+        if s.strip() in ("|", "&"):
+            seps += 1
+            if seps >= 2:
+                return True
+    return False
+
+
+def _filter_penalty_ids(ids, tokenizer):
+    """Drop digit-bearing and table-separator tokens from a penalty id list.
+
+    Repetition penalty exists to stop word-loop disfluency; over digits it
+    actively corrupts faithful reproduction of numeric content — reproducing
+    a table penalizes every pipe/digit after the first row and the argmax
+    flips to a wrong-but-unpenalized number (measured 2026-07-13: CLI 12k
+    table reproduction 0/6 rows at the default 1.15 vs 6/6 through the
+    raw-argmax probe on the identical compressed state; values migrated
+    across tables exactly as in the user-reported NAT-paper failure).
+    Digits carry semantics, not fluency. Loop recovery is unaffected: the
+    caller skips this filter while repetition_loop_detected is set, so the
+    escalated 1.3/256 penalty still breaks digit loops ("7741-7741-").
+    DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0 restores the old behavior."""
+    keep = []
+    cache = _REP_EXEMPT_CACHE
+    for tid in ids:
+        ex = cache.get(tid)
+        if ex is None:
+            try:
+                s = tokenizer.decode([tid])
+            except Exception:
+                s = ""
+            ex = any(c.isdigit() for c in s) or s.strip() in ("|", "&")
+            cache[tid] = ex
+        if not ex:
+            keep.append(tid)
+    return keep
+
+
 @torch.jit.script
 def _sample_gpu_jit(
     logits: torch.Tensor,                # [1, vocab_size]
@@ -1447,9 +1525,22 @@ class ContinuousBatchEngine:
             else:
                 penalty_val = req.repetition_penalty
 
-        if req.generated_ids:
+        # Numeric/separator exemption (see _filter_penalty_ids). Skipped during
+        # loop recovery so the escalated penalty can still break digit loops.
+        _protect_numeric = (not req.repetition_loop_detected and
+                            os.environ.get("DIFFKV_REP_PENALTY_PROTECT_NUMERIC", "1") == "1")
+        # Table-line suspension (see _in_table_line): verbatim table rows get
+        # no repetition penalty at all while the current line is table-like.
+        if (_protect_numeric and req.generated_ids and
+                _in_table_line(req.generated_ids, self.tokenizer)):
+            penalty_val = 1.0
+
+        gen_ids_for_penalty = req.generated_ids[-penalty_window:] if req.generated_ids else []
+        if _protect_numeric and gen_ids_for_penalty:
+            gen_ids_for_penalty = _filter_penalty_ids(gen_ids_for_penalty, self.tokenizer)
+        if gen_ids_for_penalty:
             gen_tensor = torch.tensor(
-                req.generated_ids[-penalty_window:], dtype=torch.long, device=logits.device
+                gen_ids_for_penalty, dtype=torch.long, device=logits.device
             )
         else:
             gen_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)
@@ -1460,8 +1551,11 @@ class ContinuousBatchEngine:
         # to cover the local context, and enforce an anti-copy penalty of at least 1.15
         # even if the request's repetition penalty is unset (1.0).
         if not req.repetition_loop_detected and req.prompt_ids and len(req.generated_ids) < 8:
+            prompt_ids_for_penalty = req.prompt_ids[-512:]
+            if _protect_numeric:
+                prompt_ids_for_penalty = _filter_penalty_ids(prompt_ids_for_penalty, self.tokenizer)
             prompt_tensor = torch.tensor(
-                req.prompt_ids[-512:], dtype=torch.long, device=logits.device
+                prompt_ids_for_penalty, dtype=torch.long, device=logits.device
             )
         else:
             prompt_tensor = torch.empty((0,), dtype=torch.long, device=logits.device)

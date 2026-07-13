@@ -2392,18 +2392,42 @@ int main(int argc, char ** argv) {
     }
 
     // Speed 2: Pre-build alphanumeric cache for vocab tokens
+    // rep_exempt_cache (2026-07-13): digit-bearing and table-separator tokens
+    // are EXEMPT from the normal repetition penalty — the penalty exists to
+    // stop word-loop disfluency, but over digits it corrupts faithful
+    // reproduction of numeric content (reproducing a table penalizes every
+    // pipe/digit after the first row and the argmax flips to a wrong number;
+    // mirrors _filter_penalty_ids in ACTIVE_RUNTIME batch_engine.py). Loop
+    // recovery is unaffected: the exemption is skipped while loop_detected,
+    // so the escalated 1.3/256 penalty still breaks digit loops
+    // ("7741-7741-"). DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0 restores.
     std::vector<int8_t> alnum_cache(n_vocab, 0);
+    std::vector<int8_t> rep_exempt_cache(n_vocab, 0);
+    std::vector<int8_t> nl_cache(n_vocab, 0);     // piece contains a newline
+    std::vector<int8_t> sep_cache(n_vocab, 0);    // stripped piece is '|' or '&'
     for (int32_t tok_id = 0; tok_id < n_vocab; ++tok_id) {
         std::string piece = model.token_to_piece(tok_id);
         bool has_alnum = false;
+        bool has_digit = false;
         for (char c : piece) {
-            if (std::isalnum(static_cast<unsigned char>(c))) {
-                has_alnum = true;
-                break;
-            }
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc)) has_alnum = true;
+            if (std::isdigit(uc)) { has_digit = true; break; }
         }
         alnum_cache[tok_id] = has_alnum ? 1 : 0;
+        nl_cache[tok_id] = (piece.find('\n') != std::string::npos) ? 1 : 0;
+        // strip whitespace to test for a standalone separator piece
+        size_t b = piece.find_first_not_of(" \t\n\r");
+        std::string stripped = (b == std::string::npos) ? std::string()
+            : piece.substr(b, piece.find_last_not_of(" \t\n\r") - b + 1);
+        bool is_sep = (stripped == "|" || stripped == "&");
+        sep_cache[tok_id] = is_sep ? 1 : 0;
+        rep_exempt_cache[tok_id] = (has_digit || is_sep) ? 1 : 0;
     }
+    static const bool rep_protect_numeric = []() {
+        const char* e = std::getenv("DIFFKV_REP_PENALTY_PROTECT_NUMERIC");
+        return !(e && std::string(e) == "0");
+    }();
 
 
     ggml_backend_buffer_t native_decode_buf = nullptr;
@@ -6416,6 +6440,28 @@ int main(int argc, char ** argv) {
                 float rep_penalty = loop_detected ? std::max(repetition_penalty, 1.3f) : repetition_penalty;
                 int rep_window    = loop_detected ? 256 : 64;
 
+                // Table-line suspension (mirror of batch_engine._in_table_line):
+                // while the current output line — plus the line above, so row
+                // starts count — is table-like (>= 2 standalone '|'/'&'
+                // pieces), suspend the penalty entirely; verbatim table rows
+                // can't survive ANY penalized token (measured on MLX serving:
+                // header + empty '| | | |' cells with digits exempt but glue
+                // penalized; full rows only with the penalty suspended).
+                // Loop recovery overrides.
+                if (rep_protect_numeric && !loop_detected && !all_tokens.empty()) {
+                    int seps = 0, nls = 0, walked = 0;
+                    for (auto it = all_tokens.rbegin(); it != all_tokens.rend(); ++it) {
+                        if (++walked > 64) break;
+                        int32_t t = *it;
+                        if (t < 0 || t >= n_vocab) continue;
+                        if (nl_cache[t]) {
+                            if (++nls >= 2) break;
+                            continue;
+                        }
+                        if (sep_cache[t] && ++seps >= 2) { rep_penalty = 1.0f; break; }
+                    }
+                }
+
                 std::unordered_set<int32_t> unique_penalized;
                 int combined_start = std::max(0, (int)all_tokens.size() - rep_window);
                 for (size_t i = combined_start; i < all_tokens.size(); ++i) {
@@ -6426,6 +6472,12 @@ int main(int argc, char ** argv) {
 
                 for (int32_t tok : unique_penalized) {
                     if (tok >= 0 && tok < n_vocab) {
+                        // Numeric/separator exemption (see rep_exempt_cache note);
+                        // suspended during loop recovery so escalated penalty can
+                        // still break digit loops.
+                        if (rep_protect_numeric && !loop_detected && rep_exempt_cache[tok]) {
+                            continue;
+                        }
                         // MLX aligns with penalizing all repeated tokens including punctuation to prevent periods/spaces loops.
                         float& l = output_logits[tok];
                         l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
