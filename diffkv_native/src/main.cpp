@@ -2717,31 +2717,26 @@ int main(int argc, char ** argv) {
                 ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
                 : 65536;
 
-            // The memory-budget value (auto_thresh) is now only an UPPER bound —
-            // "engage before dense KV would exhaust the budget." The DEFAULT engage
-            // point is ~8k, matching MLX. This is viable only because decode routing
-            // now defaults to fast bounded-K PRUNING (not attend-all), which makes
-            // sparse decode context-INDEPENDENT (~flat tps). Measured 2026-07-13
-            // (1.5B-q4, clean same-session A/B):
-            //   ctx   sparse(fast)   dense
-            //   8k    36 tps         39 tps    ← dense ~8% faster
-            //   16k   35 tps         39 tps    ← dense ~8% faster
-            //   32k   43 tps         19 tps    ← SPARSE 2.2x faster (dense decays)
-            // So this is a deliberate trade: a small (~8%) decode cost at 8-16k in
-            // exchange for (a) a >2x speedup by 32k as dense attention decays, and
-            // (b) freeing the full dense KV window (~0.5 GB at 16k) every step —
-            // the DiffKV thesis (long-context memory efficiency), and it matters on
-            // memory-tight Metal. Recall validated identical to attend-all: NIAH 6/6
-            // (4/8/16k × depth 0.5/0.9) + 3/3 multi-fact synthesis. min() keeps the
-            // memory cap so a tight device (auto_thresh < 8192) engages even earlier
-            // to avoid OOM. DIFFKV_ENGAGE_THRESHOLD overrides (raise it to prefer
-            // dense throughput at 8-16k); DIFFKV_HIGH_QUALITY_ROUTING=1 restores
-            // attend-all + 2-hop graph routing for max synthesis fidelity.
-            const int kDefaultEngage = 8192;
-            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
+            // Engage sparse only when dense KV would exhaust the memory budget —
+            // i.e. a memory-reach gate, NOT a speed gate.
+            //
+            // A ~8k default was tried (2026-07-13) on the theory that fast bounded-K
+            // pruning made sparse a flat-tps win. It REGRESSED real use: on a ~12k
+            // paper paste (verbatim reproduction / continue-the-document — a diffuse
+            // task that needs faithful FULL context), native sparse decode degenerates
+            // into sentence loops + trips the VSL "[uncertain]" stop, in BOTH fast and
+            // HQ routing (so it is a sparse-decode fidelity gap, not a routing-mode
+            // issue). Dense on the identical paste is clean AND faster: dense 44.7 tps
+            // vs sparse 38 @12k. Sparse's throughput win only appears past ~24-32k
+            // where dense attention decays; below that dense wins on BOTH axes. Needle/
+            // multi-fact RETRIEVAL survives pruning (few blocks), but REPRODUCTION does
+            // not — and we can't tell the task apart up front. So the safe default is
+            // dense until memory forces sparse. auto_thresh already does exactly that.
+            // Opt into early sparse (memory reach / >32k throughput, accepting the
+            // reproduction-fidelity caveat) with DIFFKV_ENGAGE_THRESHOLD=8192.
+            engage_threshold = std::max(4096, auto_thresh);
             std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
-                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
+                      << " (mem-gate; free_mem=" << free_mem / (1 << 20) << "MB"
                       << ", bytes_per_tok=" << bytes_per_token
                       << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
         }
