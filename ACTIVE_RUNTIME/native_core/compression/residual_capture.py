@@ -42,34 +42,116 @@ def _idf_weight(tid, counts, total_tokens):
 
 
 def _detect_table_rows(tok_strs):
-    """Same rule as the MLX _detect_table_rows: a line is table-like when it
-    has >= 2 STANDALONE separator tokens (strip == '|' or '&') among >= 3
-    tokens AND table shape (starts with a separator, or >= 3 separators at
-    density >= 1/12 — the density guard rejects prose with inline math |x|)."""
+    """Same rules as the MLX _detect_table_rows (keep in sync):
+    1. SEPARATOR rule — >= 2 standalone '|'/'&' tokens among >= 3, plus
+       shape (line-initial separator, LaTeX `\\\\` terminator, or density
+       >= 1/12 with >= 3 separators);
+    2. COLUMNAR rule (PDF copy-paste tables have NO pipes) — >= 2
+       consecutive lines of 3..48 tokens that end in a digit-bearing token,
+       carry >= 2 digit tokens, and are not prose-dominated; the line above
+       the run (header) joins."""
     S = len(tok_strs)
-    marked = [False] * S
+    marked = [0.0] * S
+    lines = []
     line = []
-
-    def _flush():
-        if len(line) < 3:
-            return
-        seps = sum(1 for i in line if tok_strs[i].strip() in ('|', '&'))
-        if seps < 2:
-            return
-        first = tok_strs[line[0]].strip()
-        if not (first.startswith('|') or first.startswith('&')
-                or '\\\\' in tok_strs[line[-1]]          # LaTeX row terminator
-                or (seps >= 3 and seps * 12 >= len(line))):
-            return
-        for i in line:
-            marked[i] = True
-
     for i in range(S):
         line.append(i)
         if '\n' in tok_strs[i]:
-            _flush()
+            lines.append(line)
             line = []
-    _flush()
+    if line:
+        lines.append(line)
+
+    def _sep_rule(ln):
+        if len(ln) < 3:
+            return False
+        seps = sum(1 for i in ln if tok_strs[i].strip() in ('|', '&'))
+        if seps < 2:
+            return False
+        first = tok_strs[ln[0]].strip()
+        return (first.startswith('|') or first.startswith('&')
+                or '\\\\' in tok_strs[ln[-1]]
+                or (seps >= 3 and seps * 12 >= len(ln)))
+
+    def _columnar_candidate(ln):
+        if not (3 <= len(ln) <= 48):
+            return False
+        n_digit = 0
+        n_prose = 0
+        for i in ln:
+            sc = tok_strs[i].strip()
+            if any(c.isdigit() for c in sc):
+                n_digit += 1
+            elif sc.isalpha() and sc.islower() and len(sc) >= 3:
+                n_prose += 1
+        if n_digit < 2 or 2 * n_digit < n_prose:
+            return False
+        for i in reversed(ln):
+            sc = tok_strs[i].strip()
+            if not sc or all(not c.isalnum() for c in sc):
+                continue
+            return any(c.isdigit() for c in sc)
+        return False
+
+    # Tiered marking: separator-rule lines (explicit tables) carry weight
+    # 1.0; columnar-rule lines (PDF-style tables, but also equation lines
+    # and short numeric records) carry 0.5 — under saturation the explicit
+    # table always outranks incidental numeric lines sharing its block
+    # (measured: uniform weights let reference lists steal slots from a
+    # markdown table, 6/6 -> 1/6). Headers and captions inherit their run's
+    # weight.
+    cand = [_columnar_candidate(ln) for ln in lines]
+    fired = [0.0] * len(lines)
+    for li, ln in enumerate(lines):
+        if _sep_rule(ln):
+            fired[li] = 1.0
+            for i in ln:
+                marked[i] = max(marked[i], 1.0)
+        elif cand[li] and ((li > 0 and cand[li - 1]) or
+                           (li + 1 < len(lines) and cand[li + 1])):
+            fired[li] = 0.5
+            for i in ln:
+                marked[i] = max(marked[i], 0.5)
+            if li > 0 and not cand[li - 1] and len(lines[li - 1]) <= 48:
+                for i in lines[li - 1]:
+                    marked[i] = max(marked[i], 0.5)
+    # CAPTION capture: a table's IDENTITY lives in its caption ("Table 4
+    # reports the kernel size ablation for ...") — prose, so without this it
+    # survives only as rank-r smear, and at long ctx the decoder can find
+    # exact numeric rows but not tell WHICH table they belong to (measured
+    # 2026-07-13, aligned style: 6/6 at 4k -> 84.2-attractor at 16k once the
+    # filler contributed competing numeric tables; dense, with captions
+    # exact, stayed row-correct). Walk up to 3 lines above the first fired
+    # line of each run; a line mentioning 'table'/'tab.' followed by a digit
+    # nearby joins the exact set.
+    if os.environ.get("DIFFKV_RESIDUAL_TABLE_CAPTION", "1") != "1":
+        return marked
+
+    def _is_caption(ln):
+        text = "".join(tok_strs[i] for i in ln).lower()
+        for m in ("table", "tab."):
+            j = text.find(m)
+            if j >= 0 and any(c.isdigit() for c in text[j:j + len(m) + 4]):
+                return True
+        return False
+
+    # Columnar runs ONLY: an aligned table's rows are anonymous numbers, so
+    # the caption is its only identity anchor (without it: 84.2-attractor at
+    # 16k). Separator-rule tables are self-identifying (pipes + header), and
+    # capturing their captions was measured NET-NEGATIVE: with BOTH captions
+    # exact the decoder fused the two tables into a chimera (markdown 6/6 ->
+    # 1/6; restored by scoping captions to columnar runs).
+    for li in range(len(lines)):
+        if fired[li] != 0.5 or (li > 0 and fired[li - 1]):
+            continue
+        for up in range(1, 4):
+            ui = li - up
+            if ui < 0:
+                break
+            if _is_caption(lines[ui]):
+                for i in lines[ui]:
+                    marked[i] = max(marked[i], fired[li])
+                break
     return marked
 
 
@@ -168,7 +250,7 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
         marked = _detect_table_rows(tok_strs)
         for i, m in enumerate(marked):
             if m:
-                b = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0) * priority
+                b = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0) * priority * m
                 boost[i] = max(boost[i], b)
 
     # Window pass (contiguous runs)

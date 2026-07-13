@@ -276,40 +276,138 @@ def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
 
 def _detect_table_rows(tok_strs):
     """Mark tokens that sit on TABLE-LIKE lines. A line = tokens up to and
-    including a newline-bearing token. Table-like requires >= 2 STANDALONE
-    cell-separator tokens (strip == '|' markdown / '&' LaTeX) among >= 3
-    tokens, AND table shape: the line starts with a separator (markdown data
-    row) or has separator density >= 1 per 12 tokens with >= 3 separators.
-    The density guard matters: prose paragraphs with inline math (|x−y|
-    norms) tokenize with standalone pipes too, and one 200-token paragraph
-    'line' with two of those would otherwise mark the whole block (measured:
-    19 of 22 flagged blocks in a real-paper prompt were such false positives
-    — harmless on MLX but they'd clear native's coverage scaffold).
+    including a newline-bearing token. Two detection rules, both required
+    because real documents arrive in both shapes:
+
+    1. SEPARATOR rule (markdown/LaTeX sources): >= 2 STANDALONE separator
+       tokens (strip == '|' / '&') among >= 3 tokens, plus table shape —
+       line-initial separator, LaTeX `\\\\` terminator, or separator density
+       >= 1/12 with >= 3 separators (the density guard rejects prose with
+       inline |x−y| math, which otherwise marked 19 false-positive blocks).
+
+    2. COLUMNAR rule (PDF copy-paste — the NAT-paper report 2026-07-13: PDF
+       tables flatten to whitespace-aligned rows with NO pipes, the separator
+       rule never fires, rows over-compress and generation collapses onto
+       one high-salience fragment reused for every row). A CANDIDATE line
+       has 3..48 tokens, ends in a digit-bearing token (skipping trailing
+       punctuation), carries >= 2 digit-bearing tokens, and is not
+       prose-dominated (2*digit_tokens >= lowercase words len >= 3). Two or
+       more CONSECUTIVE candidates fire, marking their tokens plus one line
+       above (the header). A lone numeric prose sentence has no numeric
+       neighbor and stays unmarked; reference lists do fire — acceptable,
+       exact citations are benign.
+
     Returns a per-token bool list."""
     S = len(tok_strs)
-    marked = [False] * S
+    marked = [0.0] * S
+    lines = []
     line = []
-
-    def _flush():
-        if len(line) < 3:
-            return
-        seps = sum(1 for i in line if tok_strs[i].strip() in ('|', '&'))
-        if seps < 2:
-            return
-        first = tok_strs[line[0]].strip()
-        if not (first.startswith('|') or first.startswith('&')
-                or '\\\\' in tok_strs[line[-1]]          # LaTeX row terminator
-                or (seps >= 3 and seps * 12 >= len(line))):
-            return
-        for i in line:
-            marked[i] = True
-
     for i in range(S):
         line.append(i)
         if '\n' in tok_strs[i]:
-            _flush()
+            lines.append(line)
             line = []
-    _flush()
+    if line:
+        lines.append(line)
+
+    def _sep_rule(ln):
+        if len(ln) < 3:
+            return False
+        seps = sum(1 for i in ln if tok_strs[i].strip() in ('|', '&'))
+        if seps < 2:
+            return False
+        first = tok_strs[ln[0]].strip()
+        return (first.startswith('|') or first.startswith('&')
+                or '\\\\' in tok_strs[ln[-1]]            # LaTeX row terminator
+                or (seps >= 3 and seps * 12 >= len(ln)))
+
+    def _columnar_candidate(ln):
+        # Real table rows are SHORT. References ("[3] D. Achlioptas, ...,
+        # 2001.") are 25-45 tokens, prose-heavy, and also end in digits —
+        # marking them was measured to STEAL residual slots from a real
+        # table sharing the block (markdown probe 6/6 -> 1/6 before this
+        # tightening). <= 20 tokens qualifies outright; 21..48 only when
+        # digit tokens outnumber prose words.
+        if not (3 <= len(ln) <= 48):
+            return False
+        n_digit = 0
+        n_prose = 0
+        for i in ln:
+            sc = tok_strs[i].strip()
+            if any(c.isdigit() for c in sc):
+                n_digit += 1
+            elif sc.isalpha() and sc.islower() and len(sc) >= 3:
+                n_prose += 1
+        if n_digit < 2:
+            return False
+        if len(ln) > 20 and n_digit < n_prose:
+            return False
+        for i in reversed(ln):                 # ends in a number
+            sc = tok_strs[i].strip()
+            if not sc or all(not c.isalnum() for c in sc):
+                continue
+            return any(c.isdigit() for c in sc)
+        return False
+
+    # Tiered marking: separator-rule lines (explicit tables) carry weight
+    # 1.0; columnar-rule lines (PDF-style tables, but also equation lines
+    # and short numeric records) carry 0.5 — under saturation the explicit
+    # table always outranks incidental numeric lines sharing its block
+    # (measured: uniform weights let reference lists steal slots from a
+    # markdown table, 6/6 -> 1/6). Headers and captions inherit their run's
+    # weight.
+    cand = [_columnar_candidate(ln) for ln in lines]
+    fired = [0.0] * len(lines)
+    for li, ln in enumerate(lines):
+        if _sep_rule(ln):
+            fired[li] = 1.0
+            for i in ln:
+                marked[i] = max(marked[i], 1.0)
+        elif cand[li] and ((li > 0 and cand[li - 1]) or
+                           (li + 1 < len(lines) and cand[li + 1])):
+            fired[li] = 0.5
+            for i in ln:
+                marked[i] = max(marked[i], 0.5)
+            if li > 0 and not cand[li - 1] and len(lines[li - 1]) <= 48:
+                for i in lines[li - 1]:
+                    marked[i] = max(marked[i], 0.5)
+    # CAPTION capture: a table's IDENTITY lives in its caption ("Table 4
+    # reports the kernel size ablation for ...") — prose, so without this it
+    # survives only as rank-r smear, and at long ctx the decoder can find
+    # exact numeric rows but not tell WHICH table they belong to (measured
+    # 2026-07-13, aligned style: 6/6 at 4k -> 84.2-attractor at 16k once the
+    # filler contributed competing numeric tables; dense, with captions
+    # exact, stayed row-correct). Walk up to 3 lines above the first fired
+    # line of each run; a line mentioning 'table'/'tab.' followed by a digit
+    # nearby joins the exact set.
+    if os.environ.get("DIFFKV_RESIDUAL_TABLE_CAPTION", "1") != "1":
+        return marked
+
+    def _is_caption(ln):
+        text = "".join(tok_strs[i] for i in ln).lower()
+        for m in ("table", "tab."):
+            j = text.find(m)
+            if j >= 0 and any(c.isdigit() for c in text[j:j + len(m) + 4]):
+                return True
+        return False
+
+    # Columnar runs ONLY: an aligned table's rows are anonymous numbers, so
+    # the caption is its only identity anchor (without it: 84.2-attractor at
+    # 16k). Separator-rule tables are self-identifying (pipes + header), and
+    # capturing their captions was measured NET-NEGATIVE: with BOTH captions
+    # exact the decoder fused the two tables into a chimera (markdown 6/6 ->
+    # 1/6; restored by scoping captions to columnar runs).
+    for li in range(len(lines)):
+        if fired[li] != 0.5 or (li > 0 and fired[li - 1]):
+            continue
+        for up in range(1, 4):
+            ui = li - up
+            if ui < 0:
+                break
+            if _is_caption(lines[ui]):
+                for i in lines[ui]:
+                    marked[i] = max(marked[i], fired[li])
+                break
     return marked
 
 
@@ -355,7 +453,7 @@ def _apply_table_capture(boost_multipliers, tok_strs, tids, counts,
         idf = math.log(max(total_tokens, 2) / (count + 0.1))
         rarity_weight = max(1.0, min(idf, 6.0))
         boost_multipliers[i] = max(boost_multipliers[i],
-                                   tok_boost * (rarity_weight / 2.0) * priority)
+                                   tok_boost * (rarity_weight / 2.0) * priority * m)
         n_marked += 1
     return n_marked
 
@@ -4483,7 +4581,7 @@ class MLXDiffKVWrapper:
                 if _protect_numeric and generated:
                     if not hasattr(self, "_rep_decode_strs"):
                         self._rep_decode_strs = {}
-                    _seps = _nl = _n = 0
+                    _seps = _nums = _nl = _n = 0
                     for _tid in reversed(generated):
                         _n += 1
                         if _n > 64:
@@ -4496,11 +4594,15 @@ class MLXDiffKVWrapper:
                             if _nl >= 2:
                                 break
                             continue
-                        if _s.strip() in ("|", "&"):
+                        _sc = _s.strip()
+                        if _sc in ("|", "&"):
                             _seps += 1
-                            if _seps >= 2:
-                                _pen_val = 1.0
-                                break
+                            _nums += 1
+                        elif any(c.isdigit() for c in _sc):
+                            _nums += 1
+                        if _seps >= 2 or _nums >= 3:
+                            _pen_val = 1.0
+                            break
                 if not hasattr(self, "_rep_exempt_tokens"):
                     self._rep_exempt_tokens = {}
                 for tok_id in set(generated[-_pen_window:]):

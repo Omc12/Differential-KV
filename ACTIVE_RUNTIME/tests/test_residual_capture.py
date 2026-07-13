@@ -55,6 +55,30 @@ class TestDetectTableRows:
         # classifier misses — table capture must include them
         assert marked[7] and marked[8], marked
 
+    def test_pdf_aligned_rows_marked(self):
+        # PDF copy-paste: whitespace-aligned columns, x as the multiplication
+        # glyph, NO pipes — the columnar rule must fire on consecutive rows
+        # and pull in the header line above.
+        header = [' Kernel', ' size', '   Top', '-', '1', ' (%)',
+                  '   Through', 'put', '\n']
+        row1 = ['3', '×', '3', '           ', '79', '.', '1', '       ',
+                '151', '2', '\n']
+        row2 = ['5', '×', '5', '           ', '80', '.', '3', '       ',
+                '137', '7', '\n']
+        toks = header + row1 + row2
+        marked = _detect_table_rows(toks)
+        assert all(marked[len(header):]), marked          # both data rows
+        assert all(marked[:len(header)]), marked          # header joins
+
+    def test_single_numeric_prose_line_unmarked(self):
+        # one prose sentence ending in a number, neighbors are plain prose —
+        # no consecutive numeric line, so the columnar rule must NOT fire
+        toks = [' The', ' model', ' achieves', ' 83', '.', '2', ' accuracy',
+                ' at', ' 15', '12', ' images', '\n',
+                ' which', ' is', ' a', ' strong', ' result', '.\n',
+                ' The', ' training', ' recipe', ' is', ' standard', '.\n']
+        assert not any(_detect_table_rows(toks))
+
 
 class TestComputeBoostMultipliers:
     def test_prose_only_core_segments_boosted(self):

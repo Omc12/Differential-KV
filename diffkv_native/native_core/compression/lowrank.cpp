@@ -1243,33 +1243,92 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                         return 4.0f;
                     }();
                     if (table_on) {
-                        std::vector<int> line;
                         auto strip_ws = [](const std::string& s) {
                             size_t b = s.find_first_not_of(" \t\n\r");
                             if (b == std::string::npos) return std::string();
                             size_t e = s.find_last_not_of(" \t\n\r");
                             return s.substr(b, e - b + 1);
                         };
-                        // Standalone separators only + shape guard (start-of-line
-                        // separator, or density >= 1/12 with >= 3 separators):
-                        // prose with inline math (|x−y|) has standalone pipes
-                        // too, and a paragraph-long 'line' with two of those
-                        // must not mark the whole block (it would also clear
-                        // the coverage scaffold below). Mirrors the MLX
-                        // _detect_table_rows.
-                        auto flush_line = [&](const std::vector<int>& ln) {
-                            if ((int)ln.size() < 3) return;
+                        auto has_digit_c = [](const std::string& s) {
+                            for (char c : s) if (c >= '0' && c <= '9') return true;
+                            return false;
+                        };
+                        // Split the block into lines once; two rules per line
+                        // (mirrors the MLX _detect_table_rows — keep in sync):
+                        // 1. SEPARATOR rule: >= 2 standalone '|'/'&' tokens +
+                        //    shape guard (line-initial separator, LaTeX \\
+                        //    terminator, or density >= 1/12 with >= 3 seps) —
+                        //    the guard rejects prose with inline |x−y| math.
+                        // 2. COLUMNAR rule (PDF copy-paste tables have NO
+                        //    pipes; without it rows over-compress and decode
+                        //    collapses onto one high-salience fragment):
+                        //    >= 2 CONSECUTIVE lines of 3..48 tokens ending in
+                        //    a digit-bearing token, >= 2 digit tokens, not
+                        //    prose-dominated; the header line above joins.
+                        std::vector<std::vector<int>> tbl_lines;
+                        {
+                            std::vector<int> cur;
+                            for (int i = 0; i < S_deltas; ++i) {
+                                cur.push_back(i);
+                                if (tok_strs[i].find('\n') != std::string::npos) {
+                                    tbl_lines.push_back(cur);
+                                    cur.clear();
+                                }
+                            }
+                            if (!cur.empty()) tbl_lines.push_back(cur);
+                        }
+                        auto sep_rule = [&](const std::vector<int>& ln) {
+                            if ((int)ln.size() < 3) return false;
                             int seps = 0;
                             for (int i2 : ln) {
                                 std::string st = strip_ws(tok_strs[i2]);
                                 if (st == "|" || st == "&") ++seps;
                             }
-                            if (seps < 2) return;
+                            if (seps < 2) return false;
                             std::string first = strip_ws(tok_strs[ln[0]]);
                             bool starts_sep = !first.empty() && (first[0] == '|' || first[0] == '&');
                             bool latex_term = tok_strs[ln.back()].find("\\\\") != std::string::npos;
-                            if (!starts_sep && !latex_term &&
-                                !(seps >= 3 && seps * 12 >= (int)ln.size())) return;
+                            return starts_sep || latex_term ||
+                                   (seps >= 3 && seps * 12 >= (int)ln.size());
+                        };
+                        // Tightened candidate: real table rows are SHORT.
+                        // References ("[3] D. Achlioptas, ..., 2001.") are
+                        // 25-45 tokens, prose-heavy, and also end in digits —
+                        // marking them STEALS residual slots from a real
+                        // table sharing the block (measured on MLX: markdown
+                        // probe 6/6 -> 1/6 before this tightening). <= 20
+                        // tokens qualifies outright; 21..48 only when digit
+                        // tokens outnumber prose words.
+                        auto columnar_cand = [&](const std::vector<int>& ln) {
+                            if ((int)ln.size() < 3 || (int)ln.size() > 48) return false;
+                            int n_digit = 0, n_prose = 0;
+                            for (int i2 : ln) {
+                                std::string sc = strip_ws(tok_strs[i2]);
+                                if (has_digit_c(sc)) { ++n_digit; continue; }
+                                bool alpha_lower = sc.size() >= 3;
+                                for (char c : sc) {
+                                    if (!(c >= 'a' && c <= 'z')) { alpha_lower = false; break; }
+                                }
+                                if (alpha_lower) ++n_prose;
+                            }
+                            if (n_digit < 2) return false;
+                            if ((int)ln.size() > 20 && n_digit < n_prose) return false;
+                            for (auto it2 = ln.rbegin(); it2 != ln.rend(); ++it2) {
+                                std::string sc = strip_ws(tok_strs[*it2]);
+                                bool has_alnum2 = false;
+                                for (char c : sc) {
+                                    if (std::isalnum(static_cast<unsigned char>(c))) { has_alnum2 = true; break; }
+                                }
+                                if (sc.empty() || !has_alnum2) continue;
+                                return has_digit_c(sc);
+                            }
+                            return false;
+                        };
+                        // Tiered boost: separator-rule lines (explicit
+                        // tables) at full table_priority; columnar lines at
+                        // half — under saturation the explicit table always
+                        // outranks incidental numeric lines in its block.
+                        auto boost_line = [&](const std::vector<int>& ln, float tier) {
                             for (int i2 : ln) {
                                 int32_t tid = params.token_ids[i2 + 1];
                                 int count = 1;
@@ -1277,19 +1336,73 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
                                 if (it != token_counts.end()) count = it->second;
                                 float idf = std::log(static_cast<float>(std::max(params.session_len, 2)) / (count + 0.1f));
                                 float rarity_weight = std::max(1.0f, std::min(idf, 6.0f));
-                                float b = tok_boost * (rarity_weight / 2.0f) * table_priority;
+                                float b = tok_boost * (rarity_weight / 2.0f) * table_priority * tier;
                                 boost_multipliers[i2] = std::max(boost_multipliers[i2], b);
                                 ++lr_table_rows;
                             }
                         };
-                        for (int i = 0; i < S_deltas; ++i) {
-                            line.push_back(i);
-                            if (tok_strs[i].find('\n') != std::string::npos) {
-                                flush_line(line);
-                                line.clear();
+                        std::vector<char> cand(tbl_lines.size(), 0);
+                        for (size_t li = 0; li < tbl_lines.size(); ++li) {
+                            cand[li] = columnar_cand(tbl_lines[li]) ? 1 : 0;
+                        }
+                        // fired tier per line: 0 none, 2 separator, 1 columnar
+                        std::vector<char> fired(tbl_lines.size(), 0);
+                        for (size_t li = 0; li < tbl_lines.size(); ++li) {
+                            if (sep_rule(tbl_lines[li])) {
+                                fired[li] = 2;
+                                boost_line(tbl_lines[li], 1.0f);
+                            } else if (cand[li] &&
+                                       ((li > 0 && cand[li - 1]) ||
+                                        (li + 1 < tbl_lines.size() && cand[li + 1]))) {
+                                fired[li] = 1;
+                                boost_line(tbl_lines[li], 0.5f);
+                                if (li > 0 && !cand[li - 1] &&
+                                    (int)tbl_lines[li - 1].size() <= 48) {
+                                    boost_line(tbl_lines[li - 1], 0.5f);   // header row
+                                }
                             }
                         }
-                        flush_line(line);
+                        // CAPTION capture — COLUMNAR runs only. An aligned
+                        // table's rows are anonymous numbers; the caption
+                        // ("Table 4 reports ...") is its only identity anchor
+                        // (without it: one high-salience value reused for
+                        // every row at 16k). Separator tables are
+                        // self-identifying, and capturing their captions was
+                        // measured NET-NEGATIVE on MLX (two exact captions →
+                        // the decoder fused both tables into a chimera).
+                        // DIFFKV_RESIDUAL_TABLE_CAPTION=0 disables.
+                        static const bool caption_on = []() {
+                            const char* e = std::getenv("DIFFKV_RESIDUAL_TABLE_CAPTION");
+                            return !(e && std::string(e) == "0");
+                        }();
+                        if (caption_on) {
+                            auto lower_c = [](char c) {
+                                return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+                            };
+                            auto is_caption = [&](const std::vector<int>& ln) {
+                                std::string text;
+                                for (int i2 : ln) text += tok_strs[i2];
+                                for (auto& c : text) c = lower_c(c);
+                                for (const char* m : {"table", "tab."}) {
+                                    size_t j = text.find(m);
+                                    if (j == std::string::npos) continue;
+                                    size_t hi = std::min(text.size(), j + strlen(m) + 4);
+                                    for (size_t k = j; k < hi; ++k) {
+                                        if (text[k] >= '0' && text[k] <= '9') return true;
+                                    }
+                                }
+                                return false;
+                            };
+                            for (size_t li = 0; li < tbl_lines.size(); ++li) {
+                                if (fired[li] != 1 || (li > 0 && fired[li - 1])) continue;
+                                for (size_t up = 1; up <= 3 && up <= li; ++up) {
+                                    if (is_caption(tbl_lines[li - up])) {
+                                        boost_line(tbl_lines[li - up], 0.5f);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

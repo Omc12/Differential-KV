@@ -203,3 +203,59 @@ Remaining tail: Table B row-name reversal (value→name) fabricates under
 BOTH dense and compressed ("Core Vector Machine" — an entity from the
 filler paper) — base-model ceiling, not DiffKV. CUDA GPU cert for the
 C10 port still owed (see CUDA_TRITON_AUDIT.md C10/C11).
+
+## 2026-07-13 (later) — PDF-paste tables (no pipes) + the multi-turn boundary
+
+Re-test with the real NAT paper pasted separately from the question showed a
+NEW failure shape: generation collapsed onto one high-salience fragment
+("NAT / Swin / 83.2 / faster") reused for every requested row, or "NOT
+STATED". Root cause: PDF copy-paste FLATTENS tables — whitespace-aligned
+columns, × glyphs, no pipes — so the separator-rule table capture never
+fired and the rows over-compressed exactly as before layer 3.
+
+Fixes (probe: `--style aligned/flat` in table_probe2; scorer rewritten to
+segment by key positions since models legitimately flow all rows onto one
+line):
+1. **COLUMNAR detection rule** (all 3 impls, same env dials): >= 2
+   CONSECUTIVE lines of 3..48 tokens that end in a digit-bearing token,
+   carry >= 2 digit tokens, and are not prose-dominated; the header line
+   above joins. Tightened after measurement: <= 20 tokens qualifies
+   outright, 21..48 requires digit tokens >= prose words — reference lists
+   ("[3] D. Achlioptas, ..., 2001.") also end in digits and marking them
+   STOLE residual slots from a markdown table sharing the block (6/6 → 1/6).
+2. **Tiered priority**: separator-rule lines at full
+   DIFFKV_RESIDUAL_TABLE_PRIORITY, columnar lines at half — under
+   saturation the explicit table always outranks incidental numeric lines.
+3. **Caption capture, COLUMNAR RUNS ONLY** (DIFFKV_RESIDUAL_TABLE_CAPTION,
+   default ON): an aligned table's rows are anonymous numbers — the caption
+   ("Table 4 reports ...") is its only identity anchor, and without it the
+   decoder finds exact numeric rows but not which table they belong to
+   (6/6 at 4k, 84.2-attractor at 16k). Scoping matters: capturing
+   SEPARATOR-table captions was measured NET-NEGATIVE — with both captions
+   exact the decoder fused the two tables into a chimera (markdown 6/6 →
+   1/6, restored by the scoping).
+4. **Decode-side numeric-record suspension** (4 sampler sites): the
+   table-line penalty suspension now also fires on >= 3 exempt-class
+   tokens (digit/separator) across the current + previous output line —
+   'KxK: top1=NUMBER' record output has no pipes.
+
+Measured end state (raw harness, 16k, temp 0): markdown 6/6, aligned 6/6
+(diffkv BEATS dense's 5-partial+1-mixed on aligned), aligned@4k 6/6.
+Native: markdown 6/6 + aligned 6/6 at the DEFAULT 1.15 sampler. Gates
+green: MLX NIAH 16k d0.5/d0.9 exact, MN 3/3 (13.3 tps — the earlier 5.9
+reading was concurrent-load, re-measured clean), synthesis 6.7 == baseline;
+native NIAH 6/6, margins 12.4769/14.2615 byte-identical. RAM: peak RSS
+byte-identical (1.31 GB) capture on/off — residual arrays are statically
+allocated; the observed wall delta is generation length (a full table vs a
+collapsed answer), not per-token cost.
+
+**Multi-turn boundary (dense-shared, NOT DiffKV):** paste-paper-then-ask
+fails even with prefix sharing disabled (fresh full re-prefill) — and the
+DENSE control refuses identically ("it's not provided in the current
+context"): Qwen2.5-1.5B-4bit cannot reach back across an intervening
+assistant turn for row-level table detail, compressed or not. DiffKV
+matches dense in this regime; the compressed session-reuse path itself was
+verified healthy (turn-2 TTFT 313ms, cache hit, prose questions about the
+same paper answered correctly). Practical guidance: ask table questions in
+the same message as the pasted document, or re-paste. New diagnostic dial:
+DIFFKV_PREFIX_SHARING=0 forces fresh prefill per turn (batch_engine).

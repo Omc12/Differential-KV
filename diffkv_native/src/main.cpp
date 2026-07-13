@@ -6449,7 +6449,11 @@ int main(int argc, char ** argv) {
                 // penalized; full rows only with the penalty suspended).
                 // Loop recovery overrides.
                 if (rep_protect_numeric && !loop_detected && !all_tokens.empty()) {
-                    int seps = 0, nls = 0, walked = 0;
+                    // >= 2 separators OR >= 3 exempt-class tokens (digit or
+                    // separator) across the current + previous output line —
+                    // the numeric rule covers PDF-style / 'key: value' record
+                    // output with no pipes (mirrors batch_engine._in_table_line).
+                    int seps = 0, nums = 0, nls = 0, walked = 0;
                     for (auto it = all_tokens.rbegin(); it != all_tokens.rend(); ++it) {
                         if (++walked > 64) break;
                         int32_t t = *it;
@@ -6458,7 +6462,9 @@ int main(int argc, char ** argv) {
                             if (++nls >= 2) break;
                             continue;
                         }
-                        if (sep_cache[t] && ++seps >= 2) { rep_penalty = 1.0f; break; }
+                        if (sep_cache[t]) ++seps;
+                        if (rep_exempt_cache[t]) ++nums;
+                        if (seps >= 2 || nums >= 3) { rep_penalty = 1.0f; break; }
                     }
                 }
 

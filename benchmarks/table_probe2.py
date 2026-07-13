@@ -45,17 +45,42 @@ A_TOP5 = {r[2] for r in ROWS_A}
 A_THR = {r[3] for r in ROWS_A}
 FABRICATED_KEYS = ["1x1", "2x2", "4x4", "6x6", "8x8", "10x10", "12x12", "15x15"]
 
-TABLE_A_TEXT = (
+_A_CAPTION = (
     "Table 4 reports the kernel size ablation for the NAT-Tiny model on "
     "ImageNet-1K. All variants use the same overlapping convolutional "
     "tokenizer and training recipe; only the neighborhood attention kernel "
     "size changes.\n\n"
-    "| Kernel size | Top-1 (%) | Top-5 (%) | Throughput (imgs/sec) |\n"
-    "|-------------|-----------|-----------|------------------------|\n"
-    + "".join(f"| {k} | {t1} | {t5} | {p} |\n" for k, t1, t5, p in ROWS_A)
-    + "\nThe 9x9 kernel achieves the best Top-1 accuracy, while 3x3 gives the "
-    "highest throughput.\n"
 )
+_A_CLOSE = ("\nThe 9x9 kernel achieves the best Top-1 accuracy, while 3x3 "
+            "gives the highest throughput.\n")
+
+# --style markdown (default): pipe-delimited, what a .md source looks like.
+# --style aligned: what a PDF copy-paste looks like — whitespace-separated
+#   columns, one line per row, x rendered as the multiplication glyph, no
+#   pipes anywhere. --style flat: the worst PDF extraction — the whole table
+#   body runs together on a single line.
+def _table_a_text(style):
+    if style == "markdown":
+        return (_A_CAPTION
+                + "| Kernel size | Top-1 (%) | Top-5 (%) | Throughput (imgs/sec) |\n"
+                + "|-------------|-----------|-----------|------------------------|\n"
+                + "".join(f"| {k} | {t1} | {t5} | {p} |\n" for k, t1, t5, p in ROWS_A)
+                + _A_CLOSE)
+    gl = lambda k: k.replace("x", "×")
+    if style == "aligned":
+        return (_A_CAPTION
+                + "Kernel size   Top-1 (%)   Top-5 (%)   Throughput (imgs/sec)\n"
+                + "".join(f"{gl(k):<12}  {t1:<9}  {t5:<9}  {p}\n"
+                          for k, t1, t5, p in ROWS_A)
+                + _A_CLOSE)
+    # flat
+    return (_A_CAPTION
+            + "Kernel size Top-1 (%) Top-5 (%) Throughput (imgs/sec) "
+            + " ".join(f"{gl(k)} {t1} {t5} {p}" for k, t1, t5, p in ROWS_A)
+            + "\n" + _A_CLOSE)
+
+
+TABLE_A_TEXT = _table_a_text(os.environ.get("TABLE_PROBE_STYLE", "markdown"))
 
 # ── TABLE B: ablation path (order matters: before -> change -> after) ──
 STEPS_B = [
@@ -68,15 +93,32 @@ STEPS_B = [
 B_VALS = {v for _, v in STEPS_B}
 ALL_VALS = A_TOP1 | A_TOP5 | A_THR | B_VALS
 
-TABLE_B_TEXT = (
+_B_CAPTION = (
     "Table 6 shows the ablation path from the Swin-T baseline to NAT-Tiny. "
     "Each row adds one component on top of the previous row.\n\n"
-    "| Model variant | Top-1 (%) |\n"
-    "|---------------|-----------|\n"
-    + "".join(f"| {n} | {v} |\n" for n, v in STEPS_B)
-    + "\nNeighborhood attention plus the larger kernel accounts for most of "
-    "the improvement over the baseline.\n"
 )
+_B_CLOSE = ("\nNeighborhood attention plus the larger kernel accounts for "
+            "most of the improvement over the baseline.\n")
+
+def _table_b_text(style):
+    if style == "markdown":
+        return (_B_CAPTION
+                + "| Model variant | Top-1 (%) |\n"
+                + "|---------------|-----------|\n"
+                + "".join(f"| {n} | {v} |\n" for n, v in STEPS_B)
+                + _B_CLOSE)
+    if style == "aligned":
+        return (_B_CAPTION
+                + "Model variant                    Top-1 (%)\n"
+                + "".join(f"{n:<32} {v}\n" for n, v in STEPS_B)
+                + _B_CLOSE)
+    return (_B_CAPTION
+            + "Model variant Top-1 (%) "
+            + " ".join(f"{n} {v}" for n, v in STEPS_B)
+            + "\n" + _B_CLOSE)
+
+
+TABLE_B_TEXT = _table_b_text(os.environ.get("TABLE_PROBE_STYLE", "markdown"))
 
 SYSTEM_PART = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n"
 ASSIST_PART = "<|im_end|>\n<|im_start|>assistant\n"
@@ -105,35 +147,52 @@ def rev_q(val):
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 
 def _key_pat(key):
+    # (?<!\d)/(?!\d) instead of \b: models echo the question's 'KxK' format
+    # as e.g. 'K3x3', and \b refuses the alpha-digit junction.
     a, b = key.split("x")
-    return re.compile(rf"\b{a}\s*[x×]\s*{b}\b", re.IGNORECASE)
+    return re.compile(rf"(?<!\d){a}\s*[x×]\s*{b}(?!\d)", re.IGNORECASE)
 
 def score_list_a(text):
+    """Segment by KEY POSITIONS, not lines: models sometimes flow all rows
+    onto one line ('3x3 |79.1 |94.2 |1512 |5x5 |80.3 ...') — content-perfect
+    but line-based scoring would call every row 'mixed'. Each key's segment
+    runs from its match to the next key match (any planted key) or +60 chars."""
     res = {}
-    lines = text.splitlines()
+    clean = text.replace(",", "")
+    matches = []            # (pos, key)
+    for key, *_ in ROWS_A:
+        m = _key_pat(key).search(clean)
+        if m:
+            matches.append((m.start(), key, m.end()))
+    matches.sort()
+    starts = [p for p, _, _ in matches]
     for key, top1, top5, thr in ROWS_A:
-        verdict = "miss"
-        for ln in lines:
-            if _key_pat(key).search(ln):
-                nums = set(_NUM.findall(ln.replace(",", "")))
-                nums -= set(key.split("x"))
-                own = {top1, top5, thr}
-                hit_own = nums & own
-                hit_other = nums & (ALL_VALS - own)
-                if top1 in nums and not hit_other:
-                    verdict = "correct" if {top5, thr} <= nums else "partial"
-                elif hit_other and hit_own:
-                    verdict = "mixed"
-                elif hit_other:
-                    verdict = "swap"
-                elif nums - own:
-                    verdict = "fab"
-                elif hit_own:
-                    verdict = "partial"
-                break
+        hit = next((mm for mm in matches if mm[1] == key), None)
+        if hit is None:
+            res[key] = "miss"
+            continue
+        pos, _, end = hit
+        nxt = min([p for p in starts if p > pos], default=end + 60)
+        seg = clean[end:min(nxt, end + 60)]
+        nums = set(_NUM.findall(seg))
+        nums -= set(key.split("x"))
+        own = {top1, top5, thr}
+        hit_own = nums & own
+        hit_other = nums & (ALL_VALS - own)
+        if top1 in nums and not hit_other:
+            verdict = "correct" if {top5, thr} <= nums else "partial"
+        elif hit_other and hit_own:
+            verdict = "mixed"
+        elif hit_other:
+            verdict = "swap"
+        elif nums - own:
+            verdict = "fab"
+        elif hit_own:
+            verdict = "partial"
+        else:
+            verdict = "miss"
         res[key] = verdict
-    fab_rows = [k for k in FABRICATED_KEYS
-                if any(_key_pat(k).search(ln) for ln in lines)]
+    fab_rows = [k for k in FABRICATED_KEYS if _key_pat(k).search(clean)]
     return res, fab_rows
 
 def score_list_b(text):

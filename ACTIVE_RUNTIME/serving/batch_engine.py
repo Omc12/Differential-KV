@@ -183,16 +183,23 @@ _REP_DECODE_CACHE = {}
 
 
 def _in_table_line(generated_ids, tokenizer, max_walk=64):
-    """True when the CURRENT output line (tokens since the last newline) looks
-    like a table row: >= 2 standalone '|'/'&' separator tokens. While that
-    holds, the caller suspends the repetition penalty entirely — reproducing
-    a table row is VERBATIM output, and any penalized token (digit, space,
-    cell word) just slides the argmax to the nearest unpenalized neighbor
-    (measured 2026-07-13: header + EMPTY '| | | |' rows with digits exempted
+    """True when the CURRENT output line (plus the previous line — row STARTS
+    must count, or row-key tokens stay penalized and the model derails at
+    every new row: '| KxK: | 78.6 ...' with the other table's values pouring
+    in) looks like structured numeric output: >= 2 standalone '|'/'&'
+    separators, or >= 3 exempt-class tokens (digit-bearing or separator)
+    across the two-line window — the latter covers PDF-style and 'key: value'
+    record output with no pipes at all (measured 2026-07-13: the
+    aligned-table probe collapsed to ONE record reused for every row).
+    While this holds the caller suspends the repetition penalty entirely —
+    reproducing a table row is VERBATIM output, and any penalized token
+    (digit, space, cell word) slides the argmax to the nearest unpenalized
+    neighbor (measured: header + EMPTY '| | | |' rows with digits exempted
     but glue still penalized; full rows only at penalty 1.0). Generation-side
-    mirror of the capture-side _detect_table_rows rule; loop recovery is
+    mirror of the capture-side _detect_table_rows rules; loop recovery is
     unaffected (caller checks loop_detected first)."""
     seps = 0
+    numerics = 0
     n = 0
     lines_seen = 0
     cache = _REP_DECODE_CACHE
@@ -208,21 +215,18 @@ def _in_table_line(generated_ids, tokenizer, max_walk=64):
                 s = ""
             cache[tid] = s
         if "\n" in s:
-            # A row START (before its 2nd separator) must also count as table
-            # context or the row-key tokens stay penalized and the model
-            # derails at every new row (measured: '| KxK: | 78.6 ...' —
-            # Table B's values pouring into Table A's shape). Tables are
-            # multi-line: keep walking into the PREVIOUS line; a separator
-            # count reached across the boundary still means we're inside a
-            # table body.
             lines_seen += 1
             if lines_seen >= 2:
                 break
             continue
-        if s.strip() in ("|", "&"):
+        sc = s.strip()
+        if sc in ("|", "&"):
             seps += 1
-            if seps >= 2:
-                return True
+            numerics += 1
+        elif any(c.isdigit() for c in sc):
+            numerics += 1
+        if seps >= 2 or numerics >= 3:
+            return True
     return False
 
 
@@ -626,7 +630,14 @@ class ContinuousBatchEngine:
         # (<|im_start|>assistant\n...\n<|im_end|>), so raw concat does NOT match the new prompt.
         # The registry is updated at the end of each turn via update_session_token_prefix().
         req.cached_len = 0
-        if hasattr(self.wrapper.manager, "get_session_sequence_length"):
+        # Diagnostic/safety dial: DIFFKV_PREFIX_SHARING=0 forces a fresh
+        # prefill every turn (frees the stale session KV first), bypassing
+        # cache reuse, rollback, and cross-session cloning below.
+        if os.environ.get("DIFFKV_PREFIX_SHARING", "1") == "0":
+            self._free_session_kv(session_id)
+            if self.draft_wrapper is not None:
+                self._free_session_kv(session_id + "_draft", is_draft=True)
+        elif hasattr(self.wrapper.manager, "get_session_sequence_length"):
             cached_len = self.wrapper.manager.get_session_sequence_length(session_id)
             if cached_len > 0 and cached_len < len(req.prompt_ids):
                 stored_ids = self.session_token_ids.get(session_id, [])

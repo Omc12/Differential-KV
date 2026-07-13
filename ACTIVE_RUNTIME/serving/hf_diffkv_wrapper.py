@@ -924,7 +924,7 @@ class PyTorchDiffKVHFWrapper:
                 if _protect_numeric and generated:
                     if not hasattr(self, "_rep_decode_strs"):
                         self._rep_decode_strs = {}
-                    _seps = _nl = _n = 0
+                    _seps = _nums = _nl = _n = 0
                     for _tid in reversed(generated):
                         _n += 1
                         if _n > 64:
@@ -937,11 +937,15 @@ class PyTorchDiffKVHFWrapper:
                             if _nl >= 2:
                                 break
                             continue
-                        if _s.strip() in ("|", "&"):
+                        _sc = _s.strip()
+                        if _sc in ("|", "&"):
                             _seps += 1
-                            if _seps >= 2:
-                                _pen_val = 1.0
-                                break
+                            _nums += 1
+                        elif any(c.isdigit() for c in _sc):
+                            _nums += 1
+                        if _seps >= 2 or _nums >= 3:
+                            _pen_val = 1.0
+                            break
                 if not hasattr(self, "_rep_exempt_tokens"):
                     self._rep_exempt_tokens = {}
                 for tok_id in set(generated[-_pen_window:]):
