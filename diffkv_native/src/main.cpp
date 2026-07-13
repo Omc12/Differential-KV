@@ -6396,34 +6396,70 @@ int main(int argc, char ** argv) {
             }
             t_after_logits = std::chrono::high_resolution_clock::now();
 
-            // Bug 🅓: n-gram loop detection (mirrors mlx_diffkv_wrapper.py:1204-1238)
-            // Every 10 tokens, check 5-gram repetition in the last 80 generated tokens.
-            // On detection: widen penalty window 64→256, boost penalty 1.3×.
-            // After 40 tokens with no recovery: force-stop.
+            // Bug 🅓: n-gram loop detection. Every 10 tokens, run the two checks
+            // below. On detection: widen penalty window 64→256, boost penalty
+            // 1.3×. After 40 tokens with no recovery: force-stop.
+            // Dual-check detector ported from the live-on-macOS reference
+            // (mlx_diffkv_wrapper.py:4514-4542). The previous single metric
+            // (top single-5-gram count / total >= 0.35, mirrored from the HF
+            // wrapper) only fires on ultra-tight single-token/short-cycle loops:
+            // for a 256-token window a 5-gram must recur ~90 times to hit 0.35,
+            // so sentence-level and recombination macro-loops — the ones users
+            // actually hit at long context — slipped through entirely. MLX
+            // instead ORs two checks:
+            //   1. exact-period repeat: the last K tokens equal the K before
+            //      them, for any period K in [10,120) — catches a repeating
+            //      block (a cycled sentence/paragraph) directly.
+            //   2. unique-5-gram ratio < 0.40 over a wider 256-token window —
+            //      catches diffuse repetition (60%+ of 5-grams are repeats).
+            // Thresholds are copied verbatim from MLX, which is already table-
+            // validated (markdown+aligned 6/6), so this cannot false-trigger on
+            // faithful table/list reproduction that MLX handles.
             if (!loop_detected && (int)generated_tokens.size() >= 30 && (int)generated_tokens.size() % 10 == 0) {
-                int window_start = std::max(0, (int)generated_tokens.size() - 80);
-                std::vector<int32_t> window(generated_tokens.begin() + window_start, generated_tokens.end());
+                const int gsz = (int)generated_tokens.size();
+
+                // 1. Exact-period loop check (period K = 10 .. min(120, gsz/2)).
+                bool exact_loop = false;
+                const int kmax = std::min(120, gsz / 2);
+                for (int K = 10; K < kmax; ++K) {
+                    bool eq = true;
+                    for (int j = 0; j < K; ++j) {
+                        if (generated_tokens[gsz - K + j] != generated_tokens[gsz - 2 * K + j]) {
+                            eq = false;
+                            break;
+                        }
+                    }
+                    if (eq) { exact_loop = true; break; }
+                }
+
+                // 2. Unique-5-gram ratio over the trailing 256-token window.
+                bool ratio_loop = false;
                 const int NG = 5;
-                if ((int)window.size() >= NG + 1) {
-                    std::unordered_map<size_t, int> ngram_counts;
+                const int win_size = std::min(256, gsz);
+                const int wstart = gsz - win_size;
+                if (win_size >= NG + 1) {
+                    std::unordered_set<size_t> uniq_ngrams;
                     int total_ngrams = 0;
-                    for (int ni = 0; ni <= (int)window.size() - NG; ++ni) {
-                        // Hash the 5-gram
+                    for (int ni = wstart; ni <= gsz - NG; ++ni) {
                         size_t h = 0;
                         for (int nj = 0; nj < NG; ++nj) {
-                            h = h * 151001 + (size_t)window[ni + nj];
+                            h = h * 151001 + (size_t)generated_tokens[ni + nj];
                         }
-                        ngram_counts[h]++;
+                        uniq_ngrams.insert(h);
                         total_ngrams++;
                     }
-                    int top_count = 0;
-                    for (auto& kv : ngram_counts) top_count = std::max(top_count, kv.second);
-                    if (total_ngrams > 0 && (float)top_count / total_ngrams >= 0.35f) {
-                        loop_detected     = true;
-                        loop_detected_idx = step;
-                        std::cerr << "\n[DiffKV Native] WARNING: repetition loop detected at step "
-                                  << step << ". Escalating penalty window to 256 and strength to 1.3x.\n";
+                    if (total_ngrams > 0 &&
+                        (float)uniq_ngrams.size() / total_ngrams < 0.40f) {
+                        ratio_loop = true;
                     }
+                }
+
+                if (exact_loop || ratio_loop) {
+                    loop_detected     = true;
+                    loop_detected_idx = step;
+                    std::cerr << "\n[DiffKV Native] WARNING: repetition loop detected at step "
+                              << step << " (" << (exact_loop ? "exact-period" : "ngram-ratio")
+                              << "). Escalating penalty window to 256 and strength to 1.3x.\n";
                 }
             }
             if (loop_detected && loop_detected_idx >= 0 && (step - loop_detected_idx) >= 40) {
@@ -6478,13 +6514,30 @@ int main(int argc, char ** argv) {
 
                 for (int32_t tok : unique_penalized) {
                     if (tok >= 0 && tok < n_vocab) {
+                        // Skip non-alphanumeric tokens (newlines, whitespace,
+                        // punctuation) — mirrors the live HF reference
+                        // (hf_diffkv_wrapper.py:951-961, `if not is_alnum: continue`),
+                        // which the §3.7 comment above already commits to. Penalizing
+                        // these suppresses paragraph/list structure: once a '\n' is
+                        // emitted it is demoted for the next rep_window steps, so at
+                        // long context — where the small model's formatting logits are
+                        // already marginal — the argmax flips off newline and the reply
+                        // collapses into one run-on paragraph (the reported bug). HF
+                        // stays coherent via coverage+grounding, not by penalizing
+                        // punctuation. alnum_cache was prebuilt for exactly this test
+                        // but was never wired in; content words (incl. the sentences in
+                        // a macro-loop) are alphanumeric and still penalized, and digit
+                        // handling is unchanged (digits are alnum → fall through to the
+                        // numeric exemption below).
+                        if (!alnum_cache[tok]) {
+                            continue;
+                        }
                         // Numeric/separator exemption (see rep_exempt_cache note);
                         // suspended during loop recovery so escalated penalty can
                         // still break digit loops.
                         if (rep_protect_numeric && !loop_detected && rep_exempt_cache[tok]) {
                             continue;
                         }
-                        // MLX aligns with penalizing all repeated tokens including punctuation to prevent periods/spaces loops.
                         float& l = output_logits[tok];
                         l = (l > 0.0f) ? l / rep_penalty : l * rep_penalty;
                     }
