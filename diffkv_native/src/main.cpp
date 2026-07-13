@@ -6605,18 +6605,28 @@ int main(int argc, char ** argv) {
             if (next_token_from_gpu != -1) {
                 next_token = next_token_from_gpu;
             } else {
-                std::vector<std::pair<float, int>> logits_sorted;
-                logits_sorted.reserve(n_vocab);
-                for (int i = 0; i < n_vocab; ++i) {
-                    logits_sorted.push_back({output_logits[i], i});
-                }
-                std::partial_sort(logits_sorted.begin(), logits_sorted.begin() + 5, logits_sorted.end(),
-                                  [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
-                    return a.first > b.first;
-                });
-                next_token = logits_sorted[0].second;
+                // PERF: the full-vocab top-5 partial_sort below is only needed for
+                // the diagnostic "[Step N Top predictions]" print (early steps or
+                // non-interactive) and for the non-interactive greedy argmax. In
+                // interactive mode past the warmup steps, sample_logits() runs its
+                // OWN O(V) nth_element top-K selection, so building + partial-sorting
+                // a ~152k-entry pair vector here EVERY token was a second, entirely
+                // redundant O(V) pass whose result was immediately overwritten. At
+                // Qwen-2.5's 152k vocab that is a measurable slice of per-token
+                // decode wall-clock. Only pay it when its output is actually used.
+                const bool need_top5_view = (step < 20 || !interactive);
+                if (need_top5_view) {
+                    std::vector<std::pair<float, int>> logits_sorted;
+                    logits_sorted.reserve(n_vocab);
+                    for (int i = 0; i < n_vocab; ++i) {
+                        logits_sorted.push_back({output_logits[i], i});
+                    }
+                    std::partial_sort(logits_sorted.begin(), logits_sorted.begin() + 5, logits_sorted.end(),
+                                      [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                        return a.first > b.first;
+                    });
+                    next_token = logits_sorted[0].second;   // greedy argmax (non-interactive uses this)
 
-                if (step < 20 || !interactive) {
                     std::cerr << "\n[Step " << step << " Top predictions]:\n";
                     for (int i = 0; i < std::min(5, n_vocab); ++i) {
                         std::cerr << "  " << i << ": \"" << model.token_to_piece(logits_sorted[i].second) << "\" (id: " << logits_sorted[i].second << ", logit: " << logits_sorted[i].first << ")\n";
