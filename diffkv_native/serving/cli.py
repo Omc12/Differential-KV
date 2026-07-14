@@ -1150,10 +1150,18 @@ async def run_direct_mode(args):
                         messages.pop()
                         break
                     if "prefill_done" in item:
-                        # Prefill completed — stop bar, print AI prompt header
+                        # Prefill completed — stop bar, print AI prompt header.
+                        # Bug fix: this used to leave first_token_time unset, so
+                        # the very first real text chunk (below) saw
+                        # `first_token_time is None` and printed the SAME header
+                        # a second time — every response opened with the model
+                        # name on its own blank line, then again on the next
+                        # line with the actual text. Setting it here marks the
+                        # header as already printed.
                         _stop_prefill_bar(prefill_bar)
                         prefill_bar = None
                         print(f"\n{COLOR_AI}{COLOR_BOLD}{model_display} >{COLOR_RESET} ", end="", flush=True)
+                        first_token_time = time.time()
                         continue
                     if "cached_len" in item:
                         new_cached_len = item["cached_len"]
