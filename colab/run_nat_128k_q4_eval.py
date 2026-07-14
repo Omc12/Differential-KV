@@ -123,165 +123,168 @@ def run_worker(mode, model_id):
 
     t0 = time.perf_counter()
 
-    if is_compressed:
-        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-        config = {
-            "mode": "fp16",
-            "quantization": "nf4",
-            "block_size": 256,
-            "rank": 16,
-            "micro_block_size": 256,
-            "preset": "mid",
-            "serving_mode": "balanced"
-        }
-        w = DiffKVHFWrapper(
-            model_id=model_id,
-            config=config,
-            torch_dtype=torch.float16,
-            device=device,
-            quantization_config=quantization_config
-        )
-        w.ensure_loaded()
-        tok, mgr, model = w.tokenizer, w.manager, w.model
+    # Wrap entire execution in torch.inference_mode() to prevent memory accumulation
+    with torch.inference_mode():
+        if is_compressed:
+            from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+            config = {
+                "mode": "fp16",
+                "quantization": "nf4",
+                "block_size": 256,
+                "rank": 16,
+                "micro_block_size": 256,
+                "preset": "mid",
+                "serving_mode": "balanced"
+            }
+            w = DiffKVHFWrapper(
+                model_id=model_id,
+                config=config,
+                torch_dtype=torch.float16,
+                device=device,
+                quantization_config=quantization_config
+            )
+            w.ensure_loaded()
+            tok, mgr, model = w.tokenizer, w.manager, w.model
 
-        ids = tok.encode(full_prompt)
-        prompt_len = len(ids)
+            ids = tok.encode(full_prompt)
+            prompt_len = len(ids)
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
-        sid = "nat_128k"
-        mgr.clear_session(sid)
-        if not hasattr(w, "_session_token_ids"):
-            w._session_token_ids = {}
-        w._session_token_ids[sid] = []
+            sid = "nat_128k"
+            mgr.clear_session(sid)
+            if not hasattr(w, "_session_token_ids"):
+                w._session_token_ids = {}
+            w._session_token_ids[sid] = []
 
-        mgr.init_session(sid, prefill_len=prompt_len)
-        mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
-        model._diffkv_session_ids = [sid]
+            mgr.init_session(sid, prefill_len=prompt_len)
+            mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
+            model._diffkv_session_ids = [sid]
 
-        CH = 512
-        t_prefill_start = time.perf_counter()
-        for cs in range(0, len(ids), CH):
-            ch = ids[cs:cs+CH]
-            out = model(torch.tensor([ch], device=device), torch.tensor([list(range(cs, cs+len(ch)))], device=device))
-            mgr.compress_deferred_prefill_blocks(sid)
-        logits = out.logits[0, -1].float().cpu().numpy()
-        prefill_time = time.perf_counter() - t_prefill_start
-
-        peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-
-        # Generate (256 tokens)
-        cur = prompt_len
-        gen_ids = []
-        t_decode_start = time.perf_counter()
-        for _ in range(256):
-            import numpy as np
-            nid = int(np.argmax(logits))
-            if nid in w.stop_token_ids:
-                break
-            gen_ids.append(nid)
-            mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
-            out = model(torch.tensor([[nid]], device=device), torch.tensor([[cur]], device=device))
+            # Prefill
+            CH = 512
+            t_prefill_start = time.perf_counter()
+            for cs in range(0, len(ids), CH):
+                ch = ids[cs:cs+CH]
+                out = model(torch.tensor([ch], device=device), torch.tensor([list(range(cs, cs+len(ch)))], device=device))
+                mgr.compress_deferred_prefill_blocks(sid)
             logits = out.logits[0, -1].float().cpu().numpy()
-            cur += 1
-        decode_time = time.perf_counter() - t_decode_start
-        peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+            prefill_time = time.perf_counter() - t_prefill_start
 
-        generated_text = tok.decode(gen_ids)
+            peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 
-        L = mgr.num_layers
-        Hkv = mgr.kv_heads
-        d = mgr.head_dim
-        B = mgr.block_size
-        r = mgr.rank
-        fp16 = 2
-        
-        kv_tok = Hkv * d * fp16 * 2
-        lowrank_block = ((B - 1) * r * fp16
-                         + 2 * Hkv * r * d * fp16
-                         + 2 * Hkv * d * fp16
-                         + 2 * Hkv * d * fp16
-                         + 8)
-        s0 = mgr.sessions.get(sid)
-        nb = s0["num_blocks"][0] if s0 else 0
-        dl = s0["dense_lens"][0] if s0 else 0
-        res_n0 = s0["comp_res_n"][0][:nb] if s0 else []
-        res_tokens_used = int(sum(res_n0))
-        kv_vram = (L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)) / 1e9
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
-        try: w.close()
-        except: pass
-        del w, model, mgr
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Generate (256 tokens)
+            cur = prompt_len
+            gen_ids = []
+            t_decode_start = time.perf_counter()
+            for _ in range(256):
+                import numpy as np
+                nid = int(np.argmax(logits))
+                if nid in w.stop_token_ids:
+                    break
+                gen_ids.append(nid)
+                mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
+                out = model(torch.tensor([[nid]], device=device), torch.tensor([[cur]], device=device))
+                logits = out.logits[0, -1].float().cpu().numpy()
+                cur += 1
+            decode_time = time.perf_counter() - t_decode_start
+            peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 
-    else:
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            quantization_config=quantization_config,
-            device_map="auto",
-            trust_remote_code=True
-        )
-        model.eval()
+            generated_text = tok.decode(gen_ids)
 
-        ids = tokenizer.encode(full_prompt)
-        prompt_len = len(ids)
+            L = mgr.num_layers
+            Hkv = mgr.kv_heads
+            d = mgr.head_dim
+            B = mgr.block_size
+            r = mgr.rank
+            fp16 = 2
+            
+            kv_tok = Hkv * d * fp16 * 2
+            lowrank_block = ((B - 1) * r * fp16
+                             + 2 * Hkv * r * d * fp16
+                             + 2 * Hkv * d * fp16
+                             + 2 * Hkv * d * fp16
+                             + 8)
+            s0 = mgr.sessions.get(sid)
+            nb = s0["num_blocks"][0] if s0 else 0
+            dl = s0["dense_lens"][0] if s0 else 0
+            res_n0 = s0["comp_res_n"][0][:nb] if s0 else []
+            res_tokens_used = int(sum(res_n0))
+            kv_vram = (L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)) / 1e9
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+            try: w.close()
+            except: pass
+            del w, model, mgr
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        t_prefill_start = time.perf_counter()
-        past_key_values = None
-        CH = 512
-        for cs in range(0, len(ids), CH):
-            ch = ids[cs:cs+CH]
-            pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
-            out = model(torch.tensor([ch], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
-            past_key_values = out.past_key_values
-        logits = out.logits[0, -1].float().cpu().numpy()
-        prefill_time = time.perf_counter() - t_prefill_start
+        else:
+            from transformers import AutoModelForCausalLM
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            model.eval()
 
-        peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+            ids = tokenizer.encode(full_prompt)
+            prompt_len = len(ids)
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
-        # Generate (256 tokens)
-        cur = prompt_len
-        gen_ids = []
-        t_decode_start = time.perf_counter()
-        for _ in range(256):
-            import numpy as np
-            nid = int(np.argmax(logits))
-            if nid in [tokenizer.eos_token_id, tokenizer.pad_token_id] or tokenizer.decode([nid]) in ["<|im_end|>", "</s>"]:
-                break
-            gen_ids.append(nid)
-            pos = torch.tensor([[cur]], device=device)
-            out = model(torch.tensor([[nid]], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
-            past_key_values = out.past_key_values
+            t_prefill_start = time.perf_counter()
+            past_key_values = None
+            CH = 512
+            for cs in range(0, len(ids), CH):
+                ch = ids[cs:cs+CH]
+                pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
+                out = model(torch.tensor([ch], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+                past_key_values = out.past_key_values
             logits = out.logits[0, -1].float().cpu().numpy()
-            cur += 1
-        decode_time = time.perf_counter() - t_decode_start
-        peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+            prefill_time = time.perf_counter() - t_prefill_start
 
-        generated_text = tokenizer.decode(gen_ids)
+            peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 
-        L = model.config.num_hidden_layers
-        Hkv = getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
-        d = model.config.hidden_size // model.config.num_attention_heads
-        fp16 = 2
-        kv_vram = (L * prompt_len * Hkv * d * fp16 * 2) / 1e9
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Generate (256 tokens)
+            cur = prompt_len
+            gen_ids = []
+            t_decode_start = time.perf_counter()
+            for _ in range(256):
+                import numpy as np
+                nid = int(np.argmax(logits))
+                if nid in [tokenizer.eos_token_id, tokenizer.pad_token_id] or tokenizer.decode([nid]) in ["<|im_end|>", "</s>"]:
+                    break
+                gen_ids.append(nid)
+                pos = torch.tensor([[cur]], device=device)
+                out = model(torch.tensor([[nid]], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+                past_key_values = out.past_key_values
+                logits = out.logits[0, -1].float().cpu().numpy()
+                cur += 1
+            decode_time = time.perf_counter() - t_decode_start
+            peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+
+            generated_text = tokenizer.decode(gen_ids)
+
+            L = model.config.num_hidden_layers
+            Hkv = getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
+            d = model.config.hidden_size // model.config.num_attention_heads
+            fp16 = 2
+            kv_vram = (L * prompt_len * Hkv * d * fp16 * 2) / 1e9
+
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     res = {
         "prompt_len": prompt_len,
