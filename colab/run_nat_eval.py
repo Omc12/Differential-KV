@@ -14,11 +14,16 @@ import urllib3
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
-# Global SSL verification bypass for firewalls/proxies inside the worker processes
+# Global absolute SSL verification bypass for all python libraries (including urllib3, requests, HF)
 urllib3.disable_warnings(InsecureRequestWarning)
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
 
+# Monkey-patch urllib3 to always use unverified SSL context
+import urllib3.util.ssl_
+urllib3.util.ssl_.create_urllib3_context = lambda *args, **kwargs: ssl._create_unverified_context()
+
+# Monkey-patch requests
 old_merge_settings = requests.Session.merge_environment_settings
 def patched_merge_settings(self, url, proxies, stream, verify, cert):
     settings = old_merge_settings(self, url, proxies, stream, verify, cert)
