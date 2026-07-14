@@ -44,6 +44,7 @@ class NativeBlockPool:
         initial_blocks: int = 512,
         num_layers: int = 28,
         lazy: bool = False,
+        max_residual_tokens: Optional[int] = None,
     ):
         # ── Phase 1: Record config — NO GPU tensors allocated yet if lazy ────────────
         # Allocation is deferred to ensure_allocated(n_tokens), called by
@@ -60,8 +61,11 @@ class NativeBlockPool:
         self.initial_blocks  = initial_blocks
         self.num_layers      = num_layers
         import os as _os
-        _env_max_res = _os.environ.get("DIFFKV_MAX_RESIDUAL_TOKENS")
-        self.max_residual_tokens = int(_env_max_res) if _env_max_res and _env_max_res.isdigit() else 8
+        if max_residual_tokens is not None:
+            self.max_residual_tokens = max_residual_tokens
+        else:
+            _env_max_res = _os.environ.get("DIFFKV_MAX_RESIDUAL_TOKENS")
+            self.max_residual_tokens = int(_env_max_res) if _env_max_res and _env_max_res.isdigit() else 8
 
         _is_mps = (str(device) == "mps" or
                    (isinstance(device, torch.device) and device.type == "mps"))

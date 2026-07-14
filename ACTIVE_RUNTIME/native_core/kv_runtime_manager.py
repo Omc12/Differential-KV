@@ -580,6 +580,7 @@ class KVRuntimeManager:
             dtype=torch.float16,
             num_layers=self.num_layers,
             lazy=True,
+            max_residual_tokens=self.config.max_residual_tokens,
         )
         self.native_pool.config = self.config
 
@@ -2745,6 +2746,12 @@ class KVRuntimeManager:
         
         lr_delta = compress_lowrank(normalized_deltas, rank)
         
+        # Populate SVD residuals on block
+        block.residual_K_positions = lr_delta.residual_K_positions
+        block.residual_K_values = lr_delta.residual_K_values
+        block.residual_V_positions = lr_delta.residual_V_positions
+        block.residual_V_values = lr_delta.residual_V_values
+        
         U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)
         U_scaled = U_scaled.to(torch.float16)
         if not torch.isfinite(U_scaled).all():
@@ -2836,6 +2843,120 @@ class KVRuntimeManager:
                 recon_deltas = (U_k_fp16.float() @ Vh_k_fp16.float()) * scale_i
                 recon_errors = (deltas_raw - recon_deltas.to(deltas_raw.device)).norm(dim=1)
                 
+                # ── SVD Residual Correction (C10 remediation parity) ──
+                n, d = normalized_deltas.shape
+                half_d = d // 2
+                delta_K = deltas_raw[:, :half_d]
+                delta_V = deltas_raw[:, half_d:]
+                recon_K = recon_deltas[:, :half_d]
+                recon_V = recon_deltas[:, half_d:]
+
+                error_K = (delta_K - recon_K).norm(dim=1)
+                error_V = (delta_V - recon_V).norm(dim=1)
+
+                norm_K = delta_K.norm(dim=1).clamp(min=1e-8)
+                norm_V = delta_V.norm(dim=1).clamp(min=1e-8)
+
+                rel_error_K = error_K / norm_K
+                rel_error_V = error_V / norm_V
+
+                # Default SVD error threshold and residual fraction
+                error_threshold = 0.08
+                n_max_residual = int(n * 0.15)
+
+                # OPT-A: Adaptive residual budget — 3-tier block classifier by median reconstruction error.
+                median_err_K = float(torch.median(rel_error_K).item()) if rel_error_K.numel() > 0 else 0.0
+                median_err_V = float(torch.median(rel_error_V).item()) if rel_error_V.numel() > 0 else 0.0
+                max_median_err = max(median_err_K, median_err_V)
+                if max_median_err < 0.05:
+                    n_max_residual = min(8, n_max_residual)
+                elif max_median_err < 0.15:
+                    n_max_residual = min(16, n_max_residual)
+
+                # Content-aware residual capture (C10 token boosting / table capture parity)
+                # Matches compress_layer_blocks_gpu and MLX wrapper behavior
+                if block_token_ids and getattr(self, "tokenizer", None) is not None and len(block_token_ids) == n:
+                    try:
+                        from native_core.compression.residual_capture import compute_boost_multipliers
+                        _tok = self.tokenizer
+                        _cache = getattr(self, "_res_capture_decode_cache", None)
+                        if _cache is None:
+                            _cache = self._res_capture_decode_cache = {}
+                        tok_strs = []
+                        for _tid in block_token_ids:
+                            _s = _cache.get(_tid)
+                            if _s is None:
+                                _s = _cache[_tid] = _tok.decode([_tid])
+                            tok_strs.append(_s)
+                        _sid = getattr(block, "session_id", None)
+                        _all = self._session_token_ids.get(_sid) if getattr(self, "_session_token_ids", None) is not None else None
+                        _total = int(_all.numel()) if _all is not None else len(block_token_ids)
+                        _ckey = (_sid, _total)
+                        _counts_cache = getattr(self, "_res_capture_counts", None)
+                        if _counts_cache is None:
+                            _counts_cache = self._res_capture_counts = {}
+                        _counts = _counts_cache.get(_ckey)
+                        if _counts is None and _all is not None:
+                            _counts = {}
+                            for _t in _all.tolist():
+                                _counts[_t] = _counts.get(_t, 0) + 1
+                            _counts_cache.clear()
+                            _counts_cache[_ckey] = _counts
+                        boost_row, n_boosted = compute_boost_multipliers(
+                            tok_strs, block_token_ids, _counts or {}, _total)
+                        if boost_row is not None and n_boosted > 0:
+                            _bt = torch.tensor(boost_row, device=rel_error_K.device, dtype=rel_error_K.dtype)
+                            rel_error_K = rel_error_K * _bt
+                            rel_error_V = rel_error_V * _bt
+                            try:
+                                _margin = int(_os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+                            except Exception:
+                                _margin = 4
+                            n_max_residual = max(n_max_residual, min(n, n_boosted + _margin))
+                    except Exception:
+                        pass
+
+                residual_K_pos = None
+                residual_K_vals = None
+                residual_V_pos = None
+                residual_V_vals = None
+
+                if n > 0 and n_max_residual > 0:
+                    top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
+                    top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+                    
+                    mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
+                    residual_K_pos = top_k_K.indices[mask_K]
+                    
+                    mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
+                    residual_V_pos = top_k_V.indices[mask_V]
+                    
+                    device = deltas_raw.device
+                    if residual_K_pos.numel() > 0:
+                        res_K_vals = (delta_K - recon_K)[residual_K_pos]
+                        if token_norms is not None:
+                            res_K_vals = res_K_vals * token_norms.cpu()[residual_K_pos.cpu()].unsqueeze(1)
+                        residual_K_vals = res_K_vals.to(torch.float16).to(device)
+                        residual_K_pos = residual_K_pos.to(torch.int16).to(device)
+                    else:
+                        residual_K_pos = None
+                        residual_K_vals = None
+                        
+                    if residual_V_pos.numel() > 0:
+                        res_V_vals = (delta_V - recon_V)[residual_V_pos]
+                        if token_norms is not None:
+                            res_V_vals = res_V_vals * token_norms.cpu()[residual_V_pos.cpu()].unsqueeze(1)
+                        residual_V_vals = res_V_vals.to(torch.float16).to(device)
+                        residual_V_pos = residual_V_pos.to(torch.int16).to(device)
+                    else:
+                        residual_V_pos = None
+                        residual_V_vals = None
+
+                block.residual_K_positions = residual_K_pos
+                block.residual_K_values = residual_K_vals
+                block.residual_V_positions = residual_V_pos
+                block.residual_V_values = residual_V_vals
+
                 seq_len = k_orig.shape[2]
                 top_k_val = min(3, seq_len)
                 heads = k_orig.shape[1]

@@ -76,6 +76,14 @@ def test_niah_depths(depth, context_len):
     
     print(f"Response: {response!r}")
     
-    # Check if correct code is present in response
-    assert "847291" in response, f"Failed to retrieve needle '847291' at context_len={context_len}, depth={depth}. Output: {response}"
+    # Check if correct code is present in generated tokens only (avoid false positive from prompt)
+    prompt_toks = len(wrapper.tokenizer.encode(prompt))
+    sid = wrapper.active_session or "default"
+    all_ids = wrapper._session_token_ids.get(sid, [])
+    gen_ids = all_ids[prompt_toks:]
+    gen_text = wrapper.tokenizer.decode(gen_ids, skip_special_tokens=True)
+    
+    print(f"Generated text only: {gen_text!r}")
+    
+    assert "847291" in gen_text, f"Failed to retrieve needle '847291' at context_len={context_len}, depth={depth}. Generated: {gen_text!r}"
     wrapper.stop()
