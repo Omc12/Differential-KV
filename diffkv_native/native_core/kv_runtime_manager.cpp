@@ -415,6 +415,85 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
             }
         }
 
+        // 2.5. Semantic proxy-query relevance — ALWAYS ON, including fast mode.
+        //
+        // Every other channel here is TOKEN-level: recency is positional, lexical
+        // is literal token-overlap against the last 128 tokens. Neither can surface
+        // a block whose CONTENT is relevant but shares no VOCABULARY with what has
+        // recently been said — and because the lexical query window includes the
+        // model's OWN generated tokens, once generation drifts even slightly the
+        // query keeps reinforcing the drift instead of correcting it. Measured
+        // (2026-07-13): a technical paper's content was dropped ENTIRELY in favor
+        // of unrelated trailing filler text, in BOTH fast pruning mode and the old
+        // attend-all+graph HQ mode — so the missing channel, not the pruning
+        // policy, was the actual gap. MLX's decode router has no lexical stage at
+        // all: every block is scored by direct Q·anchor_K relevance every step.
+        //
+        // Give native the same signal, cheaply: dot each block's anchor K
+        // (averaged across kv_heads to match the proxy query's shape) against a
+        // ONE-STEP-LAGGED proxy query vector. This reuses the exact "K as Q proxy"
+        // idiom already established for the factual store (srl_state.
+        // recent_decode_keys; main.cpp ~6185-6194 — "one-step lag is unavoidable:
+        // the true Q lives inside the GGML graph, K is the best available proxy
+        // extracted from the same token embedding"). Cost is O(n_active_blocks *
+        // head_dim) — a few hundred blocks x ~128 floats, negligible next to the
+        // lexical/recency work already done every retrieval interval.
+        if (const char* dbg = std::getenv("DIFFKV_DBG_SEMROUTE")) {
+            std::cerr << "[SEMROUTE] n_ord=" << n_ord
+                      << " recent_decode_keys.size()=" << srl_state.recent_decode_keys.size()
+                      << " engines_.empty()=" << engines_.empty() << "\n";
+        }
+        if (!srl_state.recent_decode_keys.empty() && !engines_.empty()) {
+            const std::vector<float>& q_proxy = srl_state.recent_decode_keys.back();
+            NativeBlockPool* pool0 = engines_[0].get();
+            const int hd  = pool0->get_head_dim();
+            const int kvh = pool0->get_kv_heads();
+            if (std::getenv("DIFFKV_DBG_SEMROUTE")) {
+                std::cerr << "[SEMROUTE] hd=" << hd << " kvh=" << kvh << " q_proxy.size()=" << q_proxy.size() << "\n";
+            }
+            if (hd > 0 && kvh > 0 && (int)q_proxy.size() == hd) {
+                auto& state_table = pool0->get_state_table();
+                std::vector<std::pair<float, int32_t>> sem_scored;
+                sem_scored.reserve(n_ord);
+                for (int i = 0; i < n_ord; ++i) {
+                    int32_t slot = ord[i];
+                    if (slot < 0) continue;
+                    if (state_table.get(slot) != BlockState::CompressedResident) continue;
+                    const ggml_fp16_t* anc = pool0->get_host_anchors_K(slot);
+                    if (!anc) continue;
+                    float score = 0.0f;
+                    for (int h = 0; h < kvh; ++h) {
+                        const ggml_fp16_t* row = anc + (size_t)h * hd;
+                        for (int d = 0; d < hd; ++d) {
+                            score += q_proxy[d] * ggml_fp16_to_fp32(row[d]);
+                        }
+                    }
+                    sem_scored.push_back({score / (float)kvh, slot});
+                }
+                // Same budget as the lexical channel — both are cheap first-stage
+                // retrieval channels, just scored on different signals.
+                int take_sem = std::min(eff_lexical, (int)sem_scored.size());
+                if (take_sem > 0) {
+                    std::partial_sort(sem_scored.begin(), sem_scored.begin() + take_sem, sem_scored.end(),
+                                      [](const auto& a, const auto& b) { return a.first > b.first; });
+                    int added = 0;
+                    for (int i = 0; i < take_sem; ++i) {
+                        int32_t slot = sem_scored[i].second;
+                        if (!seen.count(slot)) {
+                            host_candidates.push_back(slot);
+                            seen.insert(slot);
+                            ++added;
+                        }
+                    }
+                    if (std::getenv("DIFFKV_DBG_SEMROUTE")) {
+                        std::cerr << "[SEMROUTE] sem_scored.size()=" << sem_scored.size()
+                                  << " take_sem=" << take_sem << " newly_added=" << added
+                                  << " host_candidates.size()=" << host_candidates.size() << "\n";
+                    }
+                }
+            }
+        }
+
         // Sections 3–4.5 (chunk-graph 2-hop + anchor-neighborhood expansion) are
         // the "dynamic graph routing" — best synthesis fidelity but they balloon
         // the candidate pool on uniform docs. HIGH-QUALITY ONLY. In fast bounded-K
@@ -535,6 +614,10 @@ std::vector<int32_t> KVRuntimeManager::route_decode_slots(
         host_candidates = filtered;
     }
 
+    if (std::getenv("DIFFKV_DBG_SEMROUTE")) {
+        std::cerr << "[SEMROUTE] pre-cap host_candidates.size()=" << host_candidates.size()
+                  << " srl_k_host=" << srl_k_host << "\n";
+    }
     // Pad with 0 up to srl_k_host
     while (host_candidates.size() < (size_t)srl_k_host) {
         host_candidates.push_back(0);

@@ -5089,6 +5089,46 @@ int main(int argc, char ** argv) {
         bool has_prev_svd = false;
         const bool never_use_sparse = (L + max_generate < engage_threshold);
 
+        // Seed the semantic proxy-query (native_core/kv_runtime_manager.cpp's
+        // decode-routing semantic channel) with the PROMPT'S OWN TAIL, before
+        // k_activations is freed below. Without this, that channel has no
+        // signal until srl_state.recent_decode_keys accumulates from GENERATED
+        // tokens (main.cpp ~6185, one entry per decode step) — so the very
+        // FIRST retrieval call, which locks in the model's initial direction,
+        // gets none of it. And once the channel does activate a retrieval
+        // interval later, if generation has already drifted off-topic by then,
+        // the only available proxy IS the drift — it can't self-correct.
+        // Averaging the last ~16 PREFILL positions' (still-exact, rotated) K
+        // gives step 0 an un-contaminated "what was just being discussed"
+        // signal, extending the same "K as Q proxy" idiom already used for the
+        // factual store and per-step routing. Extracted as a plain local (not
+        // written into srl_state directly) because srl_state may still be
+        // swapped for the async-built object after this point (srl_swapped);
+        // the actual seed happens per-step below, into whichever object is
+        // active, only while it's still empty.
+        std::vector<float> prompt_tail_proxy;
+        if (L > 0 && decode_use_sparse && !k_activations.empty() && !k_activations[0].empty()) {
+            const int seed_n = std::min(L, 16);
+            prompt_tail_proxy.assign(head_dim, 0.0f);
+            int counted = 0;
+            for (int p = L - seed_n; p < L; ++p) {
+                if (p < 0) continue;
+                size_t base = (size_t)p * F_test;
+                if (base + F_test > k_activations[0].size()) continue;
+                for (int h = 0; h < kv_heads; ++h) {
+                    for (int d = 0; d < head_dim; ++d) {
+                        prompt_tail_proxy[d] += ggml_fp16_to_fp32(k_activations[0][base + (size_t)h * head_dim + d]);
+                    }
+                }
+                ++counted;
+            }
+            if (counted > 0) {
+                for (int d = 0; d < head_dim; ++d) prompt_tail_proxy[d] /= (float)(counted * kv_heads);
+            } else {
+                prompt_tail_proxy.clear();
+            }
+        }
+
         if (decode_use_sparse) {
             for (auto & v : k_activations) std::vector<ggml_fp16_t>().swap(v);
             for (auto & v : v_activations) std::vector<ggml_fp16_t>().swap(v);
@@ -5133,6 +5173,15 @@ int main(int argc, char ** argv) {
             // Mirrors ACTIVE_RUNTIME: invalidate the per-step routing cache at the
             // top of each decode step, before layer 0 re-routes.
             srl_state.clear_step_cache();
+
+            // Seed recent_decode_keys with the prompt-tail proxy (see extraction
+            // above) the first time this — possibly just-swapped-in — srl_state
+            // object is seen empty. Real generated-token keys (pushed at the end
+            // of each step, below) naturally take over once they exist; this is
+            // a one-time fallback purely for the pre-generation retrieval gap.
+            if (srl_state.recent_decode_keys.empty() && !prompt_tail_proxy.empty()) {
+                srl_state.recent_decode_keys.push_back(prompt_tail_proxy);
+            }
 
             bool step_use_sparse = (current_pos >= engage_threshold) && (kv_engines[0]->get_pool_version() > 0);
             if (std::getenv("DIFFKV_DBG_POS")) { static int o=0; if(o++<3)
