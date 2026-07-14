@@ -2717,29 +2717,33 @@ int main(int argc, char ** argv) {
                 ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
                 : 65536;
 
-            // Default engage point ~8k (matching MLX). auto_thresh (the memory
-            // budget) stays as the UPPER cap so a tight device engages even earlier.
+            // Sparse engages only when dense KV would exhaust the memory budget —
+            // a memory-reach gate, NOT a speed gate. Dense stays the default for the
+            // common paste range because native sparse decode still degrades on
+            // faithful DOCUMENT REPRODUCTION of dense technical papers.
             //
-            // History: a first ~8k attempt (2026-07-13) REGRESSED real use — on a
-            // ~12k paper paste (verbatim reproduction), native sparse decode
-            // degenerated into sentence / "2 2 2" loops and tripped the VSL
-            // "[uncertain]" stop. Root cause found: NOT pruning (attend-all HQ failed
-            // too), but the sparse exact-recency window START landing MID-BLOCK, so
-            // the straddling block's tail tokens were attended TWICE — as exact fp16
-            // rows AND as their lossy reconstructed-compressed rows (two values for
-            // one position). Fixed by aligning dense_start to the micro-block grid
-            // (see the sparse-window setup below). With that fix, the identical paste
-            // at the DEFAULT recency (512) reproduces the paper cleanly, temp 0.7,
-            // and NIAH stays 6/6 (4/8/16k × depth 0.5/0.9). So ~8k is now safe.
-            // Trade at 8-16k vs dense is small (~8% tps, dense still a touch faster
-            // there); sparse wins ~2x by 32k and frees the dense KV window every step.
-            // DIFFKV_ENGAGE_THRESHOLD raises it back toward dense; the alignment fix
-            // is unconditional (helps whenever sparse runs).
-            const int kDefaultEngage = 8192;
-            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
+            // Two ~8k attempts were made + reverted (2026-07-13). The first degraded
+            // into sentence/"2 2 2" loops; that was traced to a real bug — the sparse
+            // exact-recency window START landing mid-block, so the straddling block's
+            // tail was attended twice (exact fp16 + lossy reconstructed). That IS
+            // fixed (dense_start is block-aligned below; prose papers — random_features
+            // /berry — then reproduce cleanly, NIAH 6/6). But a table/number-heavy
+            // paper (NAT) STILL degrades into numeric loops ("100 % 121 % 100 % 121 %")
+            // in sparse — the low-rank reconstruction of tabular content is too lossy
+            // for verbatim reproduction, and attend-all HQ fails the same way (so it is
+            // reconstruction fidelity, not routing). Dense attends exact fp16 and does
+            // not have this. Since we can't tell "reproduce this paper" from "answer a
+            // question about it" up front, and reproduction is the failure mode users
+            // actually hit on a paste, the safe default is dense until memory forces
+            // sparse. Retrieval (NIAH/multi-fact) survives sparse fine.
+            //
+            // Opt into early sparse (>32k throughput / memory reach, accepting the
+            // reproduction-fidelity caveat) with DIFFKV_ENGAGE_THRESHOLD=8192. The
+            // block-alignment fix + short-period loop catch below help whenever sparse
+            // does run.
+            engage_threshold = std::max(4096, auto_thresh);
             std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
-                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
+                      << " (mem-gate; free_mem=" << free_mem / (1 << 20) << "MB"
                       << ", bytes_per_tok=" << bytes_per_token
                       << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
         }
