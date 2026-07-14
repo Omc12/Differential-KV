@@ -711,11 +711,13 @@ def compute_decode_attention_static(
     out_dense  = mx.where(mx.isnan(out_dense),  0.0, out_dense)
 
     # Correct the compressed pool's systematic LSE under-scoring (see DIFFKV_SPARSE_BIAS
-    # note at module top). Default 0.0 → exact flash merge (parity-safe, no-op).
+    # header comment). Scale the bias to stay calibrated as the dense window grows:
+    # a larger recency window produces a higher dense LSE, so the additive compensation
+    # must grow proportionally. Formula: bias * (log2(max_dense_len/1024) + 1), which
+    # gives ×1 at 1024 tokens, ×2 at 2048, ×2.58 at 3072 — matching the LSE delta.
     if _SPARSE_BIAS_MODE == "auto":
-        # Adaptive: full boost when sparse is competitive, decays to 0 as the dense half
-        # (e.g. an exact needle residual) pulls ahead — synthesis-helpful AND NIAH-safe.
-        adaptive_bias = mx.maximum(0.0, _SPARSE_BIAS_BASE - 0.5 * mx.maximum(0.0, (lse_dense - lse_sparse) - 4.0))
+        _dense_scale = math.log2(max(max_dense_len, 1024) / 1024) + 1.0
+        adaptive_bias = _dense_scale * mx.maximum(0.0, _SPARSE_BIAS_BASE - 0.5 * mx.maximum(0.0, (lse_dense - lse_sparse) - 4.0))
         lse_sparse = mx.where(lse_sparse <= NEG, lse_sparse, lse_sparse + adaptive_bias)
     elif _SPARSE_BIAS != 0.0:
         lse_sparse = mx.where(lse_sparse <= NEG, lse_sparse, lse_sparse + _SPARSE_BIAS)
@@ -1376,12 +1378,31 @@ class MLXKVBlockManager:
         self.rank = rank
         self.block_size = block_size
         
-        env_engage = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
-        if env_engage is not None:
+        # ── Dense recency window (Problem 1 fix) ──────────────────────────────
+        # recency_window is the number of EXACT (uncompressed) tokens kept in the
+        # dense buffer per layer. It should scale with model capacity, not be fixed.
+        #
+        # Formula: round_to_next_512(num_layers * head_dim * dense_window_factor)
+        # For Qwen2.5-1.5B (28 layers, 128 head_dim):
+        #   Low (0.25)  → 28*128*0.25=896   → 1024
+        #   Mid (0.50)  → 28*128*0.50=1792  → 2048   ≔ user-validated sweet spot
+        #   High (0.75) → 28*128*0.75=2688  → 3072
+        # For a 72B model (80 layers, 128 head_dim):
+        #   Mid (0.50)  → 80*128*0.50=5120 — appropriate for the larger capacity.
+        #
+        # DIFFKV_ENGAGE_THRESHOLD hard-overrides the formula (backward compat).
+        # DIFFKV_DENSE_WINDOW_FACTOR overrides the factor only.
+        env_override = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
+        if env_override is not None:
             try:
-                recency_window = int(env_engage)
+                recency_window = int(env_override)
             except ValueError:
                 pass
+        else:
+            _factor = float(os.environ.get("DIFFKV_DENSE_WINDOW_FACTOR", "0.5"))
+            _raw = num_layers * head_dim * _factor
+            # Round up to nearest 512 so the window is always a clean multiple
+            recency_window = max(512, (int(_raw) + 511) // 512 * 512)
         self.recency_window = recency_window
         
         # max_blocks: how many SVD-compressed blocks we can hold simultaneously.
