@@ -622,23 +622,36 @@ class KVRuntimeManager:
         # ── Phase 24.5: Streaming Sparse Ingest Manager ───────────────────
         if self.streaming_ingest:
             from native_core.streaming_sparse_ingest import StreamingSparseIngestManager
+            # Recency window: how many exact (uncompressed) tokens to keep dense.
+            # Computed from model dims so it scales with model size rather than being
+            # hardcoded. Formula: round_to_next_512(num_layers * head_dim * factor).
+            # DIFFKV_RECENCY_WINDOW hard-overrides; DIFFKV_DENSE_WINDOW_FACTOR overrides factor.
+            _env_rw = os.environ.get("DIFFKV_RECENCY_WINDOW")
+            if _env_rw is not None:
+                _recency_window = int(_env_rw)
+            else:
+                _factor = getattr(self.config, "dense_window_factor",
+                                  float(os.environ.get("DIFFKV_DENSE_WINDOW_FACTOR", "0.5")))
+                _raw = self.num_layers * self.head_dim * _factor
+                _recency_window = max(512, (int(_raw) + 511) // 512 * 512)
             self._streaming_mgr = StreamingSparseIngestManager(
                 compressor=self._compressor,
                 compress_fn=self._compress_block_sync,
                 micro_block_size=self.micro_block_size,
                 dense_anchor_only=True,
                 native_pool=self.native_pool,
-                # 512-token recency window: keeps the most recent 512 tokens dense for
-                # exact attention, compressing everything older. This is sufficient for
-                # typical response lengths and yields clear VRAM savings at 4K+ contexts.
-                # Increase to 1024 via recency_window=1024 if generation quality drifts.
-                recency_window=int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")),
+                recency_window=_recency_window,
             )
             self._streaming_mgr.manager = self
         else:
             self._streaming_mgr = None
+            _recency_window = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "0")) or (
+                max(512, (int(self.num_layers * self.head_dim *
+                    getattr(self.config, "dense_window_factor",
+                            float(os.environ.get("DIFFKV_DENSE_WINDOW_FACTOR", "0.5")))) + 511) // 512 * 512)
+            )
 
-        self.max_dense_len = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")) + self.block_size
+        self.max_dense_len = _recency_window + self.block_size
         self.max_residual = self.native_pool.max_residual_tokens
 
         # Telemetry
