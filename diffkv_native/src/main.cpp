@@ -6809,8 +6809,29 @@ int main(int argc, char ** argv) {
             {
                 const auto& helper_ids = diffkv::get_helper_token_ids_cpp(model);
                 diffkv::update_vsl_state_cpp(next_token, srl_state, helper_ids, model);
-                
-                if (sfa_active && srl_state.vsl_consecutive_helpers >= 16) {
+
+                // Real bug found 2026-07-14 (user-reported: a real long-document
+                // paste degenerated into 40+ consecutive stopwords — "what, was,
+                // and how, where, when, which, who, and why, that, that, that,
+                // and, of, for, by, in, to, ..." — with no stop). Traced via
+                // DIFFKV_DBG_RECON_ERR (ruled out — reconstruction error was flat
+                // and normal) + DIFFKV_VERBOSE: factual_store.query() returned
+                // fact_hits.size()=0 for 30+ consecutive steps (retrieval found
+                // nothing relevant), which makes current_step_factual_sequences
+                // empty, which makes sfa_active false — and this bailout was
+                // gated behind `sfa_active &&`, so the ONE circuit breaker for
+                // "the model is stuck emitting nothing but function words" was
+                // disabled in EXACTLY the scenario that causes it: no confident
+                // retrieval, model defaults to the "safest" (most frequent,
+                // lowest-information) tokens with nothing to interrupt the spiral.
+                // update_vsl_state_cpp's counter reset logic doesn't depend on
+                // sfa_active either (native_core/srl/factual_alignment.hpp: any
+                // single non-helper, non-matching token resets it to 0), so
+                // firing on the counter alone can't false-trigger on healthy
+                // generation that naturally mixes in content words — removing
+                // the sfa_active gate here just lets the existing, already-safe
+                // threshold actually do its job when retrieval has failed too.
+                if (srl_state.vsl_consecutive_helpers >= 16) {
                     std::string uncertainty_str = " [uncertain: details missing in source]";
                     std::vector<int32_t> uncertainty_toks = model.tokenize(uncertainty_str, false);
                     for (int32_t t : uncertainty_toks) {
