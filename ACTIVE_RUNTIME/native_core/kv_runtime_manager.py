@@ -1685,15 +1685,21 @@ class KVRuntimeManager:
 
         if k.shape[2] == 1:
             self._streaming_mgr.append_decode_token(session_id, layer_idx, k, v)
-            # CRITICAL SRL ALIGNMENT FIX: Capture decode token K/V states
-            if not hasattr(self, "_prefill_kv_capture"):
-                self._prefill_kv_capture = {}
-            session_cap = self._prefill_kv_capture.setdefault(session_id, {})
-            if layer_idx not in session_cap:
-                session_cap[layer_idx] = [k.clone().cpu(), v.clone().cpu()]
-            else:
-                session_cap[layer_idx][0] = torch.cat([session_cap[layer_idx][0], k.cpu()], dim=2)
-                session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], v.cpu()], dim=2)
+            # CRITICAL SRL ALIGNMENT FIX: Capture decode token K/V states.
+            # Guard: only accumulate when the SRL index hasn't been finalized yet.
+            # After finalize_srl_index() runs the session appears in _session_srl
+            # and the capture is never consumed again — skip to prevent O(N^2) CPU
+            # tensor accumulation across the full generation (one torch.cat per token
+            # per layer x T tokens = O(T^2) total CPU allocations).
+            if session_id not in self._session_srl:
+                if not hasattr(self, "_prefill_kv_capture"):
+                    self._prefill_kv_capture = {}
+                session_cap = self._prefill_kv_capture.setdefault(session_id, {})
+                if layer_idx not in session_cap:
+                    session_cap[layer_idx] = [k.clone().cpu(), v.clone().cpu()]
+                else:
+                    session_cap[layer_idx][0] = torch.cat([session_cap[layer_idx][0], k.cpu()], dim=2)
+                    session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], v.cpu()], dim=2)
         else:
             self._streaming_mgr.ingest_chunk(session_id, layer_idx, k, v)
 

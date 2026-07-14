@@ -1812,7 +1812,7 @@ class MLXKVBlockManager:
             "comp_min_k": [mx.array(a) for a in src["comp_min_k"]],
             "comp_max_k": [mx.array(a) for a in src["comp_max_k"]],
             "comp_scale": [mx.array(s) for s in src["comp_scale"]],
-            "comp_seq_len": [mx.array(sl) for src_sl, sl in zip(src["comp_seq_len"], src["comp_seq_len"])], # copy mx arrays properly
+            "comp_seq_len": [mx.array(sl) for sl in src["comp_seq_len"]],
             "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
             "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
             "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
@@ -2258,6 +2258,12 @@ class MLXKVBlockManager:
             decode_cache = getattr(self, "_tok_decode_cache", None)
             if decode_cache is None:
                 decode_cache = self._tok_decode_cache = {}
+            # No size cap: this is keyed by TOKEN ID, not by position or session
+            # length, so it is naturally bounded by vocabulary size (~152k for
+            # Qwen2.5, worst case ~20MB of short strings) regardless of how long
+            # a session runs. A periodic clear() here would evict good entries
+            # and force repeat tokenizer.decode() calls on a long/diverse
+            # document — undoing the exact cost this cache exists to avoid.
             boost_rows = []
             for block_idx in range(num_blocks):
                 # Global block index: blocks tile the prompt from token 0 and
@@ -2498,7 +2504,7 @@ class MLXKVBlockManager:
             session["comp_min_k"][l][start_idx:start_idx+num_blocks] = mx.min(batch_blocks_k[l_slice], axis=2)
             session["comp_max_k"][l][start_idx:start_idx+num_blocks] = mx.max(batch_blocks_k[l_slice], axis=2)
             session["comp_scale"][l][start_idx:start_idx+num_blocks] = scales_batch[l_slice]
-            session["comp_seq_len"][l][start_idx:start_idx+num_blocks] = self.block_size
+            session["comp_seq_len"][l][start_idx:start_idx+num_blocks] = self.block_size - 1  # S_comp: number of delta rows (excludes anchor)
             
             session["comp_res_k"][l][start_idx:start_idx+num_blocks] = res_k_padded[l_slice]
             session["comp_res_v"][l][start_idx:start_idx+num_blocks] = res_v_padded[l_slice]
@@ -3007,7 +3013,7 @@ class MLXKVBlockManager:
         session["comp_min_k"][layer_idx][num_blocks] = mx.min(block_k, axis=1)
         session["comp_max_k"][layer_idx][num_blocks] = mx.max(block_k, axis=1)
         session["comp_scale"][layer_idx][num_blocks]   = svd_scale
-        session["comp_seq_len"][layer_idx][num_blocks] = self.block_size
+        session["comp_seq_len"][layer_idx][num_blocks] = self.block_size - 1  # S_comp: number of delta rows (excludes anchor)
         
         session["comp_res_k"][layer_idx][num_blocks] = res_k_padded
         session["comp_res_v"][layer_idx][num_blocks] = res_v_padded
@@ -3279,7 +3285,8 @@ class MLXKVBlockManager:
         if all_blocks_full:
             # Pad nb to the next power of 2 to stabilize compile shapes and avoid re-compilations
             nb_padded = 1 << (nb - 1).bit_length() if nb > 1 else 1
-            nb_padded = min(nb_padded, session.get("max_blocks", self.max_blocks))
+            nb_padded = min(nb_padded, session.get("max_blocks", self.max_blocks),
+                           self._comp_res_n_const.shape[0])  # guard: never exceed pre-allocated const array
 
             comp_res_n_arr = self._comp_res_n_const[:nb_padded]
             S_comp = self.block_size - 1
