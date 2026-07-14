@@ -134,7 +134,7 @@ class FactualExactStore:
         self.session_id = session_id
         self.entries: List[FactEntry] = []
         
-    def build(self, prefill_kv: Dict[int, List[torch.Tensor]], token_ids: torch.Tensor, W_proj: torch.Tensor, stop_token_ids: Set[int], slot_ids: Optional[List[int]] = None, block_size: Optional[int] = None, inv_index: Optional[Any] = None, semantic_prime_slots: Optional[Set[int]] = None, use_salience_parser: bool = True):
+    def build(self, prefill_kv: Dict[int, List[torch.Tensor]], token_ids: torch.Tensor, W_proj: torch.Tensor, stop_token_ids: Set[int], slot_ids: Optional[List[int]] = None, block_size: Optional[int] = None, inv_index: Optional[Any] = None, semantic_prime_slots: Optional[Set[int]] = None, use_salience_parser: bool = True, block_anchor_idxs: Optional[List[int]] = None):
         """
         Identify rare content words and group them into factual spans, building a 3D factual graph.
         prefill_kv: Dict[layer_idx, [K_cpu, V_cpu]]
@@ -147,6 +147,7 @@ class FactualExactStore:
         inv_index: optional InvertedTokenIndex containing vocabulary/IDF mappings
         semantic_prime_slots: optional set of pool slot IDs representing semantic prime nodes
         use_salience_parser: if True, use self-supervised salience selector; else use basic stop-token rule
+        block_anchor_idxs: optional list of absolute anchor indices for slot_ids
         """
         if not prefill_kv or token_ids is None or token_ids.numel() == 0:
             return
@@ -264,11 +265,11 @@ class FactualExactStore:
             # 5. Compute joint factual salience score
             total_salience = key_norms * idf_vals * (1.0 + 1.0 * R)
             
-            # Select the top 5% most salient tokens (precision mode: max 300 tokens)
-            # 50% was selecting half the document — far too broad for exact grounding.
-            # 5% keeps only the rarest, most distinctive content words per document.
+            # Select the top 8% most salient tokens (precision mode: max 1000 tokens)
+            # Capping at 1000 instead of 300 to prevent discarding the needle or other 
+            # critical facts in extremely long context settings.
             k_num = max(8, int(total_seq_len * 0.08))
-            k_num = min(k_num, 300)  # absolute cap regardless of document length
+            k_num = min(k_num, 1000)  # absolute cap raised to 1000
             k_num = min(k_num, total_seq_len)
             
             if total_seq_len > 0:
@@ -315,7 +316,10 @@ class FactualExactStore:
                     if slot not in slot_ids:
                         continue
                     block_idx = slot_ids.index(slot)
-                    tok_start = block_idx * block_size
+                    if block_anchor_idxs is not None and len(block_anchor_idxs) == len(slot_ids):
+                        tok_start = block_anchor_idxs[block_idx]
+                    else:
+                        tok_start = block_idx * block_size
                     tok_end = min(tok_start + block_size, total_seq_len)
                     if tok_start >= total_seq_len:
                         continue
@@ -421,11 +425,17 @@ class FactualExactStore:
             # Determine which slot IDs this span overlaps with
             entry_slot_ids = []
             if slot_ids is not None and block_size is not None and block_size > 0:
-                start_block_idx = s // block_size
-                end_block_idx = (e - 1) // block_size
-                for idx in range(start_block_idx, end_block_idx + 1):
-                    if idx < len(slot_ids):
-                        entry_slot_ids.append(slot_ids[idx])
+                if block_anchor_idxs is not None and len(block_anchor_idxs) == len(slot_ids):
+                    for idx, start in enumerate(block_anchor_idxs):
+                        end = start + block_size
+                        if start < e and end > s:
+                            entry_slot_ids.append(slot_ids[idx])
+                else:
+                    start_block_idx = s // block_size
+                    end_block_idx = (e - 1) // block_size
+                    for idx in range(start_block_idx, end_block_idx + 1):
+                        if idx < len(slot_ids):
+                            entry_slot_ids.append(slot_ids[idx])
                         
             span_tokens = token_ids[s:e].tolist()
 

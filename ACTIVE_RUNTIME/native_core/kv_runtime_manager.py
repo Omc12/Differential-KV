@@ -966,7 +966,8 @@ class KVRuntimeManager:
                         slot_ids=slot_ids,
                         block_size=index_block_size,
                         inv_index=inv_index,
-                        semantic_prime_slots=prime_slots
+                        semantic_prime_slots=prime_slots,
+                        block_anchor_idxs=anchor_idxs
                     )
                     self._factual_stores[session_id] = factual_store
                     srl_state.prompt_eagle_scores = getattr(factual_store, "eagle_scores", None)

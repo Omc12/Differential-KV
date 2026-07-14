@@ -1825,31 +1825,55 @@ def native_triton_sparse_attn_decode(
                 O_i = out * l_out.unsqueeze(-1)
                 m_i = m_out
                 l_i = l_out
-                
-                dense_k_parts = []
-                dense_v_parts = []
-                for blk in (dense_blocks or []):
-                    if blk.anchor_kv is not None:
-                        dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2))
-                        dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
-                    if blk.active_k is not None and blk.active_k.shape[2] > 0:
-                        dense_k_parts.append(blk.active_k)
-                        dense_v_parts.append(blk.active_v)
+
+                # Prefer active_k (pre-assembled workspace) over iterating dense_blocks
+                # to avoid double-counting (active_k already contains all anchor+active data
+                # from every dense block, assembled by assemble_dense_window_kv).
                 if active_k is not None and active_k.shape[2] > 0:
-                    dense_k_parts.append(active_k)
-                    dense_v_parts.append(active_v)
-                    
-                if dense_k_parts:
-                    k_kv = torch.cat(dense_k_parts, dim=2).float()
-                    v_kv = torch.cat(dense_v_parts, dim=2).float()
-                    
+                    k_kv = active_k.float()
+                    v_kv = active_v.float()
+                else:
+                    dense_k_parts = []
+                    dense_v_parts = []
+                    for blk in (dense_blocks or []):
+                        if blk.anchor_kv is not None:
+                            dense_k_parts.append(blk.anchor_kv[:, 0].unsqueeze(2))
+                            dense_v_parts.append(blk.anchor_kv[:, 1].unsqueeze(2))
+                        if blk.active_k is not None and blk.active_k.shape[2] > 0:
+                            dense_k_parts.append(blk.active_k)
+                            dense_v_parts.append(blk.active_v)
+                    if dense_k_parts:
+                        k_kv = torch.cat(dense_k_parts, dim=2).float()
+                        v_kv = torch.cat(dense_v_parts, dim=2).float()
+                    else:
+                        k_kv = None
+                        v_kv = None
+
+                if k_kv is not None and k_kv.shape[2] > 0:
+                    # Apply RoPE rotation with correct absolute token positions.
+                    # Without this, q_rot(pos_q) @ k_unrot gives wrong attention scores
+                    # for dense (ACCUMULATING) blocks, breaking NIAH retrieval on CUDA.
+                    if dense_blocks and cos is not None and sin is not None:
+                        _dense_pos_list = []
+                        for _blk in (dense_blocks or []):
+                            _dense_pos_list.extend(_blk.token_indices)
+                        if _dense_pos_list and len(_dense_pos_list) == k_kv.shape[2]:
+                            _dp = torch.tensor(_dense_pos_list, dtype=torch.long, device=k_kv.device)
+                            # cos/sin: [1, seq_len, head_dim]  (standard rotary_emb output)
+                            _cos_d = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)  # [1,1,L,D]
+                            _sin_d = sin[0, _dp.clamp(max=sin.shape[1] - 1)].unsqueeze(0).unsqueeze(1)
+                            _hd = k_kv.shape[-1] // 2
+                            _k_half = torch.cat([-k_kv[..., _hd:], k_kv[..., :_hd]], dim=-1)
+                            k_kv = (k_kv * _cos_d.to(k_kv.dtype)
+                                    + _k_half * _sin_d.to(k_kv.dtype))
+
                     H_q, D = q_sq.shape
                     H_kv = k_kv.shape[1]
                     n_rep = num_key_value_groups
-                    
+
                     q_reshaped = q_sq.float().view(H_kv, n_rep, D)
                     k_permuted = k_kv[0].permute(0, 2, 1)
-                    
+
                     s = torch.bmm(q_reshaped, k_permuted).view(H_q, -1) * inv_scale
                     
                     # ── Sparse LSE Bias (Ported from MLX) ────────────────────

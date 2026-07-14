@@ -1586,22 +1586,34 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 and os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower() in ("0", "0.0", "", "false", "off")
                             )
                             if _use_combined:
-                                # Assemble dense_k/dense_v for the combined kernel.
-                                # The combined kernel expects [1, H_kv, L_dense, D]
-                                # pre-RoPE-rotated (same contract as the existing LSE path).
-                                _dk_parts, _dv_parts = [], []
-                                for _blk in (dense_blocks or []):
-                                    if _blk.anchor_kv is not None:
-                                        _dk_parts.append(_blk.anchor_kv[:, 0].unsqueeze(2))
-                                        _dv_parts.append(_blk.anchor_kv[:, 1].unsqueeze(2))
-                                    if _blk.active_k is not None and _blk.active_k.shape[2] > 0:
-                                        _dk_parts.append(_blk.active_k)
-                                        _dv_parts.append(_blk.active_v)
+                                # Assemble pre-RoPE-rotated dense_k/dense_v for the combined kernel.
+                                # The combined Triton kernel expects [1, H_kv, L_dense, D] pre-RoPE-rotated.
+                                # Use ONLY dense_k_assembled — the separate dense_blocks loop would
+                                # double-count (dense_k_assembled already contains anchor + active data
+                                # from every dense block, assembled by assemble_dense_window_kv).
+                                _dk_combined = None
+                                _dv_combined = None
                                 if dense_k_assembled is not None and dense_k_assembled.shape[2] > 0:
-                                    _dk_parts.append(dense_k_assembled)
-                                    _dv_parts.append(dense_v_assembled)
-                                _dk_combined = torch.cat(_dk_parts, dim=2) if _dk_parts else None
-                                _dv_combined = torch.cat(_dv_parts, dim=2) if _dv_parts else None
+                                    _dense_pos_list = []
+                                    for _blk in (dense_blocks or []):
+                                        _dense_pos_list.extend(_blk.token_indices)
+                                    if _dense_pos_list and len(_dense_pos_list) == dense_k_assembled.shape[2]:
+                                        _dp2 = torch.tensor(_dense_pos_list, dtype=torch.long, device=query_states.device)
+                                        _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
+                                        _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
+                                        if _cos_d2.dim() == 3:
+                                            _cos_d2 = _cos_d2.squeeze(1)
+                                            _sin_d2 = _sin_d2.squeeze(1)
+                                        _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,L,D]
+                                        _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
+                                        _hd2 = dense_k_assembled.shape[-1] // 2
+                                        _dk_half2 = torch.cat([-dense_k_assembled[..., _hd2:], dense_k_assembled[..., :_hd2]], dim=-1)
+                                        _dk_combined = (dense_k_assembled * _cos_d2.to(dense_k_assembled.dtype)
+                                                        + _dk_half2 * _sin_d2.to(dense_k_assembled.dtype))
+                                        _dv_combined = dense_v_assembled
+                                    else:
+                                        _dk_combined = dense_k_assembled
+                                        _dv_combined = dense_v_assembled
                                 attn_out_b = native_triton_sparse_attn_decode_combined(
                                     q=query_states[b_idx:b_idx+1],
                                     block_indices=block_indices,

@@ -2153,28 +2153,27 @@ class MLXKVBlockManager:
         if src_sid not in self.sessions:
             return
         src = self.sessions[src_sid]
-        self.sessions[dst_sid] = {
-            "dense_keys": [mx.array(k) for k in src["dense_keys"]],
-            "dense_values": [mx.array(v) for v in src["dense_values"]],
-            "dense_lens": src["dense_lens"].copy(),
-            "dense_lens_mx": [mx.array(dl) for dl in src["dense_lens_mx"]] if "dense_lens_mx" in src else [mx.array(dl, dtype=mx.int32) for dl in src["dense_lens"]],
-            "num_blocks": src["num_blocks"].copy(),
-            "comp_U": [mx.array(u) for u in src["comp_U"]],
-            "comp_VK": [mx.array(vk) for vk in src["comp_VK"]],
-            "comp_VV": [mx.array(vv) for vv in src["comp_VV"]],
-            "comp_anc_k": [mx.array(ak) for ak in src["comp_anc_k"]],
-            "comp_anc_v": [mx.array(av) for av in src["comp_anc_v"]],
-            "comp_min_k": [mx.array(a) for a in src["comp_min_k"]],
-            "comp_max_k": [mx.array(a) for a in src["comp_max_k"]],
-            "comp_scale": [mx.array(s) for s in src["comp_scale"]],
-            "comp_seq_len": [mx.array(sl) for sl in src["comp_seq_len"]],
-            "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
-            "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
-            "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
-            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((self.max_blocks, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": src["token_ids"].copy() if "token_ids" in src else [],
-            "token_counts": Counter(src["token_ids"]) if "token_ids" in src else Counter()
-        }
+        dst = {}
+        for k, v in src.items():
+            if isinstance(v, list):
+                # Deep copy nested list structures of mx.array or primitives
+                def _copy_list(lst):
+                    if not isinstance(lst, list):
+                        if isinstance(lst, mx.array):
+                            return mx.array(lst)
+                        return lst
+                    return [_copy_list(x) for x in lst]
+                dst[k] = _copy_list(v)
+            elif isinstance(v, mx.array):
+                dst[k] = mx.array(v)
+            elif isinstance(v, Counter):
+                dst[k] = v.copy()
+            elif isinstance(v, (int, float, str, bool)) or v is None:
+                dst[k] = v
+            else:
+                import copy
+                dst[k] = copy.deepcopy(v)
+        self.sessions[dst_sid] = dst
         if hasattr(self, "patched_model") and self.patched_model is not None:
             src_key = (src_sid,)
             dst_key = (dst_sid,)
@@ -3717,10 +3716,11 @@ class MLXKVBlockManager:
                     res_mask = mx.take(_full_mask, topk_sel, axis=0) if topk_sel is not None else _full_mask
                 else:
                     res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
-                out_combined, _, _ = compute_decode_attention_static(
+                out_combined, _, _, _ = compute_decode_attention_static(
                     q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
                     comp_scale, comp_seq_len, res_mask,
                     dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
+                    mx.array(comp_U.shape[0], dtype=mx.int32),
                     scale, gpk, self.kv_heads, self.block_size, self.rank,
                     current_max_dense_len,
                 )

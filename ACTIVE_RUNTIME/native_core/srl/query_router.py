@@ -744,10 +744,21 @@ def route_query(
     if getattr(srl_state, "prompt_anchors", None):
         block_size = srl_state.inverted_index.block_size if (srl_state.inverted_index is not None and hasattr(srl_state.inverted_index, "block_size")) else 256
         prompt_anchor_slots = []
-        for idx in srl_state.prompt_anchors:
-            block_idx = idx // block_size
-            if block_idx < len(srl_state.ordered_slot_ids):
-                prompt_anchor_slots.append(srl_state.ordered_slot_ids[block_idx])
+        ordered_anchors = getattr(srl_state, "ordered_anchor_idxs", None)
+        if ordered_anchors and len(ordered_anchors) == len(srl_state.ordered_slot_ids):
+            for idx in srl_state.prompt_anchors:
+                matched_block_idx = -1
+                for b_idx, start in enumerate(ordered_anchors):
+                    if start <= idx < start + block_size:
+                        matched_block_idx = b_idx
+                        break
+                if matched_block_idx != -1:
+                    prompt_anchor_slots.append(srl_state.ordered_slot_ids[matched_block_idx])
+        else:
+            for idx in srl_state.prompt_anchors:
+                block_idx = idx // block_size
+                if block_idx < len(srl_state.ordered_slot_ids):
+                    prompt_anchor_slots.append(srl_state.ordered_slot_ids[block_idx])
         if prompt_anchor_slots:
             prompt_routed_slots = list(srl_state.expand_neighborhood(set(prompt_anchor_slots)))
 
