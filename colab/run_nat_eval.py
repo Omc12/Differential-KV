@@ -31,6 +31,17 @@ def patched_merge_settings(self, url, proxies, stream, verify, cert):
     return settings
 requests.Session.merge_environment_settings = patched_merge_settings
 
+# Ensure active runtime path and C++ compiled library directory are in sys.path
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
+CORE_DIR = os.path.join(ACTIVE, "native_core", "diffkv_core")
+
+if ACTIVE not in sys.path:
+    sys.path.insert(0, ACTIVE)
+if CORE_DIR not in sys.path:
+    sys.path.insert(0, CORE_DIR)
+
 import json
 import time
 import argparse
@@ -38,14 +49,6 @@ import gc
 import re
 import math
 import subprocess
-
-# Add required paths to sys.path
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, ".."))
-ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
-if ACTIVE not in sys.path:
-    sys.path.insert(0, ACTIVE)
-
 import torch
 
 # Define Prompts
@@ -88,7 +91,7 @@ def format_prompt(paper_content, prompt_instructions):
 You are a helpful assistant. Answer the user's request strictly using the provided context.<|im_end|>
 <|im_start|>user
 Provided Text:
-{paper_text}
+{paper_content}
 
 Instructions:
 {prompt_instructions}<|im_end|>
@@ -175,8 +178,7 @@ def run_worker(config_name, model_id):
     # Wrap in torch.inference_mode() to prevent OOM
     with torch.inference_mode():
         for idx, prompt_instructions in enumerate([PROMPT1_TEXT, PROMPT2_TEXT], 1):
-            # Create full prompt (pass paper_text)
-            full_prompt = f"<|im_start|>system\nYou are a helpful assistant. Answer the user's request strictly using the provided context.<|im_end|>\n<|im_start|>user\nProvided Text:\n{paper_text}\n\nInstructions:\n{prompt_instructions}<|im_end|>\n<|im_start|>assistant\n"
+            full_prompt = format_prompt(paper_text, prompt_instructions)
             
             if is_compressed:
                 from serving.hf_diffkv_wrapper import DiffKVHFWrapper

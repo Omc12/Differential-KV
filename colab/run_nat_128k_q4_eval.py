@@ -30,19 +30,22 @@ def patched_merge_settings(self, url, proxies, stream, verify, cert):
     return settings
 requests.Session.merge_environment_settings = patched_merge_settings
 
+# Ensure active runtime path and C++ compiled library directory are in sys.path
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
+CORE_DIR = os.path.join(ACTIVE, "native_core", "diffkv_core")
+
+if ACTIVE not in sys.path:
+    sys.path.insert(0, ACTIVE)
+if CORE_DIR not in sys.path:
+    sys.path.insert(0, CORE_DIR)
+
 import json
 import time
 import argparse
 import gc
 import subprocess
-
-# Ensure active runtime path is in sys.path
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, ".."))
-ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
-if ACTIVE not in sys.path:
-    sys.path.insert(0, ACTIVE)
-
 import torch
 
 # New Prompt
@@ -123,7 +126,6 @@ def run_worker(mode, model_id):
 
     t0 = time.perf_counter()
 
-    # Wrap entire execution in torch.inference_mode() to prevent memory accumulation
     with torch.inference_mode():
         if is_compressed:
             from serving.hf_diffkv_wrapper import DiffKVHFWrapper
@@ -287,6 +289,7 @@ def run_worker(mode, model_id):
                 torch.cuda.empty_cache()
 
     res = {
+        "status": "success",
         "prompt_len": prompt_len,
         "generated_tokens": len(gen_ids),
         "prefill_time_s": prefill_time,
@@ -331,7 +334,19 @@ def main():
             results[mode] = res
             print(f"    Prefill={res['prefill_time_s']:.2f}s, TPS={res['decode_tps']:.1f}, Cache VRAM={res['kv_cache_vram_gb']:.3f}GB, Peak VRAM={res['peak_decode_vram_gb']:.2f}GB", flush=True)
         else:
-            print(f"    FAILED: Subprocess for {mode} exited without writing results file.", flush=True)
+            print(f"    Subprocess for {mode} crashed or went Out-Of-Memory (OOM).", flush=True)
+            results[mode] = {
+                "status": "OOM",
+                "prompt_len": 131072,
+                "generated_tokens": 0,
+                "prefill_time_s": 0.0,
+                "decode_time_s": 0.0,
+                "decode_tps": 0.0,
+                "peak_prefill_vram_gb": 0.0,
+                "peak_decode_vram_gb": 0.0,
+                "kv_cache_vram_gb": 0.0,
+                "output_text": "ERROR: CUDA OUT OF MEMORY (OOM) - Standard Dense cache footprint is too large for the GPU."
+            }
 
     # Compile Markdown Report
     report_path = os.path.join(REPO, "colab", "nat_128k_q4_report.md")
@@ -342,20 +357,19 @@ def main():
         f.write("This report benchmarks Standard Dense (4-bit quantized weights) against Differential KV (4-bit quantized weights + Compressed KV cache) on an A100 GPU over a 128,000 token sequence.\n\n")
         
         f.write("## Performance & Resource Summary\n\n")
-        headers = ["Mode", "Prefill Time (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Tokens Gen"]
+        headers = ["Mode", "Status", "Prefill Time (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Tokens Gen"]
         rows = []
         for mode in ["dense", "compressed"]:
             res = results.get(mode, {})
-            if not res:
-                rows.append([mode, "FAILED", "N/A", "N/A", "N/A", "N/A", "N/A"])
-                continue
+            status_text = res.get("status", "success").upper()
             rows.append([
                 mode,
-                f"{res.get('prefill_time_s', 0):.2f}s",
-                f"{res.get('decode_tps', 0):.2f}",
-                f"{res.get('peak_prefill_vram_gb', 0):.2f} GB",
-                f"{res.get('peak_decode_vram_gb', 0):.2f} GB",
-                f"{res.get('kv_cache_vram_gb', 0):.3f} GB",
+                status_text,
+                f"{res.get('prefill_time_s', 0):.2f}s" if status_text != "OOM" else "N/A",
+                f"{res.get('decode_tps', 0):.2f}" if status_text != "OOM" else "N/A",
+                f"{res.get('peak_prefill_vram_gb', 0):.2f} GB" if status_text != "OOM" else "N/A",
+                f"{res.get('peak_decode_vram_gb', 0):.2f} GB" if status_text != "OOM" else "N/A",
+                f"{res.get('kv_cache_vram_gb', 0):.3f} GB" if status_text != "OOM" else "N/A",
                 str(res.get("generated_tokens", 0))
             ])
             
@@ -365,8 +379,6 @@ def main():
         f.write("## Generated Responses Side-by-Side\n\n")
         for mode in ["dense", "compressed"]:
             res = results.get(mode, {})
-            if not res:
-                continue
             text = res.get("output_text", "").strip()
             word_count = len(text.split())
             f.write(f"### Mode: `{mode}` ({word_count} words)\n")
