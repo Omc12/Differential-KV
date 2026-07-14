@@ -3,8 +3,7 @@
 
 This script runs comparative prompt evaluations of standard Dense attention against
 various DiffKV (Differential KV) configurations (presets, early rank boost, factual store)
-using Qwen/Qwen2.5-7B-Instruct. It logs VRAM metrics, prefill time, decode tokens per second (TPS),
-and generated quality comparisons.
+using Qwen/Qwen2.5-14B-Instruct in 4-bit weights.
 """
 
 import os
@@ -30,6 +29,9 @@ def patched_merge_settings(self, url, proxies, stream, verify, cert):
     settings['verify'] = False
     return settings
 requests.Session.merge_environment_settings = patched_merge_settings
+
+# Prevent PyTorch VRAM fragmentation OOMs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Ensure active runtime path and C++ compiled library directory are in sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -132,17 +134,13 @@ def analytic_kv_bytes(mgr, seq_len, sid):
     }
 
 def run_worker(config_name, model_id):
-    # Setup environment variables
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
     os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
     
-    if config_name == "dense":
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = "0"
-        is_compressed = False
-    else:
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-        is_compressed = True
-        
+    is_compressed = (config_name != "dense")
+    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
+
+    if is_compressed:
         if config_name == "low_preset":
             os.environ["DIFFKV_PRESET"] = "low"
         elif config_name == "mid_preset":
@@ -160,12 +158,10 @@ def run_worker(config_name, model_id):
             os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
             os.environ["DIFFKV_FACTUAL_STORE"] = "1"
 
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        device = "cuda:0"
-    else:
-        device = "cpu"
 
     if not os.path.exists(PAPER_PATH):
         raise FileNotFoundError(f"Context paper file not found at {PAPER_PATH}")
@@ -174,8 +170,16 @@ def run_worker(config_name, model_id):
         paper_text = f.read()
 
     results = {}
+
+    # Define bitsandbytes 4-bit config to load model weights in 4-bit (Q4)
+    from transformers import BitsAndBytesConfig
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
     
-    # Wrap in torch.inference_mode() to prevent OOM
     with torch.inference_mode():
         for idx, prompt_instructions in enumerate([PROMPT1_TEXT, PROMPT2_TEXT], 1):
             full_prompt = format_prompt(paper_text, prompt_instructions)
@@ -195,7 +199,8 @@ def run_worker(config_name, model_id):
                     model_id=model_id,
                     config=cfg,
                     torch_dtype=torch.float16,
-                    device=device
+                    device=device,
+                    quantization_config=quantization_config
                 )
                 w.ensure_loaded()
                 
@@ -203,11 +208,9 @@ def run_worker(config_name, model_id):
                 ids = tok.encode(full_prompt)
                 prompt_len = len(ids)
                 
-                # Reset peak VRAM for prefill
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
-                # Prefill (chunked) - Use CH = 128
                 sid = f"prompt_{idx}"
                 mgr.clear_session(sid)
                 if not hasattr(w, "_session_token_ids"):
@@ -229,7 +232,6 @@ def run_worker(config_name, model_id):
                 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
                 
-                # Isolate decode VRAM
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
@@ -251,7 +253,6 @@ def run_worker(config_name, model_id):
                 
                 generated_text = tok.decode(gen_ids)
                 
-                # Calculate memory
                 kv = analytic_kv_bytes(mgr, prompt_len, sid)
                 kv_vram = kv.get("store_used_bytes", 0) / 1e9
                 
@@ -264,24 +265,22 @@ def run_worker(config_name, model_id):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             else:
-                # Eager Dense baseline
                 from transformers import AutoTokenizer, AutoModelForCausalLM
                 tok = AutoTokenizer.from_pretrained(model_id)
                 model = AutoModelForCausalLM.from_pretrained(
                     model_id,
-                    torch_dtype=torch.float16,
+                    quantization_config=quantization_config,
+                    device_map="auto",
                     trust_remote_code=True
-                ).to(device)
+                )
                 model.eval()
                 
                 ids = tok.encode(full_prompt)
                 prompt_len = len(ids)
                 
-                # Reset peak VRAM for prefill
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
-                # Prefill (chunked) - Use CH = 128
                 t_prefill_start = time.perf_counter()
                 past_key_values = None
                 CH = 128
@@ -295,7 +294,6 @@ def run_worker(config_name, model_id):
                 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
                 
-                # Isolate decode VRAM
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
@@ -318,7 +316,6 @@ def run_worker(config_name, model_id):
                 
                 generated_text = tok.decode(gen_ids)
                 
-                # Calculate memory
                 L = model.config.num_hidden_layers
                 Hkv = getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
                 d = model.config.hidden_size // model.config.num_attention_heads
@@ -331,6 +328,7 @@ def run_worker(config_name, model_id):
                     torch.cuda.empty_cache()
                     
             results[f"prompt{idx}"] = {
+                "status": "success",
                 "prompt_len": prompt_len,
                 "generated_tokens": len(gen_ids),
                 "prefill_time_s": prefill_time,
@@ -358,16 +356,18 @@ def generate_report(all_results, model_id):
             p_key = f"prompt{p_idx}"
             f.write(f"## Prompt {p_idx} Performance & Resource Comparison\n\n")
             
-            headers = ["Config", "Prefill Time (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Gen Tokens"]
+            headers = ["Config", "Status", "Prefill Time (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Gen Tokens"]
             rows = []
             
             for cfg_name, cfg_res in all_results.items():
-                if cfg_res.get("status") == "failed":
-                    rows.append([cfg_name, "FAILED", "N/A", "N/A", "N/A", "N/A", "N/A"])
-                    continue
+                status_text = cfg_res.get("status", "success").upper()
                 p_res = cfg_res.get(p_key, {})
+                if status_text == "OOM":
+                    rows.append([cfg_name, "OOM (Out of VRAM)", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"])
+                    continue
                 rows.append([
                     cfg_name,
+                    status_text,
                     f"{p_res.get('prefill_time_s', 0):.3f}s",
                     f"{p_res.get('decode_tps', 0):.2f}",
                     f"{p_res.get('peak_prefill_vram_gb', 0):.2f} GB",
@@ -384,8 +384,6 @@ def generate_report(all_results, model_id):
             f.write(f"### Responses to Prompt {p_idx}\n\n")
             
             for cfg_name, cfg_res in all_results.items():
-                if cfg_res.get("status") == "failed":
-                    continue
                 p_res = cfg_res.get(p_key, {})
                 text = p_res.get("output_text", "").strip()
                 word_count = len(text.split())
@@ -403,10 +401,10 @@ def main():
     args = parser.parse_args()
 
     if args.worker:
-        results = run_worker(args.worker, args.model)
+        res = run_worker(args.worker, args.model)
         temp_file = f"temp_res_{args.worker}.json"
         with open(temp_file, "w") as f:
-            json.dump(results, f)
+            json.dump(res, f)
         return
 
     configs = [
@@ -440,8 +438,12 @@ def main():
                 p_res = res.get(p_key, {})
                 print(f"    {p_key} Success: tokens={p_res.get('generated_tokens')}, prefill={p_res.get('prefill_time_s',0):.2f}s, tps={p_res.get('decode_tps',0):.1f}, kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB", flush=True)
         else:
-            print(f"    FAILED: Subprocess for {cfg} exited without writing results file.", flush=True)
-            all_results[cfg] = {"status": "failed", "stderr": "No results temp file written."}
+            print(f"    Subprocess for {cfg} crashed or went Out-Of-Memory (OOM).", flush=True)
+            all_results[cfg] = {
+                "status": "OOM",
+                "prompt1": {"output_text": "ERROR: CUDA OUT OF MEMORY (OOM) - Model footprint too large for GPU VRAM."},
+                "prompt2": {"output_text": "ERROR: CUDA OUT OF MEMORY (OOM) - Model footprint too large for GPU VRAM."}
+            }
 
     # Save raw results
     out_path = os.path.join(REPO, args.out) if not os.path.isabs(args.out) else args.out

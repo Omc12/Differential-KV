@@ -30,6 +30,9 @@ def patched_merge_settings(self, url, proxies, stream, verify, cert):
     return settings
 requests.Session.merge_environment_settings = patched_merge_settings
 
+# Prevent PyTorch VRAM fragmentation OOMs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 # Ensure active runtime path and C++ compiled library directory are in sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
@@ -171,6 +174,10 @@ def run_worker(mode, model_id):
                 ch = ids[cs:cs+CH]
                 out = model(torch.tensor([ch], device=device), torch.tensor([list(range(cs, cs+len(ch)))], device=device))
                 mgr.compress_deferred_prefill_blocks(sid)
+                if cs % 4096 == 0 and cs > 0:
+                    allocated_gb = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                    reserved_gb = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
+                    print(f"    [Prefill Progress] Processed {cs}/{len(ids)} tokens. Allocated VRAM: {allocated_gb:.2f} GB (Reserved: {reserved_gb:.2f} GB)", flush=True)
             logits = out.logits[0, -1].float().cpu().numpy()
             prefill_time = time.perf_counter() - t_prefill_start
 
@@ -250,6 +257,10 @@ def run_worker(mode, model_id):
                 pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
                 out = model(torch.tensor([ch], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
                 past_key_values = out.past_key_values
+                if cs % 4096 == 0 and cs > 0:
+                    allocated_gb = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                    reserved_gb = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
+                    print(f"    [Prefill Progress] Processed {cs}/{len(ids)} tokens. Allocated VRAM: {allocated_gb:.2f} GB (Reserved: {reserved_gb:.2f} GB)", flush=True)
             logits = out.logits[0, -1].float().cpu().numpy()
             prefill_time = time.perf_counter() - t_prefill_start
 
