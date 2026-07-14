@@ -1950,30 +1950,26 @@ class MLXKVBlockManager:
         if session_id not in self.sessions:
             raise ValueError(f"Session {session_id} not found to snapshot.")
         src = self.sessions[session_id]
-        max_b = src.get("max_blocks", self.max_blocks)
-        self._session_checkpoints[checkpoint_id] = {
-            "max_blocks": max_b,
-            "dense_keys": [mx.array(k) for k in src["dense_keys"]],
-            "dense_values": [mx.array(v) for v in src["dense_values"]],
-            "dense_lens": src["dense_lens"].copy(),
-            "dense_lens_mx": [mx.array(dl) for dl in src["dense_lens_mx"]] if "dense_lens_mx" in src else [mx.array(dl, dtype=mx.int32) for dl in src["dense_lens"]],
-            "num_blocks": src["num_blocks"].copy(),
-            "comp_U": [mx.array(u) for u in src["comp_U"]],
-            "comp_VK": [mx.array(vk) for vk in src["comp_VK"]],
-            "comp_VV": [mx.array(vv) for vv in src["comp_VV"]],
-            "comp_anc_k": [mx.array(ak) for ak in src["comp_anc_k"]],
-            "comp_anc_v": [mx.array(av) for av in src["comp_anc_v"]],
-            "comp_min_k": [mx.array(a) for a in src["comp_min_k"]],
-            "comp_max_k": [mx.array(a) for a in src["comp_max_k"]],
-            "comp_scale": [mx.array(s) for s in src["comp_scale"]],
-            "comp_seq_len": [mx.array(sl) for sl in src["comp_seq_len"]],
-            "comp_res_k": [mx.array(rk) for rk in src["comp_res_k"]],
-            "comp_res_v": [mx.array(rv) for rv in src["comp_res_v"]],
-            "comp_res_n": [list(rn) for rn in src["comp_res_n"]],
-            "comp_res_mask": [mx.array(rm) for rm in src["comp_res_mask"]] if "comp_res_mask" in src else [mx.zeros((max_b, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": src["token_ids"].copy() if "token_ids" in src else [],
-            "token_counts": Counter(src["token_ids"]) if "token_ids" in src else Counter()
-        }
+        dst = {}
+        for k, v in src.items():
+            if isinstance(v, list):
+                def _copy_list(lst):
+                    if not isinstance(lst, list):
+                        if isinstance(lst, mx.array):
+                            return mx.array(lst)
+                        return lst
+                    return [_copy_list(x) for x in lst]
+                dst[k] = _copy_list(v)
+            elif isinstance(v, mx.array):
+                dst[k] = mx.array(v)
+            elif isinstance(v, Counter):
+                dst[k] = v.copy()
+            elif isinstance(v, (int, float, str, bool)) or v is None:
+                dst[k] = v
+            else:
+                import copy
+                dst[k] = copy.deepcopy(v)
+        self._session_checkpoints[checkpoint_id] = dst
         if hasattr(self, "patched_model") and self.patched_model is not None:
             if not hasattr(self, "_session_checkpoints_prompt_cache"):
                 self._session_checkpoints_prompt_cache = {}
@@ -1998,31 +1994,27 @@ class MLXKVBlockManager:
     def restore_session(self, session_id: str, checkpoint_id: str):
         if checkpoint_id not in self._session_checkpoints:
             raise ValueError(f"Checkpoint {checkpoint_id} not found.")
-        ckpt = self._session_checkpoints[checkpoint_id]
-        max_b = ckpt.get("max_blocks", self.max_blocks)
-        self.sessions[session_id] = {
-            "max_blocks": max_b,
-            "dense_keys": [mx.array(k) for k in ckpt["dense_keys"]],
-            "dense_values": [mx.array(v) for v in ckpt["dense_values"]],
-            "dense_lens": ckpt["dense_lens"].copy(),
-            "dense_lens_mx": [mx.array(dl) for dl in ckpt["dense_lens_mx"]] if "dense_lens_mx" in ckpt else [mx.array(dl, dtype=mx.int32) for dl in ckpt["dense_lens"]],
-            "num_blocks": ckpt["num_blocks"].copy(),
-            "comp_U": [mx.array(u) for u in ckpt["comp_U"]],
-            "comp_VK": [mx.array(vk) for vk in ckpt["comp_VK"]],
-            "comp_VV": [mx.array(vv) for vv in ckpt["comp_VV"]],
-            "comp_anc_k": [mx.array(ak) for ak in ckpt["comp_anc_k"]],
-            "comp_anc_v": [mx.array(av) for av in ckpt["comp_anc_v"]],
-            "comp_min_k": [mx.array(a) for a in ckpt["comp_min_k"]],
-            "comp_max_k": [mx.array(a) for a in ckpt["comp_max_k"]],
-            "comp_scale": [mx.array(s) for s in ckpt["comp_scale"]],
-            "comp_seq_len": [mx.array(sl) for sl in ckpt["comp_seq_len"]],
-            "comp_res_k": [mx.array(rk) for rk in ckpt["comp_res_k"]],
-            "comp_res_v": [mx.array(rv) for rv in ckpt["comp_res_v"]],
-            "comp_res_n": [list(rn) for rn in ckpt["comp_res_n"]],
-            "comp_res_mask": [mx.array(rm) for rm in ckpt["comp_res_mask"]] if "comp_res_mask" in ckpt else [mx.zeros((max_b, self.block_size - 1), dtype=mx.bool_) for _ in range(self.num_layers)],
-            "token_ids": ckpt["token_ids"].copy() if "token_ids" in ckpt else [],
-            "token_counts": Counter(ckpt["token_ids"]) if "token_ids" in ckpt else Counter()
-        }
+        src = self._session_checkpoints[checkpoint_id]
+        dst = {}
+        for k, v in src.items():
+            if isinstance(v, list):
+                def _copy_list(lst):
+                    if not isinstance(lst, list):
+                        if isinstance(lst, mx.array):
+                            return mx.array(lst)
+                        return lst
+                    return [_copy_list(x) for x in lst]
+                dst[k] = _copy_list(v)
+            elif isinstance(v, mx.array):
+                dst[k] = mx.array(v)
+            elif isinstance(v, Counter):
+                dst[k] = v.copy()
+            elif isinstance(v, (int, float, str, bool)) or v is None:
+                dst[k] = v
+            else:
+                import copy
+                dst[k] = copy.deepcopy(v)
+        self.sessions[session_id] = dst
         if hasattr(self, "patched_model") and self.patched_model is not None:
             if hasattr(self, "_session_checkpoints_prompt_cache") and checkpoint_id in self._session_checkpoints_prompt_cache:
                 from mlx_lm.models.cache import KVCache
