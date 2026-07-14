@@ -199,6 +199,98 @@ _OWNER_STOPWORDS = {
 }
 
 
+def _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
+                              tok_strs, tids, counts, total_tokens):
+    """Relational-edge capture (DIFFKV_BRIDGE_GAP, default 8; 0=disabled).
+
+    **The relationship-fidelity problem:**
+    Content anchors (digits, identifiers, table cells) are correctly captured
+    as exact residuals by the boost system.  The tokens that CONNECT those
+    anchors — relational verbs ("reduces", "prevents", "without"), prepositions
+    ("instead of"), and conjunctions ("which causes") — are all lowercase
+    alphabetic, classified is_prose=True, and fall into the lossy SVD pool.
+    The rank-r reconstruction confuses semantically opposite relations
+    ("reduces" ↔ "increases", "without" ↔ "with") because their key vectors
+    differ only by small low-energy directions that SVD discards.  The decoder
+    then fills the gap with a plausible relationship from its prior.
+
+    **Fix: bridge capture.**
+    For each pair of consecutive boosted segments (after window boost, so
+    the edges are already committed), if the prose gap between them is ≤
+    DIFFKV_BRIDGE_GAP tokens, boost every gap token to:
+        min(left_edge_boost, right_edge_boost) × bridge_scale
+    The bridge scale (DIFFKV_BRIDGE_SCALE, default 0.6) is deliberately < 1.0
+    so gap tokens compete for residual slots *below* the content anchors they
+    connect — they don't displace exact-value rows, they just ensure the
+    relational connective isn't the ONLY token reconstructed by SVD.
+
+    IDF-weights the bridge so structurally rare relational tokens (domain-specific
+    verbs that appear ≤ 3× in the document) get a proportionally stronger push.
+    Returns the number of newly boosted tokens.
+    """
+    if os.environ.get("DIFFKV_BRIDGE_GAP", "8") in ("0", "off", "false"):
+        return 0
+    try:
+        gap_limit = int(os.environ.get("DIFFKV_BRIDGE_GAP", "8"))
+    except ValueError:
+        gap_limit = 8
+    if gap_limit <= 0:
+        return 0
+    try:
+        bridge_scale = float(os.environ.get("DIFFKV_BRIDGE_SCALE", "0.6"))
+    except ValueError:
+        bridge_scale = 0.6
+
+    import math as _math
+
+    # Find positions with a committed boost (from content capture + window).
+    boosted = [boost_multipliers[i] > 1.0 for i in range(S_comp)]
+
+    # Locate contiguous runs of boosted positions ("boosted segments").
+    bsegs = []          # list of (start, end) inclusive for each boosted run
+    in_run = False
+    for i in range(S_comp):
+        if boosted[i]:
+            if not in_run:
+                bsegs.append([i, i])
+                in_run = True
+            else:
+                bsegs[-1][1] = i
+        else:
+            in_run = False
+
+    if len(bsegs) < 2:
+        return 0
+
+    n_bridged = 0
+    for k in range(len(bsegs) - 1):
+        left_end  = bsegs[k][1]
+        right_start = bsegs[k + 1][0]
+        gap = right_start - left_end - 1      # number of prose tokens between them
+        if gap <= 0 or gap > gap_limit:
+            continue
+
+        # Bridge boost = min of the two adjacent edge boosts × scale.
+        left_boost  = boost_multipliers[left_end]
+        right_boost = boost_multipliers[right_start]
+        base_bridge = min(left_boost, right_boost) * bridge_scale
+
+        for i in range(left_end + 1, right_start):
+            if boost_multipliers[i] >= base_bridge:
+                continue          # already captured at higher priority
+            count = counts.get(tids[i], 1) if tids is not None else 1
+            idf = _math.log(max(total_tokens, 2) / (count + 0.1))
+            rarity_weight = max(0.5, min(idf, 4.0))   # gentler cap than content
+            # IDF up-weights rare relational tokens; common stop-words (idf≈1)
+            # get a small nudge; domain verbs (idf≈4) compete meaningfully.
+            bridge_val = base_bridge * (rarity_weight / 2.0)
+            if bridge_val > boost_multipliers[i]:
+                boost_multipliers[i] = bridge_val
+                n_bridged += 1
+
+    return n_bridged
+
+
 def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
                          tids, counts, total_tokens, tok_boost):
     """Relational-locality capture (DIFFKV_RESIDUAL_OWNER_CAPTURE, default ON).
@@ -1376,12 +1468,38 @@ class MLXKVBlockManager:
         self.rank = rank
         self.block_size = block_size
         
+        # ── Dense recency window ───────────────────────────────────────────────
+        # recency_window is the number of EXACT (uncompressed) tokens kept per layer.
+        # It should scale with model capacity, not be a flat constant.
+        #
+        # Formula: round_to_next_512(num_layers * head_dim * dense_window_factor)
+        # For Qwen2.5-1.5B (28 layers, 128 head_dim):
+        #   factor=0.25 → 28*128*0.25 = 896  → 1024  (conservative default)
+        #   factor=0.50 → 28*128*0.50 = 1792 → 2048  (validated sweet spot, set via env)
+        #   factor=0.75 → 28*128*0.75 = 2688 → 3072
+        # For a 7B model (32 layers, 128 head_dim):
+        #   factor=0.25 → 32*128*0.25 = 1024 → 1024
+        # For a 72B model (80 layers, 128 head_dim):
+        #   factor=0.25 → 80*128*0.25 = 2560 → 2560
+        #
+        # DIFFKV_ENGAGE_THRESHOLD hard-overrides (backward compat).
+        # DIFFKV_DENSE_WINDOW_FACTOR overrides the factor only.
+        #
+        # NOTE: Do NOT pair a higher factor with adaptive bias scaling (P4).  At
+        # factor=0.50 the bias formula from the reverted commit over-boosted
+        # compressed blocks (~2.17× multiplier) and caused NIAH regressions near
+        # the recency boundary.  If you raise the factor, keep the bias as-is.
         env_engage = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
         if env_engage is not None:
             try:
                 recency_window = int(env_engage)
             except ValueError:
                 pass
+        else:
+            _factor = float(os.environ.get("DIFFKV_DENSE_WINDOW_FACTOR", "0.25"))
+            _raw = num_layers * head_dim * _factor
+            # Round up to nearest 512 for stable compiled-kernel shapes.
+            recency_window = max(512, (int(_raw) + 511) // 512 * 512)
         self.recency_window = recency_window
         
         # max_blocks: how many SVD-compressed blocks we can hold simultaneously.
@@ -2352,6 +2470,11 @@ class MLXKVBlockManager:
                             for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                                 final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                     boost_multipliers = final_boosts
+                    # Phase 3: Relational bridge — promote tokens in prose gaps
+                    # between committed boosted segments (relational verbs,
+                    # prepositions, conjunctions that encode fact-to-fact edges).
+                    _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
+                                            tok_strs, tids, counts, total_tokens)
                 boost_rows.append(boost_multipliers)
             # b = layer*num_blocks + block  →  tile the per-block rows per layer
             boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
@@ -2916,6 +3039,11 @@ class MLXKVBlockManager:
                         for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                             final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                 boost_multipliers = final_boosts
+                # Phase 3: Relational bridge — promote tokens in prose gaps
+                # between committed boosted segments (relational verbs,
+                # prepositions, conjunctions that encode fact-to-fact edges).
+                _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
+                                         tok_strs, tids, counts, total_tokens)
                 n_boosted_rows = sum(1 for m in boost_multipliers if m > 1.0)
 
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
