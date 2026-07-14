@@ -172,6 +172,7 @@ void KVRuntimeManager::ingest_prefill(
     int chunk_len,
     int position_start,
     const std::vector<int32_t>& token_ids,
+    int engage_threshold,
     SessionSRLState* srl_state
 ) {
     if (position_start == 0) {
@@ -229,6 +230,7 @@ void KVRuntimeManager::ingest_prefill(
             engines_,
             *compressor_,
             r,
+            engage_threshold,
             pager_.get(),
             srl_state
         );
@@ -269,6 +271,7 @@ void KVRuntimeManager::ingest_decode(
     const std::vector<std::vector<float>>& v_layers,
     int current_pos,
     const std::vector<int32_t>& token_ids,
+    int engage_threshold,
     SessionSRLState* srl_state,
     bool defer_device_sync
 ) {
@@ -298,6 +301,7 @@ void KVRuntimeManager::ingest_decode(
             engines_,
             *compressor_,
             r,
+            engage_threshold,
             pager_.get(),
             srl_state
         );

@@ -59,7 +59,20 @@ public:
     // Truncates/rolls back the sequence to target_len.
     void rollback(int target_len, std::vector<std::unique_ptr<NativeBlockPool>>& engines);
 
-    // Ingest a chunk of prefill tokens
+    // Ingest a chunk of prefill tokens.
+    // engage_threshold: the SAME resolved sparse-engage threshold the caller's
+    // own decode-time logic uses (main.cpp's cached_engage_threshold, or
+    // batch_engine.cpp's own local computation). Bug found + fixed 2026-07-14:
+    // this used to read DIFFKV_ENGAGE_THRESHOLD itself with its own independent
+    // hardcoded default (4096), completely disconnected from main.cpp's
+    // decode-time default (8192) — a document between the two defaulted to
+    // DENSE at decode time but still had its blocks silently COMPRESSED during
+    // prefill (bypass_diffkv false here, decode_use_sparse false there), so
+    // "dense decode" was actually attending lossy low-rank reconstructions for
+    // large parts of the context instead of the true exact values. That ~0.001-
+    // level reconstruction noise was enough to flip a hard VSL similarity
+    // threshold (>=0.40f) and produce a completely different generation.
+    // Passing the value explicitly makes the two decisions provably identical.
     void ingest_chunk(
         int layer_idx,
         const float* k_chunk, // [chunk_len * F_test]
@@ -70,6 +83,7 @@ public:
         std::vector<std::unique_ptr<NativeBlockPool>>& engines,
         AsyncCompressor& compressor,
         int rank,
+        int engage_threshold,
         PagedKVStore* pager = nullptr,
         SessionSRLState* srl_state = nullptr
     );

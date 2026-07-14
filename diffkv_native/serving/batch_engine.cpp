@@ -1243,7 +1243,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
         
-        runtime_manager_->ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &session->srl_state);
+        runtime_manager_->ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, engage_threshold, &session->srl_state);
         
         if (pos_start + chunk_len >= L && prefill_logits) {
             ggml_backend_tensor_get(prefill_logits, prefill_output_logits.data(), 0, n_vocab * sizeof(float));
@@ -1832,7 +1832,7 @@ void DiffKVBatchEngine::process_request(const std::shared_ptr<BatchRequest>& req
             }
         }
         
-        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens, &session->srl_state);
+        runtime_manager_->ingest_decode(decode_k, decode_v, current_pos, all_tokens, engage_threshold, &session->srl_state);
 
         {
             int kv_heads = model_->get_config().n_head_kv;

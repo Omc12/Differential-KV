@@ -2441,6 +2441,66 @@ int main(int argc, char ** argv) {
         return !(e && std::string(e) == "0");
     }();
 
+    // ── Sparse engage threshold: computed ONCE here, not per-turn ────────────
+    // Bug found + fixed 2026-07-14: this used to be recomputed fresh inside the
+    // while(true) turn loop, right at the prefill->decode boundary of EVERY
+    // request — i.e. while prefill's GPU work was still draining. The auto path
+    // calls ggml_backend_dev_memory() (a real Metal device query); the explicit-
+    // override path skips it entirely. Traced a reproducible divergence between
+    // the two paths back to this: on an otherwise-identical request, decode
+    // logits differed by only ~0.001 between the two paths (ordinary GPU
+    // parallel-reduction float noise) EXCEPT for one value that differed by
+    // EXACTLY 7.0 — the magnitude of the VSL soft logit mask
+    // (output_logits[i] -= 7.0f). That 0.001-level noise was enough to shift
+    // srl_state.current_step_max_similarity across the hard `>= 0.40f` SFA/VSL
+    // activation threshold, flipping whether an entire logit-masking pass ran —
+    // a knife-edge amplifying a tiny numeric difference into a completely
+    // different generation. Root cause: the Metal device-memory query, issued
+    // right as prefill's GPU work was finishing, perturbed dispatch/scheduling
+    // enough to change floating-point summation order in that window.
+    //
+    // Fix: do this query ONCE, here, before the turn loop even starts (no
+    // prefill/decode GPU work is in flight yet — the model has just finished
+    // loading), and cache the result. Every turn thereafter reuses the cached
+    // value with zero additional Metal calls, so it can no longer interleave
+    // with a request's own GPU dispatch. DIFFKV_ENGAGE_THRESHOLD still overrides
+    // (read once here too — it doesn't change between turns of the same process).
+    int cached_engage_threshold = 0;  // 0 = auto
+    if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
+        cached_engage_threshold = std::stoi(env_et);
+    }
+    if (cached_engage_threshold <= 0) {
+        size_t free_mem = 0, total_mem = 0;
+        ggml_backend_dev_t bdev = ggml_backend_get_device(backend);
+        if (bdev) ggml_backend_dev_memory(bdev, &free_mem, &total_mem);
+
+        const size_t bytes_per_token = (size_t)head_dim * kv_heads * (size_t)n_layers * 2 /* K+V */ * sizeof(ggml_fp16_t);
+
+        const char* env_frac = std::getenv("DIFFKV_KV_MEM_FRAC");
+        double kv_budget_frac = env_frac ? std::stod(env_frac) : 0.50;
+        const size_t kv_budget = static_cast<size_t>(free_mem * kv_budget_frac);
+        const int auto_thresh = (bytes_per_token > 0 && kv_budget > 0)
+            ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
+            : 65536;
+
+        // Default engage point ~8k (matching MLX's DIFFKV_COMPRESSED_MIN_CTX=8192
+        // serving default). auto_thresh (the memory budget) stays as the UPPER
+        // cap so a tight device still engages earlier to avoid OOM.
+        //
+        // IMPORTANT: dense_cap_engage (~line 2345, sizes DENSE_WINDOW_CAP) must
+        // stay >= this constant. It has its own env-var read because it runs
+        // before this Metal device query is available, but its DEFAULT (used
+        // whenever DIFFKV_ENGAGE_THRESHOLD is unset — i.e. every auto-resolved
+        // dense decode) must cover whatever this auto-path can produce, or the
+        // dense window buffer truncates mid-context. Keep both literals in sync.
+        const int kDefaultEngage = 8192;
+        cached_engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
+        std::cerr << "[DiffKV] auto engage_threshold=" << cached_engage_threshold
+                  << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
+                  << "; free_mem=" << free_mem / (1 << 20) << "MB"
+                  << ", bytes_per_tok=" << bytes_per_token
+                  << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
+    }
 
     ggml_backend_buffer_t native_decode_buf = nullptr;
     while (true) {
@@ -2697,78 +2757,12 @@ int main(int argc, char ** argv) {
         // flash_attn_ext (dense path) is fast and correct for any context that fits
         // in GPU memory. ggml_diffkv_attn (sparse path) enables 1M+ contexts by
         // compressing KV, but its custom Metal kernel is ~8x slower per token.
-        //
-        // AUTO-THRESHOLD: query Metal free memory and derive the maximum context
-        // length whose dense KV fits within a configurable fraction of that budget.
-        //
-        //   dense_kv_bytes(ctx) = ctx × F_kv × n_layers × 2 (K+V) × 2 (F16)
-        //                       = ctx × 128 × 28 × 4  (for Qwen2.5-1.5B)
-        //   threshold = floor(kv_budget / bytes_per_token)
-        //
-        // Default budget fraction: 0.5 (use half of free GPU memory for dense KV,
-        // leaving the other half for weights, activations, and OS headroom).
-        // Override the entire threshold with DIFFKV_ENGAGE_THRESHOLD (tokens).
-        int engage_threshold = 0;  // 0 = auto
-        if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
-            engage_threshold = std::stoi(env_et);
-        }
-        if (engage_threshold <= 0) {
-            // Query available Metal memory
-            size_t free_mem = 0, total_mem = 0;
-            ggml_backend_dev_t bdev = ggml_backend_get_device(backend);
-            if (bdev) ggml_backend_dev_memory(bdev, &free_mem, &total_mem);
-
-            // bytes per decode-context token in the dense KV window (F16, both sides)
-            const size_t bytes_per_token = (size_t)head_dim * kv_heads * (size_t)n_layers * 2 /* K+V */ * sizeof(ggml_fp16_t);
-
-            // Budget fraction of free memory (default 50%); tune with DIFFKV_KV_MEM_FRAC
-            const char* env_frac = std::getenv("DIFFKV_KV_MEM_FRAC");
-            double kv_budget_frac = env_frac ? std::stod(env_frac) : 0.50;
-            const size_t kv_budget = static_cast<size_t>(free_mem * kv_budget_frac);
-            const int auto_thresh = (bytes_per_token > 0 && kv_budget > 0)
-                ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
-                : 65536;
-
-            // Default engage point ~8k (matching MLX's DIFFKV_COMPRESSED_MIN_CTX=8192
-            // serving default). auto_thresh (the memory budget) stays as the UPPER
-            // cap so a tight device still engages earlier to avoid OOM.
-            //
-            // History (2026-07-13): 8k was tried and reverted twice on real papers —
-            // first hit a genuine seam bug (exact-recency window landing mid-block,
-            // double-counting the straddling block's tail as both exact fp16 AND
-            // lossy reconstructed; fixed by block-aligning dense_start, below). Then,
-            // even with that fixed, a table/number-heavy paper still lost the
-            // document entirely under sparse (wrote about an unrelated trailing
-            // excerpt instead) — traced to route_decode_slots (kv_runtime_manager.cpp)
-            // having NO semantic/embedding channel at all, only positional recency +
-            // literal token-overlap. That channel is now added (semantic proxy-query,
-            // seeded from the prompt's own tail so the FIRST retrieval isn't blind) —
-            // mirrors what MLX's decode router already does every step (direct
-            // Q.anchor_K relevance, no lexical gate). Verified: real-paper garbled
-            // output -> coherent; a repeatable digit-loop-at-7tps case -> clean at
-            // 29-43 tps; NIAH 6/6 (4/8/16k x depth 0.5/0.9), multi-fact 3/3, tps
-            // unchanged. Known remaining gap (shared with MLX, confirmed by testing
-            // MLX the same way): neither engine reproduces an injected table
-            // VERBATIM even when it stays on-topic — a harder capability limit, not
-            // something this threshold change claims to fix.
-            //
-            // DIFFKV_ENGAGE_THRESHOLD overrides (raise it to prefer dense throughput
-            // at 8-16k, where dense is still marginally faster).
-            //
-            // IMPORTANT: dense_cap_engage (~line 2345, sizes DENSE_WINDOW_CAP) must
-            // stay >= this constant. It has its own env-var read because it runs
-            // before this Metal device query is available, but its DEFAULT (used
-            // whenever DIFFKV_ENGAGE_THRESHOLD is unset — i.e. every auto-resolved
-            // dense decode) must cover whatever this auto-path can produce, or the
-            // dense window buffer truncates mid-context. Keep both literals in sync.
-            const int kDefaultEngage = 8192;
-            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
-            std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
-                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
-                      << ", bytes_per_tok=" << bytes_per_token
-                      << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
-        }
+        // Resolved ONCE, before the turn loop (see above) — reused here so no
+        // Metal device query ever runs while a request's own GPU work is in
+        // flight (that interleaving was the root cause of a real, reproducible
+        // divergence between the auto and explicit-override paths; see the
+        // comment at the computation site above the turn loop).
+        int engage_threshold = cached_engage_threshold;
         bool decode_use_sparse = (L >= engage_threshold);
 
         // ── sparse_dense_cap: dense window size for the SPARSE path ──────────────
@@ -3824,13 +3818,13 @@ int main(int argc, char ** argv) {
             // Ingest chunk into KV manager (raw K + raw V, matching ACTIVE_RUNTIME ingest_streaming)
             if (ingest_async) {
                 prefill_ingest_thread = std::thread(
-                    [&runtime_manager, chunk_k = std::move(chunk_k), chunk_v = std::move(chunk_v), chunk_len, pos_start, prompt_tokens, &srl_state]() {
-                        runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+                    [&runtime_manager, chunk_k = std::move(chunk_k), chunk_v = std::move(chunk_v), chunk_len, pos_start, prompt_tokens, cached_engage_threshold, &srl_state]() {
+                        runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, cached_engage_threshold, &srl_state);
                     }
                 );
                 prefill_ingest_thread_active = true;
             } else {
-                runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, &srl_state);
+                runtime_manager.ingest_prefill(chunk_k, chunk_v, chunk_len, pos_start, prompt_tokens, cached_engage_threshold, &srl_state);
             }
             tp_ingest += std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now() - tp_cap1).count();
             tp_chunks++;
@@ -5752,8 +5746,8 @@ int main(int argc, char ** argv) {
                           << " FLASH_ATTN=" << nflash << "\n";
             }}
             if (has_prev_svd) {
-                svd_thread = std::thread([&runtime_manager, prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state]() {
-                    runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state, true);
+                svd_thread = std::thread([&runtime_manager, prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, cached_engage_threshold, &srl_state]() {
+                    runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, cached_engage_threshold, &srl_state, true);
                 });
                 svd_thread_active = true;
             }
@@ -7519,7 +7513,7 @@ int main(int argc, char ** argv) {
         }
         // Run SVD for the final token synchronously
         if (has_prev_svd) {
-            runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, &srl_state);
+            runtime_manager.ingest_decode(prev_decode_k, prev_decode_v, prev_pos, prev_all_tokens, cached_engage_threshold, &srl_state);
         }
 
         if (profile_steps > 0 && std::getenv("DIFFKV_PROFILE") && std::string(std::getenv("DIFFKV_PROFILE")) == "1") {

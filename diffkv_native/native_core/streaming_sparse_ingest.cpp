@@ -404,6 +404,7 @@ void StreamingSparseIngestManager::ingest_chunk(
     std::vector<std::unique_ptr<NativeBlockPool>>& engines,
     AsyncCompressor& compressor,
     int rank,
+    int engage_threshold,
     PagedKVStore* pager,
     SessionSRLState* srl_state
 ) {
@@ -497,17 +498,19 @@ void StreamingSparseIngestManager::ingest_chunk(
         }
     }
 
-    // RECONSTRUCTION FIX (F13): this MUST match the decode-side engage_threshold
-    // (main.cpp uses 2048 for the same DIFFKV_ENGAGE_THRESHOLD env var). Previously
-    // this defaulted to 4096 while decode defaulted to 2048 — so prompts in [2048,4096)
-    // switched to the SPARSE decode path (L>=2048) but had ZERO compressed blocks
-    // (bypass kept everything dense), causing ~4x dense-KV RAM vs ACTIVE_RUNTIME AND
-    // sparse routing over an empty pool. ACTIVE_RUNTIME has no such global bypass — it
-    // compresses blocks during prefill regardless of total length.
-    int engage_threshold = 4096;
-    if (const char* env_et = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
-        engage_threshold = std::stoi(env_et);
-    }
+    // RECONSTRUCTION FIX (F13, then F13-b 2026-07-14): this MUST match the
+    // decode-side engage_threshold exactly, or a document lands in DENSE mode
+    // at decode time while still having blocks silently COMPRESSED during
+    // prefill (or vice versa) — "dense decode" then actually attends lossy
+    // low-rank reconstructions for large parts of the context instead of the
+    // true exact values, a ~0.001-level numeric difference that can flip a
+    // hard downstream threshold (e.g. VSL similarity >= 0.40f) into a
+    // completely different generation. F13 tried to keep this in sync by
+    // independently re-reading DIFFKV_ENGAGE_THRESHOLD here with a hardcoded
+    // default matching main.cpp's AT THE TIME — which drifted again the next
+    // time main.cpp's default changed (2048 -> 4096 -> 8192), because nothing
+    // enforced the two copies staying equal. Fixed for good by taking the
+    // caller's ALREADY-RESOLVED value as a parameter instead of re-deriving it.
     bool bypass_diffkv = ((int)token_ids.size() < engage_threshold);
 
     size_t scan_start = last_compression_scan_idx_[layer_idx];

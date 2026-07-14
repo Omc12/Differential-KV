@@ -38,22 +38,29 @@ public:
     void reset();
     void register_prefill_tokens(const std::vector<int32_t>& token_ids);
 
-    // Ingest a chunk of prefill tokens for all layers
+    // Ingest a chunk of prefill tokens for all layers.
+    // engage_threshold: the caller's OWN already-resolved sparse-engage
+    // threshold — must be the exact value driving that caller's decode-time
+    // decode_use_sparse decision. See streaming_sparse_ingest.hpp's ingest_chunk
+    // for why this can no longer be independently re-derived here.
     void ingest_prefill(
         const std::vector<std::vector<float>>& k_layers, // [n_layers][chunk_len * F_test]
         const std::vector<std::vector<float>>& v_layers, // [n_layers][chunk_len * F_test]
         int chunk_len,
         int position_start,
         const std::vector<int32_t>& token_ids,
+        int engage_threshold,
         SessionSRLState* srl_state = nullptr
     );
 
-    // Ingest a single decode token's key/value for all layers
+    // Ingest a single decode token's key/value for all layers.
+    // engage_threshold: same requirement as ingest_prefill above.
     void ingest_decode(
         const std::vector<std::vector<float>>& k_layers, // [n_layers][F_test]
         const std::vector<std::vector<float>>& v_layers, // [n_layers][F_test]
         int current_pos,
         const std::vector<int32_t>& token_ids,
+        int engage_threshold,
         SessionSRLState* srl_state = nullptr,
         bool defer_device_sync = false
     );
