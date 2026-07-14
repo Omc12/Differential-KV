@@ -2342,7 +2342,19 @@ int main(int argc, char ** argv) {
     // per-append guards (`offset + F_test <= active_k_dense[l].size()`) already
     // prevent overflow, so this only trims unused RAM. MLX keeps no such fp32 host
     // copy at all (KV lives fp16 in unified memory).
-    int dense_cap_engage = 4096;  // DIFFKV_ENGAGE_THRESHOLD default
+    // Default must match kDefaultEngage (the auto engage_threshold's upper bound,
+    // set below) — NOT the old hardcoded 4096. Bug found 2026-07-13: when the auto
+    // threshold was lowered from a ~75k memory gate to ~8k, this buffer's
+    // independent, stale 4096 default stayed put. A prompt landing in [4096, 8192)
+    // then resolved to DENSE mode (auto engage_threshold=8192 > L) while this
+    // buffer was sized for only 4096 + max_generate + slack — silently truncating
+    // the dense window mid-context on the unset (auto) path specifically (an
+    // explicit DIFFKV_ENGAGE_THRESHOLD=8192 was unaffected, since the env-var
+    // branch below already reads the same value). Symptom: a 3-fact synthesis
+    // prompt at ~8k tokens lost all 3 facts under the new default but recovered
+    // instantly forcing either dense (huge threshold) or the identical 8192 via
+    // explicit env — the smoking gun that it was buffer sizing, not routing.
+    int dense_cap_engage = 8192;  // matches kDefaultEngage below
     if (const char* e = std::getenv("DIFFKV_ENGAGE_THRESHOLD")) {
         try { dense_cap_engage = std::max(dense_cap_engage, std::stoi(e)); } catch (...) {}
     }
@@ -2717,33 +2729,43 @@ int main(int argc, char ** argv) {
                 ? static_cast<int>(std::min<size_t>(kv_budget / bytes_per_token, 1 << 20))
                 : 65536;
 
-            // Sparse engages only when dense KV would exhaust the memory budget —
-            // a memory-reach gate, NOT a speed gate. Dense stays the default for the
-            // common paste range because native sparse decode still degrades on
-            // faithful DOCUMENT REPRODUCTION of dense technical papers.
+            // Default engage point ~8k (matching MLX's DIFFKV_COMPRESSED_MIN_CTX=8192
+            // serving default). auto_thresh (the memory budget) stays as the UPPER
+            // cap so a tight device still engages earlier to avoid OOM.
             //
-            // Two ~8k attempts were made + reverted (2026-07-13). The first degraded
-            // into sentence/"2 2 2" loops; that was traced to a real bug — the sparse
-            // exact-recency window START landing mid-block, so the straddling block's
-            // tail was attended twice (exact fp16 + lossy reconstructed). That IS
-            // fixed (dense_start is block-aligned below; prose papers — random_features
-            // /berry — then reproduce cleanly, NIAH 6/6). But a table/number-heavy
-            // paper (NAT) STILL degrades into numeric loops ("100 % 121 % 100 % 121 %")
-            // in sparse — the low-rank reconstruction of tabular content is too lossy
-            // for verbatim reproduction, and attend-all HQ fails the same way (so it is
-            // reconstruction fidelity, not routing). Dense attends exact fp16 and does
-            // not have this. Since we can't tell "reproduce this paper" from "answer a
-            // question about it" up front, and reproduction is the failure mode users
-            // actually hit on a paste, the safe default is dense until memory forces
-            // sparse. Retrieval (NIAH/multi-fact) survives sparse fine.
+            // History (2026-07-13): 8k was tried and reverted twice on real papers —
+            // first hit a genuine seam bug (exact-recency window landing mid-block,
+            // double-counting the straddling block's tail as both exact fp16 AND
+            // lossy reconstructed; fixed by block-aligning dense_start, below). Then,
+            // even with that fixed, a table/number-heavy paper still lost the
+            // document entirely under sparse (wrote about an unrelated trailing
+            // excerpt instead) — traced to route_decode_slots (kv_runtime_manager.cpp)
+            // having NO semantic/embedding channel at all, only positional recency +
+            // literal token-overlap. That channel is now added (semantic proxy-query,
+            // seeded from the prompt's own tail so the FIRST retrieval isn't blind) —
+            // mirrors what MLX's decode router already does every step (direct
+            // Q.anchor_K relevance, no lexical gate). Verified: real-paper garbled
+            // output -> coherent; a repeatable digit-loop-at-7tps case -> clean at
+            // 29-43 tps; NIAH 6/6 (4/8/16k x depth 0.5/0.9), multi-fact 3/3, tps
+            // unchanged. Known remaining gap (shared with MLX, confirmed by testing
+            // MLX the same way): neither engine reproduces an injected table
+            // VERBATIM even when it stays on-topic — a harder capability limit, not
+            // something this threshold change claims to fix.
             //
-            // Opt into early sparse (>32k throughput / memory reach, accepting the
-            // reproduction-fidelity caveat) with DIFFKV_ENGAGE_THRESHOLD=8192. The
-            // block-alignment fix + short-period loop catch below help whenever sparse
-            // does run.
-            engage_threshold = std::max(4096, auto_thresh);
+            // DIFFKV_ENGAGE_THRESHOLD overrides (raise it to prefer dense throughput
+            // at 8-16k, where dense is still marginally faster).
+            //
+            // IMPORTANT: dense_cap_engage (~line 2345, sizes DENSE_WINDOW_CAP) must
+            // stay >= this constant. It has its own env-var read because it runs
+            // before this Metal device query is available, but its DEFAULT (used
+            // whenever DIFFKV_ENGAGE_THRESHOLD is unset — i.e. every auto-resolved
+            // dense decode) must cover whatever this auto-path can produce, or the
+            // dense window buffer truncates mid-context. Keep both literals in sync.
+            const int kDefaultEngage = 8192;
+            engage_threshold = std::min(kDefaultEngage, std::max(4096, auto_thresh));
             std::cerr << "[DiffKV] auto engage_threshold=" << engage_threshold
-                      << " (mem-gate; free_mem=" << free_mem / (1 << 20) << "MB"
+                      << " (default ~8k, mem-cap=" << std::max(4096, auto_thresh)
+                      << "; free_mem=" << free_mem / (1 << 20) << "MB"
                       << ", bytes_per_tok=" << bytes_per_token
                       << ", budget=" << kv_budget / (1 << 20) << "MB)" << std::endl;
         }
