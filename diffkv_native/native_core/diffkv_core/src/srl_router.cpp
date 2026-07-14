@@ -172,6 +172,79 @@ void anchor_screen(
     std::vector<float> scores(M_unique, 0.0f);
     cblas_sgemv(CblasRowMajor, CblasNoTrans, M_unique, D, scale, anc_flat.data(), D, q_mean.data(), 1, 0.0f, scores.data(), 1);
 
+    // 3b. Edge-aware routing propagation
+    static const bool er_on = []() {
+        const char* e = std::getenv("DIFFKV_EDGE_ROUTING");
+        return !(e && (std::string(e) == "0" || std::string(e) == "OFF" || std::string(e) == "false"));
+    }();
+    if (er_on && M_unique >= 3) {
+        static const float er_beta = []() {
+            const char* e = std::getenv("DIFFKV_EDGE_ROUTE_BETA");
+            return e ? std::stof(e) : 0.25f;
+        }();
+        static const int er_maxnb = []() {
+            const char* e = std::getenv("DIFFKV_EDGE_ROUTE_MAXNB");
+            return e ? std::stoi(e) : 512;
+        }();
+
+        if (M_unique <= er_maxnb) {
+            int feat_dim = kv_heads * D;
+            std::vector<float> akn(M_unique * feat_dim, 0.0f);
+            for (int m = 0; m < M_unique; ++m) {
+                int slot_id = unique_candidates[m];
+                int base = slot_id * feat_dim;
+                float norm = 0.0f;
+                for (int i = 0; i < feat_dim; ++i) {
+                    float val = anchors_K[base + i];
+                    akn[m * feat_dim + i] = val;
+                    norm += val * val;
+                }
+                norm = std::sqrt(norm);
+                if (norm < 1e-8f) norm = 1e-8f;
+                float inv_norm = 1.0f / norm;
+                for (int i = 0; i < feat_dim; ++i) {
+                    akn[m * feat_dim + i] *= inv_norm;
+                }
+            }
+
+            // Compute cosine adjacency matrix A: [M_unique, M_unique]
+            // and row-normalize it on the fly
+            std::vector<float> A(M_unique * M_unique, 0.0f);
+            for (int i = 0; i < M_unique; ++i) {
+                float row_sum = 0.0f;
+                for (int j = 0; j < M_unique; ++j) {
+                    if (i == j) continue;
+                    float dot = 0.0f;
+                    for (int d = 0; d < feat_dim; ++d) {
+                        dot += akn[i * feat_dim + d] * akn[j * feat_dim + d];
+                    }
+                    float val = std::max(dot, 0.0f);
+                    A[i * M_unique + j] = val;
+                    row_sum += val;
+                }
+                float inv_row_sum = 1.0f / (row_sum + 1e-6f);
+                for (int j = 0; j < M_unique; ++j) {
+                    if (i == j) continue;
+                    A[i * M_unique + j] *= inv_row_sum;
+                }
+            }
+
+            // Propagate relevance
+            std::vector<float> prop(M_unique, 0.0f);
+            for (int i = 0; i < M_unique; ++i) {
+                for (int j = 0; j < M_unique; ++j) {
+                    if (i == j) continue;
+                    prop[i] += A[i * M_unique + j] * scores[j];
+                }
+            }
+
+            // Update relevance scores
+            for (int i = 0; i < M_unique; ++i) {
+                scores[i] += er_beta * prop[i];
+            }
+        }
+    }
+
     // 4. Top-k sorting
     int k_clamped = std::min(k_keep, M_unique);
     std::vector<int32_t> idx(M_unique);

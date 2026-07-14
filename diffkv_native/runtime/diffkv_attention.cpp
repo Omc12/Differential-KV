@@ -951,6 +951,79 @@ void custom_attention_op_callback(
             relevance[k] = max_blk_score;
         }
 
+        // ── Edge-aware routing propagation (native C++ CPU router) ────
+        static const bool er_on = []() {
+            const char* e = std::getenv("DIFFKV_EDGE_ROUTING");
+            return !(e && (std::string(e) == "0" || std::string(e) == "OFF" || std::string(e) == "false"));
+        }();
+        if (er_on && actual_K >= 3) {
+            static const float er_beta = []() {
+                const char* e = std::getenv("DIFFKV_EDGE_ROUTE_BETA");
+                return e ? std::stof(e) : 0.25f;
+            }();
+            static const int er_maxnb = []() {
+                const char* e = std::getenv("DIFFKV_EDGE_ROUTE_MAXNB");
+                return e ? std::stoi(e) : 512;
+            }();
+
+            if (actual_K <= er_maxnb) {
+                int feat_dim = n_kv_heads * D;
+                std::vector<float> akn(actual_K * feat_dim, 0.0f);
+                for (int k = 0; k < actual_K; ++k) {
+                    int s = slot_indices_cpu[k];
+                    const ggml_fp16_t* slot_anchors_K = pool->get_host_anchors_K(s);
+                    float norm = 0.0f;
+                    for (int i = 0; i < feat_dim; ++i) {
+                        float val = slot_anchors_K ? ggml_fp16_to_fp32(slot_anchors_K[i]) : 0.0f;
+                        akn[k * feat_dim + i] = val;
+                        norm += val * val;
+                    }
+                    norm = std::sqrt(norm);
+                    if (norm < 1e-8f) norm = 1e-8f;
+                    float inv_norm = 1.0f / norm;
+                    for (int i = 0; i < feat_dim; ++i) {
+                        akn[k * feat_dim + i] *= inv_norm;
+                    }
+                }
+
+                // Compute cosine adjacency matrix A: [actual_K, actual_K]
+                // and row-normalize it on the fly
+                std::vector<float> A(actual_K * actual_K, 0.0f);
+                for (int i = 0; i < actual_K; ++i) {
+                    float row_sum = 0.0f;
+                    for (int j = 0; j < actual_K; ++j) {
+                        if (i == j) continue;
+                        float dot = 0.0f;
+                        for (int d = 0; d < feat_dim; ++d) {
+                            dot += akn[i * feat_dim + d] * akn[j * feat_dim + d];
+                        }
+                        float val = std::max(dot, 0.0f);
+                        A[i * actual_K + j] = val;
+                        row_sum += val;
+                    }
+                    float inv_row_sum = 1.0f / (row_sum + 1e-6f);
+                    for (int j = 0; j < actual_K; ++j) {
+                        if (i == j) continue;
+                        A[i * actual_K + j] *= inv_row_sum;
+                    }
+                }
+
+                // Propagate relevance
+                std::vector<float> prop(actual_K, 0.0f);
+                for (int i = 0; i < actual_K; ++i) {
+                    for (int j = 0; j < actual_K; ++j) {
+                        if (i == j) continue;
+                        prop[i] += A[i * actual_K + j] * relevance[j];
+                    }
+                }
+
+                // Update relevance
+                for (int i = 0; i < actual_K; ++i) {
+                    relevance[i] += er_beta * prop[i];
+                }
+            }
+        }
+
         std::vector<int> idx(actual_K);
         for (int i = 0; i < actual_K; ++i) idx[i] = i;
         std::sort(idx.begin(), idx.end(), [&](int a, int b) { return relevance[a] > relevance[b]; });

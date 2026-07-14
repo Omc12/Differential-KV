@@ -712,6 +712,7 @@ class PyTorchDiffKVHFWrapper:
         temperature: float = 0.7,
         top_p: float = 0.9,
         repetition_penalty: float = 1.15,
+        query_text: Optional[str] = None,
     ):
         session_id = self.active_session or "default"
         
@@ -861,9 +862,65 @@ class PyTorchDiffKVHFWrapper:
         max_total_len = cur_pos + max_new_tokens + 10
         pos_cache = torch.arange(max_total_len, dtype=torch.long, device=self.device)
 
+        # ── Context-Aware Decoding (CAD) setup — PyTorch/CUDA port ──────────────
+        # Mirrors mlx_diffkv_wrapper.generate: contrast full-context logits against
+        # a PRIOR-only stream (question, no document) to pull the decoder off its
+        # pretrained prior onto the document's relation:
+        #     logits ← (1+α)·logits_full − α·logits_prior
+        # The prior runs as its own short DiffKV session (own past_kv), advanced by
+        # plain eager forward (device-agnostic — no CUDA/MPS graph capture needed).
+        # Gated by DIFFKV_CAD_ALPHA (0 = off); DIFFKV_CAD_MAX_STEPS caps it to the
+        # first N tokens. Runs identically on CUDA / MPS / CPU.
+        try:
+            _cad_alpha = float(os.environ.get("DIFFKV_CAD_ALPHA", "0"))
+        except ValueError:
+            _cad_alpha = 0.0
+        try:
+            _cad_max_steps = int(os.environ.get("DIFFKV_CAD_MAX_STEPS", "0"))
+        except ValueError:
+            _cad_max_steps = 0
+        _cad_on = _cad_alpha > 0.0 and bool(query_text)
+        _cad_prior_logits = None
+        _cad_sid = None
+        _cad_past = None
+        _cad_pos = 0
+        _cad_step = 0
+        if _cad_on:
+            try:
+                _pri_text = self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": query_text}],
+                    tokenize=False, add_generation_prompt=True)
+                _pri_ids = self.tokenizer(_pri_text, return_tensors="pt").input_ids.to(self.device)
+            except Exception:
+                _pri_ids = self.tokenizer(query_text, return_tensors="pt").input_ids.to(self.device)
+            _cad_sid = session_id + "::cadprior"
+            try:
+                self.manager.clear_session(_cad_sid)
+                self.manager.init_session(_cad_sid, prefill_len=_pri_ids.shape[1])
+                if hasattr(self.manager, "register_prefill_tokens"):
+                    self.manager.register_prefill_tokens(_cad_sid, _pri_ids[0].detach().cpu())
+                self.model._diffkv_session_ids = [_cad_sid]
+                _pp = torch.arange(_pri_ids.shape[1], dtype=torch.long, device=self.device).unsqueeze(0)
+                with torch.no_grad():
+                    _po = self.model(input_ids=_pri_ids, position_ids=_pp, use_cache=True)
+                _cad_prior_logits = _po.logits[:, -1, :]
+                _cad_past = _po.past_key_values
+                _cad_pos = _pri_ids.shape[1]
+                if hasattr(self.manager, "compress_deferred_prefill_blocks"):
+                    self.manager.compress_deferred_prefill_blocks(_cad_sid)
+            except Exception as _e:
+                print(f"[DiffKV HF CAD] disabled (prior prefill failed: {_e})")
+                _cad_on = False
+            finally:
+                self.model._diffkv_session_ids = [session_id]
+
         sfa_active = False
 
         for _ in range(max_new_tokens):
+            # Context-Aware Decoding: extrapolate away from the prior-only stream
+            # BEFORE rep-penalty / factual bias / sampling.
+            if _cad_on and _cad_prior_logits is not None:
+                logits = (1.0 + _cad_alpha) * logits - _cad_alpha * _cad_prior_logits
             # ── Repetition-loop detection (mirrors batch_engine.py / mlx_diffkv_wrapper.py Fix 2) ──────
             # Detect tight token-level loops every 10 new tokens.
             # On detection, widen the penalty window and boost the strength.
@@ -1228,6 +1285,39 @@ class PyTorchDiffKVHFWrapper:
             logits = outputs.logits[:, -1, :]
             past_kv = outputs.past_key_values
             cur_pos += 1
+
+            # Advance the CAD prior stream by the SAME token (plain eager forward,
+            # device-agnostic), refreshing its logits for the next combine. Stop
+            # once the step cap is hit and decode the rest at full tps.
+            if _cad_on:
+                _cad_step += 1
+                if _cad_max_steps > 0 and _cad_step >= _cad_max_steps:
+                    _cad_on = False
+                    if _cad_sid is not None:
+                        try:
+                            self.manager.clear_session(_cad_sid)
+                        except Exception:
+                            pass
+                        _cad_sid = None
+                else:
+                    try:
+                        self.model._diffkv_session_ids = [_cad_sid]
+                        _pp = torch.tensor([[_cad_pos]], dtype=torch.long, device=self.device)
+                        with torch.no_grad():
+                            _po = self.model(input_ids=input_ids, position_ids=_pp,
+                                             past_key_values=_cad_past, use_cache=True)
+                        _cad_prior_logits = _po.logits[:, -1, :]
+                        _cad_past = _po.past_key_values
+                        _cad_pos += 1
+                    finally:
+                        self.model._diffkv_session_ids = [session_id]
+
+        # Release the CAD prior stream session.
+        if _cad_sid is not None:
+            try:
+                self.manager.clear_session(_cad_sid)
+            except Exception:
+                pass
 
         # Store the generated tokens to the session token cache
         self._session_token_ids[session_id] = generated

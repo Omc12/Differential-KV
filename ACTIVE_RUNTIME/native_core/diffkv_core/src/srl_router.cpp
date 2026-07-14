@@ -99,6 +99,38 @@ torch::Tensor anchor_screen(
     // On MPS, mm requires contiguous 2D tensors (satisfied by mean output)
     auto scores = torch::mv(anc_flat, q_mean) * scale;  // [M]
 
+    // ── Step 3b: Edge-aware routing propagation ──────────────────────────────
+    static const bool er_on = []() {
+        const char* e = std::getenv("DIFFKV_EDGE_ROUTING");
+        return !(e && (std::string(e) == "0" || std::string(e) == "OFF" || std::string(e) == "false"));
+    }();
+    if (er_on && M >= 3) {
+        static const float er_beta = []() {
+            const char* e = std::getenv("DIFFKV_EDGE_ROUTE_BETA");
+            return e ? std::stof(e) : 0.25f;
+        }();
+        static const int er_maxnb = []() {
+            const char* e = std::getenv("DIFFKV_EDGE_ROUTE_MAXNB");
+            return e ? std::stoi(e) : 512;
+        }();
+
+        if (M <= er_maxnb) {
+            // Flatten anchor keys: [M, kv_heads, D] -> [M, kv_heads * D]
+            auto akf = anc_K.reshape({M, -1});
+            // Normalize row-wise to get unit vector signatures
+            auto akn = akf / (akf.norm(2, -1, true) + 1e-6f);
+            // Cosine similarity: [M, M]
+            auto A = torch::mm(akn, akn.t());
+            // Remove self-loops and keep positive connections only
+            A = torch::clamp(A - torch::eye(M, A.options()), 0.0);
+            // Row-normalize the adjacency matrix
+            A = A / (A.sum(-1, true) + 1e-6f);
+            // Diffuse: relevance <- relevance + beta * (A @ relevance)
+            auto prop = torch::mv(A, scores);
+            scores = scores + er_beta * prop;
+        }
+    }
+
     // ── Step 4: Top-k by anchor score ────────────────────────────────────────
     int k_clamped = std::min(k_keep, M);
     auto [top_vals, top_idx] = scores.topk(k_clamped, 0, true, true);

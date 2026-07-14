@@ -274,180 +274,100 @@ def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
     return n_boosted
 
 
-# ── Relational EDGE vocabulary ────────────────────────────────────────────────
-# The closed-class connectives that carry an EDGE between two concepts and whose
-# meaning FLIPS under low-rank smear. Owner/content/table capture pin the NODES
-# (entities, values, cells); these tokens are the EDGES the SVD pool otherwise
-# reconstructs into a nearby-but-wrong relation ("reduces"→"increases",
-# "without"→"with", "approaches … as … grows"→"larger receptive field").
-#
-# STRONG tier = negation + limiting/asymptotic + equivalence/identity. These are
-# the hardest meaning-flippers and are RARE in filler prose, so they are captured
-# even in a pure-prose block with no other captured node (tightly capped). WEAK
-# tier = causal/conditional/logical connectives, which are common everywhere, so
-# they are captured ONLY when they sit next to already-captured content (else a
-# paragraph of filler would spend its whole residual budget on "as"/"so"/"if").
-_EDGE_STRONG = frozenset({
-    # negation / exclusion
-    "not", "no", "without", "never", "cannot", "nor", "neither", "none", "non",
-    "unlike", "except", "unless", "instead", "rather",
-    # limiting / comparative / asymptotic
-    "approaches", "approach", "approaching", "converges", "converge",
-    "converging", "tends", "tend", "tending", "asymptotically", "asymptotic",
-    "bounded", "unbounded", "grows", "grow", "growing", "increases", "increase",
-    "increasing", "decreases", "decrease", "decreasing", "larger", "smaller",
-    "greater", "less", "fewer", "exceeds", "exceed", "approximately",
-    "proportional", "inversely", "monotonically", "monotonic", "vanishes",
-    "vanish", "diverges", "diverge", "saturates", "saturate", "plateaus",
-    "linearly", "exponentially", "sublinear", "superlinear", "quadratic",
-    # equivalence / identity / reduction
-    "equals", "equal", "equivalent", "equivalently", "identical", "becomes",
-    "become", "becoming", "reduces", "reduce", "reducing", "recovers",
-    "recover", "corresponds", "correspond", "coincides", "coincide", "matches",
-    "iff", "namely", "precisely", "exactly", "generalizes", "generalize",
-    "specializes", "collapses", "collapse",
-})
-_EDGE_WEAK = frozenset({
-    "because", "causes", "cause", "causing", "caused", "leads", "lead",
-    "leading", "results", "result", "resulting", "due", "therefore", "thus",
-    "hence", "enables", "enable", "enabling", "prevents", "prevent",
-    "preventing", "requires", "require", "requiring", "implies", "imply",
-    "implying", "yields", "yield", "yielding", "since", "if", "when",
-    "whenever", "while", "whereas", "as", "only", "then", "so", "although",
-    "though", "despite", "however", "otherwise",
-})
-
-
-def _edge_tier(s):
-    """2 = strong (meaning-flipper), 1 = weak (common causal/conditional),
-    0 = not a relational connective. Matches the stripped, lower-cased token."""
-    w = s.strip().lower().strip(".,;:!?()[]{}\"'")
-    if not w:
-        return 0
-    if w in _EDGE_STRONG:
-        return 2
-    if w in _EDGE_WEAK:
-        return 1
-    return 0
-
-
-def _apply_relational_capture(boost_multipliers, tok_strs, tids, counts,
-                              total_tokens, tok_boost):
-    """Relational EDGE capture (DIFFKV_RESIDUAL_EDGE_CAPTURE, default ON).
+def _apply_relational_capture(boost_multipliers, severity, tok_strs, tok_boost,
+                              dbg=None):
+    """Reconstruction-COLLISION edge capture (DIFFKV_RESIDUAL_EDGE_CAPTURE).
 
     **The edge-fidelity problem.** Residual capture pins the NODES of a document
-    (digits/identifiers via is_core, entity names via owner-capture, cells via
-    table-capture) as EXACT K/V, but the connectives that BIND those nodes —
-    relational verbs, negations, limit/equivalence markers — are lowercase prose,
-    never captured, and survive only as rank-r reconstruction. SVD discards the
-    low-energy directions that separate "reduces"↔"increases" and "with"↔
-    "without", so the reconstructed key/value is a smear and the small decoder
-    fills the edge from its prior: a limiting condition ("X approaches Y AS N
-    grows") flattens into a generic claim ("larger receptive field"). Because the
-    router scores blocks by their EXACT residual keys, an uncaptured connective is
-    also weak in the routing signature — its block is less likely to even be
-    selected when the query is about that relation. Nodes survive; edges rebound.
+    (digits via is_core, entity names via owner-capture, cells via table-capture)
+    as EXACT K/V, but the tokens that BIND those nodes into a relation — "grows …
+    to its maximum … becomes equivalent", "needs X BECAUSE Y" — are lowercase,
+    low-energy prose, so the rank-r basis (dominated by the block's content tokens)
+    cannot span their direction. The reconstruction pulls such a token toward a
+    NEIGHBOUR in the block, and because attention/routing select by key dot-product
+    the decoder then retrieves (and generates) the neighbour's relation: a limiting
+    law → "captures more context"; the exact causal reason → an invented mechanism.
+    Nodes survive; edges rebound.
 
-    **Fix.** Give the relational connectives the same exact-residual treatment,
-    but scaled to sit BELOW the content they connect so they never displace a
-    value or an owner (edge_scale < 1). STRONG connectives (negation / limit /
-    equivalence) are the meaning-flippers and are rare in filler, so they are
-    captured even with no other node in the block; WEAK connectives (common
-    causal/conditional words) are captured only within DIFFKV_EDGE_RADIUS of an
-    already-captured node. At most DIFFKV_EDGE_MAX tokens per block are added,
-    prioritised (tier, has-node, proximity), so the extra residuals — and the RAM
-    they cost — stay bounded well inside the max_residual cap. Runs AFTER the
-    window pass, on the committed boost map, mirroring the other capture helpers.
-    Returns the number of newly boosted rows."""
-    if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "1") != "1":
+    **The signal (no word list, not norm-degenerate).** A connective vocabulary is
+    always incomplete, and plain relative error (‖Δ−recon‖/‖Δ‖) is degenerate —
+    low-norm tokens near the anchor get error/norm→∞ and dominate. Instead we
+    measure the actual failure directly: does a token's low-rank reconstruction sit
+    CLOSER (cosine) to a DIFFERENT token's exact key than to its own?
+
+        severity[i] = max_{j≠i} cos(recon_i, exact_j) − cos(recon_i, exact_i)
+
+    severity > 0 means the reconstruction has moved token i onto a neighbour — it
+    will be confused ("reduces"→"increases"). This is computed per block per layer
+    (cheap, in the joint K|V space the SVD already produced) and meaned over layers;
+    a token collided in most layers scores high. Content nodes are already exact
+    (skipped); the non-node tokens with the highest collision are exactly the
+    smeared relational words, whatever surface form they take.
+
+    Capture the top DIFFKV_EDGE_MAX non-node tokens whose severity clears an
+    absolute floor (DIFFKV_EDGE_FLOOR) AND the block median + DIFFKV_EDGE_MARGIN
+    (so a collision-free block captures nothing → decode cost stays flat), boosted
+    to a fixed level below the content nodes (DIFFKV_EDGE_SCALE). Returns the count.
+    `severity` is the (S_comp,) per-token, layer-meaned collision score.
+
+    EXPERIMENTAL, DEFAULT OFF (2026-07-14). Direct instrumentation (DIFFKV_DBG_EDGE)
+    on a relation-dense paragraph showed the hypothesis is empirically WEAK: rank-16
+    collision severities cluster near the floor (~0.02–0.04) for almost everything,
+    and the planted relational tokens ("grows/becomes/because/converges") did NOT
+    score above ordinary prose — so it captures a scattered, noise-level mix rather
+    than the edges. This is consistent with the deeper finding that the relation
+    loss is largely DECODER-level (full-KV "dense" flips the same relations on every
+    synthetic probe), which no KV-side capture can repair. Kept as an opt-in scaffold
+    (e.g. to retry in V-only space or a single semantic layer band); not a default."""
+    if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "0") != "1":
         return 0
+    import math as _math
     try:
-        radius = int(os.environ.get("DIFFKV_EDGE_RADIUS", "6"))
+        edge_floor = float(os.environ.get("DIFFKV_EDGE_FLOOR", "0.02"))
     except ValueError:
-        radius = 6
+        edge_floor = 0.02
+    try:
+        edge_margin = float(os.environ.get("DIFFKV_EDGE_MARGIN", "0.02"))
+    except ValueError:
+        edge_margin = 0.02
     try:
         edge_scale = float(os.environ.get("DIFFKV_EDGE_SCALE", "0.7"))
     except ValueError:
         edge_scale = 0.7
     try:
-        edge_max = int(os.environ.get("DIFFKV_EDGE_MAX", "10"))
+        edge_max = int(os.environ.get("DIFFKV_EDGE_MAX", "6"))
     except ValueError:
-        edge_max = 10
-    try:
-        edge_floor = float(os.environ.get("DIFFKV_EDGE_FLOOR", "0.5"))
-    except ValueError:
-        edge_floor = 0.5
-    try:
-        rare_frac = float(os.environ.get("DIFFKV_EDGE_RARE_FRAC", "0.002"))
-    except ValueError:
-        rare_frac = 0.002
-    if radius <= 0 or edge_scale <= 0.0 or edge_max <= 0:
+        edge_max = 6
+    S = len(boost_multipliers)
+    if edge_max <= 0 or S == 0 or severity is None or len(severity) != S:
         return 0
-    # A STRONG connective may enter the exact set WITHOUT a captured node next to
-    # it only if it is DISTINCTIVE in this document (in-doc count below rare_max).
-    # This is what keeps decode cost flat: common words ("not", "more", "less",
-    # "as") recur in every prose block, and capturing them everywhere would bloat
-    # the per-block residual count the decoder must reconstruct — so they fire
-    # ONLY next to content they actually negate/bound. Rare relational verbs
-    # ("approaches", "converges", "asymptotically", "equals") are informative
-    # wherever they appear, so they may fire alone (few per document).
-    rare_max = max(8, int(total_tokens * rare_frac))
 
-    S = len(tok_strs)
-    node = [boost_multipliers[i] > 1.0 for i in range(S)]
+    # Adaptive threshold: absolute floor OR the block's own median + margin, so a
+    # collision-free block captures nothing and a colliding block captures only its
+    # outliers (keeping the extra residual count — and decode cost — bounded).
+    srt = sorted(float(x) for x in severity if _math.isfinite(float(x)))
+    med = srt[len(srt) // 2] if srt else 0.0
+    thresh = max(edge_floor, med + edge_margin)
 
-    # Nearest captured-node distance in two O(S) sweeps (INF = out of radius).
-    INF = radius + 1
-    dist = [INF] * S
-    node_boost = [0.0] * S          # boost of the nearest node (either side)
-    last_i = -1
-    for i in range(S):
-        if node[i]:
-            last_i = i
-        if last_i >= 0 and (i - last_i) < dist[i]:
-            dist[i] = i - last_i
-            node_boost[i] = boost_multipliers[last_i]
-    last_i = -1
-    for i in range(S - 1, -1, -1):
-        if node[i]:
-            last_i = i
-        if last_i >= 0 and (last_i - i) < dist[i]:
-            dist[i] = last_i - i
-            node_boost[i] = boost_multipliers[last_i]
-
-    # Candidates: (tier, has_node, -dist, i). WEAK requires a node in radius;
-    # STRONG may fire alone (its default anchor is the flat edge_floor boost).
-    cands = []
-    for i in range(S):
-        if node[i]:
-            continue
-        tier = _edge_tier(tok_strs[i])
-        if tier == 0:
-            continue
-        near = dist[i] <= radius
-        if not near:
-            # Weak connectives never fire off-node; strong ones only if rare.
-            if tier != 2:
-                continue
-            cnt = counts.get(tids[i], 1) if tids is not None else 1
-            if cnt > rare_max:
-                continue
-        cands.append((tier, 1 if near else 0, -dist[i], i))
-    if not cands:
+    cand = [(float(severity[i]), i) for i in range(S)
+            if boost_multipliers[i] <= 1.0 and _math.isfinite(float(severity[i]))
+            and float(severity[i]) >= thresh]
+    if not cand:
         return 0
-    cands.sort(reverse=True)
+    cand.sort(reverse=True)
 
+    # Fixed boost below the content nodes (~tok_boost): collision is thresholded,
+    # so the value carries the decision, not a magnitude — an edge never displaces
+    # a value or owner but sits clearly above unboosted filler.
+    val = tok_boost * edge_scale
     n_edge = 0
-    tier_w = {2: 1.0, 1: 0.85}
-    for tier, has_node, _negd, i in cands[:edge_max]:
-        anchor = node_boost[i] if has_node else (tok_boost * edge_floor)
-        val = anchor * edge_scale * tier_w[tier]
-        # Never let an edge outrank the content it binds.
-        if has_node:
-            val = min(val, node_boost[i] * 0.95)
+    for sev, i in cand[:edge_max]:
         if val > boost_multipliers[i]:
             boost_multipliers[i] = val
             n_edge += 1
+            if dbg is not None:
+                dbg.append((i, tok_strs[i].strip() if tok_strs else "",
+                            round(sev, 3), round(val, 2)))
     return n_edge
 
 
@@ -1079,6 +999,51 @@ def _execute_decode_attention_compiled(
 
 
 @mx.compile
+def _edge_propagate_relevance(relevance, anc_k, beta, max_nb):
+    """Edge-aware routing (DIFFKV_EDGE_ROUTING, default ON).
+
+    The router scores each compressed block INDEPENDENTLY (top-K by q·k), so it
+    has no notion of which chunks are CONNECTED — when a relation's two ends live
+    in different chunks, the router can pick the chunk the query matches and miss
+    the chunk that COMPLETES the relation. This diffuses relevance ONE hop over a
+    block-to-block similarity graph (cosine of the blocks' anchor keys, the cheap
+    always-present block signature): a chunk strongly connected to a high-relevance
+    chunk is pulled up, so the pair is co-selected.
+
+        relevance ← relevance + β · (Â · relevance)
+
+    Â is the row-normalised positive anchor-cosine adjacency (self removed). k_eff
+    is unchanged, so the SAME number of blocks is attended → decode tps is flat;
+    the (nb×nb) graph is tiny and this runs only on the route interval (not every
+    token). β = DIFFKV_EDGE_ROUTE_BETA (default 0.25); skipped above max_nb blocks
+    to bound the nb² cost at very large contexts. Returns the reweighted relevance."""
+    nb = anc_k.shape[0]
+    if nb < 3 or nb > max_nb:
+        return relevance
+    akf = anc_k.reshape(nb, -1).astype(mx.float32)
+    akn = akf / (mx.linalg.norm(akf, axis=-1, keepdims=True) + 1e-6)
+    A = mx.matmul(akn, akn.T)                       # [nb, nb] cosine, [-1, 1]
+    A = mx.maximum(A - mx.eye(nb), 0.0)             # positive edges, self removed
+    A = A / (mx.sum(A, axis=-1, keepdims=True) + 1e-6)   # row-normalised
+    prop = mx.matmul(A, relevance.astype(mx.float32))    # [nb] neighbour-diffused
+    return relevance + beta * prop.astype(relevance.dtype)
+
+
+def _edge_routing_params():
+    """(on, beta, max_nb) for edge-aware routing; cheap env read."""
+    if os.environ.get("DIFFKV_EDGE_ROUTING", "1") != "1":
+        return False, 0.0, 0
+    try:
+        beta = float(os.environ.get("DIFFKV_EDGE_ROUTE_BETA", "0.25"))
+    except ValueError:
+        beta = 0.25
+    try:
+        max_nb = int(os.environ.get("DIFFKV_EDGE_ROUTE_MAXNB", "512"))
+    except ValueError:
+        max_nb = 512
+    return beta > 0.0, beta, max_nb
+
+
 def _block_relevance_minmax(
     q: mx.array,              # [H_q, D]
     comp_min_k: mx.array,     # [nb, kv_heads, D]  element-wise key min over block
@@ -2421,7 +2386,34 @@ class MLXKVBlockManager:
         else:
             errors_v_balanced = errors_v
         joint_errors = mx.sqrt(errors_k**2 + errors_v_balanced**2)
-        
+
+        # Reconstruction-COLLISION signal (see _apply_relational_capture): for each
+        # token, does its low-rank reconstruction sit CLOSER (cosine) to a DIFFERENT
+        # token's exact key than to its own? severity = max_{j≠i} cos(recon_i,exact_j)
+        # − cos(recon_i,exact_i); > 0 ⇒ the SVD confuses this token with a neighbour.
+        # Computed in the joint K|V space, meaned over layers → (num_blocks, S_comp).
+        # Looped per layer so the (nb, S, S) similarity never materialises for all
+        # layers at once — prefill peak memory stays flat.
+        sev_by_block = None
+        if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "0") == "1":
+            _nrows = int(recon_delta.shape[0])
+            if num_blocks > 0 and _nrows % num_blocks == 0:
+                _nl = _nrows // num_blocks
+                _rn = recon_delta / mx.maximum(
+                    mx.linalg.norm(recon_delta, axis=-1, keepdims=True), 1e-6)
+                _en = batch_deltas / mx.maximum(
+                    mx.linalg.norm(batch_deltas, axis=-1, keepdims=True), 1e-6)
+                _eye = mx.eye(S_comp)
+                _sev_sum = mx.zeros((num_blocks, S_comp))
+                for _l in range(_nl):
+                    _sl = slice(_l * num_blocks, (_l + 1) * num_blocks)
+                    _A = mx.matmul(_rn[_sl], _en[_sl].transpose(0, 2, 1))  # (nb,S,S)
+                    _self = mx.sum(_A * _eye, axis=-1)             # (nb,S) diagonal
+                    _other = mx.max(_A - _eye * 10.0, axis=-1)     # (nb,S) best j≠i
+                    _sev_sum = _sev_sum + (_other - _self)
+                    mx.eval(_sev_sum)   # free _A each iteration (bound peak memory)
+                sev_by_block = np.asarray(_sev_sum / _nl)
+
         # Content-aware residual capture / token boosting
         tok_boost_env = os.environ.get("DIFFKV_RESIDUAL_TOKEN_BOOST")
         tok_boost = 8.0
@@ -2542,11 +2534,18 @@ class MLXKVBlockManager:
                                 final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                     boost_multipliers = final_boosts
 
-                    # Relational edge capture: pin the connectives that BIND the
-                    # captured nodes (negation/limit/equivalence/causal) into the
-                    # exact set so the SVD pool can't rebound them (see helper doc).
-                    _apply_relational_capture(boost_multipliers, tok_strs, tids,
-                                              counts, total_tokens, tok_boost)
+                    # Relational edge capture: pin the tokens the SVD is smearing
+                    # (highest RELATIVE reconstruction error) into the exact set,
+                    # so the relation isn't rebound from the decoder's prior.
+                    _dbg_edge = [] if os.environ.get("DIFFKV_DBG_EDGE") == "1" else None
+                    _apply_relational_capture(
+                        boost_multipliers,
+                        sev_by_block[block_idx] if sev_by_block is not None else None,
+                        tok_strs, tok_boost, dbg=_dbg_edge)
+                    if _dbg_edge:
+                        print(f"[DBG_EDGE] block {start_blocks + block_idx}: " +
+                              ", ".join(f"{w!r}(rel={r},b={v})" for _, w, r, v in _dbg_edge),
+                              flush=True)
                 boost_rows.append(boost_multipliers)
             # b = layer*num_blocks + block  →  tile the per-block rows per layer
             boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
@@ -3112,10 +3111,28 @@ class MLXKVBlockManager:
                             final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                 boost_multipliers = final_boosts
 
-                # Relational edge capture: pin the connectives that BIND the
-                # captured nodes into the exact set (see helper doc).
-                _apply_relational_capture(boost_multipliers, tok_strs, tids,
-                                          counts, total_tokens, tok_boost)
+                # Relational edge capture: pin the tokens whose low-rank
+                # reconstruction COLLIDES with a different token (see helper doc).
+                # Single-layer flush → severity computed directly (S×S is small).
+                _sev_stream = None
+                if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "0") == "1":
+                    _rn = recon_delta / mx.maximum(
+                        mx.linalg.norm(recon_delta, axis=-1, keepdims=True), 1e-6)
+                    _en = deltas_2d / mx.maximum(
+                        mx.linalg.norm(deltas_2d, axis=-1, keepdims=True), 1e-6)
+                    _A = mx.matmul(_rn, _en.transpose(1, 0))       # (S, S)
+                    _I = mx.eye(_A.shape[0])
+                    _sev_stream = np.asarray(
+                        mx.max(_A - _I * 10.0, axis=-1) - mx.sum(_A * _I, axis=-1))
+                    if _sev_stream.shape[0] != S_comp:
+                        _sev_stream = None
+                _dbg_edge = [] if os.environ.get("DIFFKV_DBG_EDGE") == "1" else None
+                _apply_relational_capture(boost_multipliers, _sev_stream,
+                                          tok_strs, tok_boost, dbg=_dbg_edge)
+                if _dbg_edge:
+                    print(f"[DBG_EDGE/stream] block {num_blocks}: " +
+                          ", ".join(f"{w!r}(rel={r},b={v})" for _, w, r, v in _dbg_edge),
+                          flush=True)
                 n_boosted_rows = sum(1 for m in boost_multipliers if m > 1.0)
 
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
@@ -3323,6 +3340,11 @@ class MLXKVBlockManager:
                 R_route = min(self.route_residuals, self.max_residual)
                 rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(mx.minimum(res_n, R_route), 1)
                 relevance = _block_relevance_residual(q, ak, rk[:, :R_route], rvld, scale, gpk)
+                _er_on, _er_beta, _er_maxnb = _edge_routing_params()
+                if _er_on:
+                    # Co-select chunks connected to high-relevance chunks (the edge
+                    # that completes a cross-chunk relation). k_eff unchanged → flat tps.
+                    relevance = _edge_propagate_relevance(relevance, ak, _er_beta, _er_maxnb)
                 sel = mx.argsort(relevance)[-k_eff:]
                 U = mx.take(U, sel, 0); VK = mx.take(VK, sel, 0); VV = mx.take(VV, sel, 0)
                 ak = mx.take(ak, sel, 0); av = mx.take(av, sel, 0); sc = mx.take(sc, sel, 0)
@@ -4519,6 +4541,22 @@ class MLXDiffKVWrapper:
             quant = "int4"
             print("[DiffKV MLX] Low preset: auto-enabling 4-bit quantization")
 
+        # Quality presets opt into Context-Aware Decoding (CAD): contrast each
+        # step's full-context logits against a prior-only stream to pull the
+        # decoder off its pretrained prior and onto the document's relation
+        # (the decoder-level source of relational-edge drift). RAM is unaffected.
+        # CAD is ~2x decode WHILE ACTIVE, so it is CAPPED to the first
+        # DIFFKV_CAD_MAX_STEPS tokens (the relation is stated early): a 32-token
+        # cap covers a full extraction answer yet amortizes to ~0 overhead on a
+        # long generation (measured 200-tok story: cap-16 = 30 tps == CAD off).
+        # Fast presets leave it at 0. Explicit env vars always win.
+        if preset in ("high", "quality", "max"):
+            os.environ.setdefault("DIFFKV_CAD_ALPHA", "0.5")
+            os.environ.setdefault("DIFFKV_CAD_MAX_STEPS", "32")
+            print(f"[DiffKV MLX] {preset} preset: Context-Aware Decoding on "
+                  f"(alpha={os.environ['DIFFKV_CAD_ALPHA']}, "
+                  f"max_steps={os.environ['DIFFKV_CAD_MAX_STEPS']})")
+
         if quant in ("int4", "int8") and not model_id.startswith("mlx-community/"):
             parts = model_id.split("/")
             if len(parts) == 2:
@@ -4698,7 +4736,63 @@ class MLXDiffKVWrapper:
         # print(f"[DBG] generate: entering decoding loop. Reading initial logits...", flush=True)
         logits = output.logits[0, -1].cpu().numpy()
         # print(f"[DBG] generate: initial logits read.", flush=True)
-        
+
+        # ── Context-Aware Decoding (CAD) setup ─────────────────────────────────
+        # The dominant relational-fidelity failure is decoder-level: even with the
+        # exact document in context the small model rebinds a relation from its
+        # pretrained PRIOR ("reduces"→"increases", a limiting law → "more context").
+        # CAD counteracts it by contrasting the full-context next-token logits
+        # against a PRIOR-only stream (the question with NO document):
+        #     logits ← (1+α)·logits_full − α·logits_prior
+        # which up-weights exactly the tokens the document makes more likely than
+        # the prior. The prior stream is the short query alone → dense + cheap; it
+        # runs as its own session, switched in per forward. Gated by DIFFKV_CAD_ALPHA
+        # (0 = off) so default/fast presets pay nothing; a quality preset sets it.
+        try:
+            _cad_alpha = float(os.environ.get("DIFFKV_CAD_ALPHA", "0"))
+        except ValueError:
+            _cad_alpha = 0.0
+        # CAD costs one extra prior forward/token. The prior MUST be the SAME model
+        # with no document (a smaller amateur was measured 1/9 vs 6/9 — subtracting
+        # a different model's distribution is not "the prior"). The affordable lever
+        # is instead to CAP CAD to the first DIFFKV_CAD_MAX_STEPS decode tokens
+        # (0 = unlimited): the relation is decided early, so on long answers the
+        # contrast is spent only where it matters and the rest decodes at full tps.
+        _cad_on = _cad_alpha > 0.0 and bool(query_text)
+        try:
+            _cad_max_steps = int(os.environ.get("DIFFKV_CAD_MAX_STEPS", "0"))
+        except ValueError:
+            _cad_max_steps = 0
+        _logits_prior = None
+        _cad_sid = None
+        _cad_step = 0
+        if _cad_on:
+            try:
+                _pri_text = self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": query_text}],
+                    tokenize=False, add_generation_prompt=True)
+                _pri_ids = self.tokenizer.encode(_pri_text)
+            except Exception:
+                _pri_ids = self.tokenizer.encode(query_text)
+            # Self-prior: the SAME model with the question only, as its own session.
+            _cad_sid = session_id + "::cadprior"
+            try:
+                self.manager.clear_session(_cad_sid)
+                self.manager.init_session(_cad_sid, prefill_len=len(_pri_ids))
+                self.manager.register_prefill_tokens(_cad_sid, torch.tensor(_pri_ids, dtype=torch.long))
+                self.model._get_or_create_prefill_cache(tuple([_cad_sid]), total_tokens=len(_pri_ids))
+                self.model._diffkv_session_ids = [_cad_sid]
+                _op = self.model(torch.tensor([_pri_ids], dtype=torch.long),
+                                 torch.tensor([list(range(len(_pri_ids)))], dtype=torch.long))
+                mx.eval(_op.logits)
+                _logits_prior = _op.logits[0, -1].cpu().numpy()
+                _cad_pos = len(_pri_ids)
+            except Exception as _e:
+                print(f"[DiffKV CAD] disabled (prior prefill failed: {_e})", flush=True)
+                _cad_on = False
+            finally:
+                self.model._diffkv_session_ids = [session_id]
+
         # Helper sampling
         def sample_logits(logits, temp, top_p):
             if temp <= 0.01:
@@ -4719,6 +4813,10 @@ class MLXDiffKVWrapper:
 
         sfa_active = False
         for _ in range(max_new_tokens):
+            # Context-Aware Decoding: extrapolate away from the prior-only stream
+            # BEFORE rep-penalty / factual bias / sampling (see CAD setup above).
+            if _cad_on and _logits_prior is not None:
+                logits = (1.0 + _cad_alpha) * logits - _cad_alpha * _logits_prior
             # ── Repetition-loop detection (mirrors batch_engine.py Fix 2) ──────
             # Detect tight token-level loops every 10 new tokens.
             # On detection, widen the penalty window and boost the strength.
@@ -4994,8 +5092,38 @@ class MLXDiffKVWrapper:
             output = self.model(input_ids, pos_tensor)
             logits = output.logits[0, -1].cpu().numpy()
             # print(f"[DBG] generate: decode step {_n_new+1}/{max_new_tokens} completed.", flush=True)
-            
+
             cur_pos += 1
+
+            # Advance the CAD prior stream by the SAME token to refresh its logits
+            # (combined at the top of the next iteration, before sampling). Once the
+            # step cap is hit, stop the prior stream and decode the rest at full tps.
+            if _cad_on:
+                _cad_step += 1
+                if _cad_max_steps > 0 and _cad_step >= _cad_max_steps:
+                    _cad_on = False
+                    if _cad_sid is not None:
+                        try:
+                            self.manager.clear_session(_cad_sid)
+                        except Exception:
+                            pass
+                        _cad_sid = None
+                else:
+                    try:
+                        self.model._diffkv_session_ids = [_cad_sid]
+                        _op = self.model(input_ids, torch.tensor([[_cad_pos]], dtype=torch.long))
+                        mx.eval(_op.logits)
+                        _logits_prior = _op.logits[0, -1].cpu().numpy()
+                        _cad_pos += 1
+                    finally:
+                        self.model._diffkv_session_ids = [session_id]
+
+        # CAD prior stream is a throwaway session — release it.
+        if _cad_sid is not None:
+            try:
+                self.manager.clear_session(_cad_sid)
+            except Exception:
+                pass
 
         # Clear loop detection state for this session after generation completes
         self._mlx_loop_detected = False

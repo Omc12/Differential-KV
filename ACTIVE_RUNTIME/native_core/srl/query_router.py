@@ -139,6 +139,34 @@ def two_level_gate(
             boosts_t = torch.tensor(boosts, dtype=anchor_scores.dtype, device=anchor_scores.device)
             anchor_scores = anchor_scores + boosts_t
 
+    # ── Edge-aware routing propagation (Python fallback) ──────────────────────
+    er_on = os.environ.get("DIFFKV_EDGE_ROUTING", "1").strip().lower() not in ("0", "", "false", "off", "auto")
+    if er_on and N >= 3:
+        try:
+            er_beta = float(os.environ.get("DIFFKV_EDGE_ROUTE_BETA", "0.25"))
+        except ValueError:
+            er_beta = 0.25
+        try:
+            er_maxnb = int(os.environ.get("DIFFKV_EDGE_ROUTE_MAXNB", "512"))
+        except ValueError:
+            er_maxnb = 512
+
+        if N <= er_maxnb:
+            # anc_K shape is [N, kv_heads, D]
+            # Flatten to [N, kv_heads * D]
+            akf = anc_K.reshape(N, -1).float()
+            # Normalize row-wise to get unit vector signatures
+            akn = akf / (torch.norm(akf, dim=-1, keepdim=True) + 1e-6)
+            # Cosine similarity matrix A: [N, N]
+            A = torch.matmul(akn, akn.t())
+            # Self-loops removed, keep positive edges only
+            A = torch.clamp(A - torch.eye(N, device=A.device), min=0.0)
+            # Row normalize A
+            A = A / (torch.sum(A, dim=-1, keepdim=True) + 1e-6)
+            # Propagate relevance
+            prop = torch.mv(A, anchor_scores.float())
+            anchor_scores = anchor_scores + er_beta * prop
+
     k_keep = min(k_pass, N)
     top_idx = torch.topk(anchor_scores, k=k_keep, largest=True, sorted=True).indices
     return slot_ids[top_idx]
