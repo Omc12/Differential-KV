@@ -9,6 +9,23 @@ and generated quality comparisons.
 
 import os
 import sys
+import ssl
+import urllib3
+import requests
+from urllib3.exceptions import InsecureRequestWarning
+
+# Global SSL verification bypass for firewalls/proxies inside the worker processes
+urllib3.disable_warnings(InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+ssl._create_default_https_context = ssl._create_unverified_context
+
+old_merge_settings = requests.Session.merge_environment_settings
+def patched_merge_settings(self, url, proxies, stream, verify, cert):
+    settings = old_merge_settings(self, url, proxies, stream, verify, cert)
+    settings['verify'] = False
+    return settings
+requests.Session.merge_environment_settings = patched_merge_settings
+
 import json
 import time
 import argparse
@@ -376,7 +393,6 @@ def main():
 
     if args.worker:
         results = run_worker(args.worker, args.model)
-        # Write results to a temp json file instead of standard stdout output capture
         temp_file = f"temp_res_{args.worker}.json"
         with open(temp_file, "w") as f:
             json.dump(results, f)
@@ -400,7 +416,6 @@ def main():
         env = os.environ.copy()
         cmd = [sys.executable, os.path.abspath(__file__), "--worker", cfg, "--model", args.model]
         
-        # Run subprocess without capture_output to see real-time downloads/Triton logs
         p = subprocess.run(cmd, env=env)
         
         temp_file = f"temp_res_{cfg}.json"

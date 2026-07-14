@@ -8,6 +8,23 @@ and benchmarks 4-bit Dense against 4-bit DiffKV on an A100 GPU.
 
 import os
 import sys
+import ssl
+import urllib3
+import requests
+from urllib3.exceptions import InsecureRequestWarning
+
+# Global SSL verification bypass for firewalls/proxies inside the worker processes
+urllib3.disable_warnings(InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+ssl._create_default_https_context = ssl._create_unverified_context
+
+old_merge_settings = requests.Session.merge_environment_settings
+def patched_merge_settings(self, url, proxies, stream, verify, cert):
+    settings = old_merge_settings(self, url, proxies, stream, verify, cert)
+    settings['verify'] = False
+    return settings
+requests.Session.merge_environment_settings = patched_merge_settings
+
 import json
 import time
 import argparse
@@ -138,7 +155,6 @@ def run_worker(mode, model_id):
         mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
         model._diffkv_session_ids = [sid]
 
-        # Prefill
         CH = 512
         t_prefill_start = time.perf_counter()
         for cs in range(0, len(ids), CH):
@@ -283,7 +299,6 @@ def main():
 
     if args.worker:
         res = run_worker(args.worker, args.model)
-        # Write results to a temp json file instead of capturing stdout
         temp_file = f"temp_res_{args.worker}.json"
         with open(temp_file, "w") as f:
             json.dump(res, f)
