@@ -207,7 +207,7 @@ def run_worker(config_name, model_id):
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
-                # Prefill (chunked)
+                # Prefill (chunked) - Use CH = 128
                 sid = f"prompt_{idx}"
                 mgr.clear_session(sid)
                 if not hasattr(w, "_session_token_ids"):
@@ -218,7 +218,7 @@ def run_worker(config_name, model_id):
                 mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
                 model._diffkv_session_ids = [sid]
                 
-                CH = 512
+                CH = 128
                 t_prefill_start = time.perf_counter()
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
@@ -281,9 +281,10 @@ def run_worker(config_name, model_id):
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                     
+                # Prefill (chunked) - Use CH = 128
                 t_prefill_start = time.perf_counter()
                 past_key_values = None
-                CH = 512
+                CH = 128
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
                     pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
