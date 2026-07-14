@@ -199,98 +199,6 @@ _OWNER_STOPWORDS = {
 }
 
 
-def _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
-                              tok_strs, tids, counts, total_tokens):
-    """Relational-edge capture (DIFFKV_BRIDGE_GAP, default 8; 0=disabled).
-
-    **The relationship-fidelity problem:**
-    Content anchors (digits, identifiers, table cells) are correctly captured
-    as exact residuals by the boost system.  The tokens that CONNECT those
-    anchors — relational verbs ("reduces", "prevents", "without"), prepositions
-    ("instead of"), and conjunctions ("which causes") — are all lowercase
-    alphabetic, classified is_prose=True, and fall into the lossy SVD pool.
-    The rank-r reconstruction confuses semantically opposite relations
-    ("reduces" ↔ "increases", "without" ↔ "with") because their key vectors
-    differ only by small low-energy directions that SVD discards.  The decoder
-    then fills the gap with a plausible relationship from its prior.
-
-    **Fix: bridge capture.**
-    For each pair of consecutive boosted segments (after window boost, so
-    the edges are already committed), if the prose gap between them is ≤
-    DIFFKV_BRIDGE_GAP tokens, boost every gap token to:
-        min(left_edge_boost, right_edge_boost) × bridge_scale
-    The bridge scale (DIFFKV_BRIDGE_SCALE, default 0.6) is deliberately < 1.0
-    so gap tokens compete for residual slots *below* the content anchors they
-    connect — they don't displace exact-value rows, they just ensure the
-    relational connective isn't the ONLY token reconstructed by SVD.
-
-    IDF-weights the bridge so structurally rare relational tokens (domain-specific
-    verbs that appear ≤ 3× in the document) get a proportionally stronger push.
-    Returns the number of newly boosted tokens.
-    """
-    if os.environ.get("DIFFKV_BRIDGE_GAP", "8") in ("0", "off", "false"):
-        return 0
-    try:
-        gap_limit = int(os.environ.get("DIFFKV_BRIDGE_GAP", "8"))
-    except ValueError:
-        gap_limit = 8
-    if gap_limit <= 0:
-        return 0
-    try:
-        bridge_scale = float(os.environ.get("DIFFKV_BRIDGE_SCALE", "0.6"))
-    except ValueError:
-        bridge_scale = 0.6
-
-    import math as _math
-
-    # Find positions with a committed boost (from content capture + window).
-    boosted = [boost_multipliers[i] > 1.0 for i in range(S_comp)]
-
-    # Locate contiguous runs of boosted positions ("boosted segments").
-    bsegs = []          # list of (start, end) inclusive for each boosted run
-    in_run = False
-    for i in range(S_comp):
-        if boosted[i]:
-            if not in_run:
-                bsegs.append([i, i])
-                in_run = True
-            else:
-                bsegs[-1][1] = i
-        else:
-            in_run = False
-
-    if len(bsegs) < 2:
-        return 0
-
-    n_bridged = 0
-    for k in range(len(bsegs) - 1):
-        left_end  = bsegs[k][1]
-        right_start = bsegs[k + 1][0]
-        gap = right_start - left_end - 1      # number of prose tokens between them
-        if gap <= 0 or gap > gap_limit:
-            continue
-
-        # Bridge boost = min of the two adjacent edge boosts × scale.
-        left_boost  = boost_multipliers[left_end]
-        right_boost = boost_multipliers[right_start]
-        base_bridge = min(left_boost, right_boost) * bridge_scale
-
-        for i in range(left_end + 1, right_start):
-            if boost_multipliers[i] >= base_bridge:
-                continue          # already captured at higher priority
-            count = counts.get(tids[i], 1) if tids is not None else 1
-            idf = _math.log(max(total_tokens, 2) / (count + 0.1))
-            rarity_weight = max(0.5, min(idf, 4.0))   # gentler cap than content
-            # IDF up-weights rare relational tokens; common stop-words (idf≈1)
-            # get a small nudge; domain verbs (idf≈4) compete meaningfully.
-            bridge_val = base_bridge * (rarity_weight / 2.0)
-            if bridge_val > boost_multipliers[i]:
-                boost_multipliers[i] = bridge_val
-                n_bridged += 1
-
-    return n_bridged
-
-
 def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
                          tids, counts, total_tokens, tok_boost):
     """Relational-locality capture (DIFFKV_RESIDUAL_OWNER_CAPTURE, default ON).
@@ -364,6 +272,183 @@ def _apply_owner_capture(boost_multipliers, segment_indices, is_core, tok_strs,
             boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
             n_boosted += 1
     return n_boosted
+
+
+# ── Relational EDGE vocabulary ────────────────────────────────────────────────
+# The closed-class connectives that carry an EDGE between two concepts and whose
+# meaning FLIPS under low-rank smear. Owner/content/table capture pin the NODES
+# (entities, values, cells); these tokens are the EDGES the SVD pool otherwise
+# reconstructs into a nearby-but-wrong relation ("reduces"→"increases",
+# "without"→"with", "approaches … as … grows"→"larger receptive field").
+#
+# STRONG tier = negation + limiting/asymptotic + equivalence/identity. These are
+# the hardest meaning-flippers and are RARE in filler prose, so they are captured
+# even in a pure-prose block with no other captured node (tightly capped). WEAK
+# tier = causal/conditional/logical connectives, which are common everywhere, so
+# they are captured ONLY when they sit next to already-captured content (else a
+# paragraph of filler would spend its whole residual budget on "as"/"so"/"if").
+_EDGE_STRONG = frozenset({
+    # negation / exclusion
+    "not", "no", "without", "never", "cannot", "nor", "neither", "none", "non",
+    "unlike", "except", "unless", "instead", "rather",
+    # limiting / comparative / asymptotic
+    "approaches", "approach", "approaching", "converges", "converge",
+    "converging", "tends", "tend", "tending", "asymptotically", "asymptotic",
+    "bounded", "unbounded", "grows", "grow", "growing", "increases", "increase",
+    "increasing", "decreases", "decrease", "decreasing", "larger", "smaller",
+    "greater", "less", "fewer", "exceeds", "exceed", "approximately",
+    "proportional", "inversely", "monotonically", "monotonic", "vanishes",
+    "vanish", "diverges", "diverge", "saturates", "saturate", "plateaus",
+    "linearly", "exponentially", "sublinear", "superlinear", "quadratic",
+    # equivalence / identity / reduction
+    "equals", "equal", "equivalent", "equivalently", "identical", "becomes",
+    "become", "becoming", "reduces", "reduce", "reducing", "recovers",
+    "recover", "corresponds", "correspond", "coincides", "coincide", "matches",
+    "iff", "namely", "precisely", "exactly", "generalizes", "generalize",
+    "specializes", "collapses", "collapse",
+})
+_EDGE_WEAK = frozenset({
+    "because", "causes", "cause", "causing", "caused", "leads", "lead",
+    "leading", "results", "result", "resulting", "due", "therefore", "thus",
+    "hence", "enables", "enable", "enabling", "prevents", "prevent",
+    "preventing", "requires", "require", "requiring", "implies", "imply",
+    "implying", "yields", "yield", "yielding", "since", "if", "when",
+    "whenever", "while", "whereas", "as", "only", "then", "so", "although",
+    "though", "despite", "however", "otherwise",
+})
+
+
+def _edge_tier(s):
+    """2 = strong (meaning-flipper), 1 = weak (common causal/conditional),
+    0 = not a relational connective. Matches the stripped, lower-cased token."""
+    w = s.strip().lower().strip(".,;:!?()[]{}\"'")
+    if not w:
+        return 0
+    if w in _EDGE_STRONG:
+        return 2
+    if w in _EDGE_WEAK:
+        return 1
+    return 0
+
+
+def _apply_relational_capture(boost_multipliers, tok_strs, tids, counts,
+                              total_tokens, tok_boost):
+    """Relational EDGE capture (DIFFKV_RESIDUAL_EDGE_CAPTURE, default ON).
+
+    **The edge-fidelity problem.** Residual capture pins the NODES of a document
+    (digits/identifiers via is_core, entity names via owner-capture, cells via
+    table-capture) as EXACT K/V, but the connectives that BIND those nodes —
+    relational verbs, negations, limit/equivalence markers — are lowercase prose,
+    never captured, and survive only as rank-r reconstruction. SVD discards the
+    low-energy directions that separate "reduces"↔"increases" and "with"↔
+    "without", so the reconstructed key/value is a smear and the small decoder
+    fills the edge from its prior: a limiting condition ("X approaches Y AS N
+    grows") flattens into a generic claim ("larger receptive field"). Because the
+    router scores blocks by their EXACT residual keys, an uncaptured connective is
+    also weak in the routing signature — its block is less likely to even be
+    selected when the query is about that relation. Nodes survive; edges rebound.
+
+    **Fix.** Give the relational connectives the same exact-residual treatment,
+    but scaled to sit BELOW the content they connect so they never displace a
+    value or an owner (edge_scale < 1). STRONG connectives (negation / limit /
+    equivalence) are the meaning-flippers and are rare in filler, so they are
+    captured even with no other node in the block; WEAK connectives (common
+    causal/conditional words) are captured only within DIFFKV_EDGE_RADIUS of an
+    already-captured node. At most DIFFKV_EDGE_MAX tokens per block are added,
+    prioritised (tier, has-node, proximity), so the extra residuals — and the RAM
+    they cost — stay bounded well inside the max_residual cap. Runs AFTER the
+    window pass, on the committed boost map, mirroring the other capture helpers.
+    Returns the number of newly boosted rows."""
+    if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "1") != "1":
+        return 0
+    try:
+        radius = int(os.environ.get("DIFFKV_EDGE_RADIUS", "6"))
+    except ValueError:
+        radius = 6
+    try:
+        edge_scale = float(os.environ.get("DIFFKV_EDGE_SCALE", "0.7"))
+    except ValueError:
+        edge_scale = 0.7
+    try:
+        edge_max = int(os.environ.get("DIFFKV_EDGE_MAX", "10"))
+    except ValueError:
+        edge_max = 10
+    try:
+        edge_floor = float(os.environ.get("DIFFKV_EDGE_FLOOR", "0.5"))
+    except ValueError:
+        edge_floor = 0.5
+    try:
+        rare_frac = float(os.environ.get("DIFFKV_EDGE_RARE_FRAC", "0.002"))
+    except ValueError:
+        rare_frac = 0.002
+    if radius <= 0 or edge_scale <= 0.0 or edge_max <= 0:
+        return 0
+    # A STRONG connective may enter the exact set WITHOUT a captured node next to
+    # it only if it is DISTINCTIVE in this document (in-doc count below rare_max).
+    # This is what keeps decode cost flat: common words ("not", "more", "less",
+    # "as") recur in every prose block, and capturing them everywhere would bloat
+    # the per-block residual count the decoder must reconstruct — so they fire
+    # ONLY next to content they actually negate/bound. Rare relational verbs
+    # ("approaches", "converges", "asymptotically", "equals") are informative
+    # wherever they appear, so they may fire alone (few per document).
+    rare_max = max(8, int(total_tokens * rare_frac))
+
+    S = len(tok_strs)
+    node = [boost_multipliers[i] > 1.0 for i in range(S)]
+
+    # Nearest captured-node distance in two O(S) sweeps (INF = out of radius).
+    INF = radius + 1
+    dist = [INF] * S
+    node_boost = [0.0] * S          # boost of the nearest node (either side)
+    last_i = -1
+    for i in range(S):
+        if node[i]:
+            last_i = i
+        if last_i >= 0 and (i - last_i) < dist[i]:
+            dist[i] = i - last_i
+            node_boost[i] = boost_multipliers[last_i]
+    last_i = -1
+    for i in range(S - 1, -1, -1):
+        if node[i]:
+            last_i = i
+        if last_i >= 0 and (last_i - i) < dist[i]:
+            dist[i] = last_i - i
+            node_boost[i] = boost_multipliers[last_i]
+
+    # Candidates: (tier, has_node, -dist, i). WEAK requires a node in radius;
+    # STRONG may fire alone (its default anchor is the flat edge_floor boost).
+    cands = []
+    for i in range(S):
+        if node[i]:
+            continue
+        tier = _edge_tier(tok_strs[i])
+        if tier == 0:
+            continue
+        near = dist[i] <= radius
+        if not near:
+            # Weak connectives never fire off-node; strong ones only if rare.
+            if tier != 2:
+                continue
+            cnt = counts.get(tids[i], 1) if tids is not None else 1
+            if cnt > rare_max:
+                continue
+        cands.append((tier, 1 if near else 0, -dist[i], i))
+    if not cands:
+        return 0
+    cands.sort(reverse=True)
+
+    n_edge = 0
+    tier_w = {2: 1.0, 1: 0.85}
+    for tier, has_node, _negd, i in cands[:edge_max]:
+        anchor = node_boost[i] if has_node else (tok_boost * edge_floor)
+        val = anchor * edge_scale * tier_w[tier]
+        # Never let an edge outrank the content it binds.
+        if has_node:
+            val = min(val, node_boost[i] * 0.95)
+        if val > boost_multipliers[i]:
+            boost_multipliers[i] = val
+            n_edge += 1
+    return n_edge
 
 
 def _detect_table_rows(tok_strs):
@@ -1469,26 +1554,12 @@ class MLXKVBlockManager:
         self.block_size = block_size
         
         # ── Dense recency window ───────────────────────────────────────────────
-        # recency_window is the number of EXACT (uncompressed) tokens kept per layer.
-        # It should scale with model capacity, not be a flat constant.
-        #
-        # Formula: round_to_next_512(num_layers * head_dim * dense_window_factor)
-        # For Qwen2.5-1.5B (28 layers, 128 head_dim):
-        #   factor=0.25 → 28*128*0.25 = 896  → 1024  (conservative default)
-        #   factor=0.50 → 28*128*0.50 = 1792 → 2048  (validated sweet spot, set via env)
-        #   factor=0.75 → 28*128*0.75 = 2688 → 3072
-        # For a 7B model (32 layers, 128 head_dim):
-        #   factor=0.25 → 32*128*0.25 = 1024 → 1024
-        # For a 72B model (80 layers, 128 head_dim):
-        #   factor=0.25 → 80*128*0.25 = 2560 → 2560
-        #
-        # DIFFKV_ENGAGE_THRESHOLD hard-overrides (backward compat).
-        # DIFFKV_DENSE_WINDOW_FACTOR overrides the factor only.
-        #
-        # NOTE: Do NOT pair a higher factor with adaptive bias scaling (P4).  At
-        # factor=0.50 the bias formula from the reverted commit over-boosted
-        # compressed blocks (~2.17× multiplier) and caused NIAH regressions near
-        # the recency boundary.  If you raise the factor, keep the bias as-is.
+        # recency_window = number of most-recent EXACT (uncompressed) tokens kept
+        # per layer. Scales with model capacity via a factor rather than a flat
+        # constant: round_to_next_512(num_layers * head_dim * dense_window_factor).
+        # Qwen2.5-1.5B (28 layers, 128 head_dim): factor=0.25 → 896 → 1024.
+        # DIFFKV_ENGAGE_THRESHOLD hard-overrides; DIFFKV_DENSE_WINDOW_FACTOR tunes
+        # the factor only (lower it, e.g. 0.125, to trade recency for RAM).
         env_engage = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
         if env_engage is not None:
             try:
@@ -2470,11 +2541,12 @@ class MLXKVBlockManager:
                             for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                                 final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                     boost_multipliers = final_boosts
-                    # Phase 3: Relational bridge — promote tokens in prose gaps
-                    # between committed boosted segments (relational verbs,
-                    # prepositions, conjunctions that encode fact-to-fact edges).
-                    _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
-                                            tok_strs, tids, counts, total_tokens)
+
+                    # Relational edge capture: pin the connectives that BIND the
+                    # captured nodes (negation/limit/equivalence/causal) into the
+                    # exact set so the SVD pool can't rebound them (see helper doc).
+                    _apply_relational_capture(boost_multipliers, tok_strs, tids,
+                                              counts, total_tokens, tok_boost)
                 boost_rows.append(boost_multipliers)
             # b = layer*num_blocks + block  →  tile the per-block rows per layer
             boost_np = np.tile(np.asarray(boost_rows, dtype=np.float32), (self.num_layers, 1))
@@ -3039,11 +3111,11 @@ class MLXKVBlockManager:
                         for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
                             final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
                 boost_multipliers = final_boosts
-                # Phase 3: Relational bridge — promote tokens in prose gaps
-                # between committed boosted segments (relational verbs,
-                # prepositions, conjunctions that encode fact-to-fact edges).
-                _apply_relational_bridge(boost_multipliers, segment_indices, S_comp,
-                                         tok_strs, tids, counts, total_tokens)
+
+                # Relational edge capture: pin the connectives that BIND the
+                # captured nodes into the exact set (see helper doc).
+                _apply_relational_capture(boost_multipliers, tok_strs, tids,
+                                          counts, total_tokens, tok_boost)
                 n_boosted_rows = sum(1 for m in boost_multipliers if m > 1.0)
 
                 boost_arr = mx.array(boost_multipliers, dtype=joint_errors.dtype)
