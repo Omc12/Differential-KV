@@ -159,9 +159,9 @@ def run_worker(config_name, model_id):
                 "preset": os.environ.get("DIFFKV_PRESET", "mid"),
                 "serving_mode": "balanced"
             }
-            if config_name == "early_boost" or config_name == "combined":
+            if config_name in ["early_boost", "combined"]:
                 cfg["early_layer_rank_boost"] = True
-            if config_name == "factual_store" or config_name == "combined":
+            if config_name in ["factual_store", "combined"]:
                 cfg["factual_store"] = True
                 
             w = DiffKVHFWrapper(
@@ -376,7 +376,10 @@ def main():
 
     if args.worker:
         results = run_worker(args.worker, args.model)
-        print("__RESULT__ " + json.dumps(results))
+        # Write results to a temp json file instead of standard stdout output capture
+        temp_file = f"temp_res_{args.worker}.json"
+        with open(temp_file, "w") as f:
+            json.dump(results, f)
         return
 
     configs = [
@@ -396,19 +399,23 @@ def main():
         print(f"\n>>> Running configuration: {cfg}", flush=True)
         env = os.environ.copy()
         cmd = [sys.executable, os.path.abspath(__file__), "--worker", cfg, "--model", args.model]
-        p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         
-        line = [l for l in p.stdout.splitlines() if l.startswith("__RESULT__")]
-        if line:
-            res = json.loads(line[-1][len("__RESULT__ "):])
+        # Run subprocess without capture_output to see real-time downloads/Triton logs
+        p = subprocess.run(cmd, env=env)
+        
+        temp_file = f"temp_res_{cfg}.json"
+        if os.path.exists(temp_file):
+            with open(temp_file, "r") as f:
+                res = json.load(f)
+            os.remove(temp_file)
             all_results[cfg] = res
             
             for p_key in ["prompt1", "prompt2"]:
                 p_res = res.get(p_key, {})
-                print(f"    {p_key}: tokens={p_res.get('generated_tokens')}, prefill={p_res.get('prefill_time_s',0):.2f}s, tps={p_res.get('decode_tps',0):.1f}, kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB", flush=True)
+                print(f"    {p_key} Success: tokens={p_res.get('generated_tokens')}, prefill={p_res.get('prefill_time_s',0):.2f}s, tps={p_res.get('decode_tps',0):.1f}, kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB", flush=True)
         else:
-            print(f"    FAILED:\nSTDOUT:\n{p.stdout[-1000:]}\nSTDERR:\n{p.stderr[-1000:]}", flush=True)
-            all_results[cfg] = {"status": "failed", "stderr": p.stderr}
+            print(f"    FAILED: Subprocess for {cfg} exited without writing results file.", flush=True)
+            all_results[cfg] = {"status": "failed", "stderr": "No results temp file written."}
 
     # Save raw results
     out_path = os.path.join(REPO, args.out) if not os.path.isabs(args.out) else args.out
