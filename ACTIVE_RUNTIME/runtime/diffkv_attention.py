@@ -64,6 +64,34 @@ _SRL_THRESHOLD      = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "50"))
 _SRL_VALIDATE       = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
 _SRL_VALIDATE_EVERY = int(os.environ.get("DIFFKV_VALIDATE_EVERY", "50"))
 
+# ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
+_SPARSE_BIAS_ENV = os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower()
+if _SPARSE_BIAS_ENV.startswith("auto"):
+    _SPARSE_BIAS_MODE = "auto"
+    _parts = _SPARSE_BIAS_ENV.split(",")
+    try:
+        _SPARSE_BIAS_BASE = float(_parts[1]) if len(_parts) > 1 and _parts[1] else 2.0
+    except ValueError:
+        _SPARSE_BIAS_BASE = 2.0
+    _SPARSE_BIAS = 0.0
+else:
+    _SPARSE_BIAS_MODE = "fixed"
+    _SPARSE_BIAS_BASE = 0.0
+    try:
+        _SPARSE_BIAS = float(_SPARSE_BIAS_ENV)
+    except ValueError:
+        _SPARSE_BIAS = 0.0
+
+def _apply_sparse_bias(lse_sparse, lse_dense):
+    if _SPARSE_BIAS_MODE == "auto":
+        diff = lse_dense - lse_sparse
+        diff_clamped = torch.clamp(diff - 4.0, min=0.0)
+        adaptive_bias = torch.clamp(_SPARSE_BIAS_BASE - 0.5 * diff_clamped, min=0.0)
+        return torch.where(lse_sparse <= -1e9, lse_sparse, lse_sparse + adaptive_bias)
+    elif _SPARSE_BIAS != 0.0:
+        return torch.where(lse_sparse <= -1e9, lse_sparse, lse_sparse + _SPARSE_BIAS)
+    return lse_sparse
+
 # ── Context-aware bypass threshold ────────────────────────────────────────────
 # DIFFKV_ENGAGE_THRESHOLD: total token count (prefill + history) below which
 # DiffKV bypasses all custom logic and falls through to pure Dense SDPA.
@@ -1166,6 +1194,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 lse_facts = lse_facts + boost
 
                             # 4. Three-way LSE combination (unclamped to preserve true log-sum-exp combination math)
+                            lse_sparse = _apply_sparse_bias(lse_sparse, lse_dense)
                             lse_max = torch.maximum(torch.maximum(lse_dense, lse_sparse), lse_facts)
                             lse_max_masked = lse_max.clone()
                             lse_max_masked[torch.isinf(lse_max)] = 0.0
@@ -1525,6 +1554,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         )  # [H_q, D], [H_q]
 
                                     # 4. Combine outputs via LSE safely (unclamped to preserve true log-sum-exp combination math)
+                                    lse_sparse = _apply_sparse_bias(lse_sparse, lse_dense)
                                     lse_max = torch.maximum(lse_dense, lse_sparse)
                                     lse_max_masked = lse_max.clone()
                                     lse_max_masked[torch.isinf(lse_max)] = 0.0
@@ -1553,6 +1583,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 and pool is not None
                                 and block_indices is not None
                                 and block_indices.numel() > 0
+                                and os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower() in ("0", "0.0", "", "false", "off")
                             )
                             if _use_combined:
                                 # Assemble dense_k/dense_v for the combined kernel.

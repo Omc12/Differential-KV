@@ -1852,6 +1852,34 @@ def native_triton_sparse_attn_decode(
                     
                     s = torch.bmm(q_reshaped, k_permuted).view(H_q, -1) * inv_scale
                     
+                    # ── Sparse LSE Bias (Ported from MLX) ────────────────────
+                    bias_env = os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower()
+                    if bias_env.startswith("auto"):
+                        bias_parts = bias_env.split(",")
+                        try:
+                            bias_base = float(bias_parts[1]) if len(bias_parts) > 1 and bias_parts[1] else 2.0
+                        except ValueError:
+                            bias_base = 2.0
+                        
+                        lse_dense = torch.logsumexp(s, dim=-1)
+                        lse_sparse = m_i + torch.log(torch.clamp(l_i, min=1e-9))
+                        diff = lse_dense - lse_sparse
+                        diff_clamped = torch.clamp(diff - 4.0, min=0.0)
+                        adaptive_bias = torch.clamp(bias_base - 0.5 * diff_clamped, min=0.0)
+                        
+                        factor = torch.exp(adaptive_bias)
+                        l_i = l_i * factor
+                        O_i = O_i * factor.unsqueeze(-1)
+                    else:
+                        try:
+                            bias_val = float(bias_env)
+                        except ValueError:
+                            bias_val = 0.0
+                        if bias_val != 0.0:
+                            factor = math.exp(bias_val)
+                            l_i = l_i * factor
+                            O_i = O_i * factor
+                    
                     m_b = s.max(-1).values
                     m_new = torch.maximum(m_i, m_b)
                     a = torch.exp(m_i - m_new)
