@@ -14,7 +14,7 @@ import os
 import threading
 from collections import OrderedDict
 from typing import Optional, Tuple, List, Any
-from native_core.compression.lowrank import reconstruct_batch_U, reconstruct_fact_only_U
+from native_core.compression.lowrank import reconstruct_batch_U
 
 try:
     from native_core.mac_utils import nvtx_push as _nvtx_push, nvtx_pop as _nvtx_pop, has_cuda as _has_cuda
@@ -895,30 +895,13 @@ def _build_stratified_U_for_triton(
               * pool.U_scale.view(-1, 1, 1).to(pool.dtype))  # [n_pool, S, R]
     U_full = U_full.clone()  # detach from pool view before scatter-write
 
-    # 2. Problem 3 fix — two separate reconstructions:
-    #
-    #    SCORE PROXY (U_full): uses reconstruct_fact_only_U — U_fact columns only.
-    #    U_sem (smooth semantic average) caused nearby blocks that share the same
-    #    topic/vocabulary cluster to outscore the factually-correct block during
-    #    routing, making the model attend to the wrong block and confabulate the
-    #    missing relationship from its prior.  Zeroing U_sem columns in the score
-    #    proxy anchors routing to concrete, specific information.
-    #
-    #    VALUE RECONSTRUCTION (U_full_recon): uses reconstruct_batch_U — full
-    #    U_sem + U_fact blend.  After routing selects the right block, we want
-    #    the most accurate value reconstruction possible, so U_sem is restored here.
-    U_fact_active = reconstruct_fact_only_U(pool, active_idx)  # [N_active, S, R] fp16
-    U_full[active_idx] = U_fact_active                          # score proxy: fact-only
-
-    # Full reconstruction for value path — kept in a separate tensor on the proxy.
-    U_full_recon = (pool.U.to(pool.dtype)
-                    * pool.U_scale.view(-1, 1, 1).to(pool.dtype)).clone()
-    U_active_full = reconstruct_batch_U(pool, active_idx)       # [N_active, S, R] fp16
-    U_full_recon[active_idx] = U_active_full
+    # 2. Accurate int4/fp16 stratified reconstruction for the N_active slots only.
+    #    reconstruct_batch_U loops over idx — now N_active (≤ 16 typical) instead
+    #    of N_pool (up to 256+), giving ≥16× speedup on the hot per-decode call.
+    U_active = reconstruct_batch_U(pool, active_idx)   # [N_active, S, R] fp16
+    U_full[active_idx] = U_active
 
     proxy = _StratifiedUProxy(pool, U_full)
-    # Attach full-blend U so kernels that need value accuracy can use it.
-    proxy._U_full_recon = U_full_recon
 
     # ── OPT-D: Populate cache ─────────────────────────────────────────────────
     _stratified_proxy_cache[cache_key] = proxy

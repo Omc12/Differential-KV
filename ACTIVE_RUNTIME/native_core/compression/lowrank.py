@@ -869,58 +869,6 @@ def reconstruct_batch_U(pool, idx: torch.Tensor) -> torch.Tensor:
     return U_recon
 
 
-def reconstruct_fact_only_U(pool, idx: torch.Tensor) -> torch.Tensor:
-    """
-    Build U using ONLY the factual (U_fact) singular vectors for block routing/scoring.
-
-    Problem 3 fix: U_sem is a smooth low-rank projection of the document's KV
-    distribution — essentially a thematic average.  When used in the score proxy
-    (block routing), semantically-related but factually-different blocks outscore
-    the correct block because they share the same thematic cluster.  The model
-    then attends to the wrong block and fills in the missing relationship from its
-    prior — the confabulation pattern seen in Enhanced mode.
-
-    By using ONLY U_fact (the residual singular vectors that carry specific,
-    high-frequency information) for routing, block selection stays anchored to
-    concrete facts rather than topic proximity.  U_sem is still used inside the
-    kernel for value reconstruction (accuracy) — just not for picking which blocks
-    to attend.
-
-    Blocks with n_sem == 0 (no stratified quantization) fall back to pool.U
-    unchanged, so this is a strict no-op for un-quantized blocks.
-    """
-    N = idx.shape[0]
-    device = pool.device
-    dtype = pool.dtype
-
-    max_seq_len = pool.U.shape[1]
-    rank = pool.U.shape[2]
-
-    U_recon = torch.zeros((N, max_seq_len, rank), device=device, dtype=dtype)
-
-    idx_list = idx.tolist() if hasattr(idx, "tolist") else list(idx)
-    for i, pool_idx in enumerate(idx_list):
-        n_sem = int(pool.n_semantic[pool_idx].item()) if hasattr(pool, "n_semantic") else 0
-        seq_len = int(pool.seq_lens[pool_idx].item())
-
-        if n_sem == 0:
-            # No stratified quantization — U_fact is the whole U; return as-is.
-            scale_val = pool.U_scale[pool_idx].to(dtype)
-            U_recon[i] = pool.U[pool_idx].to(dtype) * scale_val.view(1, 1)
-            continue
-
-        # Factual columns only — skip U_sem entirely.
-        # Zero-fill the semantic columns so scores from those dimensions are 0.
-        n_fact = rank - n_sem
-        if n_fact > 0:
-            U_fact = pool.U_fact[pool_idx, :seq_len, :n_fact]
-            U_recon[i, :seq_len, n_sem:n_sem + n_fact] = U_fact.to(dtype)
-        # U_sem columns stay zero → they contribute zero to q·k scores → no
-        # thematic bleed into routing decisions.
-
-    return U_recon
-
-
 def compress_lowrank_batch(
     deltas: torch.Tensor,  # [B, n, d]
     rank: int,

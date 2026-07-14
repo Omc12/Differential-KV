@@ -28,39 +28,35 @@ class DiffKVConfig:
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
             self.kv_quant = "q4_0"
-            # dense_window_factor: recency_window = round_to_512(num_layers * head_dim * factor)
-            # Resolved at manager init where model dims are known; overridable via
-            # DIFFKV_ENGAGE_THRESHOLD. For Qwen2.5-1.5B (28L, 128D): 0.25 → ~1024 tokens.
-            self.dense_window_factor = 0.25
-            self.max_residual_tokens = 4
+            self.max_active_dense_tokens = 1024
+            self.max_residual_tokens = 8
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
             self.prefill_chunk_size = 2048
             self.srl_threshold = 100
-            self.async_svd = False if is_macos else True
+            self.async_svd = False if is_macos else True  # Disable background async SVD on macOS for MPS stability
             self.mps_watermark = 0.0
             self.torch_compile = False if is_macos else True
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
             self.kv_quant = "f16"
-            # 0.75 → ~3072 tokens for 1.5B, scales proportionally for larger models.
-            self.dense_window_factor = 0.75
-            self.max_residual_tokens = 32
+            self.max_active_dense_tokens = 4096
+            # On CUDA, allow more residuals for better correction at high quality
+            self.max_residual_tokens = 8 if is_macos else 16
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
             self.prefill_chunk_size = 512
             self.srl_threshold = 50
-            self.async_svd = False if is_macos else True
+            self.async_svd = False if is_macos else True  # Disable background async SVD on macOS for MPS stability
             self.mps_watermark = 0.0
             self.torch_compile = False
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
             self.kv_quant = "q8_0"
-            # 0.50 → exactly 2048 tokens for Qwen2.5-1.5B (28L×128D×0.50=1792→2048).
-            self.dense_window_factor = 0.50
-            self.max_residual_tokens = 16
+            self.max_active_dense_tokens = 2048
+            self.max_residual_tokens = 8
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -93,15 +89,14 @@ class DiffKVConfig:
         self.kv_quant = self._get_str(
             "kv_quant", "DIFFKV_KV_QUANT", self.kv_quant, config_dict
         )
-
+        self.max_active_dense_tokens = self._get_int(
+            "max_active_dense_tokens", "DIFFKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
+        )
         # Issue 10: max_residual_tokens — configurable upper bound on correction slots per block.
         # NativeBlockPool reads DIFFKV_MAX_RESIDUAL_TOKENS directly for backward-compat;
         # DiffKVConfig surfaces it here for callers that pass config objects.
         self.max_residual_tokens = self._get_int(
             "max_residual_tokens", "DIFFKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
-        )
-        self.dense_window_factor = self._get_float(
-            "dense_window_factor", "DIFFKV_DENSE_WINDOW_FACTOR", self.dense_window_factor, config_dict
         )
 
         # 3. Per-layer rank options
@@ -133,8 +128,7 @@ class DiffKVConfig:
             print(f"  srl_age_penalty           = {self.srl_age_penalty}")
             print(f"  early_layer_rank_boost    = {self.early_layer_rank_boost}")
             print(f"  kv_quant                  = {self.kv_quant}")
-            print(f"  dense_window_factor       = {self.dense_window_factor}  (recency_window = round_to_512(L*D*factor))")
-            print(f"  max_residual_tokens       = {self.max_residual_tokens}")
+            print(f"  max_active_dense_tokens   = {self.max_active_dense_tokens}")
             if self.early_layer_rank_boost:
                 print(f"  max_rank_early            = {self.max_rank_early} (0=auto 2×base)")
 
