@@ -853,6 +853,20 @@ bool compress_lowrank_block(const LowRankCompressParams& params) {
             median_err_V = temp_V[mid];
         }
         float max_median_err = std::max(median_err_K, median_err_V);
+        if (std::getenv("DIFFKV_DBG_RECON_ERR")) {
+            // Per-block relative reconstruction error (median rel_K/rel_V, the
+            // SAME metric this function already computes to size the residual
+            // budget) tagged with layer_idx + anchor_idx, so it can be grepped
+            // and averaged PER LAYER on a real document to see WHERE low-rank
+            // reconstruction is struggling most (e.g. table-heavy blocks vs
+            // prose blocks, or systematically-worse layers).
+            std::cerr << "[RECON_ERR] layer=" << params.layer_idx
+                      << " block=" << params.block_id
+                      << " anchor=" << params.anchor_idx
+                      << " median_err_K=" << median_err_K
+                      << " median_err_V=" << median_err_V
+                      << " max=" << max_median_err << "\n";
+        }
         int adaptive_MR = MR;
         // DIFFKV_RESIDUAL_UNIFORM=1 (set by the native LEGO prefill, studs far
         // mode): skip the adaptive cap so every full prefill block carries the

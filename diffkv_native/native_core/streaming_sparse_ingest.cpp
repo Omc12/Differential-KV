@@ -702,6 +702,7 @@ void StreamingSparseIngestManager::submit_block_for_compression(
     job.session_id = active_session_id_.empty() ? "42" : active_session_id_;
     job.block_id = slot_id;
     job.local_block_id = block_idx;
+    job.layer_idx = layer_idx;
     job.block_size = S_total;
     job.feat_dim = F_test;
     job.rank = svd_rank;

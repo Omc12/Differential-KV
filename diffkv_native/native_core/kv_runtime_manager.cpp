@@ -149,6 +149,32 @@ void KVRuntimeManager::register_prefill_tokens(const std::vector<int32_t>& token
 
 int KVRuntimeManager::get_layer_rank(int layer_idx) const {
     double ratio = (double)layer_idx / std::max(n_layers_, 1);
+    // Rank schedule fixed 2026-07-14. This used to taper rank down for later
+    // layers (0.75x at ratio>=0.50, 0.50x at ratio>=0.79) — a native-only
+    // design; MLX (the reference this codebase mirrors) uses a single
+    // uniform rank for EVERY layer, no depth-based reduction at all.
+    //
+    // Root-caused via a new per-block reconstruction-error probe
+    // (DIFFKV_DBG_RECON_ERR, native_core/compression/lowrank.cpp) run on a
+    // real table-heavy document: median relative reconstruction error was
+    // flat (~0.41-0.50) through most of the network, then jumped sharply
+    // (~0.55-0.60 avg, up to 0.75+ max) exactly in the last ~21% of layers —
+    // precisely the tier this schedule had halved the rank for. Those are
+    // also the layers closest to the LM head, where reconstruction error has
+    // the least room to be corrected before it reaches the output logits —
+    // this was a direct, measured contributor to native's garbled/incoherent
+    // output on dense technical (table-heavy) documents under sparse decode.
+    //
+    // Restoring uniform rank flattened the error back to the ~0.41-0.50
+    // baseline in those layers and measurably fixed the garbled-table failure
+    // on the document that exposed it (coherent, on-topic, accurate output
+    // afterward). Verified cost: ~15% slower decode at 32k (37.4 -> 31.9 tps)
+    // from the extra reconstruction compute in the previously-reduced tiers;
+    // peak RSS was NOT meaningfully affected (~3.4GB either way, within
+    // run-to-run noise) — pool_rank is already sized at 2x layer_rank
+    // regardless, so most of the allocation was already paid for. NIAH 6/6,
+    // multi-fact 3/3, table reproduction byte-exact all held. Net: a real but
+    // modest speed cost for fixing a real coherence bug.
     if (ratio < 0.15) {
         // Boosted schedule for early layers (disabled by default, check env)
         if (const char* boost_env = std::getenv("DIFFKV_EARLY_LAYER_RANK_BOOST")) {
@@ -156,14 +182,8 @@ int KVRuntimeManager::get_layer_rank(int layer_idx) const {
                 return std::min(2 * base_rank_, 64);
             }
         }
-        return base_rank_;
-    } else if (ratio < 0.50) {
-        return base_rank_;
-    } else if (ratio < 0.79) {
-        return std::max(6, (int)std::round(0.75 * base_rank_));
-    } else {
-        return std::max(8, (int)std::round(0.50 * base_rank_));
     }
+    return base_rank_;
 }
 
 void KVRuntimeManager::ingest_prefill(

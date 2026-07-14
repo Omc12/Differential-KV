@@ -144,6 +144,7 @@ void AsyncCompressor::process_job(const CompressJob& job) {
     // 3. Delegate to lowrank block compressor logic
     LowRankCompressParams params;
     params.block_id = job.block_id;
+    params.layer_idx = job.layer_idx;
     params.block_size = job.block_size;
     params.feat_dim = job.feat_dim;
     params.rank = job.rank;

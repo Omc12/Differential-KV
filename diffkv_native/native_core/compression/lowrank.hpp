@@ -12,6 +12,7 @@ namespace diffkv {
 // LowRank block compression parameters and outputs
 struct LowRankCompressParams {
     int block_id;
+    int layer_idx = -1;  // diagnostic-only: for DIFFKV_DBG_RECON_ERR per-layer breakdown
     int block_size;  // S (total tokens in block, typically 64)
     int feat_dim;    // F
     int rank;        // R

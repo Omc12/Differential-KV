@@ -17,6 +17,7 @@ struct CompressJob {
     std::string session_id;
     int block_id;
     int local_block_id = -1;
+    int layer_idx = -1;  // diagnostic-only: for DIFFKV_DBG_RECON_ERR per-layer breakdown
     int block_size;  // S (total tokens in block, typically 64)
     int feat_dim;    // F
     int rank;        // R
@@ -72,6 +73,7 @@ struct CompressJob {
         session_id = other.session_id;
         block_id = other.block_id;
         local_block_id = other.local_block_id;
+        layer_idx = other.layer_idx;
         block_size = other.block_size;
         feat_dim = other.feat_dim;
         rank = other.rank;
@@ -145,6 +147,7 @@ struct CompressJob {
             session_id = other.session_id;
             block_id = other.block_id;
             local_block_id = other.local_block_id;
+        layer_idx = other.layer_idx;
             block_size = other.block_size;
             feat_dim = other.feat_dim;
             rank = other.rank;
