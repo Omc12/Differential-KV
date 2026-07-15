@@ -551,7 +551,11 @@ def _reconstruct_and_score_compiled(
     D = q_sq.shape[1]
     
     deltas_k_flat = torch.bmm(U.float(), V_K.float().reshape(N, R, -1))
-    deltas_k = deltas_k_flat.reshape(N, S, H, D).to(U.dtype) * scales.unsqueeze(-1)
+    # scales shape is [N] (one scale per block).  We need to broadcast across all
+    # four dims [N, S, H, D], so reshape to [N, 1, 1, 1].
+    # NOTE: scales.unsqueeze(-1) gives [N, 1] which PyTorch pads to [1, 1, N, 1]
+    # and then tries to match dim-2 (H) against N — fails for H≠N.
+    deltas_k = deltas_k_flat.reshape(N, S, H, D).to(U.dtype) * scales.view(N, 1, 1, 1)
     
     zeros_pad = torch.zeros((N, 1, H, D), dtype=U.dtype, device=U.device)
     deltas_k_full = torch.cat([zeros_pad, deltas_k], dim=1)
@@ -1719,10 +1723,16 @@ def _pytorch_vectorized_sparse_attn_decode(
                 _tl = blk.token_indices
                 _n = len(_tl)
                 if _n > 0 and _pos < S_dense:
-                    _dp_ws[_pos:_pos + _n].copy_(
-                        torch.tensor(_tl, dtype=torch.long, device=_dp_ws.device)
+                    # Clip to remaining workspace capacity.  This can happen when
+                    # assemble_dense_window_kv trimmed the oldest blocks (reducing
+                    # the workspace) but dense_blocks still contains all blocks
+                    # (including async-compressed ones with active_k=None whose
+                    # token_indices list spans more positions than the workspace).
+                    _actual_n = min(_n, S_dense - _pos)
+                    _dp_ws[_pos:_pos + _actual_n].copy_(
+                        torch.tensor(_tl[:_actual_n], dtype=torch.long, device=_dp_ws.device)
                     )
-                    _pos += _n
+                    _pos += _actual_n
         elif active_len > 0:
             _dp_ws[:active_len] = torch.arange(
                 total_seq_len - active_len, total_seq_len, device=q.device

@@ -261,12 +261,35 @@ def run_worker(mode, model_id, target_len):
             # CUDAGraphDecodeRunner to re-record the full model CUDA graph
             # (3-5 forward warmups per shape). 51 shapes = thousands of extra
             # forward passes. Barrier ensures stable shapes from decode step 1.
+            #
+            # WHY NOT _pending_cpu_blocks: that counter is initialized to 0 and
+            # never incremented on the submit side, so the old check always exits
+            # immediately. We check ACTUAL block states instead.
+            def _count_in_flight(mgr, sid):
+                """Count blocks still being compressed (not yet GPU-resident).
+                A block is "in-flight" when:
+                  - state == SUBMITTED: sent to background compressor, SVD not done
+                  - state == CPU_COMPRESSED: SVD done on CPU, waiting for GPU upload
+                  - state == ACCUMULATING AND active_k is None: async path cleared
+                    the GPU tensor before the compressor thread changed state
+                Only layer 0 is checked as a representative proxy — all layers are
+                processed by the same background thread in sequence."""
+                _sm = getattr(mgr, "_streaming_mgr", None)
+                if _sm is None:
+                    return 0
+                _l0 = _sm.session_blocks.get(sid, {}).get(0, [])
+                return sum(
+                    1 for b in _l0
+                    if getattr(b, "state", "") in ("SUBMITTED", "CPU_COMPRESSED")
+                    or (getattr(b, "state", "") == "ACCUMULATING" and getattr(b, "active_k", None) is None)
+                )
+
             _barrier_start = time.perf_counter()
             _barrier_timeout = 120.0
             _prev_pending = -1
             while True:
-                _pending = getattr(mgr, "_pending_cpu_blocks", 0)
-                if _pending <= 0:
+                _pending = _count_in_flight(mgr, sid)
+                if _pending == 0:
                     break
                 if time.perf_counter() - _barrier_start > _barrier_timeout:
                     print(f"    [Barrier] Timeout after {_barrier_timeout:.0f}s, {_pending} blocks still pending.", flush=True)
