@@ -1,157 +1,195 @@
 """
 profile_decode_step.py
-Run on Lightning AI to pinpoint exactly where the 1.4 TPS bottleneck is.
-Usage: python colab/profile_decode_step.py
+Run on Lightning AI:
+    cd /home/zeus/Differential-KV && python colab/profile_decode_step.py
+
+Instruments a compressed decode step (after 4K prefill) and prints a
+detailed per-phase timing breakdown to find exactly where time is going.
 """
+
 import sys, os, time, gc
+sys.path.insert(0, "/home/zeus/Differential-KV/ACTIVE_RUNTIME")
+os.environ["DIFFKV_FACTUAL_STORE"]  = "0"
+os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
+
 import torch
 
-# ── Path setup identical to run_nat_128k_q4_eval.py ─────────────────
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUNTIME = os.path.join(REPO, "ACTIVE_RUNTIME")
-NATIVE  = os.path.join(RUNTIME, "native_core")
-DIFFKV_CORE = os.path.join(NATIVE, "diffkv_core")
-for p in [RUNTIME, NATIVE, DIFFKV_CORE]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+print(f"Device: {device}\n")
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-import transformers
-from transformers import AutoTokenizer, BitsAndBytesConfig
-transformers.logging.set_verbosity_error()
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Load DiffKV model
+# ──────────────────────────────────────────────────────────────────────────────
+from transformers import BitsAndBytesConfig
+from serving.hf_diffkv_wrapper import DiffKVHFWrapper
 
 MODEL_ID = "Qwen/Qwen2.5-14B-Instruct"
-device   = "cuda:0"
-N_STEPS  = 30     # measure 30 decode steps
-N_WARMUP = 3
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True, bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True,
+)
+config = {
+    "mode": "fp16", "quantization": "nf4",
+    "block_size": 256, "rank": 16,
+    "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"
+}
 
-print("Loading tokenizer...")
-tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-print("Building 4K prompt...")
-unit = "The quick brown fox jumped over the lazy dog. "
-prompt_text = unit * (4096 // len(tok.encode(unit)) + 1)
-ids = tok.encode(prompt_text)[:4096]
-print(f"Prompt length: {len(ids)} tokens")
-
-# ── Dense baseline ────────────────────────────────────────────────────
-print("\n=== DENSE BASELINE ===")
-from transformers import AutoModelForCausalLM
-qcfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
-                           bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4")
-dense_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=qcfg,
-                                                    device_map="auto", trust_remote_code=True)
-dense_model.eval()
-
-# Prefill
-CH = 128; past_kv = None
-with torch.no_grad():
-    for cs in range(0, len(ids), CH):
-        ch = ids[cs:cs+CH]
-        pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
-        out = dense_model(torch.tensor([ch], device=device), position_ids=pos,
-                          past_key_values=past_kv, use_cache=True)
-        past_kv = out.past_key_values
-
-static_in  = torch.zeros((1,1), dtype=torch.long, device=device)
-static_pos = torch.zeros((1,1), dtype=torch.long, device=device)
-last_logits = out.logits[0,-1].float()
-cur = len(ids)
-
-# Warmup
-with torch.no_grad():
-    for _ in range(N_WARMUP):
-        nid = int(torch.argmax(last_logits).item())
-        static_in[0,0] = nid; static_pos[0,0] = cur
-        out2 = dense_model(static_in, position_ids=static_pos, past_key_values=past_kv, use_cache=True)
-        last_logits = out2.logits[0,-1].float()
-        past_kv = out2.past_key_values
-        cur += 1
-
-torch.cuda.synchronize()
+print("Loading DiffKV model...")
 t0 = time.perf_counter()
-with torch.no_grad():
-    for step in range(N_STEPS):
-        nid = int(torch.argmax(last_logits).item())
-        static_in[0,0] = nid; static_pos[0,0] = cur
-        out2 = dense_model(static_in, position_ids=static_pos, past_key_values=past_kv, use_cache=True)
-        last_logits = out2.logits[0,-1].float()
-        past_kv = out2.past_key_values
-        cur += 1
-torch.cuda.synchronize()
-dt = time.perf_counter() - t0
-print(f"Dense TPS: {N_STEPS/dt:.1f}  ({dt*1000/N_STEPS:.1f}ms/tok)")
+w = DiffKVHFWrapper(model_id=MODEL_ID, config=config,
+                    torch_dtype=torch.float16, device=device,
+                    quantization_config=quantization_config)
+w.ensure_loaded()
+tok, mgr, model = w.tokenizer, w.manager, w.model
+print(f"Model loaded in {time.perf_counter()-t0:.1f}s\n")
 
-del dense_model, past_kv; gc.collect(); torch.cuda.empty_cache()
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Build 4K prompt and run prefill
+# ──────────────────────────────────────────────────────────────────────────────
+TARGET_LEN = 4096
+WARMUP_TEXT = "The following is a long document. " * 300
+ids = tok.encode(WARMUP_TEXT)[:TARGET_LEN]
+print(f"Prompt tokens: {len(ids)}")
 
-# ── Compressed — per-section timing ─────────────────────────────────
-print("\n=== COMPRESSED TIMING ===")
-from serving.hf_diffkv_wrapper import DiffKVWrapper
-
-w = DiffKVWrapper(model_id=MODEL_ID, device=device, rank=8,
-                  block_size=64, max_blocks=512)
-model = w.model
-mgr   = w.manager
-
-sid = "prof_session"
+sid = "profile_session"
+mgr.clear_session(sid)
 mgr.init_session(sid, prefill_len=len(ids))
 mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
 model._diffkv_session_ids = [sid]
 
-# Prefill
-with torch.no_grad():
+print("Running prefill...", flush=True)
+CH = 128
+out = None
+t_pre = time.perf_counter()
+with torch.inference_mode():
     for cs in range(0, len(ids), CH):
         ch = ids[cs:cs+CH]
-        out = model(torch.tensor([ch], device=device),
-                    torch.tensor([list(range(cs, cs+len(ch)))], device=device))
+        out = model(
+            torch.tensor([ch], device=device),
+            position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device)
+        )
         mgr.compress_deferred_prefill_blocks(sid)
+print(f"Prefill done in {time.perf_counter()-t_pre:.2f}s\n")
 
-last_logits = out.logits[0,-1].float()
+if hasattr(mgr, "finalize_srl_index"):
+    mgr.finalize_srl_index(sid, cached_len=0)
+if hasattr(mgr, "_prefill_kv_capture"):
+    mgr._prefill_kv_capture.pop(sid, None)
+
+torch.cuda.synchronize()
+torch.cuda.reset_peak_memory_stats()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Warm up 3 decode steps (let JIT, CUDA graphs settle)
+# ──────────────────────────────────────────────────────────────────────────────
+last_logits = out.logits[0, -1].float()
+static_in  = torch.zeros((1, 1), dtype=torch.long, device=device)
+static_pos = torch.zeros((1, 1), dtype=torch.long, device=device)
 cur = len(ids)
 
-static_in  = torch.zeros((1,1), dtype=torch.long, device=device)
-static_pos = torch.zeros((1,1), dtype=torch.long, device=device)
-
-# ── cProfile the hot decode loop ────────────────────────────────────
-print("\n--- cProfile: top 30 functions by cumulative time ---")
-import cProfile, pstats, io
-
-def one_step():
-    nid = int(torch.argmax(last_logits).item())
-    static_in[0,0] = nid; static_pos[0,0] = cur
-    with torch.no_grad():
-        out3 = model(static_in, static_pos)
-    return out3.logits[0,-1].float()
-
-# Warmup
-for _ in range(N_WARMUP):
-    last_logits = one_step()
-
-torch.cuda.synchronize()
-
-pr = cProfile.Profile()
-pr.enable()
-for _ in range(N_STEPS):
-    last_logits = one_step()
-torch.cuda.synchronize()
-pr.disable()
-
-s = io.StringIO()
-ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
-ps.print_stats(30)
-print(s.getvalue())
-
-# ── Wall-clock TPS ───────────────────────────────────────────────────
-torch.cuda.synchronize()
-t0 = time.perf_counter()
-with torch.no_grad():
-    for step in range(N_STEPS):
+print("Warming up 3 decode steps...")
+with torch.inference_mode():
+    for _ in range(3):
         nid = int(torch.argmax(last_logits).item())
-        static_in[0,0] = nid; static_pos[0,0] = cur
-        out3 = model(static_in, static_pos)
-        last_logits = out3.logits[0,-1].float()
+        static_in[0, 0] = nid
+        static_pos[0, 0] = cur
+        out = model(static_in, position_ids=static_pos)
+        last_logits = out.logits[0, -1].float()
         cur += 1
 torch.cuda.synchronize()
-dt = time.perf_counter() - t0
-print(f"\nCompressed TPS: {N_STEPS/dt:.1f}  ({dt*1000/N_STEPS:.1f}ms/tok)")
+print("Warmup done.\n")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Per-step timing (20 steps, synchronized)
+# ──────────────────────────────────────────────────────────────────────────────
+N_STEPS = 20
+step_times = []
+
+print(f"Profiling {N_STEPS} decode steps (torch.cuda.synchronize before+after):")
+with torch.inference_mode():
+    for step in range(N_STEPS):
+        pending_before = getattr(mgr, "_pending_cpu_blocks", 0)
+
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+
+        nid = int(torch.argmax(last_logits).item())
+        t_argmax = time.perf_counter()
+
+        static_in[0, 0] = nid
+        static_pos[0, 0] = cur
+        out = model(static_in, position_ids=static_pos)
+
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+
+        last_logits = out.logits[0, -1].float()
+        cur += 1
+
+        pending_after = getattr(mgr, "_pending_cpu_blocks", 0)
+        total_ms  = (t_end    - t_start)  * 1000
+        argmax_ms = (t_argmax - t_start)  * 1000
+        model_ms  = (t_end    - t_argmax) * 1000
+        step_times.append(total_ms)
+        print(f"  Step {step+1:2d}: total={total_ms:7.1f}ms  "
+              f"argmax={argmax_ms:.1f}ms  model={model_ms:.1f}ms  "
+              f"pending={pending_before}")
+
+avg_ms = sum(step_times) / len(step_times)
+print(f"\nAvg: {avg_ms:.1f}ms/token  ({1000/avg_ms:.1f} TPS)\n")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. Phase-level instrumentation for ONE decode step
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 60)
+print("Phase breakdown for a single decode step:")
+print("=" * 60)
+
+_orig_ingest = mgr.ingest_streaming
+_ingest_ms = [0.0]; _ingest_n = [0]
+def _timed_ingest(*a, **kw):
+    t = time.perf_counter()
+    r = _orig_ingest(*a, **kw)
+    _ingest_ms[0] += (time.perf_counter()-t)*1000
+    _ingest_n[0] += 1
+    return r
+mgr.ingest_streaming = _timed_ingest
+
+_orig_blocks = mgr.get_cached_decode_blocks if hasattr(mgr, "get_cached_decode_blocks") else None
+_blocks_ms = [0.0]; _blocks_n = [0]
+if _orig_blocks:
+    def _timed_blocks(*a, **kw):
+        t = time.perf_counter()
+        r = _orig_blocks(*a, **kw)
+        _blocks_ms[0] += (time.perf_counter()-t)*1000
+        _blocks_n[0] += 1
+        return r
+    mgr.get_cached_decode_blocks = _timed_blocks
+
+with torch.inference_mode():
+    nid = int(torch.argmax(last_logits).item())
+    static_in[0, 0] = nid
+    static_pos[0, 0] = cur
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    out = model(static_in, position_ids=static_pos)
+    torch.cuda.synchronize()
+    total_ms = (time.perf_counter() - t0) * 1000
+
+# Print
+print(f"  Total model forward:       {total_ms:.1f} ms")
+print(f"  ingest_streaming:          {_ingest_ms[0]:.1f} ms  ({_ingest_n[0]} calls @ {_ingest_ms[0]/max(1,_ingest_n[0]):.3f} ms/call)")
+if _orig_blocks:
+    print(f"  get_cached_decode_blocks:  {_blocks_ms[0]:.1f} ms  ({_blocks_n[0]} calls @ {_blocks_ms[0]/max(1,_blocks_n[0]):.3f} ms/call)")
+other = total_ms - _ingest_ms[0] - _blocks_ms[0]
+print(f"  Remaining (GPU+other):     {other:.1f} ms")
+
+mgr.ingest_streaming = _orig_ingest
+if _orig_blocks:
+    mgr.get_cached_decode_blocks = _orig_blocks
+
+print(f"""
+KEY: if 'model forward' >> dense baseline (~88ms), the bottleneck is inside
+     the DiffKV decode path. If 'pending' stays > 0, background SVD is
+     competing with decode. If 'ingest_streaming' is large, that's the hot path.
+""")
