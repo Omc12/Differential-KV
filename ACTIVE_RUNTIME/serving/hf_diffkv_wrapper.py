@@ -657,6 +657,34 @@ class PyTorchDiffKVHFWrapper:
         if os.environ.get("DIFFKV_SYNC_DEBUG", "0") == "1":
             _patch_tensor_sync_barriers()
 
+        # ── Decode JIT pre-warm ──────────────────────────────────────────────
+        # torch.compile() is lazy — Inductor only fires on the first REAL tensor
+        # call.  Pre-trigger it here at load time using dummy tensors so neither
+        # CLI users nor benchmark runs pay the 60-120s compile cost on their
+        # first request.  Matches the behaviour of MLX's @mx.compile, which
+        # compiles at definition time.
+        #
+        # Skip if DIFFKV_JIT_SKIP_WARMUP=1 (useful for fast CI smoke tests that
+        # don't exercise the CUDA decode path).
+        if self.device == "cuda" and os.environ.get("DIFFKV_JIT_SKIP_WARMUP", "0") != "1":
+            try:
+                from native_core.sparse_decode.triton_fused_decode import warm_up_jit
+                _cfg  = self.manager.config if hasattr(self, "manager") and self.manager else {}
+                _dtype = torch_dtype if torch_dtype in (torch.float16, torch.bfloat16) else torch.float16
+                # Read model's actual head counts from config for accurate dummy shapes
+                _hf_cfg = getattr(self.model, "config", None)
+                _H      = getattr(_hf_cfg, "num_attention_heads", 32)
+                _kv_H   = getattr(_hf_cfg, "num_key_value_heads", _H)
+                _D      = getattr(_hf_cfg, "head_dim",
+                                  getattr(_hf_cfg, "hidden_size", 4096) // max(_H, 1))
+                _R      = _cfg.get("rank", 16) if isinstance(_cfg, dict) else getattr(_cfg, "rank", 16)
+                _bs     = _cfg.get("block_size", 256) if isinstance(_cfg, dict) else getattr(_cfg, "block_size", 256)
+                print(f"[DiffKV] Pre-warming decode JIT (H={_H}, kv_H={_kv_H}, D={_D}, R={_R}) ...", flush=True)
+                warm_up_jit(device=self.device, dtype=_dtype, H=_H, kv_heads=_kv_H, D=_D, R=_R, block_size=_bs)
+            except Exception as _e:
+                print(f"[DiffKV] WARNING: JIT pre-warm step failed ({_e}). "
+                      "First decode request will trigger compilation.", flush=True)
+
         # ── Post-init memory cleanup ─────────────────────────────────────────
         # Fix 1B + 2.2 — run after everything is wired up so all temp objects are free.
         _clear_cpu_param_copies(self.model, self.device)   # audit stray CPU params + flush cache

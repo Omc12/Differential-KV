@@ -777,6 +777,96 @@ else:
     except Exception:
         _prefill_fused_history_attend = _prefill_fused_history_attend_compiled
 
+
+# ── 2b-pre. JIT Warmup helper ─────────────────────────────────────────────────
+# torch.compile() wraps functions LAZILY — actual Inductor code generation only
+# fires on the first real tensor call.  For the CLI, that means the first user
+# request pays a 60-120s compile penalty.  For benchmarks, the first measured
+# decode step is dominated by compile time and reports artificially low TPS.
+#
+# warm_up_jit() pre-triggers Inductor with small dummy tensors so both paths
+# see steady-state performance from the very first real call — matching how
+# MLX's @mx.compile compiles at definition time.
+#
+# Called from DiffKVHFWrapper.ensure_loaded() once weights are on-device.
+
+def warm_up_jit(
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float16,
+    H: int = 8,         # query heads (any value; compiled with dynamic=True)
+    kv_heads: int = 4,  # KV heads
+    D: int = 64,        # head dim  (small → faster compile, works for any D)
+    R: int = 4,         # SVD rank
+    block_size: int = 16,  # small block for fast dummy ops
+) -> None:
+    """
+    Pre-trigger Inductor compilation for the two decode JIT functions.
+
+    Uses tiny dummy tensors so the compile+kernel-gen finishes in roughly the
+    same wall-clock time as with real tensors (Inductor analysis cost dominates
+    over tensor size), but without keeping large intermediate buffers alive.
+
+    Safe to call multiple times; subsequent calls hit the compiled cache and
+    return instantly.
+    """
+    if not _IS_CUDA_AVAILABLE or use_compile != "1":
+        return  # No-op on MPS/CPU — nothing to warm up
+
+    try:
+        N = 2          # number of dummy blocks
+        S = block_size - 1  # tokens per block minus anchor
+
+        _dev = torch.device(device)
+
+        # ── _reconstruct_and_score dummy inputs ───────────────────────────
+        U_d       = torch.zeros(N, S, R,          device=_dev, dtype=dtype)
+        VK_d      = torch.zeros(N, kv_heads, R, D, device=_dev, dtype=dtype)
+        anchK_d   = torch.zeros(N, kv_heads, D,   device=_dev, dtype=dtype)
+        scales_d  = torch.ones(N,                  device=_dev, dtype=dtype)
+        cos_d     = torch.ones(N, 1 + S, 1, D,    device=_dev, dtype=dtype)
+        sin_d     = torch.zeros(N, 1 + S, 1, D,   device=_dev, dtype=dtype)
+        q_sq_d    = torch.zeros(H, D,             device=_dev, dtype=dtype)
+
+        with torch.no_grad():
+            _out = _reconstruct_and_score(U_d, VK_d, anchK_d, scales_d, cos_d, sin_d, q_sq_d, 1.0)
+            # Force completion so compilation finishes before we proceed
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(_dev)
+
+        # ── _attend_and_reconstruct_v dummy inputs ────────────────────────
+        H_q    = H
+        S_dens = block_size      # small dense window
+
+        P_anc_d  = torch.zeros(H_q, N,       device=_dev, dtype=dtype)
+        P_comp_d = torch.zeros(H_q, N * S,   device=_dev, dtype=dtype)
+        P_den_d  = torch.zeros(H_q, S_dens,  device=_dev, dtype=dtype)
+        VV_d     = torch.zeros(N, kv_heads, R, D, device=_dev, dtype=dtype)
+        anchV_d  = torch.zeros(N, kv_heads, D,    device=_dev, dtype=dtype)
+        v_den_d  = torch.zeros(1, S_dens, kv_heads, D, device=_dev, dtype=dtype)
+
+        with torch.no_grad():
+            _out2 = _attend_and_reconstruct_v(
+                P_anc_d, P_comp_d, P_den_d,
+                U_d, VV_d, anchV_d, scales_d,
+                v_den_d, H_q, N, S, R, D, S_dens,
+            )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(_dev)
+
+        # Clean up dummy tensors immediately
+        del U_d, VK_d, anchK_d, scales_d, cos_d, sin_d, q_sq_d, _out
+        del P_anc_d, P_comp_d, P_den_d, VV_d, anchV_d, v_den_d, _out2
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print("[DiffKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
+
+    except Exception as e:
+        # Non-fatal: warmup failure just means first real call will compile.
+        print(f"[DiffKV JIT] WARNING: decode kernel warmup failed ({e}). "
+              "First decode request will trigger JIT compilation.", flush=True)
+
+
 # ── 2b. Stratified U reconstruction helper (Issue 1 fix) ─────────────────────
 # The Triton kernel reads pool.U (int8) + pool.U_scale (scalar).  That path
 # bypasses the stratified quantization system (U_sem int4 + U_fact fp16) built

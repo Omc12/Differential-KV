@@ -252,12 +252,15 @@ def run_worker(mode, model_id, target_len):
             if _barrier_elapsed > 0.2:
                 print(f"    [Barrier] Done in {_barrier_elapsed:.1f}s", flush=True)
 
-            # CRITICAL: Warm up decode before starting TPS timer.
-            # _reconstruct_and_score and _attend_and_reconstruct_v are decode-only
-            # Triton JIT functions: they compile on the very first decode call
-            # (30-120s Inductor compilation). Without warmup this compilation time
-            # dominates the 256-step measurement → 1.6 TPS instead of ~12 TPS.
-            print("    [Warmup] Running 3 decode warmup steps for JIT compilation...", flush=True)
+            # NOTE: as of the warm_up_jit() integration in ensure_loaded(), the
+            # Inductor compilation for _reconstruct_and_score and
+            # _attend_and_reconstruct_v is triggered at model-load time (before
+            # this eval script even runs the prefill).  The 3-step generate loop
+            # below is kept as a safety net for:
+            #  (a) entry points that bypass ensure_loaded (raw model scripts), and
+            #  (b) warming up CUDA graph recording passes if enabled.
+            # When already compiled, the 3 steps run in <1s total.
+            print("    [Warmup] Running 3 decode warmup steps (CUDA graph + JIT safety)...", flush=True)
             _wup_in  = torch.zeros((1, 1), dtype=torch.long, device=device)
             _wup_pos = torch.zeros((1, 1), dtype=torch.long, device=device)
             _wup_logits = last_logits_gpu
