@@ -50,6 +50,15 @@ import gc
 import subprocess
 import torch
 
+# Disable CUDA graph recording for dynamic-shape Triton JIT functions.
+# Without this, _reconstruct_and_score / _attend_and_reconstruct_v record a new
+# CUDA graph for each unique block_count seen during prefill & decode (51 shapes
+# in practice), each needing 3 warmup passes → the spikey GPU 50% / slow prefill.
+# Skipping graphs means each call runs eagerly — the per-call overhead is ~0.5ms
+# vs ~2µs for graph replay, but we avoid 51 × 3 × warmup_time of recording cost.
+import torch._inductor.config as _ind_cfg
+_ind_cfg.triton.cudagraph_skip_dynamic_graphs = True
+
 # New Prompt
 CUSTOM_PROMPT = """Use only the supplied text.
 
