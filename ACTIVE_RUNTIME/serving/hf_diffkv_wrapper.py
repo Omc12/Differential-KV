@@ -678,8 +678,11 @@ class PyTorchDiffKVHFWrapper:
                 _D      = getattr(_hf_cfg, "head_dim",
                                   getattr(_hf_cfg, "hidden_size", 4096) // max(_H, 1))
                 _R      = _cfg.get("rank", 16) if isinstance(_cfg, dict) else getattr(_cfg, "rank", 16)
-                _bs     = _cfg.get("block_size", 256) if isinstance(_cfg, dict) else getattr(_cfg, "block_size", 256)
-                print(f"[DiffKV] Pre-warming decode JIT (H={_H}, kv_H={_kv_H}, D={_D}, R={_R}) ...", flush=True)
+                # Use the manager's actual block_size, not the config value.
+                # The manager derives block_size independently (currently 64 by default);
+                # the config dict may carry a different value that is ignored by the manager.
+                _bs     = getattr(self.manager, "block_size", 64)
+                print(f"[DiffKV] Pre-warming decode JIT (H={_H}, kv_H={_kv_H}, D={_D}, R={_R}, block_size={_bs}) ...", flush=True)
                 warm_up_jit(device=self.device, dtype=_dtype, H=_H, kv_heads=_kv_H, D=_D, R=_R, block_size=_bs)
             except Exception as _e:
                 print(f"[DiffKV] WARNING: JIT pre-warm step failed ({_e}). "

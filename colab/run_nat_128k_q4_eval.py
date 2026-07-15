@@ -91,31 +91,61 @@ def get_gpu_metrics():
         return None, None
 
 def build_prompt_for_len(tokenizer, target_len):
+    """Build a prompt of approximately `target_len` tokens using the model's own
+    chat template.  Works for Qwen (ChatML), Llama 3, Mistral, Phi-3, etc.
+    The paper text is repeated to fill up to `target_len` tokens.
+    """
     with open(PAPER_PATH, "r", encoding="utf-8") as f:
         paper_content = f.read()
 
-    system_prefix = "<|im_start|>system\nYou are a helpful assistant. Answer the user's request strictly using the provided context.<|im_end|>\n<|im_start|>user\nProvided Text:\n"
-    suffix = f"\n\nInstructions:\n{CUSTOM_PROMPT}<|im_end|>\n<|im_start|>assistant\n"
+    # Measure the token overhead of the chat framing using a tiny placeholder.
+    _placeholder = "X"
+    try:
+        _framed = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": "You are a helpful assistant. Answer the user's request strictly using the provided context."},
+                {"role": "user",   "content": f"Provided Text:\n{_placeholder}\n\nInstructions:\n{CUSTOM_PROMPT}"},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        # Fallback for tokenizers without a chat template.
+        _framed = (
+            "You are a helpful assistant. Answer the user's request strictly using the provided context.\n\n"
+            f"Provided Text:\n{_placeholder}\n\nInstructions:\n{CUSTOM_PROMPT}\n\nAssistant:"
+        )
 
-    system_overhead = len(tokenizer.encode(system_prefix))
-    suffix_overhead = len(tokenizer.encode(suffix))
-    available_budget = target_len - system_overhead - suffix_overhead
+    overhead = len(tokenizer.encode(_framed)) - len(tokenizer.encode(_placeholder))
+    available_budget = target_len - overhead
 
     if available_budget <= 0:
-        return f"{system_prefix}{paper_content[:100]}{suffix}"
+        # Not enough budget — just use a small fragment and accept the mismatch.
+        return _framed.replace(_placeholder, paper_content[:100])
 
     paper_tokens = tokenizer.encode(paper_content)
-    n_paper_tokens = len(paper_tokens)
-
-    reps = available_budget // n_paper_tokens
+    reps = available_budget // len(paper_tokens)
     haystack_tokens = paper_tokens * reps
-
     rem = available_budget - len(haystack_tokens)
     if rem > 0:
         haystack_tokens += paper_tokens[:rem]
-
     haystack_text = tokenizer.decode(haystack_tokens)
-    return f"{system_prefix}{haystack_text}{suffix}"
+
+    try:
+        return tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": "You are a helpful assistant. Answer the user's request strictly using the provided context."},
+                {"role": "user",   "content": f"Provided Text:\n{haystack_text}\n\nInstructions:\n{CUSTOM_PROMPT}"},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return (
+            "You are a helpful assistant. Answer the user's request strictly using the provided context.\n\n"
+            f"Provided Text:\n{haystack_text}\n\nInstructions:\n{CUSTOM_PROMPT}\n\nAssistant:"
+        )
+
 
 def run_worker(mode, model_id, target_len):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
@@ -157,7 +187,6 @@ def run_worker(mode, model_id, target_len):
             config = {
                 "mode": "fp16",
                 "quantization": "nf4",
-                "block_size": 256,
                 "rank": 16,
                 "micro_block_size": 256,
                 "preset": "mid",
@@ -466,7 +495,7 @@ def main():
     sweep_lengths = [4096, 8192, 16384, 32768, 65536, 131072]
     all_results = {}
 
-    print(f"=== Starting Qwen2.5-14B Context Sweep Evaluation (4K - 128K) ===", flush=True)
+    print(f"=== Starting {args.model} Context Sweep Evaluation (4K - 128K) ===", flush=True)
 
     for target_len in sweep_lengths:
         print(f"\n=======================================================", flush=True)

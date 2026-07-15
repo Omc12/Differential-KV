@@ -88,17 +88,36 @@ Maximum 180 words."""
 
 PAPER_PATH = os.path.join(ACTIVE, "nat_paper.txt")
 
-def format_prompt(paper_content, prompt_instructions):
-    return f"""<|im_start|>system
-You are a helpful assistant. Answer the user's request strictly using the provided context.<|im_end|>
-<|im_start|>user
-Provided Text:
-{paper_content}
+def build_prompt(tokenizer, paper_content, prompt_instructions):
+    """Build a prompt using the model's own chat template.
 
-Instructions:
-{prompt_instructions}<|im_end|>
-<|im_start|>assistant
-"""
+    Works for any HuggingFace model — Qwen (ChatML), Llama 3 (llama3), Mistral,
+    Phi-3, Gemma, etc.  Falls back to a plain concatenation if the tokenizer has
+    no chat template defined.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. Answer the user's request strictly using the provided context.",
+        },
+        {
+            "role": "user",
+            "content": f"Provided Text:\n{paper_content}\n\nInstructions:\n{prompt_instructions}",
+        },
+    ]
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        # Fallback: plain concatenation (still correct for most models that at least tokenize
+        # system+user text without special tokens).
+        system = messages[0]["content"]
+        user   = messages[1]["content"]
+        return f"{system}\n\n{user}\n\nAssistant:"
+
 
 def analytic_kv_bytes(mgr, seq_len, sid):
     """Calculate the footprint of the DiffKV Cache."""
@@ -136,7 +155,7 @@ def analytic_kv_bytes(mgr, seq_len, sid):
 def run_worker(config_name, model_id):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
     os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
-    
+
     is_compressed = (config_name != "dense")
     os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
 
@@ -171,176 +190,224 @@ def run_worker(config_name, model_id):
 
     results = {}
 
-    # Define bitsandbytes 4-bit config to load model weights in 4-bit (Q4)
-    from transformers import BitsAndBytesConfig
+    from transformers import BitsAndBytesConfig, AutoTokenizer
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16,
         bnb_4bit_use_double_quant=True,
     )
-    
+
+    # ── Load tokenizer ONCE (before the prompts loop) so we can use
+    #    apply_chat_template for model-agnostic prompt formatting.
+    print(f"[NAT eval] Loading tokenizer for {model_id}...")
+    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+    # Build all prompts using the model's own chat template (works for Qwen,
+    # Llama 3, Mistral, Phi-3, Gemma, etc. — no hardcoded special tokens).
+    all_prompts = [
+        (idx, build_prompt(tok, paper_text, instr))
+        for idx, instr in enumerate([PROMPT1_TEXT, PROMPT2_TEXT], 1)
+    ]
+
+    # Derive stop token IDs from the tokenizer (model-agnostic).
+    _stop_ids = set()
+    for _sid in [tok.eos_token_id, tok.pad_token_id]:
+        if _sid is not None:
+            _stop_ids.add(_sid)
+    # Also add any EOS-like special tokens that are registered in the vocab.
+    for _word in ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>", "<|endoftext|>"]:
+        _tid = tok.convert_tokens_to_ids(_word)
+        if _tid is not None and _tid != tok.unk_token_id:
+            _stop_ids.add(_tid)
+
+    CH = 128  # prefill chunk size (not model-specific, just a throughput knob)
+
     with torch.inference_mode():
-        for idx, prompt_instructions in enumerate([PROMPT1_TEXT, PROMPT2_TEXT], 1):
-            full_prompt = format_prompt(paper_text, prompt_instructions)
-            
-            if is_compressed:
-                from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-                cfg = {
-                    "preset": os.environ.get("DIFFKV_PRESET", "mid"),
-                    "serving_mode": "balanced"
-                }
-                if config_name in ["early_boost", "combined"]:
-                    cfg["early_layer_rank_boost"] = True
-                if config_name in ["factual_store", "combined"]:
-                    cfg["factual_store"] = True
-                    
-                w = DiffKVHFWrapper(
-                    model_id=model_id,
-                    config=cfg,
-                    torch_dtype=torch.float16,
-                    device=device,
-                    quantization_config=quantization_config
-                )
-                w.ensure_loaded()
-                
-                tok, mgr, model = w.tokenizer, w.manager, w.model
+        if is_compressed:
+            # ── Load DiffKV wrapper ONCE, iterate over all prompts ──────────
+            from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+            cfg = {
+                "preset": os.environ.get("DIFFKV_PRESET", "mid"),
+                "serving_mode": "balanced",
+            }
+            if config_name in ["early_boost", "combined"]:
+                cfg["early_layer_rank_boost"] = True
+            if config_name in ["factual_store", "combined"]:
+                cfg["factual_store"] = True
+
+            w = DiffKVHFWrapper(
+                model_id=model_id,
+                config=cfg,
+                torch_dtype=torch.float16,
+                device=device,
+                quantization_config=quantization_config,
+            )
+            w.ensure_loaded()
+            tok, mgr, model = w.tokenizer, w.manager, w.model
+            # Use the wrapper's stop token set (superset of what we derived above)
+            stop_ids = getattr(w, "stop_token_ids", _stop_ids) | _stop_ids
+
+            for idx, full_prompt in all_prompts:
                 ids = tok.encode(full_prompt)
                 prompt_len = len(ids)
-                
+
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
-                    
+
                 sid = f"prompt_{idx}"
                 mgr.clear_session(sid)
                 if not hasattr(w, "_session_token_ids"):
                     w._session_token_ids = {}
                 w._session_token_ids[sid] = []
-                
+
                 mgr.init_session(sid, prefill_len=prompt_len)
                 mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
                 model._diffkv_session_ids = [sid]
-                
-                CH = 128
+
                 t_prefill_start = time.perf_counter()
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
-                    out = model(torch.tensor([ch], device=device), torch.tensor([list(range(cs, cs+len(ch)))], device=device))
+                    out = model(
+                        torch.tensor([ch], device=device),
+                        torch.tensor([list(range(cs, cs+len(ch)))], device=device),
+                    )
                     mgr.compress_deferred_prefill_blocks(sid)
-                logits = out.logits[0, -1].float().cpu().numpy()
+                # Keep logits on GPU — no D2H sync during prefill
+                last_logits_gpu = out.logits[0, -1].float()
                 prefill_time = time.perf_counter() - t_prefill_start
-                
+
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-                
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
-                    
+
                 cur = prompt_len
                 gen_ids = []
+                # Pre-allocate static decode tensors — no per-step allocation
+                _inp = torch.zeros((1, 1), dtype=torch.long, device=device)
+                _pos = torch.zeros((1, 1), dtype=torch.long, device=device)
                 t_decode_start = time.perf_counter()
                 for _ in range(256):
-                    import numpy as np
-                    nid = int(np.argmax(logits))
-                    if nid in w.stop_token_ids:
+                    nid_gpu = torch.argmax(last_logits_gpu)
+                    nid = int(nid_gpu.item())  # one scalar D2H — unavoidable for stop check
+                    if nid in stop_ids:
                         break
                     gen_ids.append(nid)
                     mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
-                    out = model(torch.tensor([[nid]], device=device), torch.tensor([[cur]], device=device))
-                    logits = out.logits[0, -1].float().cpu().numpy()
+                    _inp[0, 0] = nid
+                    _pos[0, 0] = cur
+                    out = model(_inp, _pos)
+                    last_logits_gpu = out.logits[0, -1].float()
                     cur += 1
                 decode_time = time.perf_counter() - t_decode_start
                 peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-                
+
                 generated_text = tok.decode(gen_ids)
-                
                 kv = analytic_kv_bytes(mgr, prompt_len, sid)
                 kv_vram = kv.get("store_used_bytes", 0) / 1e9
-                
-                try:
-                    w.close()
-                except Exception:
-                    pass
-                del w, model, mgr
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            else:
-                from transformers import AutoTokenizer, AutoModelForCausalLM
-                tok = AutoTokenizer.from_pretrained(model_id)
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_id,
-                    quantization_config=quantization_config,
-                    device_map="auto",
-                    trust_remote_code=True
-                )
-                model.eval()
-                
+
+                results[f"prompt{idx}"] = {
+                    "status": "success",
+                    "prompt_len": prompt_len,
+                    "generated_tokens": len(gen_ids),
+                    "prefill_time_s": prefill_time,
+                    "decode_time_s": decode_time,
+                    "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
+                    "peak_prefill_vram_gb": peak_prefill_vram,
+                    "peak_decode_vram_gb": peak_decode_vram,
+                    "kv_cache_vram_gb": kv_vram,
+                    "output_text": generated_text,
+                }
+
+            try:
+                w.close()
+            except Exception:
+                pass
+            del w, model, mgr
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        else:
+            # ── Dense baseline — load model once for all prompts ──────────
+            from transformers import AutoModelForCausalLM
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            model.eval()
+
+            for idx, full_prompt in all_prompts:
                 ids = tok.encode(full_prompt)
                 prompt_len = len(ids)
-                
+
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
-                    
+
                 t_prefill_start = time.perf_counter()
                 past_key_values = None
-                CH = 128
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
                     pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
                     out = model(torch.tensor([ch], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
                     past_key_values = out.past_key_values
-                logits = out.logits[0, -1].float().cpu().numpy()
+                # Keep logits on GPU — no D2H sync during prefill
+                last_logits_gpu = out.logits[0, -1].float()
                 prefill_time = time.perf_counter() - t_prefill_start
-                
+
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-                
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
-                    
+
                 cur = prompt_len
                 gen_ids = []
+                # Pre-allocate static decode tensors
+                _inp = torch.zeros((1, 1), dtype=torch.long, device=device)
+                _pos = torch.zeros((1, 1), dtype=torch.long, device=device)
                 t_decode_start = time.perf_counter()
                 for _ in range(256):
-                    import numpy as np
-                    nid = int(np.argmax(logits))
-                    if nid in [tok.eos_token_id, tok.pad_token_id] or tok.decode([nid]) in ["<|im_end|>", "</s>"]:
+                    nid_gpu = torch.argmax(last_logits_gpu)
+                    nid = int(nid_gpu.item())  # one scalar D2H — unavoidable for stop check
+                    if nid in _stop_ids:
                         break
                     gen_ids.append(nid)
-                    pos = torch.tensor([[cur]], device=device)
-                    out = model(torch.tensor([[nid]], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+                    _inp[0, 0] = nid
+                    _pos[0, 0] = cur
+                    out = model(_inp, position_ids=_pos, past_key_values=past_key_values, use_cache=True)
                     past_key_values = out.past_key_values
-                    logits = out.logits[0, -1].float().cpu().numpy()
+                    last_logits_gpu = out.logits[0, -1].float()
                     cur += 1
                 decode_time = time.perf_counter() - t_decode_start
                 peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-                
+
                 generated_text = tok.decode(gen_ids)
-                
-                L = model.config.num_hidden_layers
+                L   = model.config.num_hidden_layers
                 Hkv = getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
-                d = model.config.hidden_size // model.config.num_attention_heads
-                fp16 = 2
-                kv_vram = (L * prompt_len * Hkv * d * fp16 * 2) / 1e9
-                
-                del model
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            results[f"prompt{idx}"] = {
-                "status": "success",
-                "prompt_len": prompt_len,
-                "generated_tokens": len(gen_ids),
-                "prefill_time_s": prefill_time,
-                "decode_time_s": decode_time,
-                "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
-                "peak_prefill_vram_gb": peak_prefill_vram,
-                "peak_decode_vram_gb": peak_decode_vram,
-                "kv_cache_vram_gb": kv_vram,
-                "output_text": generated_text
-            }
-        
+                d   = model.config.hidden_size // model.config.num_attention_heads
+                kv_vram = (L * prompt_len * Hkv * d * 2 * 2) / 1e9  # fp16 bytes × K+V
+
+                results[f"prompt{idx}"] = {
+                    "status": "success",
+                    "prompt_len": prompt_len,
+                    "generated_tokens": len(gen_ids),
+                    "prefill_time_s": prefill_time,
+                    "decode_time_s": decode_time,
+                    "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
+                    "peak_prefill_vram_gb": peak_prefill_vram,
+                    "peak_decode_vram_gb": peak_decode_vram,
+                    "kv_cache_vram_gb": kv_vram,
+                    "output_text": generated_text,
+                }
+
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     return results
+
 
 def generate_report(all_results, model_id):
     from tabulate import tabulate
