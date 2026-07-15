@@ -231,8 +231,6 @@ def run_worker(mode, model_id, target_len):
                     torch.tensor([ch], device=device),
                     position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device)
                 )
-                mgr.compress_deferred_prefill_blocks(sid)
-                
                 # Dynamic hardware monitoring
                 if cs % 4096 == 0 and cs > 0:
                     allocated_gb = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -240,6 +238,8 @@ def run_worker(mode, model_id, target_len):
                     if temp and temp > peak_prefill_temp: peak_prefill_temp = temp
                     if power and power > peak_prefill_power: peak_prefill_power = power
                     print(f"    [Prefill Progress] {cs}/{len(ids)} tokens. VRAM: {allocated_gb:.2f} GB (Temp: {temp}°C, Power: {power}W)", flush=True)
+            
+            mgr.compress_deferred_prefill_blocks(sid)
             
             # Keep initial logits on GPU — no D2H sync during prefill
             last_logits_gpu = out.logits[0, -1].float()

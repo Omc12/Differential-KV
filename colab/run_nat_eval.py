@@ -272,7 +272,7 @@ def run_worker(config_name, model_id):
                         torch.tensor([ch], device=device),
                         torch.tensor([list(range(cs, cs+len(ch)))], device=device),
                     )
-                    mgr.compress_deferred_prefill_blocks(sid)
+                mgr.compress_deferred_prefill_blocks(sid)
                 # Keep logits on GPU — no D2H sync during prefill
                 last_logits_gpu = out.logits[0, -1].float()
                 prefill_time = time.perf_counter() - t_prefill_start
