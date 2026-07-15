@@ -24,7 +24,7 @@ class DiffKVConfig:
             self.srl_threshold = 30
             self.async_svd = False if is_macos else True
             self.mps_watermark = 0.0
-            self.torch_compile = False if is_macos else True
+            self.torch_compile = False
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
             self.kv_quant = "q4_0"
@@ -51,7 +51,7 @@ class DiffKVConfig:
             self.srl_threshold = 50
             self.async_svd = False if is_macos else True  # Disable background async SVD on macOS for MPS stability
             self.mps_watermark = 0.0
-            self.torch_compile = False if is_macos else True
+            self.torch_compile = False
             self.approximate_attn = True if is_macos else False
             self.srl_age_penalty = 0.01
             self.kv_quant = "q8_0"
