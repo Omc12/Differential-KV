@@ -883,8 +883,8 @@ def _build_stratified_U_for_triton(
     if cached is not None:
         return cached, True   # ── Cache HIT: skip all tensor work ──
 
-    # Evict all stale entries for this pool_id (keeps dict bounded at O(1) entries).
-    stale = [k for k in _stratified_proxy_cache if k[0] == pool_id]
+    # Evict stale entries only when pool generation changes (keeps cache alive across layers)
+    stale = [k for k in _stratified_proxy_cache if k[0] == pool_id and k[1] < pool_gen]
     for k in stale:
         del _stratified_proxy_cache[k]
 
@@ -1017,10 +1017,9 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
         g["max_fact"] = 1
 
     if cache_key is not None:
-        # Evict stale entries for this pool (older generation or routing) so the
-        # cache stays O(1) entries per live pool.
+        # Evict stale entries only when pool generation changes (keeps cache alive across layers)
         stale = [k for k in _gathered_rot_cache
-                 if k[0] == cache_key[0] and k != cache_key]
+                 if k[0] == cache_key[0] and k[1] < pool_gen]
         for k in stale:
             del _gathered_rot_cache[k]
         _gathered_rot_cache[cache_key] = g
