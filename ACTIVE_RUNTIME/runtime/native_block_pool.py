@@ -398,15 +398,10 @@ class NativeBlockPool:
         self._ensure()  # Trigger lazy allocation if pool not yet created
         import math as _math
         
-        # Sanitize inputs to prevent NaN/Inf propagation
-        if not torch.isfinite(U).all():
-            U = torch.nan_to_num(U, nan=0.0, posinf=65504.0, neginf=-65504.0)
-        if not torch.isfinite(V).all():
-            V = torch.nan_to_num(V, nan=0.0, posinf=65504.0, neginf=-65504.0)
-        if not torch.isfinite(anchor_K).all():
-            anchor_K = torch.nan_to_num(anchor_K, nan=0.0, posinf=65504.0, neginf=-65504.0)
-        if not torch.isfinite(anchor_V).all():
-            anchor_V = torch.nan_to_num(anchor_V, nan=0.0, posinf=65504.0, neginf=-65504.0)
+        # Sanitize inputs to prevent NaN/Inf propagation.
+        # NOTE: The full torch.isfinite().all() check is a GPU D2H sync on every
+        # write_block call (called from background compressor thread).
+        # Replace with lightweight Python-level scale check only.
         if not _math.isfinite(scale):
             scale = 1.0
 
@@ -468,6 +463,12 @@ class NativeBlockPool:
         self.U_sem_scale[pool_idx] = 0.0
         self.U_fact[pool_idx] = 0.0
         self.n_semantic[pool_idx] = n_semantic
+        # Track whether any block has ever received non-zero n_semantic.
+        # This is a cheap Python int comparison — no GPU sync.
+        # Used by _build_stratified_U_for_triton to skip the GPU .all().item()
+        # check when stratified quantization has never been activated.
+        if n_semantic > 0 and not getattr(self, "_n_semantic_ever_nonzero", False):
+            self._n_semantic_ever_nonzero = True
 
         if U_sem_int4 is not None and U_sem_int4.numel() > 0:
             write_sem_seq = min(U_sem_int4.shape[0], self.U_sem.shape[1])

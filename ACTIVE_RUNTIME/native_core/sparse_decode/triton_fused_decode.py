@@ -864,18 +864,22 @@ def _build_stratified_U_for_triton(
     If the pool has no stratified components (n_semantic all-zero) the original
     pool is returned unchanged to avoid a pointless VRAM allocation.
     """
-    # Fast-path: no stratified components in this pool at all.
-    # Use a cached Python bool flag (_no_stratified) tied to pool_gen to avoid a
-    # GPU .all().item() D2H sync on every call (48 per token × every layer = 48 stalls/token).
-    # The flag is invalidated automatically when pool_gen increments (new blocks written).
+    # Fast-path: no stratified components ever written to this pool.
+    # _n_semantic_ever_nonzero is a cheap Python bool set in write_block() only
+    # when n_semantic > 0 is actually written. For standard SVD compression this
+    # is always False — so we return immediately with ZERO GPU operations and
+    # ZERO D2H syncs, regardless of how often _stratified_generation increments.
     n_sem_attr = getattr(pool, "n_semantic", None)
     if n_sem_attr is None:
         return pool, False
+    if not getattr(pool, "_n_semantic_ever_nonzero", False):
+        return pool, False
+
+    # Stratified blocks exist — do the full check.
     pool_gen = getattr(pool, "_stratified_generation", -1)
     _no_strat     = getattr(pool, "_no_stratified", None)
     _no_strat_gen = getattr(pool, "_no_stratified_gen", None)
     if _no_strat is None or _no_strat_gen != pool_gen:
-        # Recompute when first called or when pool_gen changes (new blocks written).
         _no_strat = bool((n_sem_attr == 0).all().item())
         pool._no_stratified     = _no_strat
         pool._no_stratified_gen = pool_gen
