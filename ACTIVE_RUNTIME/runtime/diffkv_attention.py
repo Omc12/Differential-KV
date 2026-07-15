@@ -321,7 +321,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                     if cos_sliced is None or sin_sliced is None:
                         block_anchors   = torch.tensor(anchors_tuple, device=q.device, dtype=torch.long)
-                        positions       = block_anchors.view(N_blocks, 1).expand(N_blocks, 1 + max_seq_len)
+                        positions       = block_anchors.view(N_blocks, 1) + torch.arange(1 + max_seq_len, device=q.device).view(1, 1 + max_seq_len)
                         positions_flat  = positions.reshape(-1)
                         cos_ref = cos_all if cos_all is not None else cos
                         sin_ref = sin_all if sin_all is not None else sin
