@@ -209,12 +209,12 @@ def adaptive_k(
     # Normalize to [0, 1] on GPU; clamp for safety
     complexity_t = (entropy_t / max_ent).clamp(min=0.0, max=1.0)     # GPU tensor
 
-    # Scale K linearly with complexity on GPU
+    # Scale K linearly with complexity on GPU; apply floor to mimic Python's int() cast
     k_range = k_max - k_min
-    k_raw_t = k_min + k_range * complexity_t                          # GPU tensor
+    k_raw_t = torch.floor(k_min + k_range * complexity_t)             # GPU tensor
 
     # Apply adaptive multiplier (boosted when miss rate is high)
-    k_scaled_t = k_raw_t * srl_state.k_multiplier                    # GPU scalar
+    k_scaled_t = torch.floor(k_raw_t * srl_state.k_multiplier)        # GPU scalar
 
     # Calculate C_active (number of active clusters) — GPU-resident throughout
     C_active = 1
@@ -234,7 +234,7 @@ def adaptive_k(
             C_active = int((parent_scores >= theta_active_t).sum().item())  # single .item() here
             C_active = max(1, C_active)
 
-    k_final_t = k_scaled_t * (1.0 + 0.35 * math.log(max(C_active, 1)))
+    k_final_t = torch.floor(k_scaled_t * (1.0 + 0.35 * math.log(max(C_active, 1))))
 
     # Single .item() to materialize the final K integer (unavoidable for loop bound)
     k_final = int(k_final_t.item())
