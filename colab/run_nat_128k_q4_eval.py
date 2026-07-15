@@ -214,6 +214,17 @@ def run_worker(mode, model_id, target_len):
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
 
+            # CRITICAL: Finalize SRL index before decode.
+            # Without this, ingest_streaming runs an O(N²) GPU→CPU KV capture
+            # (torch.cat + .cpu()) on every decode token for all 48 layers,
+            # which is the root cause of 1.4 TPS.
+            if hasattr(mgr, "finalize_srl_index"):
+                mgr.finalize_srl_index(sid, cached_len=0)
+            # Also clear the prefill KV capture buffer to free CPU RAM
+            if hasattr(mgr, "_prefill_kv_capture"):
+                mgr._prefill_kv_capture.pop(sid, None)
+
+
             # Generate (256 tokens)
             cur = prompt_len
             gen_ids = []

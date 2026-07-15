@@ -529,10 +529,16 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         if captured_layer_idx == 0:
                             srl_state = kv_manager.get_srl_state(sid)
                             if srl_state is not None:
-                                k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
-                                srl_state.recent_decode_keys.append(k_avg)
-                                if len(srl_state.recent_decode_keys) > 512:
-                                    srl_state.recent_decode_keys = srl_state.recent_decode_keys[-512:]
+                                # Accumulate every 8 tokens to amortize the D2H copy cost.
+                                # recent_decode_keys is only used for SRL re-routing heuristics,
+                                # so coarse sampling is fine.
+                                _step_ctr = getattr(srl_state, "_decode_step_ctr", 0)
+                                srl_state._decode_step_ctr = _step_ctr + 1
+                                if _step_ctr % 8 == 0:
+                                    k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
+                                    srl_state.recent_decode_keys.append(k_avg)
+                                    if len(srl_state.recent_decode_keys) > 512:
+                                        srl_state.recent_decode_keys = srl_state.recent_decode_keys[-512:]
 
                     # 2. Attention decode dispatch
                     # Always route through the unified native_triton_sparse_attn_decode path.
