@@ -194,7 +194,10 @@ def run_worker(mode, model_id, target_len):
             t_prefill_start = time.perf_counter()
             for cs in range(0, len(ids), CH):
                 ch = ids[cs:cs+CH]
-                out = model(torch.tensor([ch], device=device), torch.tensor([list(range(cs, cs+len(ch)))], device=device))
+                out = model(
+                    torch.tensor([ch], device=device),
+                    position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device)
+                )
                 mgr.compress_deferred_prefill_blocks(sid)
                 
                 # Dynamic hardware monitoring
@@ -244,7 +247,10 @@ def run_worker(mode, model_id, target_len):
                 # In-place copy into static buffers — no new allocation
                 static_input_ids[0, 0]  = nid
                 static_pos_ids[0, 0]    = cur
-                out = model(static_input_ids, static_pos_ids)
+                out = model(
+                    static_input_ids,
+                    position_ids=static_pos_ids
+                )
                 # Keep logits on GPU — no D2H sync per step
                 last_logits_gpu = out.logits[0, -1].float()
                 cur += 1
