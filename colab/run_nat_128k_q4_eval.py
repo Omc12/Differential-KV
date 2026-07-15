@@ -230,7 +230,6 @@ def run_worker(mode, model_id, target_len):
                 if nid in stop_ids_set:
                     break
                 gen_ids.append(nid)
-                mgr.register_prefill_tokens(sid, nid_gpu.view(1))
                 # In-place copy into static buffers — no new allocation
                 static_input_ids[0, 0]  = nid
                 static_pos_ids[0, 0]    = cur
