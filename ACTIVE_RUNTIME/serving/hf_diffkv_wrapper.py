@@ -666,7 +666,7 @@ class PyTorchDiffKVHFWrapper:
         #
         # Skip if DIFFKV_JIT_SKIP_WARMUP=1 (useful for fast CI smoke tests that
         # don't exercise the CUDA decode path).
-        if self.device == "cuda" and os.environ.get("DIFFKV_JIT_SKIP_WARMUP", "0") != "1":
+        if str(self.device).startswith("cuda") and os.environ.get("DIFFKV_JIT_SKIP_WARMUP", "0") != "1":
             try:
                 from native_core.sparse_decode.triton_fused_decode import warm_up_jit
                 _cfg  = self.manager.config if hasattr(self, "manager") and self.manager else {}

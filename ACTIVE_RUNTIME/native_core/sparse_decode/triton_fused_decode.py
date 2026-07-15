@@ -723,14 +723,33 @@ elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
     use_compile = "0"
 
 if use_compile == "1":
+    # mode="default" is correct for functions with dynamic tensor shapes (S_dense grows
+    # each decode step).  "reduce-overhead" / CUDA-graph mode records a NEW graph for
+    # every distinct shape set it encounters; with S_dense incrementing by 1 per step
+    # this produces O(decode_len) graph recordings (51+ observed) at ~3s each, which
+    # dominates TPS.  "default" compiles once with symbolic (dynamic) shapes via Inductor
+    # and executes eagerly — one compilation, zero per-step recording overhead.
+    # This matches what MLX does: @mx.compile compiles at definition time with fixed
+    # Metal shaders that handle any size via masking, never re-recording.
+    _decode_compile_mode = "default"
+    _prefill_compile_mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+
+    # Suppress Inductor CUDA-graph dynamic-shape warning for the decode functions
+    # (it fires even when we're not using reduce-overhead, because a prior compile
+    # run may have left cached graph metadata).
+    try:
+        import torch._inductor.config as _ind_cfg
+        _ind_cfg.triton.cudagraph_skip_dynamic_graphs = True
+    except Exception:
+        pass
+
     try:
         _backend = "inductor"
-        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
         _reconstruct_and_score = torch.compile(
             _reconstruct_and_score_compiled,
             backend=_backend,
-            mode=_mode,
+            mode=_decode_compile_mode,
             fullgraph=False,
             dynamic=True,
         )
@@ -740,12 +759,11 @@ if use_compile == "1":
         
     try:
         _backend = "inductor"
-        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
         _attend_and_reconstruct_v = torch.compile(
             _attend_and_reconstruct_v_compiled,
             backend=_backend,
-            mode=_mode,
+            mode=_decode_compile_mode,
             fullgraph=False,
             dynamic=True,
         )
@@ -754,12 +772,11 @@ if use_compile == "1":
         _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
     try:
         _backend = "inductor"
-        _mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-        print(f"[DiffKV JIT] Compiling _prefill_fused_history_attend with backend={_backend}, mode={_mode} (dynamic=True) ...")
+        print(f"[DiffKV JIT] Compiling _prefill_fused_history_attend with backend={_backend}, mode={_prefill_compile_mode} (dynamic=True) ...")
         _prefill_fused_history_attend = torch.compile(
             _prefill_fused_history_attend_compiled,
             backend=_backend,
-            mode=_mode,
+            mode=_prefill_compile_mode,
             fullgraph=False,
             dynamic=True,
         )
