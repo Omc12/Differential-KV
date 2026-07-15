@@ -1688,12 +1688,14 @@ class KVRuntimeManager:
         if k.shape[2] == 1:
             self._streaming_mgr.append_decode_token(session_id, layer_idx, k, v)
             # CRITICAL SRL ALIGNMENT FIX: Capture decode token K/V states.
-            # Guard: only accumulate when the SRL index hasn't been finalized yet.
-            # After finalize_srl_index() runs the session appears in _session_srl
-            # and the capture is never consumed again — skip to prevent O(N^2) CPU
-            # tensor accumulation across the full generation (one torch.cat per token
-            # per layer x T tokens = O(T^2) total CPU allocations).
-            if session_id not in self._session_srl:
+            # Guard: only accumulate when the SRL index hasn't been finalized yet,
+            # AND when SRL is actually enabled (W_proj is not None).
+            # When W_proj is None, finalize_srl_index() returns early without
+            # populating _session_srl, so we must also check W_proj here to
+            # prevent O(N²) torch.cat+.cpu() on every decode token × all layers.
+            _pool = getattr(self, "native_pool", None)
+            _srl_active = (_pool is not None and getattr(_pool, "W_proj", None) is not None)
+            if _srl_active and session_id not in self._session_srl:
                 if not hasattr(self, "_prefill_kv_capture"):
                     self._prefill_kv_capture = {}
                 session_cap = self._prefill_kv_capture.setdefault(session_id, {})
