@@ -864,9 +864,18 @@ def _build_stratified_U_for_triton(
     If the pool has no stratified components (n_semantic all-zero) the original
     pool is returned unchanged to avoid a pointless VRAM allocation.
     """
-    # Fast-path: no stratified components in this pool at all
+    # Fast-path: no stratified components in this pool at all.
+    # Use a cached Python bool flag (_no_stratified) to avoid a GPU .all().item()
+    # D2H sync on every call (48 per token × every layer = 48 stalls/token).
     n_sem_attr = getattr(pool, "n_semantic", None)
-    if n_sem_attr is None or (n_sem_attr == 0).all().item():
+    if n_sem_attr is None:
+        return pool, False
+    _no_strat = getattr(pool, "_no_stratified", None)
+    if _no_strat is None:
+        # One-time D2H check; result cached as Python bool on the pool object.
+        _no_strat = bool((n_sem_attr == 0).all().item())
+        pool._no_stratified = _no_strat
+    if _no_strat:
         return pool, False
 
     active_idx = block_indices.long()
@@ -942,7 +951,11 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     pool_gen = getattr(base_pool, "_stratified_generation", None)
     cache_key = None
     if pool_gen is not None:
-        cache_key = (id(base_pool), pool_gen, tuple(block_indices.tolist()))
+        # Use data_ptr+numel as cache key instead of block_indices.tolist().
+        # Same uniqueness guarantee (same tensor object = same content for
+        # immutable routing tensors) but ZERO D2H sync — tolist() was
+        # causing 48 GPU pipeline stalls per token (one per layer).
+        cache_key = (id(base_pool), pool_gen, block_indices.data_ptr(), block_indices.numel())
         got = _gathered_rot_cache.get(cache_key)
         if got is not None:
             return got
