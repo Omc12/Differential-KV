@@ -136,11 +136,14 @@ class NativeBlockPool:
         n_raw = max(1, int(n_tokens / self.max_seq_len) * self.num_layers)
         n_desired = int(n_raw * 1.5)
         
-        # CRITICAL FIX: Respect the max_blocks budget that was set based on MPS memory constraints
-        # Start with a smaller initial allocation and let it grow on demand via _grow_pool
-        # Initial allocation: min(n_desired, max_blocks // 2, 512)
-        # This prevents upfront allocation of the full budget when a large prompt comes in
-        n_blocks = max(64, min(n_desired, self.max_blocks // 2, 512))
+        # CRITICAL: On CUDA we pre-allocate the full n_desired to avoid mid-session
+        # _grow_pool stalls (which realloc all 17 pool tensors and block decode for
+        # hundreds of ms). The 512 cap was only needed on MPS due to Metal memory limits.
+        if self._is_mps:
+            n_blocks = max(64, min(n_desired, self.max_blocks // 2, 512))
+        else:
+            # CUDA: pre-allocate fully; _grow_pool will never fire during a normal session
+            n_blocks = max(64, min(n_desired, self.max_blocks))
 
         self._allocate_tensors(n_blocks)
         self._allocated = True
