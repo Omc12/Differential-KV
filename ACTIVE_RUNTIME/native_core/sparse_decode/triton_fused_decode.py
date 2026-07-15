@@ -609,7 +609,10 @@ def _attend_and_reconstruct_v_compiled(
         O_final = O_final + O_delta.sum(0).to(P_anchor.dtype)
 
     if S_dense > 0:
-        O_dense_total = torch.matmul(P_dense.unsqueeze(1), v_dense_rep.squeeze(0)).squeeze(1)
+        O_dense_total = torch.matmul(
+            P_dense.view(H_q, 1, S_dense),
+            v_dense_rep[0].view(H_q, S_dense, D)
+        ).squeeze(1)
         O_final = O_final + O_dense_total.to(P_anchor.dtype)
 
     return O_final
