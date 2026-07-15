@@ -205,7 +205,8 @@ def run_worker(mode, model_id, target_len):
                     if power and power > peak_prefill_power: peak_prefill_power = power
                     print(f"    [Prefill Progress] {cs}/{len(ids)} tokens. VRAM: {allocated_gb:.2f} GB (Temp: {temp}°C, Power: {power}W)", flush=True)
             
-            logits = out.logits[0, -1].float().cpu().numpy()
+            # Keep initial logits on GPU — no D2H sync during prefill
+            last_logits_gpu = out.logits[0, -1].float()
             prefill_time = time.perf_counter() - t_prefill_start
 
             peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -216,18 +217,28 @@ def run_worker(mode, model_id, target_len):
             # Generate (256 tokens)
             cur = prompt_len
             gen_ids = []
+            # Pre-allocate static GPU tensors — avoids new allocation + CUDA
+            # graph invalidation on every step. Use .copy_() in the loop.
+            static_input_ids  = torch.zeros((1, 1), dtype=torch.long,  device=device)
+            static_pos_ids    = torch.zeros((1, 1), dtype=torch.long,  device=device)
+            stop_ids_set = set(w.stop_token_ids)
             t_decode_start = time.perf_counter()
             for step in range(256):
-                import numpy as np
-                nid = int(np.argmax(logits))
-                if nid in w.stop_token_ids:
+                # GPU argmax — no D2H sync, no numpy
+                nid_gpu = torch.argmax(last_logits_gpu)
+                nid = int(nid_gpu.item())  # single scalar D2H — unavoidable for stop check
+                if nid in stop_ids_set:
                     break
                 gen_ids.append(nid)
-                mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
-                out = model(torch.tensor([[nid]], device=device), torch.tensor([[cur]], device=device))
-                logits = out.logits[0, -1].float().cpu().numpy()
+                mgr.register_prefill_tokens(sid, nid_gpu.view(1))
+                # In-place copy into static buffers — no new allocation
+                static_input_ids[0, 0]  = nid
+                static_pos_ids[0, 0]    = cur
+                out = model(static_input_ids, static_pos_ids)
+                # Keep logits on GPU — no D2H sync per step
+                last_logits_gpu = out.logits[0, -1].float()
                 cur += 1
-                
+
                 if step % 32 == 0:
                     temp, power = get_gpu_metrics()
                     if temp and temp > peak_decode_temp: peak_decode_temp = temp
@@ -298,7 +309,8 @@ def run_worker(mode, model_id, target_len):
                     if power and power > peak_prefill_power: peak_prefill_power = power
                     print(f"    [Prefill Progress] {cs}/{len(ids)} tokens. VRAM: {allocated_gb:.2f} GB (Temp: {temp}°C, Power: {power}W)", flush=True)
             
-            logits = out.logits[0, -1].float().cpu().numpy()
+            # Keep initial logits on GPU — no D2H sync
+            last_logits_gpu = out.logits[0, -1].float()
             prefill_time = time.perf_counter() - t_prefill_start
 
             peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -309,19 +321,27 @@ def run_worker(mode, model_id, target_len):
             # Generate (256 tokens)
             cur = prompt_len
             gen_ids = []
+            # Pre-allocate static GPU tensors — no per-step allocation, no CUDA graph invalidation
+            static_input_ids = torch.zeros((1, 1), dtype=torch.long, device=device)
+            static_pos_ids   = torch.zeros((1, 1), dtype=torch.long, device=device)
+            stop_ids_dense = {tokenizer.eos_token_id, tokenizer.pad_token_id}
+            stop_strings_dense = {"<|im_end|>", "</s>"}
             t_decode_start = time.perf_counter()
             for step in range(256):
-                import numpy as np
-                nid = int(np.argmax(logits))
-                if nid in [tokenizer.eos_token_id, tokenizer.pad_token_id] or tokenizer.decode([nid]) in ["<|im_end|>", "</s>"]:
+                nid_gpu = torch.argmax(last_logits_gpu)
+                nid = int(nid_gpu.item())  # single scalar D2H — unavoidable for stop check
+                if nid in stop_ids_dense or tokenizer.decode([nid]) in stop_strings_dense:
                     break
                 gen_ids.append(nid)
-                pos = torch.tensor([[cur]], device=device)
-                out = model(torch.tensor([[nid]], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
+                # In-place update of static buffers — no new allocation
+                static_input_ids[0, 0] = nid
+                static_pos_ids[0, 0]   = cur
+                out = model(static_input_ids, position_ids=static_pos_ids, past_key_values=past_key_values, use_cache=True)
                 past_key_values = out.past_key_values
-                logits = out.logits[0, -1].float().cpu().numpy()
+                # Keep logits on GPU — no D2H sync per step
+                last_logits_gpu = out.logits[0, -1].float()
                 cur += 1
-                
+
                 if step % 32 == 0:
                     temp, power = get_gpu_metrics()
                     if temp and temp > peak_decode_temp: peak_decode_temp = temp
