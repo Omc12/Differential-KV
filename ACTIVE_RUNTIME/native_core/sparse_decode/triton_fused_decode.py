@@ -600,7 +600,7 @@ def _attend_and_reconstruct_v_compiled(
         P_U_flat = P_U.reshape(N * H_q, 1, R)
         if V_V_perm is None:
             V_V_perm = V_V.float().permute(0, 2, 1, 3).contiguous().reshape(N * H_q, R, D)
-        O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float()
+        O_delta = torch.bmm(P_U_flat, V_V_perm).reshape(N, H_q, D) * scales.float().view(N, 1, 1)
         O_final = O_final + O_delta.sum(0).to(P_anchor.dtype)
 
     if S_dense > 0:

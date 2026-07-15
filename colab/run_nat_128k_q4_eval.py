@@ -188,7 +188,11 @@ def run_worker(mode, model_id, target_len):
                 "mode": "fp16",
                 "quantization": "nf4",
                 "rank": 16,
-                "micro_block_size": 256,
+                "micro_block_size": 64,      # block_capacity = 1+64 = 65 ≤ CH=128, so each
+                                               # 128-token prefill chunk produces ≥1 full block
+                                               # that is immediately submitted for SVD compression.
+                                               # micro_block_size=256 gives block_capacity=257>128
+                                               # → zero full blocks → all 4096 tokens stay dense.
                 "preset": "mid",
                 "serving_mode": "balanced"
             }
@@ -312,16 +316,28 @@ def run_worker(mode, model_id, target_len):
             #  (a) entry points that bypass ensure_loaded (raw model scripts), and
             #  (b) warming up CUDA graph recording passes if enabled.
             # When already compiled, the 3 steps run in <1s total.
+            
+            # ── diagnostics: show block state before warmup ──────────────────
+            if hasattr(mgr, "_streaming_mgr") and mgr._streaming_mgr is not None:
+                _l0 = mgr._streaming_mgr.session_blocks.get(sid, {}).get(0, [])
+                _state_counts = {}
+                for _b in _l0:
+                    _s = getattr(_b, "state", "?")
+                    _state_counts[_s] = _state_counts.get(_s, 0) + 1
+                print(f"    [PreWarmup] Layer-0 block states: {_state_counts} "
+                      f"(total={len(_l0)} blocks)", flush=True)
+
             print("    [Warmup] Running 3 decode warmup steps (CUDA graph + JIT safety)...", flush=True)
+            # Pre-allocate static GPU tensors for warmup (same pattern as gen loop).
             _wup_in  = torch.zeros((1, 1), dtype=torch.long, device=device)
             _wup_pos = torch.zeros((1, 1), dtype=torch.long, device=device)
             _wup_logits = last_logits_gpu
             _wup_cur = prompt_len
             t_wup = time.perf_counter()
             for _wi in range(3):
-                _wid = int(torch.argmax(_wup_logits).item())
-                _wup_in[0, 0] = _wid
-                _wup_pos[0, 0] = _wup_cur
+                # In-place fill from GPU argmax — no D2H sync during graph capture.
+                _wup_in.fill_(int(torch.argmax(_wup_logits).item()))
+                _wup_pos.fill_(_wup_cur)
                 _wout = model(_wup_in, position_ids=_wup_pos)
                 _wup_logits = _wout.logits[0, -1].float()
                 _wup_cur += 1
