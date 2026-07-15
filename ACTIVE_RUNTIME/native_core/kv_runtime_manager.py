@@ -1828,18 +1828,20 @@ class KVRuntimeManager:
         layer_idx: int,
         dense_blocks: list,
         dtype: torch.dtype,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], int]:
         """
         Lightweight dense-window-only KV assembler for the decode hot path.
 
         ONLY processes non-compressed (ACCUMULATING / SUBMITTED) blocks.
         Compressed blocks are handled by block_indices in the sparse kernel.
 
-        Pre-allocates static workspace tensors to eliminate torch.cat dynamic malloc
-        and fragmenting allocator memory growth on Apple Silicon (MPS).
+        Returns (workspace_k, workspace_v, L_dense) where workspace_k/v always have
+        shape [1, kv_heads, max_dense_len, head_dim] regardless of how many tokens
+        are valid this step.  L_dense is the count of valid tokens (Python int).
+        Callers mask positions >= L_dense with -inf before softmax.
         """
         if not dense_blocks:
-            return None, None
+            return None, None, 0
 
         # 1. Compute total length of dense tokens
         L_dense = 0
@@ -1850,7 +1852,13 @@ class KVRuntimeManager:
             elif getattr(blk, "active_k_cpu", None) is not None:
                 L_dense += blk.active_k_cpu.shape[2]
 
-        # 2. Retrieve or allocate workspaces
+        # 2. Retrieve or allocate workspaces.
+        # Static-shape invariant: always allocate to self.max_dense_len (= recency_window +
+        # block_size) so the returned tensor always has the same shape regardless of how many
+        # dense tokens are actually valid this step.  The caller masks out positions >= L_dense
+        # before softmax so padding zeros contribute nothing to attention output.
+        # This makes tensor shapes inside the decode forward pass completely static, enabling
+        # the CUDAGraphDecodeRunner to capture the forward once and replay it every step.
         session_dict = self.decode_workspace.setdefault(session_id, {})
         dense_k_cache = session_dict.setdefault("dense_workspace_k", {})
         dense_v_cache = session_dict.setdefault("dense_workspace_v", {})
@@ -1861,19 +1869,17 @@ class KVRuntimeManager:
         last_start_pos = dense_start_pos_dict.get(layer_idx)
         start_pos = dense_blocks[0].anchor_idx
 
-        new_alloc = (workspace_k is None 
-            or workspace_k.shape[1] != self.kv_heads 
-            or workspace_k.dtype != dtype 
-            or workspace_k.shape[2] < L_dense
+        new_alloc = (workspace_k is None
+            or workspace_k.shape[1] != self.kv_heads
+            or workspace_k.dtype != dtype
             or last_start_pos is None
             or last_start_pos != start_pos)
 
         if new_alloc:
-            # Align allocation length to multiples of 512 to prevent VRAM fragmentation
-            if workspace_k is None or workspace_k.shape[2] < L_dense:
-                alloc_len = ((L_dense + 511) // 512) * 512
-                workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-                workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
+            if workspace_k is None or workspace_k.shape[1] != self.kv_heads or workspace_k.dtype != dtype:
+                # Allocate once to the session-level cap — shape never changes after this.
+                workspace_k = torch.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), device=self.device, dtype=dtype)
+                workspace_v = torch.zeros((1, self.kv_heads, self.max_dense_len, self.head_dim), device=self.device, dtype=dtype)
                 dense_k_cache[layer_idx] = workspace_k
                 dense_v_cache[layer_idx] = workspace_v
             dense_start_pos_dict[layer_idx] = start_pos
@@ -1899,12 +1905,7 @@ class KVRuntimeManager:
                     if cur_alen != _cached_alen:
                         # Block grew — invalidate workspace layout, force full rewrite
                         new_alloc = True
-                        if workspace_k is not None and workspace_k.shape[2] < L_dense:
-                            alloc_len = ((L_dense + 511) // 512) * 512
-                            workspace_k = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-                            workspace_v = torch.zeros((1, self.kv_heads, alloc_len, self.head_dim), device=self.device, dtype=dtype)
-                            dense_k_cache[layer_idx] = workspace_k
-                            dense_v_cache[layer_idx] = workspace_v
+                        # Workspace is always max_dense_len; no reallocation needed.
                         dense_start_pos_dict[layer_idx] = start_pos
                         break
 
@@ -1969,8 +1970,11 @@ class KVRuntimeManager:
                 else:
                     curr_idx = offset + 1
 
-        # 4. Return zero-allocation slice views of the static workspace
-        return workspace_k[:, :, :L_dense], workspace_v[:, :, :L_dense]
+        # 4. Return the FULL fixed-size workspace + L_dense as a scalar.
+        # Shape is always [1, kv_heads, max_dense_len, head_dim] — static across every
+        # decode step.  Positions >= L_dense contain stale/zero data; the caller masks
+        # those positions with -inf before softmax so they get exactly 0 attention weight.
+        return workspace_k, workspace_v, L_dense
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 

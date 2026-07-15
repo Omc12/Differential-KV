@@ -674,11 +674,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         )
 
                         # Assemble ONLY the dense window (non-compressed blocks) into a
-                        # persistent workspace tensor. Uses lightweight slice copies, zero GEMM.
-                        # Compressed blocks are handled by block_indices in the sparse kernel.
-                        dense_k_assembled, dense_v_assembled = None, None
+                        # persistent fixed-size workspace tensor. Uses lightweight slice copies,
+                        # zero GEMM. Compressed blocks handled by block_indices in sparse kernel.
+                        # workspace shape is always [1, kv_heads, max_dense_len, head_dim];
+                        # dense_len tells us how many positions are actually valid this step.
+                        dense_k_assembled, dense_v_assembled, dense_len = None, None, 0
                         if dense_blocks:
-                            dense_k_assembled, dense_v_assembled = kv_manager.assemble_dense_window_kv(
+                            dense_k_assembled, dense_v_assembled, dense_len = kv_manager.assemble_dense_window_kv(
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
 
@@ -1085,7 +1087,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                         if matching_entries:
                             # 1. Dense recency attention output & LSE
-                            has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                            has_dense = (dense_k_assembled is not None and dense_len > 0)
                             H_q = query_states.shape[1]
                             D = query_states.shape[3]
                             if has_dense:
@@ -1095,16 +1097,18 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                 cos_dense = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
                                 sin_dense = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
-                                
-                                dense_k_half = torch.zeros_like(dense_k_assembled)
+                                # Slice to dense_len for correct shapes (cos_dense has shape [dense_len, D])
+                                dense_k_valid = dense_k_assembled[:, :, :dense_len]
+                                dense_v_valid = dense_v_assembled[:, :, :dense_len]
+                                dense_k_half = torch.zeros_like(dense_k_valid)
                                 half_d = head_dim // 2
-                                dense_k_half[..., :half_d] = -dense_k_assembled[..., half_d:]
-                                dense_k_half[..., half_d:] = dense_k_assembled[..., :half_d]
+                                dense_k_half[..., :half_d] = -dense_k_valid[..., half_d:]
+                                dense_k_half[..., half_d:] = dense_k_valid[..., :half_d]
                                 
-                                dense_k_rot = dense_k_assembled * cos_dense + dense_k_half * sin_dense
+                                dense_k_rot = dense_k_valid * cos_dense + dense_k_half * sin_dense
                                 
                                 k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                v_rep = repeat_kv(dense_v_valid, num_key_value_groups)
                                 out_dense = F.scaled_dot_product_attention(
                                     query_states[b_idx:b_idx+1], k_rep, v_rep,
                                     is_causal=False,
@@ -1306,7 +1310,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 attn_out_b = out_val.unsqueeze(0).unsqueeze(2)
                             else:
                                 # ── Separate Dense SDPA and Compressed fused_decode_mps combined via LSE ──
-                                has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                                has_dense = (dense_k_assembled is not None and dense_len > 0)
                                 has_comp  = (block_indices is not None and block_indices.numel() > 0)
                                 H_q       = query_states.shape[1]
                                 D         = query_states.shape[3]
@@ -1363,7 +1367,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 elif has_dense and not has_comp:
                                     # Dense window only: use standard SDPA
                                     k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                    v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                    # Slice V to L_dense (actual valid tokens in MPS path) for SDPA
+                                    v_rep = repeat_kv(dense_v_assembled[:, :, :L_dense], num_key_value_groups)
                                     attn_out_b = F.scaled_dot_product_attention(
                                         query_states[b_idx:b_idx+1], k_rep, v_rep,
                                         is_causal=False,
@@ -1460,7 +1465,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # Both present: run independently and combine via LSE
                                     # 1. Dense SDPA path
                                     k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                    v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                    v_rep = repeat_kv(dense_v_assembled[:, :, :L_dense], num_key_value_groups)
                                     out_dense = F.scaled_dot_product_attention(
                                         query_states[b_idx:b_idx+1], k_rep, v_rep,
                                         is_causal=False,
@@ -1593,33 +1598,41 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             )
                             if _use_combined:
                                 # Assemble pre-RoPE-rotated dense_k/dense_v for the combined kernel.
-                                # The combined Triton kernel expects [1, H_kv, L_dense, D] pre-RoPE-rotated.
+                                # The combined Triton kernel expects [1, H_kv, max_dense_len, D]
+                                # pre-RoPE-rotated workspace (fixed shape).
                                 # Use ONLY dense_k_assembled — the separate dense_blocks loop would
                                 # double-count (dense_k_assembled already contains anchor + active data
                                 # from every dense block, assembled by assemble_dense_window_kv).
                                 _dk_combined = None
                                 _dv_combined = None
-                                if dense_k_assembled is not None and dense_k_assembled.shape[2] > 0:
-                                    _dense_pos_list = []
+                                if dense_k_assembled is not None and dense_len > 0:
+                                    _max_dense = dense_k_assembled.shape[2]  # = max_dense_len (fixed)
+                                    # Build a fixed-size [max_dense_len] position tensor for RoPE.
+                                    # Padding slots (dense_len..max_dense_len-1) map to position 0;
+                                    # their rotated zeros are masked in the kernel via L_dense_valid.
+                                    _dp2 = torch.zeros(_max_dense, dtype=torch.long, device=query_states.device)
+                                    _pos2 = 0
                                     for _blk in (dense_blocks or []):
-                                        _dense_pos_list.extend(_blk.token_indices)
-                                    if _dense_pos_list and len(_dense_pos_list) == dense_k_assembled.shape[2]:
-                                        _dp2 = torch.tensor(_dense_pos_list, dtype=torch.long, device=query_states.device)
-                                        _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
-                                        _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
-                                        if _cos_d2.dim() == 3:
-                                            _cos_d2 = _cos_d2.squeeze(1)
-                                            _sin_d2 = _sin_d2.squeeze(1)
-                                        _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,L,D]
-                                        _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
-                                        _hd2 = dense_k_assembled.shape[-1] // 2
-                                        _dk_half2 = torch.cat([-dense_k_assembled[..., _hd2:], dense_k_assembled[..., :_hd2]], dim=-1)
-                                        _dk_combined = (dense_k_assembled * _cos_d2.to(dense_k_assembled.dtype)
-                                                        + _dk_half2 * _sin_d2.to(dense_k_assembled.dtype))
-                                        _dv_combined = dense_v_assembled
-                                    else:
-                                        _dk_combined = dense_k_assembled
-                                        _dv_combined = dense_v_assembled
+                                        _tl2 = _blk.token_indices
+                                        _n2 = len(_tl2)
+                                        if _n2 > 0 and _pos2 < _max_dense:
+                                            _dp2[_pos2:_pos2 + _n2].copy_(
+                                                torch.tensor(_tl2, dtype=torch.long, device=_dp2.device)
+                                            )
+                                            _pos2 += _n2
+                                    _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
+                                    _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
+                                    if _cos_d2.dim() == 3:
+                                        _cos_d2 = _cos_d2.squeeze(1)
+                                        _sin_d2 = _sin_d2.squeeze(1)
+                                    _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,max_dense_len,D]
+                                    _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
+                                    _hd2 = dense_k_assembled.shape[-1] // 2
+                                    # Full-workspace RoPE rotation — shapes match because both are max_dense_len
+                                    _dk_half2 = torch.cat([-dense_k_assembled[..., _hd2:], dense_k_assembled[..., :_hd2]], dim=-1)
+                                    _dk_combined = (dense_k_assembled * _cos_d2.to(dense_k_assembled.dtype)
+                                                    + _dk_half2 * _sin_d2.to(dense_k_assembled.dtype))
+                                    _dv_combined = dense_v_assembled
                                 attn_out_b = native_triton_sparse_attn_decode_combined(
                                     q=query_states[b_idx:b_idx+1],
                                     block_indices=block_indices,
@@ -1632,6 +1645,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     anchor_indices=anchor_indices,
                                     cos=cos_all,
                                     sin=sin_all,
+                                    dense_len=dense_len,
                                 )
                             else:
                                 attn_out_b = native_triton_sparse_attn_decode(
@@ -1654,6 +1668,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     session_id=sid,
                                     layer_idx=captured_layer_idx,
                                     decode_workspace=kv_manager.decode_workspace,
+                                    active_len=dense_len,
                                 )
 
                         # ── Validation: compare SRL output vs. full-attention output ──
@@ -1664,15 +1679,17 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 )
                                 with torch.no_grad():
                                     if _is_mps_decode:
-                                        has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                                        has_dense = (dense_k_assembled is not None and dense_len > 0)
                                         if has_dense:
+                                            # Validation path: slice to dense_len for RoPE (shape-safe)
+                                            dense_k_valid = dense_k_assembled[:, :, :dense_len]
                                             dense_positions_list = []
                                             for blk in dense_blocks:
                                                 dense_positions_list.extend(blk.token_indices)
                                             dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                             cos_dense = cos_all[0, dense_positions.clamp(max=cos_all.shape[1] - 1)].squeeze().unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_all[0, dense_positions.clamp(max=sin_all.shape[1] - 1)].squeeze().unsqueeze(0).unsqueeze(1)
-                                            dense_k_rot = (dense_k_assembled * cos_dense) + (rotate_half(dense_k_assembled)) * sin_dense
+                                            dense_k_rot = (dense_k_valid * cos_dense) + (rotate_half(dense_k_valid)) * sin_dense
 
                                         _q_val = query_states[b_idx, :, 0, :]
                                         _full_bsizes = pool.seq_lens[_full_bi]
@@ -1687,14 +1704,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             sin                  = sin_all,
                                         )
                                         
-                                        has_dense = (dense_k_assembled is not None and dense_k_assembled.shape[2] > 0)
+                                        has_dense = (dense_k_assembled is not None and dense_len > 0)
                                         has_comp  = (_full_bi is not None and _full_bi.numel() > 0)
                                         
                                         if not has_dense and not has_comp:
                                             attn_out_full_approx = torch.zeros((1, query_states.shape[1], 1, query_states.shape[3]), dtype=query_states.dtype, device=query_states.device)
                                         elif has_dense and not has_comp:
                                             k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                            v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                            v_rep = repeat_kv(dense_v_assembled[:, :, :dense_len], num_key_value_groups)
                                             attn_out_full_approx = F.scaled_dot_product_attention(
                                                 query_states[b_idx:b_idx+1], k_rep, v_rep,
                                                 is_causal=False,
@@ -1703,7 +1720,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             attn_out_full_approx = out_sparse_full.unsqueeze(0).unsqueeze(2)
                                         else:
                                             k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
-                                            v_rep = repeat_kv(dense_v_assembled, num_key_value_groups)
+                                            v_rep = repeat_kv(dense_v_assembled[:, :, :dense_len], num_key_value_groups)
                                             out_dense_val = F.scaled_dot_product_attention(
                                                 query_states[b_idx:b_idx+1], k_rep, v_rep,
                                                 is_causal=False,

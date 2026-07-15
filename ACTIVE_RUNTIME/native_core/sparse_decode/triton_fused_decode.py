@@ -723,25 +723,14 @@ elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
     use_compile = "0"
 
 if use_compile == "1":
-    # mode="default" is correct for functions with dynamic tensor shapes (S_dense grows
-    # each decode step).  "reduce-overhead" / CUDA-graph mode records a NEW graph for
-    # every distinct shape set it encounters; with S_dense incrementing by 1 per step
-    # this produces O(decode_len) graph recordings (51+ observed) at ~3s each, which
-    # dominates TPS.  "default" compiles once with symbolic (dynamic) shapes via Inductor
-    # and executes eagerly — one compilation, zero per-step recording overhead.
-    # This matches what MLX does: @mx.compile compiles at definition time with fixed
-    # Metal shaders that handle any size via masking, never re-recording.
-    _decode_compile_mode = "default"
+    # mode="reduce-overhead" is now correct for both decode functions.
+    # The fixed-size dense window workspace (max_dense_len = recency_window + block_size)
+    # makes S_dense constant across ALL decode steps.  _attend_and_reconstruct_v receives
+    # P_dense[H_q, max_dense_len] and v_dense_rep[H_q, max_dense_len, D] with FIXED shapes
+    # every step → Inductor records ONE CUDA graph → replays it → maximum performance.
+    # This mirrors what MLX does: @mx.compile compiles once with fixed Metal shaders.
+    _decode_compile_mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
     _prefill_compile_mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-
-    # Suppress Inductor CUDA-graph dynamic-shape warning for the decode functions
-    # (it fires even when we're not using reduce-overhead, because a prior compile
-    # run may have left cached graph metadata).
-    try:
-        import torch._inductor.config as _ind_cfg
-        _ind_cfg.triton.cudagraph_skip_dynamic_graphs = True
-    except Exception:
-        pass
 
     try:
         _backend = "inductor"
@@ -1465,6 +1454,7 @@ def _pytorch_vectorized_sparse_attn_decode(
     session_id:           Optional[str] = None,
     layer_idx:            Optional[int] = None,
     decode_workspace:     Optional[dict] = None,
+    active_len:           int = 0,           # actual valid dense tokens (workspace may be larger)
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -1691,7 +1681,7 @@ def _pytorch_vectorized_sparse_attn_decode(
     dense_k_parts = []
     dense_v_parts = []
     
-    if active_k is not None and active_k.shape[2] > 0:
+    if active_k is not None and active_len > 0:
         dense_k_parts.append(active_k)
         dense_v_parts.append(active_v)
     else:
@@ -1706,25 +1696,53 @@ def _pytorch_vectorized_sparse_attn_decode(
         full_k = torch.cat(dense_k_parts, dim=2)
         full_v = torch.cat(dense_v_parts, dim=2)
         
+        # S_dense = full workspace size (= max_dense_len, constant across all steps)
         S_dense = full_k.shape[2]
-        if dense_blocks:
-            dense_positions_list = []
-            for blk in dense_blocks:
-                dense_positions_list.extend(blk.token_indices)
-            dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=q.device)
+
+        # Build a fixed-size dense_positions tensor (shape [S_dense], always constant).
+        # Pre-allocate in session workspace so the GPU tensor is reused across steps.
+        # Positions [active_len..S_dense-1] are padding; they index position 0 in cos/sin
+        # (arbitrary — their rotated zeros contribute nothing because scores are masked below).
+        if decode_workspace is not None and session_id is not None and layer_idx is not None:
+            _sd = decode_workspace.setdefault(session_id, {})
+            _dpc = _sd.setdefault("dense_pos_ws", {})
+            _dp_ws = _dpc.get(layer_idx)
+            if _dp_ws is None or _dp_ws.shape[0] != S_dense or _dp_ws.device != q.device:
+                _dp_ws = torch.zeros(S_dense, dtype=torch.long, device=q.device)
+                _dpc[layer_idx] = _dp_ws
         else:
-            dense_positions = torch.arange(total_seq_len - S_dense, total_seq_len, device=q.device)
-        
+            _dp_ws = torch.zeros(S_dense, dtype=torch.long, device=q.device)
+
+        if dense_blocks and active_len > 0:
+            _pos = 0
+            for blk in dense_blocks:
+                _tl = blk.token_indices
+                _n = len(_tl)
+                if _n > 0 and _pos < S_dense:
+                    _dp_ws[_pos:_pos + _n].copy_(
+                        torch.tensor(_tl, dtype=torch.long, device=_dp_ws.device)
+                    )
+                    _pos += _n
+        elif active_len > 0:
+            _dp_ws[:active_len] = torch.arange(
+                total_seq_len - active_len, total_seq_len, device=q.device
+            )
+        dense_positions = _dp_ws  # [S_dense] — always fixed shape
+
         if cos is not None and sin is not None:
-            cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1)
+            cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1)  # [1,1,S_dense,D]
             sin_dense = sin[0, dense_positions].unsqueeze(0).unsqueeze(1)
             full_k_rot = (full_k * cos_dense) + (rotate_half(full_k) * sin_dense)
         else:
             full_k_rot = full_k
-        
+
         k_dense_rep = repeat_kv_at_dim(full_k_rot, num_key_value_groups, dim=1)
         v_dense_rep = repeat_kv_at_dim(full_v, num_key_value_groups, dim=1)
         scores_dense = torch.sum(q.float() * k_dense_rep.float(), dim=-1).squeeze(0) * inv_scale
+        # Mask padding positions so they get 0 softmax weight (not diluted exp(0))
+        if active_len < S_dense:
+            scores_dense = scores_dense.clone()
+            scores_dense[:, active_len:] = float('-inf')
     else:
         S_dense = 0
         scores_dense = torch.empty((H_q, 0), device=q.device, dtype=torch.float32)
@@ -1849,6 +1867,7 @@ def native_triton_sparse_attn_decode(
     session_id:           Optional[str] = None,
     layer_idx:            Optional[int] = None,
     decode_workspace:     Optional[dict] = None,
+    active_len:           int = 0,           # actual valid dense tokens (workspace may be padded)
 ) -> torch.Tensor:
     bsz, H_q, q_len, D = q.shape
     assert bsz == 1 and q_len == 1
@@ -1859,6 +1878,7 @@ def native_triton_sparse_attn_decode(
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
             cos_sliced=cos_sliced, sin_sliced=sin_sliced,
             session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+            active_len=active_len,
         )
         
     inv_scale = 1.0 / math.sqrt(D)
@@ -2069,6 +2089,7 @@ def native_triton_sparse_attn_decode(
                 anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
                 cos_sliced=cos_sliced, sin_sliced=sin_sliced,
                 session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+                active_len=active_len,
             )
     else:
         return _pytorch_vectorized_sparse_attn_decode(
@@ -2076,6 +2097,7 @@ def native_triton_sparse_attn_decode(
             anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
             cos_sliced=cos_sliced, sin_sliced=sin_sliced,
             session_id=session_id, layer_idx=layer_idx, decode_workspace=decode_workspace,
+            active_len=active_len,
         )
 
 
@@ -2118,7 +2140,8 @@ if HAS_TRITON:
         # ── Dense window inputs (new) ──
         dense_k_ptr,        # [H_kv, L_dense, D]  pre-RoPE-rotated
         dense_v_ptr,        # [H_kv, L_dense, D]
-        L_dense,            # int  (total dense tokens, NOT constexpr — passed as a scalar)
+        L_dense,            # int  (total/padded dense positions = max_dense_len)
+        L_dense_valid,      # int  (actual valid dense tokens; positions >= L_dense_valid are padding)
         # ── Strides for dense tensors ──
         stride_dk_h, stride_dk_l, stride_dk_d,
         stride_dv_h, stride_dv_l, stride_dv_d,
@@ -2276,13 +2299,16 @@ if HAS_TRITON:
                 dk = tl.load(dk_ptrs, mask=mask_t[:, None], other=0.0).to(tl.float32)
 
                 score = tl.sum(q[None, :] * dk, axis=1) * INV_SCALE
-                score = tl.where(mask_t, score, -float("inf"))
+                # Mask both out-of-chunk-range positions AND padding positions
+                # (offs_t >= L_dense_valid contain zero-padded keys from the fixed workspace)
+                valid_t = mask_t & (offs_t < L_dense_valid)
+                score = tl.where(valid_t, score, -float("inf"))
 
                 mb = tl.max(score, axis=0)
                 m_new = tl.maximum(m_i, mb)
                 alpha = tl.exp(m_i - m_new)
                 p = tl.exp(score - m_new)
-                p = tl.where(mask_t, p, 0.0)
+                p = tl.where(valid_t, p, 0.0)
 
                 l_i = l_i * alpha + tl.sum(p, axis=0)
 
@@ -2314,14 +2340,15 @@ def native_triton_sparse_attn_decode_combined(
     q:                    torch.Tensor,       # [1, H_q, 1, D]
     block_indices:        torch.Tensor,       # [N]  active compressed-block indices
     pool:                 object,             # NativeBlockPool
-    dense_k:              Optional[torch.Tensor],  # [1, H_kv, L_dense, D] pre-RoPE-rotated; None if no dense
-    dense_v:              Optional[torch.Tensor],  # [1, H_kv, L_dense, D]
+    dense_k:              Optional[torch.Tensor],  # [1, H_kv, max_dense_len, D] pre-RoPE-rotated; None if no dense
+    dense_v:              Optional[torch.Tensor],  # [1, H_kv, max_dense_len, D]
     num_key_value_groups: int,
     R:                    int = 16,
     S_MAX:                int = 64,
     anchor_indices:       Optional[torch.Tensor] = None,
     cos:                  Optional[torch.Tensor] = None,
     sin:                  Optional[torch.Tensor] = None,
+    dense_len:            int = 0,            # actual valid dense tokens (< dense_k.shape[2] due to fixed workspace padding)
 ) -> torch.Tensor:
     """
     Single-dispatch fused attention over both compressed blocks and dense window tokens.
@@ -2348,11 +2375,14 @@ def native_triton_sparse_attn_decode_combined(
     assert bsz == 1 and q_len == 1
 
     N = block_indices.shape[0] if block_indices is not None else 0
-    has_dense = dense_k is not None and dense_k.shape[2] > 0
-    L_dense = dense_k.shape[2] if has_dense else 0
+    # has_dense is driven by dense_len (actual valid tokens), not the padded buffer shape.
+    has_dense = dense_k is not None and dense_len > 0
+    # L_dense = padded workspace size (fixed shape, = max_dense_len).  Kernel uses
+    # L_dense for pointer arithmetic and L_dense_valid for score masking.
+    L_dense = dense_k.shape[2] if dense_k is not None else 0
 
     # If nothing to attend to, return zeros
-    if N == 0 and L_dense == 0:
+    if N == 0 and not has_dense:
         return torch.zeros((1, H_q, 1, D), device=q.device, dtype=q.dtype)
 
     # If there are no compressed blocks, just run dense SDPA (fast path)
@@ -2360,10 +2390,14 @@ def native_triton_sparse_attn_decode_combined(
         H_kv = dense_k.shape[1]
         n_rep = H_q // H_kv
         q_sq = q[0, :, 0, :].float()
-        dk = dense_k[0].float()  # [H_kv, L_dense, D]
+        dk = dense_k[0].float()  # [H_kv, L_dense, D] (padded workspace)
         dv = dense_v[0].float()
         q_r = q_sq.view(H_kv, n_rep, D)
         s = torch.bmm(q_r, dk.permute(0, 2, 1)).view(H_q, L_dense) / math.sqrt(D)
+        # Mask padding positions (dense_len..L_dense-1) so they contribute 0 to softmax
+        if dense_len < L_dense:
+            s = s.clone()
+            s[:, dense_len:] = float('-inf')
         w = torch.softmax(s, dim=-1)
         w_r = w.view(H_kv, n_rep, L_dense)
         out = torch.bmm(w_r, dv).view(H_q, D)
@@ -2437,7 +2471,7 @@ def native_triton_sparse_attn_decode_combined(
             g["U"], g["U_scale"], g["scales"], g["seq_lens"],
             g["res_k"], g["res_v"], g["res_pos"], g["res_pos_v"], g["res_n"],
             g["fact_pos"], g["fact_ak"], g["fact_av"],
-            dk_t, dv_t, L_dense,
+            dk_t, dv_t, L_dense, dense_len,
             dk_t.stride(0), dk_t.stride(1), dk_t.stride(2),
             dv_t.stride(0), dv_t.stride(1), dv_t.stride(2),
             out_workspace, m_workspace, l_workspace,
@@ -2486,6 +2520,7 @@ def native_triton_sparse_attn_decode_combined(
             q, block_indices, pool, [], dense_k, dense_v,
             num_key_value_groups, R, S_MAX,
             anchor_indices=anchor_indices, cos=cos, sin=sin,
+            active_len=dense_len,
         )
 
 
