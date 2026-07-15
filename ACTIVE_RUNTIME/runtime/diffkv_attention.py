@@ -545,6 +545,17 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     # This dispatches to either the GPU Triton kernel or the high-performance
                     # Project-Then-Attend PyTorch fallback!
                     attn_outputs = []
+                    # P1-6: Deferred Triton batch dispatch for CUDA combined path.
+                    # When bsz > 1, collecting all session params then dispatching in tight
+                    # sequence eliminates per-session Python overhead between kernel launches,
+                    # allowing CUDA to pipeline them. Each call is still B=1 (no kernel change).
+                    _triton_batch_queue = []   # list of (b_idx, kwargs) for deferred dispatch
+                    _triton_batch_enabled = (
+                        bsz > 1
+                        and HAS_TRITON
+                        and query_states.device.type == "cuda"
+                        and os.environ.get("DIFFKV_BATCH_TRITON_DISPATCH", "1") not in ("0", "false", "off")
+                    )
                     for b_idx in range(bsz):
                         sid = session_ids[b_idx]
                         if sid == "dummy_session":
@@ -593,24 +604,48 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             try:
                                 from native_core.srl.query_router import route_query_fixed_k
                                 if captured_layer_idx == 0:
-                                    # Route at layer 0 — cache result for all 28 layers
-                                    q_for_routing = unrot_query_states[b_idx, :, 0, :]  # [H, D]
-                                    _scale = 1.0 / math.sqrt(head_dim)
-                                    selected_slots = route_query_fixed_k(
-                                        Q         = q_for_routing,
-                                        srl_state = srl_state,
-                                        pool      = pool,
-                                        scale     = _scale,
-                                        layer_idx = captured_layer_idx,
-                                    )
-                                    srl_state.current_step_slots = selected_slots
-                                    
-                                    # Map slot IDs to absolute sequence anchor indices
-                                    mask = (selected_slots.unsqueeze(1) == block_indices.unsqueeze(0))
-                                    block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)
-                                    selected_anchors = anchor_indices[block_idx_in_full]
-                                    srl_state.current_step_anchors = selected_anchors
-                                    
+                                    # SRL routing cadence: route every N tokens to amortise
+                                    # the D2H cost of entropy/.item(), centroid/.tolist(),
+                                    # and semantic score vector .cpu() in route_query_fixed_k.
+                                    # Between route steps, cached slots from the previous step
+                                    # are reused (valid because token embeddings change slowly).
+                                    # Default N=1 = every token (original behaviour).
+                                    # DIFFKV_SRL_ROUTE_EVERY=4 routes every 4 tokens (~3-4×
+                                    # less D2H traffic during long decodes).
+                                    _route_every = getattr(srl_state, "_route_cadence", None)
+                                    if _route_every is None:
+                                        try:
+                                            _route_every = int(os.environ.get("DIFFKV_SRL_ROUTE_EVERY", "1"))
+                                        except (ValueError, TypeError):
+                                            _route_every = 1
+                                        srl_state._route_cadence = max(1, _route_every)
+
+                                    _step_ctr = getattr(srl_state, "current_step_count", 0)
+                                    _should_route = (_step_ctr % srl_state._route_cadence == 0)
+
+                                    if _should_route:
+                                        # Route at layer 0 — cache result for all 28 layers
+                                        q_for_routing = unrot_query_states[b_idx, :, 0, :]  # [H, D]
+                                        _scale = 1.0 / math.sqrt(head_dim)
+                                        selected_slots = route_query_fixed_k(
+                                            Q         = q_for_routing,
+                                            srl_state = srl_state,
+                                            pool      = pool,
+                                            scale     = _scale,
+                                            layer_idx = captured_layer_idx,
+                                        )
+                                        srl_state.current_step_slots = selected_slots
+
+                                        # Map slot IDs to absolute sequence anchor indices
+                                        mask = (selected_slots.unsqueeze(1) == block_indices.unsqueeze(0))
+                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)
+                                        selected_anchors = anchor_indices[block_idx_in_full]
+                                        srl_state.current_step_anchors = selected_anchors
+                                    else:
+                                        # Reuse cached routing from the previous cadence step
+                                        selected_slots = getattr(srl_state, "current_step_slots", None)
+                                        selected_anchors = getattr(srl_state, "current_step_anchors", None)
+
                                 else:
                                     # Layers 1-27: reuse cached slot selection
                                     selected_slots = getattr(srl_state, "current_step_slots", None)
@@ -1245,10 +1280,16 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 
                                 if dense_k_assembled is not None:
-                                    dense_positions_list = []
-                                    for blk in dense_blocks:
-                                        dense_positions_list.extend(blk.token_indices)
-                                    dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    # OPT (P1-7): reuse cached position tensor (shared with CUDA combined path)
+                                    _cache_key = (session_dict.get("routing_version", 0), dense_len)
+                                    _dp_cache  = session_dict.get("dense_pos_tensor_cache")
+                                    if _dp_cache is not None and _dp_cache[0] == _cache_key:
+                                        dense_positions = _dp_cache[1].to(query_states.device)
+                                    else:
+                                        dense_positions_list = []
+                                        for blk in dense_blocks:
+                                            dense_positions_list.extend(blk.token_indices)
+                                        dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                     _cos = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
                                     _sin = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
                                 else:
@@ -1317,10 +1358,16 @@ def apply_diffkv_attention_patch(model, kv_manager):
 
                                 if has_dense:
                                     # 1. Optimize RoPE Slicing: gather non-contiguous positions directly
-                                    dense_positions_list = []
-                                    for blk in dense_blocks:
-                                        dense_positions_list.extend(blk.token_indices)
-                                    dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
+                                    # OPT (P1-7): cache dense position tensor across steps (same routing_version)
+                                    _cache_key = (session_dict.get("routing_version", 0), dense_len)
+                                    _dp_cache  = session_dict.get("dense_pos_tensor_cache")
+                                    if _dp_cache is not None and _dp_cache[0] == _cache_key:
+                                        dense_positions = _dp_cache[1].to(query_states.device)
+                                    else:
+                                        dense_positions_list = []
+                                        for blk in dense_blocks:
+                                            dense_positions_list.extend(blk.token_indices)
+                                        dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                     L_dense = dense_positions.shape[0]
                                     cos_dense = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
                                     sin_dense = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
@@ -1610,43 +1657,81 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # Build a fixed-size [max_dense_len] position tensor for RoPE.
                                     # Padding slots (dense_len..max_dense_len-1) map to position 0;
                                     # their rotated zeros are masked in the kernel via L_dense_valid.
-                                    _dp2 = torch.zeros(_max_dense, dtype=torch.long, device=query_states.device)
-                                    _pos2 = 0
-                                    for _blk in (dense_blocks or []):
-                                        _tl2 = _blk.token_indices
-                                        _n2 = len(_tl2)
-                                        if _n2 > 0 and _pos2 < _max_dense:
-                                            _dp2[_pos2:_pos2 + _n2].copy_(
-                                                torch.tensor(_tl2, dtype=torch.long, device=_dp2.device)
-                                            )
-                                            _pos2 += _n2
-                                    _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
-                                    _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
-                                    if _cos_d2.dim() == 3:
-                                        _cos_d2 = _cos_d2.squeeze(1)
-                                        _sin_d2 = _sin_d2.squeeze(1)
-                                    _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,max_dense_len,D]
-                                    _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
+                                    # OPT (P1-7): cache this tensor across decode steps. The dense-window
+                                    # layout is stable between steps (only changes on routing change or
+                                    # block growth). routing_version already invalidates decode_cos_sliced
+                                    # on any routing change — reuse the same event here.
+                                    _cache_key = (current_version, dense_len)
+                                    _dp2_cache = session_dict.get("dense_pos_tensor_cache")
+                                    if (_dp2_cache is not None
+                                            and _dp2_cache[0] == _cache_key
+                                            and _dp2_cache[1].shape[0] == _max_dense):
+                                        _dp2 = _dp2_cache[1]
+                                        _cos_d2 = _dp2_cache[2]
+                                        _sin_d2 = _dp2_cache[3]
+                                    else:
+                                        _dp2 = torch.zeros(_max_dense, dtype=torch.long, device=query_states.device)
+                                        _pos2 = 0
+                                        for _blk in (dense_blocks or []):
+                                            _tl2 = _blk.token_indices
+                                            _n2 = len(_tl2)
+                                            if _n2 > 0 and _pos2 < _max_dense:
+                                                _dp2[_pos2:_pos2 + _n2].copy_(
+                                                    torch.tensor(_tl2, dtype=torch.long, device=_dp2.device)
+                                                )
+                                                _pos2 += _n2
+                                        _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
+                                        _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
+                                        if _cos_d2.dim() == 3:
+                                            _cos_d2 = _cos_d2.squeeze(1)
+                                            _sin_d2 = _sin_d2.squeeze(1)
+                                        _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,max_dense_len,D]
+                                        _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
+                                        session_dict["dense_pos_tensor_cache"] = (_cache_key, _dp2, _cos_d2, _sin_d2)
                                     _hd2 = dense_k_assembled.shape[-1] // 2
                                     # Full-workspace RoPE rotation — shapes match because both are max_dense_len
                                     _dk_half2 = torch.cat([-dense_k_assembled[..., _hd2:], dense_k_assembled[..., :_hd2]], dim=-1)
                                     _dk_combined = (dense_k_assembled * _cos_d2.to(dense_k_assembled.dtype)
                                                     + _dk_half2 * _sin_d2.to(dense_k_assembled.dtype))
                                     _dv_combined = dense_v_assembled
-                                attn_out_b = native_triton_sparse_attn_decode_combined(
-                                    q=query_states[b_idx:b_idx+1],
-                                    block_indices=block_indices,
-                                    pool=pool,
-                                    dense_k=_dk_combined,
-                                    dense_v=_dv_combined,
-                                    num_key_value_groups=num_key_value_groups,
-                                    R=kv_manager.rank,
-                                    S_MAX=session_mbs,
-                                    anchor_indices=anchor_indices,
-                                    cos=cos_all,
-                                    sin=sin_all,
-                                    dense_len=dense_len,
-                                )
+                                # P1-6: Deferred batch dispatch — queue this session's call
+                                # so we can dispatch all sessions in tight Python-free sequence.
+                                if _triton_batch_enabled:
+                                    _triton_batch_queue.append((
+                                        b_idx,
+                                        dict(
+                                            q=query_states[b_idx:b_idx+1],
+                                            block_indices=block_indices,
+                                            pool=pool,
+                                            dense_k=_dk_combined,
+                                            dense_v=_dv_combined,
+                                            num_key_value_groups=num_key_value_groups,
+                                            R=kv_manager.rank,
+                                            S_MAX=session_mbs,
+                                            anchor_indices=anchor_indices,
+                                            cos=cos_all,
+                                            sin=sin_all,
+                                            dense_len=dense_len,
+                                        ),
+                                    ))
+                                    # Placeholder; filled after the deferred dispatch below
+                                    attn_outputs.append(None)
+                                    continue  # skip the attn_outputs.append(attn_out_b) below
+                                else:
+                                    attn_out_b = native_triton_sparse_attn_decode_combined(
+                                        q=query_states[b_idx:b_idx+1],
+                                        block_indices=block_indices,
+                                        pool=pool,
+                                        dense_k=_dk_combined,
+                                        dense_v=_dv_combined,
+                                        num_key_value_groups=num_key_value_groups,
+                                        R=kv_manager.rank,
+                                        S_MAX=session_mbs,
+                                        anchor_indices=anchor_indices,
+                                        cos=cos_all,
+                                        sin=sin_all,
+                                        dense_len=dense_len,
+                                    )
                             else:
                                 attn_out_b = native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],
@@ -1789,6 +1874,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 traceback.print_exc()
 
                         attn_outputs.append(attn_out_b)
+
+                    # P1-6: Deferred Triton batch dispatch — fire all queued sessions
+                    # in tight Python-free sequence on the default CUDA stream.
+                    if _triton_batch_queue:
+                        for _b_deferred, _kwargs_deferred in _triton_batch_queue:
+                            _out_deferred = native_triton_sparse_attn_decode_combined(**_kwargs_deferred)
+                            attn_outputs[_b_deferred] = _out_deferred
 
                     attn_output = torch.cat(attn_outputs, dim=0)
 

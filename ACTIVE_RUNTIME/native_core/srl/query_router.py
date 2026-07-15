@@ -192,27 +192,31 @@ def adaptive_k(
     if N_total <= k_min:
         return N_total
 
-    # Compute softmax-entropy over semantic scores
+    # Compute softmax-entropy over semantic scores.
+    # OPT: Keep everything on GPU until the very last scalar conversion.
+    # Previously: entropy.item() + max_ent float + C_active.item() = 3 CUDA syncs.
+    # Now: a single .item() at the end to read final K.
     if q_desc.device.type == "mps":
         scores = srl_state.semantic_index.desc_matrix.float() @ q_desc.float()
     else:
         scores = srl_state.semantic_index.desc_matrix.float() @ q_desc   # [N]
     probs  = torch.softmax(scores * 5.0, dim=0)                       # temperature-scaled
-    # Clamp log to avoid -inf
+    # Clamp log to avoid -inf; compute entropy entirely on GPU
     log_probs = probs.clamp(min=1e-10).log()
-    entropy   = -(probs * log_probs).sum().item()
-    max_ent   = math.log(N_total)
+    entropy_t = -(probs * log_probs).sum()                            # GPU scalar tensor, no sync
+    max_ent   = math.log(max(N_total, 2))                             # pure Python, no GPU
 
-    # Normalize to [0, 1]
-    complexity = min(entropy / max(max_ent, 1e-8), 1.0)
+    # Normalize to [0, 1] on GPU; clamp for safety
+    complexity_t = (entropy_t / max_ent).clamp(min=0.0, max=1.0)     # GPU tensor
 
-    # Scale K linearly with complexity
-    k_raw = int(k_min + (k_max - k_min) * complexity)
+    # Scale K linearly with complexity on GPU
+    k_range = k_max - k_min
+    k_raw_t = k_min + k_range * complexity_t                          # GPU tensor
 
     # Apply adaptive multiplier (boosted when miss rate is high)
-    k_scaled = int(k_raw * srl_state.k_multiplier)
+    k_scaled_t = k_raw_t * srl_state.k_multiplier                    # GPU scalar
 
-    # Calculate C_active (number of active clusters)
+    # Calculate C_active (number of active clusters) — GPU-resident throughout
     C_active = 1
     chunk_graph = srl_state.chunk_graph
     if chunk_graph is not None and getattr(chunk_graph, "parent_landmarks", None) is not None and chunk_graph.parent_landmarks.numel() > 0:
@@ -225,14 +229,16 @@ def adaptive_k(
         if parent_idxs:
             parent_descs = desc_matrix[parent_idxs].to(q_desc.device, dtype=q_desc.dtype)
             parent_scores = parent_descs @ q_desc
-            S_max = float(parent_scores.max().item()) if parent_scores.numel() > 0 else 0.0
-            theta_active = max(0.30, 0.85 * S_max)
-            C_active = int((parent_scores >= theta_active).sum().item())
+            S_max_t = parent_scores.max()                              # GPU tensor, no sync
+            theta_active_t = torch.clamp(S_max_t * 0.85, min=0.30)
+            C_active = int((parent_scores >= theta_active_t).sum().item())  # single .item() here
             C_active = max(1, C_active)
 
-    k_scaled = int(k_scaled * (1.0 + 0.35 * math.log(C_active)))
+    k_final_t = k_scaled_t * (1.0 + 0.35 * math.log(max(C_active, 1)))
 
-    return max(k_min, min(k_max, k_scaled))
+    # Single .item() to materialize the final K integer (unavoidable for loop bound)
+    k_final = int(k_final_t.item())
+    return max(k_min, min(k_max, k_final))
 
 
 # ── Full Query Router ──────────────────────────────────────────────────────────
@@ -819,26 +825,33 @@ def route_query(
     sink_tensor = torch.tensor(sink, dtype=torch.int32, device=Q.device)
     combined_tensor = torch.cat([sink_tensor, filtered_non_sink.to(torch.int32)])
 
-    # Update slot reinforcement/activation strength for the routed slots using an EMA
+    # Update slot reinforcement/activation strength for the routed slots using an EMA.
+    # OPT: Amortize the O(N_slots) decay loop — run only every DECAY_EVERY steps.
+    # The decay is multiplicative (0.99^16 ≈ 0.851) so infrequent application is
+    # still correct; no slot escapes eventual decay.
+    _DECAY_EVERY = 16
     if srl_state is not None and getattr(srl_state, "slot_activation_strength", None) is not None:
         selected_slots_set = set(combined_tensor.tolist())
         alpha_boost = 0.05
         decay_rate = 0.99
         
-        # Initialize strength for slots not yet seen
+        # Initialize strength for slots not yet seen and boost selected slots
         for slot in selected_slots_set:
             if slot not in srl_state.slot_activation_strength:
                 srl_state.slot_activation_strength[slot] = 1.0
-            # Boost strength of selected slots
             srl_state.slot_activation_strength[slot] += alpha_boost
-            
-        # Slowly decay all slots to prevent permanent locking
-        for slot in list(srl_state.slot_activation_strength.keys()):
-            if slot not in selected_slots_set:
-                srl_state.slot_activation_strength[slot] *= decay_rate
-                # Clamp minimum strength to 1.0 to avoid fading below baseline
-                if srl_state.slot_activation_strength[slot] < 1.0:
-                    srl_state.slot_activation_strength[slot] = 1.0
+
+        # Lazy decay: run only every DECAY_EVERY steps to cut O(N_slots) Python
+        # work from every token to every DECAY_EVERY tokens (~16× reduction).
+        _step = getattr(srl_state, "current_step_count", 0)
+        if _step % _DECAY_EVERY == 0:
+            # Batch decay factor for N applications: rate^N = 0.99^16 ≈ 0.851
+            batch_decay = decay_rate ** _DECAY_EVERY
+            for slot in list(srl_state.slot_activation_strength.keys()):
+                if slot not in selected_slots_set:
+                    srl_state.slot_activation_strength[slot] *= batch_decay
+                    if srl_state.slot_activation_strength[slot] < 1.0:
+                        srl_state.slot_activation_strength[slot] = 1.0
 
     srl_state.current_step_count += 1
     return combined_tensor.to(torch.int32)

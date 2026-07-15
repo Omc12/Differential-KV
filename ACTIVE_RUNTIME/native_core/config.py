@@ -140,6 +140,15 @@ class DiffKVConfig:
             "gc_interval", "DIFFKV_GC_INTERVAL", _default_gc, config_dict
         )
 
+        # srl_route_every: run route_query_fixed_k every N decode tokens; reuse
+        # cached slots in between.  Reduces D2H traffic from SRL entropy/.item()
+        # and centroid/.tolist() calls during long generations.
+        # Default 1 = every token (preserves original behaviour).
+        # Set to 2-4 on CUDA for 2-4× less D2H during SRL-routed decode.
+        self.srl_route_every = self._get_int(
+            "srl_route_every", "DIFFKV_SRL_ROUTE_EVERY", 1, config_dict
+        )
+
         # 3. Per-layer rank options
         # early_layer_rank_boost: when True, layers in the first 15% of the network
         # use up to 2× base_rank to improve syntactic representation quality.
@@ -178,6 +187,7 @@ class DiffKVConfig:
                 print(f"  gpu_compress              = {self.gpu_compress}")
                 print(f"  cuda_graph                = {self.cuda_graph}")
                 print(f"  gc_interval               = {self.gc_interval}")
+                print(f"  srl_route_every           = {self.srl_route_every}")
 
     def _get_bool(self, key: str, env_name: str, default: bool, config_dict: dict) -> bool:
         if key in config_dict:

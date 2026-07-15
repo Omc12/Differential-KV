@@ -10,6 +10,11 @@
 #include "spsc_ring_buffer.hpp"
 #include "block_state.hpp"
 
+// Forward-declare cuSOLVER handle type so the header does not require cusolverDn.h.
+// The full type is only needed in compressor_thread.cpp which includes cusolverDn.h.
+struct cusparseDnContext;   // unused, just for clarity
+typedef struct cusolverDnContext* cusolverDnHandle_t;
+
 namespace diffkv {
 
 // Slab tiers — must match Python-side SlabAllocator constants
@@ -20,8 +25,8 @@ struct CompressJob {
     uint64_t  session_id;
     float*    dense_k_ptr;  // Raw GPU pointer to dense K block [block_size, heads, head_dim]
     float*    dense_v_ptr;  // Raw GPU pointer to dense V block
-    float*    slab_u_ptr;   // Destination: slab U matrix pointer
-    float*    slab_v_ptr;   // Destination: slab V matrix pointer
+    float*    slab_u_ptr;   // Destination: slab U matrix pointer [2*block_size, rank] (K then V)
+    float*    slab_v_ptr;   // Destination: slab Vt matrix pointer [2*rank, feat_dim] (K then V)
     int       block_size;
     int       heads;
     int       head_dim;
@@ -62,7 +67,8 @@ public:
 
 private:
     void worker_loop();
-    void process_job(const CompressJob& job);
+    // handle is owned by worker_loop() (one per thread) to avoid creation overhead per job
+    void process_job(const CompressJob& job, cusolverDnHandle_t handle);
 
     DiffKVBlockStateTable&                    state_table_;
     SessionAliveCallback                      alive_cb_;
