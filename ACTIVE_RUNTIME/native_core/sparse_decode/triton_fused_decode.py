@@ -865,16 +865,20 @@ def _build_stratified_U_for_triton(
     pool is returned unchanged to avoid a pointless VRAM allocation.
     """
     # Fast-path: no stratified components in this pool at all.
-    # Use a cached Python bool flag (_no_stratified) to avoid a GPU .all().item()
-    # D2H sync on every call (48 per token × every layer = 48 stalls/token).
+    # Use a cached Python bool flag (_no_stratified) tied to pool_gen to avoid a
+    # GPU .all().item() D2H sync on every call (48 per token × every layer = 48 stalls/token).
+    # The flag is invalidated automatically when pool_gen increments (new blocks written).
     n_sem_attr = getattr(pool, "n_semantic", None)
     if n_sem_attr is None:
         return pool, False
-    _no_strat = getattr(pool, "_no_stratified", None)
-    if _no_strat is None:
-        # One-time D2H check; result cached as Python bool on the pool object.
+    pool_gen = getattr(pool, "_stratified_generation", -1)
+    _no_strat     = getattr(pool, "_no_stratified", None)
+    _no_strat_gen = getattr(pool, "_no_stratified_gen", None)
+    if _no_strat is None or _no_strat_gen != pool_gen:
+        # Recompute when first called or when pool_gen changes (new blocks written).
         _no_strat = bool((n_sem_attr == 0).all().item())
-        pool._no_stratified = _no_strat
+        pool._no_stratified     = _no_strat
+        pool._no_stratified_gen = pool_gen
     if _no_strat:
         return pool, False
 
@@ -882,11 +886,12 @@ def _build_stratified_U_for_triton(
 
     # ── OPT-D: Cache lookup ────────────────────────────────────────────────────
     pool_id  = id(pool)
-    pool_gen = getattr(pool, "_stratified_generation", -1)
+    # pool_gen already read above — reuse it.
     # Sort for stable key; routing order may differ but the block set is what matters.
     # tolist() is O(N_active), acceptable for N_active ≤ 256.
     active_key = tuple(sorted(active_idx.tolist()))
     cache_key  = (pool_id, pool_gen, active_key)
+
 
     cached = _stratified_proxy_cache.get(cache_key)
     if cached is not None:
