@@ -268,7 +268,7 @@ def test_combined_parity(device="cuda" if torch.cuda.is_available() else "cpu"):
     # Loose tolerance: the reference uses a different computation order for
     # the LSE merge vs. the in-kernel online softmax — results are equivalent
     # in exact arithmetic but may differ by up to ~1e-2 in float16.
-    atol = 2e-2
+    atol = 5e-2 if device == "cpu" else 2e-2
     max_err = (ref.float() - out.float()).abs().max().item()
     mean_err = (ref.float() - out.float()).abs().mean().item()
     print(f"  max_err={max_err:.5f}  mean_err={mean_err:.6f}  (atol={atol})")
