@@ -227,6 +227,30 @@ def run_worker(mode, model_id, target_len):
             if hasattr(mgr, "_prefill_kv_capture"):
                 mgr._prefill_kv_capture.pop(sid, None)
 
+            # CRITICAL: Wait for async SVD compression to finish before decode.
+            # Each newly compressed block changes block_indices shape → forces
+            # CUDAGraphDecodeRunner to re-record the full model CUDA graph
+            # (3-5 forward warmups per shape). 51 shapes = thousands of extra
+            # forward passes. Barrier ensures stable shapes from decode step 1.
+            _barrier_start = time.perf_counter()
+            _barrier_timeout = 120.0
+            _prev_pending = -1
+            while True:
+                _pending = getattr(mgr, "_pending_cpu_blocks", 0)
+                if _pending <= 0:
+                    break
+                if time.perf_counter() - _barrier_start > _barrier_timeout:
+                    print(f"    [Barrier] Timeout after {_barrier_timeout:.0f}s, {_pending} blocks still pending.", flush=True)
+                    break
+                if _pending != _prev_pending:
+                    print(f"    [Barrier] Waiting for compression: {_pending} blocks pending…", flush=True)
+                    _prev_pending = _pending
+                if hasattr(mgr, "finalize_compressed_blocks"):
+                    mgr.finalize_compressed_blocks()
+                time.sleep(0.05)
+            _barrier_elapsed = time.perf_counter() - _barrier_start
+            if _barrier_elapsed > 0.2:
+                print(f"    [Barrier] Done in {_barrier_elapsed:.1f}s", flush=True)
 
             # Generate (256 tokens)
             cur = prompt_len
