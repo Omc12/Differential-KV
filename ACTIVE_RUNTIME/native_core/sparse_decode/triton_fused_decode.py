@@ -2382,7 +2382,7 @@ def native_triton_sparse_attn_decode_combined(
     anchor_indices:       Optional[torch.Tensor] = None,
     cos:                  Optional[torch.Tensor] = None,
     sin:                  Optional[torch.Tensor] = None,
-    dense_len:            int = 0,            # actual valid dense tokens (< dense_k.shape[2] due to fixed workspace padding)
+    dense_len:            Optional[int] = None,  # actual valid dense tokens
 ) -> torch.Tensor:
     """
     Single-dispatch fused attention over both compressed blocks and dense window tokens.
@@ -2410,6 +2410,8 @@ def native_triton_sparse_attn_decode_combined(
 
     N = block_indices.shape[0] if block_indices is not None else 0
     # has_dense is driven by dense_len (actual valid tokens), not the padded buffer shape.
+    if dense_len is None:
+        dense_len = dense_k.shape[2] if dense_k is not None else 0
     has_dense = dense_k is not None and dense_len > 0
     # L_dense = padded workspace size (fixed shape, = max_dense_len).  Kernel uses
     # L_dense for pointer arithmetic and L_dense_valid for score masking.
