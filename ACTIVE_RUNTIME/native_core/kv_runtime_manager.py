@@ -962,9 +962,24 @@ class KVRuntimeManager:
             self._session_srl[session_id] = srl_state
 
             # ── 6. Assemble and Build Factual Store (Solution 4) ──
+            # Gated by DIFFKV_FACTUAL_STORE=1.  Default is OFF to match the MLX
+            # wrapper and the documented default behaviour.  When disabled:
+            #   - No CPU KV duplicate is retained (_prefill_kv_capture is empty).
+            #   - No FactualExactStore is built or queried during decode.
+            #   - The factual-logit machinery in hf_diffkv_wrapper.py is skipped
+            #     because kv_manager._factual_stores will not contain this session.
+            _factual_enabled = _os.environ.get("DIFFKV_FACTUAL_STORE", "0") == "1"
+            if not getattr(self, "_factual_store_logged", False):
+                _tag = "ENABLED" if _factual_enabled else "DISABLED (set DIFFKV_FACTUAL_STORE=1 to enable)"
+                print(f"[DiffKV] Factual store: {_tag}")
+                self._factual_store_logged = True
             try:
                 from native_core.srl.factual_store import FactualExactStore
-                if hasattr(self, "_prefill_kv_capture") and session_id in self._prefill_kv_capture:
+                if (
+                    _factual_enabled
+                    and hasattr(self, "_prefill_kv_capture")
+                    and session_id in self._prefill_kv_capture
+                ):
                     factual_store = FactualExactStore(session_id)
                     prefill_kv = self._prefill_kv_capture[session_id]
                     
@@ -1033,18 +1048,32 @@ class KVRuntimeManager:
           1. Eliminates all torch.cat accumulation (zero extra allocations).
           2. Allows compression to start immediately on the first chunk.
           3. Keeps VRAM bounded to 1 chunk at a time (not the whole prompt).
+
+        Factual KV capture: CPU copies of K/V are only retained when
+        DIFFKV_FACTUAL_STORE=1.  When the flag is absent/"0" the factual-store
+        path is skipped entirely, saving O(context_len) host RAM and the
+        associated D2H traffic.  This matches the MLX wrapper's gating and the
+        documented default behaviour.
         """
-        if not hasattr(self, "_prefill_kv_capture"):
-            self._prefill_kv_capture = {}
-        session_cap = self._prefill_kv_capture.setdefault(session_id, {})
-        # If we have multiple chunks, concatenate them along chunk_len (dim=2)
-        if layer_idx not in session_cap:
-            session_cap[layer_idx] = [K.clone().cpu(), V.clone().cpu()]
-        else:
-            session_cap[layer_idx][0] = torch.cat([session_cap[layer_idx][0], K.clone().cpu()], dim=2)
-            session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], V.clone().cpu()], dim=2)
+        _factual_enabled = os.environ.get("DIFFKV_FACTUAL_STORE", "0") == "1"
+
+        # Only accumulate CPU KV copies when the factual store is enabled.
+        # This avoids retaining a full host-RAM duplicate of every prefill K/V
+        # and the torch.cat O(N²) allocation spike at long contexts.
+        if _factual_enabled:
+            if not hasattr(self, "_prefill_kv_capture"):
+                self._prefill_kv_capture = {}
+            session_cap = self._prefill_kv_capture.setdefault(session_id, {})
+            # If we have multiple chunks, concatenate them along chunk_len (dim=2)
+            if layer_idx not in session_cap:
+                session_cap[layer_idx] = [K.clone().cpu(), V.clone().cpu()]
+            else:
+                session_cap[layer_idx][0] = torch.cat([session_cap[layer_idx][0], K.clone().cpu()], dim=2)
+                session_cap[layer_idx][1] = torch.cat([session_cap[layer_idx][1], V.clone().cpu()], dim=2)
 
         # Stream directly — ingest_streaming handles block alignment, SVD, pool writes.
+        # This is unconditional: the block pool must always be fed regardless of factual
+        # store setting.
         self.ingest_streaming(session_id, layer_idx, K, V)
 
     def compress_prefill_kv(self, session_id: str) -> None:

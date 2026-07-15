@@ -99,6 +99,47 @@ class DiffKVConfig:
             "max_residual_tokens", "DIFFKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
         )
 
+        # ── CUDA-specific performance flags ──────────────────────────────────
+        # These have no effect on MPS/CPU; they are documented here so that
+        # DIFFKV_TELEMETRY=1 output gives a complete picture of active defaults.
+
+        # factual_store: retain full prefill K/V on CPU and build FactualExactStore.
+        # Default OFF to match MLX path and documentation.  Enable with
+        # DIFFKV_FACTUAL_STORE=1 when factual-recall accuracy matters more than
+        # the additional RAM/D2H cost.
+        self.factual_store = self._get_bool(
+            "factual_store", "DIFFKV_FACTUAL_STORE", False, config_dict
+        )
+
+        # gpu_compress: run randomized SVD on the GPU instead of CPU workers.
+        # Default ON for CUDA (GPU-rSVD is ~30× faster than CPU rSVD for typical
+        # rank/block sizes).  Force CPU with DIFFKV_GPU_COMPRESS=0.
+        _cuda_default_gpu_compress = not is_macos
+        self.gpu_compress = self._get_bool(
+            "gpu_compress", "DIFFKV_GPU_COMPRESS", _cuda_default_gpu_compress, config_dict
+        )
+
+        # cuda_graph: capture a static CUDA decode graph.
+        # Default OFF until the graph ABI is redesigned around device-resident
+        # routing/session state.  The current implementation captures mutable
+        # Python state and produces stale outputs after any routing change.
+        # Enable with DIFFKV_DISABLE_CUDA_GRAPH=0.
+        self.cuda_graph = self._get_bool(
+            "cuda_graph", "__DIFFKV_CUDA_GRAPH_PLACEHOLDER", False, config_dict
+        )
+        # Read disable flag directly for parity with static_decode_graph.py.
+        if not is_macos:
+            _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
+            self.cuda_graph = (_disable_graph != "1")
+
+        # gc_interval: decode steps between torch.cuda.empty_cache() calls.
+        # 500 on CUDA amortises allocator overhead without large fragmentation.
+        # 100 on MPS matches the original value (MPS memory model differs).
+        _default_gc = 100 if is_macos else 500
+        self.gc_interval = self._get_int(
+            "gc_interval", "DIFFKV_GC_INTERVAL", _default_gc, config_dict
+        )
+
         # 3. Per-layer rank options
         # early_layer_rank_boost: when True, layers in the first 15% of the network
         # use up to 2× base_rank to improve syntactic representation quality.
@@ -131,6 +172,12 @@ class DiffKVConfig:
             print(f"  max_active_dense_tokens   = {self.max_active_dense_tokens}")
             if self.early_layer_rank_boost:
                 print(f"  max_rank_early            = {self.max_rank_early} (0=auto 2×base)")
+            if not is_macos:
+                print(f"  --- CUDA-specific ---")
+                print(f"  factual_store             = {self.factual_store}")
+                print(f"  gpu_compress              = {self.gpu_compress}")
+                print(f"  cuda_graph                = {self.cuda_graph}")
+                print(f"  gc_interval               = {self.gc_interval}")
 
     def _get_bool(self, key: str, env_name: str, default: bool, config_dict: dict) -> bool:
         if key in config_dict:

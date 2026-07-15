@@ -30,6 +30,11 @@ try:
 except ImportError:
     HAS_TRITON = False
 
+# Counts how many times the PyTorch fallback path has been invoked after a
+# Triton kernel failure.  Logged at thresholds (1, 10, 100) with increasing
+# severity so recurring failures are visible without flooding the log.
+_triton_fallback_count = 0
+
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -2091,9 +2096,28 @@ def native_triton_sparse_attn_decode(
             # historical silent-fallback behavior exactly.
             if os.environ.get("DIFFKV_TRITON_STRICT") == "1":
                 raise
-            if not hasattr(native_triton_sparse_attn_decode, "fallback_fired"):
-                print(f"[DiffKV] WARNING: Triton compilation failed: {e}. Falling back to PyTorch vectorized decoder.")
-                native_triton_sparse_attn_decode.fallback_fired = True
+            global _triton_fallback_count
+            _triton_fallback_count += 1
+            if _triton_fallback_count == 1:
+                print(
+                    f"[DiffKV] WARNING: Triton sparse kernel failed: {e}. "
+                    "Falling back to PyTorch vectorized decoder. "
+                    "Set DIFFKV_TRITON_STRICT=1 to surface the full error.",
+                    flush=True,
+                )
+            elif _triton_fallback_count == 10:
+                print(
+                    f"[DiffKV] WARNING: Triton fallback has now occurred 10 times "
+                    f"(last error: {e}). Check kernel compilation and CUDA version.",
+                    flush=True,
+                )
+            elif _triton_fallback_count == 100:
+                print(
+                    f"[DiffKV] ERROR: Triton fallback count reached 100. The Triton "
+                    "sparse kernel appears persistently broken — all decode steps are "
+                    "running the slow PyTorch fallback. Investigate immediately.",
+                    flush=True,
+                )
             return _pytorch_vectorized_sparse_attn_decode(
                 q, block_indices, pool, dense_blocks, active_k, active_v, num_key_value_groups, R, S_MAX,
                 anchor_indices=anchor_indices, cos=cos, sin=sin, total_seq_len=total_seq_len, max_valid_len=max_valid_len,
@@ -2522,10 +2546,27 @@ def native_triton_sparse_attn_decode_combined(
     except Exception as e:
         if os.environ.get("DIFFKV_TRITON_STRICT") == "1":
             raise
-        if not hasattr(native_triton_sparse_attn_decode_combined, "_fallback_warned"):
-            print(f"[DiffKV] WARNING: combined Triton kernel failed ({e}). "
-                  "Falling back to native_triton_sparse_attn_decode.")
-            native_triton_sparse_attn_decode_combined._fallback_warned = True
+        global _triton_fallback_count
+        _triton_fallback_count += 1
+        if _triton_fallback_count == 1:
+            print(
+                f"[DiffKV] WARNING: combined Triton kernel failed: {e}. "
+                "Falling back to native_triton_sparse_attn_decode. "
+                "Set DIFFKV_TRITON_STRICT=1 to surface the full error.",
+                flush=True,
+            )
+        elif _triton_fallback_count == 10:
+            print(
+                f"[DiffKV] WARNING: Triton fallback count reached 10 "
+                f"(last error: {e}). Check kernel compilation and CUDA version.",
+                flush=True,
+            )
+        elif _triton_fallback_count == 100:
+            print(
+                "[DiffKV] ERROR: Triton fallback count reached 100. The combined "
+                "Triton kernel appears persistently broken — investigate immediately.",
+                flush=True,
+            )
         return native_triton_sparse_attn_decode(
             q, block_indices, pool, [], dense_k, dense_v,
             num_key_value_groups, R, S_MAX,

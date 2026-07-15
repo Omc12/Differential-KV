@@ -1246,8 +1246,11 @@ class StreamingSparseIngestManager:
         head_dim = blocks_list[0].active_k.shape[3]
         device = blocks_list[0].active_k.device
 
-        # GPU-accelerated randomized SVD path (Component 2)
-        if os.environ.get("DIFFKV_GPU_COMPRESS", "0") == "1" and device.type == "cuda":
+        # GPU-accelerated randomized SVD path (Component 2).
+        # Default to GPU compression on CUDA for maximum throughput; CPU path
+        # is the fallback (set DIFFKV_GPU_COMPRESS=0 to force CPU SVD).
+        _gpu_compress_default = "1" if device.type == "cuda" else "0"
+        if os.environ.get("DIFFKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
             from native_core.compression.lowrank import compress_layer_blocks_gpu
             _rank = getattr(self.manager, "rank", 16)
             success = compress_layer_blocks_gpu(blocks_list, _rank, manager=self.manager)
@@ -1281,28 +1284,41 @@ class StreamingSparseIngestManager:
             k_cpu[:num_blocks, :, :cur_mbs, :].copy_(k_gpu_concat, non_blocking=_is_cuda)
             v_cpu[:num_blocks, :, :cur_mbs, :].copy_(v_gpu_concat, non_blocking=_is_cuda)
 
+            # Record a CUDA event after the non-blocking D2H copy so the worker
+            # thread can synchronize on it before reading the CPU buffer.  The
+            # producer thread must NOT call event.synchronize() here — doing so
+            # blocks the main thread until the PCIe transfer finishes and removes
+            # any overlap between compression and the next forward pass.
+            # On MPS, the copy_ is always synchronous, so no event is needed.
             _dma_event = None
             if _is_cuda:
                 _dma_event = _new_event(device.type)
                 _dma_event.record()
-                _dma_event.synchronize()
+                # NOTE: Do NOT call _dma_event.synchronize() here.
+                # The worker thread owns the synchronization (async_compressor.py
+                # _run_item_sequential calls event.synchronize() before SVD).
             elif device.type == "mps":
-                # On MPS, we must synchronize to ensure the CPU copy is complete before background threads read it
+                # On MPS, copy_ to pinned CPU is always synchronous — no event needed.
                 torch.mps.synchronize()
-            
+
             for idx, block in enumerate(group):
                 if getattr(block, "skip_compression", False):
                     continue
 
                 if is_async_active:
-                    # Slice to the exact actual shape (unpadded) to avoid running SVD on 4x larger padded buffers
-                    k_cpu_slice = k_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
-                    v_cpu_slice = v_cpu[idx : idx + 1, :, :cur_mbs, :].clone()
+                    # Take a narrow view of the staging buffer for this block.
+                    # The staging buffer is pinned on CUDA (allocated in
+                    # _get_session_staging_buffer), so no extra clone()+pin_memory()
+                    # is needed — the worker can read the slice safely once the
+                    # DMA event fires.  A contiguous() ensures the Triton SVD
+                    # backend sees a simple stride layout.
+                    k_cpu_slice = k_cpu[idx : idx + 1, :, :cur_mbs, :].contiguous()
+                    v_cpu_slice = v_cpu[idx : idx + 1, :, :cur_mbs, :].contiguous()
 
-                    # Store CPU-pinned uncompressed tensors on the block immediately
-                    block.active_k_cpu = k_cpu_slice.pin_memory() if _is_cuda else k_cpu_slice
-                    block.active_v_cpu = v_cpu_slice.pin_memory() if _is_cuda else v_cpu_slice
-                    
+                    # Keep a reference on the block for any synchronous fallback paths
+                    block.active_k_cpu = k_cpu_slice
+                    block.active_v_cpu = v_cpu_slice
+
                     # Delete/free the GPU active_k/v immediately!
                     block.active_k = None
                     block.active_v = None

@@ -1490,7 +1490,14 @@ class ContinuousBatchEngine:
 
 
             self.decode_steps_since_gc += 1
-            if self.decode_steps_since_gc >= 100:
+            # On CUDA, calling empty_cache() every 100 steps causes ~0.3-1ms latency
+            # spikes as the allocator scans and consolidates.  500 steps amortizes the
+            # cost while still preventing unbounded fragmentation growth.
+            # On MPS the memory model differs, so we keep the tighter 100-step cadence.
+            # Override with DIFFKV_GC_INTERVAL=N for tuning without a code change.
+            _default_gc_interval = 500 if torch.cuda.is_available() else 100
+            _gc_interval = int(os.environ.get("DIFFKV_GC_INTERVAL", str(_default_gc_interval)))
+            if self.decode_steps_since_gc >= _gc_interval:
                 self.decode_steps_since_gc = 0
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

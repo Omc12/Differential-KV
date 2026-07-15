@@ -287,6 +287,18 @@ class AsyncCompressor:
                 for sz, items in by_size.items():
                     if has_batch_fn:
                         try:
+                            # Synchronize any pending CUDA D2H events before reading
+                            # the CPU buffer.  The producer thread records the event
+                            # after copy_(..., non_blocking=True) and passes it here
+                            # so the synchronization happens on the worker thread,
+                            # not the main thread (which is what deferred async gives us).
+                            for _itm in items:
+                                _ev = _itm[3] if _itm is not None and len(_itm) > 3 else None
+                                if _ev is not None:
+                                    try:
+                                        _ev.synchronize()
+                                    except Exception:
+                                        pass
                             t0 = time.perf_counter()
                             mgr._compress_blocks_batch(items)
                             elapsed = (time.perf_counter() - t0) * 1000

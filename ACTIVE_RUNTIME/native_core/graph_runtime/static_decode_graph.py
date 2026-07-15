@@ -60,7 +60,27 @@ class CUDAGraphDecodeRunner:
         self._static_output_logits   = None   # [B, V] float — static output
         self._captured_shape_sig     = None   # (batch, seq) shape for invalidation
         self._model_ref              = None   # weak ref to the model (non-owning)
-        self._capture_enabled        = _is_cuda_available() and os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "0") != "1"
+        # CUDA graph capture is DISABLED by default.
+        #
+        # The DiffKV attention patch mutates Python/session state on every decode
+        # forward (routing slots, dense-window layout, SRL state, session IDs).
+        # A captured graph replays without executing any of this Python — the
+        # graph becomes stale after the first routing change and silently produces
+        # incorrect outputs.  The graph ABI must be redesigned around static,
+        # device-resident state buffers before it can be safely re-enabled.
+        #
+        # To opt-in for testing: DIFFKV_DISABLE_CUDA_GRAPH=0
+        # Production code should leave this at the default until the graph ABI
+        # redesign is complete and validated (see CUDA_VS_MLX_PERFORMANCE_AUDIT).
+        _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
+        self._capture_enabled = _is_cuda_available() and _disable_graph != "1"
+        if _is_cuda_available() and not self._capture_enabled:
+            import sys as _sys
+            print(
+                "[DiffKV] CUDA graph capture DISABLED (default — mutable routing state "
+                "prevents correct replay). Set DIFFKV_DISABLE_CUDA_GRAPH=0 to opt-in.",
+                file=_sys.stderr,
+            )
         self._num_warmup             = 3
 
     def is_captured(self) -> bool:
