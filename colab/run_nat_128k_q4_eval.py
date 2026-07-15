@@ -50,15 +50,6 @@ import gc
 import subprocess
 import torch
 
-# Disable CUDA graph recording for dynamic-shape Triton JIT functions.
-# Without this, _reconstruct_and_score / _attend_and_reconstruct_v record a new
-# CUDA graph for each unique block_count seen during prefill & decode (51 shapes
-# in practice), each needing 3 warmup passes → the spikey GPU 50% / slow prefill.
-# Skipping graphs means each call runs eagerly — the per-call overhead is ~0.5ms
-# vs ~2µs for graph replay, but we avoid 51 × 3 × warmup_time of recording cost.
-import torch._inductor.config as _ind_cfg
-_ind_cfg.triton.cudagraph_skip_dynamic_graphs = True
-
 # New Prompt
 CUSTOM_PROMPT = """Use only the supplied text.
 
@@ -232,7 +223,7 @@ def run_worker(mode, model_id, target_len):
             # which is the root cause of 1.4 TPS.
             if hasattr(mgr, "finalize_srl_index"):
                 mgr.finalize_srl_index(sid, cached_len=0)
-            # Also clear the prefill KV capture buffer to free CPU RAM
+            # Clear the prefill KV capture buffer to free CPU RAM
             if hasattr(mgr, "_prefill_kv_capture"):
                 mgr._prefill_kv_capture.pop(sid, None)
 
@@ -261,8 +252,30 @@ def run_worker(mode, model_id, target_len):
             if _barrier_elapsed > 0.2:
                 print(f"    [Barrier] Done in {_barrier_elapsed:.1f}s", flush=True)
 
+            # CRITICAL: Warm up decode before starting TPS timer.
+            # _reconstruct_and_score and _attend_and_reconstruct_v are decode-only
+            # Triton JIT functions: they compile on the very first decode call
+            # (30-120s Inductor compilation). Without warmup this compilation time
+            # dominates the 256-step measurement → 1.6 TPS instead of ~12 TPS.
+            print("    [Warmup] Running 3 decode warmup steps for JIT compilation...", flush=True)
+            _wup_in  = torch.zeros((1, 1), dtype=torch.long, device=device)
+            _wup_pos = torch.zeros((1, 1), dtype=torch.long, device=device)
+            _wup_logits = last_logits_gpu
+            _wup_cur = prompt_len
+            t_wup = time.perf_counter()
+            for _wi in range(3):
+                _wid = int(torch.argmax(_wup_logits).item())
+                _wup_in[0, 0] = _wid
+                _wup_pos[0, 0] = _wup_cur
+                _wout = model(_wup_in, position_ids=_wup_pos)
+                _wup_logits = _wout.logits[0, -1].float()
+                _wup_cur += 1
+            torch.cuda.synchronize()
+            print(f"    [Warmup] Done in {time.perf_counter()-t_wup:.1f}s", flush=True)
+            last_logits_gpu = _wup_logits
+
             # Generate (256 tokens)
-            cur = prompt_len
+            cur = _wup_cur
             gen_ids = []
             # Pre-allocate static GPU tensors — avoids new allocation + CUDA
             # graph invalidation on every step. Use .copy_() in the loop.
