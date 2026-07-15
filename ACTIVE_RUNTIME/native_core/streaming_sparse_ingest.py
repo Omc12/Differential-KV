@@ -990,29 +990,33 @@ class StreamingSparseIngestManager:
 
             # Get the current sequence length to determine rolling dense window
             current_seq_len = current_block.anchor_idx + len(current_block.token_indices)
-            
-            # Compress any blocks that have now fallen out of the rolling dense window
-            # Also protect Block 0 (anchor_idx == 0) from SVD compression entirely to prevent
-            # delta scale corruption caused by the first token attention sink outlier.
-            for idx, b in enumerate(blocks):
-                if b.state == "ACCUMULATING" and b.active_k is not None:
-                    is_last = (idx == len(blocks) - 1)
-                    if _is_block_compression_eligible(b, is_last_block=is_last) and (b.anchor_idx + b.token_count()) < (current_seq_len - self.recency_window):
+            recency_cutoff  = current_seq_len - self.recency_window
+
+            # Compress any blocks that have now fallen out of the rolling dense window.
+            # OPTIMIZED: scan backwards — during steady-state decode, all old blocks are
+            # already COMPRESSED/SUBMITTED; only the last 1-2 are ACCUMULATING.
+            # Backwards scan + early-break gives O(1) average case vs O(N_blocks) forward.
+            n_blocks = len(blocks)
+            for idx in range(n_blocks - 2, -1, -1):   # skip the current (last) block
+                b = blocks[idx]
+                if b.state not in ("ACCUMULATING",):
+                    # Everything earlier is also non-ACCUMULATING (chronological order).
+                    break
+                if b.active_k is not None:
+                    if _is_block_compression_eligible(b, is_last_block=False) and (b.anchor_idx + b.token_count()) < recency_cutoff:
                         self._submit_block_for_compression(b)
                         self.update_metadata_block(session_id, layer_idx, idx, b)
-                    elif b.is_outlier and (b.anchor_idx + b.token_count()) < (current_seq_len - self.recency_window):
-                        # Outlier blocks skip SVD (to preserve attention quality) but their
-                        # dense active_k/v tensors can be offloaded to CPU once they've left
-                        # the recency window. The assemble_dense_window_kv() path handles
-                        # active_k_cpu transparently via .to(device, non_blocking=True).
-                        if b.active_k is not None:
-                            b.active_k_cpu = b.active_k.cpu().pin_memory() if b.active_k.is_cuda else b.active_k.cpu()
-                            b.active_v_cpu = b.active_v.cpu().pin_memory() if b.active_v.is_cuda else b.active_v.cpu()
-                            b.active_k = None
-                            b.active_v = None
-                            b.dirty = True
-                            self.update_metadata_block(session_id, layer_idx, idx, b)
+                elif b.is_outlier and (b.anchor_idx + b.token_count()) < recency_cutoff:
+                    # Outlier blocks skip SVD but dense tensors can be offloaded to CPU.
+                    if b.active_k is not None:
+                        b.active_k_cpu = b.active_k.cpu().pin_memory() if b.active_k.is_cuda else b.active_k.cpu()
+                        b.active_v_cpu = b.active_v.cpu().pin_memory() if b.active_v.is_cuda else b.active_v.cpu()
+                        b.active_k = None
+                        b.active_v = None
+                        b.dirty = True
+                        self.update_metadata_block(session_id, layer_idx, idx, b)
             return
+
 
         # ───────────────────────────────────────────────────────────────────
         # PREFILL PATH (T > 1) — highly optimized vectorized batch ingestion
