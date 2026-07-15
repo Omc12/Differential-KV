@@ -2956,33 +2956,47 @@ class KVRuntimeManager:
                 # Matches compress_layer_blocks_gpu and MLX wrapper behavior
                 if block_token_ids and getattr(self, "tokenizer", None) is not None and len(block_token_ids) == n:
                     try:
-                        from native_core.compression.residual_capture import compute_boost_multipliers
-                        _tok = self.tokenizer
-                        _cache = getattr(self, "_res_capture_decode_cache", None)
-                        if _cache is None:
-                            _cache = self._res_capture_decode_cache = {}
-                        tok_strs = []
-                        for _tid in block_token_ids:
-                            _s = _cache.get(_tid)
-                            if _s is None:
-                                _s = _cache[_tid] = _tok.decode([_tid])
-                            tok_strs.append(_s)
                         _sid = getattr(block, "session_id", None)
-                        _all = self._session_token_ids.get(_sid) if getattr(self, "_session_token_ids", None) is not None else None
-                        _total = int(_all.numel()) if _all is not None else len(block_token_ids)
-                        _ckey = (_sid, _total)
-                        _counts_cache = getattr(self, "_res_capture_counts", None)
-                        if _counts_cache is None:
-                            _counts_cache = self._res_capture_counts = {}
-                        _counts = _counts_cache.get(_ckey)
-                        if _counts is None and _all is not None:
-                            _counts = {}
-                            for _t in _all.tolist():
-                                _counts[_t] = _counts.get(_t, 0) + 1
-                            _counts_cache.clear()
-                            _counts_cache[_ckey] = _counts
-                        boost_row, n_boosted = compute_boost_multipliers(
-                            tok_strs, block_token_ids, _counts or {}, _total)
+                        _cached_boost = None
+                        if _sid is not None:
+                            _boost_cache = getattr(self, "_res_capture_boost_rows", None)
+                            if _boost_cache is None:
+                                _boost_cache = self._res_capture_boost_rows = {}
+                            _session_boosts = _boost_cache.setdefault(_sid, {})
+                            _cached_boost = _session_boosts.get(block.anchor_idx)
+
+                        if _cached_boost is not None:
+                            boost_row, n_boosted = _cached_boost
+                        else:
+                            from native_core.compression.residual_capture import compute_boost_multipliers
+                            _tok = self.tokenizer
+                            _cache = getattr(self, "_res_capture_decode_cache", None)
+                            if _cache is None:
+                                _cache = self._res_capture_decode_cache = {}
+                            tok_strs = []
+                            for _tid in block_token_ids:
+                                _s = _cache.get(_tid)
+                                if _s is None:
+                                    _s = _cache[_tid] = _tok.decode([_tid])
+                                tok_strs.append(_s)
+                            _all = self._session_token_ids.get(_sid) if getattr(self, "_session_token_ids", None) is not None else None
+                            _total = int(_all.numel()) if _all is not None else len(block_token_ids)
+                            _ckey = (_sid, _total)
+                            _counts_cache = getattr(self, "_res_capture_counts", None)
+                            if _counts_cache is None:
+                                _counts_cache = self._res_capture_counts = {}
+                            _counts = _counts_cache.get(_ckey)
+                            if _counts is None and _all is not None:
+                                _counts = {}
+                                for _t in _all.tolist():
+                                    _counts[_t] = _counts.get(_t, 0) + 1
+                                _counts_cache.clear()
+                                _counts_cache[_ckey] = _counts
+                            boost_row, n_boosted = compute_boost_multipliers(
+                                tok_strs, block_token_ids, _counts or {}, _total)
+                            if _sid is not None:
+                                _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
+
                         if boost_row is not None and n_boosted > 0:
                             _bt = torch.tensor(boost_row, device=rel_error_K.device, dtype=rel_error_K.dtype)
                             rel_error_K = rel_error_K * _bt

@@ -1009,8 +1009,8 @@ class StreamingSparseIngestManager:
                 elif b.is_outlier and (b.anchor_idx + b.token_count()) < recency_cutoff:
                     # Outlier blocks skip SVD but dense tensors can be offloaded to CPU.
                     if b.active_k is not None:
-                        b.active_k_cpu = b.active_k.cpu().pin_memory() if b.active_k.is_cuda else b.active_k.cpu()
-                        b.active_v_cpu = b.active_v.cpu().pin_memory() if b.active_v.is_cuda else b.active_v.cpu()
+                        b.active_k_cpu = b.active_k.to("cpu", non_blocking=True) if b.active_k.is_cuda else b.active_k.cpu()
+                        b.active_v_cpu = b.active_v.to("cpu", non_blocking=True) if b.active_v.is_cuda else b.active_v.cpu()
                         b.active_k = None
                         b.active_v = None
                         b.dirty = True
@@ -1350,9 +1350,9 @@ class StreamingSparseIngestManager:
         block.state = "SUBMITTED"
 
         _is_cuda = k.is_cuda if k is not None else False
-        block.active_k_cpu = (k.cpu().pin_memory() if _is_cuda else k.cpu()) if k is not None else None
-        block.active_v_cpu = (v.cpu().pin_memory() if _is_cuda else v.cpu()) if v is not None else None
-        block.anchor_kv_cpu = block.anchor_kv.cpu() if block.anchor_kv is not None else None
+        block.active_k_cpu = (k.to("cpu", non_blocking=True) if _is_cuda else k.cpu()) if k is not None else None
+        block.active_v_cpu = (v.to("cpu", non_blocking=True) if _is_cuda else v.cpu()) if v is not None else None
+        block.anchor_kv_cpu = (block.anchor_kv.to("cpu", non_blocking=True) if _is_cuda and block.anchor_kv is not None else block.anchor_kv.cpu()) if block.anchor_kv is not None else None
         
         # Clear GPU tensors immediately
         block.active_k = None
