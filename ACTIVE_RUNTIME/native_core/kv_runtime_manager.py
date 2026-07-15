@@ -639,7 +639,21 @@ class KVRuntimeManager:
         else:
             self._streaming_mgr = None
 
-        self.max_dense_len = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")) + self.block_size
+        _recency_window = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512"))
+        # Compute a generous upper bound for the dense window workspace.
+        # During chunked prefill, active_k can temporarily hold up to 2*block_size − 1 tokens
+        # per block (e.g. 127 for block_size=64).  Formula:
+        #   n_max_blocks  = ceil(recency_window / block_size) + 3   (safety margin)
+        #   max_per_block = 2 * block_size + 1                      (anchor + 2× active)
+        #   max_dense_len = n_max_blocks × max_per_block
+        # This is independent of model architecture — it only depends on block_size and
+        # recency_window, both of which are system parameters (not per-model constants).
+        _n_max_blocks = (_recency_window + self.block_size - 1) // self.block_size + 3
+        _max_per_block = 2 * self.block_size + 1
+        self.max_dense_len = int(
+            os.environ.get("DIFFKV_MAX_DENSE_LEN", str(_n_max_blocks * _max_per_block))
+        )
+
         self.max_residual = self.native_pool.max_residual_tokens
 
         # Telemetry
@@ -1843,14 +1857,33 @@ class KVRuntimeManager:
         if not dense_blocks:
             return None, None, 0
 
-        # 1. Compute total length of dense tokens
-        L_dense = 0
-        for blk in dense_blocks:
-            L_dense += 1
-            if blk.active_k is not None:
-                L_dense += blk.active_k.shape[2]
-            elif getattr(blk, "active_k_cpu", None) is not None:
-                L_dense += blk.active_k_cpu.shape[2]
+        # 1. Compute per-block sizes, then trim oldest blocks if total > max_dense_len.
+        # During chunked prefill, blk.active_k.shape[2] can reach 2*block_size - 1, so
+        # the total may occasionally exceed the workspace.  We preserve recency by
+        # dropping the OLDEST blocks (front of the list) until the content fits.
+        def _blk_len(blk):
+            a = (blk.active_k.shape[2] if blk.active_k is not None
+                 else (blk.active_k_cpu.shape[2] if getattr(blk, "active_k_cpu", None) is not None else 0))
+            return 1 + a  # anchor + active
+
+        blk_sizes = [_blk_len(b) for b in dense_blocks]
+        L_dense   = sum(blk_sizes)
+
+        if L_dense > self.max_dense_len:
+            # Drop oldest blocks until L_dense fits.  Emit a one-time warning so it's visible.
+            if not getattr(self, "_dense_trim_warned", False):
+                print(
+                    f"[DiffKV] WARNING: dense window ({L_dense} tokens) exceeds workspace "
+                    f"({self.max_dense_len}).  Trimming oldest blocks to fit.  "
+                    f"Set DIFFKV_MAX_DENSE_LEN={L_dense + 64} to suppress.",
+                    flush=True,
+                )
+                self._dense_trim_warned = True
+            while blk_sizes and L_dense > self.max_dense_len:
+                L_dense -= blk_sizes.pop(0)
+                dense_blocks = dense_blocks[1:]
+            if not dense_blocks:
+                return None, None, 0
 
         # 2. Retrieve or allocate workspaces.
         # Static-shape invariant: always allocate to self.max_dense_len (= recency_window +
@@ -1909,31 +1942,38 @@ class KVRuntimeManager:
                         dense_start_pos_dict[layer_idx] = start_pos
                         break
 
-        # 3. Copy only dirty blocks directly into the pre-allocated workspace slices
+        # 3. Copy only dirty blocks directly into the pre-allocated workspace slices.
+        # Safety net: if a single block's active_k still exceeds the remaining workspace
+        # (should not happen after trimming above, but guarded defensively), clip it.
         curr_idx = 0
         for blk in dense_blocks:
+            if curr_idx >= self.max_dense_len:
+                break  # workspace full — skip remaining blocks
             key = (layer_idx, blk.anchor_idx)
             if new_alloc:
                 workspace_k[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 0].unsqueeze(2), non_blocking=True)
                 workspace_v[:, :, curr_idx : curr_idx + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
 
                 if blk.active_k is not None:
-                    active_len = blk.active_k.shape[2]
-                    workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k, non_blocking=True)
-                    workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v, non_blocking=True)
-                    dense_offsets[key] = (curr_idx, active_len)  # store (offset, active_len)
+                    active_len = min(blk.active_k.shape[2], self.max_dense_len - curr_idx - 1)
+                    if active_len > 0:
+                        workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k[:, :, :active_len], non_blocking=True)
+                        workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v[:, :, :active_len], non_blocking=True)
+                    dense_offsets[key] = (curr_idx, active_len)
                     curr_idx += 1 + active_len
                 elif getattr(blk, "active_k_cpu", None) is not None:
-                    active_len = blk.active_k_cpu.shape[2]
-                    workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
-                    workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
-                    dense_offsets[key] = (curr_idx, active_len)  # store (offset, active_len)
+                    active_len = min(blk.active_k_cpu.shape[2], self.max_dense_len - curr_idx - 1)
+                    if active_len > 0:
+                        workspace_k[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_k_cpu[:, :, :active_len], non_blocking=True)
+                        workspace_v[:, :, curr_idx + 1 : curr_idx + 1 + active_len].copy_(blk.active_v_cpu[:, :, :active_len], non_blocking=True)
+                    dense_offsets[key] = (curr_idx, active_len)
                     curr_idx += 1 + active_len
                 else:
                     dense_offsets[key] = (curr_idx, 0)  # anchor only
                     curr_idx += 1
-                
+
                 blk.dirty = False
+
             else:
                 cached_entry = dense_offsets.get(key)
                 if cached_entry is not None and isinstance(cached_entry, tuple):
@@ -1949,26 +1989,29 @@ class KVRuntimeManager:
                     workspace_v[:, :, offset : offset + 1].copy_(blk.anchor_kv[:, 1].unsqueeze(2), non_blocking=True)
 
                     if blk.active_k is not None:
-                        active_len = blk.active_k.shape[2]
-                        workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k, non_blocking=True)
-                        workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v, non_blocking=True)
+                        active_len = min(blk.active_k.shape[2], self.max_dense_len - offset - 1)
+                        if active_len > 0:
+                            workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k[:, :, :active_len], non_blocking=True)
+                            workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v[:, :, :active_len], non_blocking=True)
                         dense_offsets[key] = (offset, active_len)
                     elif getattr(blk, "active_k_cpu", None) is not None:
-                        active_len = blk.active_k_cpu.shape[2]
-                        workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k_cpu, non_blocking=True)
-                        workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v_cpu, non_blocking=True)
+                        active_len = min(blk.active_k_cpu.shape[2], self.max_dense_len - offset - 1)
+                        if active_len > 0:
+                            workspace_k[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_k_cpu[:, :, :active_len], non_blocking=True)
+                            workspace_v[:, :, offset + 1 : offset + 1 + active_len].copy_(blk.active_v_cpu[:, :, :active_len], non_blocking=True)
                         dense_offsets[key] = (offset, active_len)
                     else:
                         dense_offsets[key] = (offset, 0)
-                    
+
                     blk.dirty = False
 
                 if blk.active_k is not None:
-                    curr_idx = offset + 1 + blk.active_k.shape[2]
+                    curr_idx = min(offset + 1 + blk.active_k.shape[2], self.max_dense_len)
                 elif getattr(blk, "active_k_cpu", None) is not None:
-                    curr_idx = offset + 1 + blk.active_k_cpu.shape[2]
+                    curr_idx = min(offset + 1 + blk.active_k_cpu.shape[2], self.max_dense_len)
                 else:
-                    curr_idx = offset + 1
+                    curr_idx = min(offset + 1, self.max_dense_len)
+
 
         # 4. Return the FULL fixed-size workspace + L_dense as a scalar.
         # Shape is always [1, kv_heads, max_dense_len, head_dim] — static across every

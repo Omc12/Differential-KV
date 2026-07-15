@@ -550,7 +550,7 @@ def _reconstruct_and_score_compiled(
     H = q_sq.shape[0]
     D = q_sq.shape[1]
     
-    deltas_k_flat = torch.bmm(U.float(), V_K.float().reshape(N, R, H * D))
+    deltas_k_flat = torch.bmm(U.float(), V_K.float().reshape(N, R, -1))
     deltas_k = deltas_k_flat.reshape(N, S, H, D).to(U.dtype) * scales.unsqueeze(-1)
     
     zeros_pad = torch.zeros((N, 1, H, D), dtype=U.dtype, device=U.device)
@@ -630,7 +630,7 @@ def _prefill_fused_history_attend_compiled(
     Q = q.shape[2]
     D = q.shape[3]
 
-    V_K_flat = V_K.reshape(N, R, H * D)
+    V_K_flat = V_K.reshape(N, R, -1)
     deltas_k_flat = torch.bmm(U, V_K_flat)
     deltas_k = deltas_k_flat.reshape(N, S, H, D) * scales.view(N, 1, 1, 1).to(q.dtype)
 
@@ -821,17 +821,18 @@ def warm_up_jit(
     try:
         N = 2          # number of dummy blocks
         S = block_size - 1  # tokens per block minus anchor
+        H_q = H
 
         _dev = torch.device(device)
 
         # ── _reconstruct_and_score dummy inputs ───────────────────────────
         U_d       = torch.zeros(N, S, R,          device=_dev, dtype=dtype)
-        VK_d      = torch.zeros(N, kv_heads, R, D, device=_dev, dtype=dtype)
-        anchK_d   = torch.zeros(N, kv_heads, D,   device=_dev, dtype=dtype)
+        VK_d      = torch.zeros(N, R, H_q, D,     device=_dev, dtype=dtype)
+        anchK_d   = torch.zeros(N, H_q, D,        device=_dev, dtype=dtype)
         scales_d  = torch.ones(N,                  device=_dev, dtype=dtype)
         cos_d     = torch.ones(N, 1 + S, 1, D,    device=_dev, dtype=dtype)
         sin_d     = torch.zeros(N, 1 + S, 1, D,   device=_dev, dtype=dtype)
-        q_sq_d    = torch.zeros(H, D,             device=_dev, dtype=dtype)
+        q_sq_d    = torch.zeros(H_q, D,           device=_dev, dtype=dtype)
 
         with torch.no_grad():
             _out = _reconstruct_and_score(U_d, VK_d, anchK_d, scales_d, cos_d, sin_d, q_sq_d, 1.0)
@@ -840,15 +841,14 @@ def warm_up_jit(
                 torch.cuda.synchronize(_dev)
 
         # ── _attend_and_reconstruct_v dummy inputs ────────────────────────
-        H_q    = H
         S_dens = block_size      # small dense window
 
         P_anc_d  = torch.zeros(H_q, N,       device=_dev, dtype=dtype)
         P_comp_d = torch.zeros(H_q, N * S,   device=_dev, dtype=dtype)
         P_den_d  = torch.zeros(H_q, S_dens,  device=_dev, dtype=dtype)
-        VV_d     = torch.zeros(N, kv_heads, R, D, device=_dev, dtype=dtype)
-        anchV_d  = torch.zeros(N, kv_heads, D,    device=_dev, dtype=dtype)
-        v_den_d  = torch.zeros(1, S_dens, kv_heads, D, device=_dev, dtype=dtype)
+        VV_d     = torch.zeros(N, R, H_q, D,     device=_dev, dtype=dtype)  # GQA-expanded
+        anchV_d  = torch.zeros(N, H_q, D,         device=_dev, dtype=dtype)  # GQA-expanded
+        v_den_d  = torch.zeros(1, S_dens, H_q, D, device=_dev, dtype=dtype)  # GQA-expanded
 
         with torch.no_grad():
             _out2 = _attend_and_reconstruct_v(
