@@ -1940,15 +1940,22 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 # PREFILL / MULTI-QUERY PATH
                 # ==============================================================
                 if use_cache:
-                    # Check if ANY active session already has history blocks in the pool.
-                    # This includes both uncompressed (accumulating) and compressed blocks,
-                    # ensuring that short contexts (<2048 tokens) are correctly routed to the
-                    # incremental prefill path instead of losing context.
+                    # Only a prior-turn COMPRESSED block set is compressed-history
+                    # prefill.  During a fresh long prompt, the current prompt's
+                    # earlier chunks are also present as ACCUMULATING blocks, but
+                    # treating those as "compressed history" selects the
+                    # incremental branch too early and diverges from MLX's raw
+                    # prefill cache behavior.
                     has_compressed_history = False
                     for sid in session_ids:
                         if sid != "dummy_session":
                             blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
-                            if blocks:
+                            if any(
+                                getattr(b, "state", None) == "COMPRESSED"
+                                and getattr(b, "U", None) is not None
+                                and getattr(b, "V", None) is not None
+                                for b in blocks
+                            ):
                                 has_compressed_history = True
                                 break
 

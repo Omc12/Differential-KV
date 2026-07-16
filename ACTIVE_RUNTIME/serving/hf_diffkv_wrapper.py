@@ -863,6 +863,12 @@ class PyTorchDiffKVHFWrapper:
         # Release pre-allocated buffers
         del _prefill_buf, _pos_buf
 
+        # Snapshot the final prefill logits before compression/SRL finalization
+        # can allocate or mutate CUDA workspaces. MLX evaluates the output
+        # before changing its dense/compressed cache state; keep the same
+        # ordering on CUDA.
+        prefill_logits = outputs.logits[:, -1, :].clone()
+
         # ── Post-prefill compression barrier ────────────────────────────────
         # Trigger SVD compression for all deferred prefill blocks
         if hasattr(self.manager, "compress_deferred_prefill_blocks"):
@@ -897,7 +903,7 @@ class PyTorchDiffKVHFWrapper:
             srl_state.dual_entity_ids = []
 
         past_kv = outputs.past_key_values
-        logits = outputs.logits[:, -1, :]  # [1, vocab]
+        logits = prefill_logits  # [1, vocab]
 
         # CRITICAL FIX: track the absolute sequence position for each decode step.
         cur_pos = cached_len + prefill_len

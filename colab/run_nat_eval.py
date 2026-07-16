@@ -321,6 +321,9 @@ def run_worker(config_name, model_id):
                     # available through the whole prefill and only switches to the
                     # compressed store at the prefill->decode boundary.
 
+                # Snapshot the final prefill logits before compression/SRL
+                # finalization can allocate or mutate CUDA workspaces.
+                last_logits_gpu = out.logits[0, -1].float().clone()
                 # Compression is intentionally started once, after all prefill
                 # forwards have completed, so validation measures exact causal
                 # prefill rather than a lossy mid-prefill approximation.
@@ -358,8 +361,6 @@ def run_worker(config_name, model_id):
                               f"mbs={_b.micro_block_size} ak={_ak_shape}", flush=True)
                 # ── End diagnostic ──
 
-                # Keep logits on GPU — no D2H sync during prefill
-                last_logits_gpu = out.logits[0, -1].float()
                 prefill_time = time.perf_counter() - t_prefill_start
 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
