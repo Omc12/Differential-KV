@@ -333,6 +333,14 @@ def run_worker(config_name, model_id):
                     # token (including an immediate EOS).  MLX keeps raw prefill KV
                     # available through the whole prefill and only switches to the
                     # compressed store at the prefill->decode boundary.
+                    #
+                    # Fix 4 (opt-in): DIFFKV_STREAMING_COMPRESS=1 streams the
+                    # compression per chunk (MLX-parity) to bound peak VRAM at
+                    # long context — at the cost of later chunks attending the
+                    # lossy form of far-back blocks.  A/B against the default.
+                    if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" \
+                            and hasattr(mgr, "compress_deferred_prefill_blocks"):
+                        mgr.compress_deferred_prefill_blocks(sid)
 
                 # The forward passes are done; everything after this point is
                 # DiffKV-specific cache construction.  Time it separately —

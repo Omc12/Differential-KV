@@ -1205,6 +1205,24 @@ class KVRuntimeManager:
         """
 
         import gc as _gc, os as _os
+
+        # ── Fix 4: opt-in streaming compression (MLX-parity) ─────────────
+        # Default (flag off): SVD publication stays deferred to the prefill
+        # boundary, so every chunk attends EXACT raw KV history — the current
+        # CUDA behaviour.  The cost is that all raw prefill K/V co-resides with
+        # the growing pool until the boundary, which is the long-context peak
+        # VRAM spike (raw-KV/pool co-residency).
+        # With DIFFKV_STREAMING_COMPRESS=1 we compress every block that has
+        # already cleared the recency window after each chunk — exactly what
+        # mlx_diffkv_wrapper.generate() does per chunk (line 4704).  Peak
+        # uncompressed KV is then bounded by ~(recency_window + chunk) instead
+        # of the whole prompt.  Trade-off: later chunks attend the compressed
+        # (lossy) form of far-back blocks rather than raw KV, so it is opt-in
+        # and A/B-gated — validate retrieval (NIAH) before defaulting it on.
+        if _os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" \
+                and self._streaming_mgr is not None:
+            self._streaming_mgr.compress_deferred_blocks(session_id)
+
         _gc.collect()
         _empty_cache(self.device)
 

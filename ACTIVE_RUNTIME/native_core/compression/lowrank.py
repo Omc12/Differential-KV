@@ -619,22 +619,24 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         print(f"[DiffKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")
         return False
 
-    # 4. Extract dynamic rank using S
+    # 4. Extract dynamic rank using S — vectorized over the whole block batch.
+    # Was a per-block Python loop with a per-block .item() (N syncs even though
+    # S is already on CPU here).  Equivalent batched form: keep 99.9% of the
+    # energy, clamp into [4, b_rank] on the truncation branch, else keep b_rank.
     S_cpu = S.cpu()
-    ranks = []
-    for i in range(N_blocks):
-        tot = (S_cpu[i] ** 2).sum().item()
-        b_rank = block_ranks[i]
-        k = b_rank
-        if tot > 1e-9:
-            cum = torch.cumsum(S_cpu[i] ** 2, dim=0)
-            threshold = 0.999 * tot
-            idx = torch.where(cum >= threshold)[0]
-            if idx.numel() > 0:
-                k = max(4, min(int(idx[0].item() + 1), b_rank))
-        if k > T_active:
-            k = T_active
-        ranks.append(k)
+    block_ranks_t = torch.tensor(block_ranks, dtype=torch.long)          # [N]
+    S_sq = S_cpu.float() ** 2                                            # [N, r_proj]
+    tot = S_sq.sum(dim=1)                                                # [N]
+    cum = torch.cumsum(S_sq, dim=1)                                      # [N, r_proj]
+    ge = cum >= (0.999 * tot).unsqueeze(1)                               # [N, r_proj]
+    has_idx = ge.any(dim=1)                                              # [N]
+    first_idx = ge.float().argmax(dim=1) + 1                             # first True col + 1
+    # Truncation branch: tot > 1e-9 AND an index crossed the threshold.
+    trunc = has_idx & (tot > 1e-9)
+    k_trunc = torch.clamp(torch.minimum(first_idx, block_ranks_t), min=4)
+    k = torch.where(trunc, k_trunc, block_ranks_t)
+    k = torch.minimum(k, torch.full_like(k, int(T_active)))
+    ranks = k.tolist()
 
     # 5. Conversion and Sanitization
     U_fp16 = U.to(torch.float16)
@@ -712,33 +714,78 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     # selection.
     S16_cpu = S_cpu.to(torch.float16)
     half_d = feat_dim // 2
-    _finalize_state = []
 
+    # ── Batched finalization (MLX-parity) ────────────────────────────────────
+    # The old code ran TWO Python loops over blocks_list (~49 blocks × 48 layers
+    # ≈ 2,352 iterations per 13K prefill), each launching a per-block recon
+    # matmul, an int4 pack, norms and medians.  On discrete CUDA memory with
+    # eager execution those launches — NOT the SVD — dominated "compress"
+    # (~9s, ~51% of prefill; MLX keeps the equivalent batched finalization at
+    # ~13% by doing it over the whole batch at once, see
+    # mlx_diffkv_wrapper.compress_deferred_prefill_blocks).  Here every
+    # GPU-heavy step runs ONCE over the whole [N, ...] batch:
+    #   • U_scaled = U·S·token_norms, columns ≥ dynamic-rank[i] zeroed per block
+    #   • recon    = bmm(U_scaled, V)              (one batched matmul)
+    #   • errors / rel-errors / medians            (batched reductions)
+    # Zeroing columns ≥ k[i] is numerically exact vs the old per-block [:k]
+    # slice (the dropped columns contribute 0 to the matmul and the singular
+    # values are sorted descending), so the residual selection and pool bytes
+    # are identical to the per-block path — verified by test_batched_compress_parity.
+    #
+    # The per-block int4 pack that used to run here was DEAD on this path:
+    # compress_layer_blocks_gpu's own write_block() call (below) never forwards
+    # U_sem_int4/n_semantic, so write_block re-quantizes U to int8 and
+    # n_semantic stays 0 (the stratified store is only fed by the CPU compress
+    # and the finalize_compressed_blocks upload).  It is dropped rather than
+    # wired up: full int8 U is higher precision than int4-semantic + fp16-factual.
+    ranks_t = torch.tensor(ranks, device=gpu_device, dtype=torch.long)          # [N]
+    _col_idx = torch.arange(r_proj, device=gpu_device).unsqueeze(0)             # [1, r_proj]
+    rank_mask = (_col_idx < ranks_t.unsqueeze(1)).to(U_fp16.dtype)             # [N, r_proj]
+
+    # U scaled by singular values and per-token norms (matches the old u_k).
+    U_scaled = U_fp16 * S_fp16.unsqueeze(1)                # [N, T, r_proj]
+    U_scaled = U_scaled * token_norms.unsqueeze(2)         # [N, T, r_proj]
+    U_masked = U_scaled * rank_mask.unsqueeze(1)           # zero cols ≥ k[i]
+    V_masked = Vh_fp16 * rank_mask.unsqueeze(2)            # [N, r_proj, feat]
+
+    # One batched recon over all blocks (replaces N per-block matmuls).
+    recon_all = torch.bmm(U_masked.float(), V_masked.float())   # [N, T, feat]
+    delta_K_all = deltas[:, :, :half_d]
+    delta_V_all = deltas[:, :, half_d:]
+    recon_K_all = recon_all[:, :, :half_d]
+    recon_V_all = recon_all[:, :, half_d:]
+
+    error_K_all = (delta_K_all - recon_K_all).norm(dim=2)      # [N, T]
+    error_V_all = (delta_V_all - recon_V_all).norm(dim=2)
+    norm_K_all = delta_K_all.norm(dim=2).clamp(min=1e-8)
+    norm_V_all = delta_V_all.norm(dim=2).clamp(min=1e-8)
+    rel_error_K_all = error_K_all / norm_K_all
+    rel_error_V_all = error_V_all / norm_V_all
+
+    if T_active > 0:
+        med_K_all = torch.median(rel_error_K_all, dim=1).values   # [N]
+        med_V_all = torch.median(rel_error_V_all, dim=1).values
+    else:
+        med_K_all = torch.zeros(N_blocks, device=gpu_device)
+        med_V_all = torch.zeros(N_blocks, device=gpu_device)
+    # One batched device→host transfer for every block's medians (was N).
+    _meds_cpu = torch.stack((med_K_all, med_V_all), dim=1).float().cpu()   # [N, 2]
+
+    # n_semantic per block (metadata parity only — dead on this path).  Computed
+    # batched on the already-transferred CPU singular values: count values above
+    # 5% of the per-block max.  Sorted-descending S makes this equal to the old
+    # per-block "count over [:k] then min(k)".
+    _maxs_cpu = S16_cpu.max(dim=1, keepdim=True).values                        # [N,1]
+    _nsem_cpu = (S16_cpu > (_maxs_cpu * 0.05)).sum(dim=1).clamp(min=1)          # [N]
+    _ranks_cpu = torch.tensor(ranks, dtype=_nsem_cpu.dtype)
+    _nsem_cpu = torch.minimum(_nsem_cpu, _ranks_cpu).tolist()
+
+    # Lightweight per-block attribute assignment — no GPU compute in this loop.
     for i, block in enumerate(blocks_list):
         k = ranks[i]
-        u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)  # [T_active, k]
-        u_k = u_k * token_norms[i].unsqueeze(1)               # Scale U by token norms
-        v_k = Vh_fp16[i, :k, :]                                # [k, feat_dim]
-
-        # ── Singular Value Stratified Quantization (Solution 2) ──
-        s_vals = S16_cpu[i, :k]
-        max_s = s_vals.max().item() if s_vals.numel() > 0 else 0.0
-        s_threshold = max_s * 0.05
-        n_sem = int((s_vals > s_threshold).sum().item())
-        n_sem = max(1, min(n_sem, k))
-
-        u_semantic = u_k[:, :n_sem]
-        u_factual = u_k[:, n_sem:]
-
-        u_sem_int4, u_sem_scale = pack_int4(u_semantic)
-        u_fact_fp16 = u_factual.clone()
-
-        block.U = u_k.contiguous()
-        block.V = v_k.contiguous()
-        block.U_sem_int4 = u_sem_int4.to(gpu_device)
-        block.U_sem_scale = u_sem_scale.to(gpu_device)
-        block.U_fact_fp16 = u_fact_fp16.to(gpu_device)
-        block.n_semantic = n_sem
+        block.U = U_scaled[i, :, :k].contiguous()
+        block.V = Vh_fp16[i, :k, :].contiguous()
+        block.n_semantic = int(_nsem_cpu[i]) if k > 0 else 0
         block.scale = 1.0
         block.dynamic_rank = k
         block.active_k = None
@@ -748,49 +795,15 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.state = "COMPRESSED"
         block.dirty = True
 
-        # ── Post-SVD Sparse Residual Storage on GPU ──
-        # recon is kept per block for pass 2 (residual value extraction);
-        # transient cost ≈ N × T × feat × 4B (~100 MB at 49×256×2048), freed
-        # when _finalize_state drops at return.
-        recon = u_k.float() @ v_k.float()  # [T_active, feat_dim]
-        delta_K = deltas[i, :, :half_d]
-        delta_V = deltas[i, :, half_d:]
-        recon_K = recon[:, :half_d]
-        recon_V = recon[:, half_d:]
-
-        error_K = (delta_K - recon_K).norm(dim=1)
-        error_V = (delta_V - recon_V).norm(dim=1)
-
-        norm_K = delta_K.norm(dim=1).clamp(min=1e-8)
-        norm_V = delta_V.norm(dim=1).clamp(min=1e-8)
-
-        rel_error_K = error_K / norm_K
-        rel_error_V = error_V / norm_V
-
-        if rel_error_K.numel() > 0:
-            med_K = torch.median(rel_error_K)
-        else:
-            med_K = torch.zeros((), device=gpu_device, dtype=torch.float32)
-        if rel_error_V.numel() > 0:
-            med_V = torch.median(rel_error_V)
-        else:
-            med_V = torch.zeros((), device=gpu_device, dtype=torch.float32)
-
-        _finalize_state.append(
-            (rel_error_K, rel_error_V, error_K, error_V, recon_K, recon_V, med_K, med_V)
-        )
-
-    # One batched device→host transfer for every block's medians.
-    if _finalize_state:
-        _meds_cpu = torch.stack(
-            [torch.stack((st[6], st[7])) for st in _finalize_state]
-        ).float().cpu()
-
     for i, block in enumerate(blocks_list):
-        (rel_error_K, rel_error_V, error_K, error_V,
-         recon_K, recon_V, _mk, _mv) = _finalize_state[i]
-        delta_K = deltas[i, :, :half_d]
-        delta_V = deltas[i, :, half_d:]
+        rel_error_K = rel_error_K_all[i]
+        rel_error_V = rel_error_V_all[i]
+        error_K = error_K_all[i]
+        error_V = error_V_all[i]
+        recon_K = recon_K_all[i]
+        recon_V = recon_V_all[i]
+        delta_K = delta_K_all[i]
+        delta_V = delta_V_all[i]
 
         # Content-aware residual capture (C10 remediation): the same token
         # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
