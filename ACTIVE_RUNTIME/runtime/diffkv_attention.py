@@ -642,16 +642,36 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     _should_route = (_step_ctr % srl_state._route_cadence == 0)
 
                                     if _should_route:
-                                        # Route at layer 0 — cache result for all 28 layers
+                                        # Route at layer 0 — cache result for all 28 layers.
+                                        # DIFFKV_ROUTER selects the scorer:
+                                        #   "residual" (default) — MLX-parity pure q·k relevance
+                                        #     top-K over anchors + exact residual keys.  Zero host
+                                        #     syncs; the router behind MLX's flat decode tps.
+                                        #   "srl" — the legacy multi-channel router (lexical index
+                                        #     + semantic ANN + chunk graph + anchor rerank).
+                                        #     Measured net-negative on whole-document synthesis at
+                                        #     13.4K (degraded outputs, lower tps); kept for
+                                        #     multi-turn experiments.
                                         q_for_routing = unrot_query_states[b_idx, :, 0, :]  # [H, D]
                                         _scale = 1.0 / math.sqrt(head_dim)
-                                        selected_slots = route_query_fixed_k(
-                                            Q         = q_for_routing,
-                                            srl_state = srl_state,
-                                            pool      = pool,
-                                            scale     = _scale,
-                                            layer_idx = captured_layer_idx,
-                                        )
+                                        _router_mode = os.environ.get("DIFFKV_ROUTER", "residual").lower()
+                                        if _router_mode == "srl":
+                                            selected_slots = route_query_fixed_k(
+                                                Q         = q_for_routing,
+                                                srl_state = srl_state,
+                                                pool      = pool,
+                                                scale     = _scale,
+                                                layer_idx = captured_layer_idx,
+                                            )
+                                        else:
+                                            from native_core.srl.query_router import route_blocks_relevance
+                                            selected_slots = route_blocks_relevance(
+                                                Q              = q_for_routing,
+                                                pool           = pool,
+                                                block_indices  = block_indices,
+                                                anchor_indices = anchor_indices,
+                                                scale          = _scale,
+                                            )
                                         srl_state.current_step_slots = selected_slots
 
                                         # Map slot IDs to absolute sequence anchor indices.
@@ -1198,8 +1218,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             has_comp = (block_indices is not None and block_indices.numel() > 0)
                             if has_comp:
                                 _Q_sq = query_states[b_idx, :, 0, :]
-                                if captured_layer_idx == 0:
-                                    print(f"[DiffKV DEBUG] layer 0 _Q_sq tensor:\n{_Q_sq}", flush=True)
                                 _bsizes = pool.seq_lens[block_indices]
                                 out_sparse, lse_sparse = fused_decode_mps(
                                     Q                    = _Q_sq,

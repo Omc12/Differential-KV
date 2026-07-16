@@ -868,6 +868,100 @@ def route_query(
 # ── Static Shape Routing ──────────────────────────────────────────────────────
 K_FIXED = int(os.environ.get("DIFFKV_SRL_K_FIXED", "64"))
 
+
+def route_blocks_relevance(
+    Q:              torch.Tensor,   # [H, D] current UNROTATED query (all query heads)
+    pool,                           # NativeBlockPool
+    block_indices:  torch.Tensor,   # [N] candidate pool slot IDs for this layer
+    anchor_indices: torch.Tensor,   # [N] absolute anchor positions (same order)
+    scale:          float,
+) -> torch.Tensor:                  # [K<=N] selected slot IDs, best-first, distinct
+    """MLX-parity block router: rank blocks by exact q·k relevance, take top-K.
+
+    Direct port of mlx_diffkv_wrapper._block_relevance_residual: a block's
+    relevance is the max over query heads of max(q·anchor, max over its stored
+    residual keys of q·k), fp16 products with fp32 accumulation, then plain
+    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N)).  The
+    residuals ARE each block's outlier tokens, so scoring them directly is a
+    tight signal that keeps a buried needle's block in the top-K — this is the
+    router behind MLX's flat decode tps.
+
+    Replaces the SRL multi-channel router as the CUDA default
+    (DIFFKV_ROUTER=srl restores it): the SRL path was measured net-negative at
+    13.4K — forcing it on degraded synthesis outputs AND lowered tps, with or
+    without the age penalty — and it costs several host syncs per token
+    (entropy .item(), centroid .tolist(), score-vector .cpu()).  This scorer
+    launches a handful of GPU ops and returns a GPU tensor: zero device→host
+    syncs on the routing path.
+
+    One deliberate deviation from MLX: the sink block (smallest anchor — the
+    system prompt / attention sink) is always force-included.  MLX survives
+    without this because its dense-window trim protects block 0; on CUDA,
+    losing block 0 is a known immediate-EOS failure mode, and one guaranteed
+    slot out of K=16 is cheap insurance.
+    """
+    N = block_indices.numel()
+    try:
+        topk = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
+    except ValueError:
+        topk = 16
+    try:
+        topk_frac = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
+    except ValueError:
+        topk_frac = 0.0
+    if topk <= 0:
+        return block_indices  # routing disabled — attend every block
+    k_eff = max(topk, int(topk_frac * N))
+    if N <= k_eff:
+        return block_indices
+
+    H, D = Q.shape
+    slots_long = block_indices.long()
+
+    anc = pool.anchors_K[slots_long]                    # [N, H_kv, D] fp16
+    H_kv = anc.shape[1]
+    gpk = max(1, H // H_kv)
+    q_g = Q.reshape(H_kv, gpk, D)                       # [H_kv, gpk, D]
+
+    # Anchor scores: fp16 product, fp32 sum (matches MLX router arithmetic)
+    s_anc = (
+        (q_g.unsqueeze(2) * anc.permute(1, 0, 2).unsqueeze(1)).float().sum(-1) * scale
+    )                                                   # [H_kv, gpk, N]
+
+    # Residual scores over each block's stored exact keys.  Positions are
+    # -1-padded; padded rows score -inf so they never win the max.
+    res_scores = None
+    res_k = getattr(pool, "residual_K_values", None)
+    res_pos = getattr(pool, "residual_K_positions", None)
+    if res_k is not None and res_pos is not None and res_k.numel() > 0:
+        try:
+            r_route = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
+        except ValueError:
+            r_route = 0
+        R_all = res_k.shape[1]
+        R = min(R_all, r_route) if r_route > 0 else min(R_all, 64)
+        rk = res_k[slots_long, :R]                      # [N, R, H_kv, D]
+        rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
+        s_res = (
+            (q_g.unsqueeze(2).unsqueeze(3) * rk.permute(2, 0, 1, 3).unsqueeze(1))
+            .float().sum(-1) * scale
+        )                                               # [H_kv, gpk, N, R]
+        s_res = s_res.masked_fill(~rvalid.view(1, 1, N, R), float("-inf"))
+        res_scores = s_res.max(dim=-1).values           # [H_kv, gpk, N]
+
+    if res_scores is not None:
+        relevance = torch.maximum(s_anc, res_scores)
+    else:
+        relevance = s_anc
+    relevance = relevance.reshape(H_kv * gpk, N).max(dim=0).values   # [N]
+
+    # Force-include the sink block, then top-(k_eff-1) over the rest.
+    sink_pos = anchor_indices.argmin()
+    relevance = relevance.clone()
+    relevance[sink_pos] = float("inf")
+    sel = torch.topk(relevance, k=k_eff).indices
+    return block_indices[sel].to(torch.int32)
+
 def route_query_fixed_k(
     Q:          torch.Tensor,
     srl_state:  "SessionSRLState",

@@ -683,6 +683,27 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         combined = combined[order]
         return _TopKCov(indices=combined, values=vals[order])
 
+    # ── Host-sync batching ────────────────────────────────────────────────
+    # The per-block finalization used to force FOUR device→host reads per
+    # block (max_s .item(), n_sem .item(), median_K .item(), median_V .item()).
+    # At 49 blocks × 48 layers that is ~9,400 stream stalls per 13K-token
+    # prefill — measured as ~9s of "compress" wall time, i.e. comparable to
+    # the entire forward pass.  Restructured into two passes:
+    #   Pass 1: all GPU work enqueued asynchronously; the S-derived scalars
+    #           are read from ONE tiny S16_cpu snapshot (identical fp16 bits,
+    #           identical expressions → identical values), and the medians
+    #           stay on-device as 0-d tensors.
+    #   One batched transfer moves all medians to the host together.
+    #   Pass 2: residual selection consumes the CPU scalars.  The remaining
+    #           per-block syncs are the two boolean-mask compactions
+    #           (fact_positions indexing), which resolve against a mostly
+    #           drained stream.
+    # torch.median selects an element (no arithmetic), so deferring its
+    # transfer cannot change the value.
+    S16_cpu = S_fp16.cpu()
+    half_d = feat_dim // 2
+    _finalize_state = []
+
     for i, block in enumerate(blocks_list):
         k = ranks[i]
         u_k = U_fp16[i, :, :k] * S_fp16[i, :k].unsqueeze(0)  # [T_active, k]
@@ -690,15 +711,15 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         v_k = Vh_fp16[i, :k, :]                                # [k, feat_dim]
 
         # ── Singular Value Stratified Quantization (Solution 2) ──
-        s_vals = S_fp16[i, :k]
+        s_vals = S16_cpu[i, :k]
         max_s = s_vals.max().item() if s_vals.numel() > 0 else 0.0
         s_threshold = max_s * 0.05
         n_sem = int((s_vals > s_threshold).sum().item())
         n_sem = max(1, min(n_sem, k))
-        
+
         u_semantic = u_k[:, :n_sem]
         u_factual = u_k[:, n_sem:]
-        
+
         u_sem_int4, u_sem_scale = pack_int4(u_semantic)
         u_fact_fp16 = u_factual.clone()
 
@@ -718,8 +739,10 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.dirty = True
 
         # ── Post-SVD Sparse Residual Storage on GPU ──
+        # recon is kept per block for pass 2 (residual value extraction);
+        # transient cost ≈ N × T × feat × 4B (~100 MB at 49×256×2048), freed
+        # when _finalize_state drops at return.
         recon = u_k.float() @ v_k.float()  # [T_active, feat_dim]
-        half_d = feat_dim // 2
         delta_K = deltas[i, :, :half_d]
         delta_V = deltas[i, :, half_d:]
         recon_K = recon[:, :half_d]
@@ -734,6 +757,31 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         rel_error_K = error_K / norm_K
         rel_error_V = error_V / norm_V
 
+        if rel_error_K.numel() > 0:
+            med_K = torch.median(rel_error_K)
+        else:
+            med_K = torch.zeros((), device=gpu_device, dtype=torch.float32)
+        if rel_error_V.numel() > 0:
+            med_V = torch.median(rel_error_V)
+        else:
+            med_V = torch.zeros((), device=gpu_device, dtype=torch.float32)
+
+        _finalize_state.append(
+            (rel_error_K, rel_error_V, error_K, error_V, recon_K, recon_V, med_K, med_V)
+        )
+
+    # One batched device→host transfer for every block's medians.
+    if _finalize_state:
+        _meds_cpu = torch.stack(
+            [torch.stack((st[6], st[7])) for st in _finalize_state]
+        ).float().cpu()
+
+    for i, block in enumerate(blocks_list):
+        (rel_error_K, rel_error_V, error_K, error_V,
+         recon_K, recon_V, _mk, _mv) = _finalize_state[i]
+        delta_K = deltas[i, :, :half_d]
+        delta_V = deltas[i, :, half_d:]
+
         # Content-aware residual capture (C10 remediation): the same token
         # boost + owner capture + table capture the MLX wrapper and lowrank.cpp
         # apply, so the CUDA path stops selecting residuals blind. Boosts
@@ -746,8 +794,8 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         # residual slots; hard factual/code blocks keep the full budget.
         # (Medians read the UNBOOSTED rel errors, matching the MLX wrapper.)
         n_max_residual = int(T_active * 0.15)
-        median_err_K = float(torch.median(rel_error_K).item()) if rel_error_K.numel() > 0 else 0.0
-        median_err_V = float(torch.median(rel_error_V).item()) if rel_error_V.numel() > 0 else 0.0
+        median_err_K = float(_meds_cpu[i, 0])
+        median_err_V = float(_meds_cpu[i, 1])
         max_median_err = max(median_err_K, median_err_V)
         if max_median_err < 0.05:
             # Easy block (prose filler / repeated text): cap at 8 residuals.
