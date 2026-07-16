@@ -437,8 +437,12 @@ class StreamingKVBlock:
         )
 _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 
-def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False) -> bool:
-    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier or block.skip_compression:
+def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False,
+                                   ignore_skip_compression: bool = False) -> bool:
+    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier:
+        return False
+    # skip_compression can be bypassed for the deferred prefill path — see compress_deferred_blocks
+    if not ignore_skip_compression and block.skip_compression:
         return False
     toks = block.token_count()
     if block.anchor_idx + toks < StreamingKVBlock.short_context_threshold:
@@ -616,6 +620,12 @@ class StreamingSparseIngestManager:
         self.session_prefill_lens.pop(session_id, None)
         self.session_query_words.pop(session_id, None)
         self.session_doc_words.pop(session_id, None)
+        # Clear the skip_compression cache for this session (prevents stale entries)
+        if hasattr(self, "_skip_compress_cache"):
+            keys_to_del = [k for k in self._skip_compress_cache if k[0] == session_id]
+            for k in keys_to_del:
+                del self._skip_compress_cache[k]
+
 
     def rollback_session(self, session_id: str, target_len: int) -> None:
         """
@@ -741,21 +751,35 @@ class StreamingSparseIngestManager:
           2. Scientific notation: 1.23e+4, 2.998e8 — never appear in prose.
           3. Unicode math symbols: π, ∑, ∞, ≤, ± — never in normal prose.
           4. Short digits (≥2) that overlap with current query keywords.
+
+        Results are cached per (session_id, anchor_idx) so the 7-regex + tokenizer.decode
+        work is only done ONCE across all 40 layers, cutting CPU usage by 97.5%.
         """
+        # ── Fast cache lookup ─────────────────────────────────────────────────
+        if not hasattr(self, "_skip_compress_cache"):
+            self._skip_compress_cache = {}
+        _cache_key = (session_id, anchor_idx)
+        if _cache_key in self._skip_compress_cache:
+            return self._skip_compress_cache[_cache_key]
+
         if self.manager is None or getattr(self.manager, "tokenizer", None) is None:
+            self._skip_compress_cache[_cache_key] = False
             return False
         session_tok_dict = getattr(self.manager, "_session_token_ids", {})
         token_ids_cpu = session_tok_dict.get(session_id)
         if token_ids_cpu is None:
+            self._skip_compress_cache[_cache_key] = False
             return False
 
         start = anchor_idx
         end = min(start + block_capacity, len(token_ids_cpu))
         if start >= end:
+            self._skip_compress_cache[_cache_key] = False
             return False
 
         block_toks = token_ids_cpu[start:end].tolist()
 
+        _result = False
         try:
             block_text = self.manager.tokenizer.decode(block_toks)
             block_text_lc = block_text.lower()
@@ -764,108 +788,106 @@ class StreamingSparseIngestManager:
             if _RE_LONG_DIGITS.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 1 skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 2: Scientific notation — always exempt (1.23e+4, 2.998e8)
-            if _RE_SCI_NOTATION.search(block_text):
+            elif _RE_SCI_NOTATION.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 2 skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 3: Unicode math symbols — always exempt (π, ∑, ∞, ≤, ±, etc.)
-            if _RE_UNICODE_MATH.search(block_text):
+            elif _RE_UNICODE_MATH.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 3 skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 3b: LaTeX math formula block — always exempt
-            if _RE_LATEX_MATH.search(block_text):
+            elif _RE_LATEX_MATH.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 3b skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 3c: ASCII equation statement — always exempt
-            if _RE_ASCII_EQUATION.search(block_text):
+            elif _RE_ASCII_EQUATION.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 3c skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 3d: Verbatim definitions — always exempt
-            if _RE_DEFINITIONS.search(block_text):
+            elif _RE_DEFINITIONS.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 3d skip block anchor={anchor_idx}: '{block_text}'")
-                return True
-
+                _result = True
             # Rule 3e: Formal claims / theorems — always exempt
-            if _RE_CLAIMS.search(block_text):
+            elif _RE_CLAIMS.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 3e skip block anchor={anchor_idx}: '{block_text}'")
-                return True
+                _result = True
+            else:
+                # Rule 3f: Acronym density — always exempt
+                acronyms = set(_RE_ACRONYMS.findall(block_text))
+                if len(acronyms) >= 3:
+                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                        print(f"[DiffKV DEBUG] Rule 3f skip block anchor={anchor_idx}: '{block_text}', acronyms={acronyms}")
+                    _result = True
+                else:
+                    # Rule 4: Short digits (≥2 digits) with query-word overlap
+                    digit_parts = re.findall(r'\d+', block_text)
+                    if any(len(p) >= 2 for p in digit_parts):
+                        query_words = self.session_query_words.get(session_id)
+                        if query_words is None:
+                            prefill_len = self.session_prefill_lens.get(session_id, 0)
+                            if prefill_len <= 0:
+                                prefill_len = len(token_ids_cpu)
+                            query_start = max(0, prefill_len - 128)
+                            query_toks = token_ids_cpu[query_start:prefill_len].tolist()
+                            if query_toks:
+                                query_text = self.manager.tokenizer.decode(query_toks).lower()
+                                query_words = {
+                                    w for w in _RE_WORD_TOKENS.findall(query_text)
+                                    if w not in _STOP_WORDS_COMPRESS
+                                }
+                            else:
+                                query_words = set()
+                            self.session_query_words[session_id] = query_words
 
-            # Rule 3f: Acronym density — always exempt
-            acronyms = set(_RE_ACRONYMS.findall(block_text))
-            if len(acronyms) >= 3:
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3f skip block anchor={anchor_idx}: '{block_text}', acronyms={acronyms}")
-                return True
+                        if query_words:
+                            block_words = {
+                                w for w in _RE_WORD_TOKENS.findall(block_text_lc)
+                                if w not in _STOP_WORDS_COMPRESS
+                            }
+                            if block_words & query_words:
+                                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                    print(f"[DiffKV DEBUG] Rule 4 skip block anchor={anchor_idx}: overlap={block_words & query_words}")
+                                _result = True
 
-            # Rule 4: Short digits (≥2 digits) with query-word overlap
-            digit_parts = re.findall(r'\d+', block_text)
-            if any(len(p) >= 2 for p in digit_parts):
-                query_words = self.session_query_words.get(session_id)
-                if query_words is None:
-                    prefill_len = self.session_prefill_lens.get(session_id, 0)
-                    if prefill_len <= 0:
-                        prefill_len = len(token_ids_cpu)
-                    query_start = max(0, prefill_len - 128)
-                    query_toks = token_ids_cpu[query_start:prefill_len].tolist()
-                    if query_toks:
-                        query_text = self.manager.tokenizer.decode(query_toks).lower()
-                        query_words = {
-                            w for w in _RE_WORD_TOKENS.findall(query_text)
+                    if not _result:
+                        # Rule 5: Rare document words (exact keywords)
+                        doc_words = self.session_doc_words.get(session_id)
+                        if doc_words is None:
+                            doc_words = {}
+                            if token_ids_cpu is not None:
+                                # Decode the entire document text
+                                full_text = self.manager.tokenizer.decode(token_ids_cpu.tolist()).lower()
+                                # Count all words
+                                from collections import Counter
+                                doc_words = Counter(_RE_WORD_TOKENS.findall(full_text))
+                            self.session_doc_words[session_id] = doc_words
+
+                        block_words = {
+                            w for w in _RE_WORD_TOKENS.findall(block_text_lc)
                             if w not in _STOP_WORDS_COMPRESS
                         }
-                    else:
-                        query_words = set()
-                    self.session_query_words[session_id] = query_words
-
-                if query_words:
-                    block_words = {
-                        w for w in _RE_WORD_TOKENS.findall(block_text_lc)
-                        if w not in _STOP_WORDS_COMPRESS
-                    }
-                    if block_words & query_words:
-                        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                            print(f"[DiffKV DEBUG] Rule 4 skip block anchor={anchor_idx}: overlap={block_words & query_words}")
-                        return True
-
-            # Rule 5: Rare document words (exact keywords)
-            doc_words = self.session_doc_words.get(session_id)
-            if doc_words is None:
-                doc_words = {}
-                if token_ids_cpu is not None:
-                    # Decode the entire document text
-                    full_text = self.manager.tokenizer.decode(token_ids_cpu.tolist()).lower()
-                    # Count all words
-                    from collections import Counter
-                    doc_words = Counter(_RE_WORD_TOKENS.findall(full_text))
-                self.session_doc_words[session_id] = doc_words
-
-            block_words = {
-                w for w in _RE_WORD_TOKENS.findall(block_text_lc)
-                if w not in _STOP_WORDS_COMPRESS
-            }
-            for w in block_words:
-                if doc_words.get(w, 0) <= 2:
-                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                        print(f"[DiffKV DEBUG] Rule 5 skip block anchor={anchor_idx}: word '{w}' occurs {doc_words.get(w, 0)} times")
-                    return True
+                        for w in block_words:
+                            if doc_words.get(w, 0) <= 2:
+                                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                    print(f"[DiffKV DEBUG] Rule 5 skip block anchor={anchor_idx}: word '{w}' occurs {doc_words.get(w, 0)} times")
+                                _result = True
+                                break
 
         except Exception as e:
             if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                 print(f"[DiffKV DEBUG] skip check error: {e}")
-            pass
-        return False
+
+        self._skip_compress_cache[_cache_key] = _result
+        return _result
+
 
     # ── Core streaming ingest ──────────────────────────────────────────────────
 
@@ -1515,9 +1537,19 @@ class StreamingSparseIngestManager:
             blocks_to_compress = []
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
-                    if getattr(b, "skip_compression", False):
-                        continue
-                    eligible = _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1))
+                    # NOTE: skip_compression is intentionally NOT checked here.
+                    # That flag was designed for the decode-path inline compression
+                    # (ingest_chunk) to keep blocks with digits/math/acronyms dense
+                    # so the model doesn't hallucinate during decode.  For the
+                    # post-forward prefill compression path (compress_deferred_blocks),
+                    # applying it causes ALL blocks in technical/math papers to stay
+                    # dense, defeating compression entirely (13K tokens → 53 ACCUMULATING
+                    # blocks, dense workspace overflow, trim warning, EOS collapse).
+                    # All out-of-window prefill blocks are compressed regardless.
+                    eligible = _is_block_compression_eligible(
+                        b, is_last_block=(idx == len(blocks) - 1),
+                        ignore_skip_compression=True,  # deferred prefill path bypasses skip_compression
+                    )
                     window_ok = (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window)
                     if _diag and layer_idx == 0:
                         print(f"[DIAG compress_deferred] layer=0 blk#{idx} anchor={b.anchor_idx} "
