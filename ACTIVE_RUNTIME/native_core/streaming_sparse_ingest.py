@@ -1125,7 +1125,10 @@ class StreamingSparseIngestManager:
                     # Check if the block is eligible for immediate compression.
                     # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
                     # Only submit block if it lies outside the rolling dense recency window, or if immediate prefill compression is active.
-                    _immediate_prefill = os.environ.get("DIFFKV_IMMEDIATE_PREFILL_COMPRESS", "1") == "1"
+                    # Default "0": compression runs post-forward via compress_deferred_prefill_blocks,
+                    # mirroring MLX and decoupling block formation from chunk size.
+                    # Set DIFFKV_IMMEDIATE_PREFILL_COMPRESS=1 to restore inline GPU-rSVD (not recommended).
+                    _immediate_prefill = os.environ.get("DIFFKV_IMMEDIATE_PREFILL_COMPRESS", "0") == "1"
                     if (anchor_idx > 0 or not self.protect_block_zero) and not new_block.skip_compression:
                         if _immediate_prefill or (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
                             new_block.state = "SUBMITTED"

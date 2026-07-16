@@ -17,10 +17,19 @@ class DiffKVConfig:
         is_macos = (sys.platform == "darwin")
 
         # Apply preset defaults
+        # NOTE on CUDA prefill_chunk_size: ingest_chunk creates full blocks of exactly
+        # (1 + micro_block_size) tokens — 1 anchor + micro_block_size active keys.
+        # micro_block_size defaults to 256, so block_capacity = 257.
+        # prefill_chunk_size MUST be >= 2 * block_capacity (= 514) so that at least one
+        # full block is produced per inner chunk.  On macOS/MPS the chunk size is already
+        # small (256) because MLX handles compression differently; on CUDA we need larger
+        # chunks or every chunk produces only a partial block and nothing is ever compressed.
         if self.preset == "low":
             self.decode_cache_enabled = False
             self.decode_cache_max_tokens = 0
-            self.prefill_chunk_size = 256
+            # CUDA: 1024 ensures ≥3 full blocks (3×257=771 < 1024) per inner chunk.
+            # macOS/MLX keeps 256 (handled post-forward by compress_deferred_prefill_blocks).
+            self.prefill_chunk_size = 256 if is_macos else 1024
             self.srl_threshold = 30
             self.async_svd = False if is_macos else True
             self.mps_watermark = 0.0
@@ -47,7 +56,8 @@ class DiffKVConfig:
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
-            self.prefill_chunk_size = 512
+            # CUDA: 1024 ensures ≥3 full blocks per inner chunk.
+            self.prefill_chunk_size = 512 if is_macos else 1024
             self.srl_threshold = 50
             self.async_svd = False if is_macos else True  # Disable background async SVD on macOS for MPS stability
             self.mps_watermark = 0.0
@@ -68,6 +78,18 @@ class DiffKVConfig:
         self.prefill_chunk_size = self._get_int(
             "prefill_chunk_size", "DIFFKV_PREFILL_CHUNK_SIZE", self.prefill_chunk_size, config_dict
         )
+        # Safety guard: prefill_chunk_size must accommodate at least 2 full streaming
+        # blocks (each block = 1 anchor + micro_block_size active tokens = 257 tokens
+        # at the default micro_block_size=256).  If the resolved value is too small,
+        # ingest_chunk produces zero full blocks → all blocks stay ACCUMULATING →
+        # dense window overflows at decode → model collapse.  We clamp upward on
+        # non-macOS (CUDA) only; on macOS MLX compression runs post-forward so chunks
+        # can be small without this constraint.
+        import sys as _sys
+        if _sys.platform != "darwin":
+            _min_chunk = 2 * 257  # 2 × (1 anchor + 256 active) = 514
+            if self.prefill_chunk_size < _min_chunk:
+                self.prefill_chunk_size = _min_chunk
         self.srl_threshold = self._get_int(
             "srl_threshold", "DIFFKV_SRL_THRESHOLD", self.srl_threshold, config_dict
         )

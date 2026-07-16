@@ -221,7 +221,7 @@ def run_worker(config_name, model_id):
         if _tid is not None and _tid != tok.unk_token_id:
             _stop_ids.add(_tid)
 
-    CH = 128  # prefill chunk size (not model-specific, just a throughput knob)
+    CH = 128  # prefill chunk size initial value; updated below from config once wrapper is loaded
 
     with torch.inference_mode():
         if is_compressed:
@@ -247,7 +247,16 @@ def run_worker(config_name, model_id):
             tok, mgr, model = w.tokenizer, w.manager, w.model
             # Use the wrapper's stop token set (superset of what we derived above)
             stop_ids = getattr(w, "stop_token_ids", _stop_ids) | _stop_ids
-
+            # Align outer prefill chunk size with the config's prefill_chunk_size so
+            # ingest_chunk receives ≥ block_capacity (= 1 + micro_block_size = 257)
+            # tokens per call and can form full compressible blocks.  On CUDA the
+            # config now defaults to 1024; on macOS/MLX it stays at the preset value.
+            _cfg = getattr(mgr, "config", None)
+            if _cfg is not None:
+                CH = _cfg.prefill_chunk_size
+            print(f"[NAT eval] Outer prefill chunk size: CH={CH}", flush=True)
+            # CH controls forward-pass throughput, not compression.
+            # Compression runs post-forward (compress_deferred_prefill_blocks) at any CH.
             for idx, full_prompt in all_prompts:
                 ids = tok.encode(full_prompt)
                 prompt_len = len(ids)
@@ -272,7 +281,28 @@ def run_worker(config_name, model_id):
                         torch.tensor([ch], device=device),
                         torch.tensor([list(range(cs, cs+len(ch)))], device=device),
                     )
-                mgr.compress_deferred_prefill_blocks(sid)
+                    # Compress after every outer chunk — mirrors MLX exactly.
+                    # Keeps peak uncompressed KV bounded to (recency_window + CH) tokens
+                    # instead of the full prompt, and decouples block formation from chunk size.
+                    mgr.compress_deferred_prefill_blocks(sid)
+
+                # ── Block-state diagnostic (one-time, remove after fix) ──
+                _smgr = getattr(mgr, "_streaming_mgr", None)
+                if _smgr is not None:
+                    _blks = _smgr.session_blocks.get(sid, {}).get(0, [])
+                    from collections import Counter
+                    _states = Counter(b.state for b in _blks)
+                    _pool = getattr(mgr, "native_pool", None)
+                    _pool_used = int(_pool.num_allocated.item()) if _pool is not None and hasattr(_pool, "num_allocated") else "n/a"
+                    print(f"[DIAG] Layer-0 block states after prefill: {dict(_states)}", flush=True)
+                    print(f"[DIAG] Total layer-0 blocks: {len(_blks)}  |  native_pool used: {_pool_used}", flush=True)
+                    # Also show metadata state column for first 5 blocks
+                    _meta = _smgr.session_metadata.get(sid, {}).get(0)
+                    if _meta is not None:
+                        n = min(5, len(_blks))
+                        print(f"[DIAG] Metadata state codes (first {n} blocks): {_meta[:n, 3].tolist()}", flush=True)
+                # ── End diagnostic ──
+
                 # Keep logits on GPU — no D2H sync during prefill
                 last_logits_gpu = out.logits[0, -1].float()
                 prefill_time = time.perf_counter() - t_prefill_start
