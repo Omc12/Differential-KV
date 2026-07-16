@@ -1319,11 +1319,14 @@ class StreamingSparseIngestManager:
                 return  # all blocks handled by GPU path — skip CPU fallback
             # Otherwise fall through: only partial blocks (or failed GPU blocks) remain
 
-        # Group blocks by active sequence length to handle partial blocks
+        # Group blocks by active sequence length to handle partial blocks.
+        # Filter out blocks already compressed by the GPU path above (active_k cleared to None).
         from collections import defaultdict
         by_len = defaultdict(list)
         for b in blocks_list:
-            by_len[b.active_k.shape[2]].append(b)
+            if b.active_k is not None:
+                by_len[b.active_k.shape[2]].append(b)
+
 
         is_async_active = getattr(self.compressor, "_running", False) and hasattr(self.compressor, "submit_cpu")
 
