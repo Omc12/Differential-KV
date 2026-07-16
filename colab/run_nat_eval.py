@@ -32,6 +32,8 @@ requests.Session.merge_environment_settings = patched_merge_settings
 
 # Prevent PyTorch VRAM fragmentation OOMs
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Enable surgical compression diagnostics (remove once root cause confirmed)
+os.environ["DIFFKV_DIAG"] = "1"
 
 # Ensure active runtime path and C++ compiled library directory are in sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -292,15 +294,26 @@ def run_worker(config_name, model_id):
                     _blks = _smgr.session_blocks.get(sid, {}).get(0, [])
                     from collections import Counter
                     _states = Counter(b.state for b in _blks)
-                    _pool = getattr(mgr, "native_pool", None)
-                    _pool_used = int(_pool.num_allocated.item()) if _pool is not None and hasattr(_pool, "num_allocated") else "n/a"
                     print(f"[DIAG] Layer-0 block states after prefill: {dict(_states)}", flush=True)
-                    print(f"[DIAG] Total layer-0 blocks: {len(_blks)}  |  native_pool used: {_pool_used}", flush=True)
-                    # Also show metadata state column for first 5 blocks
-                    _meta = _smgr.session_metadata.get(sid, {}).get(0)
-                    if _meta is not None:
-                        n = min(5, len(_blks))
-                        print(f"[DIAG] Metadata state codes (first {n} blocks): {_meta[:n, 3].tolist()}", flush=True)
+                    print(f"[DIAG] Total layer-0 blocks: {len(_blks)}", flush=True)
+
+                    # Compute total_seq_len as compress_deferred_blocks would see it
+                    if _blks:
+                        _lb = _blks[-1]
+                        _tsl = _lb.anchor_idx + _lb.token_count()
+                        print(f"[DIAG] total_seq_len (last blk anchor={_lb.anchor_idx} + tcount={_lb.token_count()}) = {_tsl}", flush=True)
+                        print(f"[DIAG] recency_window={_smgr.recency_window}  threshold={_tsl - _smgr.recency_window}", flush=True)
+
+                    # Per-block eligibility dump for first 10 blocks
+                    from native_core.streaming_sparse_ingest import _is_block_compression_eligible
+                    _tsl2 = _blks[-1].anchor_idx + _blks[-1].token_count() if _blks else 0
+                    for _i, _b in enumerate(_blks[:10]):
+                        _elig = _is_block_compression_eligible(_b, is_last_block=(_i == len(_blks) - 1))
+                        _wok = (_b.anchor_idx + _b.token_count()) < (_tsl2 - _smgr.recency_window)
+                        _ak_shape = tuple(_b.active_k.shape) if _b.active_k is not None else None
+                        print(f"[DIAG] blk#{_i} anchor={_b.anchor_idx} tcount={_b.token_count()} "
+                              f"state={_b.state} eligible={_elig} window_ok={_wok} "
+                              f"mbs={_b.micro_block_size} ak={_ak_shape}", flush=True)
                 # ── End diagnostic ──
 
                 # Keep logits on GPU — no D2H sync during prefill

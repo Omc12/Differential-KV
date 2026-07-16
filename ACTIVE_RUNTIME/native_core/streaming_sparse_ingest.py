@@ -1256,12 +1256,46 @@ class StreamingSparseIngestManager:
         if os.environ.get("DIFFKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
             from native_core.compression.lowrank import compress_layer_blocks_gpu
             _rank = getattr(self.manager, "rank", 16)
-            success = compress_layer_blocks_gpu(blocks_list, _rank, manager=self.manager)
-            if success:
+            # Group by T_active: compress_layer_blocks_gpu requires all blocks in
+            # the batch to have the same active_k.shape[2].  Mixed batches (full
+            # blocks T=256 + partial blocks T=252) crash at the reshape on line 478.
+            # We mirror the CPU path — group by T_active, GPU-compress each group.
+            # Only process groups where T_active == micro_block_size (full blocks);
+            # partial blocks are rare and handled by the CPU fallback below.
+            from collections import defaultdict as _ddict
+            _by_T = _ddict(list)
+            for _b in blocks_list:
+                _by_T[_b.active_k.shape[2]].append(_b)
+            _gpu_full_success = True
+            _gpu_compressed_count = 0
+            for _T_active, _group in _by_T.items():
+                if _T_active != micro_block_size:
+                    # Partial block — skip GPU path, let CPU fallback handle it
+                    _gpu_full_success = False  # signal that CPU path is still needed
+                    continue
+                try:
+                    _ok = compress_layer_blocks_gpu(_group, _rank, manager=self.manager)
+                    if _ok:
+                        _gpu_compressed_count += len(_group)
+                    else:
+                        _gpu_full_success = False
+                except Exception as _gpu_err:
+                    import traceback
+                    print(f"[DiffKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
+                    if os.environ.get("DIFFKV_DIAG", "0") == "1":
+                        traceback.print_exc()
+                    _gpu_full_success = False
+                    # Rollback SUBMITTED → ACCUMULATING for this group so CPU path retries
+                    for _b in _group:
+                        if _b.state == "SUBMITTED":
+                            _b.state = "ACCUMULATING"
+            if _gpu_compressed_count > 0:
                 with self._stats_lock:
-                    self.stats["total_compressed"] += len(blocks_list)
-                    self.stats["compressions_during_ingest"] += len(blocks_list)
-                return
+                    self.stats["total_compressed"] += _gpu_compressed_count
+                    self.stats["compressions_during_ingest"] += _gpu_compressed_count
+            if _gpu_full_success:
+                return  # all blocks handled by GPU path — skip CPU fallback
+            # Otherwise fall through: only partial blocks (or failed GPU blocks) remain
 
         # Group blocks by active sequence length to handle partial blocks
         from collections import defaultdict
@@ -1464,7 +1498,16 @@ class StreamingSparseIngestManager:
                 last_block = first_layer_blocks[-1]
                 total_seq_len = last_block.anchor_idx + last_block.token_count()
 
+        _diag = os.environ.get("DIFFKV_DIAG", "0") == "1"
+        if _diag:
+            n_blocks_l0 = len(layers.get(0, []))
+            print(f"[DIAG compress_deferred] session={session_id} total_seq_len={total_seq_len} "
+                  f"recency_window={self.recency_window} short_ctx_threshold={self.short_context_threshold} "
+                  f"layer-0 blocks={n_blocks_l0}", flush=True)
+
         if total_seq_len < self.short_context_threshold:
+            if _diag:
+                print(f"[DIAG compress_deferred] EARLY RETURN: total_seq_len={total_seq_len} < short_context_threshold={self.short_context_threshold}", flush=True)
             return  # No blocks are eligible
 
         # 2. Iterate over each layer
@@ -1474,14 +1517,32 @@ class StreamingSparseIngestManager:
                 if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
                     if getattr(b, "skip_compression", False):
                         continue
-                    if _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1)):
-                        if (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window):
-                            b.state = "SUBMITTED"
-                            blocks_to_compress.append(b)
-                            self.update_metadata_state(session_id, layer_idx, b)
+                    eligible = _is_block_compression_eligible(b, is_last_block=(idx == len(blocks) - 1))
+                    window_ok = (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window)
+                    if _diag and layer_idx == 0:
+                        print(f"[DIAG compress_deferred] layer=0 blk#{idx} anchor={b.anchor_idx} "
+                              f"tcount={b.token_count()} eligible={eligible} window_ok={window_ok} "
+                              f"state={b.state} ak={'yes' if b.active_k is not None else 'none'} "
+                              f"skip={getattr(b, 'skip_compression', False)} mbs={b.micro_block_size}", flush=True)
+                    if eligible and window_ok:
+                        b.state = "SUBMITTED"
+                        blocks_to_compress.append(b)
+                        self.update_metadata_state(session_id, layer_idx, b)
+
+            if _diag and layer_idx == 0:
+                print(f"[DIAG compress_deferred] layer=0 blocks_to_compress={len(blocks_to_compress)}", flush=True)
 
             if blocks_to_compress:
-                self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+                try:
+                    self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+                except Exception as _e:
+                    import traceback
+                    print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
+                    traceback.print_exc()
+                    # Rollback state so next compress attempt can retry
+                    for _b in blocks_to_compress:
+                        if _b.state == "SUBMITTED":
+                            _b.state = "ACCUMULATING"
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
