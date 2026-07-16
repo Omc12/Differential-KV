@@ -482,6 +482,20 @@ def run_worker(config_name, model_id):
                     "output_text": generated_text,
                 }
 
+                # Release THIS prompt's session before the next one runs.
+                # The loop previously only ever cleared the fresh, not-yet-created
+                # sid ("prompt_2" on iteration 2 is a no-op), so prompt_1's pool
+                # slots + block/SRL state were never freed.  prompt_2 then
+                # allocated its own on top, doubling `pool` (1039MB -> 2065MB) and
+                # inflating peak VRAM.  clear_session() returns the pool slots to
+                # the free list (native_pool.free_block) so the next prompt reuses
+                # them instead of growing the pool.  Dense's per-prompt state is
+                # already independent (fresh past_key_values), so this makes the
+                # DiffKV rows a like-for-like single-session comparison.
+                mgr.clear_session(sid)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             try:
                 w.close()
             except Exception:
