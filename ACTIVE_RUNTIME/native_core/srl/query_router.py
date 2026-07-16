@@ -92,7 +92,7 @@ def two_level_gate(
     if srl_state is not None:
         age_penalty_factor = getattr(srl_state, "srl_age_penalty", 0.01)
     else:
-        age_penalty_factor = float(os.environ.get("DIFFKV_SRL_AGE_PENALTY", "0.01"))
+        age_penalty_factor = float(os.environ.get("DIFFKV_SRL_AGE_PENALTY", "0.0"))
     try:
         import diffkv_core as _dkv_core
         if getattr(_dkv_core, "HAS_SRL_ROUTER", False) and (srl_state is None or age_penalty_factor == 0.0):

@@ -569,15 +569,55 @@ class KVRuntimeManager:
             # saving memory, and the failure looks like pool exhaustion rather
             # than OOM.
             #
-            # 4GB was sized around rank 16.  Raising the default rank to 32
-            # (MLX parity) grows bytes_per_block ~2x and would have dropped the
-            # ceiling on a 48-layer model from ~211K to ~107K tokens — breaking
-            # the 128K evaluation.  8GB restores ~200K of headroom at zero
-            # allocation cost.  MPS keeps 4GB: unified memory is the hard
-            # constraint there, and MLX manages its own pool anyway.
-            _ceiling_gb = float(os.environ.get("DIFFKV_POOL_BUDGET_GB", "8"))
+            # The ceiling is chosen in priority order:
+            #   1. DIFFKV_POOL_BUDGET_GB — explicit override, always wins.
+            #   2. CUDA: a fraction of the VRAM actually free right now.  The
+            #      model weights are already resident by the time the manager is
+            #      built, so mem_get_info()'s free figure is post-weights.  We
+            #      keep DIFFKV_POOL_VRAM_FRAC (default 0.5) of that for the pool
+            #      and leave the rest for prefill activations, decode
+            #      workspaces, and the compression staging tensors.  This scales
+            #      the context ceiling to the card — a hardcoded 8GB throttled
+            #      an 80GB A100 to ~215K tokens while risking OOM on a 24GB card.
+            #   3. Fallback (CPU, or mem query fails): 8GB, the old fixed value.
+            # A 4GB floor keeps context usable even when free VRAM is tight.
+            _explicit_gb = os.environ.get("DIFFKV_POOL_BUDGET_GB")
+            _ceiling_bytes = None
+            if _explicit_gb is not None:
+                try:
+                    _ceiling_bytes = int(float(_explicit_gb) * 1024 ** 3)
+                except ValueError:
+                    _ceiling_bytes = None
+            _dev_is_cuda = (
+                getattr(self.device, "type", None) == "cuda"
+                or (isinstance(self.device, str) and self.device.startswith("cuda"))
+            )
+            if _ceiling_bytes is None and _dev_is_cuda:
+                try:
+                    _dev = self.device if isinstance(self.device, torch.device) else torch.device(self.device)
+                    _free, _total = torch.cuda.mem_get_info(_dev)
+                    _frac = float(os.environ.get("DIFFKV_POOL_VRAM_FRAC", "0.5"))
+                    # Floor at 4GB (or all of free if free < 4GB) so a busy card
+                    # still gets a usable context window.
+                    _ceiling_bytes = max(min(4 * 1024 ** 3, _free), int(_free * _frac))
+                    self._pool_budget_source = (
+                        f"{_frac:.0%} of {_free / 1024**3:.1f} GB free VRAM"
+                    )
+                except Exception as _mem_err:
+                    _ceiling_bytes = None
+                    print(f"[DiffKV] VRAM query for pool budget failed ({_mem_err}); "
+                          f"falling back to 8 GB. Set DIFFKV_POOL_BUDGET_GB to override.")
+            if _ceiling_bytes is None:
+                _ceiling_bytes = 8 * 1024 ** 3
+                if not hasattr(self, "_pool_budget_source"):
+                    self._pool_budget_source = "8 GB fallback"
+            else:
+                if _explicit_gb is not None:
+                    self._pool_budget_source = f"DIFFKV_POOL_BUDGET_GB={_explicit_gb}"
+                elif not hasattr(self, "_pool_budget_source"):
+                    self._pool_budget_source = "8 GB fallback"
             pool_budget_bytes = max(
-                128 * 1024 ** 2, min(int(_ceiling_gb * 1024 ** 3), pool_budget_bytes)
+                128 * 1024 ** 2, min(_ceiling_bytes, pool_budget_bytes)
             )
         
         min_blocks = 2048 if self.serving_mode == "lightweight" else (4096 if self.serving_mode == "balanced" else 8000)
@@ -607,7 +647,8 @@ class KVRuntimeManager:
             f"rank={self.rank} (pool_rank={pool_rank}), "
             f"max_residual={_max_res}, "
             f"{_true_bpb / 1024:.0f} KB/slot, "
-            f"budget={pool_budget_bytes / 1024**3:.1f} GB, "
+            f"budget={pool_budget_bytes / 1024**3:.1f} GB "
+            f"(ceiling: {getattr(self, '_pool_budget_source', 'default')}), "
             f"worst-case {dynamic_max_blocks * _true_bpb / 1e9:.1f} GB if every slot fills "
             f"(lazy: only used slots are allocated)"
         )

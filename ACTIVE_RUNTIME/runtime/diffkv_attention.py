@@ -654,11 +654,18 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         )
                                         srl_state.current_step_slots = selected_slots
 
-                                        # Map slot IDs to absolute sequence anchor indices
+                                        # Map slot IDs to absolute sequence anchor indices.
+                                        # argmax(dim=1) returns 0 for a row with NO match, so a
+                                        # selected slot that is not among this layer's blocks would
+                                        # silently map to block 0 — duplicating the sink and dropping
+                                        # the intended block.  Keep only rows that actually matched.
                                         mask = (selected_slots.unsqueeze(1) == block_indices.unsqueeze(0))
-                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)
+                                        has_match = mask.any(dim=1)
+                                        block_idx_in_full = mask.to(torch.uint8).argmax(dim=1)[has_match]
                                         selected_anchors = anchor_indices[block_idx_in_full]
+                                        srl_state.current_step_slots = selected_slots[has_match]
                                         srl_state.current_step_anchors = selected_anchors
+                                        selected_slots = srl_state.current_step_slots
                                     else:
                                         # Reuse cached routing from the previous cadence step
                                         selected_slots = getattr(srl_state, "current_step_slots", None)
@@ -669,15 +676,24 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     selected_slots = getattr(srl_state, "current_step_slots", None)
                                     selected_anchors = getattr(srl_state, "current_step_anchors", None)
 
-                                if selected_slots is not None and selected_slots.numel() > 0:
-                                    # 1. GPU mapping (for block_indices and anchor_indices used in kernels)
+                                if (selected_slots is not None and selected_slots.numel() > 0
+                                        and selected_anchors is not None and selected_anchors.numel() > 0):
+                                    # 1. GPU mapping (for block_indices and anchor_indices used in kernels).
+                                    # Same argmax(dim=1)==0 hazard as the slot→anchor map above: a
+                                    # selected anchor absent from THIS layer (block-state can differ
+                                    # per layer) would map to block 0.  Filter to matched anchors, and
+                                    # only apply the reroute if at least one selected block survives —
+                                    # otherwise fall through to full attention rather than collapsing
+                                    # onto block 0.
                                     mask = (selected_anchors.unsqueeze(1) == anchor_indices.unsqueeze(0))
-                                    block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)
-                                    block_indices = block_indices[block_idx_in_layer]
-                                    anchor_indices = selected_anchors
-                                    
-                                    # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
-                                    _srl_rerouted = True
+                                    has_match = mask.any(dim=1)
+                                    if bool(has_match.any()):
+                                        block_idx_in_layer = mask.to(torch.uint8).argmax(dim=1)[has_match]
+                                        block_indices = block_indices[block_idx_in_layer]
+                                        anchor_indices = selected_anchors[has_match]
+
+                                        # Cache is structured and self-evicting based on layer_idx and anchors_tuple comparison
+                                        _srl_rerouted = True
 
                                     # Log routing decision if verbose or telemetry is enabled
                                     if captured_layer_idx == 0 and (os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DIFFKV_TELEMETRY", "0") == "1"):

@@ -35,14 +35,16 @@ class DiffKVConfig:
             self.mps_watermark = 0.0
             self.torch_compile = False
             self.approximate_attn = True if is_macos else False
-            self.srl_age_penalty = 0.01
+            self.srl_age_penalty = 0.0  # MLX parity: pure relevance, no recency bias (see override note)
             self.kv_quant = "q4_0"
             self.max_active_dense_tokens = 1024
-            # Residual budget per block.  See the "mid" branch for why these
-            # moved off 8; `low` uses MLX's own documented speed/memory
-            # trade-back value (mlx_diffkv_wrapper.py:1557) rather than its 128
-            # default, because `low` exists to bound memory.
-            self.max_residual_tokens = 64
+            # Residual budget per block — see the "mid" branch for the full
+            # rationale.  The presets ladder it as a memory/quality dial: `low`
+            # is memory-priority, and 40 already covers the adaptive prose cap
+            # (int(0.15*256)=38), so it loses essentially nothing on prose while
+            # roughly halving the pool vs 128.  A/B at 13.4K confirmed res40
+            # matched res128 output quality at ~1.5 GB vs ~2.8 GB pool.
+            self.max_residual_tokens = 40
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -52,9 +54,12 @@ class DiffKVConfig:
             self.mps_watermark = 0.0
             self.torch_compile = False if is_macos else True
             self.approximate_attn = True if is_macos else False
-            self.srl_age_penalty = 0.01
+            self.srl_age_penalty = 0.0  # MLX parity: pure relevance, no recency bias (see override note)
             self.kv_quant = "f16"
             self.max_active_dense_tokens = 4096
+            # `high` = max fidelity: full 128-residual ceiling (paper config of
+            # record, MLX default) for table/factual-dense docs, accepting the
+            # larger pool.  See the "mid" branch for the ladder rationale.
             self.max_residual_tokens = 128
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
@@ -66,22 +71,28 @@ class DiffKVConfig:
             self.mps_watermark = 0.0
             self.torch_compile = False
             self.approximate_attn = True if is_macos else False
-            self.srl_age_penalty = 0.01
+            self.srl_age_penalty = 0.0  # MLX parity: pure relevance, no recency bias (see override note)
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
-            # 128 matches MLX's DIFFKV_MAX_RESIDUAL default
-            # (mlx_diffkv_wrapper.py:1560) and the paper's config of record.
-            # This path shipped 8 — the same residual cap already identified as
-            # a needle-recall root cause in the native runtime (fixed there
-            # 8->40).  Residuals are the exact-token correction on top of the
-            # lossy SVD, so this is the main quality dial.
+            # Residual budget per block: how many exact (uncompressed) tokens
+            # correct the lossy SVD.  This is the main quality dial, but it is
+            # NOT a flat cost=benefit knob.  The compressor caps actual usage at
+            # n_max_residual = int(0.15*T_active) (=38 for T=256), clamped down
+            # to 8/16 for low-error blocks and raised only for digit/table
+            # blocks (up to T_active).  So prose blocks never use more than ~38
+            # regardless of this value; only factual/table-dense blocks benefit
+            # from a higher ceiling.
             #
-            # Cost: residual arrays dominate bytes/block (at R=128 they are ~78%
-            # of a slot), and they scale with kv_heads x layers.  MLX validated
-            # 128 on a 1.5B/2-kv-head model; on a 14B/8-kv-head/48-layer model
-            # the same setting is roughly an order of magnitude more VRAM.
-            # Lower via DIFFKV_MAX_RESIDUAL_TOKENS if the pool does not fit.
-            self.max_residual_tokens = 128
+            # The pool allocates this many slots UNIFORMLY per block, so the
+            # physical VRAM cost is paid on every block even though most sit
+            # mostly empty.  A/B at 13.4K: res128 pool = 2.8 GB, res40 = 1.5 GB,
+            # identical output quality on prose synthesis.  So the presets
+            # ladder it: `mid` = 64 (covers the prose cap plus boost headroom),
+            # `high` = 128 (full table/factual fidelity, accepts the VRAM), and
+            # `low` = 40 (memory-priority).  Override with
+            # DIFFKV_MAX_RESIDUAL_TOKENS; raise toward 128+ for table-heavy or
+            # exact-recall (needle) workloads.
+            self.max_residual_tokens = 64
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -120,6 +131,14 @@ class DiffKVConfig:
         self.approximate_attn = self._get_bool(
             "approximate_attn", "DIFFKV_MPS_APPROXIMATE_ATTN", self.approximate_attn, config_dict
         )
+        # srl_age_penalty: subtracts age*penalty from each block's relevance in
+        # two_level_gate, biasing selection toward RECENT blocks.  Default moved
+        # from 0.01 to 0.0 to match the MLX router, which ranks blocks purely by
+        # q·k relevance with no recency term — a recency bias actively drops
+        # early-document content on whole-document synthesis (the likely cause
+        # of the routed-decode degradation observed at 13.4K).  Re-enable with
+        # DIFFKV_SRL_AGE_PENALTY>0 for multi-turn chat, where damping stale
+        # concepts from earlier turns can help.
         self.srl_age_penalty = self._get_float(
             "srl_age_penalty", "DIFFKV_SRL_AGE_PENALTY", self.srl_age_penalty, config_dict
         )
