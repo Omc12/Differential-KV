@@ -1700,14 +1700,47 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # layout is stable between steps (only changes on routing change or
                                     # block growth). routing_version already invalidates decode_cos_sliced
                                     # on any routing change — reuse the same event here.
-                                    _cache_key = (current_version, dense_len)
-                                    _dp2_cache = session_dict.get("dense_pos_tensor_cache")
+                                    _dense_anchor_sig = tuple(
+                                        int(_blk.anchor_idx) for _blk in (dense_blocks or [])
+                                    )
+                                    _dense_lengths = tuple(
+                                        len(_blk.token_indices) for _blk in (dense_blocks or [])
+                                    )
+                                    # dense_len changes on every decode token.  It is
+                                    # not a valid cache key: the position tensor has a
+                                    # fixed max_dense_len shape and only its appended
+                                    # suffix needs updating.
+                                    _cache_key = (current_version, _dense_anchor_sig, _max_dense)
+                                    _dp2_cache = session_dict.get("cuda_dense_pos_tensor_cache")
                                     if (_dp2_cache is not None
                                             and _dp2_cache[0] == _cache_key
-                                            and _dp2_cache[1].shape[0] == _max_dense):
-                                        _dp2 = _dp2_cache[1]
-                                        _cos_d2 = _dp2_cache[2]
-                                        _sin_d2 = _dp2_cache[3]
+                                            and _dp2_cache[2].shape[0] == _max_dense):
+                                        _old_lengths = _dp2_cache[1]
+                                        _dp2 = _dp2_cache[2]
+                                        _cos_d2 = _dp2_cache[3]
+                                        _sin_d2 = _dp2_cache[4]
+                                        _offset = 0
+                                        for _old_len, _new_len, _blk in zip(
+                                            _old_lengths, _dense_lengths, dense_blocks or []
+                                        ):
+                                            if _new_len > _old_len:
+                                                _s = _offset + _old_len
+                                                _e = _offset + _new_len
+                                                _dp2[_s:_e].copy_(torch.tensor(
+                                                    _blk.token_indices[_old_len:_new_len],
+                                                    dtype=torch.long,
+                                                    device=_dp2.device,
+                                                ))
+                                                _cos_d2[:, :, _s:_e].copy_(
+                                                    cos_all[0, _dp2[_s:_e]].unsqueeze(0).unsqueeze(1)
+                                                )
+                                                _sin_d2[:, :, _s:_e].copy_(
+                                                    sin_all[0, _dp2[_s:_e]].unsqueeze(0).unsqueeze(1)
+                                                )
+                                            _offset += _new_len
+                                        session_dict["cuda_dense_pos_tensor_cache"] = (
+                                            _cache_key, _dense_lengths, _dp2, _cos_d2, _sin_d2
+                                        )
                                     else:
                                         _dp2 = torch.zeros(_max_dense, dtype=torch.long, device=query_states.device)
                                         _pos2 = 0
@@ -1728,12 +1761,98 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             _sin_d2 = _sin_d2.squeeze(1)
                                         _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,max_dense_len,D]
                                         _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
-                                        session_dict["dense_pos_tensor_cache"] = (_cache_key, _dp2, _cos_d2, _sin_d2)
+                                        session_dict["cuda_dense_pos_tensor_cache"] = (
+                                            _cache_key, _dense_lengths, _dp2, _cos_d2, _sin_d2
+                                        )
+                                    # Keep the dense KV in its RoPE-rotated form across
+                                    # decode steps.  The dense window changes by only one
+                                    # token at a time, but the old code rotated all
+                                    # max_dense_len tokens for every layer/token.  That
+                                    # made the CUDA path redo roughly 1,419 * 48 RoPE
+                                    # operations per generated token, while HF's dense
+                                    # cache rotates each key once when it is appended.
+                                    #
+                                    # Rebuild only when routing changes or a dense block is
+                                    # removed.  Otherwise update the appended suffix of
+                                    # each block in-place and reuse the existing rotation.
+                                    _rot_cache = session_dict.setdefault("dense_rot_state", {})
+                                    _rot_state = _rot_cache.get(captured_layer_idx)
+                                    _layout_sig = tuple(
+                                        (int(_blk.anchor_idx), len(_blk.token_indices))
+                                        for _blk in (dense_blocks or [])
+                                    )
+                                    _lengths = tuple(item[1] for item in _layout_sig)
+                                    _anchors = tuple(item[0] for item in _layout_sig)
                                     _hd2 = dense_k_assembled.shape[-1] // 2
-                                    # Full-workspace RoPE rotation — shapes match because both are max_dense_len
-                                    _dk_half2 = torch.cat([-dense_k_assembled[..., _hd2:], dense_k_assembled[..., :_hd2]], dim=-1)
-                                    _dk_combined = (dense_k_assembled * _cos_d2.to(dense_k_assembled.dtype)
-                                                    + _dk_half2 * _sin_d2.to(dense_k_assembled.dtype))
+                                    _rot_valid = (
+                                        _rot_state is not None
+                                        and _rot_state.get("anchors") == _anchors
+                                        and len(_rot_state.get("lengths", ())) == len(_lengths)
+                                        and all(
+                                            new_len >= old_len
+                                            for old_len, new_len in zip(
+                                                _rot_state.get("lengths", ()), _lengths
+                                            )
+                                        )
+                                        and _rot_state["rot"].shape == dense_k_assembled.shape
+                                    )
+
+                                    if not _rot_valid:
+                                        _dk_half2 = torch.empty_like(dense_k_assembled)
+                                        _dk_half2[..., :_hd2] = -dense_k_assembled[..., _hd2:]
+                                        _dk_half2[..., _hd2:] = dense_k_assembled[..., :_hd2]
+                                        _cos_compute = _cos_d2.to(dense_k_assembled.dtype)
+                                        _sin_compute = _sin_d2.to(dense_k_assembled.dtype)
+                                        _rot = torch.empty_like(dense_k_assembled)
+                                        torch.mul(dense_k_assembled, _cos_compute, out=_rot)
+                                        _rot.addcmul_(_dk_half2, _sin_compute)
+                                        _rot_state = {
+                                            "anchors": _anchors,
+                                            "lengths": _lengths,
+                                            "rot": _rot,
+                                            "half": _dk_half2,
+                                            "cos": _cos_compute,
+                                            "sin": _sin_compute,
+                                        }
+                                        _rot_cache[captured_layer_idx] = _rot_state
+                                    else:
+                                        _rot = _rot_state["rot"]
+                                        _dk_half2 = _rot_state["half"]
+                                        _cos_compute = _rot_state["cos"]
+                                        _sin_compute = _rot_state["sin"]
+                                        _offset = 0
+                                        for _old_len, _new_len in zip(
+                                            _rot_state["lengths"], _lengths
+                                        ):
+                                            if _new_len > _old_len:
+                                                _s = _offset + _old_len
+                                                _e = _offset + _new_len
+                                                _raw_suffix = dense_k_assembled[:, :, _s:_e]
+                                                _half_suffix = _dk_half2[:, :, _s:_e]
+                                                _half_suffix[..., :_hd2] = -_raw_suffix[..., _hd2:]
+                                                _half_suffix[..., _hd2:] = _raw_suffix[..., :_hd2]
+                                                # Only the newly appended positions
+                                                # need dtype conversion; the cached
+                                                # prefix is already in compute dtype.
+                                                _cos_compute[:, :, _s:_e].copy_(
+                                                    _cos_d2[:, :, _s:_e].to(_cos_compute.dtype)
+                                                )
+                                                _sin_compute[:, :, _s:_e].copy_(
+                                                    _sin_d2[:, :, _s:_e].to(_sin_compute.dtype)
+                                                )
+                                                torch.mul(
+                                                    _raw_suffix,
+                                                    _cos_compute[:, :, _s:_e],
+                                                    out=_rot[:, :, _s:_e],
+                                                )
+                                                _rot[:, :, _s:_e].addcmul_(
+                                                    _half_suffix,
+                                                    _sin_compute[:, :, _s:_e],
+                                                )
+                                            _offset += _new_len
+                                        _rot_state["lengths"] = _lengths
+
+                                    _dk_combined = _rot
                                     _dv_combined = dense_v_assembled
                                 # P1-6: Deferred batch dispatch — queue this session's call
                                 # so we can dispatch all sessions in tight Python-free sequence.

@@ -394,7 +394,10 @@ def run_worker(config_name, model_id):
                     if nid in stop_ids:
                         break
                     gen_ids.append(nid)
-                    mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
+                    # The prompt token IDs were registered before prefill and
+                    # SRL is finalized before decode.  Appending every decoded
+                    # token here would repeatedly torch.cat the full 13K-token
+                    # prompt on the CPU and is not needed for this benchmark.
                     _inp[0, 0] = nid
                     _pos[0, 0] = cur
                     # Keep position_ids explicit here as well.  Passing _pos as
