@@ -721,9 +721,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         # dense_len tells us how many positions are actually valid this step.
                         dense_k_assembled, dense_v_assembled, dense_len = None, None, 0
                         if dense_blocks:
-                            dense_k_assembled, dense_v_assembled, dense_len = kv_manager.assemble_dense_window_kv(
+                            dense_k_assembled, dense_v_assembled, dense_len, dense_blocks = kv_manager.assemble_dense_window_kv(
                                 sid, captured_layer_idx, dense_blocks, query_states.dtype
                             )
+
 
                         total_seq_len = kv_manager.get_session_sequence_length(sid)
                         max_pos = total_seq_len
@@ -1682,10 +1683,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             _tl2 = _blk.token_indices
                                             _n2 = len(_tl2)
                                             if _n2 > 0 and _pos2 < _max_dense:
-                                                _dp2[_pos2:_pos2 + _n2].copy_(
-                                                    torch.tensor(_tl2, dtype=torch.long, device=_dp2.device)
+                                                _fit = min(_n2, _max_dense - _pos2)
+                                                _dp2[_pos2:_pos2 + _fit].copy_(
+                                                    torch.tensor(_tl2[:_fit], dtype=torch.long, device=_dp2.device)
                                                 )
-                                                _pos2 += _n2
+                                                _pos2 += _fit
+
                                         _cos_d2 = cos_all[0, _dp2.clamp(min=0, max=cos_all.shape[1] - 1)]
                                         _sin_d2 = sin_all[0, _dp2.clamp(min=0, max=sin_all.shape[1] - 1)]
                                         if _cos_d2.dim() == 3:

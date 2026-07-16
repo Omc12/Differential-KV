@@ -2042,11 +2042,13 @@ class KVRuntimeManager:
                     curr_idx = min(offset + 1, self.max_dense_len)
 
 
-        # 4. Return the FULL fixed-size workspace + L_dense as a scalar.
+        # 4. Return the FULL fixed-size workspace + L_dense as a scalar + trimmed block list.
         # Shape is always [1, kv_heads, max_dense_len, head_dim] — static across every
         # decode step.  Positions >= L_dense contain stale/zero data; the caller masks
         # those positions with -inf before softmax so they get exactly 0 attention weight.
-        return workspace_k, workspace_v, L_dense
+        # dense_blocks may have been trimmed (oldest dropped); return the surviving list so
+        # the caller's position-tensor loop uses the same trimmed set.
+        return workspace_k, workspace_v, L_dense, dense_blocks
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
