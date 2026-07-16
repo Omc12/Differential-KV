@@ -247,7 +247,13 @@ def run_worker(config_name, model_id):
         if _tid is not None and _tid != tok.unk_token_id:
             _stop_ids.add(_tid)
 
-    CH = 128  # prefill chunk size initial value; updated below from config once wrapper is loaded
+    # Prefill chunk size.  The DiffKV branch overwrites this from the active
+    # preset and then rounds it up to the block capacity; the dense branch used
+    # to keep the 128 default, so dense ran ~105 forwards over a 13K prompt
+    # while DiffKV ran ~13.  That is a per-forward-overhead difference, not an
+    # attention difference, and it silently inflated the dense prefill baseline.
+    # Both branches now start from the same value.
+    CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
 
     with torch.inference_mode():
         if is_compressed:
@@ -328,6 +334,18 @@ def run_worker(config_name, model_id):
                     # available through the whole prefill and only switches to the
                     # compressed store at the prefill->decode boundary.
 
+                # The forward passes are done; everything after this point is
+                # DiffKV-specific cache construction.  Time it separately —
+                # folding it into prefill_time made a 17s number that is really
+                # "forward + SVD + SRL index" look like a like-for-like
+                # comparison against dense's forward-only prefill.
+                # Measured before the diagnostic below so that the diagnostic's
+                # own .item()/.tolist() syncs land outside the timer, matching
+                # where the dense branch stops its clock.
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                forward_time = time.perf_counter() - t_prefill_start
+
                 # Snapshot the final prefill logits before compression/SRL
                 # finalization can allocate or mutate CUDA workspaces.
                 last_logits_gpu = out.logits[0, -1].float().clone()
@@ -339,6 +357,8 @@ def run_worker(config_name, model_id):
                     f"top5={[int(x) for x in _prefill_topi.tolist()]}",
                     flush=True,
                 )
+
+                t_compress_start = time.perf_counter()
                 # Compression is intentionally started once, after all prefill
                 # forwards have completed, so validation measures exact causal
                 # prefill rather than a lossy mid-prefill approximation.
@@ -347,6 +367,9 @@ def run_worker(config_name, model_id):
                 wait_for_compression(mgr, sid)
                 if hasattr(mgr, "finalize_srl_index"):
                     mgr.finalize_srl_index(sid, cached_len=0)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                compress_time = time.perf_counter() - t_compress_start
 
                 # ── Block-state diagnostic (one-time, remove after fix) ──
                 _smgr = getattr(mgr, "_streaming_mgr", None)
@@ -376,7 +399,9 @@ def run_worker(config_name, model_id):
                               f"mbs={_b.micro_block_size} ak={_ak_shape}", flush=True)
                 # ── End diagnostic ──
 
-                prefill_time = time.perf_counter() - t_prefill_start
+                # Excludes the block-state diagnostic dump above, which is
+                # measurement scaffolding rather than runtime work.
+                prefill_time = forward_time + compress_time
 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
                 if torch.cuda.is_available():
@@ -430,6 +455,9 @@ def run_worker(config_name, model_id):
                     "prompt_len": prompt_len,
                     "generated_tokens": len(gen_ids),
                     "prefill_time_s": prefill_time,
+                    "prefill_forward_s": forward_time,
+                    "prefill_compress_s": compress_time,
+                    "prefill_chunk_size": CH,
                     "decode_time_s": decode_time,
                     "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
                     "peak_prefill_vram_gb": peak_prefill_vram,
@@ -472,6 +500,11 @@ def run_worker(config_name, model_id):
                     pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)
                     out = model(torch.tensor([ch], device=device), position_ids=pos, past_key_values=past_key_values, use_cache=True)
                     past_key_values = out.past_key_values
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                # Dense has no compression stage; its prefill is all forward.
+                forward_time = time.perf_counter() - t_prefill_start
+                compress_time = 0.0
                 # Keep logits on GPU — no D2H sync during prefill
                 last_logits_gpu = out.logits[0, -1].float()
                 _prefill_topv, _prefill_topi = torch.topk(last_logits_gpu, k=5)
@@ -482,7 +515,8 @@ def run_worker(config_name, model_id):
                     f"top5={[int(x) for x in _prefill_topi.tolist()]}",
                     flush=True,
                 )
-                prefill_time = time.perf_counter() - t_prefill_start
+                # Excludes the top-5 diagnostic, matching the DiffKV branch.
+                prefill_time = forward_time
 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
                 if torch.cuda.is_available():
@@ -522,6 +556,9 @@ def run_worker(config_name, model_id):
                     "prompt_len": prompt_len,
                     "generated_tokens": len(gen_ids),
                     "prefill_time_s": prefill_time,
+                    "prefill_forward_s": forward_time,
+                    "prefill_compress_s": compress_time,
+                    "prefill_chunk_size": CH,
                     "decode_time_s": decode_time,
                     "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
                     "peak_prefill_vram_gb": peak_prefill_vram,
@@ -552,19 +589,21 @@ def generate_report(all_results, model_id):
             p_key = f"prompt{p_idx}"
             f.write(f"## Prompt {p_idx} Performance & Resource Comparison\n\n")
             
-            headers = ["Config", "Status", "Prefill Time (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Gen Tokens"]
+            headers = ["Config", "Status", "Prefill Total (s)", "— Forward (s)", "— Compress (s)", "Decode TPS", "Peak Prefill VRAM (GB)", "Peak Decode VRAM (GB)", "KV Cache VRAM (GB)", "Gen Tokens"]
             rows = []
-            
+
             for cfg_name, cfg_res in all_results.items():
                 status_text = cfg_res.get("status", "success").upper()
                 p_res = cfg_res.get(p_key, {})
                 if status_text == "OOM":
-                    rows.append([cfg_name, "OOM (Out of VRAM)", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"])
+                    rows.append([cfg_name, "OOM (Out of VRAM)", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"])
                     continue
                 rows.append([
                     cfg_name,
                     status_text,
                     f"{p_res.get('prefill_time_s', 0):.3f}s",
+                    f"{p_res.get('prefill_forward_s', 0):.3f}s",
+                    f"{p_res.get('prefill_compress_s', 0):.3f}s",
                     f"{p_res.get('decode_tps', 0):.2f}",
                     f"{p_res.get('peak_prefill_vram_gb', 0):.2f} GB",
                     f"{p_res.get('peak_decode_vram_gb', 0):.2f} GB",
@@ -632,7 +671,16 @@ def main():
             
             for p_key in ["prompt1", "prompt2"]:
                 p_res = res.get(p_key, {})
-                print(f"    {p_key} Success: tokens={p_res.get('generated_tokens')}, prefill={p_res.get('prefill_time_s',0):.2f}s, tps={p_res.get('decode_tps',0):.1f}, kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB", flush=True)
+                print(
+                    f"    {p_key} Success: tokens={p_res.get('generated_tokens')}, "
+                    f"prefill={p_res.get('prefill_time_s',0):.2f}s "
+                    f"(fwd={p_res.get('prefill_forward_s',0):.2f}s "
+                    f"+ compress={p_res.get('prefill_compress_s',0):.2f}s, "
+                    f"CH={p_res.get('prefill_chunk_size','?')}), "
+                    f"tps={p_res.get('decode_tps',0):.1f}, "
+                    f"kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB",
+                    flush=True,
+                )
         else:
             print(f"    Subprocess for {cfg} crashed or went Out-Of-Memory (OOM).", flush=True)
             all_results[cfg] = {

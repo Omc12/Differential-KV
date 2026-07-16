@@ -10,6 +10,7 @@ PyTorch CPU for large blocks.  Falls back to PyTorch rSVD if MLX fails.
 """
 
 import math
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import torch
@@ -459,6 +460,77 @@ def estimate_memory(seq_len: int, heads: int, dim: int,
     }
 
 
+_RE_MATH_BOOST = re.compile(
+    r'[\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^'
+)
+_RE_DEFINITIONS_BOOST = re.compile(
+    r'\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b'
+    r'|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b',
+    re.IGNORECASE,
+)
+
+
+def _block_boost_rank(block, rank: int, manager) -> int:
+    """Return the SVD rank for one block, boosting content-bearing blocks by 1.5x.
+
+    The boost depends only on the block's token IDs, so the result is identical
+    for every layer.  Recomputing it per layer meant a full tokenizer.decode()
+    plus three regex scans for each of (num_blocks x num_layers) calls — 2,352
+    times for a 13K prompt on a 48-layer model.  MLX hit the same wall and
+    solved it the same way (mlx_diffkv_wrapper.py:2424): compute once per
+    block, then tile the result across layers.
+
+    Cached on the manager as _block_rank_cache[sid][anchor_idx] -> int, and
+    dropped by KVRuntimeManager.clear_session.  The text still comes from one
+    whole-block tokenizer.decode() so the matched string is byte-for-byte what
+    the uncached path produced; joining per-token decodes would differ whenever
+    a multi-byte character is split across two tokens.
+    """
+    if manager is None:
+        return rank
+
+    sid = getattr(block, "session_id", None)
+    anchor = getattr(block, "anchor_idx", None)
+
+    rank_cache = None
+    if sid is not None and anchor is not None:
+        rank_cache = getattr(manager, "_block_rank_cache", None)
+        if rank_cache is None:
+            rank_cache = manager._block_rank_cache = {}
+        cached = rank_cache.setdefault(sid, {}).get(anchor)
+        if cached is not None:
+            return cached
+
+    tokenizer = getattr(manager, "tokenizer", None)
+    all_tids = None
+    if getattr(manager, "_session_token_ids", None) is not None:
+        all_tids = manager._session_token_ids.get(sid)
+
+    block_rank = rank
+    if tokenizer is not None and all_tids is not None:
+        # One vectorised gather + tolist() replaces the previous per-position
+        # .item() loop (256 Python round-trips per block).
+        positions = [p for p in getattr(block, "token_indices", []) if 0 <= p < len(all_tids)]
+        if positions:
+            idx = torch.tensor(positions, dtype=torch.long, device=all_tids.device)
+            block_token_ids = all_tids[idx].tolist()
+            try:
+                block_text = tokenizer.decode(block_token_ids)
+                boost = (
+                    any(c.isdigit() for c in block_text)
+                    or _RE_MATH_BOOST.search(block_text) is not None
+                    or _RE_DEFINITIONS_BOOST.search(block_text) is not None
+                )
+                if boost:
+                    block_rank = int(math.ceil(rank * 1.5))
+            except Exception:
+                pass
+
+    if rank_cache is not None:
+        rank_cache[sid][anchor] = block_rank
+    return block_rank
+
+
 def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     """
     Compress a list of StreamingKVBlock objects batched together entirely on the GPU.
@@ -499,44 +571,7 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     max_rank_for_batch = rank
     block_ranks = []
     for block in blocks_list:
-        block_token_ids = []
-        if manager is not None and getattr(manager, "_session_token_ids", None) is not None:
-            session_id = getattr(block, "session_id", None)
-            all_tids = manager._session_token_ids.get(session_id)
-            if all_tids is not None:
-                for pos in getattr(block, "token_indices", []):
-                    if 0 <= pos < len(all_tids):
-                        block_token_ids.append(int(all_tids[pos].item()))
-        
-        boost = False
-        if block_token_ids and getattr(manager, "tokenizer", None) is not None:
-            try:
-                block_text = manager.tokenizer.decode(block_token_ids)
-                if any(c.isdigit() for c in block_text):
-                    boost = True
-                else:
-                    import re
-                    re_math_boost = re.compile(
-                        r'[\+\-\*\/=]|\$\$|\\\[|\\\(|\\begin\{|\\alpha|\\beta|\\gamma|\\delta|\\sum|\\int|\\frac|\\sqrt|_\{|\^'
-                    )
-                    if re_math_boost.search(block_text):
-                        boost = True
-                    else:
-                        re_definitions_boost = re.compile(
-                            r'\b(?:is|are|we)\s+(?:defined|referred|called|known)\s+(?:as|by)\b|\brefers?\s+to\b|\b(?:denotes?|stands\s+for|represents?)\b|\bwe\s+define\b|\b(?:let\s+us|let)\s+define\b',
-                            re.IGNORECASE
-                        )
-                        if re_definitions_boost.search(block_text):
-                            boost = True
-            except Exception:
-                pass
-
-        if boost:
-            import math
-            block_rank = int(math.ceil(rank * 1.5))
-        else:
-            block_rank = rank
-        
+        block_rank = _block_boost_rank(block, rank, manager)
         block_ranks.append(block_rank)
         if block_rank > max_rank_for_batch:
             max_rank_for_batch = block_rank

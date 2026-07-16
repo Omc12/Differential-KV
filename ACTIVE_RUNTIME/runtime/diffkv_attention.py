@@ -447,26 +447,6 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
                 session_ids = getattr(model, "_diffkv_session_ids", ["default"] * bsz)
-                if captured_layer_idx == 0:
-                    for b_idx, sid in enumerate(session_ids):
-                        if sid and sid != "dummy_session":
-                            session_dict = kv_manager.decode_workspace.setdefault(sid, {})
-                            cos_dict = session_dict.setdefault("rope_cos_dict", {})
-                            sin_dict = session_dict.setdefault("rope_sin_dict", {})
-                            
-                            c_item = cos[b_idx].squeeze()
-                            s_item = sin[b_idx].squeeze()
-                            p_item = position_ids[b_idx]
-                            
-                            if p_item.dim() == 0 or p_item.numel() == 1:
-                                p_val = int(p_item.item())
-                                cos_dict[p_val] = c_item
-                                sin_dict[p_val] = s_item
-                            else:
-                                for idx in range(p_item.shape[0]):
-                                    p_val = int(p_item[idx].item())
-                                    cos_dict[p_val] = c_item[idx]
-                                    sin_dict[p_val] = s_item[idx]
 
                 # Fix 3: Gate finalize_compressed_blocks to layer 0 only.
                 # The function is idempotent and protected by _pending_lock internally.

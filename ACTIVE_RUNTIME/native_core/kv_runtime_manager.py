@@ -1307,6 +1307,12 @@ class KVRuntimeManager:
         self._session_srl.pop(session_id, None)
         self._factual_stores.pop(session_id, None)
         self._session_token_ids.pop(session_id, None)
+        # Per-session content caches keyed by block anchor.  These are derived
+        # from _session_token_ids, so they are stale the moment it is dropped.
+        for _cache_attr in ("_block_rank_cache", "_res_capture_boost_rows"):
+            _cache = getattr(self, _cache_attr, None)
+            if _cache is not None:
+                _cache.pop(session_id, None)
         if hasattr(self, "_prefill_kv_capture"):
             self._prefill_kv_capture.pop(session_id, None)
         if hasattr(self, "attention_score_cache"):

@@ -607,8 +607,21 @@ class PyTorchDiffKVHFWrapper:
 
         if use_compile == "0":
             print("[DiffKV] torch.compile disabled.")
-        elif is_quantized and use_compile != "1":
-            print("[DiffKV] Quantized model detected — skipping torch.compile to avoid graph-break errors.")
+        elif is_quantized and os.environ.get("DIFFKV_FORCE_COMPILE_QUANTIZED", "0") != "1":
+            # Quantized linears (bnb Linear4bit, AWQ WQLinear, ...) are opaque to
+            # Inductor: it cannot fuse the dequantize step, so every FFN call
+            # graph-breaks and each new prefill chunk shape triggers a fresh
+            # compile.  On a 14B NF4 model that turned a 17.4s prefill into
+            # 42.6s (first prompt) / 31.9s (recompile on the second) while
+            # *lowering* decode throughput, because the compiled wrapper only
+            # adds guard overhead around eager dequant kernels.
+            #
+            # The `high` preset sets torch_compile=True, which used to satisfy
+            # `use_compile != "1"` and bypass this guard entirely.  Quantization
+            # now wins over the preset: it is a property of the loaded weights,
+            # not a user preference.  MLX has no equivalent step.
+            print("[DiffKV] Quantized model detected — skipping torch.compile to avoid graph-break errors. "
+                  "(Set DIFFKV_FORCE_COMPILE_QUANTIZED=1 to override.)")
         else:
             # Pre-flight: verify the C++ compiler required by TorchInductor is available.
             # On Windows this is cl.exe (MSVC); on Linux/macOS it is gcc/clang.
