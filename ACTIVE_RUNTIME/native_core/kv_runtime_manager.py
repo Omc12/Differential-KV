@@ -558,8 +558,27 @@ class KVRuntimeManager:
             print(f"[DiffKV] MPS + low preset detected: reducing pool budget to {pool_budget_bytes // (1024**2)}MB "
                   f"for {expected_tokens} expected tokens to fit 4GB MPS limit")
         else:
-            # Clamp pool between 128MB and 4.0GB (generous limit for multi-session serving)
-            pool_budget_bytes = max(128 * 1024 ** 2, min(4 * 1024 ** 3, pool_budget_bytes))
+            # Clamp pool between 128MB and the budget ceiling.
+            #
+            # This ceiling is not a VRAM reservation — the pool is lazy, so it
+            # only ever allocates the slots a session actually fills.  What the
+            # ceiling really sets is max_blocks (below), i.e. the LONGEST
+            # CONTEXT the pool can represent:
+            #     max_ctx ~= (ceiling / bytes_per_block / num_layers) * block_size
+            # So a ceiling that is too low silently caps context instead of
+            # saving memory, and the failure looks like pool exhaustion rather
+            # than OOM.
+            #
+            # 4GB was sized around rank 16.  Raising the default rank to 32
+            # (MLX parity) grows bytes_per_block ~2x and would have dropped the
+            # ceiling on a 48-layer model from ~211K to ~107K tokens — breaking
+            # the 128K evaluation.  8GB restores ~200K of headroom at zero
+            # allocation cost.  MPS keeps 4GB: unified memory is the hard
+            # constraint there, and MLX manages its own pool anyway.
+            _ceiling_gb = float(os.environ.get("DIFFKV_POOL_BUDGET_GB", "8"))
+            pool_budget_bytes = max(
+                128 * 1024 ** 2, min(int(_ceiling_gb * 1024 ** 3), pool_budget_bytes)
+            )
         
         min_blocks = 2048 if self.serving_mode == "lightweight" else (4096 if self.serving_mode == "balanced" else 8000)
         
@@ -569,7 +588,30 @@ class KVRuntimeManager:
         
         dynamic_max_blocks = max(min_blocks, min(65536, pool_budget_bytes // bytes_per_block))
         self.max_blocks = dynamic_max_blocks
-        
+
+        # Surface the context ceiling this pool implies.  max_blocks is shared
+        # across layers, so the reachable context is (max_blocks / num_layers)
+        # blocks per layer.  Exhausting it does not raise OOM — it just stops
+        # accepting compressed blocks — so print it rather than let a long run
+        # fail obscurely.  Note bytes_per_block above deliberately excludes the
+        # residual arrays; the pool's own accounting includes them, so report
+        # the real per-slot cost here too.
+        _max_res = getattr(self.config, "max_residual_tokens", 8) if self.config is not None else 8
+        _res_bytes = _max_res * (2 + 2 + self.kv_heads * self.head_dim * 2 * 2)
+        _true_bpb = bytes_per_block + _res_bytes
+        _blocks_per_layer = max(1, dynamic_max_blocks // max(self.num_layers, 1))
+        print(
+            f"[DiffKV Memory] Pool: max_blocks={dynamic_max_blocks} "
+            f"({_blocks_per_layer}/layer x {self.num_layers} layers "
+            f"~= {_blocks_per_layer * pool_block_size:,} tokens max context), "
+            f"rank={self.rank} (pool_rank={pool_rank}), "
+            f"max_residual={_max_res}, "
+            f"{_true_bpb / 1024:.0f} KB/slot, "
+            f"budget={pool_budget_bytes / 1024**3:.1f} GB, "
+            f"worst-case {dynamic_max_blocks * _true_bpb / 1e9:.1f} GB if every slot fills "
+            f"(lazy: only used slots are allocated)"
+        )
+
         self.native_pool = NativeBlockPool(
             max_blocks=dynamic_max_blocks,
             num_kv_heads=self.kv_heads,

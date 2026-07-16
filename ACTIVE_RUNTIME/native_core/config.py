@@ -38,7 +38,11 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "q4_0"
             self.max_active_dense_tokens = 1024
-            self.max_residual_tokens = 8
+            # Residual budget per block.  See the "mid" branch for why these
+            # moved off 8; `low` uses MLX's own documented speed/memory
+            # trade-back value (mlx_diffkv_wrapper.py:1557) rather than its 128
+            # default, because `low` exists to bound memory.
+            self.max_residual_tokens = 64
         elif self.preset == "high":
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 16384
@@ -51,8 +55,7 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "f16"
             self.max_active_dense_tokens = 4096
-            # On CUDA, allow more residuals for better correction at high quality
-            self.max_residual_tokens = 8 if is_macos else 16
+            self.max_residual_tokens = 128
         else:  # "mid" (Default)
             self.decode_cache_enabled = True
             self.decode_cache_max_tokens = 4096
@@ -66,7 +69,19 @@ class DiffKVConfig:
             self.srl_age_penalty = 0.01
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
-            self.max_residual_tokens = 8
+            # 128 matches MLX's DIFFKV_MAX_RESIDUAL default
+            # (mlx_diffkv_wrapper.py:1560) and the paper's config of record.
+            # This path shipped 8 — the same residual cap already identified as
+            # a needle-recall root cause in the native runtime (fixed there
+            # 8->40).  Residuals are the exact-token correction on top of the
+            # lossy SVD, so this is the main quality dial.
+            #
+            # Cost: residual arrays dominate bytes/block (at R=128 they are ~78%
+            # of a slot), and they scale with kv_heads x layers.  MLX validated
+            # 128 on a 1.5B/2-kv-head model; on a 14B/8-kv-head/48-layer model
+            # the same setting is roughly an order of magnitude more VRAM.
+            # Lower via DIFFKV_MAX_RESIDUAL_TOKENS if the pool does not fit.
+            self.max_residual_tokens = 128
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(

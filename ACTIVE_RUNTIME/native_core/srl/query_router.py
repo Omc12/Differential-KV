@@ -876,18 +876,38 @@ def route_query_fixed_k(
     layer_idx:  int,
     query_tokens: Optional[List[int]] = None,
 ) -> torch.Tensor:
-    """Always returns exactly K_FIXED pool slot IDs, padded with duplicates if necessary."""
+    """Return at most K_FIXED pool slot IDs, ranked best-first, always distinct.
+
+    This used to pad the selection up to exactly K_FIXED by repeating
+    ``selected[-1]``, to hand the decode kernel a static block count.  The
+    padding is unsound: the caller feeds this list straight into
+    ``block_indices`` (diffkv_attention.py:676), and the sparse kernel scores
+    every entry independently, so a repeated block enters the softmax once per
+    copy.  Padding repeats the *lowest-ranked* selected block, so that block was
+    the one whose weight got inflated.
+
+    Concretely, at the 13.4K NAT prompt (49 blocks) with adaptive_k picking
+    K=20: the kernel received 64 entries, 44 of them copies of the 20th-ranked
+    block — its attention weight inflated ~45x, while the dispatch did MORE work
+    (64) than simply attending every block (49).  That is why routing measured
+    no faster than not routing.
+
+    MPS/MLX never hit this (it returns above), and MLX's own router selects a
+    fixed K=16 *distinct* blocks.  Match that semantic: truncate when we have
+    more than K_FIXED, otherwise return what we have.  The count is still stable
+    for a given block count, and it can never exceed the number of live blocks.
+    """
     selected = route_query(Q, srl_state, pool, scale, layer_idx, query_tokens)
-    
+
     if Q.device.type == "mps":
         return selected
 
     if selected.numel() == 0:
-        return torch.zeros(K_FIXED, dtype=torch.int32, device=Q.device)
-        
-    if selected.numel() >= K_FIXED:
+        # No routing signal — an empty selection means "no opinion".  Returning
+        # K_FIXED copies of slot 0 would force the kernel onto block 0 alone.
+        return selected
+
+    if selected.numel() > K_FIXED:
         return selected[:K_FIXED]
-        
-    pad_count = K_FIXED - selected.numel()
-    pad = selected[-1:].expand(pad_count)
-    return torch.cat([selected, pad])
+
+    return selected

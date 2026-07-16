@@ -377,7 +377,11 @@ class PyTorchDiffKVHFWrapper:
         
         self.mode = self.config.get("mode", "fp16")
         self.block_size = self.config.get("block_size", 256)      # S=256 → 5.2× compression
-        self.rank = self.config.get("rank", 16)
+        # Rank 32 matches the MLX wrapper (mlx_diffkv_wrapper.py:4493) and the
+        # paper's config of record.  This path defaulted to 16, which is the
+        # exact value already diagnosed as a ~43% needle-recall floor in the
+        # native runtime — CUDA was the last runtime still shipping it.
+        self.rank = self.config.get("rank", 32)
         self.micro_block_size = self.config.get("micro_block_size", 256)
         
         self.local_files_only = (
