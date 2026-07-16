@@ -470,6 +470,31 @@ _RE_DEFINITIONS_BOOST = re.compile(
 )
 
 
+def _gather_block_token_ids(block, manager) -> Optional[List[int]]:
+    """Return this block's token IDs in order, or None if unavailable.
+
+    Shared by _block_boost_rank (SVD rank boost, below) and
+    compress_layer_blocks_gpu's residual-capture finalization loop (content-
+    aware residual boost) — both need the same "look up this block's actual
+    token ids" step, just for different downstream purposes.  One vectorised
+    gather + tolist() replaces a per-position .item() loop (256 Python
+    round-trips per block).
+    """
+    if manager is None:
+        return None
+    sid = getattr(block, "session_id", None)
+    all_tids = None
+    if getattr(manager, "_session_token_ids", None) is not None:
+        all_tids = manager._session_token_ids.get(sid)
+    if all_tids is None:
+        return None
+    positions = [p for p in getattr(block, "token_indices", []) if 0 <= p < len(all_tids)]
+    if not positions:
+        return None
+    idx = torch.tensor(positions, dtype=torch.long, device=all_tids.device)
+    return all_tids[idx].tolist()
+
+
 def _block_boost_rank(block, rank: int, manager) -> int:
     """Return the SVD rank for one block, boosting content-bearing blocks by 1.5x.
 
@@ -502,18 +527,10 @@ def _block_boost_rank(block, rank: int, manager) -> int:
             return cached
 
     tokenizer = getattr(manager, "tokenizer", None)
-    all_tids = None
-    if getattr(manager, "_session_token_ids", None) is not None:
-        all_tids = manager._session_token_ids.get(sid)
-
     block_rank = rank
-    if tokenizer is not None and all_tids is not None:
-        # One vectorised gather + tolist() replaces the previous per-position
-        # .item() loop (256 Python round-trips per block).
-        positions = [p for p in getattr(block, "token_indices", []) if 0 <= p < len(all_tids)]
-        if positions:
-            idx = torch.tensor(positions, dtype=torch.long, device=all_tids.device)
-            block_token_ids = all_tids[idx].tolist()
+    if tokenizer is not None:
+        block_token_ids = _gather_block_token_ids(block, manager)
+        if block_token_ids:
             try:
                 block_text = tokenizer.decode(block_token_ids)
                 boost = (
@@ -747,8 +764,15 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         # under the pool's max_residual_tokens truncation the boosted
         # (value/owner/table) rows sort first and are what survives. Budget
         # floor mirrors the other impls: boosted rows + margin, capped at
-        # T_active. Requires the tokenizer + session ids already fetched for
-        # the block-rank heuristic; silently skipped when absent.
+        # T_active.
+        #
+        # This block's own token ids — NOT the rank-boost loop's variable
+        # above, which only ever held the LAST block of blocks_list by the
+        # time execution reaches here (they are two separate loops over the
+        # same list).  Silently applying one block's tokens to every other
+        # block's residual selection was a pre-existing bug; look them up
+        # fresh per block instead of relying on Python for-loop leakage.
+        block_token_ids = _gather_block_token_ids(block, manager)
         if block_token_ids and getattr(manager, "tokenizer", None) is not None \
                 and len(block_token_ids) == T_active:
             try:
