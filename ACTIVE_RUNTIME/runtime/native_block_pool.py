@@ -114,6 +114,31 @@ class NativeBlockPool:
             self._allocated = True
 
     # ── Phase 2: Actual GPU allocation ───────────────────────────────────────
+    def _required_blocks(self, n_tokens: int = None) -> int:
+        """Return the slot count needed for prefill plus bounded decode headroom."""
+        if n_tokens is None or n_tokens <= 0:
+            n_tokens = self._default_token_hint
+
+        blocks_per_layer = max(
+            1, (int(n_tokens) + self.max_seq_len - 1) // self.max_seq_len
+        )
+
+        # One guard block per layer absorbs the first decode block after a
+        # partially filled prefill tail.  Additional headroom is opt-in so
+        # long-generation serving can trade memory for fewer pool grows.
+        import os as _os_pool
+        try:
+            reserve_tokens = int(
+                _os_pool.environ.get("DIFFKV_DECODE_RESERVE_TOKENS", "0")
+            )
+        except ValueError:
+            reserve_tokens = 0
+        reserve_tokens = max(0, reserve_tokens)
+        reserve_blocks_per_layer = 1 + (
+            reserve_tokens + self.max_seq_len - 1
+        ) // self.max_seq_len
+        return (blocks_per_layer + reserve_blocks_per_layer) * self.num_layers
+
     def ensure_allocated(self, n_tokens: int = None) -> None:
         """
         Allocate pool tensors sized to *n_tokens* of context.
@@ -129,20 +154,13 @@ class NativeBlockPool:
         if self._allocated:
             return  # Already allocated — nothing to do
 
-        if n_tokens is None or n_tokens <= 0:
-            n_tokens = self._default_token_hint
+        n_desired = self._required_blocks(n_tokens)
 
-        # n_blocks = blocks needed across all layers with 1.5x headroom, clamped to [64, max_blocks]
-        n_raw = max(1, int(n_tokens / self.max_seq_len) * self.num_layers)
-        n_desired = int(n_raw * 1.5)
-        
-        # CRITICAL: On CUDA we pre-allocate the full n_desired to avoid mid-session
-        # _grow_pool stalls (which realloc all 17 pool tensors and block decode for
-        # hundreds of ms). The 512 cap was only needed on MPS due to Metal memory limits.
         if self._is_mps:
             n_blocks = max(64, min(n_desired, self.max_blocks // 2, 512))
         else:
-            # CUDA: pre-allocate fully; _grow_pool will never fire during a normal session
+            # CUDA: pre-allocate exact prefill capacity plus the small guard
+            # above.  _grow_pool handles unusually long generations.
             n_blocks = max(64, min(n_desired, self.max_blocks))
 
         self._allocate_tensors(n_blocks)

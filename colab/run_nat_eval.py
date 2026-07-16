@@ -345,6 +345,10 @@ def run_worker(config_name, model_id):
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 forward_time = time.perf_counter() - t_prefill_start
+                prefill_forward_vram = (
+                    torch.cuda.memory_allocated() / 1e9
+                    if torch.cuda.is_available() else 0.0
+                )
 
                 # Snapshot the final prefill logits before compression/SRL
                 # finalization can allocate or mutate CUDA workspaces.
@@ -370,6 +374,10 @@ def run_worker(config_name, model_id):
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 compress_time = time.perf_counter() - t_compress_start
+                prefill_compress_vram = (
+                    torch.cuda.memory_allocated() / 1e9
+                    if torch.cuda.is_available() else 0.0
+                )
 
                 # ── Block-state diagnostic (one-time, remove after fix) ──
                 _smgr = getattr(mgr, "_streaming_mgr", None)
@@ -461,7 +469,15 @@ def run_worker(config_name, model_id):
                     "decode_time_s": decode_time,
                     "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
                     "peak_prefill_vram_gb": peak_prefill_vram,
+                    "prefill_forward_vram_gb": prefill_forward_vram,
+                    "prefill_compress_vram_gb": prefill_compress_vram,
                     "peak_decode_vram_gb": peak_decode_vram,
+                    "pool_physical_mb": (
+                        mgr.native_pool._pool_mb()
+                        if getattr(mgr, "native_pool", None) is not None
+                        and hasattr(mgr.native_pool, "_pool_mb")
+                        else 0.0
+                    ),
                     "kv_cache_vram_gb": kv_vram,
                     "output_text": generated_text,
                 }
@@ -562,7 +578,10 @@ def run_worker(config_name, model_id):
                     "decode_time_s": decode_time,
                     "decode_tps": len(gen_ids) / decode_time if decode_time > 0 else 0.0,
                     "peak_prefill_vram_gb": peak_prefill_vram,
+                    "prefill_forward_vram_gb": 0.0,
+                    "prefill_compress_vram_gb": 0.0,
                     "peak_decode_vram_gb": peak_decode_vram,
+                    "pool_physical_mb": 0.0,   # dense baseline has no DiffKV pool
                     "kv_cache_vram_gb": kv_vram,
                     "output_text": generated_text,
                 }
@@ -678,7 +697,17 @@ def main():
                     f"+ compress={p_res.get('prefill_compress_s',0):.2f}s, "
                     f"CH={p_res.get('prefill_chunk_size','?')}), "
                     f"tps={p_res.get('decode_tps',0):.1f}, "
-                    f"kv_mem={p_res.get('kv_cache_vram_gb',0):.3f}GB",
+                    # PEAK VRAM is the number that matters for "does DiffKV save RAM":
+                    # torch.cuda.max_memory_allocated across prefill / decode, which
+                    # includes weights + raw KV + pool + workspaces.  kv_mem is the
+                    # analytic/logical store size only (misleadingly small — it does
+                    # not count the pool's uniform-slot padding or transient buffers).
+                    f"peak_prefill={p_res.get('peak_prefill_vram_gb',0):.2f}GB, "
+                    f"after_fwd={p_res.get('prefill_forward_vram_gb',0):.2f}GB, "
+                    f"after_comp={p_res.get('prefill_compress_vram_gb',0):.2f}GB, "
+                    f"peak_decode={p_res.get('peak_decode_vram_gb',0):.2f}GB, "
+                    f"pool={p_res.get('pool_physical_mb',0):.0f}MB, "
+                    f"kv_logical={p_res.get('kv_cache_vram_gb',0):.3f}GB",
                     flush=True,
                 )
         else:

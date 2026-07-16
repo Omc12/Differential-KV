@@ -753,6 +753,11 @@ class KVRuntimeManager:
         # Phase 32 Fix: GPU block_indices cache to eliminate PCIe & GPU allocator churn
         self._indices_gpu_cache: dict = {}
 
+        # Decode metadata cache: compressed membership and dense block identity
+        # are stable across ordinary token appends.  The streaming manager bumps
+        # a per-layer version when a block is created or changes state.
+        self._decode_block_cache: dict = {}
+
 
 
         # Fast-path counter: number of blocks in CPU_COMPRESSED state waiting for
@@ -770,7 +775,6 @@ class KVRuntimeManager:
         # Fix 1: Lazy pool allocation — size to actual session context on first use.
         if getattr(self, "native_pool", None) is not None:
             pool = self.native_pool
-            growth_factor = 1.5
             block_size = self.micro_block_size if self.streaming_ingest else self.block_size
             block_size = max(block_size, 257)
 
@@ -779,10 +783,35 @@ class KVRuntimeManager:
                 # max_tokens_hint is the prompt_len passed from batch_engine.
                 # Fall back to prefill_len, then to the serving_mode expected size.
                 hint = max_tokens_hint or prefill_len or None
-                pool.ensure_allocated(hint)
+                # A fresh CUDA prefill reads its prior chunks from the raw
+                # accumulating blocks; it cannot use compressed pool rows yet.
+                # Deferring the pool allocation until the compression boundary
+                # removes pool + raw-KV overlap from the forward-pass peak.
+                # Short contexts still allocate on their first decode token.
+                _is_cuda = (
+                    str(self.device).startswith("cuda")
+                    or (isinstance(self.device, torch.device) and self.device.type == "cuda")
+                )
+                _defer_pool = (
+                    _is_cuda
+                    and hint is not None
+                    and prefill_len > 1
+                    and os.environ.get("DIFFKV_DEFER_PREFILL_POOL", "1")
+                    not in ("0", "false", "off")
+                )
+                if not _defer_pool:
+                    pool.ensure_allocated(hint)
             elif max_tokens_hint is not None:
-                # Pool already allocated: grow if this session needs more space
-                needed_blocks = int((max_tokens_hint / block_size) * self.num_layers * growth_factor)
+                # Pool already allocated: grow only to the exact capacity this
+                # session needs.  The old 1.5× multiplier reintroduced the
+                # same steady-state padding that lazy allocation removed.
+                if hasattr(pool, "_required_blocks"):
+                    needed_blocks = pool._required_blocks(max_tokens_hint)
+                else:
+                    needed_blocks = (
+                        max(1, (int(max_tokens_hint) + block_size - 1) // block_size)
+                        * self.num_layers
+                    )
                 if needed_blocks > pool.current_blocks:
                     print(f"[DiffKV] Growing block pool from {pool.current_blocks} → "
                           f"{needed_blocks} blocks for session {session_id}")
@@ -830,6 +859,11 @@ class KVRuntimeManager:
             session_dict.pop("indices_gpu", None)
             session_dict.pop("decode_cos_sliced", None)
             session_dict.pop("decode_sin_sliced", None)
+
+        self._decode_block_cache = {
+            key: value for key, value in self._decode_block_cache.items()
+            if key[0] != session_id
+        }
 
         if clear_srl:
             self._session_srl.pop(session_id, None)
@@ -1350,6 +1384,8 @@ class KVRuntimeManager:
         # Now fully clear the workspace entry
         if hasattr(self, 'decode_workspace'):
             self.decode_workspace.pop(session_id, None)
+
+        self._decode_block_cache.pop(session_id, None)
 
         # Free blocks from NativeBlockPool before deleting references
         if hasattr(self, 'native_pool') and self.native_pool is not None:
@@ -1914,6 +1950,19 @@ class KVRuntimeManager:
         if metadata is None:
             return None, [], None, None, None
 
+        metadata_version = self._streaming_mgr._metadata_versions.get(
+            session_id, {}
+        ).get(layer_idx, 0)
+        cache_key = (session_id, layer_idx)
+        device_key = (device.type, device.index)
+        cached = self._decode_block_cache.get(cache_key)
+        if (
+            cached is not None
+            and cached[0] == metadata_version
+            and cached[1] == device_key
+        ):
+            return cached[2]
+
         active_meta = metadata[:num_blocks]          # CPU slice view
 
         # state_code 2 == COMPRESSED
@@ -1960,7 +2009,19 @@ class KVRuntimeManager:
         # and SUBMITTED blocks will be promoted to COMPRESSED shortly after decode starts.
         dense_blocks = [block for block in blocks if block.state == "ACCUMULATING"]
 
-        return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len
+        result = (
+            block_indices_tensor,
+            dense_blocks,
+            anchor_indices_gpu,
+            max_anchor_idx,
+            max_valid_len,
+        )
+        self._decode_block_cache[cache_key] = (
+            metadata_version,
+            device_key,
+            result,
+        )
+        return result
 
     def assemble_dense_window_kv(
         self,

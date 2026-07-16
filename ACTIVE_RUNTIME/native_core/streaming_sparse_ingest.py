@@ -512,6 +512,11 @@ class StreamingSparseIngestManager:
         
         # session_id -> layer_idx -> Contiguous 2D metadata tensor [MAX_BLOCKS, 4]
         self.session_metadata: Dict[str, Dict[int, torch.Tensor]] = {}
+
+        # Metadata changes relevant to sparse decode only when block membership
+        # or compression state changes.  Decode token appends update the live
+        # block/ring-buffer directly and do not need to invalidate this cache.
+        self._metadata_versions: Dict[str, Dict[int, int]] = {}
         
         # session_id -> micro_block_size (dynamic adaptive size per session)
         self.session_micro_block_sizes: Dict[str, int] = {}
@@ -546,6 +551,7 @@ class StreamingSparseIngestManager:
             self.session_blocks[session_id] = {i: [] for i in range(num_layers)}
         if session_id not in self.session_metadata:
             self.session_metadata[session_id] = {}
+        self._metadata_versions.setdefault(session_id, {})
         self.session_prefill_lens[session_id] = prefill_len
         if session_id not in self.session_micro_block_sizes:
             if prefill_len > 0:
@@ -615,6 +621,7 @@ class StreamingSparseIngestManager:
     def clear_session(self, session_id: str):
         self.session_blocks.pop(session_id, None)
         self.session_metadata.pop(session_id, None)
+        self._metadata_versions.pop(session_id, None)
         self.session_micro_block_sizes.pop(session_id, None)
         self.session_staging_buffers.pop(session_id, None)
         self.session_prefill_lens.pop(session_id, None)
@@ -714,6 +721,8 @@ class StreamingSparseIngestManager:
         metadata[block_idx, 1] = int(block.anchor_idx)
         metadata[block_idx, 2] = block.token_count()
         metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
+        versions = self._metadata_versions.setdefault(session_id, {})
+        versions[layer_idx] = versions.get(layer_idx, 0) + 1
 
     def update_metadata_state(self, session_id: str, layer_idx: int, block):
         """
@@ -737,6 +746,8 @@ class StreamingSparseIngestManager:
             metadata[block_idx, 0] = int(block.pool_idx) if block.pool_idx is not None else -1
             metadata[block_idx, 2] = block.token_count()
             metadata[block_idx, 3] = _STATE_CODES.get(block.state, -1)
+            versions = self._metadata_versions.setdefault(session_id, {})
+            versions[layer_idx] = versions.get(layer_idx, 0) + 1
 
     def _should_skip_compression(self, session_id: str, anchor_idx: int, block_capacity: int) -> bool:
         """
@@ -1008,7 +1019,9 @@ class StreamingSparseIngestManager:
             current_block.token_indices.append(
                 current_block.anchor_idx + len(current_block.token_indices)
             )
-            self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, current_block)
+            # The decode cache only consumes compressed membership/state from
+            # metadata.  The dense window reads the live block and ring buffer,
+            # so rewriting this CPU row for every token is unnecessary.
 
             # Get the current sequence length to determine rolling dense window
             current_seq_len = current_block.anchor_idx + len(current_block.token_indices)
@@ -1050,6 +1063,15 @@ class StreamingSparseIngestManager:
         # SVD compression is deferred during prefill to ensure 100% exact causal attention
         # and prevent mixing compressed/uncompressed blocks which perturbs logits.
         past_blocks_to_compress = []
+
+        # Fresh CUDA prefills can keep these blocks entirely in their raw
+        # accumulating representation until the boundary.  Pool rows are not
+        # read by this exact-causal path, so avoid allocating the full pool (and
+        # its residual slabs) while the raw KV is still resident.
+        _pool_ready = (
+            self.native_pool is not None
+            and getattr(self.native_pool, "_allocated", True)
+        )
 
         # All four historical regions currently use the same MBS.  Splitting
         # at the fixed 1024/4096/12288 boundaries therefore changes nothing
@@ -1101,9 +1123,19 @@ class StreamingSparseIngestManager:
                 active_k_blocks = k_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
                 active_v_blocks = v_reshaped[:, :, :, 1:].permute(2, 0, 1, 3, 4)
 
+                # Keep one owning tensor per K/V batch instead of launching a
+                # separate device clone for every block.  The per-block
+                # slices below remain views of these tensors, so their
+                # storage stays alive until deferred compression consumes it.
+                # This preserves the old ownership/lifetime guarantee while
+                # removing thousands of small CUDA allocations on long
+                # prefills.
+                active_k_owned = active_k_blocks.contiguous()
+                active_v_owned = active_v_blocks.contiguous()
+
                 # Pre-allocate NativeBlockPool indices in a single batch call!
                 pool_indices = []
-                if self.native_pool is not None:
+                if _pool_ready:
                     pool_indices = self.native_pool.allocate_blocks(num_full_blocks)
 
                 for i in range(num_full_blocks):
@@ -1121,8 +1153,8 @@ class StreamingSparseIngestManager:
                         token_indices=list(range(anchor_idx, anchor_idx + block_capacity)),
                         pool_idx=pool_idx,
                     )
-                    new_block.active_k = active_k_blocks[i].clone()
-                    new_block.active_v = active_v_blocks[i].clone()
+                    new_block.active_k = active_k_owned[i]
+                    new_block.active_v = active_v_owned[i]
                     
                     # Outlier check (CPU-local list access, zero sync overhead)
                     new_block.is_outlier = False
@@ -1175,7 +1207,7 @@ class StreamingSparseIngestManager:
                     token_indices.extend(list(range(anchor_idx + 1, anchor_idx + 1 + (region_len - active_start))))
 
                 pool_idx = None
-                if self.native_pool is not None:
+                if _pool_ready:
                     pool_idx = self.native_pool.allocate_block()
 
                 new_block = StreamingKVBlock(
@@ -1238,6 +1270,9 @@ class StreamingSparseIngestManager:
                     metadata[bi, 1] = int(block.anchor_idx)
                     metadata[bi, 2] = block.token_count()
                     metadata[bi, 3] = _STATE_CODES.get(block.state, -1)
+
+                versions = self._metadata_versions.setdefault(session_id, {})
+                versions[layer_idx] = versions.get(layer_idx, 0) + 1
 
             # Batch submit all compression requests in one consolidation transfer
             if full_blocks_to_compress:
@@ -1528,6 +1563,15 @@ class StreamingSparseIngestManager:
             if _diag:
                 print(f"[DIAG compress_deferred] EARLY RETURN: total_seq_len={total_seq_len} < short_context_threshold={self.short_context_threshold}", flush=True)
             return  # No blocks are eligible
+
+        # If init_session deferred a fresh CUDA pool, materialize it now with
+        # the actual context length before compressed rows are published.  The
+        # exact prefill path above never needs pool-backed rows.
+        if (
+            self.native_pool is not None
+            and not getattr(self.native_pool, "_allocated", True)
+        ):
+            self.native_pool.ensure_allocated(total_seq_len)
 
         # 2. Iterate over each layer
         for layer_idx, blocks in layers.items():
