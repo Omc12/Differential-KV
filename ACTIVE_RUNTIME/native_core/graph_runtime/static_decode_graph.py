@@ -77,8 +77,8 @@ class CUDAGraphDecodeRunner:
         if _is_cuda_available() and not self._capture_enabled:
             import sys as _sys
             print(
-                "[DiffKV] CUDA graph capture DISABLED (default — mutable routing state "
-                "prevents correct replay). Set DIFFKV_DISABLE_CUDA_GRAPH=0 to opt-in.",
+                "[DiffKV] CUDA graph capture DISABLED (mutable routing state "
+                "prevents correct replay; the compatibility opt-in is still ABI-guarded).",
                 file=_sys.stderr,
             )
         self._num_warmup             = 3

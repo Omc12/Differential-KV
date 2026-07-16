@@ -234,6 +234,7 @@ def run_worker(mode, model_id, target_len):
                 _block_capacity = max(2, int(_mbs) + 1)
                 CH = ((CH + _block_capacity - 1) // _block_capacity) * _block_capacity
                 print(f"    [Prefill] Aligned chunk size: {CH} (block_capacity={_block_capacity})", flush=True)
+                print("    [Prefill] CUDA exact-prefill mode: SVD deferred until boundary; internal splitter is block-aligned", flush=True)
             t_prefill_start = time.perf_counter()
             for cs in range(0, len(ids), CH):
                 ch = ids[cs:cs+CH]

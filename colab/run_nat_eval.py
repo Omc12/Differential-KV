@@ -279,6 +279,7 @@ def run_worker(config_name, model_id):
             if _cfg is not None:
                 CH = _cfg.prefill_chunk_size
             print(f"[NAT eval] Outer prefill chunk size: CH={CH}", flush=True)
+            print("[NAT eval] CUDA exact-prefill mode: SVD deferred until boundary; contiguous block layout", flush=True)
             # CH controls forward-pass throughput, not compression.
             # Compression runs post-forward (compress_deferred_prefill_blocks) at any CH.
             for idx, full_prompt in all_prompts:
@@ -387,6 +388,14 @@ def run_worker(config_name, model_id):
                 peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 
                 generated_text = tok.decode(gen_ids)
+                if not gen_ids:
+                    _topv, _topi = torch.topk(last_logits_gpu, k=5)
+                    print(
+                        f"[DIAG] zero-token decode prompt{idx}: first_id={int(_topi[0].item())} "
+                        f"stop={int(_topi[0].item()) in stop_ids} "
+                        f"top5={[int(x) for x in _topi.tolist()]}",
+                        flush=True,
+                    )
                 kv = analytic_kv_bytes(mgr, prompt_len, sid)
                 kv_vram = kv.get("store_used_bytes", 0) / 1e9
 

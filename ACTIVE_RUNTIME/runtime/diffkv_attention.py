@@ -117,6 +117,38 @@ def _get_engage_threshold():
     return int(os.environ.get("DIFFKV_ENGAGE_THRESHOLD", "4096"))
 
 
+def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
+    """Return a prefill chunk size that preserves the CUDA block stride.
+
+    The outer CUDA runners already round chunks to ``micro_block_size + 1``.
+    The attention hook has its own internal chunk loop, though; leaving that
+    loop at the raw 1024-token config split a 1028-token outer chunk into
+    1024 + 4 and created the 252-token/3-token block pairs seen in validation.
+    MLX has one contiguous dense tail, so its internal and external chunk
+    boundaries never disagree.  Keep the same invariant here.
+    """
+    configured = os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE")
+    if configured is not None:
+        try:
+            base = int(configured)
+        except ValueError:
+            base = 512
+    else:
+        cfg = getattr(kv_manager, "config", None)
+        base = int(getattr(cfg, "prefill_chunk_size", 512))
+    base = max(1, base)
+
+    if getattr(device, "type", None) == "cuda" and hasattr(kv_manager, "get_session_micro_block_size"):
+        try:
+            capacity = max(2, int(kv_manager.get_session_micro_block_size(session_id)) + 1)
+            base = ((base + capacity - 1) // capacity) * capacity
+        except Exception:
+            # Chunking must never make attention fail; the configured value is
+            # still a valid fallback if the session is not initialized yet.
+            pass
+    return base
+
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -1924,12 +1956,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         # ── INCREMENTAL PREFILL (2nd+ turn) ─────────────────────────────────
                         # Compressed history already exists in the pool from a prior turn.
                         # Chunk the new query sequence to avoid high peak memory on MPS.
-                        _chunk_size = os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE")
-                        if _chunk_size is not None:
-                            _chunk_size = int(_chunk_size)
-                        else:
-                            cfg = getattr(kv_manager, "config", None)
-                            _chunk_size = cfg.prefill_chunk_size if cfg is not None else 512
+                        _chunk_sid = next(
+                            (x for x in session_ids if x != "dummy_session"),
+                            "default",
+                        )
+                        _chunk_size = _get_prefill_chunk_size(
+                            kv_manager, _chunk_sid, query_states.device
+                        )
                         seq_lens = []
                         for b_idx, sid in enumerate(session_ids):
                             if sid == "dummy_session":
@@ -2070,12 +2103,13 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         # ── FRESH PREFILL (1st turn / new session) ───────────────────────────
                         # Attend to previous prefill chunks of the same prompt if they exist.
                         # This is critical for progressive prompt chunking correctness!
-                        _chunk_size = os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE")
-                        if _chunk_size is not None:
-                            _chunk_size = int(_chunk_size)
-                        else:
-                            cfg = getattr(kv_manager, "config", None)
-                            _chunk_size = cfg.prefill_chunk_size if cfg is not None else 512
+                        _chunk_sid = next(
+                            (x for x in session_ids if x != "dummy_session"),
+                            "default",
+                        )
+                        _chunk_size = _get_prefill_chunk_size(
+                            kv_manager, _chunk_sid, query_states.device
+                        )
                         # B2: Pre-compute per-batch position offsets with a single .tolist()
                         # sync so the inner chunk loop reads plain Python ints, not tensors.
                         if position_ids is not None:

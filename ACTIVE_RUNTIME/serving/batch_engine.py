@@ -1182,22 +1182,19 @@ class ContinuousBatchEngine:
             del input_ids, position_ids
 
             # ── Per-chunk KV compression flush ──────────────────────────────────────
-            # CRITICAL for MLX models: compress_prefill_kv() is intentionally a no-op
-            # in MLXDiffKVKVManager (line 1815: `pass`). All KV tensors from each
-            # forward pass are stashed by the MLX attention hook. Without per-chunk
-            # compression, we accumulate ALL 226 chunks × 28 layers of raw KV into
-            # RAM (~6–8 GB for 29K tokens), then attempt one giant batched SVD at
-            # end-of-prefill. That single Metal submission takes 60s+ → GPU watchdog.
-            #
-            # compress_deferred_prefill_blocks() has "STREAMING semantics: safe (and
-            # intended) to call after EVERY prefill chunk" (its own docstring). The
-            # standalone generate() method does exactly this. batch_engine.py must too.
-            #
-            # Calling it per-chunk keeps the stash bounded to ~1 chunk per layer,
-            # memory stays flat, and each Metal SVD dispatch completes in <1s.
-            if hasattr(self.wrapper.manager, "compress_deferred_prefill_blocks"):
-                self.wrapper.manager.compress_deferred_prefill_blocks(req.session_id)
+            # MLX can safely publish compressed blocks here because its compiled
+            # prefill attention keeps the raw dense tail as explicit array state.
+            # The CUDA attention hook reads the same StreamingKVBlock objects as
+            # history; publishing SVD blocks before the final prefill chunk would
+            # feed reconstructed KV back into causal attention and change logits.
+            # Keep CUDA exact and let the final-boundary call below submit SVD.
+            _is_mlx_wrapper = bool(getattr(self.wrapper, "is_mlx", False))
+            if _is_mlx_wrapper:
+                if hasattr(self.wrapper.manager, "compress_deferred_prefill_blocks"):
+                    self.wrapper.manager.compress_deferred_prefill_blocks(req.session_id)
             elif hasattr(self.wrapper.manager, "compress_prefill_kv"):
+                # Compatibility hook; the CUDA implementation only performs
+                # bookkeeping and does not publish compression during prefill.
                 self.wrapper.manager.compress_prefill_kv(req.session_id)
 
             if req.prefill_offset >= len(req.prompt_ids):

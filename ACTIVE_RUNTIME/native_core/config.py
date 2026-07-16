@@ -145,14 +145,14 @@ class DiffKVConfig:
         # Default OFF until the graph ABI is redesigned around device-resident
         # routing/session state.  The current implementation captures mutable
         # Python state and produces stale outputs after any routing change.
-        # Enable with DIFFKV_DISABLE_CUDA_GRAPH=0.
-        self.cuda_graph = self._get_bool(
-            "cuda_graph", "__DIFFKV_CUDA_GRAPH_PLACEHOLDER", False, config_dict
-        )
-        # Read disable flag directly for parity with static_decode_graph.py.
-        if not is_macos:
-            _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
-            self.cuda_graph = (_disable_graph != "1")
+        # DIFFKV_DISABLE_CUDA_GRAPH=0 is retained as a compatibility request,
+        # but the current mutable model does not have the static-state ABI
+        # required for a valid full-forward graph.  Keep the effective flag
+        # false so config telemetry cannot claim graphs are active merely
+        # because an environment variable was set.
+        _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
+        self.cuda_graph_requested = (not is_macos and _disable_graph != "1")
+        self.cuda_graph = False
 
         # gc_interval: decode steps between torch.cuda.empty_cache() calls.
         # 500 on CUDA amortises allocator overhead without large fragmentation.
@@ -207,7 +207,10 @@ class DiffKVConfig:
                 print(f"  --- CUDA-specific ---")
                 print(f"  factual_store             = {self.factual_store}")
                 print(f"  gpu_compress              = {self.gpu_compress}")
-                print(f"  cuda_graph                = {self.cuda_graph}")
+                _graph_note = "static ABI unavailable"
+                if self.cuda_graph_requested:
+                    _graph_note += "; request ignored"
+                print(f"  cuda_graph                = {self.cuda_graph} ({_graph_note})")
                 print(f"  gc_interval               = {self.gc_interval}")
                 print(f"  srl_route_every           = {self.srl_route_every}")
 
