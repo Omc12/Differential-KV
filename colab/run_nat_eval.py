@@ -312,11 +312,19 @@ def run_worker(config_name, model_id):
                         torch.tensor([ch], device=device),
                         torch.tensor([list(range(cs, cs+len(ch)))], device=device),
                     )
-                    # Compress after every outer chunk — mirrors MLX exactly.
-                    # Keeps peak uncompressed KV bounded to (recency_window + CH) tokens
-                    # instead of the full prompt, and decouples block formation from chunk size.
-                    mgr.compress_deferred_prefill_blocks(sid)
+                    # Do not publish lossy SVD blocks between prefill chunks.
+                    # CUDA's chunked prefill reads the previous chunks back through
+                    # the same block manager; compressing here would make the next
+                    # chunk attend reconstructed KV and can change the first decode
+                    # token (including an immediate EOS).  MLX keeps raw prefill KV
+                    # available through the whole prefill and only switches to the
+                    # compressed store at the prefill->decode boundary.
 
+                # Compression is intentionally started once, after all prefill
+                # forwards have completed, so validation measures exact causal
+                # prefill rather than a lossy mid-prefill approximation.
+                if hasattr(mgr, "compress_deferred_prefill_blocks"):
+                    mgr.compress_deferred_prefill_blocks(sid)
                 wait_for_compression(mgr, sid)
                 if hasattr(mgr, "finalize_srl_index"):
                     mgr.finalize_srl_index(sid, cached_len=0)

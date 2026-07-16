@@ -69,9 +69,9 @@ class CUDAGraphDecodeRunner:
         # incorrect outputs.  The graph ABI must be redesigned around static,
         # device-resident state buffers before it can be safely re-enabled.
         #
-        # To opt-in for testing: DIFFKV_DISABLE_CUDA_GRAPH=0
-        # Production code should leave this at the default until the graph ABI
-        # redesign is complete and validated (see CUDA_VS_MLX_PERFORMANCE_AUDIT).
+        # `DIFFKV_DISABLE_CUDA_GRAPH=0` remains accepted for compatibility, but
+        # it is not sufficient to make a DiffKV model capturable.  The model
+        # must explicitly advertise a static-state ABI (see capture()).
         _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
         self._capture_enabled = _is_cuda_available() and _disable_graph != "1"
         if _is_cuda_available() and not self._capture_enabled:
@@ -82,6 +82,12 @@ class CUDAGraphDecodeRunner:
                 file=_sys.stderr,
             )
         self._num_warmup             = 3
+        self._unsafe_capture_warned  = False
+
+    @property
+    def capture_enabled(self) -> bool:
+        """Whether the environment/device allow capture before model checks."""
+        return self._capture_enabled
 
     def is_captured(self) -> bool:
         """Returns True if a CUDA graph has been captured and is ready for replay."""
@@ -100,6 +106,27 @@ class CUDAGraphDecodeRunner:
             position_ids: [B, 1] int64 on CUDA — current absolute positions.
         """
         if not self._capture_enabled:
+            return
+
+        # A full DiffKV model is not a static CUDA-graph workload yet.  Its
+        # attention interception updates Python/session state (KV blocks,
+        # routing slots, dense-window membership and SRL state) on every
+        # forward.  CUDA Graph replay records kernels only, so replaying this
+        # forward would reuse stale state and also fail to append the token.
+        # MLX can compile the analogous path because its @mx.compile functions
+        # are pure array functions with all state passed explicitly.  Refuse
+        # capture until the CUDA path has the same ABI instead of exposing a
+        # switch that silently changes model semantics.
+        if not getattr(model, "_diffkv_cuda_graph_safe", False):
+            if not self._unsafe_capture_warned:
+                import sys as _sys
+                print(
+                    "[DiffKV] CUDA graph capture skipped: the current stateful "
+                    "DiffKV forward has no static-state graph ABI; using eager "
+                    "decode for correctness.",
+                    file=_sys.stderr,
+                )
+                self._unsafe_capture_warned = True
             return
 
         sig = (tuple(input_ids.shape), tuple(position_ids.shape))

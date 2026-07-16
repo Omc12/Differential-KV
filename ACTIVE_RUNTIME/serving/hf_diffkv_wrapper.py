@@ -649,8 +649,9 @@ class PyTorchDiffKVHFWrapper:
         # On MPS/CPU: CUDAGraphDecodeRunner._capture_enabled=False so it's a no-op.
         if _HAS_CUDA_GRAPH_RUNNER:
             self._cuda_graph_runner = CUDAGraphDecodeRunner()
+            _graph_enabled = bool(getattr(self._cuda_graph_runner, "capture_enabled", False))
             print(f"[DiffKV] CUDAGraphDecodeRunner initialized "
-                  f"({'CUDA graph capture enabled' if _has_cuda() else 'MPS/CPU — eager mode only'})")
+                  f"({'capture permitted — static ABI required' if _graph_enabled else 'capture disabled — eager mode'})")
         else:
             self._cuda_graph_runner = None
 
@@ -784,13 +785,12 @@ class PyTorchDiffKVHFWrapper:
             self._cuda_graph_runner.invalidate()
 
         # ── Chunked prefill ──────────────────────────────────────────────────
-        # Process the prompt in 512-token chunks. After each chunk we call
-        # compress_prefill_kv so SVD runs on the background thread while the
-        # next chunk is being forward-passed (double-buffering compute and
-        # compression). This:
-        #   1. Eliminates the O(N²) attention VRAM spike from one giant forward.
-        #   2. Hides most of the SVD latency inside prefill time.
-        #   3. Keeps peak VRAM bounded regardless of prompt length.
+        # Process the prompt in aligned chunks. Blocks remain dense through the
+        # final prefill forward so later chunks see exact raw history; SVD is
+        # published once at the prefill→decode boundary. This:
+          #   1. Eliminates the O(N²) attention VRAM spike from one giant forward.
+          #   2. Preserves exact causal prefill semantics like the MLX path.
+          #   3. Avoids repeated partial-block SVD launches.
         PREFILL_CHUNK = getattr(self.manager, "config", None) and self.manager.config.prefill_chunk_size or 512
         # Keep CUDA chunk boundaries aligned with the streaming block layout.
         # Otherwise, e.g. 1024 tokens with 256 active tokens per block creates
@@ -855,8 +855,8 @@ class PyTorchDiffKVHFWrapper:
                     except Exception:
                         pass
 
-            # Kick off async background SVD for this chunk immediately —
-            # the next chunk's forward pass runs in parallel with SVD.
+            # Keep this compatibility call; it only drains completed work and
+            # does not publish new SVD blocks during prefill.
             if hasattr(self.manager, "compress_prefill_kv"):
                 self.manager.compress_prefill_kv(session_id)
 

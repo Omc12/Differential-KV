@@ -1051,28 +1051,17 @@ class StreamingSparseIngestManager:
         # and prevent mixing compressed/uncompressed blocks which perturbs logits.
         past_blocks_to_compress = []
 
-        regions = []
-        # Region 1 (Active recent window): last 1024 tokens (MBS = micro_block_size)
-        r1_start = max(0, seq_len - 1024)
-        if r1_start < seq_len:
-            regions.append((r1_start, seq_len, micro_block_size))
-            
-        # Region 2 (Conversational locality): from seq_len-4096 to seq_len-1024 (MBS = micro_block_size)
-        r2_start = max(0, seq_len - 4096)
-        if r2_start < r1_start:
-            regions.append((r2_start, r1_start, micro_block_size))
-            
-        # Region 3 (Mid-history): from seq_len-12288 to seq_len-4096 (MBS = micro_block_size)
-        r3_start = max(0, seq_len - 12288)
-        if r3_start < r2_start:
-            regions.append((r3_start, r2_start, micro_block_size))
-            
-        # Region 4 (Cold archive): from 0 to seq_len-12288 (MBS = micro_block_size)
-        if 0 < r3_start:
-            regions.append((0, r3_start, micro_block_size))
-            
-        # Reverse to process chronologically (left to right)
-        regions.reverse()
+        # All four historical regions currently use the same MBS.  Splitting
+        # at the fixed 1024/4096/12288 boundaries therefore changes nothing
+        # semantically, but it breaks the global (micro_block_size + 1)
+        # anchor stride.  For a 257-token CUDA block this produced the
+        # 252-token + 3-token pairs visible in diagnostics at anchors 771 and
+        # 1024, which in turn launched many tiny SVD jobs and weakened routing.
+        # Keep one contiguous region so an outer chunk aligned to the block
+        # capacity stays aligned all the way through ingest.  MLX follows the
+        # same contiguous block layout and applies the recency policy at
+        # attention time rather than by splitting storage blocks.
+        regions = [(0, seq_len, micro_block_size)]
 
         for start_idx, end_idx, r_mbs in regions:
             region_k = k[:, :, start_idx:end_idx]
@@ -1144,21 +1133,20 @@ class StreamingSparseIngestManager:
                         if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                             print(f"[DiffKV Ingest] Block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
-                    # Check if the block is eligible for immediate compression.
-                    # Block 0 (anchor_idx == 0) skips SVD to prevent delta scale corruption.
-                    # Only submit block if it lies outside the rolling dense recency window, or if immediate prefill compression is active.
-                    # Default "0": compression runs post-forward via compress_deferred_prefill_blocks,
-                    # mirroring MLX and decoupling block formation from chunk size.
-                    # Set DIFFKV_IMMEDIATE_PREFILL_COMPRESS=1 to restore inline GPU-rSVD (not recommended).
+                    # Prefill must remain exact until the final chunk has run.
+                    # The next chunk reads these blocks as history, so publishing
+                    # an SVD reconstruction here would feed lossy KV back into
+                    # causal attention and can change the first generated token.
+                    # The normal path submits all eligible blocks from
+                    # compress_deferred_prefill_blocks() after prefill.  The
+                    # immediate mode is retained only as an explicit benchmark
+                    # knob for approximate prefill experiments.
                     _immediate_prefill = os.environ.get("DIFFKV_IMMEDIATE_PREFILL_COMPRESS", "0") == "1"
-                    if (anchor_idx > 0 or not self.protect_block_zero) and not new_block.skip_compression:
-                        if _immediate_prefill or (anchor_idx + block_capacity) < (total_seq_len - self.recency_window):
-                            new_block.state = "SUBMITTED"
-                            full_blocks_to_compress.append(new_block)
-                            # Keep GPU anchor intact until compression completes so attention forward can read it
-                            pass
-                        else:
-                            new_block.state = "ACCUMULATING"
+                    if (_immediate_prefill
+                            and (anchor_idx > 0 or not self.protect_block_zero)
+                            and not new_block.skip_compression):
+                        new_block.state = "SUBMITTED"
+                        full_blocks_to_compress.append(new_block)
                     else:
                         new_block.state = "ACCUMULATING"
 

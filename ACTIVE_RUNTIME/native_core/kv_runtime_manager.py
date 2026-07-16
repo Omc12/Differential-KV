@@ -1044,10 +1044,11 @@ class KVRuntimeManager:
         created an O(N²) GPU allocation spike and held all chunks in VRAM simultaneously.
 
         New behaviour: each chunk is streamed directly into ingest_streaming() as
-        soon as the forward pass for that layer returns. This:
+        soon as the forward pass for that layer returns, while SVD publication is
+        deferred until the prefill boundary. This:
           1. Eliminates all torch.cat accumulation (zero extra allocations).
-          2. Allows compression to start immediately on the first chunk.
-          3. Keeps VRAM bounded to 1 chunk at a time (not the whole prompt).
+          2. Preserves exact causal attention across prefill chunks.
+          3. Keeps the ingest representation block-aligned for one final SVD batch.
 
         Factual KV capture: CPU copies of K/V are only retained when
         DIFFKV_FACTUAL_STORE=1.  When the flag is absent/"0" the factual-store
@@ -1078,9 +1079,9 @@ class KVRuntimeManager:
 
     def compress_prefill_kv(self, session_id: str) -> None:
         """
-        No-op barrier stub — compression now fires immediately in capture_prefill_kv().
-        Kept for API compatibility with hf_diffkv_wrapper.py which calls this after
-        each prefill chunk to trigger SVD overlap with the next chunk forward pass.
+        Compatibility barrier retained for callers that invoke it after each
+        prefill chunk.  SVD publication is intentionally deferred until
+        compress_deferred_prefill_blocks() at the prefill boundary.
 
         Also triggers SRL index build once all blocks are finalized, if token IDs
         have been registered for this session via register_prefill_tokens().
@@ -1694,8 +1695,10 @@ class KVRuntimeManager:
         Phase 24.5 entry point: streaming sparse ingest.
 
         Routes tokens through StreamingSparseIngestManager instead of set_kv().
-        - Compresses during ingest, not after.
-        - Dense footprint bounded to 1 micro-block (default 16 tokens) at any time.
+        - Streams blocks during ingest; prefill compression is published after the
+          final chunk, while decode still compresses eligible blocks incrementally.
+        - Dense footprint is bounded during decode; prefill retains raw history for
+          exact causal attention.
         - For decode (T=1), delegates to append_decode_token().
         """
         if self._streaming_mgr is None:
@@ -3201,4 +3204,3 @@ class KVRuntimeManager:
 
     def __del__(self):
         self.close()
-
