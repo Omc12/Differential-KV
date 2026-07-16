@@ -239,8 +239,9 @@ def run_worker(mode, model_id, target_len):
             for cs in range(0, len(ids), CH):
                 ch = ids[cs:cs+CH]
                 out = model(
-                    torch.tensor([ch], device=device),
-                    position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device)
+                    input_ids=torch.tensor([ch], device=device),
+                    position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device),
+                    use_cache=True,
                 )
                 # Dynamic hardware monitoring
                 if cs % 4096 == 0 and cs > 0:
@@ -250,10 +251,13 @@ def run_worker(mode, model_id, target_len):
                     if power and power > peak_prefill_power: peak_prefill_power = power
                     print(f"    [Prefill Progress] {cs}/{len(ids)} tokens. VRAM: {allocated_gb:.2f} GB (Temp: {temp}°C, Power: {power}W)", flush=True)
             
+            # Keep all prefill blocks raw until the final forward has completed.
+            # Publishing SVD blocks here would make the next chunk attend a
+            # lossy reconstruction instead of the MLX-like dense prefill cache.
+
+            # Snapshot logits before the compression barrier mutates block state.
+            last_logits_gpu = out.logits[0, -1].float().clone()
             mgr.compress_deferred_prefill_blocks(sid)
-            
-            # Keep initial logits on GPU — no D2H sync during prefill
-            last_logits_gpu = out.logits[0, -1].float()
             prefill_time = time.perf_counter() - t_prefill_start
 
             peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -363,8 +367,9 @@ def run_worker(mode, model_id, target_len):
                 static_input_ids[0, 0]  = nid
                 static_pos_ids[0, 0]    = cur
                 out = model(
-                    static_input_ids,
-                    position_ids=static_pos_ids
+                    input_ids=static_input_ids,
+                    position_ids=static_pos_ids,
+                    use_cache=True,
                 )
                 # Keep logits on GPU — no D2H sync per step
                 last_logits_gpu = out.logits[0, -1].float()
@@ -375,6 +380,8 @@ def run_worker(mode, model_id, target_len):
                     if temp and temp > peak_decode_temp: peak_decode_temp = temp
                     if power and power > peak_decode_power: peak_decode_power = power
             
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             decode_time = time.perf_counter() - t_decode_start
             peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 

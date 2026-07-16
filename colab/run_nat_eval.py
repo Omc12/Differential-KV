@@ -310,8 +310,15 @@ def run_worker(config_name, model_id):
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
                     out = model(
-                        torch.tensor([ch], device=device),
-                        torch.tensor([list(range(cs, cs+len(ch)))], device=device),
+                        input_ids=torch.tensor([ch], device=device),
+                        # The second positional argument of a HF causal-LM
+                        # forward is attention_mask, not position_ids.  Passing
+                        # this position tensor positionally silently made every
+                        # outer CUDA chunk restart RoPE at position zero.
+                        position_ids=torch.tensor(
+                            [list(range(cs, cs + len(ch)))], device=device
+                        ),
+                        use_cache=True,
                     )
                     # Do not publish lossy SVD blocks between prefill chunks.
                     # CUDA's chunked prefill reads the previous chunks back through
@@ -324,6 +331,14 @@ def run_worker(config_name, model_id):
                 # Snapshot the final prefill logits before compression/SRL
                 # finalization can allocate or mutate CUDA workspaces.
                 last_logits_gpu = out.logits[0, -1].float().clone()
+                _prefill_topv, _prefill_topi = torch.topk(last_logits_gpu, k=5)
+                _prefill_first_id = int(_prefill_topi[0].item())
+                print(
+                    f"[DIAG] prefill-next prompt{idx}: first_id={_prefill_first_id} "
+                    f"stop={_prefill_first_id in stop_ids} "
+                    f"top5={[int(x) for x in _prefill_topi.tolist()]}",
+                    flush=True,
+                )
                 # Compression is intentionally started once, after all prefill
                 # forwards have completed, so validation measures exact causal
                 # prefill rather than a lossy mid-prefill approximation.
@@ -382,21 +397,28 @@ def run_worker(config_name, model_id):
                     mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long, device=device))
                     _inp[0, 0] = nid
                     _pos[0, 0] = cur
-                    out = model(_inp, _pos)
+                    # Keep position_ids explicit here as well.  Passing _pos as
+                    # the second positional argument makes it attention_mask and
+                    # can route the single-token step through the wrong cache
+                    # semantics.  Explicit use_cache is required for the CUDA
+                    # sparse decode branch.
+                    out = model(
+                        input_ids=_inp,
+                        position_ids=_pos,
+                        use_cache=True,
+                    )
                     last_logits_gpu = out.logits[0, -1].float()
                     cur += 1
+                if torch.cuda.is_available():
+                    # Include the final queued CUDA work in the measurement.
+                    # Without this, a run that reaches the token cap can report
+                    # an artificially high TPS because the last forward is still
+                    # asynchronous when the timer stops.
+                    torch.cuda.synchronize()
                 decode_time = time.perf_counter() - t_decode_start
                 peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 
                 generated_text = tok.decode(gen_ids)
-                if not gen_ids:
-                    _topv, _topi = torch.topk(last_logits_gpu, k=5)
-                    print(
-                        f"[DIAG] zero-token decode prompt{idx}: first_id={int(_topi[0].item())} "
-                        f"stop={int(_topi[0].item()) in stop_ids} "
-                        f"top5={[int(x) for x in _topi.tolist()]}",
-                        flush=True,
-                    )
                 kv = analytic_kv_bytes(mgr, prompt_len, sid)
                 kv_vram = kv.get("store_used_bytes", 0) / 1e9
 
@@ -449,6 +471,14 @@ def run_worker(config_name, model_id):
                     past_key_values = out.past_key_values
                 # Keep logits on GPU — no D2H sync during prefill
                 last_logits_gpu = out.logits[0, -1].float()
+                _prefill_topv, _prefill_topi = torch.topk(last_logits_gpu, k=5)
+                _prefill_first_id = int(_prefill_topi[0].item())
+                print(
+                    f"[DIAG] dense prefill-next prompt{idx}: first_id={_prefill_first_id} "
+                    f"stop={_prefill_first_id in _stop_ids} "
+                    f"top5={[int(x) for x in _prefill_topi.tolist()]}",
+                    flush=True,
+                )
                 prefill_time = time.perf_counter() - t_prefill_start
 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -473,6 +503,8 @@ def run_worker(config_name, model_id):
                     past_key_values = out.past_key_values
                     last_logits_gpu = out.logits[0, -1].float()
                     cur += 1
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 decode_time = time.perf_counter() - t_decode_start
                 peak_decode_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
 

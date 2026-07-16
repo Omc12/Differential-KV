@@ -77,11 +77,12 @@ with torch.inference_mode():
     for cs in range(0, len(ids), CH):
         ch = ids[cs:cs+CH]
         out = model(
-            torch.tensor([ch], device=device),
-            position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device)
+            input_ids=torch.tensor([ch], device=device),
+            position_ids=torch.tensor([list(range(cs, cs+len(ch)))], device=device),
+            use_cache=True,
         )
-        mgr.compress_deferred_prefill_blocks(sid)
 last_logits_gpu = out.logits[0, -1].float()
+mgr.compress_deferred_prefill_blocks(sid)
 print(f"Prefill done in {time.perf_counter()-t_pre:.2f}s\n")
 
 # ── 5. Exact same post-prefill steps as eval ──────────────────────────────────
@@ -168,7 +169,7 @@ with torch.inference_mode():
         nid = int(torch.argmax(last_logits_gpu).item())
         static_in[0, 0] = nid
         static_pos[0, 0] = cur
-        out = model(static_in, position_ids=static_pos)
+        out = model(input_ids=static_in, position_ids=static_pos, use_cache=True)
         last_logits_gpu = out.logits[0, -1].float()
         cur += 1
 torch.cuda.synchronize()
@@ -194,7 +195,7 @@ with torch.inference_mode():
 
         static_in[0, 0] = nid
         static_pos[0, 0] = cur
-        out = model(static_in, position_ids=static_pos)
+        out = model(input_ids=static_in, position_ids=static_pos, use_cache=True)
 
         torch.cuda.synchronize()
         t1 = time.perf_counter()
