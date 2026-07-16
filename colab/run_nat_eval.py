@@ -32,8 +32,9 @@ requests.Session.merge_environment_settings = patched_merge_settings
 
 # Prevent PyTorch VRAM fragmentation OOMs
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-# Enable surgical compression diagnostics (remove once root cause confirmed)
-os.environ["DIFFKV_DIAG"] = "1"
+# Diagnostics are opt-in.  The old unconditional setting printed every block
+# decision during 4K–128K sweeps and added noticeable host/I/O overhead.
+os.environ.setdefault("DIFFKV_DIAG", "0")
 
 # Ensure active runtime path and C++ compiled library directory are in sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -154,6 +155,29 @@ def analytic_kv_bytes(mgr, seq_len, sid):
         "store_used_bytes": store_used,
     }
 
+
+def wait_for_compression(mgr, session_id: str) -> bool:
+    """Drain prefill compression before starting the first decode step."""
+    streaming_mgr = getattr(mgr, "_streaming_mgr", None)
+    if streaming_mgr is None:
+        return True
+    timeout_s = float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30"))
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if hasattr(mgr, "finalize_compressed_blocks"):
+            mgr.finalize_compressed_blocks()
+        blocks = streaming_mgr.session_blocks.get(session_id, {})
+        pending = sum(
+            1 for layer_blocks in blocks.values()
+            for block in layer_blocks
+            if getattr(block, "state", None) in ("SUBMITTED", "CPU_COMPRESSED")
+        )
+        if pending == 0:
+            return True
+        time.sleep(0.002)
+    print(f"[NAT eval] WARNING: compression barrier timed out for {session_id}", flush=True)
+    return False
+
 def run_worker(config_name, model_id):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
     os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
@@ -249,10 +273,8 @@ def run_worker(config_name, model_id):
             tok, mgr, model = w.tokenizer, w.manager, w.model
             # Use the wrapper's stop token set (superset of what we derived above)
             stop_ids = getattr(w, "stop_token_ids", _stop_ids) | _stop_ids
-            # Align outer prefill chunk size with the config's prefill_chunk_size so
-            # ingest_chunk receives ≥ block_capacity (= 1 + micro_block_size = 257)
-            # tokens per call and can form full compressible blocks.  On CUDA the
-            # config now defaults to 1024; on macOS/MLX it stays at the preset value.
+            # Start from the configured outer prefill chunk size.  It is rounded
+            # to the active block capacity after each session is initialized.
             _cfg = getattr(mgr, "config", None)
             if _cfg is not None:
                 CH = _cfg.prefill_chunk_size
@@ -276,6 +298,13 @@ def run_worker(config_name, model_id):
                 mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
                 model._diffkv_session_ids = [sid]
 
+                if torch.cuda.is_available() and hasattr(mgr, "get_session_micro_block_size"):
+                    _mbs = mgr.get_session_micro_block_size(sid)
+                    _block_capacity = max(2, int(_mbs) + 1)
+                    _base_chunk = int(getattr(_cfg, "prefill_chunk_size", CH))
+                    CH = ((_base_chunk + _block_capacity - 1) // _block_capacity) * _block_capacity
+                    print(f"[NAT eval] Aligned CUDA chunk size: CH={CH} (block_capacity={_block_capacity})", flush=True)
+
                 t_prefill_start = time.perf_counter()
                 for cs in range(0, len(ids), CH):
                     ch = ids[cs:cs+CH]
@@ -287,6 +316,10 @@ def run_worker(config_name, model_id):
                     # Keeps peak uncompressed KV bounded to (recency_window + CH) tokens
                     # instead of the full prompt, and decouples block formation from chunk size.
                     mgr.compress_deferred_prefill_blocks(sid)
+
+                wait_for_compression(mgr, sid)
+                if hasattr(mgr, "finalize_srl_index"):
+                    mgr.finalize_srl_index(sid, cached_len=0)
 
                 # ── Block-state diagnostic (one-time, remove after fix) ──
                 _smgr = getattr(mgr, "_streaming_mgr", None)

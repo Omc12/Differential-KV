@@ -1020,6 +1020,16 @@ class ContinuousBatchEngine:
                             file=sys.stderr
                         )
 
+                # Align CUDA chunks to complete streaming blocks.  This keeps
+                # only the final prompt tail partial, matching the MLX manager
+                # and avoiding one partial rSVD group on every chunk.
+                _is_cuda = (self.wrapper.device == "cuda" or
+                            (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
+                if _is_cuda and hasattr(self.wrapper.manager, "get_session_micro_block_size"):
+                    _mbs = self.wrapper.manager.get_session_micro_block_size(req.session_id)
+                    _block_capacity = max(2, int(_mbs) + 1)
+                    max_chunk = ((max_chunk + _block_capacity - 1) // _block_capacity) * _block_capacity
+
                 chunk_size = min(remaining, max_chunk)
             else:
                 cfg = getattr(self.wrapper.manager, "config", None)
@@ -1029,6 +1039,12 @@ class ContinuousBatchEngine:
                     chunk_size = min(remaining, 512)
                 else:
                     chunk_size = 2048
+                _is_cuda = (self.wrapper.device == "cuda" or
+                            (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "cuda"))
+                if _is_cuda and hasattr(self.wrapper.manager, "get_session_micro_block_size"):
+                    _mbs = self.wrapper.manager.get_session_micro_block_size(req.session_id)
+                    _block_capacity = max(2, int(_mbs) + 1)
+                    chunk_size = min(remaining, ((chunk_size + _block_capacity - 1) // _block_capacity) * _block_capacity)
             offset = req.prefill_offset
             chunk_ids = req.prompt_ids[offset : offset + chunk_size]
             actual_len = len(chunk_ids)

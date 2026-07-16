@@ -222,8 +222,18 @@ def run_worker(mode, model_id, target_len):
             mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
             model._diffkv_session_ids = [sid]
 
-            # Prefill
-            CH = 128
+            # Prefill.  Use the runtime's chunk size so CUDA receives a useful
+            # batch of blocks per compression dispatch.  CH=128 with the 64-token
+            # sweep block size creates one full + one partial block on every
+            # chunk, which serializes dozens of tiny rSVD launches and used to
+            # strand the partial blocks in SUBMITTED.
+            _cfg = getattr(mgr, "config", None)
+            CH = int(getattr(_cfg, "prefill_chunk_size", 1024))
+            if torch.cuda.is_available() and hasattr(mgr, "get_session_micro_block_size"):
+                _mbs = mgr.get_session_micro_block_size(sid)
+                _block_capacity = max(2, int(_mbs) + 1)
+                CH = ((CH + _block_capacity - 1) // _block_capacity) * _block_capacity
+                print(f"    [Prefill] Aligned chunk size: {CH} (block_capacity={_block_capacity})", flush=True)
             t_prefill_start = time.perf_counter()
             for cs in range(0, len(ids), CH):
                 ch = ids[cs:cs+CH]
@@ -249,16 +259,6 @@ def run_worker(mode, model_id, target_len):
 
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
-
-            # CRITICAL: Finalize SRL index before decode.
-            # Without this, ingest_streaming runs an O(N²) GPU→CPU KV capture
-            # (torch.cat + .cpu()) on every decode token for all 48 layers,
-            # which is the root cause of 1.4 TPS.
-            if hasattr(mgr, "finalize_srl_index"):
-                mgr.finalize_srl_index(sid, cached_len=0)
-            # Clear the prefill KV capture buffer to free CPU RAM
-            if hasattr(mgr, "_prefill_kv_capture"):
-                mgr._prefill_kv_capture.pop(sid, None)
 
             # CRITICAL: Wait for async SVD compression to finish before decode.
             # Each newly compressed block changes block_indices shape → forces
@@ -289,7 +289,7 @@ def run_worker(mode, model_id, target_len):
                 )
 
             _barrier_start = time.perf_counter()
-            _barrier_timeout = 120.0
+            _barrier_timeout = float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30"))
             _prev_pending = -1
             while True:
                 _pending = _count_in_flight(mgr, sid)
@@ -307,6 +307,14 @@ def run_worker(mode, model_id, target_len):
             _barrier_elapsed = time.perf_counter() - _barrier_start
             if _barrier_elapsed > 0.2:
                 print(f"    [Barrier] Done in {_barrier_elapsed:.1f}s", flush=True)
+
+            # Build routing only after every compressed block is resident.  The
+            # old ordering indexed only the blocks that happened to finish
+            # before the barrier, leaving SRL with a stale/partial view.
+            if hasattr(mgr, "finalize_srl_index"):
+                mgr.finalize_srl_index(sid, cached_len=0)
+            if hasattr(mgr, "_prefill_kv_capture"):
+                mgr._prefill_kv_capture.pop(sid, None)
 
             # NOTE: as of the warm_up_jit() integration in ensure_loaded(), the
             # Inductor compilation for _reconstruct_and_score and
@@ -327,26 +335,15 @@ def run_worker(mode, model_id, target_len):
                 print(f"    [PreWarmup] Layer-0 block states: {_state_counts} "
                       f"(total={len(_l0)} blocks)", flush=True)
 
-            print("    [Warmup] Running 3 decode warmup steps (CUDA graph + JIT safety)...", flush=True)
-            # Pre-allocate static GPU tensors for warmup (same pattern as gen loop).
-            _wup_in  = torch.zeros((1, 1), dtype=torch.long, device=device)
-            _wup_pos = torch.zeros((1, 1), dtype=torch.long, device=device)
-            _wup_logits = last_logits_gpu
-            _wup_cur = prompt_len
-            t_wup = time.perf_counter()
-            for _wi in range(3):
-                # In-place fill from GPU argmax — no D2H sync during graph capture.
-                _wup_in.fill_(int(torch.argmax(_wup_logits).item()))
-                _wup_pos.fill_(_wup_cur)
-                _wout = model(_wup_in, position_ids=_wup_pos)
-                _wup_logits = _wout.logits[0, -1].float()
-                _wup_cur += 1
-            torch.cuda.synchronize()
-            print(f"    [Warmup] Done in {time.perf_counter()-t_wup:.1f}s", flush=True)
-            last_logits_gpu = _wup_logits
+            # Do not warm up by forwarding tokens through the measured session:
+            # that mutates its KV cache and silently skips those tokens from the
+            # reported output.  ensure_loaded() already pre-warms the decode JIT;
+            # CUDA graphs are disabled by default until the mutable-state ABI is
+            # made safe.
+            print("    [Warmup] Skipped stateful decode warmup; measuring from prefill logits.", flush=True)
 
             # Generate (256 tokens)
-            cur = _wup_cur
+            cur = prompt_len
             gen_ids = []
             # Pre-allocate static GPU tensors — avoids new allocation + CUDA
             # graph invalidation on every step. Use .copy_() in the loop.
@@ -427,7 +424,9 @@ def run_worker(mode, model_id, target_len):
 
             t_prefill_start = time.perf_counter()
             past_key_values = None
-            CH = 128
+            # Match the compressed runtime's chunking so the dense baseline and
+            # compressed prefill are measured with comparable launch overhead.
+            CH = 1024
             for cs in range(0, len(ids), CH):
                 ch = ids[cs:cs+CH]
                 pos = torch.tensor([list(range(cs, cs+len(ch)))], device=device)

@@ -1274,39 +1274,47 @@ class StreamingSparseIngestManager:
         # GPU-accelerated randomized SVD path (Component 2).
         # Default to GPU compression on CUDA for maximum throughput; CPU path
         # is the fallback (set DIFFKV_GPU_COMPRESS=0 to force CPU SVD).
-        _gpu_compress_default = "1" if device.type == "cuda" else "0"
+        _config_gpu_compress = getattr(
+            getattr(self.manager, "config", None), "gpu_compress", device.type == "cuda"
+        )
+        _gpu_compress_default = "1" if _config_gpu_compress else "0"
         if os.environ.get("DIFFKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
             from native_core.compression.lowrank import compress_layer_blocks_gpu
             _rank = getattr(self.manager, "rank", 16)
             # Group by T_active: compress_layer_blocks_gpu requires all blocks in
-            # the batch to have the same active_k.shape[2].  Mixed batches (full
-            # blocks T=256 + partial blocks T=252) crash at the reshape on line 478.
-            # We mirror the CPU path — group by T_active, GPU-compress each group.
-            # Only process groups where T_active == micro_block_size (full blocks);
-            # partial blocks are rare and handled by the CPU fallback below.
+            # a batch to have the same active_k.shape[2].  Chunked CUDA prefill
+            # commonly creates partial blocks (for example CH=128 with a
+            # 64-token block produces a 63-token remainder on every chunk), so
+            # partial groups must go through the same GPU path as full groups.
+            # Sending them to the CPU fallback makes the supposedly async path
+            # host-bound and, more importantly, used to leave some of them stuck
+            # in SUBMITTED when the fallback saw skip_compression=True.
             from collections import defaultdict as _ddict
             _by_T = _ddict(list)
             for _b in blocks_list:
                 _by_T[_b.active_k.shape[2]].append(_b)
-            _gpu_full_success = True
+            _gpu_all_success = True
             _gpu_compressed_count = 0
             for _T_active, _group in _by_T.items():
-                if _T_active != micro_block_size:
-                    # Partial block — skip GPU path, let CPU fallback handle it
-                    _gpu_full_success = False  # signal that CPU path is still needed
-                    continue
                 try:
                     _ok = compress_layer_blocks_gpu(_group, _rank, manager=self.manager)
                     if _ok:
                         _gpu_compressed_count += len(_group)
                     else:
-                        _gpu_full_success = False
+                        _gpu_all_success = False
+                        # The GPU helper may return False without raising.  It
+                        # did not publish a pool entry in that case, so make
+                        # the CPU fallback's ownership explicit instead of
+                        # leaving the block marked SUBMITTED indefinitely.
+                        for _b in _group:
+                            if _b.state == "SUBMITTED":
+                                _b.state = "ACCUMULATING"
                 except Exception as _gpu_err:
                     import traceback
                     print(f"[DiffKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
                     if os.environ.get("DIFFKV_DIAG", "0") == "1":
                         traceback.print_exc()
-                    _gpu_full_success = False
+                    _gpu_all_success = False
                     # Rollback SUBMITTED → ACCUMULATING for this group so CPU path retries
                     for _b in _group:
                         if _b.state == "SUBMITTED":
@@ -1315,9 +1323,10 @@ class StreamingSparseIngestManager:
                 with self._stats_lock:
                     self.stats["total_compressed"] += _gpu_compressed_count
                     self.stats["compressions_during_ingest"] += _gpu_compressed_count
-            if _gpu_full_success:
+            if _gpu_all_success:
                 return  # all blocks handled by GPU path — skip CPU fallback
-            # Otherwise fall through: only partial blocks (or failed GPU blocks) remain
+            # Otherwise fall through: only failed GPU groups remain.  Successful
+            # groups have active_k=None and are filtered out below.
 
         # Group blocks by active sequence length to handle partial blocks.
         # Filter out blocks already compressed by the GPU path above (active_k cleared to None).
@@ -1364,9 +1373,6 @@ class StreamingSparseIngestManager:
                 torch.mps.synchronize()
 
             for idx, block in enumerate(group):
-                if getattr(block, "skip_compression", False):
-                    continue
-
                 if is_async_active:
                     # Take a narrow view of the staging buffer for this block.
                     # The staging buffer is pinned on CUDA (allocated in

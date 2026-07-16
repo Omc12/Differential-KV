@@ -792,6 +792,19 @@ class PyTorchDiffKVHFWrapper:
         #   2. Hides most of the SVD latency inside prefill time.
         #   3. Keeps peak VRAM bounded regardless of prompt length.
         PREFILL_CHUNK = getattr(self.manager, "config", None) and self.manager.config.prefill_chunk_size or 512
+        # Keep CUDA chunk boundaries aligned with the streaming block layout.
+        # Otherwise, e.g. 1024 tokens with 256 active tokens per block creates
+        # a 252-token partial block on every chunk.  MLX keeps a single dense
+        # tail; matching that shape avoids repeated tiny rSVD launches and
+        # prevents old partial blocks from becoming an artificial barrier.
+        if isinstance(self.device, torch.device):
+            _is_cuda_device = self.device.type == "cuda"
+        else:
+            _is_cuda_device = str(self.device).startswith("cuda")
+        if _is_cuda_device and hasattr(self.manager, "get_session_micro_block_size"):
+            _mbs = self.manager.get_session_micro_block_size(session_id)
+            _block_capacity = max(2, int(_mbs) + 1)
+            PREFILL_CHUNK = ((_PREFILL_CHUNK + _block_capacity - 1) // _block_capacity) * _block_capacity
         new_ids_list = new_prompt_ids
         total_new = len(new_ids_list)
         outputs = None
@@ -1417,4 +1430,3 @@ if sys.platform == "darwin" and _HAS_MLX and os.environ.get("DIFFKV_FORCE_PYTORC
         DiffKVHFWrapper = PyTorchDiffKVHFWrapper
 else:
     DiffKVHFWrapper = PyTorchDiffKVHFWrapper
-

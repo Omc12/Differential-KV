@@ -65,7 +65,11 @@ mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=devi
 model._diffkv_session_ids = [sid]
 
 # ── 4. Prefill (same as eval) ─────────────────────────────────────────────────
-CH = 128
+CH = int(getattr(getattr(mgr, "config", None), "prefill_chunk_size", 1024))
+if torch.cuda.is_available() and hasattr(mgr, "get_session_micro_block_size"):
+    _mbs = mgr.get_session_micro_block_size(sid)
+    _block_capacity = max(2, int(_mbs) + 1)
+    CH = ((CH + _block_capacity - 1) // _block_capacity) * _block_capacity
 print("Running prefill...", flush=True)
 t_pre = time.perf_counter()
 out = None
@@ -81,20 +85,30 @@ last_logits_gpu = out.logits[0, -1].float()
 print(f"Prefill done in {time.perf_counter()-t_pre:.2f}s\n")
 
 # ── 5. Exact same post-prefill steps as eval ──────────────────────────────────
+# Compression barrier: inspect block states, not only _pending_cpu_blocks.
+# GPU-rSVD does not use the CPU pending counter, while a CPU fallback may still
+# have SUBMITTED blocks that must be finalized before profiling decode.
+_bar = time.perf_counter()
+while True:
+    if hasattr(mgr, "finalize_compressed_blocks"):
+        mgr.finalize_compressed_blocks()
+    _blocks = getattr(mgr, "_streaming_mgr", None)
+    _blocks = _blocks.session_blocks.get(sid, {}) if _blocks is not None else {}
+    _p = sum(
+        1 for _layer in _blocks.values() for _block in _layer
+        if getattr(_block, "state", None) in ("SUBMITTED", "CPU_COMPRESSED")
+    )
+    if _p <= 0:
+        break
+    if time.perf_counter() - _bar > float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30")):
+        print(f"WARNING: compression barrier timed out with {_p} blocks pending", flush=True)
+        break
+    time.sleep(0.05)
+
 if hasattr(mgr, "finalize_srl_index"):
     mgr.finalize_srl_index(sid, cached_len=0)
 if hasattr(mgr, "_prefill_kv_capture"):
     mgr._prefill_kv_capture.pop(sid, None)
-
-# Compression barrier
-_bar = time.perf_counter()
-while True:
-    _p = getattr(mgr, "_pending_cpu_blocks", 0)
-    if _p <= 0: break
-    if time.perf_counter() - _bar > 120.0: break
-    if hasattr(mgr, "finalize_compressed_blocks"):
-        mgr.finalize_compressed_blocks()
-    time.sleep(0.05)
 
 # ── 6. Instrument mgr methods ─────────────────────────────────────────────────
 _timers = {
