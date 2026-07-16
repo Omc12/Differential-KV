@@ -1858,10 +1858,15 @@ class KVRuntimeManager:
             block_indices_tensor = None
             anchor_indices_gpu = None
 
-        # Get ALL non-compressed, non-paged blocks as dense context.
-        # Phase 32 backwards optimization: since blocks are compressed chronologically,
-        # we can traverse backwards and break as soon as we see a COMPRESSED/PAGED block.
-        dense_blocks = [block for block in blocks if block.state not in ("COMPRESSED", "PAGED")]
+        # Get non-compressed, non-paged, non-submitted blocks as dense context.
+        # SUBMITTED blocks are excluded: they are partial blocks awaiting async CPU
+        # compression. They have no pool_idx so cannot be served by the sparse kernel,
+        # but including them as dense overflows max_dense_len for long contexts (16 dense
+        # blocks >> workspace of ~5 blocks), triggering trim that drops block 0 and
+        # causes the model to output EOS. Dropping them temporarily is safe: neighboring
+        # full GPU-compressed blocks cover the same context region via sparse attention,
+        # and SUBMITTED blocks will be promoted to COMPRESSED shortly after decode starts.
+        dense_blocks = [block for block in blocks if block.state == "ACCUMULATING"]
 
         return block_indices_tensor, dense_blocks, anchor_indices_gpu, max_anchor_idx, max_valid_len
 
@@ -1909,8 +1914,18 @@ class KVRuntimeManager:
                 )
                 self._dense_trim_warned = True
             while blk_sizes and L_dense > self.max_dense_len:
-                L_dense -= blk_sizes.pop(0)
-                dense_blocks = dense_blocks[1:]
+                # Never drop block 0 (anchor_idx == 0): losing the system prompt / question
+                # causes the model to output EOS immediately.
+                if len(dense_blocks) > 1 and dense_blocks[0].anchor_idx == 0:
+                    # Protect block 0 — try dropping the second-oldest instead
+                    if len(dense_blocks) > 2:
+                        L_dense -= blk_sizes.pop(1)
+                        dense_blocks = [dense_blocks[0]] + dense_blocks[2:]
+                    else:
+                        break  # only block 0 and one other left — stop trimming
+                else:
+                    L_dense -= blk_sizes.pop(0)
+                    dense_blocks = dense_blocks[1:]
             if not dense_blocks:
                 return None, None, 0
 
