@@ -443,7 +443,17 @@ def apply_diffkv_attention_patch(model, kv_manager):
                 else:
                     cos, sin = position_embeddings
                 unrot_key_states = key_states.clone()
-                unrot_query_states = query_states.clone()
+                # unrot_query_states holds the PRE-RoPE query.  In DECODE (q_len==1)
+                # the block router reads it (the q_for_routing / raw_q uses, both
+                # inside the is_decode branch).  In PREFILL (q_len>1) the ONLY use
+                # is the last token, for SRL router pre-warm just below.  Cloning
+                # the full [B, H, q_len, D] query every layer every prefill chunk
+                # was pure waste (~10 MB/layer at a 1k chunk, ×48 layers); keep
+                # only the last token in prefill.
+                if q_len == 1:
+                    unrot_query_states = query_states.clone()
+                else:
+                    unrot_query_states = query_states[:, :, -1:, :].clone()
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
                 session_ids = getattr(model, "_diffkv_session_ids", ["default"] * bsz)

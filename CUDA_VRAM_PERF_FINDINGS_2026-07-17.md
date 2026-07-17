@@ -473,8 +473,22 @@ exceeds pool" error). Default path (boost auto) is unchanged: still `pool_rank=4
 
 Impact (low preset): slot 368 KB → ~300 KB (**~18% smaller pool**), so the batched
 recipe should now move the ratio too — low ~2.43× → **~2.9×** — not just the
-compress time. **Re-run the recipe to confirm `pool_rank=32` in the memory line
-and the improved `kv_phys` ratio.**
+compress time.
+
+**CONFIRMED on A100** (recipe run, `pool_rank=32` in every config):
+
+```
+preset   pool before   pool now   ratio before   ratio now
+low       1039 MB       842 MB      2.43×          2.99×
+mid       1282 MB      1085 MB      1.97×          2.32×
+high      1931 MB      1733 MB      1.31×          1.45×
+```
+
+Slots: low 368→300 KB, mid 464→396 KB, high 721→653 KB. Worst-case ceilings fell
+too (low 20.8→17.0 GB). First decoded token still matches dense every config.
+Note: with `DIFFKV_RSVD_MAX_RPROJ=32`, `early_boost` collapses to mid (pool_rank
+capped 96→32, ratio 2.32×) — the cap correctly dominates the early-layer boost,
+so that config is redundant under this recipe.
 
 ## Where this leaves it
 
@@ -486,3 +500,87 @@ and the improved `kv_phys` ratio.**
 - **Decode**: unchanged and still not the place to invest at 13.4 K.
 - **Open**: `factual_store`/`combined` remain catastrophic; the prefill-forward
   1.4× vs dense and the prompt-2 VRAM creep are still unexplained.
+
+---
+
+# FOURTH PASS — why MLX wins early and CUDA doesn't (2026-07-18)
+
+The user's question: MLX beats dense on memory early in context; CUDA takes
+~the same peak RAM as dense while being slower. Diagnosed from the eval numbers
+and the code — no theorizing.
+
+## Peak VRAM: DiffKV is lighter at REST but heavier at the PEAK
+
+```
+low_preset prompt1        VRAM
+  dense peak              13.27 GB
+  DiffKV after-compress   11.25 GB   <- 2.0 GB LIGHTER than dense (the pool wins)
+  DiffKV PEAK             15.07 GB   <- 1.8 GB HEAVIER than dense (the spike)
+```
+
+The pool (842 MB) genuinely beats dense's KV (2.6 GB) — `after_comp` proves it,
+11.25 < 13.27. But `max_memory_allocated` (what OOMs you, and what the eval
+reports) is the **compression spike**: `weights + full raw KV (2.6 GB) + fp32
+compression transients + the pool being built`, all resident at once.
+
+**Root cause:** CUDA runs *exact prefill* — it holds every token's raw KV for the
+whole prompt (`after_fwd` = 12.58 GB) and compresses only at the boundary. So at
+the peak moment the full raw KV and the new pool coexist.
+
+## Why MLX doesn't have this spike
+
+`MLXKVBlockManager.compress_deferred_prefill_blocks` is *"safe (and intended) to
+call after EVERY prefill chunk... keeps peak uncompressed KV bounded by
+~(recency_window + chunk) tokens instead of the whole prompt"*. MLX compresses
+each chunk as it goes and frees the raw KV, so its peak never contains the whole
+prompt's raw KV. **That is the entire "wins early" difference** — not the
+compression quality, the *timing* of it.
+
+## The fix already exists but is off by default: `DIFFKV_STREAMING_COMPRESS=1`
+
+The eval's CUDA loop calls `compress_deferred_prefill_blocks` + `empty_cache`
+after each chunk when `DIFFKV_STREAMING_COMPRESS=1`. `compress_deferred_blocks`
+only compresses blocks past the recency window (`window_ok`), and the fresh-
+prefill attention path already handles compressed history blocks (it splits
+`comp_blocks` vs dense in the history cross-attention). So streaming should bound
+peak raw KV to ~(512 + chunk) ≈ 1.5 K tokens instead of 13.4 K — dropping peak
+from 15 GB toward ≤ dense. Cost: far-back history is attended in lossy compressed
+form during prefill (exactly MLX's tradeoff), plus the per-chunk `empty_cache`
+slows allocation slightly. **This is the lever for "CUDA peak ≥ dense" — A/B it.**
+
+## Why prefill FORWARD is 1.4× dense (8.2 s vs 5.9 s)
+
+The fresh-prefill path (`diffkv_attention.py` ~2242) does, per chunk: local causal
+self-attention **plus** history cross-attention that re-assembles previous blocks
+(`torch.cat` of per-block K/V), re-applies RoPE to all history, `repeat_kv`s it,
+and LSE-merges the two streams. Dense does one fused flash-attention over a
+contiguous growing cache. The re-assembly + redundant RoPE per chunk per layer is
+the overhead — architectural to attending a *block* store during prefill. MLX
+keeps a contiguous dense prefill buffer and avoids it. Closing this on CUDA means
+a contiguous raw-prefill cache (big change; GPU-only to validate).
+
+Small safe win taken: `unrot_query_states` was `.clone()`d in full every layer
+every chunk, but prefill uses only its last token (the router uses are
+decode-only). Now sliced to the last token in prefill — a few hundred MB less
+transient, no behavior change (verified: all four uses accounted for; tests pass).
+
+## Why TPS is lower (7.7 vs 11.2) — and why it can't be "fixed" at 13.4 K
+
+Decode KV read is **1.9 % of the step** at 13.4 K (weights dominate the
+bandwidth). DiffKV adds per-token block routing + KV reconstruction from U/V,
+run eager (CUDA graphs are correctly OFF for mutable routing). That overhead is
+real and is not amortized by any KV saving until KV is a large fraction of the
+step — i.e. long context (break-even ~485 K tokens by the roofline). At 13.4 K
+this is simply the wrong regime to judge decode; the honest move is the
+32K/64K/128K sweep, not decode-kernel micro-optimization here.
+
+## Bottom line for the user's question
+
+- **"Same RAM as dense"** → true only at the PEAK, and only because of the
+  exact-prefill compression spike. At rest DiffKV is 2 GB lighter. Turn on
+  `DIFFKV_STREAMING_COMPRESS=1` to bound the peak (MLX's mechanism) and CUDA
+  should win early too.
+- **"Worse prefill"** → the block-store history re-attention per chunk; ~1.4×,
+  architectural. Compress itself is already fixed (6.1→2.6 s).
+- **"Worse tps"** → correct at 13.4 K and expected; sparse decode pays off only
+  when KV dominates the step. Not a bug, a regime.
