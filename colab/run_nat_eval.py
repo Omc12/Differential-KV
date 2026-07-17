@@ -353,6 +353,14 @@ def run_worker(config_name, model_id):
                     if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" \
                             and hasattr(mgr, "compress_deferred_prefill_blocks"):
                         mgr.compress_deferred_prefill_blocks(sid)
+                        # MLX-parity: after compressing out-of-window blocks, the
+                        # raw active_k/v they held is dereferenced.  Return that
+                        # freed memory to the allocator now (MLX calls
+                        # mx.clear_cache() here) so peak VRAM reflects the bounded
+                        # recency-window + pool footprint instead of the full
+                        # prompt's raw KV — the whole point of streaming at 64k+.
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                 # The forward passes are done; everything after this point is
                 # DiffKV-specific cache construction.  Time it separately —

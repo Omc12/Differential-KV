@@ -742,7 +742,19 @@ if use_compile == "1":
     # every step → Inductor records ONE CUDA graph → replays it → maximum performance.
     # This mirrors what MLX does: @mx.compile compiles once with fixed Metal shaders.
     _decode_compile_mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
-    _prefill_compile_mode = "reduce-overhead" if _IS_CUDA_AVAILABLE else "default"
+    # PREFILL history-attention must NOT use reduce-overhead.  reduce-overhead
+    # records a CUDA graph for a FIXED shape and re-records whenever the shape
+    # changes.  The decode kernels above have a constant dense-window shape so
+    # that's a win — but the prefill history-attention's compressed-block count
+    # (N_blocks) GROWS with context, and under streaming compression it changes
+    # on every prefill chunk.  reduce-overhead then re-records the graph each
+    # chunk → the ~5s/chunk recompile storm that made DIFFKV_STREAMING_COMPRESS
+    # ~5x slower than deferred (fwd 8.5s → 74s at 13k).  "default" compiles once
+    # for dynamic shapes (dynamic=True) and never re-records, which is what
+    # streaming (the MLX-parity long-context VRAM path) needs.  Deferred prefill
+    # never calls this kernel (no blocks are compressed mid-prefill), so this is
+    # a no-op for the current default and only unblocks streaming.
+    _prefill_compile_mode = "default"
 
     try:
         _backend = "inductor"
