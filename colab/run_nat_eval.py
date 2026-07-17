@@ -203,6 +203,18 @@ def run_worker(config_name, model_id):
             os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
             os.environ["DIFFKV_FACTUAL_STORE"] = "1"
 
+        # Apply the SAME production decode policy the CLI uses (serving/cli.py
+        # calls this before building the wrapper).  The eval used to bypass it,
+        # so it silently ran WITHOUT DIFFKV_DECODE_CACHE=1 (decompress-and-cache
+        # fast decode, ~2x tps when sparse, bit-exact) and DIFFKV_SPARSE_BIAS=auto
+        # — i.e. it measured a non-production config and understated DiffKV tps.
+        # setdefault: every explicit env set above still wins.
+        try:
+            from serving.decode_config import apply_best_decode_defaults
+            apply_best_decode_defaults(log=None)
+        except Exception as _e:
+            print(f"[NAT eval] WARNING: could not apply best-decode defaults: {_e}", flush=True)
+
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
