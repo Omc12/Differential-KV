@@ -1446,7 +1446,8 @@ class KVRuntimeManager:
         self._session_token_ids.pop(session_id, None)
         # Per-session content caches keyed by block anchor.  These are derived
         # from _session_token_ids, so they are stale the moment it is dropped.
-        for _cache_attr in ("_block_rank_cache", "_res_capture_boost_rows"):
+        for _cache_attr in ("_block_rank_cache", "_res_capture_boost_rows",
+                            "_rank_boost_stats"):
             _cache = getattr(self, _cache_attr, None)
             if _cache is not None:
                 _cache.pop(session_id, None)
@@ -3298,23 +3299,54 @@ class KVRuntimeManager:
 
     @property
     def sessions(self) -> dict:
+        """Per-session block accounting, used by the benchmark harnesses.
+
+        Reads whichever store actually owns the blocks.  On the streaming path
+        (the CUDA default) `self.session_blocks[sid]` is created empty by
+        init_session and NEVER appended to — the real blocks live in
+        `self._streaming_mgr.session_blocks[sid]`.  Reading the manager dict
+        therefore reported num_blocks=[0]*L and comp_res_n=[[]]*L for every
+        CUDA run, so `analytic_kv_bytes` summed only the dense recency window
+        (L * 512 * 4096 = 0.1007 GB) and called it the whole KV store.  That is
+        why every preset reported an identical kv_logical=0.101 GB regardless of
+        rank or max_residual, implying a fake ~26x reduction while the physical
+        pool actually held 1039-1931 MB (a real 1.4-2.5x).
+
+        Blocks carry `pool_idx` (StreamingKVBlock dataclass field), not
+        `slot_idx`; the old getattr(b, "slot_idx", -1) always missed and forced
+        every residual count to 0 independently of the bug above.
+        """
         sessions_dict = {}
-        for session_id in list(self.session_blocks.keys()):
-            num_blocks = [len(self.session_blocks[session_id][l]) for l in range(self.num_layers)]
+        _smgr = getattr(self, "_streaming_mgr", None)
+        recency = getattr(_smgr, "recency_window", 512) if _smgr is not None else 512
+
+        # Prefer the streaming store when it holds this session's blocks.
+        block_sources = {}
+        for session_id, layers in list(self.session_blocks.items()):
+            block_sources[session_id] = layers
+        if _smgr is not None:
+            for session_id, layers in list(getattr(_smgr, "session_blocks", {}).items()):
+                existing = block_sources.get(session_id)
+                if existing is None or not any(existing.get(l) for l in existing):
+                    block_sources[session_id] = layers
+
+        for session_id, layers in block_sources.items():
+            def _layer_blocks(l):
+                got = layers.get(l) if isinstance(layers, dict) else None
+                return got or []
+
+            num_blocks = [len(_layer_blocks(l)) for l in range(self.num_layers)]
             seq_len = self.get_session_sequence_length(session_id)
-            recency = 512
-            if getattr(self, "_streaming_mgr", None) is not None:
-                recency = getattr(self._streaming_mgr, "recency_window", 512)
             dense_len = min(seq_len, recency)
             dense_lens = [dense_len] * self.num_layers
 
             comp_res_n = []
             for l in range(self.num_layers):
                 layer_res_n = []
-                for b in self.session_blocks[session_id][l]:
-                    slot_idx = getattr(b, "slot_idx", -1)
-                    if slot_idx >= 0 and self.native_pool is not None:
-                        res_pos = self.native_pool.residual_K_positions[slot_idx]
+                for b in _layer_blocks(l):
+                    pool_idx = getattr(b, "pool_idx", None)
+                    if pool_idx is not None and pool_idx >= 0 and self.native_pool is not None:
+                        res_pos = self.native_pool.residual_K_positions[pool_idx]
                         n_valid = int((res_pos >= 0).sum().item())
                         layer_res_n.append(n_valid)
                     else:

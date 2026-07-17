@@ -10,6 +10,7 @@ PyTorch CPU for large blocks.  Falls back to PyTorch rSVD if MLX fails.
 """
 
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -510,8 +511,34 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     whole-block tokenizer.decode() so the matched string is byte-for-byte what
     the uncached path produced; joining per-token decodes would differ whenever
     a multi-byte character is split across two tokens.
+
+    ── The predicate is NOT selective in practice ──────────────────────────────
+    Measured on the eval corpus (ACTIVE_RUNTIME/nat_paper.txt, ~256-token
+    blocks): any-digit fires on 100% of blocks, _RE_MATH_BOOST on 98%, and the
+    union on 100%.  _RE_MATH_BOOST's first alternative is the character class
+    [\\+\\-\\*\\/=], so a single hyphen ("self-attention", "state-of-the-art")
+    matches, and any citation year or section number satisfies the digit test.
+    On technical prose the "boost" is therefore unconditional: every block
+    compresses at ceil(rank*1.5), i.e. rank 48 when the preset says 32.
+
+    That is not free.  pool_rank is sized ceil(max_rank*1.5) to cover this
+    (kv_runtime_manager ~line 519), so the pool's largest tensor V_KV is
+    allocated at 48 ranks and fully used, and the rSVD runs at
+    r_proj = 48 + oversamples instead of 32 + oversamples.  MLX has no SVD-rank
+    boost at all — it runs a flat rank 32 — so this is a CUDA-only divergence
+    that costs ~1.5x pool bytes and ~1.5x compression work.
+
+    DIFFKV_RANK_BOOST:
+      auto (default) — current behaviour, boost on the predicate above.
+      off            — flat `rank` for every block (MLX parity).
+    A/B `off` on the GPU before trusting either: it lowers pool VRAM and
+    compress time, and its accuracy cost has never been measured.
     """
     if manager is None:
+        return rank
+
+    mode = os.environ.get("DIFFKV_RANK_BOOST", "auto").lower()
+    if mode == "off":
         return rank
 
     sid = getattr(block, "session_id", None)
@@ -542,6 +569,18 @@ def _block_boost_rank(block, rank: int, manager) -> int:
                     block_rank = int(math.ceil(rank * 1.5))
             except Exception:
                 pass
+
+    # Telemetry: the boost rate is the whole question — a rate near 100% means
+    # this is a flat rank multiplier wearing a heuristic's clothes.  Counted per
+    # session (blocks are cached, so each block is decided exactly once).
+    if sid is not None:
+        _stats = getattr(manager, "_rank_boost_stats", None)
+        if _stats is None:
+            _stats = manager._rank_boost_stats = {}
+        s = _stats.setdefault(sid, {"boosted": 0, "total": 0})
+        s["total"] += 1
+        if block_rank > rank:
+            s["boosted"] += 1
 
     if rank_cache is not None:
         rank_cache[sid][anchor] = block_rank

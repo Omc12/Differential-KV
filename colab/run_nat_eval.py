@@ -123,36 +123,64 @@ def build_prompt(tokenizer, paper_content, prompt_instructions):
 
 
 def analytic_kv_bytes(mgr, seq_len, sid):
-    """Calculate the footprint of the DiffKV Cache."""
+    """Footprint of the DiffKV cache, both logical (ideal) and physical (real).
+
+    `store_used_bytes` is the LOGICAL number: what a perfectly packed store
+    would hold.  It is what the paper quotes, and it is NOT what the GPU
+    allocates.  `pool_physical_bytes` is the real pool allocation and is the
+    only figure comparable to dense's KV bytes.
+
+    Two bugs used to make the logical number meaningless on CUDA (both fixed in
+    KVRuntimeManager.sessions, see that property's docstring): the block list
+    was read from the wrong dict and the pool index was read under the wrong
+    attribute name, so nb and res_tokens_used were always 0 and this returned
+    exactly L * recency_window * kv_tok = 0.1007 GB for every preset.
+
+    The block size here is the REAL block size (micro_block_size, 256 on CUDA),
+    not mgr.block_size — that attribute is a hardcoded 64 (kv_runtime_manager
+    line ~465) that the streaming path never uses, and it under-counted U while
+    over-counting the block count's divisor.
+    """
     L = mgr.num_layers
     Hkv = mgr.kv_heads
     d = mgr.head_dim
-    B = mgr.block_size
-    r = mgr.rank
-    M = mgr.max_blocks
-    Dmax = mgr.max_dense_len
-    R = mgr.max_residual
     fp16 = 2
-    
+
+    # Real per-block token capacity on the streaming path.
+    B = int(getattr(mgr, "micro_block_size", 0) or getattr(mgr, "block_size", 64))
+    # Rank actually stored per block.  The pool's rank dimension is the width
+    # that write_block fills; _block_boost_rank can raise a block to
+    # ceil(rank*1.5), which is why pool_rank is 1.5x the configured rank.
+    pool = getattr(mgr, "native_pool", None)
+    r = int(getattr(pool, "rank", None) or mgr.rank)
+
     kv_tok = Hkv * d * fp16 * 2
-    lowrank_block = ((B - 1) * r * fp16
-                     + 2 * Hkv * r * d * fp16
-                     + 2 * Hkv * d * fp16
-                     + 2 * Hkv * d * fp16
+    lowrank_block = (B * r * 1                    # U (int8)
+                     + 2 * Hkv * r * d * fp16     # V_K + V_V
+                     + 2 * Hkv * d * fp16         # anchors K + V
                      + 8)
-    residual_block_max = R * kv_tok
-    per_block = lowrank_block + residual_block_max
-    dense_alloc = Dmax * kv_tok
-    
+
     s0 = mgr.sessions.get(sid)
     nb = s0["num_blocks"][0] if s0 else 0
     dl = s0["dense_lens"][0] if s0 else 0
     res_n0 = s0["comp_res_n"][0][:nb] if s0 else []
     res_tokens_used = int(sum(res_n0))
-    
+
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
+
+    # Physical: what the pool really allocated (uniform slots, lazy-grown).
+    pool_physical = 0
+    if pool is not None and hasattr(pool, "_pool_mb"):
+        pool_physical = int(pool._pool_mb() * 1024 ** 2)
+
+    dense_equiv = L * seq_len * kv_tok
     return {
         "store_used_bytes": store_used,
+        "pool_physical_bytes": pool_physical,
+        "dense_equiv_bytes": dense_equiv,
+        "blocks_layer0": nb,
+        "residual_tokens_layer0": res_tokens_used,
+        "dense_window_tokens": dl,
     }
 
 
@@ -405,6 +433,21 @@ def run_worker(config_name, model_id):
                     if torch.cuda.is_available() else 0.0
                 )
 
+                # ── Rank-boost rate ──────────────────────────────────────
+                # _block_boost_rank raises a block to ceil(rank*1.5) when its
+                # text has any digit / math char / definition phrase.  On
+                # technical prose that predicate fires on ~100% of blocks (a
+                # single hyphen in "self-attention" matches), so the "boost" is
+                # really a flat 1.5x on rank — 1.5x pool bytes and 1.5x rSVD
+                # work vs MLX, which has no SVD-rank boost at all.  Print the
+                # rate so this is visible instead of inferred.
+                _bs = getattr(mgr, "_rank_boost_stats", {}).get(sid)
+                if _bs and _bs.get("total"):
+                    _pct = 100.0 * _bs["boosted"] / _bs["total"]
+                    print(f"[DIAG] rank boost fired on {_bs['boosted']}/{_bs['total']} "
+                          f"blocks = {_pct:.1f}%  (100% => flat 1.5x rank; "
+                          f"set DIFFKV_RANK_BOOST=off for MLX parity)", flush=True)
+
                 # ── Block-state diagnostic (one-time, remove after fix) ──
                 _smgr = getattr(mgr, "_streaming_mgr", None)
                 if _smgr is not None:
@@ -505,6 +548,12 @@ def run_worker(config_name, model_id):
                         else 0.0
                     ),
                     "kv_cache_vram_gb": kv_vram,
+                    # The number that is actually comparable to dense's KV bytes.
+                    # kv_cache_vram_gb is a logical ideal; this is what the GPU holds.
+                    "kv_physical_gb": kv.get("pool_physical_bytes", 0) / 1e9,
+                    "kv_dense_equiv_gb": kv.get("dense_equiv_bytes", 0) / 1e9,
+                    "kv_blocks_layer0": kv.get("blocks_layer0", 0),
+                    "kv_residual_tokens_layer0": kv.get("residual_tokens_layer0", 0),
                     "output_text": generated_text,
                 }
 
@@ -730,6 +779,28 @@ def main():
             
             for p_key in ["prompt1", "prompt2"]:
                 p_res = res.get(p_key, {})
+
+                # PEAK VRAM is the number that matters for "does DiffKV save RAM":
+                # torch.cuda.max_memory_allocated across prefill / decode, which
+                # includes weights + raw KV + pool + workspaces.
+                #
+                # kv_logical is the analytic/ideal store size.  kv_phys is the
+                # pool's real allocation and is the ONLY figure comparable to the
+                # dense KV bytes it replaces — quoting kv_logical as the
+                # compression ratio overstates it by ~10x, because the pool pays
+                # for uniform worst-case slots on every block.
+                _phys = p_res.get("kv_physical_gb", 0.0)
+                _dense = p_res.get("kv_dense_equiv_gb", 0.0)
+                if _phys > 0:
+                    kv_str = (
+                        f"kv_logical={p_res.get('kv_cache_vram_gb',0):.3f}GB"
+                        f"[blk0={p_res.get('kv_blocks_layer0',0)}], "
+                        f"kv_phys={_phys:.3f}GB vs dense {_dense:.3f}GB "
+                        f"= {_dense / _phys:.2f}x REAL"
+                    )
+                else:
+                    kv_str = f"kv_logical={p_res.get('kv_cache_vram_gb',0):.3f}GB"
+
                 print(
                     f"    {p_key} Success: tokens={p_res.get('generated_tokens')}, "
                     f"prefill={p_res.get('prefill_time_s',0):.2f}s "
@@ -737,17 +808,12 @@ def main():
                     f"+ compress={p_res.get('prefill_compress_s',0):.2f}s, "
                     f"CH={p_res.get('prefill_chunk_size','?')}), "
                     f"tps={p_res.get('decode_tps',0):.1f}, "
-                    # PEAK VRAM is the number that matters for "does DiffKV save RAM":
-                    # torch.cuda.max_memory_allocated across prefill / decode, which
-                    # includes weights + raw KV + pool + workspaces.  kv_mem is the
-                    # analytic/logical store size only (misleadingly small — it does
-                    # not count the pool's uniform-slot padding or transient buffers).
                     f"peak_prefill={p_res.get('peak_prefill_vram_gb',0):.2f}GB, "
                     f"after_fwd={p_res.get('prefill_forward_vram_gb',0):.2f}GB, "
                     f"after_comp={p_res.get('prefill_compress_vram_gb',0):.2f}GB, "
                     f"peak_decode={p_res.get('peak_decode_vram_gb',0):.2f}GB, "
                     f"pool={p_res.get('pool_physical_mb',0):.0f}MB, "
-                    f"kv_logical={p_res.get('kv_cache_vram_gb',0):.3f}GB",
+                    + kv_str,
                     flush=True,
                 )
         else:
