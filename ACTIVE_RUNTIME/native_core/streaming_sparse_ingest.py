@@ -1319,14 +1319,19 @@ class StreamingSparseIngestManager:
             _gpu_all_success = True
             _gpu_compressed_count = 0
             # Cap blocks per compress call.  The batched finalization builds
-            # [n, T, feat] fp32 intermediates (deltas, recon) for the whole call
-            # at once; at long context a single layer has ~1000+ eligible blocks
-            # (64k / block_size) and that spikes several GB, OOMing on a full
-            # GPU next to the model + retained raw prefill KV.  Chunking bounds
-            # the spike to _B_MAX × T × feat without changing per-block results
-            # (each block compresses independently).  256 is a no-op at ≤32k
-            # (fewer blocks/layer) so short/medium context is unaffected.
-            _B_MAX = int(os.environ.get("DIFFKV_COMPRESS_BLOCK_BATCH", "256"))
+            # [n, T, feat] fp32 intermediates (deltas, recon, U_masked) for the
+            # whole call at once, so peak VRAM scales with n.  This cap exists
+            # ONLY to bound a genuinely huge layer (64k+ context ≈ 1000 blocks
+            # per layer, which spiked GBs and OOM'd next to the model + retained
+            # raw prefill KV).  Each block compresses independently, so chunking
+            # never changes results.
+            #
+            # 64, deliberately LOW: the cap must never RAISE the batch above what
+            # a layer naturally holds.  A 256 cap measured WORSE on an A100 at
+            # 13k (peak 15.07 -> 17.16 GB, and 16k began OOMing) because the
+            # natural per-layer batch there is only ~49 blocks — the "cap" was
+            # acting as a floor and inflating every transient ~5x.
+            _B_MAX = int(os.environ.get("DIFFKV_COMPRESS_BLOCK_BATCH", "64"))
             for _T_active, _group in _by_T.items():
                 for _cs in range(0, len(_group), _B_MAX):
                     _sub = _group[_cs:_cs + _B_MAX]
@@ -1584,17 +1589,21 @@ class StreamingSparseIngestManager:
         ):
             self.native_pool.ensure_allocated(total_seq_len)
 
-        # 2. Collect eligible blocks across ALL layers, then compress them in one
-        # cross-layer pass.  Previously this looped per layer and called
-        # _submit_blocks_batched 48× — i.e. 48 separate cuSOLVER SVD/QR
-        # dispatches per prefill, each with its own launch overhead.  The blocks
-        # carry their own layer_idx/pool_idx, so the batched SVD is layer-
-        # agnostic (MLX batches num_layers × num_blocks in one shot too).
-        # _submit_blocks_batched groups by T_active and internally chunks at
-        # DIFFKV_COMPRESS_BLOCK_BATCH, so the cross-layer batch still bounds
-        # peak VRAM — it just packs each SVD call full instead of one-layer-thin.
-        all_to_compress = []
+        # 2. Compress PER LAYER.
+        #
+        # A cross-layer variant (collect every layer's eligible blocks, submit
+        # once) was tried to cut the 48 per-layer cuSOLVER dispatches.  It DID
+        # cut compress time (~7.5s -> ~6.0s at 13K) but REGRESSED peak VRAM
+        # (15.07 -> 17.16 GB) and made 16K OOM: the natural per-layer batch at
+        # 13K is only ~49 blocks, so batching across layers raised the SVD batch
+        # to the chunk cap (256) and made every [N, T, feat] transient
+        # (deltas / recon / U_masked) ~5x larger.  Peak VRAM matters more than
+        # ~1.5s of compress here, so the per-layer loop stays.  The chunk cap
+        # below is kept but only BOUNDS a genuinely huge layer (64k+ context has
+        # ~1000 blocks/layer) — it must never RAISE the batch above what one
+        # layer naturally contains.
         for layer_idx, blocks in layers.items():
+            blocks_to_compress = []
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
                     # NOTE: skip_compression is intentionally NOT checked here.
@@ -1618,25 +1627,23 @@ class StreamingSparseIngestManager:
                               f"skip={getattr(b, 'skip_compression', False)} mbs={b.micro_block_size}", flush=True)
                     if eligible and window_ok:
                         b.state = "SUBMITTED"
-                        all_to_compress.append(b)
+                        blocks_to_compress.append(b)
                         self.update_metadata_state(session_id, layer_idx, b)
 
-        if _diag:
-            print(f"[DIAG compress_deferred] total blocks_to_compress across all layers={len(all_to_compress)}", flush=True)
+            if _diag and layer_idx == 0:
+                print(f"[DIAG compress_deferred] layer=0 blocks_to_compress={len(blocks_to_compress)}", flush=True)
 
-        if all_to_compress:
-            try:
-                # layer_idx=None: the GPU path reads each block's own layer_idx;
-                # the batch spans layers by design.
-                self._submit_blocks_batched(session_id, None, all_to_compress)
-            except Exception as _e:
-                import traceback
-                print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched (cross-layer): {_e}", flush=True)
-                traceback.print_exc()
-                # Rollback state so next compress attempt can retry
-                for _b in all_to_compress:
-                    if _b.state == "SUBMITTED":
-                        _b.state = "ACCUMULATING"
+            if blocks_to_compress:
+                try:
+                    self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+                except Exception as _e:
+                    import traceback
+                    print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
+                    traceback.print_exc()
+                    # Rollback state so next compress attempt can retry
+                    for _b in blocks_to_compress:
+                        if _b.state == "SUBMITTED":
+                            _b.state = "ACCUMULATING"
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

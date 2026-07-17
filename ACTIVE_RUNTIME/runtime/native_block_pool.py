@@ -72,6 +72,30 @@ class NativeBlockPool:
         self._grow_increment = 128 if _is_mps else 512
         self._is_mps         = _is_mps
 
+        # ── Legacy slots: stratified-U (U_sem/U_sem_scale/U_fact/n_semantic) and
+        # fact anchors.  ONLY the CPU compress path writes these (via
+        # write_block's optional kwargs, from finalize_compressed_blocks).  The
+        # CUDA GPU-compress path (compress_layer_blocks_gpu, the default on CUDA)
+        # never passes them, so they stay all-zero/-1 while still costing
+        # ~42 KB per slot (≈11% of a slot) AND still being handed to the decode
+        # kernel every token — HAS_FACT=True makes it loop 3 dead fact slots per
+        # block, per layer, per token.  MLX's session store has no equivalent.
+        # Skip allocating them when the GPU path owns compression; every reader
+        # already treats "missing" as absent (getattr(...) is None →
+        # _build_stratified_U_for_triton early-returns, has_fact=False).
+        # DEFERRED — kept True on purpose.  Skipping the allocation is only worth
+        # ~42 KB/slot (~110 MB at 13k, i.e. <1% of the ~15 GB peak), but
+        # `n_semantic`/`U_sem`/`U_fact` are read by EIGHT block-property getters
+        # (streaming_sparse_ingest.py:277/292/309/327,
+        # kv_runtime_manager.py:242/257/274/292) that index the pool tensors
+        # directly, and `getattr(b, "U_sem_int4", None)` at
+        # kv_runtime_manager.py:1708 triggers them.  Setting these to None
+        # without guarding every one of those is a crash waiting to happen for
+        # under 1% of peak — not a good trade.  Flip to the commented-out
+        # expression below ONLY after guarding all eight readers.
+        #   self._needs_legacy_slots = not (_is_cuda_dev and _gpu_compress)
+        self._needs_legacy_slots = True
+
         # Bytes per block — used for n_blocks computation in ensure_allocated
         self._bytes_per_block = (
             max_seq_len * rank * 1 +              # U  (int8)
@@ -173,10 +197,15 @@ class NativeBlockPool:
         self.current_blocks = n_blocks
         self.U          = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=torch.int8)
         self.U_scale    = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
-        self.U_sem      = torch.zeros((n_blocks, self.max_seq_len // 2, self.rank), device=self.device, dtype=torch.int8)
-        self.U_sem_scale = torch.zeros((n_blocks, self.rank), device=self.device, dtype=self.dtype)
-        self.U_fact     = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=self.dtype)
-        self.n_semantic = torch.zeros((n_blocks,), device=self.device, dtype=torch.int16)
+        # Stratified-U slots — only the CPU compress path fills these (see
+        # _needs_legacy_slots).  None on the CUDA GPU-compress path.
+        if self._needs_legacy_slots:
+            self.U_sem      = torch.zeros((n_blocks, self.max_seq_len // 2, self.rank), device=self.device, dtype=torch.int8)
+            self.U_sem_scale = torch.zeros((n_blocks, self.rank), device=self.device, dtype=self.dtype)
+            self.U_fact     = torch.zeros((n_blocks, self.max_seq_len, self.rank), device=self.device, dtype=self.dtype)
+            self.n_semantic = torch.zeros((n_blocks,), device=self.device, dtype=torch.int16)
+        else:
+            self.U_sem = self.U_sem_scale = self.U_fact = self.n_semantic = None
         self.V_KV       = torch.zeros((n_blocks, 2, self.rank, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.anchors_KV = torch.zeros((n_blocks, 2, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
         self.scales     = torch.zeros((n_blocks,), device=self.device, dtype=self.dtype)
@@ -188,10 +217,15 @@ class NativeBlockPool:
         self.residual_V_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
         self.residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
 
-        # Fact Anchors (Solution 3)
-        self.fact_anchors_K = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
-        self.fact_anchors_V = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
-        self.fact_anchor_positions = torch.full((n_blocks, 3), -1, device=self.device, dtype=torch.int16)
+        # Fact Anchors (Solution 3) — CPU-compress path only; None on the CUDA
+        # GPU path so the decode kernel gets HAS_FACT=False instead of looping
+        # 3 all-(-1) slots per block per layer per token.
+        if self._needs_legacy_slots:
+            self.fact_anchors_K = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+            self.fact_anchors_V = torch.zeros((n_blocks, 3, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
+            self.fact_anchor_positions = torch.full((n_blocks, 3), -1, device=self.device, dtype=torch.int16)
+        else:
+            self.fact_anchors_K = self.fact_anchors_V = self.fact_anchor_positions = None
 
         self._free_indices     = list(range(n_blocks - 1, -1, -1))
         self._free_indices_set = set(self._free_indices)
@@ -255,12 +289,13 @@ class NativeBlockPool:
         gc.collect()
         _empty_cache(self.device)
         
+        _legacy = self._needs_legacy_slots
         new_U = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=torch.int8)
         new_U_scale = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
-        new_U_sem = torch.zeros((new_blocks, max_seq_len // 2, rank), device=self.device, dtype=torch.int8)
-        new_U_sem_scale = torch.zeros((new_blocks, rank), device=self.device, dtype=self.dtype)
-        new_U_fact = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype)
-        new_n_semantic = torch.zeros((new_blocks,), device=self.device, dtype=torch.int16)
+        new_U_sem = torch.zeros((new_blocks, max_seq_len // 2, rank), device=self.device, dtype=torch.int8) if _legacy else None
+        new_U_sem_scale = torch.zeros((new_blocks, rank), device=self.device, dtype=self.dtype) if _legacy else None
+        new_U_fact = torch.zeros((new_blocks, max_seq_len, rank), device=self.device, dtype=self.dtype) if _legacy else None
+        new_n_semantic = torch.zeros((new_blocks,), device=self.device, dtype=torch.int16) if _legacy else None
         new_V_KV = torch.zeros((new_blocks, 2, rank, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_anchors_KV = torch.zeros((new_blocks, 2, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
         new_scales = torch.zeros((new_blocks,), device=self.device, dtype=self.dtype)
@@ -272,16 +307,17 @@ class NativeBlockPool:
         new_res_V_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
         new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
 
-        new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_fact_anc_pos = torch.full((new_blocks, 3), -1, device=self.device, dtype=torch.int16)
+        new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
+        new_fact_anc_V = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
+        new_fact_anc_pos = torch.full((new_blocks, 3), -1, device=self.device, dtype=torch.int16) if _legacy else None
 
         new_U[:old_blocks] = self.U
         new_U_scale[:old_blocks] = self.U_scale
-        new_U_sem[:old_blocks] = self.U_sem
-        new_U_sem_scale[:old_blocks] = self.U_sem_scale
-        new_U_fact[:old_blocks] = self.U_fact
-        new_n_semantic[:old_blocks] = self.n_semantic
+        if _legacy:
+            new_U_sem[:old_blocks] = self.U_sem
+            new_U_sem_scale[:old_blocks] = self.U_sem_scale
+            new_U_fact[:old_blocks] = self.U_fact
+            new_n_semantic[:old_blocks] = self.n_semantic
         new_V_KV[:old_blocks] = self.V_KV
         new_anchors_KV[:old_blocks] = self.anchors_KV
         new_scales[:old_blocks] = self.scales
@@ -293,9 +329,10 @@ class NativeBlockPool:
         new_res_V_pos[:old_blocks] = self.residual_V_positions
         new_res_V_val[:old_blocks] = self.residual_V_values
 
-        new_fact_anc_K[:old_blocks] = self.fact_anchors_K
-        new_fact_anc_V[:old_blocks] = self.fact_anchors_V
-        new_fact_anc_pos[:old_blocks] = self.fact_anchor_positions
+        if _legacy:
+            new_fact_anc_K[:old_blocks] = self.fact_anchors_K
+            new_fact_anc_V[:old_blocks] = self.fact_anchors_V
+            new_fact_anc_pos[:old_blocks] = self.fact_anchor_positions
 
         # Explicitly delete old tensors so the allocator can reclaim them
         del (self.U, self.U_scale, self.V_KV, self.anchors_KV, self.scales, self.seq_lens, self.desc,
@@ -479,11 +516,20 @@ class NativeBlockPool:
             self.residual_V_positions[pool_idx, :n_res_v] = residual_V_positions[:n_res_v].to(torch.int16)
             self.residual_V_values[pool_idx, :n_res_v] = residual_V_values[:n_res_v].view(n_res_v, num_kv, h_dim).to(self.dtype)
 
-        # Copy stratified SVD components (Solution 2)
-        self.U_sem[pool_idx] = 0
-        self.U_sem_scale[pool_idx] = 0.0
-        self.U_fact[pool_idx] = 0.0
-        self.n_semantic[pool_idx] = n_semantic
+        # Copy stratified SVD components (Solution 2).  Skipped entirely when the
+        # slots were never allocated (CUDA GPU-compress path — see
+        # _needs_legacy_slots); that path never supplies U_sem_int4/n_semantic.
+        if self.n_semantic is None:
+            if n_semantic:
+                raise RuntimeError(
+                    "write_block received n_semantic>0 but the pool was built without "
+                    "stratified slots (DIFFKV_GPU_COMPRESS path). Set DIFFKV_GPU_COMPRESS=0."
+                )
+        else:
+            self.U_sem[pool_idx] = 0
+            self.U_sem_scale[pool_idx] = 0.0
+            self.U_fact[pool_idx] = 0.0
+            self.n_semantic[pool_idx] = n_semantic
         # Track whether any block has ever received non-zero n_semantic.
         # This is a cheap Python int comparison — no GPU sync.
         # Used by _build_stratified_U_for_triton to skip the GPU .all().item()
@@ -502,17 +548,21 @@ class NativeBlockPool:
             write_fact_rank = min(U_fact_fp16.shape[1], self.U_fact.shape[2])
             self.U_fact[pool_idx, :write_fact_seq, :write_fact_rank] = U_fact_fp16[:write_fact_seq, :write_fact_rank].to(self.dtype)
 
-        # Copy fact anchors (Solution 3)
-        self.fact_anchors_K[pool_idx] = 0.0
-        self.fact_anchors_V[pool_idx] = 0.0
-        self.fact_anchor_positions[pool_idx] = -1
+        # Copy fact anchors (Solution 3).  Skipped when the slots were never
+        # allocated (CUDA GPU-compress path never supplies fact anchors).  Must
+        # NOT early-return here — the SRL descriptor and the generation bump
+        # below still have to run.
+        if self.fact_anchor_positions is not None:
+            self.fact_anchors_K[pool_idx] = 0.0
+            self.fact_anchors_V[pool_idx] = 0.0
+            self.fact_anchor_positions[pool_idx] = -1
 
-        if fact_anchors_K is not None and fact_anchors_K.numel() > 0:
-            self.fact_anchors_K[pool_idx] = fact_anchors_K.to(self.dtype)
-        if fact_anchors_V is not None and fact_anchors_V.numel() > 0:
-            self.fact_anchors_V[pool_idx] = fact_anchors_V.to(self.dtype)
-        if fact_anchor_positions is not None and fact_anchor_positions.numel() > 0:
-            self.fact_anchor_positions[pool_idx] = fact_anchor_positions.to(torch.int16)
+            if fact_anchors_K is not None and fact_anchors_K.numel() > 0:
+                self.fact_anchors_K[pool_idx] = fact_anchors_K.to(self.dtype)
+            if fact_anchors_V is not None and fact_anchors_V.numel() > 0:
+                self.fact_anchors_V[pool_idx] = fact_anchors_V.to(self.dtype)
+            if fact_anchor_positions is not None and fact_anchor_positions.numel() > 0:
+                self.fact_anchor_positions[pool_idx] = fact_anchor_positions.to(torch.int16)
 
         # ── SRL: compute and store semantic descriptor ─────────────────────
         # Runs only when W_proj is initialized (set by KVRuntimeManager).
