@@ -345,15 +345,45 @@ reconstruction (`U_scaled @ Vh`, the KV the pool stores) is bit-identical to the
 SVD path (1.2e-6, fp32 noise), and the existing compress parity tests pass with
 the flag on. **Opt-in — A/B recall before defaulting.**
 
-## The bigger lever than Gram: the r≤32 cuSOLVER cliff
+## THE REAL LEVER — the r≤32 cuSOLVER cliff is CONFIRMED, and it is a wall
 
-cuSOLVER's batched Jacobi solvers (`gesvdjBatched`, `syevjBatched`) cap at 32×32.
-`r_proj = rank + 5` is 53 today (rank boost → 48) or 37 (`DIFFKV_RANK_BOOST=off`).
-Both exceed 32, so the batch loops. If `r_proj ≤ 32`, cuSOLVER should run
-genuinely batched — a far larger win than Gram's 1.9x. `probe_batched_cliff`
-(now wired into `profile_compress_stages.py`) measures exactly this. If the cliff
-is real, the fix is `DIFFKV_RANK_BOOST=off` **plus** trimming oversamples so
-`r_proj ≤ 32` — not micro-optimising the decomposition. **Run the probe.**
+`probe_batched_cliff` on the A100 measured a **130× cliff** in one rank step:
+
+```
+   r    eigh ms/call    svd ms/call
+  30       0.0062         0.8710     <-- BATCHED
+  32       0.0063         0.8838     <-- BATCHED
+  33       0.8120         1.3483     <-- fell off the cliff
+  48       0.9682         1.6100
+  53       0.9778         1.6719
+```
+
+cuSOLVER's batched Jacobi solvers (`syevjBatched`/`gesvdjBatched`) run r≤32
+genuinely batched; at r=33 they drop to a per-matrix loop. So across the 2,352
+calls/prefill, Gram eigh at `r_proj ≤ 32` costs **~0.015 s** vs **~2.1 s** at
+r_proj=53 — and QR (same cuSOLVER family) drops with it. **Gram + r_proj ≤ 32
+takes compress from ~6.1 s to well under ~1 s** — the ~6x win, not the 1.9x that
+Gram alone gives at r_proj=53.
+
+The catch the probe exposed: `r_proj = max_rank + oversamples`, so even
+`DIFFKV_RANK_BOOST=off` (rank 32) gives 32+5 = **37, still over the cliff**. Two
+knobs now make r_proj ≤ 32 reachable (both in `compress_layer_blocks_gpu`):
+
+- `DIFFKV_RSVD_OVERSAMPLES` (default 5) — randomized-SVD slack; the 2 power
+  iterations already there cover most of what oversampling buys.
+- `DIFFKV_RSVD_MAX_RPROJ` (default 0=off) — hard cap on r_proj. Blocks that
+  wanted a higher rank are capped to it. The per-block dynamic-rank clamp was
+  updated so `dynamic_rank ≤ r_proj` (CPU-verified: forcing block_rank 48 with a
+  cap of 32 yields dynamic_rank 32 and consistent U/V, no crash).
+
+**Recommended batched recipe to A/B on recall:**
+```
+DIFFKV_COMPRESS_GRAM_SVD=1  DIFFKV_RANK_BOOST=off  DIFFKV_RSVD_MAX_RPROJ=32
+```
+This caps r_proj 37→32 (dropping ~5 oversamples' worth of subspace slack; the
+dynamic rank was already ≤32 with boost off, so the stored fidelity barely
+moves), and should collapse compress. Verify recall (needle + synthesis) —
+0 effective oversamples leans entirely on the 2 power iterations.
 
 ## Bugs fixed this pass (were blocking the run)
 
@@ -386,9 +416,15 @@ assert `10x in [range]` — nondeterministic SRL routing, stably failing.
 
 ## Updated next steps
 
-1. **Run `probe_batched_cliff`** (it now runs as part of the profiler). If eigh
-   drops sharply at r≤32, that is the real compress fix.
-2. A/B `DIFFKV_COMPRESS_GRAM_SVD=1` on recall; if clean, make it default.
-3. A/B `DIFFKV_RANK_BOOST=off` on recall — it cuts pool (2.43x→higher) AND
-   compress AND, combined with fewer oversamples, may cross the r≤32 cliff.
-4. Sweep 32K/64K/128K — still the only regime where sparse decode can win here.
+1. **A/B the batched recipe on recall** —
+   `DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32`.
+   Expect compress ~6.1 s → ~1 s. If needle + synthesis hold, this is the win;
+   make it the CUDA default. (The cliff is confirmed; this is now an accuracy
+   check, not a perf question.)
+2. If recall dips, back off toward the cliff instead of over it:
+   `DIFFKV_RSVD_OVERSAMPLES=0` with rank 32 (r_proj=32), or a base rank of ~26
+   with the default oversamples — both land r_proj at 32 with some slack.
+3. `DIFFKV_RANK_BOOST=off` also cuts pool VRAM (pool_rank 48→32) — fold its
+   recall check into step 1 since the recipe already sets it.
+4. Sweep 32K/64K/128K — still the only regime where sparse *decode* can win here
+   (decode KV is 1.9% of the step at 13.4K; break-even ~485K tokens).

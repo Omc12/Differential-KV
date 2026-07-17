@@ -696,8 +696,38 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         if block_rank > max_rank_for_batch:
             max_rank_for_batch = block_rank
 
-    n_oversamples = 5
+    # r_proj is the randomized-SVD projection width; it sets the size of every
+    # cuSOLVER call below (qr on [T, r_proj], svd/eigh on [r_proj, ...]).
+    #
+    # ── The batched-kernel cliff (measured, A100, colab/profile_compress_stages) ──
+    # cuSOLVER's genuinely batched Jacobi solvers (syevjBatched for eigh,
+    # gesvdjBatched for svd) cap at 32x32.  Above that, PyTorch loops per matrix:
+    #   eigh [N,r,r]:  r=32 -> 0.006 ms/call   r=33 -> 0.812 ms/call  (~130x cliff)
+    #   svd  [N,r,f]:  r=32 -> 0.884 ms/call   r=33 -> 1.348 ms/call
+    # With N_blocks x num_layers = 2,352 calls/prefill, keeping r_proj <= 32 takes
+    # the Gram eigh from ~2.1 s to ~0.015 s — the single biggest compress lever,
+    # far past the 1.9x the Gram swap gives at r_proj=53.
+    #
+    # BUT r_proj = max_rank + oversamples: even DIFFKV_RANK_BOOST=off (rank 32)
+    # gives 32+5 = 37, still over the cliff.  Two knobs make r_proj<=32 reachable:
+    #   DIFFKV_RSVD_OVERSAMPLES (default 5) — randomized-SVD slack.  With the two
+    #     power iterations below, 0-2 is usually enough; rank 32 + 0 = 32 batches.
+    #   DIFFKV_RSVD_MAX_RPROJ (default 0=off) — hard cap on r_proj.  Blocks that
+    #     wanted a higher rank are capped to it (fidelity trade — A/B recall).
+    # Recommended batched recipe to A/B:
+    #   DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32
+    try:
+        n_oversamples = int(_local_os.environ.get("DIFFKV_RSVD_OVERSAMPLES", "5"))
+    except ValueError:
+        n_oversamples = 5
+    n_oversamples = max(0, n_oversamples)
     r_proj = min(max_rank_for_batch + n_oversamples, T_active, feat_dim)
+    try:
+        _max_rproj = int(_local_os.environ.get("DIFFKV_RSVD_MAX_RPROJ", "0"))
+    except ValueError:
+        _max_rproj = 0
+    if _max_rproj > 0:
+        r_proj = min(r_proj, _max_rproj)
     if r_proj < 1:
         return False
 
@@ -762,7 +792,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # S is already on CPU here).  Equivalent batched form: keep 99.9% of the
     # energy, clamp into [4, b_rank] on the truncation branch, else keep b_rank.
     S_cpu = S.cpu()
-    block_ranks_t = torch.tensor(block_ranks, dtype=torch.long)          # [N]
+    # Cap the per-block target rank at r_proj: U/S/Vh only have r_proj columns,
+    # so a block_rank above r_proj (possible when DIFFKV_RSVD_MAX_RPROJ caps
+    # r_proj below the boosted rank) would otherwise record a dynamic_rank larger
+    # than the number of factor columns actually stored, and block.U =
+    # U_scaled[:, :, :k] would silently keep only r_proj of them — a rank/data
+    # mismatch the decode path then trusts.  Without the cap r_proj is always
+    # >= max block_rank, so this clamp is a no-op on the default path.
+    block_ranks_t = torch.tensor(block_ranks, dtype=torch.long).clamp(max=r_proj)  # [N]
     S_sq = S_cpu.float() ** 2                                            # [N, r_proj]
     tot = S_sq.sum(dim=1)                                                # [N]
     cum = torch.cumsum(S_sq, dim=1)                                      # [N, r_proj]
