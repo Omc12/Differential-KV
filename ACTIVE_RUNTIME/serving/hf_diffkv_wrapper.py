@@ -259,19 +259,33 @@ def _configure_cuda_allocator() -> None:
     the old unconditional message claimed gc_threshold/max_split_size were
     configured even when the caller's setting had already won.
 
-    NOTE: TF32 is deliberately NOT set here.  It used to be, globally, and that
-    was wrong: torch.backends.cuda.matmul.allow_tf32 is process-wide, so it also
-    changed the fp32 math in the DECODE reconstruction and router, perturbing
-    generated output (every preset's token count shifted) for a measured 4%
-    saving on compress — compress is cuSOLVER-bound, not matmul-bound, so TF32
-    buys almost nothing there.  It is now applied narrowly around the
-    compression math only; see native_core/compression/lowrank.py (_tf32_matmul).
+    TF32: `set_float32_matmul_precision('high')` lets every fp32 matmul use the
+    Ampere+ TF32 tensor cores.  This does NOT help compress (cuSOLVER-bound) and
+    does NOT touch the fp16 prefill attention, but it DOES speed up the fp32
+    DECODE reconstruction JIT kernels (`_reconstruct_and_score` etc.) — the ones
+    PyTorch's own "TensorFloat32 ... not enabled" warning fires on.  That is a
+    decode-tps win.  It slightly perturbs fp32 accumulation (TF32 has a 10-bit
+    mantissa), so generated tokens can shift a little; that is the speed/accuracy
+    trade this project has opted into.  Opt out with DIFFKV_TF32=0.  The narrow
+    compress-only `_tf32_matmul` (lowrank.py) remains as belt-and-suspenders.
     """
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
         "garbage_collection_threshold:0.6,max_split_size_mb:128"
     )
     print(f"[DiffKV] CUDA allocator config: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
+
+    if os.environ.get("DIFFKV_TF32", "1") != "0":
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.set_float32_matmul_precision("high")
+                _torch.backends.cuda.matmul.allow_tf32 = True
+                _torch.backends.cudnn.allow_tf32 = True
+                print("[DiffKV] TF32 enabled globally (float32_matmul_precision=high) "
+                      "— speeds fp32 decode reconstruction kernels. DIFFKV_TF32=0 to disable.")
+        except Exception as _e:
+            print(f"[DiffKV] Could not enable global TF32: {_e}")
 
 
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:

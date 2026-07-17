@@ -584,3 +584,65 @@ this is simply the wrong regime to judge decode; the honest move is the
   architectural. Compress itself is already fixed (6.1→2.6 s).
 - **"Worse tps"** → correct at 13.4 K and expected; sparse decode pays off only
   when KV dominates the step. Not a bug, a regime.
+
+---
+
+# FIFTH PASS — streaming verdict, TF32, contiguous prefill, tps roofline (2026-07-18)
+
+## `DIFFKV_STREAMING_COMPRESS=1` is a NET LOSS here — do not use it
+
+The A/B (user, A100): prefill **11 s → 70–84 s** (7× worse), peak barely moved
+(15.07 → 14.57 GB). Streaming bounds raw KV, but then every later chunk's forward
+attends *compressed* history, and CUDA's compressed-history prefill attention is
+~7× slower than attending raw KV. Wrong trade at this context. Reverted the
+recommendation — keep exact prefill.
+
+## TF32 enabled globally — a real decode win
+
+The prior scoped-only TF32 left the log begging (`set_float32_matmul_precision`).
+Enabled it globally in `_configure_cuda_allocator` (`DIFFKV_TF32=0` to disable).
+It does NOT touch the fp16 prefill attention or compress (cuSOLVER-bound), but it
+DOES speed the fp32 decode reconstruction JIT kernels — the ones the warning fires
+on. Small, free, and aligned with "even small gains pay off." Slight fp32-
+accumulation perturbation (TF32 = 10-bit mantissa); the project has opted in.
+
+## Contiguous dense prefill — built (MLX-parity), EXPERIMENTAL, `DIFFKV_CONTIGUOUS_PREFILL=1`
+
+MLX's `_sparse_prefill_attend` keeps a rotated K/V buffer of ALL tokens so far and
+does ONE flash SDPA per chunk. The CUDA default re-assembles history blocks +
+re-RoPEs + eager matmul + LSE-merge every chunk (the ~1.4× forward). New branch
+(`diffkv_attention.py`, fresh-prefill) replicates MLX: a per-(session,layer)
+rotated buffer + one mem-efficient SDPA with an EXPLICIT bottom-right causal mask
+(not `is_causal` — its non-square alignment is torch-version-dependent). KV is
+still captured into blocks for boundary compression, so prefill holds the rotated
+buffer AND unrotated blocks (~2× raw prefill KV); the buffer is freed at the
+prefill→decode boundary and on clear_session.
+
+Correctness of the core math is CPU-proven: the chunked contiguous attention with
+the mask reproduces a single full-sequence causal SDPA to **0.00e+00** rel error.
+But the block-capture integration and the pool/decode handoff are **UNVALIDATED on
+GPU** — A/B `output_text` vs the default before trusting it. Expected: forward
+~8 s → ~6 s (dense-like); peak similar to the current compression spike (the 2×
+buffer ≈ the spike it replaces). If the 2× peak is a problem, the follow-up is to
+drop block-capture and un-rotate the buffer at the boundary (RoPE is invertible)
+for 1× memory — not done (numerical round-trip risk, GPU-only to validate).
+
+## A fused decode kernel will NOT move tps at 13.4 K — roofline says so
+
+```
+per-token @13.4k:   weights(nf4) 7.35 GB=4.74 ms   DiffKV store 0.95 GB=0.61 ms
+dense step 89.3 ms (11.2 tps)     DiffKV step 129.9 ms (7.7 tps)     gap +40.6 ms
+```
+
+The DiffKV KV-store read a fused kernel could optimize is **0.61 ms (~0.5 % of the
+step)**. The +40.6 ms gap is **per-token eager launch / Python overhead** — 48
+layers × (routing + reconstruction + sparse attend), with CUDA graphs OFF for
+mutable routing. Both dense and DiffKV run ~19× off their bandwidth roofline
+(launch-bound + nf4 dequant), so DiffKV's *extra* launches are the gap, not kernel
+math. A better kernel optimizes the 0.5 %; it cannot close a launch-overhead gap.
+The real tps levers, in order: (1) CUDA graphs for the static-routing steps
+(route-cadence makes selection static between routes → capturable; hard, needs
+fixed addresses/shapes), (2) TF32 on reconstruction (done), (3) fewer kernels per
+layer per token. There is no kernel that makes 7.7→11 at this context; the honest
+path is the long-context regime where the store read is a real fraction of the
+step.

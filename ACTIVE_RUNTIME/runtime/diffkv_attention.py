@@ -546,6 +546,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     # DECODE PATH — sparse execution via Triton or PyTorch fallback
                     # ----------------------------------------------------------
 
+                    # Free the contiguous-prefill rotated buffer (DIFFKV_CONTIGUOUS_PREFILL)
+                    # now that prefill is over — it is only used by the prefill forward.
+                    # Layer 0 clears every session's buffers; the compressed pool is the
+                    # decode-time store from here on.
+                    if captured_layer_idx == 0 and getattr(kv_manager, "_contig_prefill", None):
+                        for _sid in session_ids:
+                            kv_manager._contig_prefill.pop(_sid, None)
+
                     # 1. Ingest new tokens for all active batch elements
                     for b_idx in range(bsz):
                         sid = session_ids[b_idx]
@@ -2267,7 +2275,67 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         else:
                             _pos_ids_cpu = [0] * bsz
                         _global_offset = _pos_ids_cpu[0]
-                        if q_len <= _chunk_size and _global_offset == 0:
+                        if os.environ.get("DIFFKV_CONTIGUOUS_PREFILL", "0") == "1":
+                            # ── CONTIGUOUS DENSE PREFILL (MLX-parity) — EXPERIMENTAL ─────────
+                            # MLX keeps a growing ROTATED K/V buffer of all tokens so far and
+                            # attends each chunk against it with ONE flash SDPA
+                            # (_sparse_prefill_attend, all_k = "rotated keys, ALL tokens").
+                            # The default CUDA path instead re-assembles history blocks
+                            # (torch.cat), re-applies RoPE to all history, and runs an EAGER
+                            # matmul+softmax+LSE-merge every chunk — the O(N^2) work behind the
+                            # ~1.4x-dense forward.  This branch replicates MLX: a per-(session,
+                            # layer) rotated buffer + a single SDPA with an explicit bottom-right
+                            # causal mask (NOT is_causal — its non-square alignment is
+                            # version-dependent; an explicit mask is unambiguous).
+                            #
+                            # KV is STILL captured into blocks (below) for boundary compression,
+                            # so during prefill this holds the rotated buffer AND the unrotated
+                            # blocks: ~2x raw prefill KV for a dense-speed forward.  The buffer
+                            # is freed when decode begins (is_decode branch) and on clear_session.
+                            # UNVALIDATED on GPU — A/B output_text vs the default path before use.
+                            if not hasattr(kv_manager, "_contig_prefill"):
+                                kv_manager._contig_prefill = {}
+                            attn_outputs = []
+                            for b_idx in range(bsz):
+                                sid = session_ids[b_idx]
+                                if sid == "dummy_session":
+                                    attn_outputs.append(torch.zeros(
+                                        (1, num_heads, q_len, head_dim),
+                                        device=query_states.device, dtype=query_states.dtype))
+                                    continue
+                                _layer_bufs = kv_manager._contig_prefill.setdefault(sid, {})
+                                _prev = _layer_bufs.get(captured_layer_idx)
+                                ck = key_states[b_idx:b_idx+1]     # rotated K, this chunk
+                                cv = value_states[b_idx:b_idx+1]
+                                cq = query_states[b_idx:b_idx+1]   # rotated Q, this chunk
+                                if _prev is None:
+                                    k_buf, v_buf = ck, cv
+                                else:
+                                    k_buf = torch.cat([_prev[0], ck], dim=2)
+                                    v_buf = torch.cat([_prev[1], cv], dim=2)
+                                _layer_bufs[captured_layer_idx] = (k_buf, v_buf)
+                                T = k_buf.shape[2]
+                                offset = T - q_len   # tokens buffered before this chunk
+                                # Bottom-right causal: chunk query i (global pos offset+i)
+                                # attends buffered key j iff j <= offset+i.
+                                _i = torch.arange(q_len, device=cq.device).view(q_len, 1)
+                                _j = torch.arange(T, device=cq.device).view(1, T)
+                                _mask = (_j <= (offset + _i))       # bool [q_len, T]
+                                k_rep = repeat_kv(k_buf, num_key_value_groups)
+                                v_rep = repeat_kv(v_buf, num_key_value_groups)
+                                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=(cq.device.type == "cuda")):
+                                    out_b = F.scaled_dot_product_attention(
+                                        cq.contiguous(), k_rep.contiguous(), v_rep.contiguous(),
+                                        attn_mask=_mask, dropout_p=0.0,
+                                    )
+                                attn_outputs.append(out_b)
+                                kv_manager.capture_prefill_kv(
+                                    sid, captured_layer_idx,
+                                    unrot_key_states[b_idx:b_idx+1].detach(),
+                                    cv.detach(),
+                                )
+                            attn_output = torch.cat(attn_outputs, dim=0)
+                        elif q_len <= _chunk_size and _global_offset == 0:
                             # Standard single-pass prefill for small/medium inputs
                             attn_outputs = []
                             for b_idx in range(bsz):
@@ -2275,12 +2343,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 curr_q = query_states[b_idx:b_idx+1]
                                 curr_k = key_states[b_idx:b_idx+1]
                                 curr_v = value_states[b_idx:b_idx+1]
-                                
+
                                 full_k = curr_k
                                 full_v = curr_v
                                 is_causal_flag = True
                                 attn_mask_flag = None
-                                    
+
                                 k_rep = repeat_kv(full_k, num_key_value_groups)
                                 v_rep = repeat_kv(full_v, num_key_value_groups)
                                 with torch.backends.cuda.sdp_kernel(enable_flash=(curr_q.device.type == "cuda"), enable_math=True, enable_mem_efficient=True):
@@ -2289,7 +2357,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         attn_mask=attn_mask_flag, dropout_p=0.0, is_causal=is_causal_flag
                                     )
                                 attn_outputs.append(out_b)
-                                
+
                                 # Capture this chunk's KV (without prev concat)
                                 if sid != "dummy_session":
                                     kv_manager.capture_prefill_kv(

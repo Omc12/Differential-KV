@@ -1474,6 +1474,11 @@ class KVRuntimeManager:
             self.attention_score_cache.clear_session(session_id)
         if hasattr(self, "_last_prefill_q"):
             self._last_prefill_q.pop(session_id, None)
+        # Contiguous-prefill rotated buffers (DIFFKV_CONTIGUOUS_PREFILL); normally
+        # freed at the prefill→decode boundary, but drop here too so an aborted
+        # prefill can't leak the ~2x raw KV buffer.
+        if hasattr(self, "_contig_prefill"):
+            self._contig_prefill.pop(session_id, None)
 
         # Trigger garbage collection and empty MPS/CUDA cache
         import gc
