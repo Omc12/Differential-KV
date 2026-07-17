@@ -769,6 +769,24 @@ async def run_direct_mode(args):
         print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
         print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
 
+    if _best_device == "cuda":
+        # ── CUDA ↔ MLX parity defaults (explicit env still wins) ──
+        # V-side rebalancing before the joint K|V SVD, matching MLX's
+        # v_scale_on.  It is already the code default in
+        # compress_layer_blocks_gpu; set here too so the CLI surfaces it and a
+        # profile/A-B can flip it with DIFFKV_V_SCALE=0.
+        os.environ.setdefault("DIFFKV_V_SCALE", "1")
+        print_system("CUDA ↔ MLX parity configuration:")
+        print(f"  - DIFFKV_V_SCALE              = {os.environ.get('DIFFKV_V_SCALE')} (V rebalanced before joint SVD)")
+        # CAD (relational accuracy) auto-enables for high/quality/max presets in
+        # DiffKVHFWrapper — matching MLX (mlx_diffkv_wrapper); reported there.
+        # Streaming compression (long-context peak VRAM, DIFFKV_STREAMING_COMPRESS)
+        # and lower engagement (DIFFKV_ENGAGE_THRESHOLD) are left opt-in: MLX
+        # engages DiffKV from token 1 by design (slower short-context), while the
+        # CUDA default bypasses to dense below the threshold for faster short
+        # prompts.  Flip either explicitly to match MLX's always-on behavior.
+        print(f"  - CAD                        = auto for high/quality/max preset (see wrapper)")
+
     # ── BEST DiffKV decode config (shared with the serving gateway) ──
     # setdefault the user-optimal serving policy: fast exact-dense for short prompts, DiffKV
     # sparse at >=8k, decompress-and-cache fast decode + adaptive bias when sparse. Single

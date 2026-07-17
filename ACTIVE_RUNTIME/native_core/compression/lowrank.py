@@ -583,10 +583,36 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     if _validate_finite and not torch.isfinite(deltas).all():
         deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Token-wise Norm-Normalization (row-wise) on GPU (Phase 41)
-    token_norms = deltas.norm(dim=2)  # [N_blocks, T_active]
+    # ── V-side rebalancing for the joint K|V SVD (MLX parity: DIFFKV_V_SCALE) ──
+    # When a block's V-delta energy is much smaller than its K-delta energy, the
+    # joint SVD spends its rank budget on K and under-represents V.  MLX scales V
+    # up by sqrt(eK/eV) before the SVD so V competes for rank, then undoes it on
+    # the V factor (mlx_diffkv_wrapper.compress_deferred_prefill_blocks,
+    # v_scale_on).  Ported here: keep the ORIGINAL `deltas` for residual/error/
+    # storage, feed a V-scaled copy to the SVD only, and divide the factor's V
+    # columns back by the same gain after the SVD (below).  Self-consistent —
+    # recon from the unscaled factor is original-space, so nothing else changes.
+    # Default ON to match MLX; DIFFKV_V_SCALE=0 restores the old CUDA behavior.
+    _half_d = feat_dim // 2
+    _v_scale_on = _local_os.environ.get("DIFFKV_V_SCALE", "1") != "0"
+    _v_gain = None
+    if _v_scale_on:
+        _eK = (deltas[:, :, :_half_d] ** 2).sum(dim=(1, 2))                    # [N]
+        _eV = (deltas[:, :, _half_d:] ** 2).sum(dim=(1, 2))                    # [N]
+        _v_gain = torch.sqrt(_eK / _eV.clamp(min=1e-12)).clamp(1.0, 10000.0)   # [N]
+        deltas_svd = torch.cat([
+            deltas[:, :, :_half_d],
+            deltas[:, :, _half_d:] * _v_gain.view(-1, 1, 1),
+        ], dim=2)
+    else:
+        deltas_svd = deltas
+
+    # Token-wise Norm-Normalization (row-wise) on GPU (Phase 41).  Uses the
+    # V-scaled deltas so U's per-token scaling matches the SVD input (MLX does
+    # the same — token_norms is taken on the scaled batch).
+    token_norms = deltas_svd.norm(dim=2)  # [N_blocks, T_active]
     token_norms = torch.clamp(token_norms, min=1e-5)
-    deltas_normalized = deltas / token_norms.unsqueeze(2)
+    deltas_normalized = deltas_svd / token_norms.unsqueeze(2)
 
     # 3. Batched Randomized SVD — O(T × rank × feat) instead of O(T² × feat)
     #    This is ~30x faster than full SVD for typical rank=8, T=256, feat=256.
@@ -642,6 +668,15 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     U_fp16 = U.to(torch.float16)
     Vh_fp16 = Vh.to(torch.float16)
     S_fp16 = S.to(torch.float16)
+
+    # Undo the V-side rebalancing on the FACTOR (not the deltas): divide the V
+    # columns of Vh by the same per-block gain so U @ Vh reconstructs original-
+    # space V.  Everything downstream (recon, residual, block.V storage) then
+    # operates in original space with no further changes.  See the DIFFKV_V_SCALE
+    # note above.
+    if _v_gain is not None:
+        _vg = _v_gain.view(-1, 1, 1).to(Vh_fp16.dtype)
+        Vh_fp16 = torch.cat([Vh_fp16[:, :, :_half_d], Vh_fp16[:, :, _half_d:] / _vg], dim=2)
 
     # Match the input guard: these scans are diagnostic protection, not part
     # of the compression algorithm.  Re-enable them when validating a new

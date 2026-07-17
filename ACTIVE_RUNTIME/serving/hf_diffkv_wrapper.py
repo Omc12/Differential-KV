@@ -441,6 +441,23 @@ class PyTorchDiffKVHFWrapper:
         
         # ── Preset-aware Auto-Quantization ──
         preset = config.get("preset", os.environ.get("DIFFKV_PRESET", "mid")).lower()
+
+        # ── MLX parity: quality presets opt into Context-Aware Decoding (CAD) ──
+        # Mirrors mlx_diffkv_wrapper (high/quality/max → DIFFKV_CAD_ALPHA=0.5,
+        # DIFFKV_CAD_MAX_STEPS=32).  CAD is already implemented in this wrapper
+        # (the PyTorch/CUDA port in generate()); it was just never auto-enabled
+        # per preset like MLX.  It contrasts each step's full-context logits
+        # against a prior-only stream to pull the decoder off its pretrained
+        # prior onto the document's relation (relational-edge fidelity), capped
+        # to DIFFKV_CAD_MAX_STEPS tokens so it amortizes to ~0 on long
+        # generations.  Explicit env always wins (setdefault).
+        if preset in ("high", "quality", "max"):
+            os.environ.setdefault("DIFFKV_CAD_ALPHA", "0.5")
+            os.environ.setdefault("DIFFKV_CAD_MAX_STEPS", "32")
+            print(f"[DiffKV] {preset} preset: Context-Aware Decoding on "
+                  f"(alpha={os.environ['DIFFKV_CAD_ALPHA']}, "
+                  f"max_steps={os.environ['DIFFKV_CAD_MAX_STEPS']}) — MLX parity")
+
         if preset == "low" and not config.get("quantization") and not os.environ.get("DIFFKV_QUANTIZATION"):
             if self.device == "cuda":
                 config["quantization"] = "nf4"
