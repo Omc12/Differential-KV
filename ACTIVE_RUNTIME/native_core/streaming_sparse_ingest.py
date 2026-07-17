@@ -1318,30 +1318,41 @@ class StreamingSparseIngestManager:
                 _by_T[_b.active_k.shape[2]].append(_b)
             _gpu_all_success = True
             _gpu_compressed_count = 0
+            # Cap blocks per compress call.  The batched finalization builds
+            # [n, T, feat] fp32 intermediates (deltas, recon) for the whole call
+            # at once; at long context a single layer has ~1000+ eligible blocks
+            # (64k / block_size) and that spikes several GB, OOMing on a full
+            # GPU next to the model + retained raw prefill KV.  Chunking bounds
+            # the spike to _B_MAX × T × feat without changing per-block results
+            # (each block compresses independently).  256 is a no-op at ≤32k
+            # (fewer blocks/layer) so short/medium context is unaffected.
+            _B_MAX = int(os.environ.get("DIFFKV_COMPRESS_BLOCK_BATCH", "256"))
             for _T_active, _group in _by_T.items():
-                try:
-                    _ok = compress_layer_blocks_gpu(_group, _rank, manager=self.manager)
-                    if _ok:
-                        _gpu_compressed_count += len(_group)
-                    else:
+                for _cs in range(0, len(_group), _B_MAX):
+                    _sub = _group[_cs:_cs + _B_MAX]
+                    try:
+                        _ok = compress_layer_blocks_gpu(_sub, _rank, manager=self.manager)
+                        if _ok:
+                            _gpu_compressed_count += len(_sub)
+                        else:
+                            _gpu_all_success = False
+                            # The GPU helper may return False without raising.  It
+                            # did not publish a pool entry in that case, so make
+                            # the CPU fallback's ownership explicit instead of
+                            # leaving the block marked SUBMITTED indefinitely.
+                            for _b in _sub:
+                                if _b.state == "SUBMITTED":
+                                    _b.state = "ACCUMULATING"
+                    except Exception as _gpu_err:
+                        import traceback
+                        print(f"[DiffKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
+                        if os.environ.get("DIFFKV_DIAG", "0") == "1":
+                            traceback.print_exc()
                         _gpu_all_success = False
-                        # The GPU helper may return False without raising.  It
-                        # did not publish a pool entry in that case, so make
-                        # the CPU fallback's ownership explicit instead of
-                        # leaving the block marked SUBMITTED indefinitely.
-                        for _b in _group:
+                        # Rollback SUBMITTED → ACCUMULATING for this group so CPU path retries
+                        for _b in _sub:
                             if _b.state == "SUBMITTED":
                                 _b.state = "ACCUMULATING"
-                except Exception as _gpu_err:
-                    import traceback
-                    print(f"[DiffKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
-                    if os.environ.get("DIFFKV_DIAG", "0") == "1":
-                        traceback.print_exc()
-                    _gpu_all_success = False
-                    # Rollback SUBMITTED → ACCUMULATING for this group so CPU path retries
-                    for _b in _group:
-                        if _b.state == "SUBMITTED":
-                            _b.state = "ACCUMULATING"
             if _gpu_compressed_count > 0:
                 with self._stats_lock:
                     self.stats["total_compressed"] += _gpu_compressed_count
@@ -1573,9 +1584,17 @@ class StreamingSparseIngestManager:
         ):
             self.native_pool.ensure_allocated(total_seq_len)
 
-        # 2. Iterate over each layer
+        # 2. Collect eligible blocks across ALL layers, then compress them in one
+        # cross-layer pass.  Previously this looped per layer and called
+        # _submit_blocks_batched 48× — i.e. 48 separate cuSOLVER SVD/QR
+        # dispatches per prefill, each with its own launch overhead.  The blocks
+        # carry their own layer_idx/pool_idx, so the batched SVD is layer-
+        # agnostic (MLX batches num_layers × num_blocks in one shot too).
+        # _submit_blocks_batched groups by T_active and internally chunks at
+        # DIFFKV_COMPRESS_BLOCK_BATCH, so the cross-layer batch still bounds
+        # peak VRAM — it just packs each SVD call full instead of one-layer-thin.
+        all_to_compress = []
         for layer_idx, blocks in layers.items():
-            blocks_to_compress = []
             for idx, b in enumerate(blocks):
                 if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
                     # NOTE: skip_compression is intentionally NOT checked here.
@@ -1599,23 +1618,25 @@ class StreamingSparseIngestManager:
                               f"skip={getattr(b, 'skip_compression', False)} mbs={b.micro_block_size}", flush=True)
                     if eligible and window_ok:
                         b.state = "SUBMITTED"
-                        blocks_to_compress.append(b)
+                        all_to_compress.append(b)
                         self.update_metadata_state(session_id, layer_idx, b)
 
-            if _diag and layer_idx == 0:
-                print(f"[DIAG compress_deferred] layer=0 blocks_to_compress={len(blocks_to_compress)}", flush=True)
+        if _diag:
+            print(f"[DIAG compress_deferred] total blocks_to_compress across all layers={len(all_to_compress)}", flush=True)
 
-            if blocks_to_compress:
-                try:
-                    self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
-                except Exception as _e:
-                    import traceback
-                    print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
-                    traceback.print_exc()
-                    # Rollback state so next compress attempt can retry
-                    for _b in blocks_to_compress:
-                        if _b.state == "SUBMITTED":
-                            _b.state = "ACCUMULATING"
+        if all_to_compress:
+            try:
+                # layer_idx=None: the GPU path reads each block's own layer_idx;
+                # the batch spans layers by design.
+                self._submit_blocks_batched(session_id, None, all_to_compress)
+            except Exception as _e:
+                import traceback
+                print(f"[DIAG compress_deferred] ERROR in _submit_blocks_batched (cross-layer): {_e}", flush=True)
+                traceback.print_exc()
+                # Rollback state so next compress attempt can retry
+                for _b in all_to_compress:
+                    if _b.state == "SUBMITTED":
+                        _b.state = "ACCUMULATING"
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

@@ -795,6 +795,8 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.state = "COMPRESSED"
         block.dirty = True
 
+    # Collect per-block residual selections for one batched pool write below.
+    _rk_pos, _rk_val, _rv_pos, _rv_val = [], [], [], []
     for i, block in enumerate(blocks_list):
         rel_error_K = rel_error_K_all[i]
         rel_error_V = rel_error_V_all[i]
@@ -936,34 +938,68 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
         block.residual_K_values = residual_K_vals
         block.residual_V_positions = fact_positions_V
         block.residual_V_values = residual_V_vals
+        _rk_pos.append(fact_positions_K); _rk_val.append(residual_K_vals)
+        _rv_pos.append(fact_positions_V); _rv_val.append(residual_V_vals)
 
-        if pool is not None:
-            if getattr(block, 'pool_idx', None) is None:
-                block.pool_idx = pool.allocate_block()
-            block.pool = pool
-            pool.write_block(
-                pool_idx=block.pool_idx,
-                U=block.U,
-                V=block.V,
-                anchor_K=block.anchor_kv[0,0],
-                anchor_V=block.anchor_kv[0,1],
-                scale=block.scale,
-                seq_len=T_active,
-                residual_K_positions=block.residual_K_positions,
-                residual_K_values=block.residual_K_values,
-                residual_V_positions=block.residual_V_positions,
-                residual_V_values=block.residual_V_values
-            )
-            # Clear local GPU tensors on block to prevent VRAM leak
-            block.U = None
-            block.V = None
-            block.residual_K_positions = None
-            block.residual_K_values = None
-            block.residual_V_positions = None
-            block.residual_V_values = None
+    # ── One batched pool write (replaces N per-block write_block calls) ──
+    # The per-block write_block used to launch ~15 kernels each (int8 U quant,
+    # V split, anchor/scale/residual writes, SRL descriptor) — ~2,352 calls per
+    # 13K prefill.  Here every block in the call is scattered at once.  Reuses
+    # U_masked / V_masked (already built for the recon; columns ≥ each block's
+    # dynamic rank are zeroed, exactly what the per-block path leaves in the
+    # slot), so the pool bytes are bit-identical — proven by
+    # test_write_blocks_batched_parity + test_compress_gpu_smoke.
+    if pool is not None:
+        _pool_rank = pool.U.shape[2]
+        _need_alloc = [b for b in blocks_list if getattr(b, 'pool_idx', None) is None]
+        if _need_alloc:
+            _slots = pool.allocate_blocks(len(_need_alloc))
+            for _b, _s in zip(_need_alloc, _slots):
+                _b.pool_idx = _s
+        for _b in blocks_list:
+            _b.pool = pool
 
-        if manager is not None and getattr(manager, "_streaming_mgr", None) is not None:
-            manager._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
+        _N = len(blocks_list)
+        _max_res = pool.max_residual_tokens
+        _rk_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
+        _rk_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
+        _rv_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
+        _rv_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
+        for _i in range(_N):
+            _fp = _rk_pos[_i]
+            if _fp is not None and _fp.numel() > 0:
+                _n = min(int(_fp.numel()), _max_res)
+                _rk_pos_pad[_i, :_n] = _fp[:_n]
+                _rk_val_pad[_i, :_n] = _rk_val[_i][:_n].view(_n, heads, head_dim)
+            _fpv = _rv_pos[_i]
+            if _fpv is not None and _fpv.numel() > 0:
+                _n = min(int(_fpv.numel()), _max_res)
+                _rv_pos_pad[_i, :_n] = _fpv[:_n]
+                _rv_val_pad[_i, :_n] = _rv_val[_i][:_n].view(_n, heads, head_dim)
+
+        pool.write_blocks_batched(
+            pool_indices=torch.tensor([b.pool_idx for b in blocks_list], device=gpu_device, dtype=torch.long),
+            U=U_masked[:, :, :_pool_rank].contiguous(),
+            V=V_masked[:, :_pool_rank, :].contiguous(),
+            anchor_K=torch.stack([b.anchor_kv[0, 0] for b in blocks_list], dim=0),
+            anchor_V=torch.stack([b.anchor_kv[0, 1] for b in blocks_list], dim=0),
+            scales=torch.tensor([float(getattr(b, 'scale', 1.0)) for b in blocks_list], device=gpu_device),
+            seq_len=T_active,
+            res_K_positions=_rk_pos_pad, res_K_values=_rk_val_pad,
+            res_V_positions=_rv_pos_pad, res_V_values=_rv_val_pad,
+        )
+        # Clear local GPU tensors on blocks to prevent VRAM leak.
+        for _b in blocks_list:
+            _b.U = None
+            _b.V = None
+            _b.residual_K_positions = None
+            _b.residual_K_values = None
+            _b.residual_V_positions = None
+            _b.residual_V_values = None
+
+    if manager is not None and getattr(manager, "_streaming_mgr", None) is not None:
+        for _b in blocks_list:
+            manager._streaming_mgr.update_metadata_state(_b.session_id, _b.layer_idx, _b)
 
     return True
 

@@ -535,6 +535,111 @@ class NativeBlockPool:
         # skip the cached proxy and reconstruct fresh fp16 U for the new data.
         self._stratified_generation += 1
 
+    def write_blocks_batched(
+        self,
+        pool_indices,            # [N] long — pre-allocated slots (allocate_blocks)
+        U,                       # [N, S, R] — per-block U, cols ≥ rank[i] already zeroed
+        V,                       # [N, R, 2*kv*hd] — joint V (first half V_K, second V_V)
+        anchor_K,                # [N, kv, hd]
+        anchor_V,                # [N, kv, hd]
+        scales,                  # [N]
+        seq_len,                 # int — SHARED across the batch (grouped by T_active)
+        res_K_positions=None,    # [N, max_res] int16 (-1 padded) or None
+        res_K_values=None,       # [N, max_res, kv, hd] or None
+        res_V_positions=None,
+        res_V_values=None,
+    ):
+        """Vectorized equivalent of N write_block() calls that share seq_len.
+
+        Mirrors write_block() field-for-field (int8 U quant with a per-block
+        scale, V_K/V_V split, anchors, residuals, SRL descriptor, generation
+        bump) but scatters every block in one set of ops instead of one
+        write_block() call each — the CUDA compress path issued ~2,352 of those
+        per 13K prefill (48 layers × ~49 blocks), each launching ~15 kernels.
+        Verified bit-identical to the per-block path by
+        test_write_blocks_batched_parity.  Zeroed rank columns (blocks with
+        dynamic_rank < R) are exactly what write_block leaves after `self.U=0`,
+        so padding to a uniform R changes nothing stored.
+        """
+        self._ensure()
+        N = int(pool_indices.shape[0])
+        if N == 0:
+            return
+        dev = self.U.device
+        pidx = pool_indices.to(device=dev, dtype=torch.long)
+        pool_max_seq = self.U.shape[1]
+        pool_rank    = self.U.shape[2]
+        num_kv       = self.V_KV.shape[3]
+        h_dim        = self.V_KV.shape[4]
+        write_seq  = min(int(seq_len), pool_max_seq)
+        write_rank = min(int(U.shape[2]), pool_rank)
+        if V.shape[1] > pool_rank:
+            raise ValueError(f"V rank {V.shape[1]} exceeds pool rank capacity {pool_rank}")
+
+        # ── int8 U quant with a per-block scale (matches write_block) ──
+        self.U[pidx] = 0
+        U_sliced = U[:, :write_seq, :write_rank].to(dev).float()          # [N, s, r]
+        max_abs = U_sliced.abs().amax(dim=(1, 2))                         # [N]
+        scale_u = torch.clamp(max_abs / 127.0, min=1e-5).to(self.dtype)   # [N]
+        U_q = torch.clamp(
+            torch.round(U_sliced / scale_u.float().view(N, 1, 1)), -127, 127
+        ).to(torch.int8)
+        self.U[pidx, :write_seq, :write_rank] = U_q
+        self.U_scale[pidx] = scale_u
+
+        # ── V_K / V_V split ──
+        Vd = V.to(dev)
+        vk = Vd[:, :write_rank, :num_kv * h_dim].reshape(N, write_rank, num_kv, h_dim)
+        vv = Vd[:, :write_rank, num_kv * h_dim:].reshape(N, write_rank, num_kv, h_dim)
+        self.V_KV[pidx] = 0
+        self.V_KV[pidx, 0, :write_rank] = vk.to(self.dtype)
+        self.V_KV[pidx, 1, :write_rank] = vv.to(self.dtype)
+
+        self.anchors_KV[pidx, 0] = anchor_K.to(device=dev, dtype=self.dtype)
+        self.anchors_KV[pidx, 1] = anchor_V.to(device=dev, dtype=self.dtype)
+
+        # Sanitize non-finite scales exactly like write_block's per-block guard.
+        sc = scales.to(device=dev).float()
+        sc = torch.where(torch.isfinite(sc), sc, torch.ones_like(sc))
+        self.scales[pidx] = sc.to(self.dtype)
+        self.seq_lens[pidx] = int(seq_len)
+        for i in range(N):
+            self.version[int(pidx[i])] += 1
+
+        # ── residuals (padded [N, max_res]; slots zeroed first) ──
+        self.residual_K_positions[pidx] = -1
+        self.residual_K_values[pidx] = 0.0
+        self.residual_V_positions[pidx] = -1
+        self.residual_V_values[pidx] = 0.0
+        if res_K_positions is not None and res_K_positions.numel() > 0:
+            mr = min(res_K_positions.shape[1], self.max_residual_tokens)
+            self.residual_K_positions[pidx, :mr] = res_K_positions[:, :mr].to(device=dev, dtype=torch.int16)
+            self.residual_K_values[pidx, :mr] = res_K_values[:, :mr].to(device=dev, dtype=self.dtype)
+            if not self.has_any_residual:
+                self.has_any_residual = bool((res_K_positions >= 0).any().item())
+        if res_V_positions is not None and res_V_positions.numel() > 0:
+            mr = min(res_V_positions.shape[1], self.max_residual_tokens)
+            self.residual_V_positions[pidx, :mr] = res_V_positions[:, :mr].to(device=dev, dtype=torch.int16)
+            self.residual_V_values[pidx, :mr] = res_V_values[:, :mr].to(device=dev, dtype=self.dtype)
+
+        # ── SRL descriptor (batched compute_descriptor over the written slots) ──
+        if self.W_proj is not None:
+            try:
+                anchor_mean = self.anchors_KV[pidx, 0].float().mean(dim=1)              # [N, hd]
+                U_f32 = self.U[pidx, :write_seq, :write_rank].float() \
+                    * self.U_scale[pidx].float().view(N, 1, 1)                          # [N, s, r]
+                mean_u = U_f32.mean(dim=1)                                              # [N, r]
+                vk_mean = self.V_KV[pidx, 0, :write_rank].float().mean(dim=2)           # [N, r, hd]
+                delta_centroid = torch.bmm(mean_u.unsqueeze(1), vk_mean).squeeze(1)     # [N, hd]
+                centroid = anchor_mean + delta_centroid                                 # [N, hd]
+                desc = centroid @ self.W_proj.float().t()                               # [N, DESC]
+                desc = desc / (desc.norm(dim=1, keepdim=True) + 1e-8)
+                self.desc[pidx] = desc.to(torch.float16)
+            except Exception:
+                pass  # descriptor failure is non-fatal (SRL routing degrades gracefully)
+
+        self._stratified_generation += N
+
     def reset(self):
         """Completely reset the pool to its initial lightweight state, releasing all grown VRAM."""
         # Free old tensors before re-allocating
