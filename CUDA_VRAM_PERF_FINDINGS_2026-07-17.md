@@ -290,3 +290,105 @@ product code. It protects nothing.
 4. If the profiler confirms the SVD loop, implement the Gram-eigh swap behind a
    flag and A/B recall.
 5. Sweep 32K/64K/128K. That is where this architecture can actually win here.
+
+---
+
+# SECOND PASS — CONFIRMED ON A100 (2026-07-17)
+
+The A100 run validated every prediction. Numbers below are measured, not
+projected.
+
+## Profiler confirmed the cuSOLVER hypothesis exactly
+
+```
+stage                                  seconds   share
+9. linalg.svd [N,r,feat]  <-- SUSPECT    3.917   84.5%
+7. linalg.qr  [N,T,r]                    0.330    7.1%
+cuSOLVER (qr + svd)                      4.247   91.6% of compress
+svd call count = 2352 sequential decompositions, 1.665 ms each
+```
+
+So compress is **91.6% cuSOLVER**, and the rSVD matmuls are ~0.1 s — as
+predicted. The 6.1 s was never arithmetic.
+
+## Metric fix confirmed — the honest ratio is now printed
+
+```
+low  : kv_phys=1.090GB vs dense 2.643GB = 2.43x REAL   (was "26x")
+mid  : kv_phys=1.345GB vs dense 2.643GB = 1.97x REAL
+high : kv_phys=2.025GB vs dense 2.643GB = 1.31x REAL
+```
+
+`kv_logical` also became meaningful (0.94–1.49 GB with `[blk0=53/54]`), landing
+on the physical pool — both routes now agree the store is ~1–2 GB.
+
+## Rank boost confirmed at 100% live
+
+`[DIAG] rank boost fired on 49/49 blocks = 100.0%` in every DiffKV config.
+
+## TF32 confirmed useless for compress → refactored to a scoped context manager
+
+TF32 on: compress 4.453 s vs 4.635 s off — a **4%** difference, because compress
+is cuSOLVER-bound. The first-pass change enabled TF32 **process-globally** in
+`_configure_cuda_allocator`, which also alters the fp32 math in decode
+reconstruction and the block router (perturbing generated output across presets
+for a 4% compress win). Replaced with `lowrank._tf32_matmul()`, a context manager
+scoped to the compression call only. `DIFFKV_TF32=0` disables it.
+
+## Gram-eigh swap: 1.9x on the SVD, proven equivalent, now implemented
+
+Profiler on the same A100: `eigh(B Bᵀ)` = 2.106 s vs `svd` 3.917 s → **1.9x**,
+projected compress 4.635 s → **2.824 s**. Reconstruction 8.2e-6 vs the SVD's
+8.5e-6 (equal). Implemented behind `DIFFKV_COMPRESS_GRAM_SVD=1` in
+`compress_layer_blocks_gpu`; CPU parity verified that the downstream
+reconstruction (`U_scaled @ Vh`, the KV the pool stores) is bit-identical to the
+SVD path (1.2e-6, fp32 noise), and the existing compress parity tests pass with
+the flag on. **Opt-in — A/B recall before defaulting.**
+
+## The bigger lever than Gram: the r≤32 cuSOLVER cliff
+
+cuSOLVER's batched Jacobi solvers (`gesvdjBatched`, `syevjBatched`) cap at 32×32.
+`r_proj = rank + 5` is 53 today (rank boost → 48) or 37 (`DIFFKV_RANK_BOOST=off`).
+Both exceed 32, so the batch loops. If `r_proj ≤ 32`, cuSOLVER should run
+genuinely batched — a far larger win than Gram's 1.9x. `probe_batched_cliff`
+(now wired into `profile_compress_stages.py`) measures exactly this. If the cliff
+is real, the fix is `DIFFKV_RANK_BOOST=off` **plus** trimming oversamples so
+`r_proj ≤ 32` — not micro-optimising the decomposition. **Run the probe.**
+
+## Bugs fixed this pass (were blocking the run)
+
+- **`lowrank.py` `import contextlib` was missing** — a `@contextlib.contextmanager`
+  (`_tf32_matmul`, added when TF32 was scoped) referenced it, so the whole module
+  failed to import. This broke `test_compress_gpu_smoke` and `test_vscale_parity`
+  collection (both now pass). The A100 eval only ran because it used the earlier
+  committed global-TF32 version.
+- **Two tests errored pytest collection on the A100** —
+  `test_decode_cache_fused_parity` and `test_diffkv_kernel_parity` do a bare
+  `import mlx.core`, which aborts the entire `pytest ACTIVE_RUNTIME/tests/` run on
+  a box without MLX. Changed to `pytest.importorskip("mlx.core")` so they skip.
+
+## factual_store / combined are catastrophic — confirmed
+
+`factual_store` 1.9/1.8 tps, `combined` 1.5/0.8 tps, prefill 25–27 s. Consistent
+with the 2026-07-06 finding that the factual store is net-negative; here it is
+far worse. Keep it off; investigate separately if it is ever wanted.
+
+## Corrected pre-existing failure count
+
+There are **4** pre-existing test failures (the first pass said 3 — a `-x` run
+masked the second `test_multidim_srl` failure). All four are identical on the
+clean committed tree and unrelated to any change here:
+`test_multidim_srl::test_dynamic_decay_and_weights`,
+`test_multidim_srl::test_prime_node_and_adaptive_k`,
+`test_reasoning_mitigations::test_python_dynamic_rank_boosting_decision`,
+`test_residual_capture::test_table_rows_selected_as_residuals`. The first two
+assert `10x in [range]` — nondeterministic SRL routing, stably failing.
+
+## Updated next steps
+
+1. **Run `probe_batched_cliff`** (it now runs as part of the profiler). If eigh
+   drops sharply at r≤32, that is the real compress fix.
+2. A/B `DIFFKV_COMPRESS_GRAM_SVD=1` on recall; if clean, make it default.
+3. A/B `DIFFKV_RANK_BOOST=off` on recall — it cuts pool (2.43x→higher) AND
+   compress AND, combined with fewer oversamples, may cross the r≤32 cliff.
+4. Sweep 32K/64K/128K — still the only regime where sparse decode can win here.

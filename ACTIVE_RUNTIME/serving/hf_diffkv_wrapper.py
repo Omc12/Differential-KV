@@ -246,8 +246,7 @@ def _configure_mps_memory(memory_fraction: Optional[float] = None) -> None:
 
 def _configure_cuda_allocator() -> None:
     """
-    Set conservative CUDA allocator options to reduce fragmentation, and enable
-    TF32 for the fp32 math on the compression path.
+    Set conservative CUDA allocator options to reduce fragmentation.
 
     garbage_collection_threshold:0.6 — trigger GC when 60% of reserved memory
       is actively allocated (vs default 80%), reducing peak fragmentation.
@@ -259,25 +258,20 @@ def _configure_cuda_allocator() -> None:
     Report what is actually in effect rather than the defaults we asked for —
     the old unconditional message claimed gc_threshold/max_split_size were
     configured even when the caller's setting had already won.
+
+    NOTE: TF32 is deliberately NOT set here.  It used to be, globally, and that
+    was wrong: torch.backends.cuda.matmul.allow_tf32 is process-wide, so it also
+    changed the fp32 math in the DECODE reconstruction and router, perturbing
+    generated output (every preset's token count shifted) for a measured 4%
+    saving on compress — compress is cuSOLVER-bound, not matmul-bound, so TF32
+    buys almost nothing there.  It is now applied narrowly around the
+    compression math only; see native_core/compression/lowrank.py (_tf32_matmul).
     """
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
         "garbage_collection_threshold:0.6,max_split_size_mb:128"
     )
     print(f"[DiffKV] CUDA allocator config: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
-
-    # TF32: compress_layer_blocks_gpu does its deltas, power iterations and
-    # projections in fp32.  Without TF32 those matmuls run on A100 at ~19.5
-    # TFLOPS instead of ~156 — an 8x cut on a path that is entirely fp32.
-    # Ampere+ only; a no-op elsewhere.  Opt out with DIFFKV_TF32=0 if a
-    # numerical A/B ever needs strict fp32.
-    if torch.cuda.is_available() and os.environ.get("DIFFKV_TF32", "1") != "0":
-        try:
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            print("[DiffKV] TF32 enabled for fp32 matmul (compression path).")
-        except Exception as e:
-            print(f"[DiffKV] Could not enable TF32: {e}")
 
 
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:

@@ -9,6 +9,7 @@ Apple Neural Engine / GPU via unified memory — significantly faster than
 PyTorch CPU for large blocks.  Falls back to PyTorch rSVD if MLX fails.
 """
 
+import contextlib
 import math
 import os
 import re
@@ -587,6 +588,33 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     return block_rank
 
 
+@contextlib.contextmanager
+def _tf32_matmul():
+    """Enable TF32 for fp32 matmul inside this block only, then restore.
+
+    torch.backends.cuda.matmul.allow_tf32 is PROCESS-GLOBAL.  Setting it at
+    startup (as an earlier version of this work did, from
+    hf_diffkv_wrapper._configure_cuda_allocator) also changed the fp32 math in
+    the decode reconstruction and the block router, which shifted generated
+    output across every preset.  Scope it to the compression math so the
+    accuracy of decode is untouched.
+
+    Measured worth on A100 (colab/profile_compress_stages.py): compress 4.635 s
+    -> 4.453 s, i.e. ~4%.  Small, because 92% of compress is cuSOLVER
+    (qr + svd), which does not use TF32 at all.  Kept because it is free and
+    confined; DIFFKV_TF32=0 disables it.
+    """
+    if not (torch.cuda.is_available() and os.environ.get("DIFFKV_TF32", "1") != "0"):
+        yield
+        return
+    _prev = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = _prev
+
+
 def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     """
     Compress a list of StreamingKVBlock objects batched together entirely on the GPU.
@@ -594,6 +622,11 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
     """
     if not blocks_list:
         return True
+    with _tf32_matmul():
+        return _compress_layer_blocks_gpu_inner(blocks_list, rank, manager)
+
+
+def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> bool:
 
     T_active = blocks_list[0].active_k.shape[2]
     heads = blocks_list[0].active_k.shape[1]
@@ -678,7 +711,47 @@ def compress_layer_blocks_gpu(blocks_list, rank: int, manager = None) -> bool:
             Y = torch.matmul(deltas_normalized, torch.matmul(deltas_normalized.transpose(1, 2), Y))
         Q, _ = torch.linalg.qr(Y, mode="reduced")              # [N, T, r_proj]
         B = torch.matmul(Q.transpose(1, 2), deltas_normalized)            # [N, r_proj, feat_dim]
-        U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)  # tiny matrix — fast!
+
+        # ── Small-matrix decomposition of B [N, r_proj, feat_dim] ────────────
+        # torch.linalg.svd(B) is the dominant compress cost. B is [r_proj≈53,
+        # feat=2048]; cuSOLVER's batched SVD (gesvdjBatched) only covers matrices
+        # up to 32x32, so this batch of N falls back to a per-matrix loop of
+        # N_blocks x num_layers = 2,352 sequential decompositions per 13K prompt.
+        # Profiled on A100 (colab/profile_compress_stages.py, 2026-07-17):
+        # svd = 3.9s of a 4.6s compress (84.5%), ~1.67 ms/block. The rSVD
+        # MATMULS around it total ~0.04s — the cost is entirely cuSOLVER.
+        #
+        # DIFFKV_COMPRESS_GRAM_SVD=1 replaces the wide SVD with an eigendecomp of
+        # the small [r_proj, r_proj] Gram matrix G = B Bᵀ:
+        #     G = U_b diag(S²) U_bᵀ            (eigh, ascending → flip to desc)
+        #     S  = sqrt(clamp(eigvals, 0))
+        #     Vh = diag(1/S) U_bᵀ B
+        # This reconstructs B identically to the SVD (sign flips in U_b cancel
+        # against Vh, and U = Q U_b feeds block.U while Vh feeds block.V, so the
+        # product U_scaled·Vh is sign-invariant). Measured on the SAME A100:
+        # 2.1s vs 3.9s → 1.9x on the SVD, compress ~4.6s → ~2.8s, prefill
+        # 14.9s → ~13s. Reconstruction error 8.2e-6 vs the SVD's 8.5e-6 (equal;
+        # the pool's downstream int8 U quantization is ~9.2e-3, ~1000x larger).
+        # Squaring cond(B) costs the SMALLEST singular values precision — exactly
+        # the tail the 99.9% energy truncation below discards.
+        #
+        # Opt-in: this changes the numerical factorisation, so A/B recall
+        # (needle + synthesis) before flipping the default. Any failure falls
+        # through to the exact SVD below.
+        _gram_ok = False
+        if _local_os.environ.get("DIFFKV_COMPRESS_GRAM_SVD", "0") == "1":
+            try:
+                G = torch.matmul(B, B.transpose(1, 2))                     # [N, r, r]
+                evals, evecs = torch.linalg.eigh(G)                        # ascending
+                evals = evals.flip(-1).clamp(min=0.0)                      # descending S²
+                U_b = evecs.flip(-1)                                       # [N, r, r]
+                S = evals.sqrt()                                           # [N, r] desc
+                Vh = torch.matmul(U_b.transpose(1, 2), B) / S.clamp(min=1e-8).unsqueeze(-1)
+                _gram_ok = True
+            except Exception as _ge:
+                print(f"[DiffKV GPU-rSVD] Gram eigh path failed ({_ge}); using exact SVD.")
+        if not _gram_ok:
+            U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)  # tiny matrix — fast!
         U = torch.matmul(Q, U_b)                               # [N, T, r_proj]
     except Exception as e:
         print(f"[DiffKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")

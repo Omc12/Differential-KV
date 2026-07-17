@@ -194,6 +194,51 @@ def check_gram_equivalence(N, T, feat, rank, dev, oversample=5):
     print("   reconstruction, not the factors themselves.)")
 
 
+def probe_batched_cliff(N, feat, layers, dev):
+    """Find the r_proj at which cuSOLVER stops using its genuinely batched kernel.
+
+    cuSOLVER's batched routines cap at 32x32 (gesvdjBatched for SVD,
+    syevjBatched for eigh).  Above that, PyTorch loops over the batch, paying a
+    launch (and, for the Jacobi solvers, a convergence-check sync) per element.
+    That loop — not the arithmetic — is what makes compress 6 s.
+
+    If a sharp cliff exists at 32, then keeping r_proj <= 32 is worth far more
+    than any other change here, and it becomes a hard design constraint:
+        r_proj = rank + oversamples
+        rank 48 + 5 = 53  (today, because the rank boost fires on 100% of blocks)
+        rank 32 + 5 = 37
+        rank 32 + 0 = 32  <- batched
+        rank 27 + 5 = 32  <- batched
+    """
+    print("\n=== BATCHED-KERNEL CLIFF PROBE (eigh on [N,r,r], svd on [N,r,feat]) ===")
+    print(f"{'r':>4} {'eigh s':>9} {'eigh ms/call':>13} {'svd s':>9} {'svd ms/call':>12}")
+    calls = N * layers
+    for r in (16, 24, 28, 30, 32, 33, 36, 37, 40, 48, 53):
+        G = torch.randn(N, r, r, device=dev)
+        G = torch.matmul(G, G.transpose(1, 2))          # symmetric PSD
+        B = torch.randn(N, r, feat, device=dev)
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(layers):
+            torch.linalg.eigh(G)
+        sync()
+        te = time.perf_counter() - t0
+
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(layers):
+            torch.linalg.svd(B, full_matrices=False)
+        sync()
+        ts = time.perf_counter() - t0
+
+        mark = "  <-- BATCHED" if r <= 32 else ""
+        print(f"{r:>4} {te:9.3f} {1000*te/calls:13.4f} {ts:9.3f} {1000*ts/calls:12.4f}{mark}")
+        del G, B
+    print("\nA sharp drop at r<=32 confirms the batched-kernel cliff.")
+    print("If it is there, the real fix is to keep r_proj <= 32, not to micro-")
+    print("optimise the decomposition.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--blocks", type=int, default=49, help="blocks per layer (13.4K prompt -> 49)")
@@ -246,6 +291,10 @@ def main():
         print(f"  projected compress  = {total - svd_t + gram_t:.3f} s (was {total:.3f} s)")
 
     check_gram_equivalence(min(N, 8), T, feat, args.rank, dev)
+
+    # The most important question: is the cost a genuine cuSOLVER cliff at r>32?
+    # If eigh drops sharply at r<=32, capping r_proj there beats the Gram swap.
+    probe_batched_cliff(N, feat, args.layers, dev)
 
     print("\nNext: re-run with --rank 32 (DIFFKV_RANK_BOOST=off) and --tf32 to")
     print("separate the rank-boost cost from the cuSOLVER cost.")

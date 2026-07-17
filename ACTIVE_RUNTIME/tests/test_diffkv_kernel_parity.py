@@ -18,7 +18,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import mlx.core as mx
+import pytest
+
+# MLX-only parity test. On CUDA/CPU boxes without MLX (e.g. the A100), skip the
+# whole module instead of erroring pytest collection — a bare `import mlx.core`
+# aborted the entire `pytest ACTIVE_RUNTIME/tests/` run.
+mx = pytest.importorskip("mlx.core")
 from serving.mlx_diffkv_wrapper import (
     compute_decode_attention_static,
     MLXKVBlockManager,
