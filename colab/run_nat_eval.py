@@ -203,17 +203,15 @@ def run_worker(config_name, model_id):
             os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
             os.environ["DIFFKV_FACTUAL_STORE"] = "1"
 
-        # Apply the SAME production decode policy the CLI uses (serving/cli.py
-        # calls this before building the wrapper).  The eval used to bypass it,
-        # so it silently ran WITHOUT DIFFKV_DECODE_CACHE=1 (decompress-and-cache
-        # fast decode, ~2x tps when sparse, bit-exact) and DIFFKV_SPARSE_BIAS=auto
-        # — i.e. it measured a non-production config and understated DiffKV tps.
-        # setdefault: every explicit env set above still wins.
-        try:
-            from serving.decode_config import apply_best_decode_defaults
-            apply_best_decode_defaults(log=None)
-        except Exception as _e:
-            print(f"[NAT eval] WARNING: could not apply best-decode defaults: {_e}", flush=True)
+        # NOTE (defaults audit): intentionally NOT calling apply_best_decode_defaults
+        # here.  On CUDA it sets DIFFKV_SPARSE_BIAS=auto, but the fast fused
+        # combined Triton decode kernel only runs when the bias is 0
+        # (diffkv_attention.py: combined-path gate) — auto would silently drop
+        # decode onto the slower separate path.  And DIFFKV_DECODE_CACHE=1 (the
+        # "~2x tps" default) is a no-op on CUDA: CUDA's decode cache is the
+        # separate, accuracy-gated DIFFKV_DECODE_CACHE_ENABLED (off by default).
+        # So the "production decode defaults" would hurt, not help, CUDA here.
+        # Keep the eval on the fast combined path (bias unset → 0.0).
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
