@@ -516,7 +516,24 @@ class KVRuntimeManager:
             for l in range(self.num_layers)
         )
         import math
-        pool_rank = int(math.ceil(max_possible_rank * 1.5))
+        # The 1.5x is headroom for the CONTENT rank-boost (_block_boost_rank
+        # promotes a block to ceil(rank*1.5)).  When DIFFKV_RANK_BOOST=off that
+        # boost never fires, so no block's stored rank exceeds max_possible_rank,
+        # and the 1.5x would over-allocate every V_KV/U slot by 50% for capacity
+        # that cannot fill — the pool_rank=48 seen with rank 32 even when boost is
+        # off.  Drop the multiplier to 1.0 in that case.  (max_possible_rank
+        # already covers the per-layer schedule, incl. early_layer_rank_boost.)
+        _content_boost_on = os.environ.get("DIFFKV_RANK_BOOST", "auto").lower() != "off"
+        pool_rank = int(math.ceil(max_possible_rank * (1.5 if _content_boost_on else 1.0)))
+        # A hard r_proj cap (DIFFKV_RSVD_MAX_RPROJ) caps every block's stored rank
+        # in the compress path, so the pool never needs to be wider than the cap.
+        # Safe: compress clamps dynamic_rank to r_proj <= this cap.
+        try:
+            _pool_rproj_cap = int(os.environ.get("DIFFKV_RSVD_MAX_RPROJ", "0"))
+        except ValueError:
+            _pool_rproj_cap = 0
+        if _pool_rproj_cap > 0:
+            pool_rank = max(1, min(pool_rank, _pool_rproj_cap))
         # Pool max_seq_len = micro_block_size (default varies by context length).
         pool_block_size = self.micro_block_size if self.streaming_ingest else self.block_size
         # Ensure pool_block_size can hold the maximum adaptive prefill block size (MBS + 1 anchor)

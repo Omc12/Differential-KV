@@ -428,3 +428,61 @@ assert `10x in [range]` — nondeterministic SRL routing, stably failing.
    recall check into step 1 since the recipe already sets it.
 4. Sweep 32K/64K/128K — still the only regime where sparse *decode* can win here
    (decode KV is 1.9% of the step at 13.4K; break-even ~485K tokens).
+
+---
+
+# THIRD PASS — batched recipe CONFIRMED, pool_rank waste fixed (2026-07-17)
+
+## The recipe works: compress 6.1 s → 2.6 s, prefill 14.9 s → ~10.5 s
+
+`DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32` on the
+A100:
+
+```
+preset   compress before   compress now   prefill now
+low          6.2 s            2.6 s          11.0 s
+mid          6.1 s            2.6 s          10.6 s
+high         6.1 s            2.6 s           9.4 s
+```
+
+Recall signal is good: the first decoded token matches dense in every config
+(`first_id=8813` / `785`), token counts unchanged. (Confirm full `output_text`
+in the JSON before defaulting.)
+
+**Why 2.6 s, not the projected ~1 s:** the eigh dropped to ~0.015 s as predicted,
+which *exposed the finalization floor* — residual selection, pool writes, the two
+fp32 `deltas`/token-norm copies, medians — that the 3.9 s SVD had hidden. That is
+now the dominant cost. Further compress wins mean attacking finalization, with
+diminishing returns; the big lever is spent.
+
+## Fixed: pool_rank stayed 48 even with the boost off (VRAM did not drop)
+
+The batched run left the memory ratio at 2.43× / 1.97× / 1.31× — unchanged — with
+the log still showing `rank=32 (pool_rank=48)`. The pool's V_KV/U slots are sized
+by `pool_rank = ceil(max_rank * 1.5)`, and that 1.5× is headroom *for the content
+rank-boost*. With `DIFFKV_RANK_BOOST=off` the boost never fires, so no block's
+stored rank exceeds `max_rank` — the 1.5× over-allocates every slot by 50% for
+capacity that cannot fill.
+
+Fixed in `KVRuntimeManager`: the multiplier is now `1.5` only when the content
+boost is active, `1.0` when `DIFFKV_RANK_BOOST=off`, and `pool_rank` is
+additionally capped by `DIFFKV_RSVD_MAX_RPROJ`. Provably safe — compress receives
+the base `manager.rank` and clamps every block's `dynamic_rank ≤ r_proj ≤` this
+value (CPU-verified: a rank-32 pool accepts the capped blocks with no "V rank
+exceeds pool" error). Default path (boost auto) is unchanged: still `pool_rank=48`.
+
+Impact (low preset): slot 368 KB → ~300 KB (**~18% smaller pool**), so the batched
+recipe should now move the ratio too — low ~2.43× → **~2.9×** — not just the
+compress time. **Re-run the recipe to confirm `pool_rank=32` in the memory line
+and the improved `kv_phys` ratio.**
+
+## Where this leaves it
+
+- **Prefill**: compress is no longer the story (2.6 s of a ~10.5 s prefill; the
+  ~8 s forward is now the bulk — that is the model, not DiffKV overhead).
+- **Memory**: with the pool_rank fix, the boost-off recipe should land low near
+  ~2.9×, mid ~2.3×, high ~1.5×. `high` (max_residual 128) stays weakest — its
+  ratio is residual-bound, not rank-bound.
+- **Decode**: unchanged and still not the place to invest at 13.4 K.
+- **Open**: `factual_store`/`combined` remain catastrophic; the prefill-forward
+  1.4× vs dense and the prompt-2 VRAM creep are still unexplained.
