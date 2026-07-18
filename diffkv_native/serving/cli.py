@@ -833,10 +833,39 @@ async def run_client_mode(args):
                     continue
                 print_system(f"Pasted {len(pasted_text)} characters successfully.")
                 user_prompt_stripped = pasted_text.strip()
+            elif cmd == "/file":
+                parts = user_prompt_stripped.split(maxsplit=1)
+                if len(parts) > 1:
+                    subparts = parts[1].split("|", 1)
+                    filepath = subparts[0].strip()
+                    question_suffix = ""
+                    if len(subparts) > 1:
+                        question_suffix = subparts[1].strip()
+                    
+                    if not os.path.exists(filepath):
+                        print_system(f"File not found: {COLOR_BOLD}{filepath}{COLOR_RESET}")
+                        continue
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            file_content = f.read()
+                        if question_suffix:
+                            file_content = f"{file_content}\n\n{question_suffix}"
+                        pasted_text = file_content
+                    except Exception as e:
+                        print_system(f"Error reading file: {e}")
+                        continue
+                else:
+                    print_system("Please provide a filepath. Usage: /file <path> | [optional question]")
+                    continue
+
+                print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} ({len(pasted_text)} characters). Submitting...")
+                user_prompt_stripped = pasted_text.strip()
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Clear chat history and start a new session.")
                 print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
+                print("  /file <path>       : Load a text file directly from disk as the prompt.")
+                print("                       Format: /file <path> | [optional question]")
                 print("  /stats             : Print details about the current chat history length.")
                 print("  /srl               : Fetch Semantic Routing Layer (SRL) details.")
                 print("  /exit, /quit       : Close the client.")
@@ -1072,10 +1101,39 @@ async def run_direct_mode(args):
                     continue
                 print_system(f"Pasted {len(pasted_text)} characters successfully.")
                 user_prompt_stripped = pasted_text.strip()
+            elif cmd == "/file":
+                parts = user_prompt_stripped.split(maxsplit=1)
+                if len(parts) > 1:
+                    subparts = parts[1].split("|", 1)
+                    filepath = subparts[0].strip()
+                    question_suffix = ""
+                    if len(subparts) > 1:
+                        question_suffix = subparts[1].strip()
+                    
+                    if not os.path.exists(filepath):
+                        print_system(f"File not found: {COLOR_BOLD}{filepath}{COLOR_RESET}")
+                        continue
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            file_content = f.read()
+                        if question_suffix:
+                            file_content = f"{file_content}\n\n{question_suffix}"
+                        pasted_text = file_content
+                    except Exception as e:
+                        print_system(f"Error reading file: {e}")
+                        continue
+                else:
+                    print_system("Please provide a filepath. Usage: /file <path> | [optional question]")
+                    continue
+
+                print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} ({len(pasted_text)} characters). Submitting...")
+                user_prompt_stripped = pasted_text.strip()
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Reset conversation and clear C++ KV cache.")
                 print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
+                print("  /file <path>       : Load a text file directly from disk as the prompt.")
+                print("                       Format: /file <path> | [optional question]")
                 print("  /stats             : Print active C++ binary cache size and configuration.")
                 print("  /srl               : Fetch Semantic Routing Layer (SRL) details.")
                 print("  /exit, /quit       : Shutdown C++ process and exit.")
