@@ -568,9 +568,15 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 # Accumulate every 8 tokens to amortize the D2H copy cost.
                                 # recent_decode_keys is only used for SRL re-routing heuristics,
                                 # so coarse sampling is fine.
+                                # CUDA-graph stage 1: this .cpu() is the one host sync on the
+                                # SRL decode path (the base low/mid/high presets never enter
+                                # here — srl_state is None).  DIFFKV_GRAPH_SAFE_DECODE=1 skips
+                                # it so the whole decode forward is provably sync-free and can
+                                # be captured; the only cost is the SRL re-routing heuristic
+                                # loses its recent-key trail (routing still works from anchors).
                                 _step_ctr = getattr(srl_state, "_decode_step_ctr", 0)
                                 srl_state._decode_step_ctr = _step_ctr + 1
-                                if _step_ctr % 8 == 0:
+                                if _step_ctr % 8 == 0 and os.environ.get("DIFFKV_GRAPH_SAFE_DECODE", "0") != "1":
                                     k_avg = curr_k[0].mean(dim=0).squeeze(0).float().cpu() # [head_dim]
                                     srl_state.recent_decode_keys.append(k_avg)
                                     if len(srl_state.recent_decode_keys) > 512:
@@ -743,6 +749,43 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 # SRL failure is non-fatal — fall back to full attention
                                 if os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
                                     print(f"[SRL] route_query error: {_srl_e}")
+
+                        # ── MLX-parity block pruning (DIFFKV_DECODE_PRUNE_K) ──────
+                        # MLX prunes decode attention to the top-K compressed blocks
+                        # by exact q·k relevance whenever there are more blocks than K
+                        # (use_topk = topk_blocks>0 and nb>k_eff; _block_relevance_
+                        # residual).  CUDA already has the identical router
+                        # (route_blocks_relevance) but only ran it behind the SRL
+                        # gate, so decode reconstructed ALL blocks (N_sparse=49) — the
+                        # bulk of DiffKV's per-token overhead.  This fires the same
+                        # residual router directly, no SRL/W_proj needed: rank blocks,
+                        # keep top-K, reconstruct only those.  Selected ANCHORS are
+                        # layer-invariant, so route once at layer 0 and map to each
+                        # layer's slots.  Default off (0); set to 16 to match MLX.
+                        _prune_k = int(os.environ.get("DIFFKV_DECODE_PRUNE_K", "0"))
+                        if (_prune_k > 0 and not _srl_rerouted and pool is not None
+                                and block_indices is not None and anchor_indices is not None
+                                and block_indices.numel() > _prune_k):
+                            _ws = kv_manager.decode_workspace.setdefault(sid, {})
+                            _pr = _ws.setdefault("_mlx_prune", {})
+                            if captured_layer_idx == 0:
+                                try:
+                                    from native_core.srl.query_router import route_blocks_relevance
+                                    _q_prune = unrot_query_states[b_idx, :, 0, :]   # [H, D]
+                                    _sc = 1.0 / math.sqrt(head_dim)
+                                    _sel_slots = route_blocks_relevance(
+                                        _q_prune, pool, block_indices, anchor_indices, _sc
+                                    )
+                                    _m = (block_indices.unsqueeze(1) == _sel_slots.unsqueeze(0)).any(dim=1)
+                                    _pr["anchors"] = anchor_indices[_m]
+                                except Exception:
+                                    _pr["anchors"] = None
+                            _sel_anchors = _pr.get("anchors")
+                            if _sel_anchors is not None and _sel_anchors.numel() > 0:
+                                _keep = (anchor_indices.unsqueeze(1) == _sel_anchors.unsqueeze(0)).any(dim=1)
+                                if bool(_keep.any()):
+                                    block_indices = block_indices[_keep]
+                                    anchor_indices = anchor_indices[_keep]
 
                         # ── Increment routing version at layer 0 ──
                         if captured_layer_idx == 0:

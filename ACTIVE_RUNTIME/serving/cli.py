@@ -523,8 +523,10 @@ async def run_client_mode(args):
         if not user_prompt_stripped:
             continue
 
-        # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /)
-        if user_prompt_stripped.startswith("/") and "\n" not in user_prompt_stripped:
+        # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /).
+        # Exception: /file explicitly supports a multi-line question suffix after the | separator.
+        _first_tok = user_prompt_stripped.split()[0].lower() if user_prompt_stripped.split() else ""
+        if user_prompt_stripped.startswith("/") and ("\n" not in user_prompt_stripped or _first_tok == "/file"):
             cmd = user_prompt_stripped.split()[0].lower()
             if cmd in ["/exit", "/quit"]:
                 print_system("Exiting client.")
@@ -944,8 +946,10 @@ async def run_direct_mode(args):
             if not user_prompt_stripped:
                 continue
 
-            # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /)
-            if user_prompt_stripped.startswith("/") and "\n" not in user_prompt_stripped:
+            # Handle Slash Commands (only if single-line to avoid misinterpreting multi-line pasted text starting with /).
+            # Exception: /file explicitly supports a multi-line question suffix after the | separator.
+            _first_tok = user_prompt_stripped.split()[0].lower() if user_prompt_stripped.split() else ""
+            if user_prompt_stripped.startswith("/") and ("\n" not in user_prompt_stripped or _first_tok == "/file"):
                 cmd = user_prompt_stripped.split()[0].lower()
                 if cmd in ["/exit", "/quit"]:
                     print_system("Stopping engine and exiting...")

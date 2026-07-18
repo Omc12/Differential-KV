@@ -59,35 +59,27 @@ import torch
 # Define Prompts
 PROMPT1_TEXT = """Use only the supplied text.
 
-Explain why Neighborhood Attention is designed around each token's nearest neighbors rather than fixed non-overlapping windows.
-
-Your answer must explain the reasoning chain:
-- the boundary behavior of zero-padded local attention,
-- the restriction created by non-overlapping window partitions,
-- how per-token neighborhoods change the attention span,
-- what Neighborhood Attention approaches as the neighborhood size reaches its maximum,
-- and why shifted windows are needed in one design but not as a manual operation in Neighborhood Attention.
-
-Do not summarize the entire work.
-Do not discuss benchmark accuracy, datasets, CUDA, or implementation speed.
-Do not introduce mechanisms not explicitly stated in the supplied text.
-
-Write one coherent technical explanation of 120 to 180 words."""
-
-PROMPT2_TEXT = """Use only the supplied text.
-
 A researcher claims:
+
 "Neighborhood Attention is simply Window Self-Attention with overlapping windows."
 
 Evaluate this claim.
 
-Identify which parts of the claim are superficially plausible and then explain precisely why the definition of Neighborhood Attention is different.
+Identify why the claim may initially sound plausible, then explain precisely why it is incorrect.
 
-Your explanation must distinguish the attention span of an individual token from the partitioning of the entire feature map.
+Your explanation must distinguish:
+
+- partitioning the feature map into windows,
+- the attention span assigned to an individual token,
+- boundary behavior,
+- receptive-field expansion,
+- and the role of shifted windows.
 
 Do not use outside knowledge.
-Do not discuss experimental results.
-Maximum 180 words."""
+Do not discuss experimental accuracy, datasets, CUDA, or implementation speed.
+Do not introduce mechanisms not explicitly stated in the supplied text.
+
+Write one coherent technical explanation of 150 to 220 words."""
 
 PAPER_PATH = os.path.join(ACTIVE, "nat_paper.txt")
 
@@ -269,9 +261,11 @@ def run_worker(config_name, model_id):
 
     # Build all prompts using the model's own chat template (works for Qwen,
     # Llama 3, Mistral, Phi-3, Gemma, etc. — no hardcoded special tokens).
+    # Single prompt (the researcher-claim evaluation). One prompt per config keeps
+    # the run short and the output easy to read/compare.
     all_prompts = [
         (idx, build_prompt(tok, paper_text, instr))
-        for idx, instr in enumerate([PROMPT1_TEXT, PROMPT2_TEXT], 1)
+        for idx, instr in enumerate([PROMPT1_TEXT], 1)
     ]
 
     # Derive stop token IDs from the tokenizer (model-agnostic).
@@ -348,7 +342,6 @@ def run_worker(config_name, model_id):
                     _block_capacity = max(2, int(_mbs) + 1)
                     _base_chunk = int(getattr(_cfg, "prefill_chunk_size", CH))
                     CH = ((_base_chunk + _block_capacity - 1) // _block_capacity) * _block_capacity
-                    print(f"[NAT eval] Aligned CUDA chunk size: CH={CH} (block_capacity={_block_capacity})", flush=True)
 
                 t_prefill_start = time.perf_counter()
                 for cs in range(0, len(ids), CH):
@@ -407,14 +400,6 @@ def run_worker(config_name, model_id):
                 # Snapshot the final prefill logits before compression/SRL
                 # finalization can allocate or mutate CUDA workspaces.
                 last_logits_gpu = out.logits[0, -1].float().clone()
-                _prefill_topv, _prefill_topi = torch.topk(last_logits_gpu, k=5)
-                _prefill_first_id = int(_prefill_topi[0].item())
-                print(
-                    f"[DIAG] prefill-next prompt{idx}: first_id={_prefill_first_id} "
-                    f"stop={_prefill_first_id in stop_ids} "
-                    f"top5={[int(x) for x in _prefill_topi.tolist()]}",
-                    flush=True,
-                )
 
                 t_compress_start = time.perf_counter()
                 # Compression is intentionally started once, after all prefill
@@ -589,15 +574,6 @@ def run_worker(config_name, model_id):
                 compress_time = 0.0
                 # Keep logits on GPU — no D2H sync during prefill
                 last_logits_gpu = out.logits[0, -1].float()
-                _prefill_topv, _prefill_topi = torch.topk(last_logits_gpu, k=5)
-                _prefill_first_id = int(_prefill_topi[0].item())
-                print(
-                    f"[DIAG] dense prefill-next prompt{idx}: first_id={_prefill_first_id} "
-                    f"stop={_prefill_first_id in _stop_ids} "
-                    f"top5={[int(x) for x in _prefill_topi.tolist()]}",
-                    flush=True,
-                )
-                # Excludes the top-5 diagnostic, matching the DiffKV branch.
                 prefill_time = forward_time
 
                 peak_prefill_vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
@@ -670,7 +646,7 @@ def generate_report(all_results, model_id):
         f.write(f"# Neighborhood Attention Paper Evaluation Report ({model_id})\n\n")
         f.write("This report compares the performance, memory usage, and generation quality of standard **Dense Attention** against **Differential KV (DiffKV)** under various presets, early layer rank boosting, and factual store routing on an A100 GPU.\n\n")
         
-        for p_idx in [1, 2]:
+        for p_idx in [1]:
             p_key = f"prompt{p_idx}"
             f.write(f"## Prompt {p_idx} Performance & Resource Comparison\n\n")
             
@@ -699,7 +675,7 @@ def generate_report(all_results, model_id):
             f.write(tabulate(rows, headers=headers, tablefmt="github") + "\n\n")
             
         f.write("## Quality and Output Analysis\n\n")
-        for p_idx in [1, 2]:
+        for p_idx in [1]:
             p_key = f"prompt{p_idx}"
             f.write(f"### Responses to Prompt {p_idx}\n\n")
             
@@ -754,7 +730,7 @@ def main():
             os.remove(temp_file)
             all_results[cfg] = res
             
-            for p_key in ["prompt1", "prompt2"]:
+            for p_key in ["prompt1"]:
                 p_res = res.get(p_key, {})
 
                 # PEAK VRAM is the number that matters for "does DiffKV save RAM":
@@ -793,6 +769,18 @@ def main():
                     + kv_str,
                     flush=True,
                 )
+                # Show the actual generated text so runs are judged on OUTPUT, not
+                # just metrics — essential for A/B'ing the numerics-changing paths
+                # (Gram, contiguous/un-rotate prefill, and any future CUDA-graph
+                # decode).  Full text unless DIFFKV_EVAL_OUTPUT_CHARS caps it.
+                _otext = p_res.get("output_text", "").strip().replace("\n", " ")
+                try:
+                    _cap = int(os.environ.get("DIFFKV_EVAL_OUTPUT_CHARS", "0"))
+                except ValueError:
+                    _cap = 0
+                if _cap > 0 and len(_otext) > _cap:
+                    _otext = _otext[:_cap] + " …"
+                print(f"      ↳ output: {_otext}", flush=True)
         else:
             print(f"    Subprocess for {cfg} crashed or went Out-Of-Memory (OOM).", flush=True)
             all_results[cfg] = {
@@ -800,6 +788,45 @@ def main():
                 "prompt1": {"output_text": "ERROR: CUDA OUT OF MEMORY (OOM) - Model footprint too large for GPU VRAM."},
                 "prompt2": {"output_text": "ERROR: CUDA OUT OF MEMORY (OOM) - Model footprint too large for GPU VRAM."}
             }
+
+    # ── Where does the time and storage go? ──────────────────────────────────
+    # One table per run so dense vs each preset is comparable at a glance:
+    #   TIME  — prefill forward, compression, and decode (tps).
+    #   VRAM  — peak prefill (the spike), peak decode, and the KV store
+    #           (pool physical vs the dense KV it replaces).
+    print("\n" + "=" * 100, flush=True)
+    print("TIME / STORAGE BREAKDOWN (prompt1)", flush=True)
+    print("=" * 100, flush=True)
+    _hdr = (f"{'config':<14} {'fwd_s':>7} {'comp_s':>7} {'dec_s':>7} {'tps':>6} "
+            f"{'peak_pf':>8} {'peak_dec':>8} {'pool_MB':>8} {'kv_phys':>8} {'vs_dense':>9}")
+    print(_hdr, flush=True)
+    print("-" * 100, flush=True)
+    _dense_kv = None
+    for cfg_name, cfg_res in all_results.items():
+        p = cfg_res.get("prompt1", {})
+        if p.get("status") != "success":
+            print(f"{cfg_name:<14} {'OOM/ERROR':>7}", flush=True)
+            continue
+        _kv_phys = p.get("kv_physical_gb", 0.0)
+        _dense_eq = p.get("kv_dense_equiv_gb", 0.0)
+        if cfg_name == "dense":
+            _dense_kv = _dense_eq or 0.0
+        _store = _kv_phys if _kv_phys > 0 else p.get("kv_cache_vram_gb", 0.0)
+        _ratio = (_dense_kv / _store) if (_store > 0 and _dense_kv) else 0.0
+        print(
+            f"{cfg_name:<14} "
+            f"{p.get('prefill_forward_s',0):>7.2f} "
+            f"{p.get('prefill_compress_s',0):>7.2f} "
+            f"{p.get('decode_time_s',0):>7.2f} "
+            f"{p.get('decode_tps',0):>6.1f} "
+            f"{p.get('peak_prefill_vram_gb',0):>7.2f}G "
+            f"{p.get('peak_decode_vram_gb',0):>7.2f}G "
+            f"{p.get('pool_physical_mb',0):>8.0f} "
+            f"{_store:>7.2f}G "
+            f"{(str(round(_ratio,2))+'x') if _ratio else '—':>9}",
+            flush=True,
+        )
+    print("=" * 100, flush=True)
 
     # Save raw results
     out_path = os.path.join(REPO, args.out) if not os.path.isabs(args.out) else args.out

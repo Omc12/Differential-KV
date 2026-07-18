@@ -733,6 +733,218 @@ is about reaching MLX's design, not adding to MLX.
 
 ---
 
+# SEVENTH PASS — 1× prefill CONFIRMED, factual-store sync fix, CUDA-graph plan (2026-07-18)
+
+## `DIFFKV_CONTIG_UNROTATE=1` (1× memory) CONFIRMED on A100
+
+The un-rotate variant worked exactly as designed:
+
+```
+low_preset      after_fwd   peak_prefill   fwd     kv_phys
+2× contiguous     15.23 GB     16.74 GB    4.85s   2.99×
+1× un-rotate      12.58 GB     14.09 GB    5.03s   2.99×   ← ≈ dense peak (13.27)
+```
+
+`after_fwd` dropped 15.23 → 12.58 GB (the duplicate buffer is gone); peak is now
+basically dense while the forward stays faster than dense. Compress rose (2.7 →
+3.8s) because block-building moved into the compress phase (un-rotate + replay
+capture). Net: best of both — dense-speed forward AND dense-level peak, with a 3×
+KV store. (The "tps dropped 7.6→6.7" in that run was the whole machine being
+slower — dense also fell 11.1→9.1; the ratio held.)
+
+## Factual store: the 1.9-tps cause fixed (the "CPU micro-spikes in a pattern")
+
+`FactualExactStore.query()` runs PER DECODE TOKEN and did
+`torch.dot(q_desc, entry.descriptor).item()` per entry in three loops (prime
+seeds, merged candidates, fallback) — thousands of host syncs per generation, the
+periodic CPU spikes. Replaced with one cached `[E, DESC]·[DESC]` matmul + a single
+`.tolist()`; bit-identical (2.4e-7). `build()` (prefill) had eight
+`token_ids[i].item()` loops → one `.tolist()`. CPU-verified equal; no new test
+failures. This targets `factual_store`/`combined` (1.9 tps), not the base presets.
+
+## CUDA graphs — researched (vLLM pattern) and scoped; the concrete blockers
+
+vLLM/SGLang pattern (deepwiki, vLLM docs): pre-allocated **static input buffers**
+(copy_ actual data in before replay), capture per fixed batch size (pad smaller),
+**block-table indirection** via a static tensor, replay = one driver call, read
+from static output. KV writes use a static **slot_mapping** updated before replay.
+
+Why DiffKV can't capture today (verified, not assumed): `CUDAGraphDecodeRunner`
+captures the model forward *inside* `torch.cuda.graph()`, and graph capture
+**forbids host syncs**. The decode forward has them:
+- routing: entropy `.item()`, centroid `.tolist()`, score `.cpu()` — but routing
+  is cadenced and can run OUTSIDE the graph (eager, every N tokens).
+- per-layer compute: `k_avg = curr_k...cpu()`, `active_slots = set(block_indices
+  .tolist())`, an `.item()` — these are INSIDE what would be captured.
+- the ring-buffer write position changes per token (needs a static slot tensor).
+- the eval also `.item()`s the sampled id per token for the stop check.
+
+Staged plan (each stage GPU-tested for output parity — capture bugs are silent
+garbage, so no stage ships without the A100):
+1. **Make the per-layer decode compute sync-free** — move routing fully outside
+   the captured region (cadenced, writes a STATIC `block_indices` tensor in place),
+   drop the per-layer `.cpu()`/`.tolist()`/`.item()`. This is the prerequisite;
+   until it's done, capture throws.
+2. **Static slot_mapping / seq-len** — the ring-buffer append becomes an in-place
+   write at a device-resident position the kernels read.
+3. **Static block-table of fixed capacity K_max** — routing writes indices in
+   place, padding masked; graph gathers K_max blocks.
+4. **Capture + self-check** — capture the sync-free forward; on replay,
+   periodically compare against one eager step and auto-disable on mismatch (a
+   safety net so testing can never corrupt output).
+
+Stage 1 is the real first increment and is independently testable (each removed
+sync is verifiable). Recommend doing it next as a focused change, GPU-validated,
+before touching capture. Not shipping capture blind — it would silently corrupt.
+
+---
+
+# EIGHTH PASS — CUDA-graph stage 1 done (the finding: decode is already sync-free) (2026-07-18)
+
+## Stage-1 outcome: the base decode path is ALREADY sync-free
+
+Audited every host sync in the decode forward. Result — the base (low/mid/high)
+presets have **none** on the hot path:
+- `k_avg.cpu()` (SRL recent-key trail): behind `if srl_state is not None` — SRL is
+  off in base presets. Now ALSO gated by `DIFFKV_GRAPH_SAFE_DECODE=1` (skips it so
+  even SRL sessions are sync-free; heuristic loses its key trail, routing still
+  works). This is the one code change this pass.
+- `active_slots = set(block_indices.tolist())`: behind the factual-store gate — off
+  in base presets.
+- the `[SRL Validate] ....item()`: behind a debug validate flag — off.
+- `get_cached_decode_blocks`: metadata is CPU-resident (Phase 29), and it returns a
+  **version-cached, stable-address** `block_indices` GPU tensor — no GPU→CPU sync,
+  and the address is stable between block-creations (the cache only rebuilds when
+  `metadata_version` changes, i.e. a new block).
+
+So "make decode sync-free" (stage 1) is effectively already satisfied for the
+eval. Capture will NOT fail on host syncs.
+
+## The actual blocker (stage 2): the ring-buffer append changes shape per token
+
+`streaming_sparse_ingest.py:990` — the decode KV append is
+`buf_k[0, :, fill, :] = k[...]` with `fill` a **Python int** advancing each token,
+and attention reads `current_block.active_k = buf_k[:, :, :fill, :]` — a
+**different-length slice every token**. CUDA graphs require static shapes and
+static write positions, so this is what breaks capture (not syncs). It is exactly
+the case vLLM solves with `slot_mapping` (a device write-position tensor) + a
+static `seq_len` (attend a FIXED max length, mask the tail).
+
+Stage-2 spec (the real work, GPU-only to validate):
+1. Attend the dense window at a FIXED length (`micro_block_size`) always; pass the
+   valid count as a **device tensor** the combined kernel masks against (the kernel
+   already takes a `dense_len` arg — it must become a static tensor, and the tail
+   masked). Behaviour-preserving vs the current sliced read (CPU-verifiable: masked
+   fixed-length == sliced).
+2. The append writes into `buf_k` at a **device-resident `fill`** via scatter
+   (in-place, fixed address) so it is graph-captured or done eagerly before replay.
+3. `block_indices` already stable between block-creations (cache) — re-capture the
+   graph on block-creation (~every 32 tokens; a cheap eager step at the boundary).
+4. Then capture the 48-layer forward over each stable window and replay.
+
+## Why I am NOT shipping capture this pass
+
+The prefill wins (Gram, contiguous, un-rotate) were shippable-untested because the
+MATH was CPU-provable to 0.00e+00. **CUDA-graph replay correctness has no CPU
+equivalent** — a stale-address replay is silent wrong tokens, not a crash, and the
+decode is stateful (you cannot run eager alongside to self-check without
+double-appending the token). So each stage-2 piece must be GPU-validated directly
+(output A/B) as it lands. Stage 1's deliverable is the audit result above + the
+`DIFFKV_GRAPH_SAFE_DECODE` guard; stage 2 (the fixed-length masked ring read + the
+device `fill`) is the next focused, GPU-tested change — the point where the tps
+win actually starts.
+
+---
+
+# NINTH PASS — the "arg12" cudagraph skip is a RED HERRING; the tps blocker is the eager nf4 model (2026-07-18)
+
+Chased the log line `skipping cudagraphs due to cpu device (arg12_1)`. Traced it
+precisely, then reverted the fix, because it does not help the eval — and the
+tracing revealed where the tps actually goes.
+
+## What `arg12` is, and why fixing it doesn't matter here
+
+`arg12 == D` (head_dim), an **int argument** to `_attend_and_reconstruct_v`. Under
+`torch.compile(dynamic=True)` a scalar int is lifted to a 0-d CPU tensor input,
+and Inductor won't cudagraph a function with a CPU input → the skip. Deriving the
+ints from tensor shapes removes the CPU input and would let the cudagraph engage.
+**But**: that compiled function is on the **SEPARATE** decode path (`bias>0`). The
+eval runs the **COMBINED** path — a raw Triton kernel (`_fused_decode_combined_
+kernel[grid]`) that never calls the compiled function. So fixing the skip changes
+nothing for the eval, and the shape-derivation broke the N=0 dense-only test
+(empty `anchors_V` ⇒ derived D=0). Reverted.
+
+## Where the eval's decode time actually goes
+
+- Both dense AND DiffKV pay the **eager nf4 model forward** (`torch.compile
+  disabled` / "skipping torch.compile to avoid graph-break errors" for bnb-quant).
+  That is the ~89 ms of the dense step — 48 layers of eager QKV/MLP/norm kernels.
+  DiffKV cannot touch this; it is the base model, and torch.compile breaks on
+  bnb-nf4. It is also why BOTH runtimes sit ~19× off their bandwidth roofline.
+- DiffKV's **extra** ~41 ms/token (the 11.2→7.7 tps gap) is its own per-layer work:
+  routing (layer 0) + **reconstructing all 49 blocks** from U/V + the combined
+  Triton kernel, ×48 layers, eager. `N_sparse=49` means routing is NOT pruning
+  (the residual router needs `pool.W_proj`; unset here) — every compressed block
+  is reconstructed every token.
+
+## The honest tps levers at 13.4K (all hard or tradeoff-laden)
+
+1. **Prune blocks via the routing** (49 → topk 16): ~3× less reconstruction, so
+   the ~41 ms DiffKV overhead could drop toward ~14 ms → real tps gain. Needs
+   `W_proj` wired + `DIFFKV_TOPK_BLOCKS=16`; accuracy-sensitive (MLX uses exactly
+   this successfully, but the CUDA SRL router was measured net-negative before —
+   the `residual` router is the one to try). GPU-only to validate; the user's new
+   output printing is exactly the A/B tool for it.
+2. **CUDA-graph the DiffKV hook** — the stage-2/3 ABI work (still the biggest, and
+   still un-CPU-validatable).
+3. **Get the nf4 model itself graphable** — a bnb/torch.compile-compatibility
+   problem, separate from DiffKV, and it would help dense too.
+
+There is no safe one-line tps win at this context. The most tractable *testable*
+one is #1 (routing prune), which the user can A/B on outputs now that the eval
+prints them. `DIFFKV_EVAL_OUTPUT_CHARS` caps the printed length; default full.
+
+---
+
+# TENTH PASS — MLX-parity decode pruning ported to CUDA + eval reworked (2026-07-18)
+
+## How MLX prunes (studied) and the CUDA port
+
+MLX (`mlx_diffkv_wrapper`): `use_topk = (topk_blocks>0 and nb>k_eff)`, then
+`sel = argsort(relevance)[-k_eff:]` where relevance = `_block_relevance_residual`
+(max over query heads of max(q·anchor, max q·residual-key)). Default K=16. NO
+W_proj / SRL state — a pure per-block q·k top-K. It gathers only the K selected
+blocks and attends those; that is why MLX reconstructs ~16 not ~50 blocks/token.
+
+CUDA already had the identical router (`route_blocks_relevance`, a direct port of
+`_block_relevance_residual`) but only ran it inside the SRL gate, so decode kept
+`N_sparse=49` (every block reconstructed). Added `DIFFKV_DECODE_PRUNE_K` (default
+0=off; set 16 to match MLX) in the decode dispatch: when `nb > K` and SRL didn't
+already reroute, run the residual router, keep the top-K, prune both
+`block_indices` and `anchor_indices`. Routes once at layer 0 (caches the selected
+ANCHORS, which are layer-invariant) and maps them to each layer's slots — verified
+on CPU (anchor→slot mapping keeps exactly K blocks across layers). Fewer blocks
+reconstructed ⇒ the ~41 ms/token DiffKV overhead should drop toward ~14 ms at K=16.
+**Accuracy-sensitive — A/B the printed output; MLX does this successfully, but the
+CUDA SRL router was net-negative before (this is the `residual` router, not SRL).**
+
+## Eval reworked (`colab/run_nat_eval.py`)
+
+- **Single prompt** (the researcher-claim evaluation) instead of two — shorter runs.
+- **Prints model outputs** already (`↳ output:` per prompt) — judge on OUTPUT.
+- **Removed debug noise**: the `[DIAG] prefill-next ... top5` lines (both branches)
+  and the repeated `[NAT eval] Aligned CUDA chunk size`. Kept the rank-boost rate.
+- **TIME / STORAGE BREAKDOWN table** at the end: per config, `fwd_s | comp_s |
+  dec_s | tps | peak_pf | peak_dec | pool_MB | kv_phys | vs_dense` — so where the
+  time and VRAM go across dense vs presets is one glance.
+
+Run to test the prune (K=16) with outputs:
+`DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32
+DIFFKV_CONTIGUOUS_PREFILL=1 DIFFKV_CONTIG_UNROTATE=1 DIFFKV_DECODE_PRUNE_K=16 ...`
+Watch tps rise, `N_sparse` drop to ~16-17, and confirm the output still answers.
+
+---
+
 # SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)
 
 ## 1× contiguous prefill (`DIFFKV_CONTIG_UNROTATE=1`) — CONFIRMED on A100
