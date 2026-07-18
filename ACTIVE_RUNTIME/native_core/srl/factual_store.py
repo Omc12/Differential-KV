@@ -133,7 +133,27 @@ class FactualExactStore:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.entries: List[FactEntry] = []
-        
+        # Cached [num_entries, DESC_DIM] descriptor matrix for vectorized query().
+        # query() ran torch.dot(q_desc, entry.descriptor).item() per entry in up to
+        # three loops PER DECODE TOKEN — thousands of GPU→CPU syncs per generation
+        # (the "CPU micro-spikes in a pattern" at 1.9 tps).  Stacking descriptors
+        # once and doing a single [E, D]·[D] matmul gives every sim at once, with a
+        # single .tolist() sync.  Bit-identical (dot product is dot product).
+        self._desc_matrix: Optional[torch.Tensor] = None
+        self._desc_matrix_len: int = -1
+
+    def _ensure_desc_matrix(self) -> Optional[torch.Tensor]:
+        """Return a cached [E, DESC_DIM] stack of entry descriptors (built once;
+        entries are fixed after prefill, so this rebuilds only if the count
+        changes)."""
+        n = len(self.entries)
+        if n == 0:
+            return None
+        if self._desc_matrix is None or self._desc_matrix_len != n:
+            self._desc_matrix = torch.stack([e.descriptor for e in self.entries], dim=0)
+            self._desc_matrix_len = n
+        return self._desc_matrix
+
     def build(self, prefill_kv: Dict[int, List[torch.Tensor]], token_ids: torch.Tensor, W_proj: torch.Tensor, stop_token_ids: Set[int], slot_ids: Optional[List[int]] = None, block_size: Optional[int] = None, inv_index: Optional[Any] = None, semantic_prime_slots: Optional[Set[int]] = None, use_salience_parser: bool = True, block_anchor_idxs: Optional[List[int]] = None):
         """
         Identify rare content words and group them into factual spans, building a 3D factual graph.
@@ -164,8 +184,13 @@ class FactualExactStore:
             seq_len_kv = token_ids.numel()
             
         total_seq_len = seq_len_kv
+        # Materialize token ids to a Python list ONCE.  The salience/IDF/relational
+        # loops below index individual tokens; `token_ids[i].item()` per element was
+        # total_seq_len host stalls per loop (and there are several) — the bulk of
+        # the factual-store prefill cost.  One .tolist() replaces all of them.
+        token_ids_list = token_ids[:total_seq_len].tolist()
         factual_mask = torch.zeros(total_seq_len, dtype=torch.bool)
-        
+
         if use_salience_parser:
             # 1. Compute Eagle lookback score R(t) using causal key self-similarity
             R = torch.zeros(total_seq_len, dtype=torch.float32)
@@ -214,12 +239,12 @@ class FactualExactStore:
             idf_vals = torch.zeros(total_seq_len, dtype=torch.float32)
             if inv_index is not None and hasattr(inv_index, "idf"):
                 for i in range(total_seq_len):
-                    tid = int(token_ids[i].item())
+                    tid = token_ids_list[i]
                     idf_vals[i] = inv_index.idf.get(tid, 1.0)
             else:
                 # Fallback using stop word exclusion: non-stop words get 2.5, stop words get 0.1
                 for i in range(total_seq_len):
-                    tid = int(token_ids[i].item())
+                    tid = token_ids_list[i]
                     idf_vals[i] = 0.1 if tid in stop_token_ids else 2.5
                     
             # 4. Relational keyword boost — give binding words a fixed IDF-
@@ -241,7 +266,7 @@ class FactualExactStore:
                             # Direct token-based identification: any token whose IDF
                             # is very low and whose decoded text matches RELATIONAL_KEYWORDS.
                             for i_t in range(total_seq_len):
-                                tid = int(token_ids[i_t].item())
+                                tid = token_ids_list[i_t]
                                 if tid in inv_index.idf and inv_index.idf[tid] < 1.5:
                                     try:
                                         text = vocab.decode([tid])
@@ -257,7 +282,7 @@ class FactualExactStore:
 
                 if _rel_tok_ids:
                     for i_t in range(total_seq_len):
-                        tid = int(token_ids[i_t].item())
+                        tid = token_ids_list[i_t]
                         if tid in _rel_tok_ids:
                             # Boost relational tokens to median content-word IDF
                             idf_vals[i_t] = max(idf_vals[i_t], 2.0)
@@ -337,7 +362,7 @@ class FactualExactStore:
         else:
             # Fallback to simple stop-token exclusion for deterministic testing
             for i in range(total_seq_len):
-                tid = int(token_ids[i].item())
+                tid = token_ids_list[i]
                 if tid not in stop_token_ids and tid > 0:
                     factual_mask[i] = True
             
@@ -385,7 +410,7 @@ class FactualExactStore:
         for s, e in spans:
             seg_start = s
             for i in range(s, e):
-                is_boundary = (int(token_ids[i].item()) in boundary_ids)
+                is_boundary = (token_ids_list[i] in boundary_ids)
                 if is_boundary or (i - seg_start + 1) >= _cap:
                     chunked_spans.append((seg_start, i + 1))
                     seg_start = i + 1
@@ -610,7 +635,7 @@ class FactualExactStore:
             # in the bridge that is common enough to carry a structural role.
             rel_tid_set: Set[int] = set()
             for i_t in range(total_seq_len):
-                tid = int(token_ids[i_t].item())
+                tid = token_ids_list[i_t]
                 if inv_index.idf.get(tid, 2.0) < 1.5:
                     rel_tid_set.add(tid)
 
@@ -829,6 +854,15 @@ class FactualExactStore:
         q_desc = q_desc / (q_desc.norm() + 1e-8)
         q_desc_cpu = q_desc.cpu()
 
+        # Vectorized entry similarities: one [E, DESC]·[DESC] matmul + one sync,
+        # replacing the per-entry torch.dot(...).item() that ran in three loops
+        # below (prime seeds, merged candidates, fallback) every decode token.
+        _dm = self._ensure_desc_matrix()
+        if _dm is not None:
+            _all_sims = torch.matmul(_dm, q_desc_cpu).tolist()   # [E] Python floats
+        else:
+            _all_sims = []
+
         # RC3 — entity-bias signature.  When the caller knows which entities the
         # query is about (from the prompt's prime matches), build a unit signature
         # from those entities' distinguishing tokens and use it to rank their spans
@@ -862,7 +896,7 @@ class FactualExactStore:
         prime_seeds = []
         for idx, entry in enumerate(self.entries):
             if entry.is_prime:
-                sim = torch.dot(q_desc_cpu, entry.descriptor).item()
+                sim = _all_sims[idx]
                 if sim >= threshold:
                     prime_seeds.append((idx, sim))
                     
@@ -882,8 +916,8 @@ class FactualExactStore:
         
         for idx in all_candidate_idxs:
             entry = self.entries[idx]
-            sim = torch.dot(q_desc_cpu, entry.descriptor).item()
-            
+            sim = _all_sims[idx]
+
             passes_main = sim >= threshold
             passes_relaxed = (active_slots is not None and 
                               any(slot in active_slots for slot in entry.slot_ids) and 
@@ -930,7 +964,7 @@ class FactualExactStore:
             fallback_matches = []
             for idx in candidate_indices:
                 entry = self.entries[idx]
-                sim = torch.dot(q_desc_cpu, entry.descriptor).item()
+                sim = _all_sims[idx]
                 if sim >= 0.15:
                     entry.current_sim = sim
                     fallback_matches.append((entry, sim))

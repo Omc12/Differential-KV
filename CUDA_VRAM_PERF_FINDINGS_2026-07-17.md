@@ -730,3 +730,64 @@ MLX wins early precisely because it *already* does the contiguous rotated buffer
 `@mx.compile` over **pure array functions with state passed explicitly** — the
 graph-safe ABI CUDA lacks. So "do it in MLX too" is already true; the CUDA work
 is about reaching MLX's design, not adding to MLX.
+
+---
+
+# SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)
+
+## 1× contiguous prefill (`DIFFKV_CONTIG_UNROTATE=1`) — CONFIRMED on A100
+
+```
+                fwd     after_fwd   peak_prefill
+2× contiguous   4.85s   15.23 GB    16.74 GB
+1× un-rotate    5.03s   12.58 GB    14.09 GB   ← near dense (13.27), fast fwd kept
+dense           6.07s   —           13.27 GB
+```
+
+after_fwd dropped 15.23→12.58 (the 2.6 GB buffer duplicate is gone); peak 16.74→
+14.09 ≈ dense. Forward stays faster than dense. Compress rose (2.7→3.8 s) because
+block-building moved into the boundary finalize — expected. The apparent tps drop
+this run was **machine-wide** (dense also fell 11.1→9.1 tps; slower instance), not
+a regression; the DiffKV/dense ratio held. Recommended prefill config now:
+`DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32
+DIFFKV_CONTIGUOUS_PREFILL=1 DIFFKV_CONTIG_UNROTATE=1`.
+
+## CUDA graphs: researched, scoped — NOT shippable blind (would be silent garbage)
+
+Studied vLLM/SGLang (sources in session): the pattern is a **two-stage** step — a
+PREP stage (CPU+GPU: routing, slot_mapping → written into STATIC tensors) then a
+REPLAY stage (only captured kernels). Requirements: static input/position/
+block-table/seq-len buffers (`copy_` in place before replay), block-table
+indirection into a fixed-address paged KV pool, and the KV write
+(`reshape_and_cache`) as an in-place op at a static slot **inside** the graph.
+
+DiffKV readiness (confirmed by reading the code):
+- ✓ pool fixed-address; ✓ dense-window ring buffer (Phase 29).
+- ✗ **decode ingest is deeply stateful**: `ingest_chunk` (streaming_sparse_ingest
+  ~935) starts a NEW block every 32 decode tokens, manages ring fill in Python,
+  and triggers compression mid-decode — none capturable.
+- ✗ routing builds a fresh `block_indices` tensor per token.
+- ✗ the hot decode path is the raw **Triton COMBINED kernel** launched eagerly
+  ×48 layers/token (not torch.compile), so Inductor's own cudagraphs don't cover
+  it. (The `arg12` CPU-scalar that skips Inductor cudagraphs is on a NON-hot
+  fallback path — fixing it would not touch the real decode.)
+
+**Verdict:** a real decode-path rewrite (static ingest, static block table,
+graph-captured ring append) — the vLLM/SGLang-scale effort, and CUDA-graph replay
+correctness **cannot be validated anywhere but the A100** (a stale-address/stale-
+state bug is silent garbage). Capturing the current stateful forward would replay
+stale routing AND never append the new token. Path forward = staged, GPU-tested
+increments (stage 1: fixed-capacity static block table + graph-safe ring append,
+cadenced routing, eager fallback at 32-token block boundaries), each A/B'd. Not a
+one-shot flag.
+
+## Factual store 1.9 tps — cause found: per-token `.item()` host-sync loops
+
+`native_core/srl/factual_store.py` runs many `for i in range(total_seq_len):
+tid = int(token_ids[i].item())` loops (lines 216, 221, 243, 259, 279, 339, 348,
+387, 493, 612…). Each `.item()` is a GPU→CPU sync; at 13.4k tokens that is tens of
+thousands of host stalls per call — the "CPU micro-spikes in a pattern" the user
+observed, and why factual_store adds ~4 s to compress and runs at 1.9 tps. Fix:
+move token_ids to CPU ONCE (`token_ids[:T].tolist()`) and index the Python list in
+the loops instead of `.item()`-ing per element; vectorize the salience/threshold
+reductions. Tractable and testable — separate from the CUDA-graph work.
