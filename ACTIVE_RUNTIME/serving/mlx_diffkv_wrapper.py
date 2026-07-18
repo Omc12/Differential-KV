@@ -117,6 +117,28 @@ def _normalize_references(text: str) -> str:
         return body + '\n' + normalized_ref_block
     return normalized_ref_block
 
+def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
+    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1":
+        ratio = layer_idx / max(num_layers, 1)
+        if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
+            return max(8, round(0.75 * base_rank))
+        elif ratio < 0.75:     # Middle layers (50%) -> higher rank (e.g. 24 if base is 16)
+            return round(1.5 * base_rank)
+        else:                  # Late layers (25%) -> lower rank (e.g. 8 if base is 16)
+            return max(8, round(0.50 * base_rank))
+    
+    # Default schedule for fallback/safety:
+    ratio = layer_idx / max(num_layers, 1)
+    if ratio < 0.15:
+        return base_rank
+    elif ratio < 0.50:
+        return base_rank
+    elif ratio < 0.79:
+        return max(6, round(0.75 * base_rank))
+    else:
+        return max(8, round(0.50 * base_rank))
+
+
 class MLXCompressedBlock:
     def __init__(self, anchor_idx: int, token_indices: List[int], U: mx.array, V_K: mx.array, V_V: mx.array, anchor_k: mx.array, anchor_v: mx.array, scale: float, seq_len: int):
         self.anchor_idx = anchor_idx
@@ -1587,7 +1609,12 @@ class MLXKVBlockManager:
         self.heads = heads
         self.kv_heads = kv_heads
         self.head_dim = head_dim
-        self.rank = rank
+        self.base_rank = rank
+        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1")
+        if self.layer_adaptive_rank:
+            self.rank = int(round(self.base_rank * 1.5))
+        else:
+            self.rank = rank
         self.block_size = block_size
         
         # ── Dense recency window ───────────────────────────────────────────────
@@ -2400,30 +2427,113 @@ class MLXKVBlockManager:
         batch_blocks_k = mx.concatenate(accum_blocks_k, axis=0)  # (B_batch, H_kv, block_size, D)
         batch_blocks_v = mx.concatenate(accum_blocks_v, axis=0)  # (B_batch, H_kv, block_size, D)
         
-        # 4. V-side rebalancing for the joint K|V SVD
         v_scale_on = os.environ.get("DIFFKV_V_SCALE", "1") != "0"
-        v_gain = 1.0
-        if v_scale_on:
-            eK = mx.sum(batch_deltas_k.astype(mx.float32)**2, axis=(1, 2))
-            eV = mx.sum(batch_deltas_v.astype(mx.float32)**2, axis=(1, 2))
-            
-            v_gain = mx.sqrt(eK / mx.maximum(eV, 1e-12))
-            v_gain = mx.minimum(mx.maximum(v_gain, 1.0), 10000.0)
-            
-            v_gain_broadcast = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)  # (B_batch, 1, 1)
-            batch_deltas_v_scaled = batch_deltas_v * v_gain_broadcast
-            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v_scaled], axis=2)
+
+        if self.layer_adaptive_rank:
+            U_batch_list = []
+            Vh_batch_list = []
+            scales_batch_list = []
+            joint_errors_list = []
+            errors_k_list = []
+            errors_v_list = []
+            recon_delta_list = []
+            recon_delta_k_list = []
+            recon_delta_v_list = []
+            v_gain_list = []
+
+            for l in range(self.num_layers):
+                deltas_k_2d = accum_deltas_k[l]
+                deltas_v_2d = accum_deltas_v[l]
+                if v_scale_on:
+                    eK = mx.sum(deltas_k_2d.astype(mx.float32)**2, axis=(1, 2))
+                    eV = mx.sum(deltas_v_2d.astype(mx.float32)**2, axis=(1, 2))
+                    v_gain_l = mx.sqrt(eK / mx.maximum(eV, 1e-12))
+                    v_gain_l = mx.minimum(mx.maximum(v_gain_l, 1.0), 10000.0)
+                    v_gain_list.append(v_gain_l)
+                    v_gain_broadcast_l = mx.expand_dims(mx.expand_dims(v_gain_l, 1), 2)
+                    deltas_v_scaled_l = deltas_v_2d * v_gain_broadcast_l
+                    deltas_l = mx.concatenate([deltas_k_2d, deltas_v_scaled_l], axis=2)
+                else:
+                    deltas_l = mx.concatenate([deltas_k_2d, deltas_v_2d], axis=2)
+
+                token_norms_l = mx.linalg.norm(deltas_l, axis=-1, keepdims=True)
+                token_norms_l = mx.maximum(token_norms_l, 1e-5)
+                deltas_normalized_l = deltas_l / token_norms_l
+
+                layer_rank = get_layer_rank(l, self.num_layers, self.base_rank)
+                U_l, Vh_l, scales_l = compress_mlx_block_batched(deltas_normalized_l, layer_rank)
+
+                if layer_rank < self.rank:
+                    U_l = mx.pad(U_l, [(0, 0), (0, 0), (0, self.rank - layer_rank)])
+                    Vh_l = mx.pad(Vh_l, [(0, 0), (0, self.rank - layer_rank), (0, 0)])
+
+                U_l = U_l * token_norms_l
+                
+                recon_delta_l = mx.matmul(U_l, Vh_l) * mx.expand_dims(mx.expand_dims(scales_l, 1), 2)
+                recon_delta_k_l = recon_delta_l[:, :, :self.kv_heads * self.head_dim]
+                recon_delta_v_l = recon_delta_l[:, :, self.kv_heads * self.head_dim:]
+                if v_scale_on:
+                    recon_delta_v_l = recon_delta_v_l / v_gain_broadcast_l
+
+                errors_k_l = mx.linalg.norm(deltas_k_2d - recon_delta_k_l, axis=-1)
+                errors_v_l = mx.linalg.norm(deltas_v_2d - recon_delta_v_l, axis=-1)
+
+                if v_scale_on:
+                    errors_v_balanced_l = errors_v_l * mx.expand_dims(v_gain_l, 1)
+                else:
+                    errors_v_balanced_l = errors_v_l
+                joint_errors_l = mx.sqrt(errors_k_l**2 + errors_v_balanced_l**2)
+
+                U_batch_list.append(U_l)
+                Vh_batch_list.append(Vh_l)
+                scales_batch_list.append(scales_l)
+                joint_errors_list.append(joint_errors_l)
+                errors_k_list.append(errors_k_l)
+                errors_v_list.append(errors_v_l)
+                recon_delta_list.append(recon_delta_l)
+                recon_delta_k_list.append(recon_delta_k_l)
+                recon_delta_v_list.append(recon_delta_v_l)
+
+            U_batch = mx.concatenate(U_batch_list, axis=0)
+            Vh_batch = mx.concatenate(Vh_batch_list, axis=0)
+            scales_batch = mx.concatenate(scales_batch_list, axis=0)
+            joint_errors = mx.concatenate(joint_errors_list, axis=0)
+            errors_k = mx.concatenate(errors_k_list, axis=0)
+            errors_v = mx.concatenate(errors_v_list, axis=0)
+            recon_delta = mx.concatenate(recon_delta_list, axis=0)
+            recon_delta_k = mx.concatenate(recon_delta_k_list, axis=0)
+            recon_delta_v = mx.concatenate(recon_delta_v_list, axis=0)
+            if v_scale_on:
+                v_gain = mx.concatenate(v_gain_list, axis=0)
+                v_gain_broadcast = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)
+                batch_deltas_v_scaled = batch_deltas_v * v_gain_broadcast
+                batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v_scaled], axis=2)
+            else:
+                batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v], axis=2)
         else:
-            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v], axis=2)
+            # 4. V-side rebalancing for the joint K|V SVD
+            v_gain = 1.0
+            if v_scale_on:
+                eK = mx.sum(batch_deltas_k.astype(mx.float32)**2, axis=(1, 2))
+                eV = mx.sum(batch_deltas_v.astype(mx.float32)**2, axis=(1, 2))
+                
+                v_gain = mx.sqrt(eK / mx.maximum(eV, 1e-12))
+                v_gain = mx.minimum(mx.maximum(v_gain, 1.0), 10000.0)
+                
+                v_gain_broadcast = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)  # (B_batch, 1, 1)
+                batch_deltas_v_scaled = batch_deltas_v * v_gain_broadcast
+                batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v_scaled], axis=2)
+            else:
+                batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v], axis=2)
+                
+            token_norms = mx.linalg.norm(batch_deltas, axis=-1, keepdims=True)
+            token_norms = mx.maximum(token_norms, 1e-5)
+            batch_deltas_normalized = batch_deltas / token_norms
             
-        token_norms = mx.linalg.norm(batch_deltas, axis=-1, keepdims=True)
-        token_norms = mx.maximum(token_norms, 1e-5)
-        batch_deltas_normalized = batch_deltas / token_norms
-        
-        # 5. Batched GPU SVD
-        U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, self.rank)
-        
-        U_batch = U_batch * token_norms  # U_batch shape: (B_batch, S_comp, rank)
+            # 5. Batched GPU SVD
+            U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, self.rank)
+            
+            U_batch = U_batch * token_norms  # U_batch shape: (B_batch, S_comp, rank)
         
         # Split Vh_batch back into VK and VV
         VK_flat = Vh_batch[:, :, :self.kv_heads * self.head_dim]
@@ -2915,7 +3025,14 @@ class MLXKVBlockManager:
         batch_deltas_normalized = batch_deltas / token_norms
 
         # 5. Batched GPU SVD
-        U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, self.rank)
+        layer_rank = get_layer_rank(layer_idx, self.num_layers, self.base_rank)
+        U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, layer_rank)
+
+        # Pad up to pool capacity rank (self.rank) if layer_rank is smaller
+        if layer_rank < self.rank:
+            U_batch = mx.pad(U_batch, [(0, 0), (0, 0), (0, self.rank - layer_rank)])
+            Vh_batch = mx.pad(Vh_batch, [(0, 0), (0, self.rank - layer_rank), (0, 0)])
+
         U_batch = U_batch * token_norms  # (num_blocks, S_comp, rank)
 
         VK_flat = Vh_batch[:, :, :self.kv_heads * self.head_dim]
@@ -3471,7 +3588,8 @@ class MLXKVBlockManager:
         token_norms = mx.maximum(token_norms, 1e-5)
         deltas_normalized = deltas_2d / token_norms
 
-        U_k, Vh_k, svd_scale, k_rank = compress_mlx_block(deltas_normalized, self.rank)
+        layer_rank = get_layer_rank(layer_idx, self.num_layers, self.base_rank)
+        U_k, Vh_k, svd_scale, k_rank = compress_mlx_block(deltas_normalized, layer_rank)
         # mx.eval(token_norms) removed: U_k is now an MLX tensor (not NumPy-backed),
         # so there is no graph boundary here. The multiply stays fully lazy.
         U_k = U_k * token_norms
@@ -4126,6 +4244,7 @@ class MLXKVBlockManager:
                         session["_route_once_sel"] = sel
                 topk_sel     = sel
                 comp_U       = mx.take(session["comp_U"][layer_idx][:nb],       sel, axis=0)
+                comp_U_scale = mx.take(session["comp_U_scale"][layer_idx][:nb], sel, axis=0)
                 comp_VK      = mx.take(session["comp_VK"][layer_idx][:nb],      sel, axis=0)
                 comp_VV      = mx.take(session["comp_VV"][layer_idx][:nb],      sel, axis=0)
                 comp_anc_k   = mx.take(session["comp_anc_k"][layer_idx][:nb],   sel, axis=0)
@@ -4135,6 +4254,7 @@ class MLXKVBlockManager:
             elif nb > 0:
                 topk_sel     = None  # attend all blocks (use the nb-keyed residual cache)
                 comp_U       = session["comp_U"][layer_idx][:nb]
+                comp_U_scale = session["comp_U_scale"][layer_idx][:nb]
                 comp_VK      = session["comp_VK"][layer_idx][:nb]
                 comp_VV      = session["comp_VV"][layer_idx][:nb]
                 comp_anc_k   = session["comp_anc_k"][layer_idx][:nb]
@@ -4217,7 +4337,7 @@ class MLXKVBlockManager:
                 else:
                     res_mask = mx.zeros((comp_U.shape[0], S_comp), dtype=mx.bool_)
                 out_combined, _, _, _ = compute_decode_attention_static(
-                    q, comp_U, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
+                    q, comp_U, comp_U_scale, comp_VK, comp_VV, comp_anc_k, comp_anc_v,
                     comp_scale, comp_seq_len, res_mask,
                     dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
                     mx.array(comp_U.shape[0], dtype=mx.int32),
@@ -5001,7 +5121,12 @@ class MLXDiffKVWrapper:
         self.is_mlx = True
         
         self.block_size = self.config.get("block_size", 256)
-        self.rank = self.config.get("rank", 32)
+        self.base_rank = self.config.get("rank", 32)
+        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1") or self.config.get("layer_adaptive_rank", False)
+        if self.layer_adaptive_rank:
+            self.rank = int(round(self.base_rank * 1.5))
+        else:
+            self.rank = self.base_rank
         self.micro_block_size = self.config.get("micro_block_size", 256)
         self.device = "mps"
         
@@ -5093,9 +5218,15 @@ class MLXDiffKVWrapper:
             heads=model.model.layers[0].self_attn.n_heads,
             kv_heads=model.model.layers[0].self_attn.n_kv_heads,
             head_dim=model.model.layers[0].self_attn.q_proj.weight.shape[0] // model.model.layers[0].self_attn.n_heads,
-            rank=self.rank,
+            rank=self.base_rank,
             block_size=self.block_size
         )
+        self.manager.base_rank = self.base_rank
+        self.manager.layer_adaptive_rank = self.layer_adaptive_rank
+        if self.layer_adaptive_rank:
+            self.manager.rank = int(round(self.base_rank * 1.5))
+        else:
+            self.manager.rank = self.base_rank
         # Hand the manager what FactualExactStore.build / setup_sas_and_eqa need
         # (no-ops unless DIFFKV_FACTUAL_STORE is enabled).
         self.manager.tokenizer = self.tokenizer

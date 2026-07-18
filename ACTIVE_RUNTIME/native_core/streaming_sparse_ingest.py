@@ -1307,7 +1307,14 @@ class StreamingSparseIngestManager:
         _gpu_compress_default = "1" if _config_gpu_compress else "0"
         if os.environ.get("DIFFKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
             from native_core.compression.lowrank import compress_layer_blocks_gpu
-            _rank = getattr(self.manager, "rank", 16)
+            from native_core.kv_runtime_manager import get_layer_rank
+            _cfg = getattr(self.manager, "config", None)
+            _early_boost = getattr(_cfg, "early_layer_rank_boost", False)
+            _max_rank_early = getattr(_cfg, "max_rank_early", 0)
+            _rank = get_layer_rank(
+                layer_idx, self.manager.num_layers, self.manager.rank,
+                early_boost=_early_boost, max_rank_early=_max_rank_early
+            )
             # Group by T_active: compress_layer_blocks_gpu requires all blocks in
             # a batch to have the same active_k.shape[2].  Chunked CUDA prefill
             # commonly creates partial blocks (for example CH=128 with a

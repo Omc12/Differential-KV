@@ -219,6 +219,12 @@ class DiffKVConfig:
         self.max_rank_early = self._get_int(
             "max_rank_early", "DIFFKV_MAX_RANK_EARLY", 0, config_dict
         )
+        # layer_adaptive_rank: when True, early/late layers use lower ranks (e.g. 8 or 12)
+        # and middle layers use higher ranks (e.g. 24), rather than a uniform rank.
+        # Default: False. Enable via DIFFKV_LAYER_ADAPTIVE_RANK=1 or config dict.
+        self.layer_adaptive_rank = self._get_bool(
+            "layer_adaptive_rank", "DIFFKV_LAYER_ADAPTIVE_RANK", False, config_dict
+        )
 
         verbose = os.environ.get("DIFFKV_TELEMETRY", "0") == "1"
         if verbose:
@@ -233,6 +239,7 @@ class DiffKVConfig:
             print(f"  approximate_attn          = {self.approximate_attn}")
             print(f"  srl_age_penalty           = {self.srl_age_penalty}")
             print(f"  early_layer_rank_boost    = {self.early_layer_rank_boost}")
+            print(f"  layer_adaptive_rank       = {self.layer_adaptive_rank}")
             print(f"  kv_quant                  = {self.kv_quant}")
             print(f"  max_active_dense_tokens   = {self.max_active_dense_tokens}")
             if self.early_layer_rank_boost:

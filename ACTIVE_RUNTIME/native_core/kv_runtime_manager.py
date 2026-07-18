@@ -80,6 +80,18 @@ def get_layer_rank(
     early_boost   : if True, boost rank for layers 0-15% (default False)
     max_rank_early: hard cap for boosted early-layer rank; 0 = auto (2 * base_rank)
     """
+    # ── Layer-Adaptive Rank Allocation (middle-boost allocator) ──
+    # Assign lower rank to early and late layers, and higher rank to middle layers.
+    # Enable via DIFFKV_LAYER_ADAPTIVE_RANK=1 or config.layer_adaptive_rank=True.
+    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1":
+        ratio = layer_idx / max(num_layers, 1)
+        if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
+            return max(8, round(0.75 * base_rank))
+        elif ratio < 0.75:     # Middle layers (50%) -> higher rank (e.g. 24 if base is 16)
+            return round(1.5 * base_rank)
+        else:                  # Late layers (25%) -> lower rank (e.g. 8 if base is 16)
+            return max(8, round(0.50 * base_rank))
+
     ratio = layer_idx / max(num_layers, 1)
     if ratio < 0.15:       # layers 0-4 for 28-layer model
         if early_boost:
@@ -426,6 +438,8 @@ class KVRuntimeManager:
     ):
         from native_core.config import DiffKVConfig
         self.config      = DiffKVConfig(config)
+        if getattr(self.config, "layer_adaptive_rank", False):
+            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
         self.num_layers  = num_layers
         self.heads       = heads
         self.kv_heads    = kv_heads if kv_heads is not None else heads
@@ -1224,6 +1238,10 @@ class KVRuntimeManager:
         # This is unconditional: the block pool must always be fed regardless of factual
         # store setting.
         self.ingest_streaming(session_id, layer_idx, K, V)
+
+        # Compress during the forward pass if DIFFKV_STREAMING_COMPRESS=1 is enabled:
+        if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" and self._streaming_mgr is not None:
+            self._streaming_mgr.compress_deferred_blocks_for_layer(session_id, layer_idx)
 
     def compress_prefill_kv(self, session_id: str) -> None:
         """
