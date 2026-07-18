@@ -2295,6 +2295,21 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             # UNVALIDATED on GPU — A/B output_text vs the default path before use.
                             if not hasattr(kv_manager, "_contig_prefill"):
                                 kv_manager._contig_prefill = {}
+                            # 1x-memory variant: keep ONLY the rotated buffer, defer
+                            # block creation to the compression boundary (the buffer is
+                            # un-rotated there).  Saves the ~2x prefill KV by not
+                            # duplicating unrotated KV into blocks each chunk.
+                            _unrotate = os.environ.get("DIFFKV_CONTIG_UNROTATE", "0") == "1"
+                            if _unrotate:
+                                if not hasattr(kv_manager, "_contig_chunk_lens"):
+                                    kv_manager._contig_chunk_lens = {}
+                                # Stash the rotary module once (used by
+                                # finalize_contiguous_prefill for inverse RoPE).
+                                if getattr(kv_manager, "_contig_rotary", None) is None:
+                                    try:
+                                        kv_manager._contig_rotary = model.model.rotary_emb
+                                    except Exception:
+                                        _unrotate = False
                             attn_outputs = []
                             for b_idx in range(bsz):
                                 sid = session_ids[b_idx]
@@ -2329,11 +2344,18 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         attn_mask=_mask, dropout_p=0.0,
                                     )
                                 attn_outputs.append(out_b)
-                                kv_manager.capture_prefill_kv(
-                                    sid, captured_layer_idx,
-                                    unrot_key_states[b_idx:b_idx+1].detach(),
-                                    cv.detach(),
-                                )
+                                if _unrotate:
+                                    # Record this chunk's length once (layer 0) so the
+                                    # boundary rebuild replays the exact block layout.
+                                    if captured_layer_idx == 0:
+                                        kv_manager._contig_chunk_lens.setdefault(sid, []).append(q_len)
+                                else:
+                                    # 2x variant: capture unrotated KV into blocks now.
+                                    kv_manager.capture_prefill_kv(
+                                        sid, captured_layer_idx,
+                                        unrot_key_states[b_idx:b_idx+1].detach(),
+                                        cv.detach(),
+                                    )
                             attn_output = torch.cat(attn_outputs, dim=0)
                         elif q_len <= _chunk_size and _global_offset == 0:
                             # Standard single-pass prefill for small/medium inputs

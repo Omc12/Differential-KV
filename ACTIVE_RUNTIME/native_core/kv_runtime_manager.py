@@ -1259,11 +1259,63 @@ class KVRuntimeManager:
             else:
                 print("[DiffKV] Post-prefill flush (MPS/CPU).")
 
+    def finalize_contiguous_prefill(self, session_id: str) -> None:
+        """1x-memory contiguous prefill (DIFFKV_CONTIG_UNROTATE): build the blocks
+        NOW, from the rotated attention buffer, instead of duplicating KV into
+        blocks during the forward.
+
+        The contiguous-prefill forward (diffkv_attention.py) keeps only a rotated
+        K/V buffer per (session, layer) for its single-SDPA attention.  With
+        DIFFKV_CONTIG_UNROTATE it does NOT also capture unrotated KV into blocks
+        each chunk — so prefill holds 1x raw KV (the buffer) instead of 2x.  Here,
+        at the compression boundary, we recover the unrotated K the pool needs by
+        applying inverse RoPE (rotation is orthogonal: unrot = rot·cos −
+        rotate_half(rot)·sin; fp16 round-trip ~1.4e-4, far under the int8 U-quant
+        floor ~9.2e-3), then replay capture_prefill_kv PER RECORDED CHUNK so the
+        block layout is byte-identical to the per-chunk path.  The buffer is freed
+        as each layer is consumed.  No-op unless a buffer exists.
+        """
+        bufs = getattr(self, "_contig_prefill", {}).get(session_id)
+        rotary = getattr(self, "_contig_rotary", None)
+        chunk_lens = getattr(self, "_contig_chunk_lens", {}).get(session_id)
+        if not bufs or rotary is None or not chunk_lens:
+            return
+        try:
+            from runtime.diffkv_attention import rotate_half
+        except Exception:
+            return
+        for layer_idx in sorted(bufs.keys()):
+            k_rot, v_buf = bufs[layer_idx]
+            T = k_rot.shape[2]
+            pos = torch.arange(T, device=k_rot.device).unsqueeze(0)
+            cos, sin = rotary(v_buf, pos)                 # [1, T, D] each
+            cos_u = cos.unsqueeze(1); sin_u = sin.unsqueeze(1)   # broadcast over heads
+            k_unrot = (k_rot * cos_u) - (rotate_half(k_rot) * sin_u)
+            cs = 0
+            for clen in chunk_lens:
+                ce = min(cs + clen, T)
+                if ce <= cs:
+                    break
+                self.capture_prefill_kv(
+                    session_id, layer_idx,
+                    k_unrot[:, :, cs:ce, :].contiguous(),
+                    v_buf[:, :, cs:ce, :].contiguous(),
+                )
+                cs = ce
+            # Free this layer's buffer immediately (bounds peak during finalize).
+            bufs[layer_idx] = None
+        self._contig_prefill.pop(session_id, None)
+        if hasattr(self, "_contig_chunk_lens"):
+            self._contig_chunk_lens.pop(session_id, None)
+
     def compress_deferred_prefill_blocks(self, session_id: str) -> None:
         """
         Trigger SVD compression for all deferred prefill blocks of a session.
         Called once after the entire prefill is finished.
         """
+        # 1x-memory contiguous prefill defers block creation to here — build the
+        # blocks from the rotated buffer first (no-op unless that path was used).
+        self.finalize_contiguous_prefill(session_id)
         if self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
 
@@ -1479,6 +1531,8 @@ class KVRuntimeManager:
         # prefill can't leak the ~2x raw KV buffer.
         if hasattr(self, "_contig_prefill"):
             self._contig_prefill.pop(session_id, None)
+        if hasattr(self, "_contig_chunk_lens"):
+            self._contig_chunk_lens.pop(session_id, None)
 
         # Trigger garbage collection and empty MPS/CUDA cache
         import gc

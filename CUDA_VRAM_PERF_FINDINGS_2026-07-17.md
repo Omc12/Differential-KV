@@ -646,3 +646,87 @@ fixed addresses/shapes), (2) TF32 on reconstruction (done), (3) fewer kernels pe
 layer per token. There is no kernel that makes 7.7→11 at this context; the honest
 path is the long-context regime where the store read is a real fraction of the
 step.
+
+---
+
+# SIXTH PASS — contiguous prefill CONFIRMED, 1× variant, CUDA-graph reality (2026-07-18)
+
+## Contiguous dense prefill WORKS — forward now faster than dense
+
+`DIFFKV_CONTIGUOUS_PREFILL=1` on the A100:
+
+```
+preset   fwd before   fwd now   dense fwd
+low        8.6 s       4.85 s      5.65 s
+mid        8.5 s       4.85 s      5.65 s
+high       7.3 s       4.01 s      5.65 s
+```
+
+The ~1.4× forward overhead is gone — DiffKV's forward is now *below* dense. The
+single-SDPA-over-a-rotated-buffer replaced the per-chunk block re-assembly +
+re-RoPE + eager matmul. Cost: peak rose (15.07 → 16.74 GB low) from the buffer
+coexisting with the captured blocks (2× raw prefill KV).
+
+## 1× variant built — `DIFFKV_CONTIG_UNROTATE=1` (with CONTIGUOUS_PREFILL=1)
+
+"Delete the old blocks": keep ONLY the rotated buffer during prefill; at the
+compression boundary, recover the unrotated K the pool needs by **inverse RoPE**
+(rotation is orthogonal), then replay `capture_prefill_kv` per recorded chunk so
+the block layout is byte-identical. Drops prefill KV from 2× back to 1× (buffer
+only ≈ dense KV), so peak should return to ~dense while keeping the fast forward.
+
+CPU-verified: inverse RoPE round-trip fp16 = 1.4e-4 (≪ the 9.2e-3 int8-U floor);
+the finalize's un-rotate+chunk-slice reproduces the exact per-chunk unrotated K
+(fp32 6e-8). So the blocks it builds are identical to the 2× path's. **The
+block-capture/pool integration is UNVALIDATED on GPU** — A/B `output_text` vs the
+2× variant (should be bit-identical up to the fp16 round-trip). Also enabled TF32
+globally last pass (`set_float32_matmul_precision('high')`).
+
+Diags: removed the verbose per-block state dump from `run_nat_eval.py` (the
+kv_logical investigation it served is closed); kept the rank-boost rate and the
+prefill-next first-token line (recall proxy). `DIFFKV_DIAG=1` still gives the
+runtime's own compress trace.
+
+## CUDA graphs: honest assessment — a real refactor, NOT shippable blind
+
+`CUDAGraphDecodeRunner` (`native_core/graph_runtime/static_decode_graph.py`)
+exists with static input/output buffers and capture/replay, but capture is gated
+behind `model._diffkv_cuda_graph_safe`, which is never set — correctly. CUDA-graph
+replay records **kernels only**, not host Python. The DiffKV decode forward mutates
+Python/session state every token (appends KV, updates routing slots, dense-window
+membership), so a captured graph would (a) replay stale routing and (b) never
+actually append the token. That is the whole reason it is off.
+
+Readiness audit:
+- ✓ Pool is pre-allocated → fixed addresses.
+- ✓ Dense window uses a **ring buffer** (Phase 29, "zero torch.cat per token") →
+  fixed address, in-place writes.
+- ✗ Routing builds a fresh `block_indices` tensor per token (dynamic shape/values).
+- ✗ Per-token host Python: dict lookups, `get_streaming_blocks`, workspace mgmt,
+  `.item()`/`.tolist()` syncs — none capturable.
+
+To make it graph-safe (the vLLM pattern the user described — "insert new chunks/
+tokens into the graph as they come"):
+1. A **static block-table tensor** of fixed capacity K_max; routing writes indices
+   in-place (masked padding), the graph gathers from it. Route eagerly every N
+   tokens (route-cadence), replay the graph for the N−1 static steps.
+2. The KV append must be an **in-place ring-buffer write at a fixed address**,
+   inside the captured region (the ring buffer exists; the append must be
+   graph-captured, not Python-orchestrated).
+3. A **static seq-len tensor** (or fixed-max + mask) so no shape changes per token.
+4. Strip host Python from the captured region — all decisions become tensor ops.
+
+This is a multi-stage refactor of the decode hot path, and **CUDA-graph replay
+cannot be validated anywhere but the A100** — a stale-address bug is silent
+garbage, not a crash. Shipping capture blind would corrupt runs. Recommend doing
+it as staged, GPU-tested increments (start with the static block-table + cadenced
+routing), each A/B'd for output parity, rather than a single blind change. The
+runner scaffolding + ring buffer mean stages 1–2 are the real work, not stage 0.
+
+## MLX: it already has both
+
+MLX wins early precisely because it *already* does the contiguous rotated buffer
+(`_sparse_prefill_attend`, `all_k` = all tokens) AND compiles its decode with
+`@mx.compile` over **pure array functions with state passed explicitly** — the
+graph-safe ABI CUDA lacks. So "do it in MLX too" is already true; the CUDA work
+is about reaching MLX's design, not adding to MLX.
