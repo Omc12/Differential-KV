@@ -201,6 +201,8 @@ def wait_for_compression(mgr, session_id: str) -> bool:
 def run_worker(config_name, model_id):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
     os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
+    os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "0"
+    os.environ["DIFFKV_STREAMING_COMPRESS"] = "0"
 
     # Default this eval to the A/B'd speed+memory combo via the single toggle
     # (the wrapper's _apply_fast_mode expands DIFFKV_FAST into the individual
@@ -216,6 +218,13 @@ def run_worker(config_name, model_id):
     if is_compressed:
         if config_name == "low_preset":
             os.environ["DIFFKV_PRESET"] = "low"
+        elif config_name == "adaptive_rank":
+            os.environ["DIFFKV_PRESET"] = "low"
+            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
+        elif config_name == "adaptive_stream":
+            os.environ["DIFFKV_PRESET"] = "low"
+            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
+            os.environ["DIFFKV_STREAMING_COMPRESS"] = "1"
         elif config_name == "mid_preset":
             os.environ["DIFFKV_PRESET"] = "mid"
         elif config_name == "high_preset":
@@ -714,6 +723,8 @@ def main():
     configs = [
         "dense",
         "low_preset",
+        "adaptive_rank",
+        "adaptive_stream",
         "mid_preset",
         "high_preset",
         "early_boost",
