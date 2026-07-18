@@ -990,6 +990,53 @@ This trims the factual memory spike and some sync time; the residual O(T²) *com
 (the K·Kᵀ softmax) is unchanged, so profile on the A100 to see how much of the
 14.7 s was the spike vs the compute.
 
+## Validated defaults now applied in the eval (not global runtime)
+
+`run_nat_eval.run_worker` now `setdefault`s the A/B'd-good combo so a no-flag run
+gets it: `DIFFKV_COMPRESS_GRAM_SVD=1`, `DIFFKV_RANK_BOOST=off`,
+`DIFFKV_RSVD_MAX_RPROJ=32`, `DIFFKV_CONTIGUOUS_PREFILL=1`, `DIFFKV_CONTIG_UNROTATE=1`.
+`DIFFKV_DECODE_PRUNE_K` is deliberately NOT set (confirmed dead end). Scoped to the
+eval (setdefault, overridable) rather than changed in the runtime, because the rank
+cap is fidelity-affecting and needle-sensitive workloads should validate it first —
+here the synthesis output held. GRAM/contiguous/un-rotate are recon-equivalent and
+safe to promote globally later; the two rank knobs want a needle sweep first.
+
+## Where does decode time go? — `colab/profile_decode_step.py` (rewritten)
+
+Runs the eval setup for a chosen `--preset` (or `dense`), prefills, decodes N tokens
+under `torch.profiler`, and reports CUDA self-time bucketed into **model** (nf4
+GEMM/dequant, shared with dense), **diffkv** (the fused sparse-attention + recon
+kernels), and **other** (generic ops left unattributed to keep the split honest),
+plus the top-K ops. This empirically shows the tps story: run it per preset; if the
+**model** bucket dominates, tps is bound by the eager nf4 forward and no DiffKV
+change moves it (the 2026-07-18 finding) — the long-context sweep is where the
+diffkv bucket, and thus DiffKV's advantage, becomes the real cost.
+`python colab/profile_decode_step.py --preset low` (and `--preset dense` for the
+baseline).
+
+## `DIFFKV_FAST=1` — one toggle for the combo, and what to validate
+
+Added `DIFFKV_FAST=1` (wrapper `_apply_fast_mode`, runs at init before the
+manager): setdefaults GRAM_SVD + CONTIGUOUS_PREFILL + CONTIG_UNROTATE (all
+recon-equivalent, safe) **and** RANK_BOOST=off + RSVD_MAX_RPROJ=32 (fidelity-
+affecting). DECODE_PRUNE is NOT bundled. An explicit individual flag still wins
+(`DIFFKV_FAST=1 DIFFKV_RANK_BOOST=auto` keeps the boost). The eval now defaults to
+`DIFFKV_FAST=1`.
+
+**The test that gates the two rank knobs: `tests/test_niah.py`.** Its needle is a
+6-DIGIT NUMBER ("847291") — and the content-aware rank boost existed precisely to
+give DIGIT blocks extra rank. So capping rank at 32 with boost off is exactly the
+change that could lose a number. Validate before trusting FAST on number-heavy
+retrieval:
+```
+DIFFKV_MODEL=Qwen/Qwen2.5-14B-Instruct python -m pytest ACTIVE_RUNTIME/tests/test_niah.py -v
+DIFFKV_MODEL=Qwen/Qwen2.5-14B-Instruct DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32 \
+  DIFFKV_COMPRESS_GRAM_SVD=1 python -m pytest ACTIVE_RUNTIME/tests/test_niah.py -v
+```
+(depths 0.1/0.5/0.9 × ctx 4k/8k). Both green ⇒ safe to promote FAST's rank knobs to
+global runtime defaults; a regression ⇒ keep the boost (or a higher cap) for
+number/formula content. `benchmarks/niah_recall.py` is the deeper sweep.
+
 ---
 
 # SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)

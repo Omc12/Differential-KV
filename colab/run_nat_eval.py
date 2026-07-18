@@ -202,6 +202,14 @@ def run_worker(config_name, model_id):
     os.environ["DIFFKV_FACTUAL_STORE"] = "0"
     os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
 
+    # Default this eval to the A/B'd speed+memory combo via the single toggle
+    # (the wrapper's _apply_fast_mode expands DIFFKV_FAST into the individual
+    # flags; see its docstring).  setdefault so an explicit DIFFKV_FAST=0 or any
+    # individual flag still wins.  DECODE_PRUNE is NOT bundled (confirmed dead
+    # end).  The rank knobs it enables are fidelity-affecting — validate
+    # test_niah.py before relying on FAST for number-heavy retrieval.
+    os.environ.setdefault("DIFFKV_FAST", "1")
+
     is_compressed = (config_name != "dense")
     os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
 

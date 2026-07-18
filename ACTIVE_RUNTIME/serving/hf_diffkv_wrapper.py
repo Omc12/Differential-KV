@@ -287,6 +287,42 @@ def _configure_cuda_allocator() -> None:
         except Exception as _e:
             print(f"[DiffKV] Could not enable global TF32: {_e}")
 
+    _apply_fast_mode()
+
+
+def _apply_fast_mode() -> None:
+    """DIFFKV_FAST=1 — one toggle for the A/B'd speed+memory CUDA combo.
+
+    Bundles (via setdefault, so an explicit flag still wins):
+      DIFFKV_COMPRESS_GRAM_SVD=1   recon-equivalent SVD (safe)
+      DIFFKV_CONTIGUOUS_PREFILL=1  forward faster than dense (recon-equivalent)
+      DIFFKV_CONTIG_UNROTATE=1     1x-memory prefill, peak ~dense (fp16-equivalent)
+      DIFFKV_RANK_BOOST=off        the boost fired on ~100% of blocks (a fake flat
+                                   1.5x); off = the configured rank + pool_rank
+                                   48->32 (VRAM ratio up to ~3x)
+      DIFFKV_RSVD_MAX_RPROJ=32     enables the batched-compress cuSOLVER cliff
+                                   (compress 6s->2.6s)
+
+    ⚠ The last two are FIDELITY-AFFECTING (rank cap + 0 oversamples).  The
+    content-aware rank boost existed to give DIGIT/number blocks extra rank, so
+    validate needle recall before trusting FAST on number-heavy retrieval:
+        DIFFKV_MODEL=<model> python -m pytest ACTIVE_RUNTIME/tests/test_niah.py -v
+    run WITH and WITHOUT DIFFKV_FAST and confirm the 6-digit needle still returns.
+    """
+    if os.environ.get("DIFFKV_FAST", "0") != "1":
+        return
+    for _k, _v in (
+        ("DIFFKV_COMPRESS_GRAM_SVD", "1"),
+        ("DIFFKV_CONTIGUOUS_PREFILL", "1"),
+        ("DIFFKV_CONTIG_UNROTATE", "1"),
+        ("DIFFKV_RANK_BOOST", "off"),
+        ("DIFFKV_RSVD_MAX_RPROJ", "32"),
+    ):
+        os.environ.setdefault(_k, _v)
+    print("[DiffKV] DIFFKV_FAST=1 — batched-compress cliff + contiguous 1x prefill "
+          "(recon-equivalent SVD; rank cap 32 is fidelity-affecting — validate "
+          "test_niah.py). DECODE_PRUNE deliberately NOT bundled (dead end).")
+
 
 def _sample_logits(logits, temperature: float, top_p: float) -> torch.Tensor:
     if temperature <= 0.01:
