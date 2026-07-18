@@ -568,12 +568,50 @@ async def run_client_mode(args):
                 else:
                     print_system(f"Captured ~{_est_tokens:,} tokens (limit: {_limit:,}). Submitting...")
                 user_prompt_stripped = pasted_text.strip()
+            elif cmd == "/file":
+                parts = user_prompt_stripped.split(maxsplit=1)
+                if len(parts) > 1:
+                    subparts = parts[1].split("|", 1)
+                    filepath = subparts[0].strip()
+                    question_suffix = ""
+                    if len(subparts) > 1:
+                        question_suffix = subparts[1].strip()
+                    
+                    if not os.path.exists(filepath):
+                        print_system(f"File not found: {COLOR_BOLD}{filepath}{COLOR_RESET}")
+                        continue
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            file_content = f.read()
+                        if question_suffix:
+                            file_content = f"{file_content}\n\n{question_suffix}"
+                        pasted_text = file_content
+                    except Exception as e:
+                        print_system(f"Error reading file: {e}")
+                        continue
+                else:
+                    print_system("Please provide a filepath. Usage: /file <path> | [optional question]")
+                    continue
+
+                _est_tokens = len(pasted_text) // 4
+                _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                if _est_tokens > _limit:
+                    print_warning(
+                        f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
+                        f"It will be truncated on submit. Raise the limit with: "
+                        f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                    )
+                else:
+                    print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} (~{_est_tokens:,} tokens). Submitting...")
+                user_prompt_stripped = pasted_text.strip()
             elif cmd == "/help":
                 print_system("Available commands:")
                 print("  /reset, /new       : Clear chat history and start a new session.")
                 print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                 print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
                 print("                       Raise token limit: DIFFKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
+                print("  /file <path>       : Load a text file directly from disk as the prompt.")
+                print("                       Format: /file <path> | [optional question]")
                 print("  /stats             : Fetch live runtime & memory stats from the server.")
                 print("  /srl               : Fetch Semantic Routing Layer (SRL) details for current session.")
                 print("  /exit, /quit       : Close the client.")
@@ -948,12 +986,50 @@ async def run_direct_mode(args):
                     else:
                         print_system(f"Captured ~{_est_tokens:,} tokens (limit: {_limit:,}). Submitting...")
                     user_prompt_stripped = pasted_text.strip()
+                elif cmd == "/file":
+                    parts = user_prompt_stripped.split(maxsplit=1)
+                    if len(parts) > 1:
+                        subparts = parts[1].split("|", 1)
+                        filepath = subparts[0].strip()
+                        question_suffix = ""
+                        if len(subparts) > 1:
+                            question_suffix = subparts[1].strip()
+                        
+                        if not os.path.exists(filepath):
+                            print_system(f"File not found: {COLOR_BOLD}{filepath}{COLOR_RESET}")
+                            continue
+                        try:
+                            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                                file_content = f.read()
+                            if question_suffix:
+                                file_content = f"{file_content}\n\n{question_suffix}"
+                            pasted_text = file_content
+                        except Exception as e:
+                            print_system(f"Error reading file: {e}")
+                            continue
+                    else:
+                        print_system("Please provide a filepath. Usage: /file <path> | [optional question]")
+                        continue
+
+                    _est_tokens = len(pasted_text) // 4
+                    _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                    if _est_tokens > _limit:
+                        print_warning(
+                            f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
+                            f"It will be truncated on submit. Raise the limit with: "
+                            f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                        )
+                    else:
+                        print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} (~{_est_tokens:,} tokens). Submitting...")
+                    user_prompt_stripped = pasted_text.strip()
                 elif cmd == "/help":
                     print_system("Available commands:")
                     print("  /reset, /new       : Reset current conversation and release KV cache.")
                     print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                     print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
                     print("                       Raise token limit: DIFFKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
+                    print("  /file <path>       : Load a text file directly from disk as the prompt.")
+                    print("                       Format: /file <path> | [optional question]")
                     print("  /stats             : Print model details, VRAM, and KV compression diagnostics.")
                     print("  /srl               : Print Semantic Routing Layer metadata for this session.")
                     print("  /exit, /quit       : Shutdown engine and exit.")
