@@ -1045,7 +1045,7 @@ def _edge_routing_params():
 
 
 def _block_relevance_minmax(
-    q: mx.array,              # [H_q, D]
+    q: mx.array,              # [H_q, D] or [H_q, L, D]
     comp_min_k: mx.array,     # [nb, kv_heads, D]  element-wise key min over block
     comp_max_k: mx.array,     # [nb, kv_heads, D]  element-wise key max over block
     scale: float,
@@ -1063,28 +1063,47 @@ def _block_relevance_minmax(
     exact-residual attention then run only for the top-K blocks, so decode cost
     scales with K, not total context.
     """
+    is_3d = q.ndim == 3
     if gpk > 1:
-        H_q, D = q.shape
-        H_kv = comp_min_k.shape[1]
-        nb = comp_min_k.shape[0]
-        MIN_exp = mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
-        MAX_exp = mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
-        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
-        # fp16 product / fp32 sum — pre-W1 router arithmetic (kept in lockstep with
-        # the decode path; see the decode-precision note in compute_decode_attention_static).
-        bound = mx.sum(mx.maximum(q_exp * MIN_exp, q_exp * MAX_exp), axis=-1) * scale # [H_kv, gpk, nb]
-        bound = bound.reshape(H_q, nb)
+        if is_3d:
+            H_q, L, D = q.shape
+            H_kv = comp_min_k.shape[1]
+            nb = comp_min_k.shape[0]
+            MIN_exp = mx.expand_dims(mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1), 2) # [H_kv, 1, 1, nb, D]
+            MAX_exp = mx.expand_dims(mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1), 2) # [H_kv, 1, 1, nb, D]
+            q_exp = mx.expand_dims(q.reshape(H_kv, gpk, L, D), 3)                        # [H_kv, gpk, L, 1, D]
+            bound = mx.sum(mx.maximum(q_exp * MIN_exp, q_exp * MAX_exp), axis=-1) * scale # [H_kv, gpk, L, nb]
+            bound = bound.reshape(H_q, L, nb)
+            return mx.max(bound, axis=(0, 1))
+        else:
+            H_q, D = q.shape
+            H_kv = comp_min_k.shape[1]
+            nb = comp_min_k.shape[0]
+            MIN_exp = mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+            MAX_exp = mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+            q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
+            bound = mx.sum(mx.maximum(q_exp * MIN_exp, q_exp * MAX_exp), axis=-1) * scale # [H_kv, gpk, nb]
+            bound = bound.reshape(H_q, nb)
+            return mx.max(bound, axis=0)
     else:
-        MIN_p = comp_min_k.transpose(1, 0, 2)                  # [H, nb, D]
-        MAX_p = comp_max_k.transpose(1, 0, 2)
-        q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
-        bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
-    return mx.max(bound, axis=0)                    # [nb]
+        if is_3d:
+            H, L, D = q.shape
+            MIN_p = mx.expand_dims(comp_min_k.transpose(1, 0, 2), 1)                  # [H, 1, nb, D]
+            MAX_p = mx.expand_dims(comp_max_k.transpose(1, 0, 2), 1)                  # [H, 1, nb, D]
+            q_e   = mx.expand_dims(q, 2)                                              # [H, L, 1, D]
+            bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale     # [H, L, nb]
+            return mx.max(bound, axis=(0, 1))
+        else:
+            MIN_p = comp_min_k.transpose(1, 0, 2)                  # [H, nb, D]
+            MAX_p = comp_max_k.transpose(1, 0, 2)
+            q_e   = mx.expand_dims(q, 1)                    # [H, 1, D]
+            bound = mx.sum(mx.maximum(q_e * MIN_p, q_e * MAX_p), axis=-1) * scale  # [H, nb]
+            return mx.max(bound, axis=0)                    # [nb]
 
 
 @mx.compile
 def _block_relevance_residual(
-    q: mx.array,              # [H_q, D]
+    q: mx.array,              # [H_q, D] or [H_q, L, D]
     comp_anc_k: mx.array,     # [nb, kv_heads, D]            exact anchor key
     comp_res_k: mx.array,     # [nb, R, kv_heads, D]         top-R exact residual keys
     res_valid: mx.array,      # [nb, R] bool
@@ -1102,39 +1121,76 @@ def _block_relevance_residual(
     cheap enough for 1M-token contexts. Model-agnostic: no tuning to head count,
     RoPE, or content — it scores whatever each block's distinctive keys are.
     """
+    is_3d = q.ndim == 3
     if gpk > 1:
-        H_q, D = q.shape
-        H_kv = comp_anc_k.shape[1]
-        nb = comp_anc_k.shape[0]
-        
-        # fp16 product / fp32 sum — pre-W1 router arithmetic (see the decode-precision
-        # note in compute_decode_attention_static; kept in lockstep with the decode path).
-        ANC_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
-        q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
-        s_anc = mx.sum((q_exp * ANC_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
-        s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
+        if is_3d:
+            H_q, L, D = q.shape
+            H_kv = comp_anc_k.shape[1]
+            nb = comp_anc_k.shape[0]
+            
+            ANC_exp = mx.expand_dims(mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1), 2) # [H_kv, 1, 1, nb, D]
+            q_exp = mx.expand_dims(q.reshape(H_kv, gpk, L, D), 3)                        # [H_kv, gpk, L, 1, D]
+            s_anc = mx.sum((q_exp * ANC_exp).astype(mx.float32), axis=-1) * scale        # [H_kv, gpk, L, nb]
+            s_anc = s_anc.reshape(H_q, L, nb).astype(q.dtype)
 
-        RK_exp = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1) # [H_kv, 1, nb, R, D]
-        q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
-        s_res = mx.sum((q_exp2 * RK_exp).astype(mx.float32), axis=-1) * scale       # [H_kv, gpk, nb, R]
-        s_res = s_res.astype(q.dtype)
-        res_valid_exp = mx.expand_dims(mx.expand_dims(res_valid, 0), 1)    # [1, 1, nb, R]
-        s_res = mx.where(res_valid_exp, s_res, -float('inf'))
-        res_max = mx.max(s_res, axis=-1)                       # [H_kv, gpk, nb]
-        res_max = res_max.reshape(H_q, nb)
+            RK_exp = mx.expand_dims(mx.expand_dims(mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1), 2), 2)
+            q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, L, D), 3), 4)    # [H_kv, gpk, L, 1, 1, D]
+            s_res = mx.sum((q_exp2 * RK_exp).astype(mx.float32), axis=-1) * scale        # [H_kv, gpk, L, nb, R]
+            
+            res_valid_exp = mx.expand_dims(mx.expand_dims(mx.expand_dims(res_valid, 0), 1), 2) # [1, 1, 1, nb, R]
+            s_res = mx.where(res_valid_exp, s_res, -float('inf'))
+            res_max = mx.max(s_res, axis=-1)                       # [H_kv, gpk, L, nb]
+            res_max = res_max.reshape(H_q, L, nb).astype(q.dtype)
+            
+            return mx.max(mx.maximum(s_anc, res_max), axis=(0, 1))
+        else:
+            H_q, D = q.shape
+            H_kv = comp_anc_k.shape[1]
+            nb = comp_anc_k.shape[0]
+            
+            ANC_exp = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1) # [H_kv, 1, nb, D]
+            q_exp = mx.expand_dims(q.reshape(H_kv, gpk, D), 2)          # [H_kv, gpk, 1, D]
+            s_anc = mx.sum((q_exp * ANC_exp).astype(mx.float32), axis=-1) * scale     # [H_kv, gpk, nb]
+            s_anc = s_anc.reshape(H_q, nb).astype(q.dtype)
+
+            RK_exp = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1) # [H_kv, 1, nb, R, D]
+            q_exp2 = mx.expand_dims(mx.expand_dims(q.reshape(H_kv, gpk, D), 2), 3) # [H_kv, gpk, 1, 1, D]
+            s_res = mx.sum((q_exp2 * RK_exp).astype(mx.float32), axis=-1) * scale       # [H_kv, gpk, nb, R]
+            s_res = s_res.astype(q.dtype)
+            res_valid_exp = mx.expand_dims(mx.expand_dims(res_valid, 0), 1)    # [1, 1, nb, R]
+            s_res = mx.where(res_valid_exp, s_res, -float('inf'))
+            res_max = mx.max(s_res, axis=-1)                       # [H_kv, gpk, nb]
+            res_max = res_max.reshape(H_q, nb)
+            
+            return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
     else:
-        ANC_p = comp_anc_k.transpose(1, 0, 2)                          # [H, nb, D]
-        s_anc = mx.sum((mx.expand_dims(q, 1) * ANC_p).astype(mx.float32), axis=-1) * scale  # [H, nb]
-        s_anc = s_anc.astype(q.dtype)
+        if is_3d:
+            H, L, D = q.shape
+            ANC_p = mx.expand_dims(comp_anc_k.transpose(1, 0, 2), 1)                          # [H, 1, nb, D]
+            s_anc = mx.sum((mx.expand_dims(q, 2) * ANC_p).astype(mx.float32), axis=-1) * scale  # [H, L, nb]
+            s_anc = s_anc.astype(q.dtype)
 
-        RK_p  = comp_res_k.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
-        q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
-        s_res = mx.sum((q_e2 * RK_p).astype(mx.float32), axis=-1) * scale            # [H, nb, R]
-        s_res = s_res.astype(q.dtype)
-        s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
-        res_max = mx.max(s_res, axis=-1)                        # [H, nb]
+            RK_p  = mx.expand_dims(comp_res_k.transpose(2, 0, 1, 3), 1)                        # [H, 1, nb, R, D]
+            q_e2  = mx.expand_dims(mx.expand_dims(q, 2), 3)                                     # [H, L, 1, 1, D]
+            s_res = mx.sum((q_e2 * RK_p).astype(mx.float32), axis=-1) * scale            # [H, L, nb, R]
+            s_res = s_res.astype(q.dtype)
+            s_res = mx.where(mx.expand_dims(mx.expand_dims(res_valid, 0), 1), s_res, -float('inf'))
+            res_max = mx.max(s_res, axis=-1)                        # [H, L, nb]
+            
+            return mx.max(mx.maximum(s_anc, res_max), axis=(0, 1))
+        else:
+            ANC_p = comp_anc_k.transpose(1, 0, 2)                          # [H, nb, D]
+            s_anc = mx.sum((mx.expand_dims(q, 1) * ANC_p).astype(mx.float32), axis=-1) * scale  # [H, nb]
+            s_anc = s_anc.astype(q.dtype)
 
-    return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
+            RK_p  = comp_res_k.transpose(2, 0, 1, 3)                        # [H, nb, R, D]
+            q_e2  = mx.expand_dims(mx.expand_dims(q, 1), 1)         # [H, 1, 1, D]
+            s_res = mx.sum((q_e2 * RK_p).astype(mx.float32), axis=-1) * scale            # [H, nb, R]
+            s_res = s_res.astype(q.dtype)
+            s_res = mx.where(mx.expand_dims(res_valid, 0), s_res, -float('inf'))
+            res_max = mx.max(s_res, axis=-1)                        # [H, nb]
+            
+            return mx.max(mx.maximum(s_anc, res_max), axis=0)       # [nb]
 
 
 
@@ -1205,9 +1261,15 @@ def _sparse_prefill_attend(
     comp_min_k = mx.min(mid_k, axis=2).transpose(1, 0, 2)
     comp_max_k = mx.max(mid_k, axis=2).transpose(1, 0, 2)
 
-    # Coarse block selection uses a single pooled query per head (mean over the chunk).
-    q_rep = mx.mean(q_rot[0], axis=1)                        # [H_q, D]
-    rel = _block_relevance_minmax(q_rep, comp_min_k, comp_max_k, scale, gpk)  # [nb]
+    # Coarse block selection: check if we should skip query pooling to prevent signal dilution
+    no_pool = os.environ.get("DIFFKV_SP_NO_POOL", "1") == "1"
+    if no_pool:
+        # Pass the full query chunk of shape [H_q, L, D]
+        rel = _block_relevance_minmax(q_rot[0], comp_min_k, comp_max_k, scale, gpk)
+    else:
+        # Coarse block selection uses a single pooled query per head (mean over the chunk).
+        q_rep = mx.mean(q_rot[0], axis=1)                        # [H_q, D]
+        rel = _block_relevance_minmax(q_rep, comp_min_k, comp_max_k, scale, gpk)  # [nb]
 
     K = min(nb, max(kmin, int(math.ceil(frac * nb))))
     # Build the gather index list ENTIRELY in MLX (no host sync). The mask makes ALL history
@@ -1346,6 +1408,8 @@ def _lego_prefill_attend(
     far_nb = min(nb, ring_start // bs)
     nb_routable = far_nb - sb
     q_rep = mx.mean(q_rot[0], axis=1)                       # [H_q, D]
+    no_pool = os.environ.get("DIFFKV_SP_NO_POOL", "1") == "1"
+    q_inp = q_rot[0] if no_pool else q_rep
     ak_all = session["comp_anc_k"][layer_idx][sb:far_nb]    # [nb_r, H_kv, D]
     K_route = min(nb_routable, max(manager._lego_kmin,
                                    int(math.ceil(manager._lego_frac * nb_routable))))
@@ -1359,10 +1423,10 @@ def _lego_prefill_attend(
             res_n_np = np.asarray(session["comp_res_n"][layer_idx][sb:far_nb], dtype=np.int32)
             rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(
                 mx.minimum(mx.array(res_n_np), R_route), 1)
-            rel = _block_relevance_residual(q_rep, ak_all, rk_all, rvld, scale, gpk)
+            rel = _block_relevance_residual(q_inp, ak_all, rk_all, rvld, scale, gpk)
         else:
             rel = _block_relevance_minmax(
-                q_rep,
+                q_inp,
                 session["comp_min_k"][layer_idx][sb:far_nb],
                 session["comp_max_k"][layer_idx][sb:far_nb],
                 scale, gpk)

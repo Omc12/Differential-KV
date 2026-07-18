@@ -1,0 +1,1 @@
+I will run a python command to tokenize the prompt, locate the needle `LYSANDER-8473-GAMMA`, and find its exact token position and block index. This will help us determine exactly which block index the router needs to select.

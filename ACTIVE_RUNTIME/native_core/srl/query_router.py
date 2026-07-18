@@ -915,25 +915,39 @@ def route_blocks_relevance(
     if N <= k_eff:
         return block_indices
 
-    H, D = Q.shape
-    slots_long = block_indices.long()
+    # Promote Q to 3D if it is 2D
+    is_3d = (Q.dim() == 3)
+    if is_3d:
+        H, L, D = Q.shape
+    else:
+        H, D = Q.shape
+        L = 1
+        Q = Q.unsqueeze(1)  # [H, 1, D]
 
+    slots_long = block_indices.long()
     anc = pool.anchors_K[slots_long]                    # [N, H_kv, D] fp16
     H_kv = anc.shape[1]
     gpk = max(1, H // H_kv)
-    q_g = Q.reshape(H_kv, gpk, D)                       # [H_kv, gpk, D]
 
-    # Anchor scores: fp16 product, fp32 sum (matches MLX router arithmetic)
-    s_anc = (
-        (q_g.unsqueeze(2) * anc.permute(1, 0, 2).unsqueeze(1)).float().sum(-1) * scale
-    )                                                   # [H_kv, gpk, N]
+    # Reshape Q to [H_kv, gpk * L, D]
+    q_reshaped = Q.reshape(H_kv, gpk * L, D)            # [H_kv, gpk * L, D]
 
-    # Residual scores over each block's stored exact keys.  Positions are
-    # -1-padded; padded rows score -inf so they never win the max.
+    # Permute anchors to [H_kv, D, N]
+    anc_permuted = anc.permute(1, 2, 0)                 # [H_kv, D, N]
+
+    # Compute anchor scores using batched matrix multiplication (BMM)
+    # [H_kv, gpk * L, D] @ [H_kv, D, N] -> [H_kv, gpk * L, N]
+    s_anc = torch.bmm(q_reshaped.float(), anc_permuted.float()) * scale
+    s_anc = s_anc.reshape(H_kv, gpk, L, N)
+
     res_scores = None
     res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)
-    if res_k is not None and res_pos is not None and res_k.numel() > 0:
+    # Skip residual scoring during 3D prefill routing to prevent large memory allocations
+    # and match MLX prefill routing behavior (which only uses anchors/minmax).
+    # Set DIFFKV_ROUTE_PREFILL_RESID=1 to override.
+    route_prefill_res = (os.environ.get("DIFFKV_ROUTE_PREFILL_RESID", "0") == "1")
+    if res_k is not None and res_pos is not None and res_k.numel() > 0 and (not is_3d or route_prefill_res):
         try:
             r_route = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
         except ValueError:
@@ -942,18 +956,26 @@ def route_blocks_relevance(
         R = min(R_all, r_route) if r_route > 0 else min(R_all, 64)
         rk = res_k[slots_long, :R]                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
-        s_res = (
-            (q_g.unsqueeze(2).unsqueeze(3) * rk.permute(2, 0, 1, 3).unsqueeze(1))
-            .float().sum(-1) * scale
-        )                                               # [H_kv, gpk, N, R]
-        s_res = s_res.masked_fill(~rvalid.view(1, 1, N, R), float("-inf"))
-        res_scores = s_res.max(dim=-1).values           # [H_kv, gpk, N]
+
+        # Permute rk to [H_kv, D, N * R]
+        rk_permuted = rk.permute(2, 3, 0, 1).reshape(H_kv, D, N * R)
+
+        # BMM: [H_kv, gpk * L, D] @ [H_kv, D, N * R] -> [H_kv, gpk * L, N * R]
+        s_res = torch.bmm(q_reshaped.float(), rk_permuted.float()) * scale
+        s_res = s_res.reshape(H_kv, gpk, L, N, R)
+
+        # Apply validity mask
+        s_res = s_res.masked_fill(~rvalid.view(1, 1, 1, N, R), float("-inf"))
+        res_scores = s_res.max(dim=-1).values           # [H_kv, gpk, L, N]
 
     if res_scores is not None:
         relevance = torch.maximum(s_anc, res_scores)
     else:
         relevance = s_anc
-    relevance = relevance.reshape(H_kv * gpk, N).max(dim=0).values   # [N]
+
+    # relevance has shape [H_kv, gpk, L, N]
+    # Max-reduce over L (dim=1) and H (dim=0 after reshape)
+    relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
 
     # Force-include the sink block, then top-(k_eff-1) over the rest.
     sink_pos = anchor_indices.argmin()
