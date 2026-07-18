@@ -221,10 +221,21 @@ class DiffKVConfig:
         )
         # layer_adaptive_rank: when True, early/late layers use lower ranks (e.g. 8 or 12)
         # and middle layers use higher ranks (e.g. 24), rather than a uniform rank.
-        # Default: False. Enable via DIFFKV_LAYER_ADAPTIVE_RANK=1 or config dict.
+        # Default: True. Disable via DIFFKV_LAYER_ADAPTIVE_RANK=0 or config dict.
+        # This is a major win for decode throughput (TPS) and VRAM reduction on both CUDA and MLX.
         self.layer_adaptive_rank = self._get_bool(
-            "layer_adaptive_rank", "DIFFKV_LAYER_ADAPTIVE_RANK", False, config_dict
+            "layer_adaptive_rank", "DIFFKV_LAYER_ADAPTIVE_RANK", True, config_dict
         )
+        # ── Streaming Compression Default Tradeoffs ───────────────────────────
+        # DIFFKV_STREAMING_COMPRESS defaults:
+        # - CUDA: OFF (0). SVD compression is a highly parallelizable operation.
+        #   Doing it layer-by-layer during the forward pass forces sequential
+        #   GPU dispatches (e.g. 624 dispatches for 13k context), incurring massive
+        #   launch overhead and serialized latency. Batched deferred SVD at the end
+        #   is 20x faster.
+        # - MLX: ON (1). macOS unified memory and low launch overhead make streaming
+        #   compression critical for bounding peak VRAM without performance penalty.
+        # ──────────────────────────────────────────────────────────────────────
 
         verbose = os.environ.get("DIFFKV_TELEMETRY", "0") == "1"
         if verbose:

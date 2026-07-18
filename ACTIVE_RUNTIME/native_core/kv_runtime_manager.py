@@ -83,7 +83,7 @@ def get_layer_rank(
     # ── Layer-Adaptive Rank Allocation (middle-boost allocator) ──
     # Assign lower rank to early and late layers, and higher rank to middle layers.
     # Enable via DIFFKV_LAYER_ADAPTIVE_RANK=1 or config.layer_adaptive_rank=True.
-    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1":
+    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "1") == "1":
         ratio = layer_idx / max(num_layers, 1)
         if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
             return max(8, round(0.75 * base_rank))

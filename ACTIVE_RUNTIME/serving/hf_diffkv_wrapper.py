@@ -780,8 +780,26 @@ class PyTorchDiffKVHFWrapper:
                 # The manager derives block_size independently (currently 64 by default);
                 # the config dict may carry a different value that is ignored by the manager.
                 _bs     = getattr(self.manager, "block_size", 64)
-                print(f"[DiffKV] Pre-warming decode JIT (H={_H}, kv_H={_kv_H}, D={_D}, R={_R}, block_size={_bs}) ...", flush=True)
-                warm_up_jit(device=self.device, dtype=_dtype, H=_H, kv_heads=_kv_H, D=_D, R=_R, block_size=_bs)
+
+                # Determine all unique ranks that can be used across layers
+                ranks_to_warm = {_R}
+                num_layers = getattr(_hf_cfg, "num_hidden_layers", 28)
+                try:
+                    from native_core.kv_runtime_manager import get_layer_rank
+                    _early_boost = getattr(_cfg, "early_layer_rank_boost", False)
+                    _max_rank_early = getattr(_cfg, "max_rank_early", 0)
+                    for l_idx in range(num_layers):
+                        r = get_layer_rank(
+                            l_idx, num_layers, _R,
+                            early_boost=_early_boost, max_rank_early=_max_rank_early
+                        )
+                        ranks_to_warm.add(r)
+                except Exception:
+                    pass
+
+                print(f"[DiffKV] Pre-warming decode JIT for ranks {sorted(list(ranks_to_warm))} (H={_H}, kv_H={_kv_H}, D={_D}, block_size={_bs}) ...", flush=True)
+                for r in sorted(list(ranks_to_warm)):
+                    warm_up_jit(device=self.device, dtype=_dtype, H=_H, kv_heads=_kv_H, D=_D, R=r, block_size=_bs)
             except Exception as _e:
                 print(f"[DiffKV] WARNING: JIT pre-warm step failed ({_e}). "
                       "First decode request will trigger compilation.", flush=True)

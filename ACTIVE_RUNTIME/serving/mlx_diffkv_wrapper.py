@@ -118,7 +118,7 @@ def _normalize_references(text: str) -> str:
     return normalized_ref_block
 
 def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
-    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1":
+    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "1") == "1":
         ratio = layer_idx / max(num_layers, 1)
         if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
             return max(8, round(0.75 * base_rank))
@@ -127,16 +127,7 @@ def get_layer_rank(layer_idx: int, num_layers: int, base_rank: int) -> int:
         else:                  # Late layers (25%) -> lower rank (e.g. 8 if base is 16)
             return max(8, round(0.50 * base_rank))
     
-    # Default schedule for fallback/safety:
-    ratio = layer_idx / max(num_layers, 1)
-    if ratio < 0.15:
-        return base_rank
-    elif ratio < 0.50:
-        return base_rank
-    elif ratio < 0.79:
-        return max(6, round(0.75 * base_rank))
-    else:
-        return max(8, round(0.50 * base_rank))
+    return base_rank
 
 
 class MLXCompressedBlock:
@@ -1610,7 +1601,7 @@ class MLXKVBlockManager:
         self.kv_heads = kv_heads
         self.head_dim = head_dim
         self.base_rank = rank
-        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1")
+        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "1") == "1")
         if self.layer_adaptive_rank:
             self.rank = int(round(self.base_rank * 1.5))
         else:
@@ -5122,7 +5113,7 @@ class MLXDiffKVWrapper:
         
         self.block_size = self.config.get("block_size", 256)
         self.base_rank = self.config.get("rank", 32)
-        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "0") == "1") or self.config.get("layer_adaptive_rank", False)
+        self.layer_adaptive_rank = (os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "1") == "1") or self.config.get("layer_adaptive_rank", True)
         if self.layer_adaptive_rank:
             self.rank = int(round(self.base_rank * 1.5))
         else:
