@@ -751,17 +751,25 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     print(f"[SRL] route_query error: {_srl_e}")
 
                         # ── MLX-parity block pruning (DIFFKV_DECODE_PRUNE_K) ──────
-                        # MLX prunes decode attention to the top-K compressed blocks
-                        # by exact q·k relevance whenever there are more blocks than K
-                        # (use_topk = topk_blocks>0 and nb>k_eff; _block_relevance_
-                        # residual).  CUDA already has the identical router
-                        # (route_blocks_relevance) but only ran it behind the SRL
-                        # gate, so decode reconstructed ALL blocks (N_sparse=49) — the
-                        # bulk of DiffKV's per-token overhead.  This fires the same
-                        # residual router directly, no SRL/W_proj needed: rank blocks,
-                        # keep top-K, reconstruct only those.  Selected ANCHORS are
-                        # layer-invariant, so route once at layer 0 and map to each
-                        # layer's slots.  Default off (0); set to 16 to match MLX.
+                        # Ports MLX's decode top-K: rank compressed blocks by exact
+                        # q·k relevance (route_blocks_relevance == MLX
+                        # _block_relevance_residual) and reconstruct only the top-K,
+                        # instead of all ~49.  Routes once at layer 0 (caches the
+                        # layer-invariant selected ANCHORS) and maps to each layer's
+                        # slots.
+                        #
+                        # OFF BY DEFAULT (0) — CONFIRMED DEAD END on A100 (2026-07-18):
+                        #   1. tps did NOT change at K=16 (49→16 blocks, decode 7.0
+                        #      vs 7.0) — decode is bound by the eager nf4 model
+                        #      forward, NOT block reconstruction, so pruning buys no
+                        #      speed at this context (block count is irrelevant to
+                        #      decode time here).
+                        #   2. Output collapsed to garbage on every pruned preset —
+                        #      the CUDA residual router drops answer-critical blocks
+                        #      at K=16 where MLX's does not.
+                        # Kept for the record; do not enable without a K that both
+                        # preserves output AND a regime where reconstruction is the
+                        # decode bottleneck (long context, not 13.4K).
                         _prune_k = int(os.environ.get("DIFFKV_DECODE_PRUNE_K", "0"))
                         if (_prune_k > 0 and not _srl_rerouted and pool is not None
                                 and block_indices is not None and anchor_indices is not None

@@ -943,6 +943,53 @@ Run to test the prune (K=16) with outputs:
 DIFFKV_CONTIGUOUS_PREFILL=1 DIFFKV_CONTIG_UNROTATE=1 DIFFKV_DECODE_PRUNE_K=16 ...`
 Watch tps rise, `N_sparse` drop to ~16-17, and confirm the output still answers.
 
+## RESULT (A100): prune is a DEAD END — keep `DIFFKV_DECODE_PRUNE_K=0`
+
+Ran K=16. `N_sparse` dropped 49→16 as intended. Two decisive findings:
+
+1. **tps did NOT change**: low 7.0, mid 6.9, high 6.8 — identical to the un-pruned
+   runs. Reconstructing 16 blocks instead of 49 changed decode speed by **zero**.
+   This is the definitive proof that decode is **100% bound by the eager nf4 model
+   forward**, not by block reconstruction. **There is no DiffKV-side tps lever at
+   this context** — the block count is irrelevant to speed. (The only tps levers
+   left touch the base model: compile/graph the nf4 forward, out of DiffKV scope.)
+2. **Output collapsed to garbage** on every pruned preset (repetition loops, mixed
+   scripts). At K=16 the CUDA residual router drops blocks the answer needs — MLX
+   tolerates K=16, CUDA does not here. So prune both fails to help AND hurts.
+
+Verdict: **prune stays OFF by default (0).** Kept the flag for the record, but it
+is a confirmed dead end for tps. The un-pruned presets are the ones to use.
+
+## Output-quality ranking (this prompt, A100)
+
+- **dense, factual_store, combined**: coherent, correct — all five required
+  distinctions covered. factual_store/combined match dense quality.
+- **low/mid/high/early_boost UN-pruned** (prior runs): coherent, correct.
+- **low/mid/high/early_boost PRUNED (K=16)**: garbage.
+
+So: the presets already answer correctly without pruning at ~2–3× KV savings and
+~7 tps; factual_store adds nothing to quality here but costs a slow O(T²) build
+(compress 14.7 s) — its query-path fix did help decode (1.9→2.5 tps). The tps
+ceiling (~7 vs dense 11) is the eager nf4 model, shared by dense, and not movable
+from the DiffKV side at 13.4K.
+
+## Factual-store build made lighter (exact, this pass)
+
+Two more costs in `FactualExactStore.build()` (the 14.7 s factual/combined compress):
+- **Eagle scores** built the full `[T, T]` form — `sim`, a `triu` mask, the
+  `masked_fill` result and the `softmax` all resident (~4× T·T fp32 ≈ 3 GB at 13K)
+  plus a T·T `nan_to_num`. Rewrote it as a **row-chunked** running column-sum:
+  peak drops to O(chunk·T) (~55 MB/chunk) and the giant mask/nan_to_num are gone.
+  EXACT same R (CPU-verified 9.5e-7 vs the full form; strictly-`j<i` causal
+  preserved).
+- Two remaining per-span `token_ids[idx].item()` / `eagle_scores[idx].item()` loops
+  (device syncs over most content tokens) → index the pre-materialised
+  `token_ids_list` and a cached eagle-score list.
+Both are exact/behaviour-preserving; verified `build()`+`query()` run end-to-end.
+This trims the factual memory spike and some sync time; the residual O(T²) *compute*
+(the K·Kᵀ softmax) is unchanged, so profile on the A100 to see how much of the
+14.7 s was the spike vs the compute.
+
 ---
 
 # SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)

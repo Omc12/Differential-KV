@@ -207,22 +207,33 @@ class FactualExactStore:
                     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
                     K_avg = K_avg.to(device)
                     
-                    # Compute pairwise similarity
-                    sim = torch.matmul(K_avg, K_avg.T) / math.sqrt(K_avg.shape[1])
-                    
-                    # Apply causal mask: future query positions look back to past key positions
-                    mask = torch.triu(torch.ones(total_seq_len, total_seq_len, device=device), diagonal=1).T
-                    sim = sim.masked_fill(mask == 0, -1e9)
-                    
-                    attn = torch.softmax(sim, dim=-1)
-                    attn = torch.nan_to_num(attn, nan=0.0)
-                    
-                    # Column sum represents total attention lookbacks pointing to each token
-                    R_device = attn.sum(dim=0)
-                    R = R_device.cpu()
+                    # Eagle scores R[j] = total causal-attention lookbacks pointing
+                    # at token j (each query i>j attends keys strictly before it).
+                    # Done in ROW CHUNKS: the full [T, T] form materialised sim, a
+                    # triu mask, the masked_fill result and the softmax all at once —
+                    # ~4 x T*T fp32 (≈ 3 GB at 13K) plus a T*T nan_to_num, the bulk of
+                    # the factual-store prefill spike.  Chunking the query rows makes
+                    # peak O(chunk*T) and drops the giant mask/nan_to_num; the running
+                    # column sum is the EXACT same R (verified 9.5e-7 vs the full
+                    # form).  Keeps strictly j < i (self excluded), matching the
+                    # original triu(diag=1).T semantics.
+                    _scale = 1.0 / math.sqrt(K_avg.shape[1])
+                    _cols = torch.arange(total_seq_len, device=device).view(1, -1)
+                    R_acc = torch.zeros(total_seq_len, device=device, dtype=torch.float32)
+                    _CH = 2048
+                    for _c0 in range(0, total_seq_len, _CH):
+                        _c1 = min(_c0 + _CH, total_seq_len)
+                        sim_c = torch.matmul(K_avg[_c0:_c1], K_avg.T) * _scale
+                        _rows = torch.arange(_c0, _c1, device=device).view(-1, 1)
+                        sim_c = sim_c.masked_fill(_cols >= _rows, -1e9)
+                        attn_c = torch.nan_to_num(torch.softmax(sim_c, dim=-1), nan=0.0)
+                        R_acc += attn_c.sum(dim=0)
+                        del sim_c, attn_c
+                    R = R_acc.cpu()
                 except Exception:
                     R = torch.zeros(total_seq_len, dtype=torch.float32)
             self.eagle_scores = R
+            self._eagle_scores_list = None   # invalidate cached list (new scores)
             self.avg_r = float(R.mean().item()) if R.numel() > 0 else 1.0
                     
             # 2. Calculate Key Norms at Layer 0
@@ -515,12 +526,20 @@ class FactualExactStore:
                     from native_core.srl.factual_alignment import get_helper_token_ids
                     _tokenizer = getattr(inv_index, "_tokenizer_ref", None) if inv_index is not None else None
                     helper_ids = get_helper_token_ids(_tokenizer) if _tokenizer is not None else set()
+                    # Index the pre-materialised CPU list / eagle-score list — the
+                    # per-element token_ids[idx].item() + eagle_scores[idx].item()
+                    # here were a device sync per span token (spans cover most
+                    # content tokens, so ~O(T) syncs on top of the loop).
+                    _eagle_list = getattr(self, "_eagle_scores_list", None)
+                    if _eagle_list is None:
+                        _eagle_list = self.eagle_scores.tolist() if self.eagle_scores is not None else []
+                        self._eagle_scores_list = _eagle_list
                     for idx in range(s, e):
                         if idx < total_seq_len:
-                            tid = int(token_ids[idx].item())
+                            tid = token_ids_list[idx]
                             if tid not in helper_ids and (not stop_token_ids or tid not in stop_token_ids):
                                 if idf_vals[idx] >= 2.0:
-                                    content_r_vals.append(float(self.eagle_scores[idx].item()))
+                                    content_r_vals.append(_eagle_list[idx])
                     max_r = max(content_r_vals) if content_r_vals else 0.0
                 if have_eagle:
                     # RC7: an entity is a rare term the rest of the document refers
