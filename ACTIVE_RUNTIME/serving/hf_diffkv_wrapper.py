@@ -471,7 +471,7 @@ class PyTorchDiffKVHFWrapper:
         elif isinstance(eos_id, int):
             self.stop_token_ids.add(eos_id)
             
-        special_words = ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
+        special_words = ["<|im_end|>", "<|endoftext|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
         for word in special_words:
             tok_id = self.tokenizer.convert_tokens_to_ids(word)
             if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
@@ -1323,6 +1323,37 @@ class PyTorchDiffKVHFWrapper:
 
             if srl_state is not None and hasattr(srl_state, "save_step_state"):
                 srl_state.save_step_state(len(generated))
+
+            # Predictive Prefetching
+            if os.environ.get("DIFFKV_PREDICTIVE_PAGING", "0") == "1" and srl_state is not None:
+                prefetch_slots = set()
+
+                # 1. Lexical: Inverted index lookup on the new generated token
+                if srl_state.inverted_index is not None and next_id_val in srl_state.inverted_index.occurrences:
+                    for slot, _, _ in srl_state.inverted_index.occurrences[next_id_val]:
+                        prefetch_slots.add(slot)
+
+                # 2. Graph neighbors of currently active slots (current_step_slots)
+                active_slots = getattr(srl_state, "current_step_slots", None)
+                if active_slots is not None:
+                    active_slots_set = set(active_slots.cpu().tolist())
+                    expanded_slots = srl_state.expand_neighborhood(active_slots_set)
+                    prefetch_slots.update(expanded_slots - active_slots_set)
+
+                    # 3. Next chronological blocks (slot + 1)
+                    for slot in active_slots_set:
+                        prefetch_slots.add(slot + 1)
+
+                # Issue prefetches across all layers
+                all_slots = set(srl_state.ordered_slot_ids)
+                for slot in prefetch_slots:
+                    if slot in all_slots:
+                        for l_idx in range(self.manager.num_layers):
+                            blocks = self.manager.session_blocks.get(session_id, {}).get(l_idx, [])
+                            for idx, b in enumerate(blocks):
+                                if b.pool_idx == slot:
+                                    self.manager.prefetch(session_id, l_idx, idx)
+                                    break
 
             # Factual Early Stopping (Option 2 Extension)
             stop_generation = False

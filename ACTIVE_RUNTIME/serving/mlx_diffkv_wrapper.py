@@ -658,7 +658,8 @@ def compress_mlx_block(deltas: mx.array, rank: int, n_oversamples: int = 5, n_it
 @mx.compile
 def compute_decode_attention_static(
     q: mx.array,              # [H_q, D]
-    comp_U: mx.array,         # [nb, S_comp, rank]       — pre-sliced to active blocks
+    comp_U: mx.array,         # [nb, S_comp, rank]       — pre-sliced to active blocks (int8)
+    comp_U_scale: mx.array,   # [nb]                     — scale factor per block (fp16)
     comp_VK: mx.array,        # [nb, kv_heads, rank, D]
     comp_VV: mx.array,        # [nb, kv_heads, rank, D]
     comp_anc_k: mx.array,     # [nb, kv_heads, D]
@@ -677,6 +678,9 @@ def compute_decode_attention_static(
     rank: int,
     max_dense_len: int,
 ):
+    # Dequantize U from int8 to target activation precision
+    comp_U = comp_U.astype(q.dtype) * (mx.expand_dims(mx.expand_dims(comp_U_scale, 1), 2) / 127.0)
+
     H_q, D = q.shape
     nb      = comp_U.shape[0]   # real block count (padded to power of 2)
     S_comp  = block_size - 1
@@ -887,6 +891,7 @@ def _execute_decode_attention_compiled(
     dense_v: mx.array,
     dense_len: mx.array,
     comp_U: mx.array,
+    comp_U_scale: mx.array,
     comp_VK: mx.array,
     comp_VV: mx.array,
     comp_anc_k: mx.array,
@@ -940,6 +945,7 @@ def _execute_decode_attention_compiled(
 
         topk_sel = sel
         comp_U_s       = mx.take(comp_U,       sel, axis=0)
+        comp_U_scale_s = mx.take(comp_U_scale, sel, axis=0)
         comp_VK_s      = mx.take(comp_VK,      sel, axis=0)
         comp_VV_s      = mx.take(comp_VV,      sel, axis=0)
         comp_anc_k_s   = mx.take(comp_anc_k,   sel, axis=0)
@@ -958,6 +964,7 @@ def _execute_decode_attention_compiled(
         nb_actual_for_attn = mx.array(k_eff, dtype=mx.int32)
     else:
         comp_U_s       = comp_U
+        comp_U_scale_s = comp_U_scale
         comp_VK_s      = comp_VK
         comp_VV_s      = comp_VV
         comp_anc_k_s   = comp_anc_k
@@ -987,7 +994,7 @@ def _execute_decode_attention_compiled(
     dense_mask_combined = mx.concatenate([res_mask_attn, dense_mask_attn], axis=0)
 
     out_combined, lse_sparse, lse_dense, scores_sparse = compute_decode_attention_static(
-        q, comp_U_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
+        q, comp_U_s, comp_U_scale_s, comp_VK_s, comp_VV_s, comp_anc_k_s, comp_anc_v_s,
         comp_scale_s, comp_seq_len_s, res_mask_s,
         dense_k_for_attn, dense_v_for_attn, dense_mask_combined,
         nb_actual_for_attn,
@@ -1450,7 +1457,8 @@ def _lego_prefill_attend(
     ak_e = mx.expand_dims(ak, 2)
     av_e = mx.expand_dims(av, 2)
     if _use_recon:
-        U   = mx.take(session["comp_U"][layer_idx],     sel_abs, 0)   # [K, S_comp, rank]
+        U_scale = mx.take(session["comp_U_scale"][layer_idx], sel_abs, 0)
+        U   = mx.take(session["comp_U"][layer_idx],     sel_abs, 0).astype(_fdt) * (mx.expand_dims(mx.expand_dims(U_scale, 1), 2) / 127.0)
         VK  = mx.take(session["comp_VK"][layer_idx],    sel_abs, 0)
         VV  = mx.take(session["comp_VV"][layer_idx],    sel_abs, 0)
         sc  = mx.take(session["comp_scale"][layer_idx], sel_abs, 0)   # [K] fp32
@@ -1928,7 +1936,8 @@ class MLXKVBlockManager:
             "prefill_V_chunks": [[] for _ in range(self.num_layers)],
             
             "num_blocks": [0 for _ in range(self.num_layers)],
-            "comp_U":     [mx.zeros((max_blocks, self.block_size - 1, self.rank), dtype=dtype) for _ in range(self.num_layers)],
+            "comp_U":     [mx.zeros((max_blocks, self.block_size - 1, self.rank), dtype=mx.int8) for _ in range(self.num_layers)],
+            "comp_U_scale": [mx.zeros((max_blocks,), dtype=dtype) for _ in range(self.num_layers)],
             "comp_VK":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_VV":    [mx.zeros((max_blocks, self.kv_heads, self.rank, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
             "comp_anc_k": [mx.zeros((max_blocks, self.kv_heads, self.head_dim), dtype=dtype) for _ in range(self.num_layers)],
@@ -1975,7 +1984,8 @@ class MLXKVBlockManager:
         grow = new_cap - cur
         f16 = mx.float16
         grown_tails = {
-            "comp_U":       ((self.block_size - 1, self.rank), f16),
+            "comp_U":       ((self.block_size - 1, self.rank), mx.int8),
+            "comp_U_scale": ((), f16),
             "comp_VK":      ((self.kv_heads, self.rank, self.head_dim), f16),
             "comp_VV":      ((self.kv_heads, self.rank, self.head_dim), f16),
             "comp_anc_k":   ((self.kv_heads, self.head_dim), f16),
@@ -2156,7 +2166,8 @@ class MLXKVBlockManager:
                 # Zero out discarded dense tokens and blocks
                 session["dense_keys"][layer_idx][0, :, dense_len:] = 0.0
                 session["dense_values"][layer_idx][0, :, dense_len:] = 0.0
-                session["comp_U"][layer_idx][keep_blocks:] = 0.0
+                session["comp_U"][layer_idx][keep_blocks:] = 0
+                session["comp_U_scale"][layer_idx][keep_blocks:] = 0.0
                 session["comp_VK"][layer_idx][keep_blocks:] = 0.0
                 session["comp_VV"][layer_idx][keep_blocks:] = 0.0
                 session["comp_anc_k"][layer_idx][keep_blocks:] = 0.0
@@ -2182,6 +2193,7 @@ class MLXKVBlockManager:
                 session["dense_keys"][layer_idx],
                 session["dense_values"][layer_idx],
                 session["comp_U"][layer_idx],
+                session["comp_U_scale"][layer_idx],
                 session["comp_VK"][layer_idx],
                 session["comp_VV"][layer_idx],
                 session["comp_anc_k"][layer_idx],
@@ -2745,7 +2757,14 @@ class MLXKVBlockManager:
             start_idx = session["num_blocks"][l]
             l_slice = slice(l * num_blocks, (l + 1) * num_blocks)
             
-            session["comp_U"][l][start_idx:start_idx+num_blocks] = U_batch[l_slice]
+            # Quantize U_batch[l_slice] to int8
+            scale_u = mx.max(mx.max(mx.abs(U_batch[l_slice]), axis=2), axis=1)
+            scale_u = mx.maximum(scale_u, 1e-5)
+            scale_u_exp = mx.expand_dims(mx.expand_dims(scale_u, 1), 2)
+            U_int8 = mx.round(U_batch[l_slice] / scale_u_exp * 127).astype(mx.int8)
+
+            session["comp_U"][l][start_idx:start_idx+num_blocks] = U_int8
+            session["comp_U_scale"][l][start_idx:start_idx+num_blocks] = scale_u.astype(session["comp_U_scale"][l].dtype)
             session["comp_VK"][l][start_idx:start_idx+num_blocks] = VK_batch[l_slice]
             session["comp_VV"][l][start_idx:start_idx+num_blocks] = VV_batch[l_slice]
             session["comp_anc_k"][l][start_idx:start_idx+num_blocks] = batch_anchors_k[l_slice]
@@ -2785,6 +2804,7 @@ class MLXKVBlockManager:
         for l in range(self.num_layers):
             eval_targets.extend([
                 session["comp_U"][l],
+                session["comp_U_scale"][l],
                 session["comp_VK"][l],
                 session["comp_VV"][l],
                 session["comp_anc_k"][l],
@@ -2799,6 +2819,422 @@ class MLXKVBlockManager:
             if "comp_res_mask" in session:
                 eval_targets.append(session["comp_res_mask"][l])
         mx.eval(*eval_targets)
+
+    def compress_deferred_prefill_blocks_for_layer(self, session_id: str, layer_idx: int):
+        """Flush stashed prefill K/V of a single layer through the SVD compressor.
+        Called during the forward pass to immediately compress completed blocks
+        and free raw VRAM, rather than waiting for the entire chunk's forward pass.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+
+        if not session["prefill_K_chunks"][layer_idx]:
+            return
+        parts_k = list(session["prefill_K_chunks"][layer_idx])
+        parts_v = list(session["prefill_V_chunks"][layer_idx])
+        tail = session["dense_lens"][layer_idx]
+        if tail > 0:
+            parts_k.insert(0, mx.expand_dims(session["dense_keys"][layer_idx][0, :, :tail], 0))
+            parts_v.insert(0, mx.expand_dims(session["dense_values"][layer_idx][0, :, :tail], 0))
+        K_layer = mx.concatenate(parts_k, axis=2) if len(parts_k) > 1 else parts_k[0]
+        V_layer = mx.concatenate(parts_v, axis=2) if len(parts_v) > 1 else parts_v[0]
+        
+        # Clear stashed chunks
+        session["prefill_K_chunks"][layer_idx] = []
+        session["prefill_V_chunks"][layer_idx] = []
+
+        L = K_layer.shape[2]
+
+        # How many full blocks clear the recency window?
+        num_blocks = (L - self.recency_window) // self.block_size
+
+        max_b = session.get("max_blocks", self.max_blocks)
+        start_blocks = session["num_blocks"][layer_idx]
+        if num_blocks > 0 and start_blocks + num_blocks > max_b:
+            max_b = self._ensure_block_capacity(session, start_blocks + num_blocks)
+        if num_blocks > 0 and start_blocks + num_blocks > max_b:
+            print(f"[DiffKV MLX] WARNING: session '{session_id}' block pool full "
+                  f"({start_blocks}+{num_blocks} > {max_b}); clamping flush.")
+            num_blocks = max(0, max_b - start_blocks)
+
+        start_idx = start_blocks
+        if num_blocks <= 0:
+            # Nothing clears the window yet: everything (tail + new) stays dense
+            L_dense = L
+            session["dense_keys"][layer_idx][0, :, :L_dense]   = K_layer.squeeze(0)
+            session["dense_values"][layer_idx][0, :, :L_dense] = V_layer.squeeze(0)
+            session["dense_lens"][layer_idx] = L_dense
+            session["dense_lens_mx"][layer_idx] = mx.array(L_dense, dtype=mx.int32)
+            return
+
+        N_comp = num_blocks * self.block_size
+        S_comp = self.block_size - 1
+        B_batch = num_blocks
+
+        K_comp = K_layer[:, :, :N_comp, :]
+        V_comp = V_layer[:, :, :N_comp, :]
+
+        # Shape: (H_kv, num_blocks, block_size, D)
+        K_comp_blocks = K_comp.squeeze(0).reshape(self.kv_heads, num_blocks, self.block_size, self.head_dim).transpose(1, 0, 2, 3)
+        V_comp_blocks = V_comp.squeeze(0).reshape(self.kv_heads, num_blocks, self.block_size, self.head_dim).transpose(1, 0, 2, 3)
+
+        anchor_k = K_comp_blocks[:, :, 0, :]  # (num_blocks, H_kv, D)
+        anchor_v = V_comp_blocks[:, :, 0, :]  # (num_blocks, H_kv, D)
+
+        deltas_k = K_comp_blocks[:, :, 1:, :] - mx.expand_dims(anchor_k, 2)  # (num_blocks, H_kv, S_comp, D)
+        deltas_v = V_comp_blocks[:, :, 1:, :] - mx.expand_dims(anchor_v, 2)  # (num_blocks, H_kv, S_comp, D)
+
+        # (num_blocks, S_comp, H_kv * D)
+        deltas_k_2d = deltas_k.transpose(0, 2, 1, 3).reshape(num_blocks, S_comp, -1)
+        deltas_v_2d = deltas_v.transpose(0, 2, 1, 3).reshape(num_blocks, S_comp, -1)
+
+        batch_deltas_k = deltas_k_2d
+        batch_deltas_v = deltas_v_2d
+        batch_anchors_k = anchor_k
+        batch_anchors_v = anchor_v
+        batch_blocks_k = K_comp_blocks
+        batch_blocks_v = V_comp_blocks
+
+        # 4. V-side rebalancing for the joint K|V SVD
+        v_scale_on = os.environ.get("DIFFKV_V_SCALE", "1") != "0"
+        v_gain = 1.0
+        if v_scale_on:
+            eK = mx.sum(batch_deltas_k.astype(mx.float32)**2, axis=(1, 2))
+            eV = mx.sum(batch_deltas_v.astype(mx.float32)**2, axis=(1, 2))
+            v_gain = mx.sqrt(eK / mx.maximum(eV, 1e-12))
+            v_gain = mx.minimum(mx.maximum(v_gain, 1.0), 10000.0)
+            v_gain_broadcast = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)
+            batch_deltas_v_scaled = batch_deltas_v * v_gain_broadcast
+            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v_scaled], axis=2)
+        else:
+            batch_deltas = mx.concatenate([batch_deltas_k, batch_deltas_v], axis=2)
+
+        token_norms = mx.linalg.norm(batch_deltas, axis=-1, keepdims=True)
+        token_norms = mx.maximum(token_norms, 1e-5)
+        batch_deltas_normalized = batch_deltas / token_norms
+
+        # 5. Batched GPU SVD
+        U_batch, Vh_batch, scales_batch = compress_mlx_block_batched(batch_deltas_normalized, self.rank)
+        U_batch = U_batch * token_norms  # (num_blocks, S_comp, rank)
+
+        VK_flat = Vh_batch[:, :, :self.kv_heads * self.head_dim]
+        VV_flat = Vh_batch[:, :, self.kv_heads * self.head_dim:]
+
+        if v_scale_on:
+            v_gain_div = mx.expand_dims(mx.expand_dims(v_gain, 1), 2)
+            VV_flat = VV_flat / v_gain_div
+
+        VK_batch = VK_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        VV_batch = VV_flat.reshape(B_batch, self.rank, self.kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+
+        # 6. SVD Residual Correction
+        recon_delta = mx.matmul(U_batch, Vh_batch) * mx.expand_dims(mx.expand_dims(scales_batch, 1), 2)
+        recon_delta_k = recon_delta[:, :, :self.kv_heads * self.head_dim]
+        recon_delta_v = recon_delta[:, :, self.kv_heads * self.head_dim:]
+        if v_scale_on:
+            recon_delta_v = recon_delta_v / v_gain_broadcast
+
+        errors_k = mx.linalg.norm(batch_deltas_k - recon_delta_k, axis=-1)
+        errors_v = mx.linalg.norm(batch_deltas_v - recon_delta_v, axis=-1)
+
+        if v_scale_on:
+            errors_v_balanced = errors_v * mx.expand_dims(v_gain, 1)
+        else:
+            errors_v_balanced = errors_v
+        joint_errors = mx.sqrt(errors_k**2 + errors_v_balanced**2)
+
+        # Relational edge capture
+        sev_by_block = None
+        if os.environ.get("DIFFKV_RESIDUAL_EDGE_CAPTURE", "0") == "1":
+            _rn = recon_delta / mx.maximum(mx.linalg.norm(recon_delta, axis=-1, keepdims=True), 1e-6)
+            _en = batch_deltas / mx.maximum(mx.linalg.norm(batch_deltas, axis=-1, keepdims=True), 1e-6)
+            _eye = mx.eye(S_comp)
+            _A = mx.matmul(_rn, _en.transpose(0, 2, 1))
+            _self = mx.sum(_A * _eye, axis=-1)
+            _other = mx.max(_A - _eye * 10.0, axis=-1)
+            sev_by_block = np.asarray(_other - _self)
+
+        # Content-aware residual capture / token boosting
+        tok_boost_env = os.environ.get("DIFFKV_RESIDUAL_TOKEN_BOOST")
+        tok_boost = 8.0
+        if tok_boost_env is not None:
+            try:
+                tok_boost = float(tok_boost_env)
+            except ValueError:
+                pass
+
+        boost_rows = []
+        if tok_boost > 1.0 and "token_ids" in session and len(session["token_ids"]) > 0:
+            counts = session.get("token_counts", {})
+            total_tokens = len(session["token_ids"])
+            decode_cache = getattr(self, "_tok_decode_cache", None)
+            if decode_cache is None:
+                decode_cache = self._tok_decode_cache = {}
+            for block_idx in range(num_blocks):
+                abs_start = (start_blocks + block_idx) * self.block_size
+                tids = session["token_ids"][abs_start + 1 : abs_start + self.block_size]
+
+                boost_multipliers = [1.0] * S_comp
+                if len(tids) == S_comp:
+                    tok_strs = []
+                    for tid in tids:
+                        s = decode_cache.get(tid)
+                        if s is None:
+                            s = decode_cache[tid] = self.tokenizer.decode([tid])
+                        tok_strs.append(s)
+
+                    is_core = []
+                    for s in tok_strs:
+                        s_clean = s.strip()
+                        has_digit = any(c.isdigit() for c in s_clean)
+                        is_upper = s_clean.isupper() and s_clean.isalpha() and len(s_clean) >= 2
+                        is_core.append(has_digit or is_upper or s_clean == '-' or s_clean == '_')
+
+                    is_prose = []
+                    for s in tok_strs:
+                        s_clean = s.strip()
+                        if not s_clean:
+                            is_prose.append(True)
+                            continue
+                        if s_clean in ('.', ',', ';', '?', '!', ':', '"', "'", '(', ')', '[', ']', '{', '}'):
+                            is_prose.append(True)
+                            continue
+                        if s_clean.isalpha():
+                            if s_clean.islower() or (s_clean.istitle() and len(s_clean) > 1):
+                                is_prose.append(True)
+                                continue
+                        is_prose.append(False)
+
+                    in_segment = False
+                    segment_indices = []
+                    for i in range(S_comp):
+                        if not is_prose[i]:
+                            if not in_segment:
+                                in_segment = True
+                                segment_indices.append([i])
+                            else:
+                                segment_indices[-1].append(i)
+                        else:
+                            in_segment = False
+
+                    for seg in segment_indices:
+                        contains_core = any(is_core[i] for i in seg)
+                        if contains_core:
+                            for i in seg:
+                                tid = tids[i]
+                                count = counts.get(tid, 1)
+                                idf = math.log(max(total_tokens, 2) / (count + 0.1))
+                                rarity_weight = max(1.0, min(idf, 6.0))
+                                boost_multipliers[i] = tok_boost * (rarity_weight / 2.0)
+
+                    _apply_owner_capture(boost_multipliers, segment_indices, is_core,
+                                         tok_strs, tids, counts, total_tokens, tok_boost)
+                    _apply_table_capture(boost_multipliers, tok_strs, tids,
+                                         counts, total_tokens, tok_boost)
+
+                    final_boosts = list(boost_multipliers)
+                    W = 2
+                    for idx in range(S_comp):
+                        if boost_multipliers[idx] > 1.0:
+                            for j in range(max(0, idx - W), min(S_comp, idx + W + 1)):
+                                final_boosts[j] = max(final_boosts[j], boost_multipliers[idx])
+                    boost_multipliers = final_boosts
+
+                    _apply_relational_capture(
+                        boost_multipliers,
+                        sev_by_block[block_idx] if sev_by_block is not None else None,
+                        tok_strs, tok_boost)
+                boost_rows.append(boost_multipliers)
+
+            boost_np = np.asarray(boost_rows, dtype=np.float32)
+            boost_mx = mx.array(boost_np).astype(joint_errors.dtype)
+            joint_errors = joint_errors * boost_mx
+
+        # Adaptive residual budget
+        batch_norms_k = mx.linalg.norm(batch_deltas_k, axis=-1)
+        batch_norms_v = mx.linalg.norm(batch_deltas_v, axis=-1)
+        rel_error_k = errors_k / mx.maximum(batch_norms_k, 1e-8)
+        rel_error_v = errors_v / mx.maximum(batch_norms_v, 1e-8)
+
+        sorted_k = mx.sort(rel_error_k, axis=-1)
+        sorted_v = mx.sort(rel_error_v, axis=-1)
+        med_k = sorted_k[:, S_comp // 2]
+        med_v = sorted_v[:, S_comp // 2]
+        max_med_err = mx.maximum(med_k, med_v).tolist()
+
+        n_res_batch = []
+        for val in max_med_err:
+            val = float(val)
+            b_res = self.max_residual
+            if val < 0.05:
+                b_res = min(8, b_res)
+            elif val < 0.15:
+                b_res = min(16, b_res)
+            n_res_batch.append(b_res)
+
+        res_v_only, cov_frac = _capture_policy_env()
+        if boost_rows:
+            try:
+                _floor_margin = int(os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+            except ValueError:
+                _floor_margin = 4
+            _n_cov = 0
+            if cov_frac > 0.0 and self.max_residual > 0:
+                _n_cov = min(self.max_residual, max(1, int(round(cov_frac * self.max_residual))))
+            floors = [
+                min(self.max_residual, sum(1 for m in row if m > 1.0) + _n_cov + _floor_margin)
+                if any(m > 1.0 for m in row) else 0
+                for row in boost_rows
+            ]
+            if any(floors):
+                n_res_batch = [max(n_res_batch[i], floors[i]) for i in range(len(n_res_batch))]
+
+        if self.max_residual > 0:
+            capture_scores = joint_errors
+            cov_bonus = _coverage_bonus(S_comp, self.max_residual, cov_frac)
+            if cov_bonus is not None:
+                capture_scores = capture_scores.astype(mx.float32) + cov_bonus
+            top_k = mx.argsort(capture_scores, axis=-1)[:, -self.max_residual:][:, ::-1]
+            if cov_bonus is not None:
+                tk = np.asarray(top_k)
+                cov_set = np.zeros(S_comp, dtype=bool)
+                cov_set[np.asarray(cov_bonus) > 0] = True
+                out_rows = np.empty_like(tk)
+                for r in range(tk.shape[0]):
+                    row = tk[r]
+                    m = cov_set[row]
+                    ranked, covs = row[~m], row[m]
+                    n_res_r = int(n_res_batch[r])
+                    n_cov_r = 0
+                    if covs.size and n_res_r > 0 and cov_frac > 0.0:
+                        n_cov_r = int(min(covs.size, max(1, round(cov_frac * n_res_r))))
+                    n_rank_r = max(0, n_res_r - n_cov_r)
+                    out_rows[r] = np.concatenate([
+                        ranked[:n_rank_r], covs[:n_cov_r],
+                        ranked[n_rank_r:], covs[n_cov_r:],
+                    ])[:tk.shape[1]]
+                top_k = mx.array(out_rows)
+
+            indices = mx.expand_dims(mx.expand_dims(top_k + 1, -1), -1)
+            batch_blocks_k_t = batch_blocks_k.transpose(0, 2, 1, 3)
+            batch_blocks_v_t = batch_blocks_v.transpose(0, 2, 1, 3)
+            res_k_padded = mx.take_along_axis(batch_blocks_k_t, indices, axis=1)
+            res_v_padded = mx.take_along_axis(batch_blocks_v_t, indices, axis=1)
+            if res_v_only:
+                recon_k_rows = (recon_delta_k.reshape(B_batch, S_comp, self.kv_heads, self.head_dim)
+                                + mx.expand_dims(batch_anchors_k, 1))
+                idx_recon = mx.expand_dims(mx.expand_dims(top_k, -1), -1)
+                res_k_padded = mx.take_along_axis(recon_k_rows, idx_recon, axis=1).astype(res_v_padded.dtype)
+
+            active_mask_np = np.zeros((B_batch, self.max_residual), dtype=np.bool_)
+            for b in range(B_batch):
+                active_mask_np[b, :n_res_batch[b]] = True
+            active_mask = mx.array(active_mask_np)
+
+            res_k_padded = res_k_padded * mx.expand_dims(mx.expand_dims(active_mask, -1), -1)
+            res_v_padded = res_v_padded * mx.expand_dims(mx.expand_dims(active_mask, -1), -1)
+
+            match = (top_k[:, :, None] == mx.arange(S_comp)[None, None, :])
+            match = match & mx.expand_dims(active_mask, -1)
+            res_mask = mx.any(match, axis=1)
+        else:
+            top_k = None
+            res_k_padded = mx.zeros((B_batch, self.max_residual, self.kv_heads, self.head_dim), dtype=batch_blocks_k.dtype)
+            res_v_padded = mx.zeros((B_batch, self.max_residual, self.kv_heads, self.head_dim), dtype=batch_blocks_v.dtype)
+            res_mask = mx.zeros((B_batch, S_comp), dtype=mx.bool_)
+
+        # Scatter back
+        # Quantize U_batch to int8
+        scale_u = mx.max(mx.max(mx.abs(U_batch), axis=2), axis=1)
+        scale_u = mx.maximum(scale_u, 1e-5)
+        scale_u_exp = mx.expand_dims(mx.expand_dims(scale_u, 1), 2)
+        U_int8 = mx.round(U_batch / scale_u_exp * 127).astype(mx.int8)
+
+        session["comp_U"][layer_idx][start_idx:start_idx+num_blocks] = U_int8
+        session["comp_U_scale"][layer_idx][start_idx:start_idx+num_blocks] = scale_u.astype(session["comp_U_scale"][layer_idx].dtype)
+        session["comp_VK"][layer_idx][start_idx:start_idx+num_blocks] = VK_batch
+        session["comp_VV"][layer_idx][start_idx:start_idx+num_blocks] = VV_batch
+        session["comp_anc_k"][layer_idx][start_idx:start_idx+num_blocks] = batch_anchors_k
+        session["comp_anc_v"][layer_idx][start_idx:start_idx+num_blocks] = batch_anchors_v
+        session["comp_min_k"][layer_idx][start_idx:start_idx+num_blocks] = mx.min(batch_blocks_k, axis=2)
+        session["comp_max_k"][layer_idx][start_idx:start_idx+num_blocks] = mx.max(batch_blocks_k, axis=2)
+        session["comp_scale"][layer_idx][start_idx:start_idx+num_blocks] = scales_batch
+        session["comp_seq_len"][layer_idx][start_idx:start_idx+num_blocks] = self.block_size - 1
+
+        session["comp_res_k"][layer_idx][start_idx:start_idx+num_blocks] = res_k_padded
+        session["comp_res_v"][layer_idx][start_idx:start_idx+num_blocks] = res_v_padded
+        for b_idx in range(num_blocks):
+            session["comp_res_n"][layer_idx][start_idx + b_idx] = n_res_batch[b_idx]
+        if "comp_res_mask" in session:
+            session["comp_res_mask"][layer_idx][start_idx:start_idx+num_blocks] = res_mask
+
+        session["num_blocks"][layer_idx] = start_idx + num_blocks
+
+        # Copy remaining dense tokens
+        K_dense = K_layer[:, :, N_comp:, :]
+        V_dense = V_layer[:, :, N_comp:, :]
+        L_dense = L - N_comp
+
+        session["dense_keys"][layer_idx][0, :, :L_dense] = K_dense.squeeze(0)
+        session["dense_values"][layer_idx][0, :, :L_dense] = V_dense.squeeze(0)
+        session["dense_lens"][layer_idx] = L_dense
+        session["dense_lens_mx"][layer_idx] = mx.array(L_dense, dtype=mx.int32)
+
+        rc = session.get("_res_cache")
+        if rc is not None:
+            rc.pop(layer_idx, None)
+
+        eval_targets = [
+            session["comp_U"][layer_idx],
+            session["comp_U_scale"][layer_idx],
+            session["comp_VK"][layer_idx],
+            session["comp_VV"][layer_idx],
+            session["comp_anc_k"][layer_idx],
+            session["comp_anc_v"][layer_idx],
+            session["comp_min_k"][layer_idx],
+            session["comp_max_k"][layer_idx],
+            session["comp_res_k"][layer_idx],
+            session["comp_res_v"][layer_idx],
+            session["dense_keys"][layer_idx],
+            session["dense_values"][layer_idx],
+        ]
+        if "comp_res_mask" in session:
+            eval_targets.append(session["comp_res_mask"][layer_idx])
+        mx.eval(*eval_targets)
+
+    def prefetch(self, session_id: str, layer_idx: int, block_idx: int) -> None:
+        """Prefetch a block by forcing its lazy tensors to evaluate in Metal cache."""
+        if os.environ.get("DIFFKV_PREDICTIVE_PAGING", "0") != "1":
+            return
+        
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        
+        num_blocks = session["num_blocks"][layer_idx]
+        if block_idx >= num_blocks:
+            return
+            
+        def _bg_eval():
+            try:
+                targets = [
+                    session["comp_U"][layer_idx][block_idx],
+                    session["comp_VK"][layer_idx][block_idx],
+                    session["comp_VV"][layer_idx][block_idx],
+                    session["comp_anc_k"][layer_idx][block_idx],
+                    session["comp_anc_v"][layer_idx][block_idx],
+                ]
+                if "comp_U_scale" in session:
+                    targets.append(session["comp_U_scale"][layer_idx][block_idx])
+                if "comp_res_mask" in session:
+                    targets.append(session["comp_res_mask"][layer_idx][block_idx])
+                mx.eval(*targets)
+            except Exception:
+                pass
+                
+        import threading
+        threading.Thread(target=_bg_eval, daemon=True).start()
 
     def _get_or_create_session(self, session_id: str):
         """dict.get + create-on-miss. NOT sessions.setdefault(_create_empty_session()):
@@ -2983,6 +3419,7 @@ class MLXKVBlockManager:
         if num_blocks >= max_b:
             # Safety: drop oldest compressed block by shifting (rare)
             session["comp_U"][layer_idx][:-1]     = session["comp_U"][layer_idx][1:]
+            session["comp_U_scale"][layer_idx][:-1] = session["comp_U_scale"][layer_idx][1:]
             session["comp_VK"][layer_idx][:-1]    = session["comp_VK"][layer_idx][1:]
             session["comp_VV"][layer_idx][:-1]    = session["comp_VV"][layer_idx][1:]
             session["comp_anc_k"][layer_idx][:-1] = session["comp_anc_k"][layer_idx][1:]
@@ -3276,7 +3713,13 @@ class MLXKVBlockManager:
             n_res = 0
 
 
-        session["comp_U"][layer_idx][num_blocks]     = U_padded
+        # Quantize U_padded to int8
+        scale_u = mx.max(mx.abs(U_padded))
+        scale_u = mx.maximum(scale_u, 1e-5)
+        U_int8 = mx.round(U_padded / scale_u * 127).astype(mx.int8)
+
+        session["comp_U"][layer_idx][num_blocks]     = U_int8
+        session["comp_U_scale"][layer_idx][num_blocks] = scale_u.astype(session["comp_U_scale"][layer_idx].dtype)
         session["comp_VK"][layer_idx][num_blocks]    = VK
         session["comp_VV"][layer_idx][num_blocks]    = VV
         session["comp_anc_k"][layer_idx][num_blocks] = anchor_k
@@ -3581,6 +4024,7 @@ class MLXKVBlockManager:
             out_combined, sel, lse_sparse, lse_dense, scores_sparse = _execute_decode_attention_compiled(
                 q, dense_k, dense_v, dense_len,
                 session["comp_U"][layer_idx][:nb_padded],
+                session["comp_U_scale"][layer_idx][:nb_padded],
                 session["comp_VK"][layer_idx][:nb_padded],
                 session["comp_VV"][layer_idx][:nb_padded],
                 session["comp_anc_k"][layer_idx][:nb_padded],
@@ -4347,6 +4791,9 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 keys[b_idx:b_idx+1],
                 values[b_idx:b_idx+1]
             )
+            # Compress during the forward pass:
+            if os.environ.get("DIFFKV_STREAMING_COMPRESS", "1") != "0":
+                manager.compress_deferred_prefill_blocks_for_layer(sid, layer_idx)
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output)
@@ -4635,7 +5082,7 @@ class MLXDiffKVWrapper:
         elif isinstance(eos_id, int):
             self.stop_token_ids.add(eos_id)
             
-        special_words = ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
+        special_words = ["<|im_end|>", "<|endoftext|>", "<|end_of_text|>", "<|eot_id|>", "</s>"]
         for word in special_words:
             tok_id = self.tokenizer.convert_tokens_to_ids(word)
             if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
@@ -5125,6 +5572,40 @@ class MLXDiffKVWrapper:
 
             if srl_state is not None and hasattr(srl_state, "save_step_state"):
                 srl_state.save_step_state(len(generated))
+
+            # Predictive Prefetching (Option 3 MLX Port)
+            if os.environ.get("DIFFKV_PREDICTIVE_PAGING", "0") == "1" and srl_state is not None:
+                prefetch_slots = set()
+
+                # 1. Lexical: Inverted index lookup on the new generated token
+                if srl_state.inverted_index is not None and next_id in srl_state.inverted_index.occurrences:
+                    for slot, _, _ in srl_state.inverted_index.occurrences[next_id]:
+                        prefetch_slots.add(slot)
+
+                # 2. Graph neighbors of currently active slots (current_step_slots)
+                active_slots = getattr(srl_state, "current_step_slots", None)
+                if active_slots is not None:
+                    if hasattr(active_slots, "tolist"):
+                        active_slots_list = active_slots.tolist()
+                    elif hasattr(active_slots, "cpu"):
+                        active_slots_list = active_slots.cpu().tolist()
+                    else:
+                        active_slots_list = list(active_slots)
+                    active_slots_set = set(active_slots_list)
+                    
+                    expanded_slots = srl_state.expand_neighborhood(active_slots_set)
+                    prefetch_slots.update(expanded_slots - active_slots_set)
+
+                    # 3. Next chronological blocks (slot + 1)
+                    for slot in active_slots_set:
+                        prefetch_slots.add(slot + 1)
+
+                # Issue prefetches across all layers
+                all_slots = set(srl_state.ordered_slot_ids)
+                for slot in prefetch_slots:
+                    if slot in all_slots:
+                        for l_idx in range(self.manager.num_layers):
+                            self.manager.prefetch(session_id, l_idx, slot)
 
             # Factual Early Stopping (Option 2 Extension)
             stop_generation = False

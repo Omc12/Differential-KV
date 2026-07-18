@@ -107,6 +107,7 @@ class KVBlock:
     anchor_kv:  torch.Tensor          # [1, 2, heads, head_dim]
     anchor_kv_cpu: Optional[torch.Tensor] = None
     _U:          Optional[torch.Tensor] = None   # [block_size, rank]
+    _U_scale:    Optional[torch.Tensor] = None   # [1] scale for int8 U
     _V:          Optional[torch.Tensor] = None   # [rank, feat_dim]
     scale:      float = 1.0
     token_indices: List[int] = None
@@ -140,6 +141,8 @@ class KVBlock:
     @property
     def U(self):
         if self._U is not None:
+            if getattr(self, "_U_scale", None) is not None:
+                return self._U.to(self._U_scale.dtype) * self._U_scale
             return self._U
         if getattr(self, "pool_idx", None) is not None and getattr(self, "pool", None) is not None:
             pool = self.pool
@@ -153,7 +156,18 @@ class KVBlock:
 
     @U.setter
     def U(self, val):
-        self._U = val
+        if val is not None:
+            if val.dtype == torch.int8:
+                self._U = val
+            else:
+                val_f = val.float()
+                max_abs = val_f.abs().max()
+                scale_u = torch.clamp(max_abs / 127.0, min=1e-5).to(val.dtype)
+                self._U = torch.clamp(torch.round(val_f / scale_u), -127, 127).to(torch.int8)
+                self._U_scale = scale_u
+        else:
+            self._U = None
+            self._U_scale = None
 
     @property
     def V(self):
@@ -2584,6 +2598,11 @@ class KVRuntimeManager:
         for idx, block in enumerate(blocks):
             self.pager.touch(session_id, layer_idx, idx)
         return blocks
+
+    def prefetch(self, session_id: str, layer_idx: int, block_idx: int) -> None:
+        """Prefetch a block asynchronously if pager is initialized."""
+        if hasattr(self, "pager") and self.pager is not None:
+            self.pager.prefetch(session_id, layer_idx, block_idx)
 
     # ── Dense KV reconstruction (legacy path for prefill) ────────────────────
 

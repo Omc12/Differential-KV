@@ -48,6 +48,7 @@ class PageEntry:
     residency:  str = BlockResidency.GPU
     last_access: float = field(default_factory=time.time)
     vram_bytes: int = 0        # bytes currently on GPU (0 if paged to CPU)
+    prefetched: bool = False   # True if loaded via async prefetch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +80,13 @@ class PagedKVStore:
         self._bg_thread = threading.Thread(target=self._bg_eviction_loop, daemon=True)
         self._bg_thread.start()
 
+        # Async prefetch thread
+        self._prefetch_queue: List[Tuple] = []
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_cv = threading.Condition(self._prefetch_lock)
+        self._bg_prefetch_thread = threading.Thread(target=self._bg_prefetch_loop, daemon=True)
+        self._bg_prefetch_thread.start()
+
         # Live stats
         self.stats = {
             "evictions":         0,
@@ -86,6 +94,8 @@ class PagedKVStore:
             "bytes_paged_out":   0,
             "bytes_paged_in":    0,
             "current_gpu_bytes": 0,
+            "prefetch_issued":   0,
+            "prefetch_hits":     0,
         }
 
     # ── Registration ────────────────────────────────────────────────────────
@@ -111,7 +121,11 @@ class PagedKVStore:
                 return
             entry.last_access = time.time()
             if entry.residency == BlockResidency.CPU:
+                entry.prefetched = False
                 self._reload_block(key, entry)
+            elif getattr(entry, "prefetched", False):
+                self.stats["prefetch_hits"] = self.stats.get("prefetch_hits", 0) + 1
+                entry.prefetched = False
 
     # ── Eviction ─────────────────────────────────────────────────────────────
 
@@ -123,6 +137,42 @@ class PagedKVStore:
                 if coldest_key is None:
                     break
                 self._evict_block(coldest_key, self._entries[coldest_key])
+
+    def prefetch(self, session_id: str, layer_idx: int, block_idx: int) -> None:
+        """Issue an asynchronous prefetch request for a block if it is on CPU."""
+        import os
+        if os.environ.get("DIFFKV_PREDICTIVE_PAGING", "0") != "1":
+            return
+
+        key = (session_id, layer_idx, block_idx)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or entry.residency == BlockResidency.GPU:
+                return
+
+        with self._prefetch_lock:
+            if key not in self._prefetch_queue:
+                self._prefetch_queue.append(key)
+                self.stats["prefetch_issued"] = self.stats.get("prefetch_issued", 0) + 1
+                self._prefetch_cv.notify()
+
+    def _bg_prefetch_loop(self):
+        """Background thread loop to process prefetch requests."""
+        while self._running:
+            with self._prefetch_lock:
+                while not self._prefetch_queue and self._running:
+                    self._prefetch_cv.wait(timeout=1.0)
+                if not self._running:
+                    break
+                if not self._prefetch_queue:
+                    continue
+                key = self._prefetch_queue.pop(0)
+
+            with self._lock:
+                entry = self._entries.get(key)
+                if entry is not None and entry.residency == BlockResidency.CPU:
+                    self._reload_block(key, entry)
+                    entry.prefetched = True
 
     def _find_coldest(self) -> Optional[Tuple]:
         """Return key of the GPU-resident entry with the oldest last_access, adjusted for reinforcement."""
@@ -158,8 +208,12 @@ class PagedKVStore:
         if block.anchor_kv is not None and block.anchor_kv.is_cuda:
             block.anchor_kv = block.anchor_kv.to("cpu", non_blocking=True)
             moved = True
-        if block.U is not None and block.U.is_cuda:
-            block.U = block.U.to("cpu", non_blocking=True)
+        u_val = getattr(block, "_U", None)
+        if u_val is not None and u_val.is_cuda:
+            block._U = u_val.to("cpu", non_blocking=True)
+            u_scale = getattr(block, "_U_scale", None)
+            if u_scale is not None:
+                block._U_scale = u_scale.to("cpu", non_blocking=True)
             moved = True
         if block.V is not None and block.V.is_cuda:
             block.V = block.V.to("cpu", non_blocking=True)
@@ -183,8 +237,12 @@ class PagedKVStore:
 
         if block.anchor_kv is not None and not block.anchor_kv.is_cuda:
             block.anchor_kv = block.anchor_kv.to(dev, non_blocking=True)
-        if block.U is not None and not block.U.is_cuda:
-            block.U = block.U.to(dev, non_blocking=True)
+        u_val = getattr(block, "_U", None)
+        if u_val is not None and not u_val.is_cuda:
+            block._U = u_val.to(dev, non_blocking=True)
+            u_scale = getattr(block, "_U_scale", None)
+            if u_scale is not None:
+                block._U_scale = u_scale.to(dev, non_blocking=True)
         if block.V is not None and not block.V.is_cuda:
             block.V = block.V.to(dev, non_blocking=True)
         if block.active_k is not None and not block.active_k.is_cuda:
@@ -222,8 +280,10 @@ class PagedKVStore:
                 pass
 
     def stop(self) -> None:
-        """Stop background eviction thread."""
+        """Stop background threads."""
         self._running = False
+        with self._prefetch_lock:
+            self._prefetch_cv.notify_all()
 
     def clear(self) -> None:
         """Clear all block entries and reset residency/stats."""
@@ -235,15 +295,18 @@ class PagedKVStore:
                 "bytes_paged_out":   0,
                 "bytes_paged_in":    0,
                 "current_gpu_bytes": 0,
+                "prefetch_issued":   0,
+                "prefetch_hits":     0,
             }
+        with self._prefetch_lock:
+            self._prefetch_queue.clear()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     @staticmethod
     def _block_vram(block) -> int:
-        """Estimate GPU bytes consumed by a KVBlock's live tensors."""
         total = 0
-        for t in [block.anchor_kv, block.U, block.V, block.active_k, block.active_v]:
+        for t in [block.anchor_kv, getattr(block, "_U", None), getattr(block, "_U_scale", None), block.V, block.active_k, block.active_v]:
             if t is not None and t.is_cuda:
                 total += t.numel() * t.element_size()
         return total
@@ -258,5 +321,7 @@ class PagedKVStore:
                 "total_reloads":     self.stats["reloads"],
                 "bytes_paged_out_mb": round(paged_out_mb, 2),
                 "bytes_paged_in_mb":  round(self.stats["bytes_paged_in"] / 1e6, 2),
+                "prefetch_issued":   self.stats.get("prefetch_issued", 0),
+                "prefetch_hits":     self.stats.get("prefetch_hits", 0),
                 "tracked_blocks":    len(self._entries),
             }

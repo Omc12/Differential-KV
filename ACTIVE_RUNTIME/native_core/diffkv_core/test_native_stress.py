@@ -59,20 +59,33 @@ if NATIVE:
     alive_sessions = set(range(100))
     alive_cb = lambda sid: sid in alive_sessions
 
-    compressor = diffkv_core.DiffKVCompressorThread(table, alive_cb)
+    if hasattr(diffkv_core, "DiffKVCompressorThread"):
+        compressor = diffkv_core.DiffKVCompressorThread(table, alive_cb)
+        is_cpu_comp = False
+    else:
+        compressor = diffkv_core.DiffKVCompressorThreadCPU(table, alive_cb)
+        is_cpu_comp = True
     compressor.start()
 
     submitted = 0
     overflowed = 0
     t0 = time.perf_counter()
     for i in range(5000):
-        job = diffkv_core.CompressJob()
-        job.block_id = i % NUM_BLOCKS
-        job.session_id = i % 100
-        job.block_size = 64
-        job.heads = 8
-        job.head_dim = 128
-        job.target_slab = diffkv_core.SlabTier.Rank16
+        if is_cpu_comp:
+            job = diffkv_core.CompressJobCPU()
+            job.block_id = i % NUM_BLOCKS
+            job.session_id = i % 100
+            job.block_size = 64
+            job.feat_dim = 8 * 128
+            job.rank = 16
+        else:
+            job = diffkv_core.CompressJob()
+            job.block_id = i % NUM_BLOCKS
+            job.session_id = i % 100
+            job.block_size = 64
+            job.heads = 8
+            job.head_dim = 128
+            job.target_slab = diffkv_core.SlabTier.Rank16
         if compressor.submit(job):
             submitted += 1
         else:
@@ -96,17 +109,30 @@ if NATIVE:
     alive_sessions_2 = set(range(10))
     alive_cb_2 = lambda sid: sid in alive_sessions_2
     table2 = diffkv_core.DiffKVBlockStateTable()
-    comp2 = diffkv_core.DiffKVCompressorThread(table2, alive_cb_2)
+    if hasattr(diffkv_core, "DiffKVCompressorThread"):
+        comp2 = diffkv_core.DiffKVCompressorThread(table2, alive_cb_2)
+        is_cpu_comp = False
+    else:
+        comp2 = diffkv_core.DiffKVCompressorThreadCPU(table2, alive_cb_2)
+        is_cpu_comp = True
     comp2.start()
 
     for i in range(50):
-        job = diffkv_core.CompressJob()
-        job.block_id = i
-        job.session_id = i % 15  # sessions 10-14 already dead
-        job.block_size = 64
-        job.heads = 8
-        job.head_dim = 128
-        job.target_slab = diffkv_core.SlabTier.Rank8
+        if is_cpu_comp:
+            job = diffkv_core.CompressJobCPU()
+            job.block_id = i
+            job.session_id = i % 15  # sessions 10-14 already dead
+            job.block_size = 64
+            job.feat_dim = 8 * 128
+            job.rank = 8
+        else:
+            job = diffkv_core.CompressJob()
+            job.block_id = i
+            job.session_id = i % 15  # sessions 10-14 already dead
+            job.block_size = 64
+            job.heads = 8
+            job.head_dim = 128
+            job.target_slab = diffkv_core.SlabTier.Rank8
         comp2.submit(job)
 
     time.sleep(0.3)

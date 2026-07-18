@@ -1284,6 +1284,10 @@ class StreamingSparseIngestManager:
             if dense_tokens > self.stats["total_dense_tokens_peak"]:
                 self.stats["total_dense_tokens_peak"] = dense_tokens
 
+        # Compress during the forward pass:
+        if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1":
+            self.compress_deferred_blocks_for_layer(session_id, layer_idx)
+
     def _submit_blocks_batched(self, session_id: str, layer_idx: int, blocks_list: List[StreamingKVBlock]):
         if not blocks_list:
             return
@@ -1550,6 +1554,58 @@ class StreamingSparseIngestManager:
                     total += b.U.numel() * 2
                     total += b.V.numel() * 2
         return total
+
+    def compress_deferred_blocks_for_layer(self, session_id: str, layer_idx: int) -> None:
+        """
+        Identify blocks in the specified layer that have left the recency window,
+        and submit them to SVD compression immediately.
+        """
+        if session_id not in self.session_blocks:
+            return
+
+        layers = self.session_blocks[session_id]
+        blocks = layers.get(layer_idx, [])
+        if not blocks:
+            return
+
+        # Determine the total sequence length of the session based on this layer's blocks
+        last_block = blocks[-1]
+        total_seq_len = last_block.anchor_idx + last_block.token_count()
+
+        if total_seq_len < self.short_context_threshold:
+            return
+
+        # If init_session deferred a fresh CUDA pool, materialize it now
+        if (
+            self.native_pool is not None
+            and not getattr(self.native_pool, "_allocated", True)
+        ):
+            self.native_pool.ensure_allocated(total_seq_len)
+
+        blocks_to_compress = []
+        for idx, b in enumerate(blocks):
+            if b.state == "ACCUMULATING" and (b.active_k is not None or b.active_k_cpu is not None):
+                eligible = _is_block_compression_eligible(
+                    b, is_last_block=(idx == len(blocks) - 1),
+                    ignore_skip_compression=True,
+                )
+                window_ok = (b.anchor_idx + b.token_count()) < (total_seq_len - self.recency_window)
+                if eligible and window_ok:
+                    b.state = "SUBMITTED"
+                    blocks_to_compress.append(b)
+                    self.update_metadata_state(session_id, layer_idx, b)
+
+        if blocks_to_compress:
+            try:
+                self._submit_blocks_batched(session_id, layer_idx, blocks_to_compress)
+            except Exception as _e:
+                import traceback
+                print(f"[DIAG compress_deferred_layer] ERROR in _submit_blocks_batched layer={layer_idx}: {_e}", flush=True)
+                traceback.print_exc()
+                # Rollback state so next compress attempt can retry
+                for _b in blocks_to_compress:
+                    if _b.state == "SUBMITTED":
+                        _b.state = "ACCUMULATING"
 
     def compress_deferred_blocks(self, session_id: str) -> None:
         """
