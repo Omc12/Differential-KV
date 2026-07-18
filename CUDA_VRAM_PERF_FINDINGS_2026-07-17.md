@@ -1037,6 +1037,34 @@ DIFFKV_MODEL=Qwen/Qwen2.5-14B-Instruct DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPR
 global runtime defaults; a regression ⇒ keep the boost (or a higher cap) for
 number/formula content. `benchmarks/niah_recall.py` is the deeper sweep.
 
+## Two findings from the A100 profiler run (2026-07-18)
+
+### BUG fixed: `wrapper.generate()` `NameError: _PREFILL_CHUNK`
+
+`hf_diffkv_wrapper.generate()` line 904 referenced `_PREFILL_CHUNK` (undefined)
+instead of `PREFILL_CHUNK` — a hard crash on the CUDA `generate()` path. The eval
+never hit it (it drives `model()` directly), but `test_niah` uses
+`wrapper.generate()`, so it crashed before generating AND before `wrapper.stop()`,
+leaking the 14B model so every subsequent parametrized test OOM'd (two 14B models
+on 40 GB). So the niah run did NOT actually validate the rank knobs — it died on
+this typo. Fixed; re-run the niah A/B.
+
+### CORRECTION: high preset IS DiffKV-kernel-bound (earlier "eager-model-bound" was low/mid only)
+
+`profile_decode_step.py` per preset:
+- **dense**: `model 48%`, `diffkv 0%` (flash attention) — model-bound, as expected.
+- **high**: `_fused_decode_combined_kernel = 55.5 ms/token = 49%` of the step —
+  the DiffKV combined kernel is the SINGLE LARGEST cost.
+
+So the blanket "decode is eager-model-bound, no DiffKV lever" holds for **low/mid**
+(cheap kernel, 40/64 residuals) but is **WRONG for high**: `max_residual=128` makes
+the combined kernel dominate. The combined-kernel cost scales with
+`N_blocks × max_residual`, so high's residual attention is the bottleneck. Real
+DiffKV tps levers FOR HIGH (not low/mid): (a) lower `max_residual` (128→64,
+speed/recall trade), or (b) optimize the combined kernel's residual path (GPU
+work). This is the profiler doing its job — it found a real DiffKV cost the
+pruning experiment (run on low/mid) had masked.
+
 ---
 
 # SEVENTH PASS — 1× confirmed, CUDA-graph reality, factual-store cause (2026-07-18)

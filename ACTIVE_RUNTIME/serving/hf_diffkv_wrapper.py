@@ -901,7 +901,7 @@ class PyTorchDiffKVHFWrapper:
         if _is_cuda_device and hasattr(self.manager, "get_session_micro_block_size"):
             _mbs = self.manager.get_session_micro_block_size(session_id)
             _block_capacity = max(2, int(_mbs) + 1)
-            PREFILL_CHUNK = ((_PREFILL_CHUNK + _block_capacity - 1) // _block_capacity) * _block_capacity
+            PREFILL_CHUNK = ((PREFILL_CHUNK + _block_capacity - 1) // _block_capacity) * _block_capacity
         new_ids_list = new_prompt_ids
         total_new = len(new_ids_list)
         outputs = None
