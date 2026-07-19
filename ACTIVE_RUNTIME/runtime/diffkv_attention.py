@@ -718,12 +718,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         #     Measured net-negative on whole-document synthesis at
                                         #     13.4K (degraded outputs, lower tps); kept for
                                         #     multi-turn experiments.
-                                        q_for_routing = unrot_query_states[b_idx, :, 0, :]  # [H, D]
+                                        q_for_routing = query_states[b_idx, :, 0, :]  # [H, D] ROTATED query (matches MLX _block_relevance_residual)
                                         _scale = 1.0 / math.sqrt(head_dim)
                                         _router_mode = os.environ.get("DIFFKV_ROUTER", "residual").lower()
                                         if _router_mode == "srl":
                                             selected_slots = route_query_fixed_k(
-                                                Q         = q_for_routing,
+                                                Q         = unrot_query_states[b_idx, :, 0, :],
                                                 srl_state = srl_state,
                                                 pool      = pool,
                                                 scale     = _scale,
@@ -737,6 +737,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                 block_indices  = block_indices,
                                                 anchor_indices = anchor_indices,
                                                 scale          = _scale,
+                                                cos            = cos_all,
+                                                sin            = sin_all,
                                             )
                                         srl_state.current_step_slots = selected_slots
 

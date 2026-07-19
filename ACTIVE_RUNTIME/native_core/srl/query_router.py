@@ -870,35 +870,20 @@ K_FIXED = int(os.environ.get("DIFFKV_SRL_K_FIXED", "64"))
 
 
 def route_blocks_relevance(
-    Q:              torch.Tensor,   # [H, D] current UNROTATED query (all query heads)
+    Q:              torch.Tensor,   # [H, D] current ROTATED query (all query heads)
     pool,                           # NativeBlockPool
     block_indices:  torch.Tensor,   # [N] candidate pool slot IDs for this layer
     anchor_indices: torch.Tensor,   # [N] absolute anchor positions (same order)
     scale:          float,
+    cos:            Optional[torch.Tensor] = None,
+    sin:            Optional[torch.Tensor] = None,
 ) -> torch.Tensor:                  # [K<=N] selected slot IDs, best-first, distinct
     """MLX-parity block router: rank blocks by exact q·k relevance, take top-K.
 
     Direct port of mlx_diffkv_wrapper._block_relevance_residual: a block's
     relevance is the max over query heads of max(q·anchor, max over its stored
     residual keys of q·k), fp16 products with fp32 accumulation, then plain
-    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N)).  The
-    residuals ARE each block's outlier tokens, so scoring them directly is a
-    tight signal that keeps a buried needle's block in the top-K — this is the
-    router behind MLX's flat decode tps.
-
-    Replaces the SRL multi-channel router as the CUDA default
-    (DIFFKV_ROUTER=srl restores it): the SRL path was measured net-negative at
-    13.4K — forcing it on degraded synthesis outputs AND lowered tps, with or
-    without the age penalty — and it costs several host syncs per token
-    (entropy .item(), centroid .tolist(), score-vector .cpu()).  This scorer
-    launches a handful of GPU ops and returns a GPU tensor: zero device→host
-    syncs on the routing path.
-
-    One deliberate deviation from MLX: the sink block (smallest anchor — the
-    system prompt / attention sink) is always force-included.  MLX survives
-    without this because its dense-window trim protects block 0; on CUDA,
-    losing block 0 is a known immediate-EOS failure mode, and one guaranteed
-    slot out of K=16 is cheap insurance.
+    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N)).
     """
     N = block_indices.numel()
     try:
@@ -925,7 +910,20 @@ def route_blocks_relevance(
         Q = Q.unsqueeze(1)  # [H, 1, D]
 
     slots_long = block_indices.long()
-    anc = pool.anchors_K[slots_long]                    # [N, H_kv, D] fp16
+    anc = pool.anchors_K[slots_long].clone()                    # [N, H_kv, D] fp16
+
+    if anchor_indices is not None and cos is not None and sin is not None:
+        cos_flat = cos.reshape(-1, anc.shape[-1])
+        sin_flat = sin.reshape(-1, anc.shape[-1])
+        anc_pos = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
+        cos_anc = cos_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
+        sin_anc = sin_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
+        half_d = anc.shape[-1] // 2
+        anc_half = torch.cat([-anc[..., half_d:], anc[..., :half_d]], dim=-1)
+        anc = anc * cos_anc + anc_half * sin_anc
+    else:
+        cos_anc = sin_anc = None
+
     H_kv = anc.shape[1]
     gpk = max(1, H // H_kv)
 
@@ -943,9 +941,6 @@ def route_blocks_relevance(
     res_scores = None
     res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)
-    # Skip residual scoring during 3D prefill routing to prevent large memory allocations
-    # and match MLX prefill routing behavior (which only uses anchors/minmax).
-    # Set DIFFKV_ROUTE_PREFILL_RESID=1 to override.
     route_prefill_res = (os.environ.get("DIFFKV_ROUTE_PREFILL_RESID", "0") == "1")
     if res_k is not None and res_pos is not None and res_k.numel() > 0 and (not is_3d or route_prefill_res):
         try:
@@ -954,8 +949,15 @@ def route_blocks_relevance(
             r_route = 0
         R_all = res_k.shape[1]
         R = min(R_all, r_route) if r_route > 0 else min(R_all, 64)
-        rk = res_k[slots_long, :R]                      # [N, R, H_kv, D]
+        rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
+
+        if cos_anc is not None and sin_anc is not None:
+            cos_anc_4d = cos_anc.unsqueeze(1)                   # [N, 1, 1, D]
+            sin_anc_4d = sin_anc.unsqueeze(1)                   # [N, 1, 1, D]
+            half_d = rk.shape[-1] // 2
+            rk_half = torch.cat([-rk[..., half_d:], rk[..., :half_d]], dim=-1)
+            rk = rk * cos_anc_4d + rk_half * sin_anc_4d
 
         # Permute rk to [H_kv, D, N * R]
         rk_permuted = rk.permute(2, 3, 0, 1).reshape(H_kv, D, N * R)
