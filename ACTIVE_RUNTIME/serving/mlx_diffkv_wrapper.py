@@ -950,10 +950,16 @@ def _execute_decode_attention_compiled(
                 relevance = _block_relevance_minmax(
                     q, comp_min_k, comp_max_k, scale, gpk
                 )
-            # Mask out relevance of padded blocks (index >= nb_actual) to ensure
-            # argsort selects only valid blocks.
+            # Mask out relevance of padded blocks (index >= nb_actual) so argsort
+            # selects only valid blocks. NaN-SAFE: the previous form
+            # `relevance + (1 - block_mask)*-1e9` computed 0.0 * -1e9 for VALID blocks,
+            # and in float16 -1e9 overflows to -inf so 0.0 * -inf = NaN — turning EVERY
+            # valid block's relevance into NaN. argsort then ordered the NaNs by index,
+            # so the router silently selected the highest-INDEX (most-recent) blocks
+            # instead of the most-relevant ones (a recency router, not the residual
+            # router). Use where() with a finite fp16-safe sentinel below any real q·k.
             block_mask = mx.arange(nb) < nb_actual
-            relevance = relevance + (1.0 - block_mask.astype(relevance.dtype)) * -1e9
+            relevance = mx.where(block_mask, relevance, mx.array(-3e4, dtype=relevance.dtype))
             sel = mx.argsort(relevance)[-k_eff:]
 
         topk_sel = sel
@@ -3929,6 +3935,7 @@ class MLXKVBlockManager:
 
         if need_route:
             U  = session["comp_U"][layer_idx][:nb]
+            us = session["comp_U_scale"][layer_idx][:nb]   # int8 dequant scale for U (per block)
             VK = session["comp_VK"][layer_idx][:nb]
             VV = session["comp_VV"][layer_idx][:nb]
             ak = session["comp_anc_k"][layer_idx][:nb]
@@ -3953,13 +3960,23 @@ class MLXKVBlockManager:
                     # that completes a cross-chunk relation). k_eff unchanged → flat tps.
                     relevance = _edge_propagate_relevance(relevance, ak, _er_beta, _er_maxnb)
                 sel = mx.argsort(relevance)[-k_eff:]
-                U = mx.take(U, sel, 0); VK = mx.take(VK, sel, 0); VV = mx.take(VV, sel, 0)
+                U = mx.take(U, sel, 0); us = mx.take(us, sel, 0); VK = mx.take(VK, sel, 0); VV = mx.take(VV, sel, 0)
                 ak = mx.take(ak, sel, 0); av = mx.take(av, sel, 0); sc = mx.take(sc, sel, 0)
                 csl = mx.take(csl, sel, 0); rk = mx.take(rk, sel, 0); rv = mx.take(rv, sel, 0)
                 res_n = mx.take(res_n, sel, 0)
                 if res_mask is not None:
                     res_mask = mx.take(res_mask, sel, 0)
             K, R = U.shape[0], rk.shape[1]
+
+            # Dequantize U from int8 → activation dtype BEFORE reconstruction. comp_U is
+            # stored int8 (round(U/scale_u*127)); the true basis weight is
+            # comp_U_int8 * comp_U_scale / 127. This MUST match the reference dequant in
+            # compute_decode_attention_static (line ~695); omitting it inflates every
+            # low-rank delta by ~127/scale_u, so the reconstructed block keys are garbage
+            # and the exact residual/dense half is intermittently outvoted → the
+            # DIFFKV_DECODE_CACHE=1 "kinda right but corrupted" regression. (The int8-U
+            # quant was added to the reference path but not to this fused reconstruction.)
+            U = U.astype(q.dtype) * (us.reshape(K, 1, 1) / 127.0)
 
             # Materialise: recon[t>0] = anchor + comp_scale*(U[t] @ V_basis); position 0 = anchor.
             delta_k = mx.einsum("bsr,bhrd->bhsd", U, VK) * sc.reshape(K, 1, 1, 1)
@@ -3980,10 +3997,17 @@ class MLXKVBlockManager:
             mk = mx.concatenate([full_k, res_k_all], axis=1)
             mv = mx.concatenate([full_v, res_v_all], axis=1)
             # SPARSE_BIAS in the unified SDPA = an additive score bonus on the COMPRESSED-block
-            # keys only (not residuals, not the dense window) — the same up-weighting the LSE
-            # merge applies. auto mode uses its base as a fixed value (the unified SDPA has no
-            # separate sparse/dense LSE to adapt on). 0.0 → bit-exact to the reference.
-            _bias = _SPARSE_BIAS_BASE if _SPARSE_BIAS_MODE == "auto" else _SPARSE_BIAS
+            # keys only (not residuals, not the dense window).
+            # NOTE: the reference (cache OFF) applies "auto" ADAPTIVELY to the sparse half's
+            # aggregate LSE, decaying it to 0 exactly when an exact residual/dense match
+            # dominates (the needle case). This fused path bakes a STATIC per-key mask once per
+            # route interval and has no per-token sparse/dense LSE to adapt on, so a flat non-zero
+            # base here would never decay AND would up-weight lossy low-rank block keys over the
+            # exact residuals in the SAME softmax — suppressing a buried needle. Since the
+            # adaptive form can't be reproduced per-token here, "auto" resolves to 0.0 (bit-exact
+            # to the no-bias flash merge). A numeric DIFFKV_SPARSE_BIAS is still honored as a flat
+            # value for users who deliberately want the nudge.
+            _bias = 0.0 if _SPARSE_BIAS_MODE == "auto" else _SPARSE_BIAS
             block_add = mx.where(block_valid, mx.array(_bias, dtype=mx.float32), NEGf)
             res_add   = mx.where(res_valid, ZEROf, NEGf)
             block_add_mask = mx.concatenate([block_add, res_add])
