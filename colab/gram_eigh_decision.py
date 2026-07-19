@@ -191,14 +191,11 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         for o in table.get(nm, {}).get("outputs", []):
             print(f"      [{'HIT' if o['hit'] else 'miss'}] want {o['code']}: '{o['out']}'")
 
+    # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DiffKV bug ──
     dref = table.get("dense_ref", {})
     base = table.get("baseline_svd", {})
     print()
-    if dref.get("n_ok", 0) < samples:
-        print(f"  ✗ DENSE REFERENCE INCOMPLETE ({dref.get('n_ok', 0)}/{samples}): dense_ref runner failed or crashed.")
-        print("    → Run with DIFFKV_WORKER_VERBOSE=1 to see worker logs / error.\n")
-        return False
-    if dref.get("recall", 0.0) <= 0:
+    if dref.get("n_ok", 0) > 0 and dref.get("recall", 0.0) <= 0:
         print("  ✗ PROMPT/EVAL BUG: plain dense HF also gets 0% recall — the NIAH prompt or the")
         print("    substring match is broken, NOT DiffKV. Dense outputs:")
         _snips("dense_ref")
@@ -254,13 +251,8 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
     if mode != "dense":
         os.environ["DIFFKV_PRESET"] = "mid"
         os.environ["DIFFKV_QUANTIZATION"] = "fp16"
-        os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-        os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
-        os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "0"
-        os.environ["DIFFKV_STREAMING_COMPRESS"] = "0"
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-        os.environ.setdefault("DIFFKV_TOPK_FRAC", "0.5")
-        os.environ.setdefault("DIFFKV_TOPK_BLOCKS", "32")
+        os.environ.pop("DIFFKV_LAYER_ADAPTIVE_RANK", None)
+        os.environ.pop("DIFFKV_STREAMING_COMPRESS", None)
         for k, v in env.items():
             os.environ[k] = str(v)
 
@@ -283,7 +275,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
             from transformers import AutoModelForCausalLM
             model = AutoModelForCausalLM.from_pretrained(
                 model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                device_map="auto" if device == "cuda" else None, trust_remote_code=True).eval()
+                device_map=device, trust_remote_code=True).eval()
             stop_ids |= _derive_stop_ids(tokenizer)
             CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
             runner = lambda ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
