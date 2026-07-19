@@ -152,6 +152,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     from run_a100_paper_experiments import _spawn_and_collect, compute_stats, wilson_ci
 
     recipes = [
+        ("dense_ref", {"__mode__": "dense"}),     # is the needle prompt retrievable AT ALL?
         ("baseline_svd", {}),
         ("gram_eigh", {"DIFFKV_COMPRESS_GRAM_SVD": "1"}),
         ("gram_rproj32", {"DIFFKV_COMPRESS_GRAM_SVD": "1", "DIFFKV_RANK_BOOST": "off",
@@ -180,21 +181,36 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         cs = compute_stats(comp)
         recall = (passes / n_ok * 100.0) if n_ok else 0.0
         rci = wilson_ci(passes, n_ok)["margin"] if n_ok else 0.0
-        table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok}
+        table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok,
+                       "outputs": r.get("outputs", [])}
         tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
-        print(f"  {name:<14} [{tag}] compress={cs['mean']:.3f}s recall={recall:.0f}% (n={n_ok})")
+        comp_str = "  n/a  " if name == "dense_ref" else f"{cs['mean']:.3f}s"
+        print(f"  {name:<14} [{tag}] compress={comp_str} recall={recall:.0f}% (n={n_ok})")
 
-    # ── Health gates: a decision tool must NOT say "safe" when runs crashed ──
+    def _snips(nm):
+        for o in table.get(nm, {}).get("outputs", []):
+            print(f"      [{'HIT' if o['hit'] else 'miss'}] want {o['code']}: '{o['out']}'")
+
+    # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DiffKV bug ──
+    dref = table.get("dense_ref", {})
     base = table.get("baseline_svd", {})
     print()
+    if dref.get("n_ok", 0) > 0 and dref.get("recall", 0.0) <= 0:
+        print("  ✗ PROMPT/EVAL BUG: plain dense HF also gets 0% recall — the NIAH prompt or the")
+        print("    substring match is broken, NOT DiffKV. Dense outputs:")
+        _snips("dense_ref")
+        print("    → fix the needle prompt / eval before judging DiffKV or Gram-eigh.\n")
+        return False
     if base.get("n_ok", 0) < samples or base.get("compress_s", 0.0) <= 0:
         print("  ✗ INCONCLUSIVE: baseline_svd did not complete all samples (likely OOM).")
         print("    → lower --ctx / --samples, or free the GPU, then re-run.\n")
         return False
     if base.get("recall", 0.0) <= 0:
-        print("  ✗ INCONCLUSIVE: baseline_svd recall is 0% — the harness isn't retrieving the")
-        print("    needle even without Gram-eigh (a separate recall/OOM problem, not compress).")
-        print("    → fix retrieval first; Gram-eigh can't be judged against a broken baseline.\n")
+        print(f"  ✗ DiffKV RETRIEVAL BUG: dense retrieves ({dref.get('recall', 0):.0f}%) but DiffKV")
+        print("    baseline is 0% at this ctx — DiffKV decode/routing drops the needle. This is a")
+        print("    real DiffKV bug, SEPARATE from Gram-eigh (which only touches compress). DiffKV outputs:")
+        _snips("baseline_svd")
+        print("    → fix DiffKV retrieval; Gram-eigh can't be judged against a broken baseline.\n")
         return False
 
     base_t, base_r, base_rci = base["compress_s"], base["recall"], base["recall_ci"]
@@ -225,19 +241,23 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
     import json as _json
     import torch
     sys.path.insert(0, HERE)
-    from run_a100_paper_experiments import (_diffkv_trial, _derive_stop_ids, _build_task,
-                                            generate_random_needles)
+    from run_a100_paper_experiments import (_diffkv_trial, _dense_family_trial, _derive_stop_ids,
+                                            _build_task, generate_random_needles)
     from transformers import AutoTokenizer
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    os.environ["DIFFKV_PRESET"] = "mid"
-    os.environ["DIFFKV_QUANTIZATION"] = "fp16"
-    os.environ.pop("DIFFKV_LAYER_ADAPTIVE_RANK", None)
-    os.environ.pop("DIFFKV_STREAMING_COMPRESS", None)
-    for k, v in env.items():
-        os.environ[k] = str(v)
+    env = dict(env)
+    mode = env.pop("__mode__", "diffkv")     # "dense" = plain HF reference, "diffkv" = DiffKV
+    if mode != "dense":
+        os.environ["DIFFKV_PRESET"] = "mid"
+        os.environ["DIFFKV_QUANTIZATION"] = "fp16"
+        os.environ.pop("DIFFKV_LAYER_ADAPTIVE_RANK", None)
+        os.environ.pop("DIFFKV_STREAMING_COMPRESS", None)
+        for k, v in env.items():
+            os.environ[k] = str(v)
 
-    result = {"name": name, "compress_times": [], "passes": 0, "n_ok": 0, "samples": samples}
+    result = {"name": name, "compress_times": [], "passes": 0, "n_ok": 0, "samples": samples,
+              "outputs": []}
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         needles = generate_random_needles(samples + 2)
@@ -248,25 +268,45 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
                 "niah", {"ctx_len": ctx, "depth": 0.5, "needle_code": code, "needle_sent": sent}, tokenizer)
             prompts.append((code, tokenizer.encode(fp)))
         stop_ids = _derive_stop_ids(tokenizer)
-        from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
-        w = PyTorchDiffKVHFWrapper(
-            model_id=model_id,
-            config={"preset": "mid", "rank": 32, "block_size": 256, "micro_block_size": 256,
-                    "quantization": "fp16"},
-            torch_dtype=torch.float16, device=device)
-        w.ensure_loaded()
-        stop_ids |= getattr(w, "stop_token_ids", set())
+
+        if mode == "dense":
+            # Plain HF reference: does the NEEDLE PROMPT retrieve at all? Isolates a
+            # prompt/eval bug (dense also 0%) from a DiffKV-specific bug (dense OK).
+            from transformers import AutoModelForCausalLM
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                device_map=device, trust_remote_code=True).eval()
+            stop_ids |= _derive_stop_ids(tokenizer)
+            CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
+            runner = lambda ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
+            closer = lambda: None                # subprocess exit frees the dense model
+        else:
+            from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
+            w = PyTorchDiffKVHFWrapper(
+                model_id=model_id,
+                config={"preset": "mid", "rank": 32, "block_size": 256, "micro_block_size": 256,
+                        "quantization": "fp16"},
+                torch_dtype=torch.float16, device=device)
+            w.ensure_loaded()
+            stop_ids |= getattr(w, "stop_token_ids", set())
+            runner = lambda ids: _diffkv_trial(w, ids, device, 32, stop_ids)
+            closer = lambda: w.close()
+
         for code, ids in prompts:
             try:
-                tr = _diffkv_trial(w, ids, device, 32, stop_ids)
+                tr = runner(ids)
             except Exception as e:
                 print(f"[recipe {name}] sample failed: {e}", file=sys.stderr)
                 continue
             result["n_ok"] += 1
             result["compress_times"].append(tr["prefill_compress_s"])
-            result["passes"] += int(code.upper() in tr["output_text"].upper())
+            hit = code.upper() in tr["output_text"].upper()
+            result["passes"] += int(hit)
+            if len(result["outputs"]) < 2:   # keep a couple of snippets for diagnosis
+                result["outputs"].append({"code": code, "hit": hit,
+                                          "out": tr["output_text"][:100].replace("\n", " ")})
         try:
-            w.close()
+            closer()
         except Exception:
             pass
     except Exception as e:
