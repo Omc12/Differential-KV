@@ -187,7 +187,8 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         rci = wilson_ci(passes, n_ok)["margin"] if n_ok else 0.0
         free_gb = r.get("free_gb_at_start")
         table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok,
-                       "outputs": r.get("outputs", []), "errors": r.get("errors", []), "free_gb": free_gb}
+                       "outputs": r.get("outputs", []), "errors": r.get("errors", []), "free_gb": free_gb,
+                       "transformers": r.get("transformers")}
         tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
         comp_str = "  n/a  " if name == "dense_ref" else f"{cs['mean']:.3f}s"
         vram = f" | GPU free@start={free_gb:.1f}GB" if free_gb is not None else ""
@@ -196,6 +197,12 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     def _snips(nm):
         for o in table.get(nm, {}).get("outputs", []):
             print(f"      [{'HIT' if o['hit'] else 'miss'}] want {o['code']}: '{o['out']}'")
+
+    # transformers version the SUBPROCESSES actually loaded (the thing that matters)
+    _tfm_ver = next((table[n].get("transformers") for n in table if table[n].get("transformers")), None)
+    if _tfm_ver:
+        _ok4x = _tfm_ver.startswith("4.")
+        print(f"\n  [subprocess transformers = {_tfm_ver}  {'OK (4.x)' if _ok4x else '❌ MUST be 4.x — this is the bug'}]")
 
     # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DiffKV bug ──
     dref = table.get("dense_ref", {})
@@ -274,8 +281,28 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
         for k, v in env.items():
             os.environ[k] = str(v)
 
+    import transformers as _tfm
     result = {"name": name, "compress_times": [], "passes": 0, "n_ok": 0, "samples": samples,
-              "outputs": []}
+              "outputs": [], "transformers": _tfm.__version__}
+
+    # ── Fail fast on the WRONG transformers version ───────────────────────────
+    # DiffKV's attention patch needs the 4.x Qwen2Attention signature, AND 5.x
+    # ignores torch_dtype (renamed to `dtype`) so the model silently loads in
+    # fp32 (~30GB → OOM on a 40GB card). Both symptoms = wrong version. Catch it
+    # here, BEFORE the load, so the message is clear instead of an fp32 OOM.
+    if not _tfm.__version__.startswith("4."):
+        result["status"] = "error"
+        result["errors"] = [
+            f"WRONG transformers {_tfm.__version__} (subprocess sees this version). DiffKV needs 4.x: "
+            "5.x garbles output (attention signature) AND loads the model in fp32 (~30GB → this OOM). "
+            "The pin didn't take in THIS python env. Fix: `pip install \"transformers==4.46.3\"` in the "
+            "SAME env, then RESTART THE KERNEL (re-importing isn't enough), and verify with "
+            "`import transformers; transformers.__version__`."]
+        tmp = out_path + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump(result, f)
+        os.replace(tmp, out_path)
+        os._exit(0)
 
     # ── Fail fast on a DIRTY GPU ──────────────────────────────────────────────
     # A 7B fp16 needs ~20GB. If the card already has most of its VRAM held by
