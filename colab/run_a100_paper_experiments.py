@@ -968,7 +968,45 @@ def _set_diffkv_env(preset: str):
     os.environ["DIFFKV_QUANTIZATION"] = "fp16"
 
 
+def _run_worker_isolated(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one worker task in a FRESH SUBPROCESS so all GPU memory is released on
+    exit. The DiffKV wrapper does not fully free on del/close (model + pool + JIT
+    caches + intercepted attention keep refs), so reloading per config in-process
+    OOMs a 40GB card (observed: 24.9GB free -> 10.1GB free -> OOM). Opt in with
+    DIFFKV_ISOLATE_WORKERS=1. Mirrors run_nat_eval.py's per-config isolation.
+    Result is written to a temp JSON file (stdout is full of DiffKV logging)."""
+    import tempfile
+    fd, out_path = tempfile.mkstemp(prefix="diffkv_worker_", suffix=".json")
+    os.close(fd)
+    env = os.environ.copy()
+    env["_DIFFKV_IN_WORKER"] = "1"     # child runs in-process (prevents re-spawn)
+    cmd = [sys.executable, os.path.abspath(__file__),
+           "--worker-task", task_type, "--worker-config", json.dumps(config),
+           "--worker-out", out_path]
+    timeout = float(os.environ.get("DIFFKV_WORKER_TIMEOUT_S", "1800"))
+    try:
+        subprocess.run(cmd, env=env, timeout=timeout)
+        with open(out_path) as f:
+            return json.load(f)
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": f"isolated worker timed out after {timeout}s"}
+    except Exception as e:
+        return {"status": "error", "error": f"isolated worker failed / produced no result: {e}"}
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
 def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    # Process isolation (opt-in) — run in a subprocess so the GPU is fully freed
+    # between configs on memory-tight cards (e.g. 40GB A100). The child sets
+    # _DIFFKV_IN_WORKER=1 so it runs the body in-process rather than re-spawning.
+    if (os.environ.get("DIFFKV_ISOLATE_WORKERS") == "1"
+            and os.environ.get("_DIFFKV_IN_WORKER") != "1"):
+        return _run_worker_isolated(task_type, config)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_id = config.get("model_id", "Qwen/Qwen2.5-7B-Instruct")
     preset = config.get("preset", "mid")
@@ -1671,10 +1709,16 @@ def main():
     parser.add_argument("--only", default="", help="comma-separated experiment ids to run (e.g. 1,5,21). Empty = all.")
     parser.add_argument("--worker-task", default="")
     parser.add_argument("--worker-config", default="{}")
+    parser.add_argument("--worker-out", default="", help="isolated-worker result file (JSON)")
     args = parser.parse_args()
 
     if args.worker_task:
-        print(json.dumps(run_worker_task(args.worker_task, json.loads(args.worker_config))))
+        res = run_worker_task(args.worker_task, json.loads(args.worker_config))
+        if args.worker_out:
+            with open(args.worker_out, "w") as f:
+                json.dump(res, f)
+        else:
+            print(json.dumps(res))
         return
 
     print("=" * 73)

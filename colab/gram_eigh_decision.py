@@ -132,13 +132,19 @@ def part1_cpu_correctness() -> bool:
 
 # ── PART 2: real GPU compress A/B (speed + recall) ───────────────────────────
 
-def part2_gpu_ab(model_id: str, ctx: int, samples: int) -> bool:
+def part2_gpu_ab(model_id: str, ctx: int, samples: int):
+    """Returns True (safe), False (not safe / inconclusive), or None (not run)."""
     print("=" * 74)
     print(f"PART 2 — GPU prefill-compress A/B @ {ctx} (compress time + NIAH recall)")
     print("=" * 74)
     if not torch.cuda.is_available():
         print("  CUDA not available — skipping GPU A/B. Run this on the A100.\n")
-        return True
+        return None
+
+    # Run each sample in a fresh subprocess. The DiffKV wrapper does not fully free
+    # on del, so reloading per sample OOMs a 40GB card (that is exactly what turned
+    # the earlier run into all-OOM). Isolation gives every run a clean GPU.
+    os.environ["DIFFKV_ISOLATE_WORKERS"] = "1"
     sys.path.insert(0, HERE)
     from run_a100_paper_experiments import run_worker_task, generate_random_needles, compute_stats, wilson_ci
 
@@ -151,35 +157,56 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int) -> bool:
     ]
     table = {}
     for name, env in recipes:
-        comp, passes = [], 0
+        comp, passes, n_ok = [], 0, 0
         for s in range(samples):
             code, sent = needles[s]
             res = run_worker_task("niah", {"model_id": model_id, "preset": "mid", "ctx_len": ctx,
                                            "depth": 0.5, "needle_code": code, "needle_sent": sent,
                                            "gen_len": 32, "extra_env": env, "n_trials": 2})
             if res.get("status") != "success":
-                print(f"    [{name}] sample {s} error: {res.get('error','')[:100]}")
+                print(f"    [{name}] sample {s} FAILED: {res.get('error','')[:120]}")
                 continue
+            n_ok += 1
             comp.append(res.get("prefill_compress_s", 0.0))
             passes += int(code.upper() in res.get("output_text", "").upper())
         cs = compute_stats(comp)
-        ci = wilson_ci(passes, samples)
-        table[name] = {"compress_s": cs["mean"], "compress_ci": cs["ci95_margin"],
-                       "recall": ci["p"], "recall_ci": ci["margin"]}
-        print(f"  {name:<14} compress={cs['mean']:.3f}s±{cs['ci95_margin']:.3f}  "
-              f"recall={ci['p']:.0f}%±{ci['margin']:.0f}")
+        recall = (passes / n_ok * 100.0) if n_ok else 0.0
+        rci = wilson_ci(passes, n_ok)["margin"] if n_ok else 0.0
+        table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci,
+                       "n_ok": n_ok}
+        tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
+        print(f"  {name:<14} [{tag}] compress={cs['mean']:.3f}s recall={recall:.0f}% (n={n_ok})")
 
+    # ── Health gates: a decision tool must NOT say "safe" when runs crashed ──
     base = table.get("baseline_svd", {})
-    base_t, base_r = base.get("compress_s", 0.0), base.get("recall", 0.0)
-    recall_ok = True
     print()
-    for name, r in table.items():
-        speed = (base_t / r["compress_s"]) if r["compress_s"] > 0 else 0.0
-        held = abs(r["recall"] - base_r) <= (r["recall_ci"] + base.get("recall_ci", 0) + 1e-6)
-        recall_ok = recall_ok and (name == "baseline_svd" or held)
-        print(f"  {name:<14} speedup={speed:.2f}x  recall_holds={'yes' if (name=='baseline_svd' or held) else 'NO'}")
-    print(f"\n  PART 2: {'speedup measured; recall held within CI ✓' if recall_ok else 'RECALL REGRESSED — do NOT default ✗'}\n")
-    return recall_ok
+    if base.get("n_ok", 0) < samples or base.get("compress_s", 0.0) <= 0:
+        print("  ✗ INCONCLUSIVE: baseline_svd did not complete all samples (likely OOM).")
+        print("    → lower --ctx / --samples, or free the GPU, then re-run.\n")
+        return False
+    if base.get("recall", 0.0) <= 0:
+        print("  ✗ INCONCLUSIVE: baseline_svd recall is 0% — the harness isn't retrieving the")
+        print("    needle even without Gram-eigh (a separate recall/OOM problem, not compress).")
+        print("    → fix retrieval first; Gram-eigh can't be judged against a broken baseline.\n")
+        return False
+
+    base_t, base_r, base_rci = base["compress_s"], base["recall"], base["recall_ci"]
+    eigh_safe = True
+    for name in ("gram_eigh", "gram_rproj32"):
+        r = table.get(name, {})
+        complete = r.get("n_ok", 0) == samples and r.get("compress_s", 0.0) > 0
+        faster = complete and r["compress_s"] < base_t
+        held = complete and (r["recall"] >= base_r - (r.get("recall_ci", 0.0) + base_rci))
+        speed = (base_t / r["compress_s"]) if r.get("compress_s", 0.0) > 0 else 0.0
+        ok = complete and faster and held
+        if name == "gram_eigh":
+            # Plain Gram-eigh is algebraically the SVD factorization → recall must
+            # hold; speed is the whole point. Both required to call it safe.
+            eigh_safe = ok
+        print(f"  {name:<14} complete={complete} speedup={speed:.2f}x recall_holds={held} "
+              f"-> {'SAFE' if ok else 'NOT SAFE'}")
+    print(f"\n  PART 2: {'gram_eigh faster + recall held ✓' if eigh_safe else 'NOT safe — see rows above ✗'}\n")
+    return eigh_safe
 
 
 def main():
@@ -191,29 +218,37 @@ def main():
     args = ap.parse_args()
 
     p1 = part1_cpu_correctness()
-    p2 = True
+    p2 = None
     if args.gpu_ab:
         p2 = part2_gpu_ab(args.model, args.ctx, args.samples)
     else:
         print("(run with --gpu-ab on the A100 to measure compress speedup + recall)\n")
 
     print("=" * 74)
-    if p1 and p2:
-        print("VERDICT: Gram-eigh is safe.")
-        print("  - Math is equivalent to SVD (Part 1).")
-        if args.gpu_ab:
-            print("  - Compress is faster and recall held within CI (Part 2).")
-            print("  TO MAKE DEFAULT: in lowrank.py:_compress_layer_blocks_gpu_inner change the")
-            print("    gate `if os.environ.get('DIFFKV_COMPRESS_GRAM_SVD','0')=='1'` so Gram-eigh")
-            print("    runs unless DIFFKV_COMPRESS_GRAM_SVD=0 is explicitly set (i.e. default '1').")
-            print("    The r_proj<=32 recipe is a fidelity trade — default it ONLY if gram_rproj32")
-            print("    recall also held above.")
-        else:
-            print("  - Run again with --gpu-ab on the A100 to confirm speed + recall before defaulting.")
+    if not p1:
+        print("VERDICT: NOT SAFE — the Gram-eigh math failed CPU parity (Part 1). Stop here.")
+        ok = False
+    elif p2 is None:
+        print("VERDICT: math verified (Part 1). SPEED + RECALL NOT YET MEASURED.")
+        print("  Run on the A100:  python colab/gram_eigh_decision.py --gpu-ab \\")
+        print("      --model Qwen/Qwen2.5-7B-Instruct --ctx 16384 --samples 3")
+        ok = True   # nothing failed; just incomplete
+    elif p2 is False:
+        print("VERDICT: NOT SAFE / INCONCLUSIVE — Part 2 did not cleanly pass (OOM, incomplete,")
+        print("  or recall regressed). Do NOT change the default. Fix the Part 2 failures above")
+        print("  (e.g. lower --ctx/--samples so runs don't OOM) and re-run.")
+        ok = False
     else:
-        print("VERDICT: NOT safe to default — see the FAIL rows above.")
+        print("VERDICT: SAFE to make Gram-eigh the default.")
+        print("  - Math equivalent to SVD (Part 1); compress faster + recall held (Part 2).")
+        print("  TO MAKE DEFAULT: in lowrank.py:_compress_layer_blocks_gpu_inner change the gate")
+        print("    `if os.environ.get('DIFFKV_COMPRESS_GRAM_SVD','0')=='1'` so Gram-eigh runs")
+        print("    unless DIFFKV_COMPRESS_GRAM_SVD=0 is explicitly set (i.e. default to '1').")
+        print("    The r_proj<=32 recipe is a fidelity trade — default it ONLY if gram_rproj32")
+        print("    also showed SAFE above.")
+        ok = True
     print("=" * 74)
-    sys.exit(0 if (p1 and p2) else 1)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
