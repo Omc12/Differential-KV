@@ -968,30 +968,70 @@ def _set_diffkv_env(preset: str):
     os.environ["DIFFKV_QUANTIZATION"] = "fp16"
 
 
+def _spawn_and_collect(cmd: List[str], out_path: str, timeout: float) -> Dict[str, Any]:
+    """Run `cmd` (a worker that writes its result ATOMICALLY to out_path) and
+    return the parsed JSON. Robust to two DiffKV quirks:
+      * console spam — the child's stdout/stderr go to DEVNULL (results come from
+        the file), so N sequential worker loads don't look like an infinite loop.
+        Set DIFFKV_WORKER_VERBOSE=1 to see child logs.
+      * hang-at-exit — the DiffKV binary has a known intermittent hang AFTER the
+        work + result are done, so we poll for the result file and KILL the child
+        once it appears instead of waiting for a clean exit.
+    The child inherits _DIFFKV_IN_WORKER=1 so it runs in-process (no re-spawn)."""
+    import time as _t
+    env = os.environ.copy()
+    env["_DIFFKV_IN_WORKER"] = "1"
+    quiet = os.environ.get("DIFFKV_WORKER_VERBOSE", "0") != "1"
+    stream = subprocess.DEVNULL if quiet else None
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+    p = subprocess.Popen(cmd, env=env, stdout=stream, stderr=stream)
+    deadline = _t.monotonic() + timeout
+    try:
+        while _t.monotonic() < deadline:
+            if os.path.exists(out_path):
+                _t.sleep(0.2)          # let the atomic rename settle
+                if p.poll() is None:
+                    p.kill()           # reap now; do not wait for a hang-at-exit
+                break
+            if p.poll() is not None:
+                break                  # child exited (possibly crashed) on its own
+            _t.sleep(0.5)
+        else:
+            p.kill()
+            return {"status": "error", "error": f"worker timed out after {timeout:.0f}s"}
+    finally:
+        try:
+            p.wait(timeout=15)
+        except Exception:
+            p.kill()
+    if os.path.exists(out_path):
+        try:
+            with open(out_path) as f:
+                return json.load(f)
+        except Exception as e:
+            return {"status": "error", "error": f"worker result unreadable: {e}"}
+    return {"status": "error", "error": "worker produced no result file (crashed before writing)"}
+
+
 def _run_worker_isolated(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """Run one worker task in a FRESH SUBPROCESS so all GPU memory is released on
-    exit. The DiffKV wrapper does not fully free on del/close (model + pool + JIT
-    caches + intercepted attention keep refs), so reloading per config in-process
-    OOMs a 40GB card (observed: 24.9GB free -> 10.1GB free -> OOM). Opt in with
-    DIFFKV_ISOLATE_WORKERS=1. Mirrors run_nat_eval.py's per-config isolation.
-    Result is written to a temp JSON file (stdout is full of DiffKV logging)."""
+    exit. The DiffKV wrapper does not fully free on del/close, so reloading per
+    config in-process OOMs a 40GB card (observed: 24.9GB free -> 10.1GB -> OOM).
+    Opt in with DIFFKV_ISOLATE_WORKERS=1."""
     import tempfile
     fd, out_path = tempfile.mkstemp(prefix="diffkv_worker_", suffix=".json")
     os.close(fd)
-    env = os.environ.copy()
-    env["_DIFFKV_IN_WORKER"] = "1"     # child runs in-process (prevents re-spawn)
+    os.remove(out_path)               # child creates it atomically; must not pre-exist
     cmd = [sys.executable, os.path.abspath(__file__),
            "--worker-task", task_type, "--worker-config", json.dumps(config),
            "--worker-out", out_path]
     timeout = float(os.environ.get("DIFFKV_WORKER_TIMEOUT_S", "1800"))
     try:
-        subprocess.run(cmd, env=env, timeout=timeout)
-        with open(out_path) as f:
-            return json.load(f)
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "error": f"isolated worker timed out after {timeout}s"}
-    except Exception as e:
-        return {"status": "error", "error": f"isolated worker failed / produced no result: {e}"}
+        return _spawn_and_collect(cmd, out_path, timeout)
     finally:
         try:
             os.remove(out_path)
@@ -1715,8 +1755,12 @@ def main():
     if args.worker_task:
         res = run_worker_task(args.worker_task, json.loads(args.worker_config))
         if args.worker_out:
-            with open(args.worker_out, "w") as f:
+            # Atomic write: the parent polls for this file then kills us (the
+            # binary can hang at exit), so it must never observe a partial file.
+            tmp = args.worker_out + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(res, f)
+            os.replace(tmp, args.worker_out)
         else:
             print(json.dumps(res))
         return
