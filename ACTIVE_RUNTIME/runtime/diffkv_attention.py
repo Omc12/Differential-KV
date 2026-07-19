@@ -561,12 +561,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 value_states[b_idx:b_idx+1].detach(),
                             )
 
-                    outputs = (attn_out,)
-                    if output_attentions:
-                        outputs += (None,)
-                    if use_cache:
-                        outputs += (None,)
-                    return outputs
+                    # transformers 4.44-4.47 decoder unpacks a FIXED 3-tuple
+                    # (attn_output, attn_weights, present_key_value); DiffKV keeps
+                    # KV in the manager, so present_key_value is None. The old
+                    # conditional tuple returned only 2 values when use_cache=True
+                    # & output_attentions=False → "expected 3, got 2".
+                    return (attn_out, None, None)
 
                 if is_decode:
                     # ----------------------------------------------------------
@@ -2158,12 +2158,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     attn_output = attn_output.reshape(bsz, q_len, hidden_size)
                     attn_output = self.o_proj(attn_output)
 
-                    outputs = (attn_output,)
-                    if output_attentions:
-                        outputs += (None,)
-                    if use_cache:
-                        outputs += (None,)
-                    return outputs
+                    # transformers 4.44-4.47: fixed 3-tuple return (output, weights, present_kv).
+                    return (attn_output, None, None)
 
                 # ==============================================================
                 # PREFILL / MULTI-QUERY PATH
@@ -2599,11 +2595,10 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     print(f"  query_states has nan: {torch.isnan(query_states).any().item()}")
                     print(f"  key_states has nan: {torch.isnan(key_states).any().item()}")
                     print(f"  value_states has nan: {torch.isnan(value_states).any().item()}")
-                outputs = (attn_output,)
-                if output_attentions:
-                    outputs += (attn_weights,)
-                if use_cache:
-                    outputs += (None,)
+                # transformers 4.44-4.47 decoder unpacks a FIXED 3-tuple
+                # (output, weights, present_kv); always return 3. DiffKV keeps KV
+                # in the manager, so present_key_value is None.
+                outputs = (attn_output, attn_weights if output_attentions else None, None)
 
                 # Reclaim VRAM on MPS during prefill
                 if not is_decode and hidden_states.device.type == "mps":
