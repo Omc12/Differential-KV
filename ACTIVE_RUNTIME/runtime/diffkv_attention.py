@@ -292,8 +292,22 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             cache_obj = sess_dict["dense_cache"]
 
                     kwargs_clean = kwargs.copy()
-                    kwargs_clean["past_key_values"] = cache_obj
-                    kwargs_clean["past_key_value"] = cache_obj
+                    # Pass ONLY the cache kwarg this transformers version's
+                    # attention actually accepts. 4.46 uses `past_key_value`
+                    # (singular); passing the plural too → "unexpected keyword
+                    # argument 'past_key_values'". Introspect once (cached).
+                    _op_params = getattr(self, "_diffkv_orig_params", None)
+                    if _op_params is None:
+                        import inspect as _insp
+                        try:
+                            _op_params = set(_insp.signature(self._original_forward).parameters)
+                        except (ValueError, TypeError):
+                            _op_params = {"past_key_value"}
+                        self._diffkv_orig_params = _op_params
+                    if "past_key_value" in _op_params:
+                        kwargs_clean["past_key_value"] = cache_obj
+                    if "past_key_values" in _op_params:
+                        kwargs_clean["past_key_values"] = cache_obj
                     return self._original_forward(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
@@ -562,11 +576,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                             )
 
                     # transformers 4.44-4.47 decoder unpacks a FIXED 3-tuple
-                    # (attn_output, attn_weights, present_key_value); DiffKV keeps
-                    # KV in the manager, so present_key_value is None. The old
-                    # conditional tuple returned only 2 values when use_cache=True
-                    # & output_attentions=False → "expected 3, got 2".
-                    return (attn_out, None, None)
+                    # (attn_output, attn_weights, present_key_value). DiffKV keeps
+                    # KV in the manager, so we return the cache object 4.46 passed
+                    # in (past_key_value) UNCHANGED — the model finalizes it
+                    # (to_legacy_cache); returning None → "NoneType has no
+                    # to_legacy_cache". The old conditional tuple returned only 2.
+                    return (attn_out, None, past_key_value)
 
                 if is_decode:
                     # ----------------------------------------------------------
@@ -2158,8 +2173,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     attn_output = attn_output.reshape(bsz, q_len, hidden_size)
                     attn_output = self.o_proj(attn_output)
 
-                    # transformers 4.44-4.47: fixed 3-tuple return (output, weights, present_kv).
-                    return (attn_output, None, None)
+                    # transformers 4.44-4.47: fixed 3-tuple return; hand back the
+                    # cache object 4.46 passed in so the model can finalize it.
+                    return (attn_output, None, past_key_value)
 
                 # ==============================================================
                 # PREFILL / MULTI-QUERY PATH
@@ -2597,8 +2613,9 @@ def apply_diffkv_attention_patch(model, kv_manager):
                     print(f"  value_states has nan: {torch.isnan(value_states).any().item()}")
                 # transformers 4.44-4.47 decoder unpacks a FIXED 3-tuple
                 # (output, weights, present_kv); always return 3. DiffKV keeps KV
-                # in the manager, so present_key_value is None.
-                outputs = (attn_output, attn_weights if output_attentions else None, None)
+                # in the manager and returns the passed-in cache object unchanged
+                # so the model can finalize it (to_legacy_cache).
+                outputs = (attn_output, attn_weights if output_attentions else None, past_key_value)
 
                 # Reclaim VRAM on MPS during prefill
                 if not is_decode and hidden_states.device.type == "mps":
