@@ -25,6 +25,10 @@ Usage:
         --ctx 16384 --samples 3
 """
 import os
+# MUST be set BEFORE `import torch` (recipe-worker subprocesses start here): the
+# expandable-segments allocator cuts fragmentation and matches the main benchmark
+# + CLI. Without it a 40GB card can fail a tiny alloc despite having free VRAM.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import sys
 import argparse
 import torch
