@@ -259,6 +259,8 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
         os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "0"
         os.environ["DIFFKV_STREAMING_COMPRESS"] = "0"
         os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
+        os.environ.setdefault("DIFFKV_TOPK_FRAC", "0.5")
+        os.environ.setdefault("DIFFKV_TOPK_BLOCKS", "32")
         for k, v in env.items():
             os.environ[k] = str(v)
 
