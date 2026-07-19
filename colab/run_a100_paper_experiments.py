@@ -615,7 +615,8 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
 
     # ── Prefill (forward) ──
     t0 = time.perf_counter()
-    past, last_logits = _chunked_prefill_dense(model, ids, device, CH)
+    with torch.no_grad():
+        past, last_logits = _chunked_prefill_dense(model, ids, device, CH)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fwd_s = time.perf_counter() - t0
@@ -1070,7 +1071,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
         if preset in DENSE_FAMILY_METHODS:
             from transformers import AutoModelForCausalLM
             load_kwargs = dict(torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                               device_map=device, trust_remote_code=True)
+                               device_map="auto" if device == "cuda" else None, trust_remote_code=True)
             # SnapKV needs real attention weights → eager attention path.
             if preset == "snapkv":
                 load_kwargs["attn_implementation"] = "eager"
