@@ -585,14 +585,15 @@ def _attend_and_reconstruct_v_compiled(
     anchors_V: torch.Tensor,
     scales: torch.Tensor,
     v_dense_rep: torch.Tensor,
-    H_q: int,
-    N: int,
-    block_capacity: int,
-    R: int,
-    D: int,
-    S_dense: int,
     V_V_perm: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    H_q = P_anchor.shape[0]
+    N = P_anchor.shape[1]
+    D = anchors_V.shape[-1] if anchors_V.numel() > 0 else (v_dense_rep.shape[-1] if v_dense_rep.numel() > 0 else (P_anchor.shape[-1] if P_anchor.dim() > 2 else 0))
+    S_dense = P_dense.shape[1] if P_dense.dim() > 1 else 0
+    block_capacity = (P_comp.shape[1] // N) if (N > 0 and P_comp.numel() > 0) else 0
+    R = U.shape[2] if (N > 0 and U.numel() > 0) else 0
+
     O_final = torch.zeros((H_q, D), device=P_anchor.device, dtype=P_anchor.dtype)
     if N > 0:
         P_comp_reshaped = P_comp.view(H_q, N, block_capacity).permute(1, 0, 2)
@@ -878,7 +879,7 @@ def warm_up_jit(
             _out2 = _attend_and_reconstruct_v(
                 P_anc_d, P_comp_d, P_den_d,
                 U_d, VV_d, anchV_d, scales_d,
-                v_den_d, H_q, N, S, R, D, S_dens,
+                v_den_d,
             )
             if torch.cuda.is_available():
                 torch.cuda.synchronize(_dev)
@@ -1584,9 +1585,10 @@ def _pytorch_vectorized_sparse_attn_decode(
             if anchor_indices is not None and cos is not None and sin is not None:
                 cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                 sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
-                cpu_anc_check = anchor_indices.cpu()
-                if (cpu_anc_check >= cos_flat.shape[0]).any():
-                    print(f"[DiffKV DEBUG] Out of bounds check: layer_idx={layer_idx} anchor_indices={cpu_anc_check.tolist()} cos_flat.shape={list(cos_flat.shape)}", flush=True)
+                if diagnostics:
+                    cpu_anc_check = anchor_indices.cpu()
+                    if (cpu_anc_check >= cos_flat.shape[0]).any():
+                        print(f"[DiffKV DEBUG] Out of bounds check: layer_idx={layer_idx} anchor_indices={cpu_anc_check.tolist()} cos_flat.shape={list(cos_flat.shape)}", flush=True)
                 
                 # Clamp anchor_indices to prevent GPU out of bounds
                 anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
@@ -1801,12 +1803,6 @@ def _pytorch_vectorized_sparse_attn_decode(
         anchors_V=anchors_V,
         scales=scales,
         v_dense_rep=v_dense_rep if S_dense > 0 else torch.empty((0,), device=q.device),
-        H_q=H_q,
-        N=N,
-        block_capacity=block_capacity,
-        R=R,
-        D=D,
-        S_dense=S_dense,
         V_V_perm=None,
     )
 

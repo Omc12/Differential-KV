@@ -1911,6 +1911,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     _hd2 = dense_k_assembled.shape[-1] // 2
                                     _rot_valid = (
                                         _rot_state is not None
+                                        and _rot_state.get("version") == current_version
                                         and _rot_state.get("anchors") == _anchors
                                         and len(_rot_state.get("lengths", ())) == len(_lengths)
                                         and all(
@@ -1932,6 +1933,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         torch.mul(dense_k_assembled, _cos_compute, out=_rot)
                                         _rot.addcmul_(_dk_half2, _sin_compute)
                                         _rot_state = {
+                                            "version": current_version,
                                             "anchors": _anchors,
                                             "lengths": _lengths,
                                             "rot": _rot,
