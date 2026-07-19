@@ -560,6 +560,21 @@ class PyTorchDiffKVHFWrapper:
                 use_safetensors=True,
                 local_files_only=self.local_files_only,
             )
+        elif quantization_config is None and str(device).startswith("cuda"):
+            # Non-quantized CUDA: load WITHOUT device_map then .to(device).
+            # device_map= triggers transformers' caching_allocator_warmup (4.46+),
+            # which coexists a full-size warmup buffer AND the weights (~2x the
+            # model → ~39GiB for a 7B on a 40GB card → OOM at load). Skipping
+            # device_map skips the warmup; peak is ~1x (fp16 weights). Quantized
+            # (4-bit) still needs device_map, handled by the else branch.
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+                use_safetensors=True,
+                low_cpu_mem_usage=True,
+                local_files_only=self.local_files_only,
+            ).to(device)
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,

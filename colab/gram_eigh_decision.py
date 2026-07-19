@@ -343,16 +343,17 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
             # Plain HF reference: does the NEEDLE PROMPT retrieve at all? Isolates a
             # prompt/eval bug (dense also 0%) from a DiffKV-specific bug (dense OK).
             from transformers import AutoModelForCausalLM
-            # attn_implementation="sdpa" so the dense reference doesn't fall to
-            # eager O(N^2) attention (which alone needs ~25GB of scores at 16k → OOM).
+            # Load WITHOUT device_map, then .to(device): device_map triggers
+            # transformers' caching_allocator_warmup (4.46), which holds a warmup
+            # buffer AND the weights at once (~2x → 39GiB on a 40GB card). No
+            # device_map → no warmup → peak ~15GiB. sdpa avoids eager O(N^2) @16k.
+            _kw = dict(torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                       trust_remote_code=True, low_cpu_mem_usage=True)
             try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                    device_map=device, trust_remote_code=True, attn_implementation="sdpa").eval()
+                model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation="sdpa", **_kw)
             except Exception:
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                    device_map=device, trust_remote_code=True).eval()
+                model = AutoModelForCausalLM.from_pretrained(model_id, **_kw)
+            model = model.to(device).eval()
             stop_ids |= _derive_stop_ids(tokenizer)
             CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
             runner = lambda fp, ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
