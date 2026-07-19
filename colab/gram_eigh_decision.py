@@ -182,7 +182,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         recall = (passes / n_ok * 100.0) if n_ok else 0.0
         rci = wilson_ci(passes, n_ok)["margin"] if n_ok else 0.0
         table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok,
-                       "outputs": r.get("outputs", [])}
+                       "outputs": r.get("outputs", []), "errors": r.get("errors", [])}
         tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
         comp_str = "  n/a  " if name == "dense_ref" else f"{cs['mean']:.3f}s"
         print(f"  {name:<14} [{tag}] compress={comp_str} recall={recall:.0f}% (n={n_ok})")
@@ -195,7 +195,19 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     dref = table.get("dense_ref", {})
     base = table.get("baseline_svd", {})
     print()
-    if dref.get("n_ok", 0) > 0 and dref.get("recall", 0.0) <= 0:
+
+    def _errs(nm):
+        for e in table.get(nm, {}).get("errors", [])[:2]:
+            print(f"      ERROR: {e[:180]}")
+
+    if dref.get("n_ok", 0) == 0:
+        print("  ⚠ dense_ref CRASHED (0 samples) — no reference for the prompt. Its errors:")
+        _errs("dense_ref")
+        # still report the DiffKV outputs so we can see if they're garbage vs wrong
+        print("    DiffKV baseline outputs (for context):")
+        _snips("baseline_svd")
+        return False
+    if dref.get("recall", 0.0) <= 0:
         print("  ✗ PROMPT/EVAL BUG: plain dense HF also gets 0% recall — the NIAH prompt or the")
         print("    substring match is broken, NOT DiffKV. Dense outputs:")
         _snips("dense_ref")
@@ -266,7 +278,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
             code, sent = needles[s]
             fp, _gt, _ans, _mode = _build_task(
                 "niah", {"ctx_len": ctx, "depth": 0.5, "needle_code": code, "needle_sent": sent}, tokenizer)
-            prompts.append((code, tokenizer.encode(fp)))
+            prompts.append((code, fp, tokenizer.encode(fp)))
         stop_ids = _derive_stop_ids(tokenizer)
 
         if mode == "dense":
@@ -278,7 +290,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
                 device_map=device, trust_remote_code=True).eval()
             stop_ids |= _derive_stop_ids(tokenizer)
             CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
-            runner = lambda ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
+            runner = lambda fp, ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
             closer = lambda: None                # subprocess exit frees the dense model
         else:
             from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
@@ -289,14 +301,16 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
                 torch_dtype=torch.float16, device=device)
             w.ensure_loaded()
             stop_ids |= getattr(w, "stop_token_ids", set())
-            runner = lambda ids: _diffkv_trial(w, ids, device, 32, stop_ids)
+            runner = lambda fp, ids: _diffkv_trial(w, ids, device, 32, stop_ids, full_prompt=fp)
             closer = lambda: w.close()
 
-        for code, ids in prompts:
+        for code, fp, ids in prompts:
             try:
-                tr = runner(ids)
+                tr = runner(fp, ids)
             except Exception as e:
-                print(f"[recipe {name}] sample failed: {e}", file=sys.stderr)
+                import traceback as _tb
+                result.setdefault("errors", []).append(f"{e}")
+                print(f"[recipe {name}] sample failed: {e}\n{_tb.format_exc()}", file=sys.stderr)
                 continue
             result["n_ok"] += 1
             result["compress_times"].append(tr["prefill_compress_s"])

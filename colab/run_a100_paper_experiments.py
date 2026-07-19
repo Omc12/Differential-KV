@@ -687,9 +687,17 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
     }
 
 
-def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set) -> Dict[str, Any]:
-    """One prefill+compress+decode trial on a SINGLE DiffKV session — no
-    generate(), no double prefill. Ported from run_nat_eval.py."""
+def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
+                  full_prompt: Optional[str] = None, question: Optional[str] = None) -> Dict[str, Any]:
+    """One DiffKV trial. Phase 1 does a manual prefill+compress on its own session
+    to get ISOLATED forward/compress timings + KV footprint + peak prefill VRAM
+    (what the paper's 'sacrifices prefill' + memory claims need). Phase 2 does the
+    DECODE + recall through the wrapper's PROVEN generate() path — a hand-rolled
+    decode loop garbles (it omits generate()'s per-token session registration + SRL
+    routing advancement), and generate() is what test_niah.py uses. Only the
+    GENERATED tokens are returned (the needle also lives in the prompt, so scoring
+    prompt+gen would false-pass). decode_time is generate()'s wall time minus the
+    measured prefill (its internal prefill ≈ the manual one)."""
     mgr, model = w.manager, w.model
     prompt_len = len(ids)
     sid = f"bench_{random.randint(10**6, 10**7)}"
@@ -747,44 +755,50 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set) -
     comp_s = time.perf_counter() - t1
 
     kv = analytic_kv_bytes(mgr, prompt_len, sid)
-
-    # ── Decode (token-by-token on the SAME session) ──
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    cur = prompt_len
-    gen_ids = []
-    _inp = torch.zeros((1, 1), dtype=torch.long, device=device)
-    _pos = torch.zeros((1, 1), dtype=torch.long, device=device)
-    t2 = time.perf_counter()
-    with torch.no_grad():
-        for _ in range(gen_len):
-            nid = int(torch.argmax(last_logits).item())
-            if nid in stop_ids:
-                break
-            gen_ids.append(nid)
-            _inp[0, 0] = nid
-            _pos[0, 0] = cur
-            out = model(input_ids=_inp, position_ids=_pos, use_cache=True)
-            last_logits = out.logits[0, -1].float()
-            cur += 1
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dec_s = time.perf_counter() - t2
-    peak_decode = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-
-    text = w.tokenizer.decode(gen_ids)
     pool_phys = kv["pool_physical_bytes"] / 1e9
     dense_eq = kv["dense_equiv_bytes"] / 1e9
-    mgr.clear_session(sid)
+    mgr.clear_session(sid)            # timing session done; decode uses its own session
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    # ── Phase 2: decode + recall via the PROVEN generate() path ──
+    text, gen_toks, dec_s = "", 0, 0.0
+    peak_decode = peak_prefill
+    if full_prompt is not None:
+        gen_sid = f"gen_{random.randint(10**6, 10**7)}"
+        w.active_session = gen_sid
+        mgr.clear_session(gen_sid)
+        w._session_token_ids[gen_sid] = []
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        t2 = time.perf_counter()
+        with torch.no_grad():
+            # rep-penalty 1.0 + top_p 1.0 = retrieval-safe (matches test_niah.py);
+            # generate() has its own numeric-digit protection.
+            _ = w.generate(prompt=full_prompt, max_new_tokens=gen_len, temperature=0.0,
+                           top_p=1.0, repetition_penalty=1.0, query_text=question)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t_gen = time.perf_counter() - t2
+        peak_decode = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+        # Score ONLY the generated tokens (the needle is in the prompt too).
+        all_ids = w._session_token_ids.get(gen_sid, [])
+        gen_only = all_ids[prompt_len:] if len(all_ids) > prompt_len else []
+        text = w.tokenizer.decode(gen_only, skip_special_tokens=True)
+        gen_toks = len(gen_only)
+        dec_s = max(1e-6, t_gen - (fwd_s + comp_s))   # generate total minus measured prefill
+        mgr.clear_session(gen_sid)
+        w.active_session = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return {
         "prefill_forward_s": fwd_s, "prefill_compress_s": comp_s, "decode_time_s": dec_s,
-        "decode_tps": len(gen_ids) / dec_s if dec_s > 0 else 0.0,
+        "decode_tps": gen_toks / dec_s if dec_s > 0 else 0.0,
         "peak_prefill_vram_gb": peak_prefill, "peak_decode_vram_gb": peak_decode,
         "kv_physical_gb": pool_phys, "kv_dense_equiv_gb": dense_eq,
         "kv_logical_gb": kv["store_used_bytes"] / 1e9, "kv_blocks_layer0": kv["blocks_layer0"],
-        "gen_len": len(gen_ids), "output_text": text,
+        "gen_len": gen_toks, "output_text": text,
     }
 
 
@@ -1112,7 +1126,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
                     _ = w.model(torch.zeros((1, 8), dtype=torch.long, device=device))
                 torch.cuda.synchronize()
             for _ in range(n_trials):
-                tr = _diffkv_trial(w, ids, device, gen_len, stop_ids)
+                tr = _diffkv_trial(w, ids, device, gen_len, stop_ids, full_prompt=full_prompt)
                 trials.append(tr)
                 last_text = tr["output_text"]
             try:
