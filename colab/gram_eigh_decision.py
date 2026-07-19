@@ -254,8 +254,11 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
     if mode != "dense":
         os.environ["DIFFKV_PRESET"] = "mid"
         os.environ["DIFFKV_QUANTIZATION"] = "fp16"
-        os.environ.pop("DIFFKV_LAYER_ADAPTIVE_RANK", None)
-        os.environ.pop("DIFFKV_STREAMING_COMPRESS", None)
+        os.environ["DIFFKV_FACTUAL_STORE"] = "0"
+        os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
+        os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "0"
+        os.environ["DIFFKV_STREAMING_COMPRESS"] = "0"
+        os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
         for k, v in env.items():
             os.environ[k] = str(v)
 
