@@ -188,7 +188,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         free_gb = r.get("free_gb_at_start")
         table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok,
                        "outputs": r.get("outputs", []), "errors": r.get("errors", []), "free_gb": free_gb,
-                       "transformers": r.get("transformers")}
+                       "transformers": r.get("transformers"), "worker_rev": r.get("worker_rev")}
         tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
         comp_str = "  n/a  " if name == "dense_ref" else f"{cs['mean']:.3f}s"
         vram = f" | GPU free@start={free_gb:.1f}GB" if free_gb is not None else ""
@@ -200,9 +200,13 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
 
     # transformers version the SUBPROCESSES actually loaded (the thing that matters)
     _tfm_ver = next((table[n].get("transformers") for n in table if table[n].get("transformers")), None)
+    _rev = next((table[n].get("worker_rev") for n in table if table[n].get("worker_rev")), None)
     if _tfm_ver:
         _ok4x = _tfm_ver.startswith("4.")
         print(f"\n  [subprocess transformers = {_tfm_ver}  {'OK (4.x)' if _ok4x else '❌ MUST be 4.x — this is the bug'}]")
+    # Build marker: if this is missing/None, the Lightning repo is running STALE
+    # code (didn't re-sync) — the device_map load fix isn't deployed.
+    print(f"  [worker build = {_rev or 'MISSING → STALE CODE on Lightning, re-sync the repo!'}]")
 
     # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DiffKV bug ──
     dref = table.get("dense_ref", {})
@@ -210,8 +214,8 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     print()
 
     def _errs(nm):
-        for e in table.get(nm, {}).get("errors", [])[:2]:
-            print(f"      ERROR: {e[:180]}")
+        for e in table.get(nm, {}).get("errors", [])[:1]:
+            print(f"      ERROR: {e[:700]}")   # full OOM breakdown (PyTorch vs non-PyTorch split)
 
     if dref.get("n_ok", 0) == 0:
         print("  ⚠ dense_ref CRASHED (0 samples) — no reference for the prompt. Its errors:")
@@ -283,7 +287,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
 
     import transformers as _tfm
     result = {"name": name, "compress_times": [], "passes": 0, "n_ok": 0, "samples": samples,
-              "outputs": [], "transformers": _tfm.__version__}
+              "outputs": [], "transformers": _tfm.__version__, "worker_rev": "nodevmap-r1"}
 
     # ── Fail fast on the WRONG transformers version ───────────────────────────
     # DiffKV's attention patch needs the 4.x Qwen2Attention signature, AND 5.x
