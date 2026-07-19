@@ -285,9 +285,16 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
             # Plain HF reference: does the NEEDLE PROMPT retrieve at all? Isolates a
             # prompt/eval bug (dense also 0%) from a DiffKV-specific bug (dense OK).
             from transformers import AutoModelForCausalLM
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                device_map=device, trust_remote_code=True).eval()
+            # attn_implementation="sdpa" so the dense reference doesn't fall to
+            # eager O(N^2) attention (which alone needs ~25GB of scores at 16k → OOM).
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                    device_map=device, trust_remote_code=True, attn_implementation="sdpa").eval()
+            except Exception:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                    device_map=device, trust_remote_code=True).eval()
             stop_ids |= _derive_stop_ids(tokenizer)
             CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
             runner = lambda fp, ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
@@ -332,6 +339,12 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
     with open(tmp, "w") as f:
         _json.dump(result, f)
     os.replace(tmp, out_path)
+    # Exit immediately: frees this subprocess's GPU memory now and skips the
+    # DiffKV hang-at-exit (so the parent never has to SIGKILL us, which can leak
+    # GPU memory that accumulates into the "39GB already used" OOM across runs).
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def main():

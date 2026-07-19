@@ -1769,12 +1769,17 @@ def main():
     if args.worker_task:
         res = run_worker_task(args.worker_task, json.loads(args.worker_config))
         if args.worker_out:
-            # Atomic write: the parent polls for this file then kills us (the
-            # binary can hang at exit), so it must never observe a partial file.
+            # Atomic write, then EXIT IMMEDIATELY via os._exit: the DiffKV binary
+            # can hang at exit, and letting the parent SIGKILL us can leak GPU
+            # memory that accumulates across runs (-> the "39GB already used" OOM).
+            # os._exit terminates now; the OS frees all GPU memory this process held.
             tmp = args.worker_out + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(res, f)
             os.replace(tmp, args.worker_out)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
         else:
             print(json.dumps(res))
         return
