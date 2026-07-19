@@ -1443,6 +1443,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                 _dk = dense_k_assembled if dense_k_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _dv = dense_v_assembled if dense_v_assembled is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 
+                                cos_flat = cos_all.reshape(-1, head_dim)
+                                sin_flat = sin_all.reshape(-1, head_dim)
+                                seq_limit = cos_flat.shape[0]
+                                _cos = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
+                                _sin = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                 if dense_k_assembled is not None:
                                     # OPT (P1-7): reuse cached position tensor (shared with CUDA combined path)
                                     _cache_key = (session_dict.get("routing_version", 0), dense_len)
@@ -1857,11 +1862,14 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                     dtype=torch.long,
                                                     device=_dp2.device,
                                                 ))
+                                                _cos_flat = cos_all.reshape(-1, head_dim)
+                                                _sin_flat = sin_all.reshape(-1, head_dim)
+                                                _seq_lim = _cos_flat.shape[0]
                                                 _cos_d2[:, :, _s:_e].copy_(
-                                                    cos_all[0, _dp2[_s:_e]].unsqueeze(0).unsqueeze(1)
+                                                    _cos_flat[_dp2[_s:_e].clamp(min=0, max=_seq_lim - 1)].unsqueeze(0).unsqueeze(1)
                                                 )
                                                 _sin_d2[:, :, _s:_e].copy_(
-                                                    sin_all[0, _dp2[_s:_e]].unsqueeze(0).unsqueeze(1)
+                                                    _sin_flat[_dp2[_s:_e].clamp(min=0, max=_seq_lim - 1)].unsqueeze(0).unsqueeze(1)
                                                 )
                                             _offset += _new_len
                                         _dpc_dict[captured_layer_idx] = (
@@ -2060,8 +2068,11 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             for blk in dense_blocks:
                                                 dense_positions_list.extend(blk.token_indices)
                                             dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
-                                            cos_dense = cos_all[0, dense_positions.clamp(max=cos_all.shape[1] - 1)].squeeze().unsqueeze(0).unsqueeze(1)
-                                            sin_dense = sin_all[0, dense_positions.clamp(max=sin_all.shape[1] - 1)].squeeze().unsqueeze(0).unsqueeze(1)
+                                            cos_flat = cos_all.reshape(-1, head_dim)
+                                            sin_flat = sin_all.reshape(-1, head_dim)
+                                            seq_limit = cos_flat.shape[0]
+                                            cos_dense = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
+                                            sin_dense = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                             dense_k_rot = (dense_k_valid * cos_dense) + (rotate_half(dense_k_valid)) * sin_dense
 
                                         _q_val = query_states[b_idx, :, 0, :]
