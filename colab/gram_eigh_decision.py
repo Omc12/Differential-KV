@@ -185,11 +185,13 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
         cs = compute_stats(comp)
         recall = (passes / n_ok * 100.0) if n_ok else 0.0
         rci = wilson_ci(passes, n_ok)["margin"] if n_ok else 0.0
+        free_gb = r.get("free_gb_at_start")
         table[name] = {"compress_s": cs["mean"], "recall": recall, "recall_ci": rci, "n_ok": n_ok,
-                       "outputs": r.get("outputs", []), "errors": r.get("errors", [])}
+                       "outputs": r.get("outputs", []), "errors": r.get("errors", []), "free_gb": free_gb}
         tag = "OK" if n_ok == samples else f"INCOMPLETE {n_ok}/{samples}"
         comp_str = "  n/a  " if name == "dense_ref" else f"{cs['mean']:.3f}s"
-        print(f"  {name:<14} [{tag}] compress={comp_str} recall={recall:.0f}% (n={n_ok})")
+        vram = f" | GPU free@start={free_gb:.1f}GB" if free_gb is not None else ""
+        print(f"  {name:<14} [{tag}] compress={comp_str} recall={recall:.0f}% (n={n_ok}){vram}")
 
     def _snips(nm):
         for o in table.get(nm, {}).get("outputs", []):
@@ -274,6 +276,31 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
 
     result = {"name": name, "compress_times": [], "passes": 0, "n_ok": 0, "samples": samples,
               "outputs": []}
+
+    # ── Fail fast on a DIRTY GPU ──────────────────────────────────────────────
+    # A 7B fp16 needs ~20GB. If the card already has most of its VRAM held by
+    # ANOTHER process (a notebook kernel or a leaked worker), the load OOMs with a
+    # cryptic "39GB in use" message. Detect it here and say so plainly.
+    if device == "cuda":
+        try:
+            free_b, total_b = torch.cuda.mem_get_info()
+            free_gb, total_gb = free_b / 1e9, total_b / 1e9
+            result["free_gb_at_start"] = round(free_gb, 1)
+            if free_gb < 18.0:
+                result["status"] = "error"
+                result["errors"] = [
+                    f"DIRTY GPU: only {free_gb:.1f} GB free of {total_gb:.0f} GB at startup — "
+                    f"another process holds ~{total_gb - free_gb:.0f} GB. A 7B needs ~20 GB. "
+                    "Run `nvidia-smi`, then restart the notebook KERNEL (not just the instance) "
+                    "or `kill -9` the leftover python PID, or run this from a fresh terminal."]
+                tmp = out_path + ".tmp"
+                with open(tmp, "w") as f:
+                    _json.dump(result, f)
+                os.replace(tmp, out_path)
+                os._exit(0)
+        except Exception:
+            pass
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         needles = generate_random_needles(samples + 2)
