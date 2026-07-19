@@ -1078,17 +1078,6 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     device = block_indices.device
     base_pool = object.__getattribute__(pool_for_kernel, "_pool") \
         if isinstance(pool_for_kernel, _StratifiedUProxy) else pool_for_kernel
-    pool_gen = getattr(base_pool, "_stratified_generation", None)
-    cache_key = None
-    if pool_gen is not None:
-        # Use data_ptr+numel as cache key instead of block_indices.tolist().
-        # Same uniqueness guarantee (same tensor object = same content for
-        # immutable routing tensors) but ZERO D2H sync — tolist() was
-        # causing 48 GPU pipeline stalls per token (one per layer).
-        cache_key = (id(base_pool), pool_gen, block_indices.data_ptr(), block_indices.numel())
-        got = _gathered_rot_cache.get(cache_key)
-        if got is not None:
-            return got
 
     indices = block_indices.long()
     g = {}
@@ -1159,13 +1148,6 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
         g["fact_av"]  = torch.empty((0, 0, 0, 0), device=device)
         g["max_fact"] = 1
 
-    if cache_key is not None:
-        # Evict stale entries only when pool generation changes (keeps cache alive across layers)
-        stale = [k for k in _gathered_rot_cache
-                 if k[0] == cache_key[0] and k[1] < pool_gen]
-        for k in stale:
-            del _gathered_rot_cache[k]
-        _gathered_rot_cache[cache_key] = g
     return g
 
 
