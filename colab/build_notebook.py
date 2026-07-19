@@ -50,7 +50,18 @@ CELLS = [
         "    p = torch.cuda.get_device_properties(0)",
         "    print('Device:', p.name, '| VRAM: %.1f GB' % (p.total_memory / 1e9))",
     ),
-    code("!pip install -q transformers accelerate bitsandbytes triton matplotlib seaborn tabulate psutil requests urllib3 datasets"),
+    md(
+        "> ⚠️ **transformers must be 4.x.** DiffKV's CUDA attention interception uses the transformers 4.x",
+        "> `Qwen2Attention.forward` signature. On 4.48+/5.x, `position_embeddings` became a positional arg and the",
+        "> patch silently produces **garbage output** (and dense falls to eager → 16k OOM). The pin below fixes it.",
+    ),
+    code("!pip install -q 'transformers==4.46.3' accelerate bitsandbytes triton matplotlib seaborn tabulate psutil requests urllib3 datasets"),
+    code(
+        "import transformers",
+        "assert transformers.__version__.startswith('4.4'), (",
+        "    f'transformers {transformers.__version__} will garble DiffKV — pin 4.x: pip install \"transformers==4.46.3\" then RESTART the kernel')",
+        "print('transformers', transformers.__version__, 'OK (4.x)')",
+    ),
     md(
         "## Step 2a: Decision run FIRST — exp22 (frontier) + exp23 (quality-vs-context)",
         "",

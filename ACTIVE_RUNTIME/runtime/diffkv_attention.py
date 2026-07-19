@@ -209,6 +209,33 @@ def apply_diffkv_attention_patch(model, kv_manager):
     head_dim              = hidden_size // num_heads
     num_key_value_groups  = num_heads // num_key_value_heads
 
+    # ── transformers-version guard ──────────────────────────────────────────
+    # diffkv_forward below replaces the attention forward with the transformers
+    # 4.x signature (hidden_states, attention_mask, position_ids, past_key_value,
+    # ... , position_embeddings). transformers 4.48+/5.x reordered this so
+    # position_embeddings is the 2nd POSITIONAL arg and use_cache/position_ids
+    # were removed — the model would then pass the RoPE tuple into our
+    # `attention_mask` slot and the patch silently produces TOKEN SALAD. Detect
+    # the mismatch and fail loudly instead of emitting garbage.
+    try:
+        import inspect as _inspect
+        _sig = _inspect.signature(type(model.model.layers[0].self_attn).forward)
+        _params = set(_sig.parameters)
+        if not ({"attention_mask", "use_cache"} <= _params):
+            import transformers as _tfm
+            raise RuntimeError(
+                "DiffKV CUDA attention interception is INCOMPATIBLE with transformers "
+                f"{_tfm.__version__}: its attention forward signature "
+                f"{tuple(_sig.parameters)} lost the 4.x args this patch relies on "
+                "(position_embeddings is now positional). This silently produces "
+                "garbage output. Pin transformers to 4.x, e.g. "
+                "`pip install \"transformers==4.46.3\"`, and restart."
+            )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass  # introspection failed — proceed and let the patch run
+
     for i, layer in enumerate(model.model.layers):
 
         def make_diffkv_forward(captured_layer_idx):
