@@ -1836,7 +1836,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     # fixed max_dense_len shape and only its appended
                                     # suffix needs updating.
                                     _cache_key = (current_version, _dense_anchor_sig, _max_dense)
-                                    _dp2_cache = session_dict.get("cuda_dense_pos_tensor_cache")
+                                    _dpc_dict = session_dict.setdefault("cuda_dense_pos_tensor_cache", {})
+                                    _dp2_cache = _dpc_dict.get(captured_layer_idx)
                                     if (_dp2_cache is not None
                                             and _dp2_cache[0] == _cache_key
                                             and _dp2_cache[2].shape[0] == _max_dense):
@@ -1863,7 +1864,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                     sin_all[0, _dp2[_s:_e]].unsqueeze(0).unsqueeze(1)
                                                 )
                                             _offset += _new_len
-                                        session_dict["cuda_dense_pos_tensor_cache"] = (
+                                        _dpc_dict[captured_layer_idx] = (
                                             _cache_key, _dense_lengths, _dp2, _cos_d2, _sin_d2
                                         )
                                     else:
