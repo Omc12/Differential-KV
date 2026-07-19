@@ -90,11 +90,12 @@ def diffkv_probe(model_id, prompt, device, n=6):
     ptoks = len(w.tokenizer.encode(prompt))
     gen = all_ids[ptoks:]
     first = gen[0] if gen else None
+    decoded = w.tokenizer.decode(gen, skip_special_tokens=True)
     try:
         w.close()
     except Exception:
         pass
-    return first, w.tokenizer.decode(gen, skip_special_tokens=True)
+    return first, decoded
 
 
 def main():
