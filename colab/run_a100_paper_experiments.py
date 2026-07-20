@@ -1120,8 +1120,10 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
                 os.environ[_k] = str(_v)
             from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
             diffkv_config = {"preset": ADAPTIVE_PRESETS.get(preset, (preset,))[0],
-                             "rank": rank, "block_size": block_size, "micro_block_size": block_size,
+                             "block_size": block_size, "micro_block_size": block_size,
                              "quantization": "fp16"}
+            if "rank" in config:
+                diffkv_config["rank"] = config["rank"]
             w = PyTorchDiffKVHFWrapper(model_id=model_id, config=diffkv_config,
                                        torch_dtype=torch.float16, device=device)
             w.ensure_loaded()
