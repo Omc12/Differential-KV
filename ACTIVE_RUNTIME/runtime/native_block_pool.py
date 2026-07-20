@@ -212,9 +212,9 @@ class NativeBlockPool:
         self.seq_lens   = torch.zeros((n_blocks,), device=self.device, dtype=torch.int32)
         self.desc       = torch.zeros((n_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
 
-        self.residual_K_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        self.residual_K_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int32)
         self.residual_K_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
-        self.residual_V_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        self.residual_V_positions = torch.full((n_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int32)
         self.residual_V_values = torch.zeros((n_blocks, self.max_residual_tokens, self.num_kv_heads, self.head_dim), device=self.device, dtype=self.dtype)
 
         # Fact Anchors (Solution 3) — CPU-compress path only; None on the CUDA
@@ -302,9 +302,9 @@ class NativeBlockPool:
         new_seq_lens = torch.zeros((new_blocks,), device=self.device, dtype=torch.int32)
         new_desc = torch.zeros((new_blocks, _SRL_DESC_DIM), device=self.device, dtype=torch.float16)
 
-        new_res_K_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        new_res_K_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int32)
         new_res_K_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
-        new_res_V_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int16)
+        new_res_V_pos = torch.full((new_blocks, self.max_residual_tokens), -1, device=self.device, dtype=torch.int32)
         new_res_V_val = torch.zeros((new_blocks, self.max_residual_tokens, num_kv_heads, head_dim), device=self.device, dtype=self.dtype)
 
         new_fact_anc_K = torch.zeros((new_blocks, 3, num_kv_heads, head_dim), device=self.device, dtype=self.dtype) if _legacy else None
