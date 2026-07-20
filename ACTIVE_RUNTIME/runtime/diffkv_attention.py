@@ -1897,7 +1897,12 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             _sin_d2 = _sin_d2.squeeze(1)
                                         _cos_d2 = _cos_d2.unsqueeze(0).unsqueeze(1)  # [1,1,max_dense_len,D]
                                         _sin_d2 = _sin_d2.unsqueeze(0).unsqueeze(1)
-                                        session_dict["cuda_dense_pos_tensor_cache"] = (
+                                        # Store per-layer (matches the cache-hit branch above,
+                                        # which writes _dpc_dict[captured_layer_idx]).  Writing a
+                                        # bare tuple to session_dict here would clobber the dict
+                                        # created by setdefault(...,{}) at the top of this block,
+                                        # so the next layer's .get() would crash on a tuple.
+                                        _dpc_dict[captured_layer_idx] = (
                                             _cache_key, _dense_lengths, _dp2, _cos_d2, _sin_d2
                                         )
                                     # Keep the dense KV in its RoPE-rotated form across
