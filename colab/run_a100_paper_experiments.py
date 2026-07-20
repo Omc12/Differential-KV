@@ -484,9 +484,12 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
 
     s0 = mgr.sessions.get(sid)
     nb = (s0["num_blocks"][0] if (s0 and "num_blocks" in s0 and s0["num_blocks"]) else 0) or (seq_len // B) or 1
-    dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
+    max_dense = int(getattr(mgr, "max_active_dense_tokens", 1024) or 1024)
+    raw_dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
+    dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
     res_n0 = s0["comp_res_n"][0][:nb] if (s0 and "comp_res_n" in s0 and s0["comp_res_n"]) else []
-    res_tokens_used = int(sum(res_n0))
+    res_cap = max(1, int(0.15 * B))
+    res_tokens_used = sum(min(int(rn), res_cap) for rn in res_n0) if res_n0 else (nb * res_cap)
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
     pool_physical = 0
