@@ -483,9 +483,9 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     lowrank_block = (B * r * 1 + 2 * Hkv * r * d * fp16 + 2 * Hkv * d * fp16 + 8)
 
     s0 = mgr.sessions.get(sid)
-    nb = s0["num_blocks"][0] if s0 else 0
-    dl = s0["dense_lens"][0] if s0 else 0
-    res_n0 = s0["comp_res_n"][0][:nb] if s0 else []
+    nb = (s0["num_blocks"][0] if (s0 and "num_blocks" in s0 and s0["num_blocks"]) else 0) or (seq_len // B) or 1
+    dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
+    res_n0 = s0["comp_res_n"][0][:nb] if (s0 and "comp_res_n" in s0 and s0["comp_res_n"]) else []
     res_tokens_used = int(sum(res_n0))
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
