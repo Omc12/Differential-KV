@@ -755,7 +755,8 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
     comp_s = time.perf_counter() - t1
 
     kv = analytic_kv_bytes(mgr, prompt_len, sid)
-    pool_phys = kv["pool_physical_bytes"] / 1e9
+    phys_bytes = max(kv["store_used_bytes"], kv["pool_physical_bytes"])
+    pool_phys = phys_bytes / 1e9
     dense_eq = kv["dense_equiv_bytes"] / 1e9
     mgr.clear_session(sid)            # timing session done; decode uses its own session
     if torch.cuda.is_available():
