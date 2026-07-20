@@ -1,7 +1,37 @@
 # CUDA DiffKV — Deep-Needle Decode Fidelity Bug — HANDOFF
 
-**Date:** 2026-07-20 · **Status:** root-caused to a real CUDA decode-fidelity bug, NOT yet fixed.
-**Owner picking this up:** you have the A100; I (assistant) can't run CUDA, only MLX locally.
+**Date:** 2026-07-20 · **Status:** ROOT-CAUSED, FIXED, and CPU-VERIFIED (`847291`). A100 re-verify owed.
+
+## 0. ✅ FIX IMPLEMENTED & CPU-VERIFIED (2026-07-20)
+
+Reproduced the exact `888888` on CPU (`DIFFKV_FORCE_PYTORCH=1`, `torch_dtype=float32`), root-caused it
+to THREE compounding bugs, fixed all three, and verified `gen='847291'` on the same CPU repro. Edits:
+
+1. **Metadata desync** — `streaming_sparse_ingest.py:1449` & `:1487`: added `update_metadata_state(...)`
+   after `block.state="COMPRESSED"` on the sync/deferred compression paths. (Sync-compressed skip blocks
+   were left stale in `metadata[:,3]` → decode's `compressed_mask==2` dropped them.)
+2. **skip_compression early-return** — `kv_runtime_manager.py:2762`: REMOVED
+   `if skip_compression: return None` in `_preprocess_block_for_compression`. It defeated the deferred
+   `ignore_skip_compression=True` force-compression, leaving the block pool-COMPRESSED with 0 residuals.
+   (Ingest-time keep-dense is still enforced by `is_compression_eligible()`, so removal is safe.)
+3. **Exact residuals** — `lowrank.py compress_lowrank(force_exact=...)` (CPU) and
+   `compress_layer_blocks_gpu` (A100 mirror, ~line 1111): when the block is `skip_compression`, store ALL
+   token positions as exact residuals (bypass the 0.08 error-threshold filter). Threaded from
+   `_compress_block_sync` (`kv_runtime_manager.py:~3128`, `force_exact=block.skip_compression`); also in
+   the async `_compress_blocks_batch`. Verified: needle `n_residuals` 0→64.
+
+**Routing config:** with all three fixes, `DIFFKV_TOPK_BLOCKS=64` OR `=0` (attend-all) → `847291`.
+Default top-16 still misses (the far block isn't ranked into top-16 — original coverage insight, now real).
+
+**A100 TODO:** the CPU path uses `compress_lowrank`; the A100 uses `compress_layer_blocks_gpu` (mirror
+added but NOT device-tested). Pull, `pip install transformers==4.46.3`, then:
+`DIFFKV_TOPK_BLOCKS=64 DIFFKV_MODEL=Qwen/Qwen2.5-0.5B-Instruct python -m pytest ACTIVE_RUNTIME/tests/test_niah.py -s`
+— expect all 6 pass. If 8k still fails, the GPU-path mirror needs adjustment (dump `pool.residual_K_positions[needle_pool_idx]`).
+
+---
+
+**Original status (superseded above):** root-caused to a real CUDA decode-fidelity bug.
+**Owner picking this up:** you have the A100; I (assistant) can't run CUDA, only MLX + CPU locally.
 
 ---
 
@@ -30,6 +60,53 @@ DIFFKV_MODEL=Qwen/Qwen2.5-0.5B-Instruct python -m pytest ACTIVE_RUNTIME/tests/te
 ```
 
 ---
+
+## 1b. ✅ ROOT CAUSE — CONFIRMED on CPU (2026-07-20). This supersedes the suspects in §4.
+
+Reproduced the exact `888888` **on CPU** by forcing the PyTorch/CUDA code path
+(`DIFFKV_FORCE_PYTORCH=1`, `torch_dtype=torch.float32`), then instrumented
+`KVRuntimeManager.get_cached_decode_blocks`. It is **two compounding bugs**, both proven:
+
+**Bug #1 — metadata desync (needle excluded from decode).**
+A 6-digit needle matches `_should_skip_compression` Rule 1 (`\d{5,}`, `streaming_sparse_ingest.py:798`)
+→ `skip_compression=True`. It leaves the recency window, so `compress_deferred_blocks_for_layer`
+(`:1592`, `ignore_skip_compression=True`) **force-compresses** it. The block object becomes
+`state="COMPRESSED"` with a `pool_idx`, **but the metadata tensor's state code (`metadata[:,3]`) is
+never updated to 2.** Decode selects compressed blocks via `active_meta[:,3]==2`
+(`kv_runtime_manager.py:2096`), so the needle is **dropped** — it's not in `compressed` (metadata says
+so) and not in `dense` (it's not ACCUMULATING). Instrument proof: `needle(770) in_compressed=False
+in_dense=False`, while the block itself is `('COMPRESSED','skip',pool_idx=98)`; its non-skip neighbors
+641/899 ARE in the compressed list. **This is why `TOPK_BLOCKS=0` never helped — the needle wasn't in
+the routed set at all.**
+- Missing `update_metadata_state` after `block.state="COMPRESSED"` at: `streaming_sparse_ingest.py:1449`
+  (`_submit_blocks_batched` CPU/sync fallback) and `:1487` (`_submit_block_for_compression`). Contrast
+  `kv_runtime_manager.py:1475` (`finalize_compressed_blocks`) which DOES call it.
+- **Fix-test:** resyncing `metadata[:,3]`/`[:,0]` from block objects in `get_cached_decode_blocks`
+  → needle now `in_compressed=True` (n_comp 46→55). **But output still `888888`** → desync alone
+  isn't enough, exposing bug #2.
+
+**Bug #2 — digit fidelity (force-SVD-compressed digit block loses digits).**
+With desync fixed AND `DIFFKV_TOPK_BLOCKS=0` (attend-all → needle definitely attended), output goes
+`888888` → **`84`**: the first two digits recover, the rest degrade. The block was **SVD-compressed**
+— the `skip_compression` exemption that was supposed to keep it EXACT got overridden by the deferred
+path. Residual selection keeps the top-`int(0.15·n)` **highest-error** tokens
+(`kv_runtime_manager.py:3246`), which does NOT guarantee the digit tokens are among the exact residuals.
+`DIFFKV_MAX_RESIDUAL_TOKENS=256` did NOT help (still `84`) → it's the *selection*, not the capacity.
+MLX retrieves because it forces digit tokens into exact residuals (`is_core`,
+`mlx_diffkv_wrapper.py:219,295`).
+
+**THE FIX (two parts, matching MLX):**
+1. Call `update_metadata_state(session_id, layer_idx, block)` immediately after every
+   `block.state="COMPRESSED"` on the sync/deferred paths (`streaming_sparse_ingest.py:1449, 1487`), OR
+   defensively resync in `get_cached_decode_blocks` before building `compressed_mask`.
+2. Ensure digit/exempt blocks that DO get compressed force **all digit tokens into exact residuals**
+   (content-aware selection like MLX `is_core`), not just top-error — OR do not force-compress digit
+   blocks and serve them exactly. Part 1 alone gets `84`; part 2 is needed for full `847291`.
+
+Repro + instrumentation: session scratchpad `cpu_repro.py` (drives the CPU path, patches
+`get_cached_decode_blocks` for fate logging and an `APPLY_FIX=1` metadata-resync). CPU venv:
+scratchpad `cpu_venv` (torch 2.4.1 + transformers 4.46.3). Note: the CPU pytorch-vectorized decode
+needs `torch_dtype=torch.float32` (else `float!=BFloat16` at `triton_fused_decode.py:613`).
 
 ## 2. What is CONFIRMED (do not re-litigate)
 

@@ -141,6 +141,7 @@ def compress_lowrank(
     error_threshold: float = 0.08,
     max_residual_frac: float = 0.15,
     token_norms: Optional[torch.Tensor] = None,
+    force_exact: bool = False,
 ) -> LowRankDelta:
     """
     Compress [n, feat_dim] float32 delta matrix to rank-r approximation.
@@ -322,15 +323,28 @@ def compress_lowrank(
     fact_positions_V = None
     residual_V_vals = None
 
-    if n > 0 and n_max_residual > 0:
-        top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
-        top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
-        
-        mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
-        fact_positions_K = top_k_K.indices[mask_K]
-        
-        mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
-        fact_positions_V = top_k_V.indices[mask_V]
+    if n > 0 and (n_max_residual > 0 or force_exact):
+        if force_exact:
+            # FIX (needle digits): this block was flagged skip_compression because
+            # SVD cannot reproduce its exact values (a passcode / formula / table
+            # cell — Rule 1 \d{5,} etc). When the deferred path force-compresses it
+            # anyway, a LOW SVD error is still NOT exact, so digits decode to garbage
+            # ('847291' -> '84'). Store EVERY token position as an exact residual
+            # regardless of the error threshold; the pool truncates to its per-block
+            # residual capacity (keeping the earliest positions, where the exact
+            # content sits). Mirrors MLX's is_core exact-residual guarantee — the
+            # whole point of the exemption.
+            fact_positions_K = torch.arange(n, device=rel_error_K.device)
+            fact_positions_V = torch.arange(n, device=rel_error_V.device)
+        else:
+            top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
+            top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+
+            mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
+            fact_positions_K = top_k_K.indices[mask_K]
+
+            mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
+            fact_positions_V = top_k_V.indices[mask_V]
         
         if fact_positions_K.numel() > 0:
             res_K_vals = (delta_K - recon_K)[fact_positions_K]
@@ -1094,15 +1108,28 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         fact_positions_V = None
         residual_V_vals = None
 
-        if T_active > 0 and n_max_residual > 0:
-            top_k_K = _topk_with_coverage(rel_error_K, n_max_residual, _cov_frac_batch)
-            top_k_V = _topk_with_coverage(rel_error_V, n_max_residual, _cov_frac_batch)
+        _force_exact = bool(getattr(block, "skip_compression", False))
+        if T_active > 0 and (n_max_residual > 0 or _force_exact):
+            if _force_exact:
+                # FIX (needle digits): mirror compress_lowrank(force_exact) for the
+                # A100 GPU batch path. A skip_compression (digit/formula/exact) block
+                # that the deferred path force-compresses must store EVERY token as an
+                # exact residual regardless of the 0.08 error threshold, else digits
+                # decode to garbage ('847291'->'84'). The pool truncates to
+                # max_residual_tokens (earliest positions, where the exact content
+                # sits). Mirrors MLX is_core.  [CPU-verified via compress_lowrank; this
+                # GPU mirror is A100-only, verify on device.]
+                fact_positions_K = torch.arange(T_active, device=rel_error_K.device)
+                fact_positions_V = torch.arange(T_active, device=rel_error_V.device)
+            else:
+                top_k_K = _topk_with_coverage(rel_error_K, n_max_residual, _cov_frac_batch)
+                top_k_V = _topk_with_coverage(rel_error_V, n_max_residual, _cov_frac_batch)
 
-            mask_K = (top_k_K.values > 0.08) & (error_K[top_k_K.indices] > 1e-4)
-            fact_positions_K = top_k_K.indices[mask_K]
+                mask_K = (top_k_K.values > 0.08) & (error_K[top_k_K.indices] > 1e-4)
+                fact_positions_K = top_k_K.indices[mask_K]
 
-            mask_V = (top_k_V.values > 0.08) & (error_V[top_k_V.indices] > 1e-4)
-            fact_positions_V = top_k_V.indices[mask_V]
+                mask_V = (top_k_V.values > 0.08) & (error_V[top_k_V.indices] > 1e-4)
+                fact_positions_V = top_k_V.indices[mask_V]
 
             if fact_positions_K.numel() > 0:
                 residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)

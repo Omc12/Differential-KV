@@ -2759,8 +2759,14 @@ class KVRuntimeManager:
             self._compress_block_sync(block, k, v)
 
     def _preprocess_block_for_compression(self, block: KVBlock, k: torch.Tensor, v: torch.Tensor):
-        if getattr(block, "skip_compression", False):
-            return None
+        # NOTE: skip_compression blocks are NOT early-returned here anymore. Ingest-
+        # time compression is already gated by is_compression_eligible() (which
+        # returns False for skip_compression), so a recent digit/formula block stays
+        # dense. This path is reached only via the DEFERRED force-compression once
+        # the block leaves the recency window — and there we DO want to compress it,
+        # but with EXACT residuals (compress_lowrank(force_exact=True)) so the digits
+        # survive. Early-returning None here left the block force-compressed into the
+        # pool with ZERO residuals elsewhere → digits decoded to garbage ('84').
         input_device = k.device
         anchor_kv_local = block.anchor_kv
         if anchor_kv_local is not None:
@@ -3124,8 +3130,14 @@ class KVRuntimeManager:
             return
             
         normalized_deltas, token_norms, deltas, rank, block_token_ids, k_orig, v_orig, anchor_kv_local = res
-        
-        lr_delta = compress_lowrank(normalized_deltas, rank)
+
+        # FIX (needle digits): force exact residuals for skip_compression (digit/
+        # formula/exact) blocks that the deferred path force-compresses — otherwise
+        # a low-but-nonzero SVD error corrupts the digits at decode ('847291'->'84').
+        lr_delta = compress_lowrank(
+            normalized_deltas, rank,
+            force_exact=bool(getattr(block, "skip_compression", False)),
+        )
         
         # Populate SVD residuals on block
         block.residual_K_positions = lr_delta.residual_K_positions
@@ -3316,16 +3328,32 @@ class KVRuntimeManager:
                 residual_V_pos = None
                 residual_V_vals = None
 
-                if n > 0 and n_max_residual > 0:
-                    top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
-                    top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
-                    
-                    mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
-                    residual_K_pos = top_k_K.indices[mask_K]
-                    
-                    mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
-                    residual_V_pos = top_k_V.indices[mask_V]
-                    
+                _force_exact = bool(getattr(block, "skip_compression", False))
+                if n > 0 and (n_max_residual > 0 or _force_exact):
+                    if _force_exact:
+                        # FIX (needle digits): this block was flagged skip_compression
+                        # because SVD cannot reproduce its exact values (a passcode,
+                        # formula, or table cell — Rule 1 \d{5,} etc). When the deferred
+                        # path force-compresses it anyway, a LOW SVD error is still not
+                        # EXACT, so digits decode to garbage ('847291' -> '84'). Store
+                        # EVERY token of the block as an exact residual regardless of the
+                        # error threshold, bounded by the pool's per-block residual
+                        # capacity (already reserved). Mirrors MLX's is_core exact-
+                        # residual guarantee — the whole point of the exemption.
+                        _cap = getattr(getattr(self, "native_pool", None), "max_residual_tokens", n) or n
+                        _npos = min(int(n), int(_cap))
+                        residual_K_pos = torch.arange(_npos, device=rel_error_K.device)
+                        residual_V_pos = torch.arange(_npos, device=rel_error_V.device)
+                    else:
+                        top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
+                        top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+
+                        mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
+                        residual_K_pos = top_k_K.indices[mask_K]
+
+                        mask_V = (top_k_V.values > error_threshold) & (error_V[top_k_V.indices] > 1e-4)
+                        residual_V_pos = top_k_V.indices[mask_V]
+
                     device = deltas_raw.device
                     if residual_K_pos.numel() > 0:
                         res_K_vals = (delta_K - recon_K)[residual_K_pos]

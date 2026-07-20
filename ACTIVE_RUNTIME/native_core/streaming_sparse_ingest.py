@@ -1447,6 +1447,14 @@ class StreamingSparseIngestManager:
                     # Sync execution directly on the GPU/MPS slices (much faster and avoids CPU fallback bugs)
                     self.compress_fn(block, block.active_k, block.active_v)
                     block.state = "COMPRESSED"
+                    # FIX (needle drop): sync the metadata state code so decode's
+                    # get_cached_decode_blocks (compressed_mask = metadata[:,3]==2,
+                    # kv_runtime_manager.py) actually SEES this block. Without this,
+                    # a synchronously-compressed block (the common case for
+                    # force-compressed skip_compression / digit blocks on the
+                    # deferred path) is left COMPRESSED on the object but stale in
+                    # metadata → silently excluded from decode → dropped needle.
+                    self.update_metadata_state(session_id, layer_idx, block)
                     if hasattr(self.compressor, "stats"):
                         stats = getattr(self.compressor, "stats")
                         if isinstance(stats, dict) and "sync_fallbacks" in stats:
@@ -1485,6 +1493,13 @@ class StreamingSparseIngestManager:
             # Backpressure or sync mode: compress synchronously
             self.compress_fn(block, k, v)
             block.state = "COMPRESSED"
+            # FIX (needle drop): same metadata sync as _submit_blocks_batched —
+            # otherwise a sync/backpressure-compressed block is COMPRESSED on the
+            # object but stale in metadata, so decode never sees it.
+            _sid = getattr(block, "session_id", None)
+            _lidx = getattr(block, "layer_idx", None)
+            if _sid is not None and _lidx is not None:
+                self.update_metadata_state(_sid, _lidx, block)
 
         with self._stats_lock:
             self.stats["total_compressed"] += 1
