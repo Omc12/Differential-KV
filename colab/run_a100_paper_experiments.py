@@ -1067,8 +1067,8 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     model_id = config.get("model_id", "Qwen/Qwen2.5-7B-Instruct")
     preset = config.get("preset", "mid")
     gen_len = config.get("gen_len", 128)
-    preset_ranks = {"low": 16, "mid": 32, "high": 64}
-    rank = config.get("rank", preset_ranks.get(preset, 32))
+    preset_ranks = {"low": 8, "mid": 16, "high": 24}
+    rank = config.get("rank", preset_ranks.get(preset, 16))
     block_size = config.get("block_size", 256)
     n_trials = config.get("n_trials", int(os.environ.get("DIFFKV_BENCH_TRIALS", "3")))
 
