@@ -1197,6 +1197,8 @@ def exp1_memory_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]
             if res.get("status") == "success":
                 print(f"      peak_prefill={res['peak_prefill_vram_gb']:.2f}GB | "
                       f"KV_phys={res['kv_physical_gb']:.3f}GB | ratio={res['compression_ratio']:.2f}x")
+            else:
+                print(f"      [FAILED] {res.get('error', 'unknown error')[:120]}")
     return results
 
 
