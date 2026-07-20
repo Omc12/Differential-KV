@@ -337,7 +337,7 @@ def compress_lowrank(
             if token_norms is not None:
                 res_K_vals = res_K_vals * token_norms.cpu()[fact_positions_K.cpu()].unsqueeze(1)
             residual_K_vals = res_K_vals.to(torch.float16).to(device)
-            fact_positions_K = fact_positions_K.to(torch.int16).to(device)
+            fact_positions_K = fact_positions_K.to(torch.int32).to(device)
         else:
             fact_positions_K = None
             residual_K_vals = None
@@ -347,7 +347,7 @@ def compress_lowrank(
             if token_norms is not None:
                 res_V_vals = res_V_vals * token_norms.cpu()[fact_positions_V.cpu()].unsqueeze(1)
             residual_V_vals = res_V_vals.to(torch.float16).to(device)
-            fact_positions_V = fact_positions_V.to(torch.int16).to(device)
+            fact_positions_V = fact_positions_V.to(torch.int32).to(device)
         else:
             fact_positions_V = None
             residual_V_vals = None
@@ -1108,14 +1108,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
             if fact_positions_K.numel() > 0:
                 residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)
-                fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
+                fact_positions_K = fact_positions_K.to(torch.int32).to(gpu_device)
             else:
                 fact_positions_K = None
                 residual_K_vals = None
 
             if fact_positions_V.numel() > 0:
                 residual_V_vals = (delta_V - recon_V)[fact_positions_V].to(torch.float16).to(gpu_device)
-                fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
+                fact_positions_V = fact_positions_V.to(torch.int32).to(gpu_device)
             else:
                 fact_positions_V = None
                 residual_V_vals = None
@@ -1147,9 +1147,9 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
         _N = len(blocks_list)
         _max_res = pool.max_residual_tokens
-        _rk_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
+        _rk_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int32)
         _rk_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
-        _rv_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
+        _rv_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int32)
         _rv_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
         for _i in range(_N):
             _fp = _rk_pos[_i]

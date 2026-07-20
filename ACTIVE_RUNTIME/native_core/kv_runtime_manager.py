@@ -3334,7 +3334,7 @@ class KVRuntimeManager:
                         if token_norms is not None:
                             res_K_vals = res_K_vals * token_norms.cpu()[residual_K_pos.cpu()].unsqueeze(1)
                         residual_K_vals = res_K_vals.to(torch.float16).to(device)
-                        residual_K_pos = residual_K_pos.to(torch.int16).to(device)
+                        residual_K_pos = residual_K_pos.to(torch.int32).to(device)
                     else:
                         residual_K_pos = None
                         residual_K_vals = None
@@ -3344,7 +3344,7 @@ class KVRuntimeManager:
                         if token_norms is not None:
                             res_V_vals = res_V_vals * token_norms.cpu()[residual_V_pos.cpu()].unsqueeze(1)
                         residual_V_vals = res_V_vals.to(torch.float16).to(device)
-                        residual_V_pos = residual_V_pos.to(torch.int16).to(device)
+                        residual_V_pos = residual_V_pos.to(torch.int32).to(device)
                     else:
                         residual_V_pos = None
                         residual_V_vals = None
