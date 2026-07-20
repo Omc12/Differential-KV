@@ -1977,21 +1977,6 @@ def native_triton_sparse_attn_decode(
                     num_chunks, D_pad, H_q,
                 )
 
-            # ── One-shot merge diagnostic (DIFFKV_DIAG_MERGE=1). Dumps the SPARSE
-            # kernel output before the dense-merge so we can tell whether the
-            # corruption is in the sparse reconstruction or the later merge/bias. ──
-            _dbg_merge = os.environ.get("DIFFKV_DIAG_MERGE") == "1"
-            if _dbg_merge and not getattr(native_triton_sparse_attn_decode, "_dbg_done", False):
-                try:
-                    print(f"[MERGE-DBG] L{layer_idx} N={N} num_chunks={num_chunks} "
-                          f"L_dense={active_k.shape[2] if active_k is not None else 0} "
-                          f"| sparse_out norm={out.norm().item():.4g} absmax={out.abs().max().item():.4g} "
-                          f"nan={bool(torch.isnan(out).any())} inf={bool(torch.isinf(out).any())} "
-                          f"| m_out[{m_out.min().item():.3g},{m_out.max().item():.3g}] "
-                          f"l_out[{l_out.min().item():.3g},{l_out.max().item():.3g}]", flush=True)
-                except Exception as _e:
-                    print(f"[MERGE-DBG] sparse-stage err: {_e}", flush=True)
-
             if dense_blocks or (active_k is not None and active_k.shape[2] > 0):
                 O_i = out * l_out.unsqueeze(-1)
                 m_i = m_out
@@ -2038,11 +2023,6 @@ def native_triton_sparse_attn_decode(
                         for _blk in (dense_blocks or []):
                             _dense_pos_list.extend(_blk.token_indices)
                         _rot_fired = bool(_dense_pos_list) and len(_dense_pos_list) == k_kv.shape[2]
-                        if _dbg_merge and not getattr(native_triton_sparse_attn_decode, "_dbg_done", False):
-                            print(f"[MERGE-DBG] dense-rot active_k[2]="
-                                  f"{(active_k.shape[2] if active_k is not None else None)} "
-                                  f"active_len={active_len} k_kv[2]={k_kv.shape[2]} "
-                                  f"len(pos)={len(_dense_pos_list)} rot_fired={_rot_fired}", flush=True)
                         if _rot_fired:
                             _dp = torch.tensor(_dense_pos_list, dtype=torch.long, device=k_kv.device)
                             # cos/sin: [1, seq_len, head_dim]  (standard rotary_emb output)
@@ -2104,19 +2084,6 @@ def native_triton_sparse_attn_decode(
                     m_i = m_new
                     
                 out = O_i / l_i.unsqueeze(-1)
-
-                if _dbg_merge and not getattr(native_triton_sparse_attn_decode, "_dbg_done", False):
-                    try:
-                        _fac = factor if isinstance(factor, float) else (
-                            float(factor.min()), float(factor.max()))
-                        print(f"[MERGE-DBG] L{layer_idx} POST-MERGE bias_env={bias_env!r} factor={_fac} "
-                              f"| lse_dense[{lse_dense.min().item():.3g},{lse_dense.max().item():.3g}] "
-                              f"lse_sparse[{lse_sparse.min().item():.3g},{lse_sparse.max().item():.3g}] "
-                              f"| final_out norm={out.norm().item():.4g} absmax={out.abs().max().item():.4g} "
-                              f"nan={bool(torch.isnan(out).any())} inf={bool(torch.isinf(out).any())}", flush=True)
-                    except Exception as _e:
-                        print(f"[MERGE-DBG] merge-stage err: {_e}", flush=True)
-                    native_triton_sparse_attn_decode._dbg_done = True
 
             # Observability (F3): confirm ONCE that the Triton kernel path is live.
             # On a GPU box this is the only positive signal that you're measuring
