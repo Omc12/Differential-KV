@@ -52,11 +52,20 @@ def test_niah_depths(depth, context_len):
     MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Set threshold low so SRL routing is active for these block counts
-    os.environ["DIFFKV_SRL_THRESHOLD"] = "5"
-    os.environ["DIFFKV_TELEMETRY"] = "1"
-    os.environ["DIFFKV_SRL_VERBOSE"] = "1"
-    
+    # Validate the SHIPPING decode path. The default router is "residual" (the
+    # MLX-parity relevance scorer). The legacy multi-channel "SRL" router is
+    # deprecated (net-negative in prior A/Bs) AND currently crashes on CUDA
+    # decode with "tensors used as indices must be long, int, byte or bool
+    # tensors" — the exception is swallowed, routing silently returns nothing,
+    # and deep needles are lost. This test previously FORCED that broken path
+    # via DIFFKV_SRL_THRESHOLD=5 and failed at 8000/0.1 with garbage output,
+    # even though the residual router retrieves the needle (verified via
+    # colab/diffkv_isolate.py --depth 0.1 --ctxs 8000). Pin the shipping router
+    # and do NOT lower the SRL threshold (a low threshold builds the SRL index,
+    # which is what triggers the crashing code path).
+    os.environ["DIFFKV_ROUTER"] = "residual"
+    os.environ.pop("DIFFKV_SRL_THRESHOLD", None)
+
     # rank=32 matches the wrapper default and DIFFKV_RSVD_MAX_RPROJ=32;
     # rank=16 is too low for 14B models with RANK_BOOST=off (loses digit blocks).
     wrapper = DiffKVHFWrapper(MODEL, config={"rank": 32}, device=device)
