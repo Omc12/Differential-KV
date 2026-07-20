@@ -55,7 +55,7 @@ def make_prompt(tok, ctx_len, needle, question, depth=0.9):
         return ctx + "\n" + question + "\nAssistant:"
 
 
-def dense_probe(model_id, prompt, device, tok, n=6):
+def dense_probe(model_id, prompt, device, tok, n=12):
     from transformers import AutoModelForCausalLM
     m = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
@@ -81,7 +81,7 @@ def dense_probe(model_id, prompt, device, tok, n=6):
     return first, tok.decode(gen)
 
 
-def diffkv_probe(model_id, prompt, device, n=6):
+def diffkv_probe(model_id, prompt, device, n=12):
     from serving.hf_diffkv_wrapper import DiffKVHFWrapper
     w = DiffKVHFWrapper(model_id, config={"rank": 32}, device=device)
     txt = w.generate(prompt=prompt, max_new_tokens=n, temperature=0.0, top_p=1.0, repetition_penalty=1.0)
@@ -102,6 +102,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     ap.add_argument("--ctxs", default="200,1500,4000")   # 200 likely bypass; 1500/4000 engage
+    ap.add_argument("--depth", type=float, default=0.9,
+                    help="needle depth 0..1 (0.1 = oldest/most-compressed region, the hard case)")
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -110,9 +112,9 @@ def main():
     needle = "The special code is 847291."
     question = "What is the special code? Answer in exactly the 6-digit code number."
 
-    print(f"model={args.model} device={device}\n")
+    print(f"model={args.model} device={device} depth={args.depth}\n")
     for ctx in [int(c) for c in args.ctxs.split(",")]:
-        prompt = make_prompt(tok, ctx, needle, question, depth=0.9)
+        prompt = make_prompt(tok, ctx, needle, question, depth=args.depth)
         plen = len(tok.encode(prompt))
         d_first, d_txt = dense_probe(args.model, prompt, device, tok)
         k_first, k_txt = diffkv_probe(args.model, prompt, device)
