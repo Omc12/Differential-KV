@@ -308,6 +308,40 @@ def apply_diffkv_attention_patch(model, kv_manager):
                         kwargs_clean["past_key_value"] = cache_obj
                     if "past_key_values" in _op_params:
                         kwargs_clean["past_key_values"] = cache_obj
+
+                    # Multi-chunk bypass correctness. The wrapper prefills in
+                    # chunks and calls the model WITHOUT past_key_values, so the
+                    # model sees key_value_length == query_length, takes the SDPA
+                    # "ignore mask" fast path and hands us attention_mask=None.
+                    # But we thread our own dense_cache here, so key_states holds
+                    # (prefix_len + q_len) keys while there are only q_len queries.
+                    # F.scaled_dot_product_attention(is_causal=True) on that
+                    # non-square shape uses UPPER-LEFT alignment (query i attends
+                    # keys 0..i) instead of the correct lower-right window
+                    # (query i attends keys 0..prefix_len+i) — so chunk 2+ queries
+                    # attend the wrong keys and prefill logits are garbage.
+                    # Square chunk 1 / single-forward prefill are unaffected.
+                    # Fix: build the explicit lower-right causal mask whenever a
+                    # cached prefix exists. Per-layer prefix length is read BEFORE
+                    # this layer's cache update (get_seq_length respects layer_idx).
+                    if (cache_obj is not None and attention_mask is None
+                            and q_len > 1):
+                        _lidx = getattr(self, "layer_idx", 0) or 0
+                        try:
+                            _prefix_len = cache_obj.get_seq_length(_lidx)
+                        except Exception:
+                            _prefix_len = 0
+                        if _prefix_len > 0:
+                            _kv_len = _prefix_len + q_len
+                            _dev = hidden_states.device
+                            _dt = hidden_states.dtype
+                            _row = torch.arange(q_len, device=_dev).unsqueeze(1)      # [q,1]
+                            _col = torch.arange(_kv_len, device=_dev).unsqueeze(0)    # [1,kv]
+                            _allowed = _col <= (_prefix_len + _row)                   # [q,kv] bool
+                            _m = torch.zeros((q_len, _kv_len), dtype=_dt, device=_dev)
+                            _m.masked_fill_(~_allowed, torch.finfo(_dt).min)
+                            attention_mask = _m.view(1, 1, q_len, _kv_len)
+
                     return self._original_forward(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
