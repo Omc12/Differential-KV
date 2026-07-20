@@ -917,7 +917,10 @@ def route_blocks_relevance(
     if anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.reshape(-1, anc.shape[-1])
         sin_flat = sin.reshape(-1, anc.shape[-1])
-        anc_pos = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1)
+        # .long(): index tensors must be long/int/byte/bool. anchor_indices is
+        # int32 (metadata) which is valid, but coerce defensively so a narrower
+        # int dtype (e.g. int16) can never raise "tensors used as indices...".
+        anc_pos = anchor_indices.long().clamp(min=0, max=cos_flat.shape[0] - 1)
         cos_anc = cos_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
         sin_anc = sin_flat[anc_pos].to(device=anc.device, dtype=anc.dtype).unsqueeze(1)  # [N, 1, D]
         half_d = anc.shape[-1] // 2
@@ -957,7 +960,11 @@ def route_blocks_relevance(
         if cos is not None and sin is not None:
             cos_flat = cos.reshape(-1, rk.shape[-1])
             sin_flat = sin.reshape(-1, rk.shape[-1])
-            res_p = res_pos[slots_long, :R].clamp(min=0, max=cos_flat.shape[0] - 1)
+            # .long(): pool.residual_K_positions is int16 (native_block_pool.py),
+            # which PyTorch REJECTS as an index dtype ("tensors used as indices
+            # must be long, int, byte or bool tensors"). This is the crash that
+            # took down SRL-gated decode routing. Coerce before indexing cos/sin.
+            res_p = res_pos[slots_long, :R].long().clamp(min=0, max=cos_flat.shape[0] - 1)
             cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
             sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
             half_d = rk.shape[-1] // 2
