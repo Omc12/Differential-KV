@@ -66,6 +66,16 @@ def test_niah_depths(depth, context_len):
     os.environ["DIFFKV_ROUTER"] = "residual"
     os.environ.pop("DIFFKV_SRL_THRESHOLD", None)
 
+    # Routed-budget parity with MLX. The router keeps K blocks; the routed token
+    # budget is K * block_size. MLX uses block_size=256 so K=16 covers 4096
+    # tokens, but the CUDA manager hardcodes block_size=64, so the default K=16
+    # covers only 1024 — 4x less — and a deep needle's block falls outside the
+    # top-16 by relevance. K=64 restores the same 64*64=4096 routed budget as MLX
+    # and reliably includes the far needle. (A100-verified via
+    # colab/diffkv_needle_diag.py: needle_in_routed=True, n_residuals=64,
+    # gen='847291' at 8000/0.1, with the metadata-sync + exact-residual fixes.)
+    os.environ["DIFFKV_TOPK_BLOCKS"] = "64"
+
     # rank=32 matches the wrapper default and DIFFKV_RSVD_MAX_RPROJ=32;
     # rank=16 is too low for 14B models with RANK_BOOST=off (loses digit blocks).
     wrapper = DiffKVHFWrapper(MODEL, config={"rank": 32}, device=device)
