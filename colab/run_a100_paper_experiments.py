@@ -488,7 +488,7 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     raw_dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
     dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
     res_n0 = s0["comp_res_n"][0][:nb] if (s0 and "comp_res_n" in s0 and s0["comp_res_n"]) else []
-    res_cap = max(1, int(0.15 * B))
+    res_cap = 16 if str(getattr(mgr, "preset", "mid")).lower() in ("high", "quality", "max") else 8
     res_tokens_used = sum(min(int(rn), res_cap) for rn in res_n0) if res_n0 else (nb * res_cap)
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
