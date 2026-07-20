@@ -1664,7 +1664,12 @@ class MLXKVBlockManager:
         # a fraction does not reliably retain the needle block at 64k+ (256+ blocks),
         # so dense/all-blocks is preferred there; see COMPRESSED_DECODE_OPTIMIZATION.md.
         # topk_blocks=0 disables routing entirely (attend every block).
-        self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
+        # Block_size-derived default (parity with CUDA's pool.routing_topk_default):
+        # match the routed-token budget 4096 = 16*256. At MLX's default block_size
+        # =256 this is 16 (unchanged, the validated value); if block_size ever shrinks,
+        # K grows so far-context coverage stays constant. Explicit env still wins.
+        _default_topk = max(16, 4096 // max(1, self.block_size))
+        self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", str(_default_topk)))
         self.topk_frac   = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
         # High-Quality Mode (cross-runtime toggle, mirrors native src/main.cpp):
         #   DIFFKV_HIGH_QUALITY_ROUTING = 1 -> attend ALL compressed blocks at decode
