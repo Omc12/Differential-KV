@@ -902,6 +902,17 @@ def route_blocks_relevance(
     if N <= k_eff:
         return block_indices
 
+    # DIFFKV_ROUTER_ROPE (default 1 = original behaviour). NOTE: MLX is NOT a
+    # raw-key router — MLX captures keys POST-RoPE (mlx_diffkv_wrapper.py:4448
+    # keys_rot = rope(keys)) and its _block_relevance_residual scores
+    # q_rot · k_rot, i.e. it is ALSO position-aware. So CUDA's per-key rotation
+    # here is architecturally correct parity, NOT the divergence — do not assume
+    # removing it "matches MLX". This flag exists only as an A/B knob: setting
+    # DIFFKV_ROUTER_ROPE=0 makes routing SELECTION content-only (no relative-
+    # position decay), a heuristic that could keep a distant needle's block in
+    # the top-K better than the decayed score — worth measuring, not a proven fix.
+    _route_rope = os.environ.get("DIFFKV_ROUTER_ROPE", "1") == "1"
+
     # Promote Q to 3D if it is 2D
     is_3d = (Q.dim() == 3)
     if is_3d:
@@ -914,7 +925,7 @@ def route_blocks_relevance(
     slots_long = block_indices.long()
     anc = pool.anchors_K[slots_long].clone()                    # [N, H_kv, D] fp16
 
-    if anchor_indices is not None and cos is not None and sin is not None:
+    if _route_rope and anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.reshape(-1, anc.shape[-1])
         sin_flat = sin.reshape(-1, anc.shape[-1])
         # .long(): index tensors must be long/int/byte/bool. anchor_indices is
@@ -957,7 +968,7 @@ def route_blocks_relevance(
         rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
-        if cos is not None and sin is not None:
+        if _route_rope and cos is not None and sin is not None:
             cos_flat = cos.reshape(-1, rk.shape[-1])
             sin_flat = sin.reshape(-1, rk.shape[-1])
             # .long(): pool.residual_K_positions is int16 (native_block_pool.py),
