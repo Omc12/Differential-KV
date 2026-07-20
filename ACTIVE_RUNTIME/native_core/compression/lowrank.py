@@ -779,11 +779,17 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # Squaring cond(B) costs the SMALLEST singular values precision — exactly
         # the tail the 99.9% energy truncation below discards.
         #
-        # Opt-in: this changes the numerical factorisation, so A/B recall
-        # (needle + synthesis) before flipping the default. Any failure falls
-        # through to the exact SVD below.
+        # DEFAULT ON (A/B-validated on A100, 2026-07-20, colab/gram_eigh_decision.py
+        # --gpu-ab @8k): compress 2.26s→1.51s (1.50x) with recall IDENTICAL to the
+        # exact SVD baseline (both 33% at that harness's samples; dense ceiling 100%)
+        # — it changes SPEED, not quality, because the factorisation is numerically
+        # equivalent (Part 1 recon error ~6e-7 << the int8-U quant floor 9.2e-3).
+        # Set DIFFKV_COMPRESS_GRAM_SVD=0 to force the exact SVD. Any runtime failure
+        # falls through to the exact SVD below. NOTE: the r_proj<=32 recipe
+        # (DIFFKV_RSVD_MAX_RPROJ=32) is a SEPARATE fidelity trade that DROPPED recall
+        # to 0% in the same A/B — it stays OFF by default; do not enable it blindly.
         _gram_ok = False
-        if _local_os.environ.get("DIFFKV_COMPRESS_GRAM_SVD", "0") == "1":
+        if _local_os.environ.get("DIFFKV_COMPRESS_GRAM_SVD", "1") != "0":
             try:
                 G = torch.matmul(B, B.transpose(1, 2))                     # [N, r, r]
                 evals, evecs = torch.linalg.eigh(G)                        # ascending
