@@ -769,6 +769,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                             cos_all = session_dict.get("rope_cos")
                                             sin_all = session_dict.get("rope_sin")
                                             _max_anc = int(anchor_indices.max().item()) + 1 if (anchor_indices is not None and anchor_indices.numel() > 0) else 1
+                                            if pool is not None and getattr(pool, "residual_K_positions", None) is not None and pool.residual_K_positions.numel() > 0:
+                                                _max_anc = max(_max_anc, int(pool.residual_K_positions.max().item()) + 1)
                                             if cos_all is None or sin_all is None or cos_all.shape[1] < _max_anc:
                                                 hist_pos = torch.arange(_max_anc, device=query_states.device, dtype=torch.long).unsqueeze(0)
                                                 _rot_emb = getattr(self, "rotary_emb", None) or getattr(getattr(model, "model", None), "rotary_emb", None)

@@ -898,12 +898,7 @@ def route_blocks_relevance(
     if topk <= 0:
         return block_indices  # routing disabled — attend every block
     
-    k_min = 0
-    if srl_state is not None:
-        srl_k_min = getattr(srl_state, "k_min", 0)
-        k_min = max(srl_k_min, int(0.15 * N))
-
-    k_eff = max(topk, k_min, int(topk_frac * N))
+    k_eff = max(topk, int(topk_frac * N))
     if N <= k_eff:
         return block_indices
 
@@ -959,12 +954,15 @@ def route_blocks_relevance(
         rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
-        if cos_anc is not None and sin_anc is not None:
-            cos_anc_4d = cos_anc.unsqueeze(1)                   # [N, 1, 1, D]
-            sin_anc_4d = sin_anc.unsqueeze(1)                   # [N, 1, 1, D]
+        if cos is not None and sin is not None:
+            cos_flat = cos.reshape(-1, rk.shape[-1])
+            sin_flat = sin.reshape(-1, rk.shape[-1])
+            res_p = res_pos[slots_long, :R].clamp(min=0, max=cos_flat.shape[0] - 1)
+            cos_res = cos_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
+            sin_res = sin_flat[res_p].to(device=rk.device, dtype=rk.dtype).unsqueeze(2)  # [N, R, 1, D]
             half_d = rk.shape[-1] // 2
             rk_half = torch.cat([-rk[..., half_d:], rk[..., :half_d]], dim=-1)
-            rk = rk * cos_anc_4d + rk_half * sin_anc_4d
+            rk = rk * cos_res + rk_half * sin_res
 
         # Permute rk to [H_kv, D, N * R]
         rk_permuted = rk.permute(2, 3, 0, 1).reshape(H_kv, D, N * R)
