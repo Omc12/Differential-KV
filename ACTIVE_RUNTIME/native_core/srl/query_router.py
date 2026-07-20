@@ -877,13 +877,14 @@ def route_blocks_relevance(
     scale:          float,
     cos:            Optional[torch.Tensor] = None,
     sin:            Optional[torch.Tensor] = None,
+    srl_state:      Optional[Any] = None,
 ) -> torch.Tensor:                  # [K<=N] selected slot IDs, best-first, distinct
     """MLX-parity block router: rank blocks by exact q·k relevance, take top-K.
 
     Direct port of mlx_diffkv_wrapper._block_relevance_residual: a block's
     relevance is the max over query heads of max(q·anchor, max over its stored
     residual keys of q·k), fp16 products with fp32 accumulation, then plain
-    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N)).
+    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N, k_min)).
     """
     N = block_indices.numel()
     try:
@@ -896,7 +897,13 @@ def route_blocks_relevance(
         topk_frac = 0.0
     if topk <= 0:
         return block_indices  # routing disabled — attend every block
-    k_eff = max(topk, int(topk_frac * N))
+    
+    k_min = 0
+    if srl_state is not None:
+        srl_k_min = getattr(srl_state, "k_min", 0)
+        k_min = max(srl_k_min, int(0.15 * N))
+
+    k_eff = max(topk, k_min, int(topk_frac * N))
     if N <= k_eff:
         return block_indices
 

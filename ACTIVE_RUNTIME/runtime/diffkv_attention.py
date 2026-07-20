@@ -783,6 +783,7 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                                 scale          = _scale,
                                                 cos            = cos_all,
                                                 sin            = sin_all,
+                                                srl_state      = srl_state,
                                             )
                                         srl_state.current_step_slots = selected_slots
 
