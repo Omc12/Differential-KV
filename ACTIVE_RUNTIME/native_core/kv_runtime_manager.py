@@ -490,7 +490,7 @@ class KVRuntimeManager:
         # session_id -> layer_idx -> List[KVBlock]
         self.session_blocks: Dict[str, Dict[int, List[KVBlock]]] = {}
 
-        self.block_size           = micro_block_size
+        self.block_size           = 64
         if rank >= head_dim:
             self.rank = head_dim // 2
             print(f"[DiffKV] WARNING: Configured SVD rank {rank} is >= head_dim {head_dim}. "
@@ -3256,9 +3256,7 @@ class KVRuntimeManager:
 
                 # Content-aware residual capture (C10 token boosting / table capture parity)
                 # Matches compress_layer_blocks_gpu and MLX wrapper behavior
-                # The first token is the block anchor; active tokens start at index 1
-                active_token_ids = block_token_ids[1:] if block_token_ids else []
-                if active_token_ids and getattr(self, "tokenizer", None) is not None and len(active_token_ids) == n:
+                if block_token_ids and getattr(self, "tokenizer", None) is not None and len(block_token_ids) == n:
                     try:
                         _sid = getattr(block, "session_id", None)
                         _cached_boost = None
@@ -3278,13 +3276,13 @@ class KVRuntimeManager:
                             if _cache is None:
                                 _cache = self._res_capture_decode_cache = {}
                             tok_strs = []
-                            for _tid in active_token_ids:
+                            for _tid in block_token_ids:
                                 _s = _cache.get(_tid)
                                 if _s is None:
                                     _s = _cache[_tid] = _tok.decode([_tid])
                                 tok_strs.append(_s)
                             _all = self._session_token_ids.get(_sid) if getattr(self, "_session_token_ids", None) is not None else None
-                            _total = int(_all.numel()) if _all is not None else len(active_token_ids)
+                            _total = int(_all.numel()) if _all is not None else len(block_token_ids)
                             _ckey = (_sid, _total)
                             _counts_cache = getattr(self, "_res_capture_counts", None)
                             if _counts_cache is None:
@@ -3297,7 +3295,7 @@ class KVRuntimeManager:
                                 _counts_cache.clear()
                                 _counts_cache[_ckey] = _counts
                             boost_row, n_boosted = compute_boost_multipliers(
-                                tok_strs, active_token_ids, _counts or {}, _total)
+                                tok_strs, block_token_ids, _counts or {}, _total)
                             if _sid is not None:
                                 _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
 
@@ -3334,7 +3332,7 @@ class KVRuntimeManager:
                         if token_norms is not None:
                             res_K_vals = res_K_vals * token_norms.cpu()[residual_K_pos.cpu()].unsqueeze(1)
                         residual_K_vals = res_K_vals.to(torch.float16).to(device)
-                        residual_K_pos = residual_K_pos.to(torch.int32).to(device)
+                        residual_K_pos = residual_K_pos.to(torch.int16).to(device)
                     else:
                         residual_K_pos = None
                         residual_K_vals = None
@@ -3344,7 +3342,7 @@ class KVRuntimeManager:
                         if token_norms is not None:
                             res_V_vals = res_V_vals * token_norms.cpu()[residual_V_pos.cpu()].unsqueeze(1)
                         residual_V_vals = res_V_vals.to(torch.float16).to(device)
-                        residual_V_pos = residual_V_pos.to(torch.int32).to(device)
+                        residual_V_pos = residual_V_pos.to(torch.int16).to(device)
                     else:
                         residual_V_pos = None
                         residual_V_vals = None

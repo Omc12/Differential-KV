@@ -131,14 +131,13 @@ class TestTorchPathIntegration:
         import torch
         from native_core.compression import lowrank
 
-        T_total, H, D = 64, 2, 16
-        T_active = T_total - 1
+        T, H, D = 64, 2, 16
         table_toks = (['|', ' 7', 'x', '7', ' |', ' 8', '3', '.', '2', ' |\n'] *
                       3)                     # 30 tokens of table rows
         prose_toks = [' the', ' quick', ' brown', ' fox', ' jumps', '.',
                       ' over', ' lazy', ' dogs', ' again'] * 4  # > owner_dist
-        toks = (prose_toks[:T_total - len(table_toks)] + table_toks)[:T_total]
-        tids = list(range(T_total))
+        toks = (prose_toks[:T - len(table_toks)] + table_toks)[:T]
+        tids = list(range(T))
 
         class FakeTok:
             def decode(self, ids):
@@ -146,14 +145,13 @@ class TestTorchPathIntegration:
 
         class FakeMgr:
             tokenizer = FakeTok()
-            _session_token_ids = {"s": torch.arange(T_total)}
+            _session_token_ids = {"s": torch.arange(T)}
             native_pool = None
             _streaming_mgr = None
 
         class FakeBlock:
             session_id = "s"
-            token_indices = list(range(T_total))
-            anchor_idx = 0
+            token_indices = list(range(T))
             anchor_kv = torch.zeros(1, 2, H * D)
             layer_idx = 0
             pool_idx = None
@@ -161,18 +159,15 @@ class TestTorchPathIntegration:
 
             def __init__(self):
                 g = torch.Generator().manual_seed(0)
-                self.active_k = torch.randn(1, H, T_active, D, generator=g)
-                self.active_v = torch.randn(1, H, T_active, D, generator=g)
+                self.active_k = torch.randn(1, H, T, D, generator=g)
+                self.active_v = torch.randn(1, H, T, D, generator=g)
 
         blk = FakeBlock()
         ok = lowrank.compress_layer_blocks_gpu([blk], rank=8, manager=FakeMgr())
         assert ok
         assert blk.residual_K_positions is not None
         sel = set(blk.residual_K_positions.tolist())
-        # In lowrank, the returned indices are relative to active tokens (0-indexed for 1..63).
-        # We need to map them back to global token indices (1..63) to match table_positions.
-        global_sel = {idx + 1 for idx in sel if idx >= 0}
-        table_positions = set(range(T_total - len(table_toks), T_total))
-        frac = len(global_sel & table_positions) / max(1, len(global_sel))
+        table_positions = set(range(T - len(table_toks), T))
+        frac = len(sel & table_positions) / max(1, len(sel))
         # boosted table rows should dominate the kept residual set
-        assert frac >= 0.7, (frac, sorted(global_sel))
+        assert frac >= 0.7, (frac, sorted(sel))

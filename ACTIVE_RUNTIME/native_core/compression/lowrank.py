@@ -337,7 +337,7 @@ def compress_lowrank(
             if token_norms is not None:
                 res_K_vals = res_K_vals * token_norms.cpu()[fact_positions_K.cpu()].unsqueeze(1)
             residual_K_vals = res_K_vals.to(torch.float16).to(device)
-            fact_positions_K = fact_positions_K.to(torch.int32).to(device)
+            fact_positions_K = fact_positions_K.to(torch.int16).to(device)
         else:
             fact_positions_K = None
             residual_K_vals = None
@@ -347,7 +347,7 @@ def compress_lowrank(
             if token_norms is not None:
                 res_V_vals = res_V_vals * token_norms.cpu()[fact_positions_V.cpu()].unsqueeze(1)
             residual_V_vals = res_V_vals.to(torch.float16).to(device)
-            fact_positions_V = fact_positions_V.to(torch.int32).to(device)
+            fact_positions_V = fact_positions_V.to(torch.int16).to(device)
         else:
             fact_positions_V = None
             residual_V_vals = None
@@ -1030,10 +1030,8 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # block's residual selection was a pre-existing bug; look them up
         # fresh per block instead of relying on Python for-loop leakage.
         block_token_ids = _gather_block_token_ids(block, manager)
-        # The first token is the block anchor; active tokens start at index 1
-        active_token_ids = block_token_ids[1:] if block_token_ids else []
-        if active_token_ids and getattr(manager, "tokenizer", None) is not None \
-                and len(active_token_ids) == T_active:
+        if block_token_ids and getattr(manager, "tokenizer", None) is not None \
+                and len(block_token_ids) == T_active:
             try:
                 _sid = getattr(block, "session_id", None)
                 _cached_boost = None
@@ -1053,14 +1051,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     if _cache is None:
                         _cache = manager._res_capture_decode_cache = {}
                     tok_strs = []
-                    for _tid in active_token_ids:
+                    for _tid in block_token_ids:
                         _s = _cache.get(_tid)
                         if _s is None:
                             _s = _cache[_tid] = _tok.decode([_tid])
                         tok_strs.append(_s)
                     _all = manager._session_token_ids.get(_sid) if getattr(
                         manager, "_session_token_ids", None) is not None else None
-                    _total = int(_all.numel()) if _all is not None else len(active_token_ids)
+                    _total = int(_all.numel()) if _all is not None else len(block_token_ids)
                     _ckey = (_sid, _total)
                     _counts_cache = getattr(manager, "_res_capture_counts", None)
                     if _counts_cache is None:
@@ -1073,7 +1071,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                         _counts_cache.clear()   # keep only the latest session state
                         _counts_cache[_ckey] = _counts
                     boost_row, n_boosted = compute_boost_multipliers(
-                        tok_strs, active_token_ids, _counts or {}, _total)
+                        tok_strs, block_token_ids, _counts or {}, _total)
                     if _sid is not None:
                         _session_boosts[block.anchor_idx] = (boost_row, n_boosted)
 
@@ -1108,14 +1106,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
             if fact_positions_K.numel() > 0:
                 residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)
-                fact_positions_K = fact_positions_K.to(torch.int32).to(gpu_device)
+                fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_K = None
                 residual_K_vals = None
 
             if fact_positions_V.numel() > 0:
                 residual_V_vals = (delta_V - recon_V)[fact_positions_V].to(torch.float16).to(gpu_device)
-                fact_positions_V = fact_positions_V.to(torch.int32).to(gpu_device)
+                fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_V = None
                 residual_V_vals = None
@@ -1147,9 +1145,9 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
         _N = len(blocks_list)
         _max_res = pool.max_residual_tokens
-        _rk_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int32)
+        _rk_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
         _rk_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
-        _rv_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int32)
+        _rv_pos_pad = torch.full((_N, _max_res), -1, device=gpu_device, dtype=torch.int16)
         _rv_val_pad = torch.zeros((_N, _max_res, heads, head_dim), device=gpu_device, dtype=torch.float16)
         for _i in range(_N):
             _fp = _rk_pos[_i]
