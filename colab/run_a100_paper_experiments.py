@@ -592,12 +592,13 @@ def _chunked_prefill_dense(model, ids: List[int], device: str, CH: int):
     """Chunked dense prefill returning (past_key_values, last_logits_gpu)."""
     past = None
     out = None
-    for cs in range(0, len(ids), CH):
-        ch = ids[cs:cs + CH]
-        pos = torch.tensor([list(range(cs, cs + len(ch)))], device=device)
-        out = model(input_ids=torch.tensor([ch], device=device),
-                    position_ids=pos, past_key_values=past, use_cache=True)
-        past = out.past_key_values
+    with torch.no_grad():
+        for cs in range(0, len(ids), CH):
+            ch = ids[cs:cs + CH]
+            pos = torch.tensor([list(range(cs, cs + len(ch)))], device=device)
+            out = model(input_ids=torch.tensor([ch], device=device),
+                        position_ids=pos, past_key_values=past, use_cache=True)
+            past = out.past_key_values
     return past, out.logits[0, -1].float()
 
 
@@ -1066,7 +1067,8 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     model_id = config.get("model_id", "Qwen/Qwen2.5-7B-Instruct")
     preset = config.get("preset", "mid")
     gen_len = config.get("gen_len", 128)
-    rank = config.get("rank", 32)
+    preset_ranks = {"low": 16, "mid": 32, "high": 64}
+    rank = config.get("rank", preset_ranks.get(preset, 32))
     block_size = config.get("block_size", 256)
     n_trials = config.get("n_trials", int(os.environ.get("DIFFKV_BENCH_TRIALS", "3")))
 
@@ -1086,9 +1088,11 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             from transformers import AutoModelForCausalLM
             load_kwargs = dict(torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                                device_map=device, trust_remote_code=True)
-            # SnapKV needs real attention weights → eager attention path.
+            # SnapKV needs real attention weights → eager attention path; others use SDPA.
             if preset == "snapkv":
                 load_kwargs["attn_implementation"] = "eager"
+            else:
+                load_kwargs["attn_implementation"] = "sdpa"
             model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
             model.eval()
             stop_ids |= _derive_stop_ids(tokenizer)
