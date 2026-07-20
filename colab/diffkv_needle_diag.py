@@ -15,6 +15,12 @@ Run (transformers MUST be 4.46.3):
 """
 import os, sys, argparse
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Mirror the PRODUCTION decode config by default: SPARSE_BIAS=auto is the serving
+# default (decode_config.py) and forks to the non-combined merge path. Running
+# without it silently exercised the combined kernel — a path production never uses
+# — which masked the deep-needle bug. Set DIFFKV_SPARSE_BIAS=0 to A/B the combined
+# kernel. TOPK is left unset so the block_size-derived pool default (=64) applies.
+os.environ.setdefault("DIFFKV_SPARSE_BIAS", "auto")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "ACTIVE_RUNTIME"))
 import torch

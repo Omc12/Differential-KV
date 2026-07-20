@@ -712,6 +712,18 @@ class KVRuntimeManager:
         )
         self.native_pool.config = self.config
 
+        # ── Routing top-K default (block_size-derived, MLX-parity) ────────
+        # A block router keeps K blocks; the routed TOKEN budget is K * block_size.
+        # MLX uses block_size=256 with K=16 → 4096 routed tokens. CUDA's routing
+        # block spans self.block_size (=64) tokens, so the equivalent K is
+        # 4096 // 64 = 64. The old flat default of 16 covered only 16*64=1024
+        # tokens — 4× less — so a distant needle's block fell outside the top-16
+        # and deep-context retrieval failed for any user who never set
+        # DIFFKV_TOPK_BLOCKS. Deriving it from block_size makes the correct budget
+        # automatic (no env var required) and scales if block_size ever changes.
+        # An explicit DIFFKV_TOPK_BLOCKS still overrides this (see query_router.py).
+        self.native_pool.routing_topk_default = max(16, 4096 // max(1, self.block_size))
+
         # ── SRL: Initialize random projection matrix W_proj ──────────────
         # Fixed at construction time — never updated.
         # All block descriptors and query descriptors use the same W_proj,

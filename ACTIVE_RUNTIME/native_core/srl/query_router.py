@@ -884,13 +884,24 @@ def route_blocks_relevance(
     Direct port of mlx_diffkv_wrapper._block_relevance_residual: a block's
     relevance is the max over query heads of max(q·anchor, max over its stored
     residual keys of q·k), fp16 products with fp32 accumulation, then plain
-    top-K (DIFFKV_TOPK_BLOCKS, default 16; K = max(topk, topk_frac·N, k_min)).
+    top-K (DIFFKV_TOPK_BLOCKS; default = pool.routing_topk_default = 4096 // block_size
+    = 64 on CUDA; K = max(topk, topk_frac·N, k_min)).
     """
     N = block_indices.numel()
-    try:
-        topk = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
-    except ValueError:
-        topk = 16
+    # DIFFKV_TOPK_BLOCKS: an explicit env value always wins. When unset, use the
+    # block_size-derived default the manager stamped on the pool (MLX routed-token-
+    # budget parity: 4096 // block_size = 64 on CUDA's block_size=64). The old flat
+    # "16" covered only 16*64=1024 tokens and dropped a distant needle's block from
+    # the top-K, breaking deep-context retrieval unless the user knew to set K=64.
+    _pool_default = int(getattr(pool, "routing_topk_default", 16) or 16)
+    _topk_env = os.environ.get("DIFFKV_TOPK_BLOCKS")
+    if _topk_env is None or _topk_env.strip() == "":
+        topk = _pool_default
+    else:
+        try:
+            topk = int(_topk_env)
+        except ValueError:
+            topk = _pool_default
     try:
         topk_frac = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
     except ValueError:
