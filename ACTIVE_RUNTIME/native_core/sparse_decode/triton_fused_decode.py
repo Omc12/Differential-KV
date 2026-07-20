@@ -2001,8 +2001,17 @@ def native_triton_sparse_attn_decode(
                 # to avoid double-counting (active_k already contains all anchor+active data
                 # from every dense block, assembled by assemble_dense_window_kv).
                 if active_k is not None and active_k.shape[2] > 0:
-                    k_kv = active_k.float()
-                    v_kv = active_v.float()
+                    # active_k/active_v are the FIXED-SIZE assembled workspace, padded
+                    # to max_dense_len. Slice to the actual valid dense count so we
+                    # (a) never attend over padding rows, and (b) the RoPE length-check
+                    # below (len(_dense_pos_list) == k_kv.shape[2]) MATCHES. When left
+                    # padded, token_count != padded_len so rotation was silently
+                    # skipped, leaving the dense keys UNROTATED — corrupting the recent-
+                    # window attention and producing garbage decode (the deep-needle bug
+                    # in the DIFFKV_SPARSE_BIAS=auto production path).
+                    _alen = active_len if (active_len and active_len > 0) else active_k.shape[2]
+                    k_kv = active_k[:, :, :_alen].float()
+                    v_kv = active_v[:, :, :_alen].float()
                 else:
                     dense_k_parts = []
                     dense_v_parts = []
@@ -2028,7 +2037,13 @@ def native_triton_sparse_attn_decode(
                         _dense_pos_list = []
                         for _blk in (dense_blocks or []):
                             _dense_pos_list.extend(_blk.token_indices)
-                        if _dense_pos_list and len(_dense_pos_list) == k_kv.shape[2]:
+                        _rot_fired = bool(_dense_pos_list) and len(_dense_pos_list) == k_kv.shape[2]
+                        if _dbg_merge and not getattr(native_triton_sparse_attn_decode, "_dbg_done", False):
+                            print(f"[MERGE-DBG] dense-rot active_k[2]="
+                                  f"{(active_k.shape[2] if active_k is not None else None)} "
+                                  f"active_len={active_len} k_kv[2]={k_kv.shape[2]} "
+                                  f"len(pos)={len(_dense_pos_list)} rot_fired={_rot_fired}", flush=True)
+                        if _rot_fired:
                             _dp = torch.tensor(_dense_pos_list, dtype=torch.long, device=k_kv.device)
                             # cos/sin: [1, seq_len, head_dim]  (standard rotary_emb output)
                             _cos_d = cos[0, _dp.clamp(max=cos.shape[1] - 1)].unsqueeze(0).unsqueeze(1)  # [1,1,L,D]
