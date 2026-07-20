@@ -1666,6 +1666,7 @@ class MLXKVBlockManager:
         # topk_blocks=0 disables routing entirely (attend every block).
         self.topk_blocks = int(os.environ.get("DIFFKV_TOPK_BLOCKS", "16"))
         self.topk_frac   = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
+        self.srl_k_min   = int(os.environ.get("DIFFKV_SRL_K_MIN", self.config.get("srl_k_min", 20)))
         # High-Quality Mode (cross-runtime toggle, mirrors native src/main.cpp):
         #   DIFFKV_HIGH_QUALITY_ROUTING = 1 -> attend ALL compressed blocks at decode
         #     (max synthesis fidelity, cost scales with full context).
@@ -3947,9 +3948,10 @@ class MLXKVBlockManager:
             res_n = mx.array(session["comp_res_n"][layer_idx][:nb], dtype=mx.int32)
             res_mask = session["comp_res_mask"][layer_idx][:nb] if "comp_res_mask" in session else None
 
-            k_eff = self.topk_blocks
+            k_min = max(getattr(self, "srl_k_min", 20), int(0.15 * nb))
+            k_eff = max(self.topk_blocks, k_min)
             if self.topk_blocks > 0 and self.topk_frac > 0.0:
-                k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+                k_eff = max(k_eff, int(nb * self.topk_frac))
             if self.topk_blocks > 0 and nb > k_eff:
                 R_route = min(self.route_residuals, self.max_residual)
                 rvld = mx.expand_dims(mx.arange(R_route), 0) < mx.expand_dims(mx.minimum(res_n, R_route), 1)
@@ -4117,9 +4119,10 @@ class MLXKVBlockManager:
         # so cost scales with K rather than total context. `topk_sel` (an mx.array of
         # selected block ids, kept lazy) carries the selection to the residual gather
         # below; None = attend all blocks.
-        k_eff = self.topk_blocks
+        k_min = max(getattr(self, "srl_k_min", 20), int(0.15 * nb))
+        k_eff = max(self.topk_blocks, k_min)
         if self.topk_blocks > 0 and self.topk_frac > 0.0:
-            k_eff = max(self.topk_blocks, int(nb * self.topk_frac))
+            k_eff = max(k_eff, int(nb * self.topk_frac))
         # High-Quality Mode forces attend-all (no top-K prune) — the direct analog
         # of native's DIFFKV_HIGH_QUALITY_ROUTING attend-all path.
         use_topk = (self.topk_blocks > 0 and nb > k_eff) and not self._high_quality_routing
