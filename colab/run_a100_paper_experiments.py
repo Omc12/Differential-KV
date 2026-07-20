@@ -1054,10 +1054,10 @@ def _run_worker_isolated(task_type: str, config: Dict[str, Any]) -> Dict[str, An
 
 
 def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    # Process isolation (opt-in) — run in a subprocess so the GPU is fully freed
+    # Process isolation (enabled by default) — run in a subprocess so the GPU is fully freed
     # between configs on memory-tight cards (e.g. 40GB A100). The child sets
     # _DIFFKV_IN_WORKER=1 so it runs the body in-process rather than re-spawning.
-    if (os.environ.get("DIFFKV_ISOLATE_WORKERS") == "1"
+    if (os.environ.get("DIFFKV_ISOLATE_WORKERS", "1") != "0"
             and os.environ.get("_DIFFKV_IN_WORKER") != "1"):
         return _run_worker_isolated(task_type, config)
 
