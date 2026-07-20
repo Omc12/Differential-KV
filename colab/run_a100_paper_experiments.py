@@ -981,10 +981,9 @@ def _set_diffkv_env(preset: str):
         for k, v in extra.items():
             os.environ[k] = v
     os.environ["DIFFKV_PRESET"] = base
-    # Keep weights FP16 across ALL presets so memory/VRAM comparisons isolate the
-    # KV cache, not weight quantization (the low preset otherwise auto-enables
-    # 4-bit NF4 weights). Quantization is composable and reported as future work.
     os.environ["DIFFKV_QUANTIZATION"] = "fp16"
+    if torch.cuda.is_available():
+        os.environ["DIFFKV_GPU_COMPRESS"] = "1"
 
 
 def _spawn_and_collect(cmd: List[str], out_path: str, timeout: float) -> Dict[str, Any]:
@@ -1772,6 +1771,7 @@ def main():
                         help="Second model FAMILY for generalization (default: Llama-3.1-8B, not just a bigger Qwen).")
     parser.add_argument("--out", default="diffkv_paper_benchmark_results.json")
     parser.add_argument("--only", default="", help="comma-separated experiment ids to run (e.g. 1,5,21). Empty = all.")
+    parser.add_argument("--skip", default="", help="comma-separated experiment ids to skip (e.g. 1,11).")
     parser.add_argument("--worker-task", default="")
     parser.add_argument("--worker-config", default="{}")
     parser.add_argument("--worker-out", default="", help="isolated-worker result file (JSON)")
@@ -1802,9 +1802,13 @@ def main():
 
     contexts = [4096, 8192, 16384, 32768, 65536]
     only = set(x.strip() for x in args.only.split(",") if x.strip())
+    skip = set(x.strip() for x in args.skip.split(",") if x.strip())
 
     def want(i):
-        return (not only) or (str(i) in only)
+        s = str(i)
+        if s in skip:
+            return False
+        return (not only) or (s in only)
 
     R = {}
     if want(1): R["exp1_memory_vs_context"] = exp1_memory_vs_context(args.model, contexts)
