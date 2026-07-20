@@ -55,6 +55,37 @@ def make_prompt(tok, ctx_len, needle, question, depth=0.9):
         return ctx + "\n" + question + "\nAssistant:"
 
 
+def make_niah_prompt(tokenizer, context_length, depth, needle, question):
+    """EXACT copy of ACTIVE_RUNTIME/tests/test_niah.py:make_niah_prompt — the
+    builder whose 8k placements CUDA mangles. Use --builder niah to reproduce
+    the pytest failure here (with a dense baseline for comparison)."""
+    filler = (
+        "Quantum computing is a multidisciplinary field comprising aspects of computer science, "
+        "physics, and mathematics that utilizes quantum mechanics to solve complex problems faster "
+        "than on classical computers. The field of quantum computing includes hardware research and "
+        "application development. Quantum computers are able to solve certain classes of problems "
+        "much faster than classical computers by taking advantage of quantum mechanical effects, "
+        "such as superposition and quantum entanglement. "
+    )
+    filler_tokens = tokenizer.encode(filler, add_special_tokens=False)
+    needle_tokens = tokenizer.encode(needle + "\n", add_special_tokens=False)
+    target_filler_tokens = context_length - len(needle_tokens) - 100
+    if target_filler_tokens < 0:
+        target_filler_tokens = 100
+    num_repeats = (target_filler_tokens // len(filler_tokens)) + 1
+    all_filler_tokens = (filler_tokens * num_repeats)[:target_filler_tokens]
+    insert_idx = int(len(all_filler_tokens) * depth)
+    part1_text = tokenizer.decode(all_filler_tokens[:insert_idx])
+    part2_text = tokenizer.decode(all_filler_tokens[insert_idx:])
+    return (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        + part1_text + "\n" + needle + "\n" + part2_text + "\n\n"
+        + question + "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
 def dense_probe(model_id, prompt, device, tok, n=12):
     from transformers import AutoModelForCausalLM
     m = AutoModelForCausalLM.from_pretrained(
@@ -104,6 +135,8 @@ def main():
     ap.add_argument("--ctxs", default="200,1500,4000")   # 200 likely bypass; 1500/4000 engage
     ap.add_argument("--depth", type=float, default=0.9,
                     help="needle depth 0..1 (0.1 = oldest/most-compressed region, the hard case)")
+    ap.add_argument("--builder", choices=["isolate", "niah"], default="isolate",
+                    help="isolate=make_prompt (retrieves); niah=EXACT test_niah.py builder (CUDA mangles at 8k)")
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -112,9 +145,12 @@ def main():
     needle = "The special code is 847291."
     question = "What is the special code? Answer in exactly the 6-digit code number."
 
-    print(f"model={args.model} device={device} depth={args.depth}\n")
+    print(f"model={args.model} device={device} depth={args.depth} builder={args.builder}\n")
     for ctx in [int(c) for c in args.ctxs.split(",")]:
-        prompt = make_prompt(tok, ctx, needle, question, depth=args.depth)
+        if args.builder == "niah":
+            prompt = make_niah_prompt(tok, ctx, args.depth, needle, question)
+        else:
+            prompt = make_prompt(tok, ctx, needle, question, depth=args.depth)
         plen = len(tok.encode(prompt))
         d_first, d_txt = dense_probe(args.model, prompt, device, tok)
         k_first, k_txt = diffkv_probe(args.model, prompt, device)
