@@ -706,6 +706,47 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
     }
 
 
+def _summarize_decode_profile(prof, gen_len: int) -> None:
+    """Print a compact CPU-vs-CUDA breakdown of a profiled generate() call.
+
+    The question this answers: is DiffKV decode kernel-bound or host-bound?
+    If self-CPU time and the cudaLaunchKernel count dwarf total CUDA time, the
+    decode is launch/orchestration-bound (per-token, per-layer Python running in
+    eager mode with no CUDA-graph capture) — the structural gap vs MLX's fused
+    lazy-eval graph — NOT the Triton kernels themselves. If CUDA time dominates,
+    the kernels are the cost and the fix is in the kernel, not the dispatch.
+    """
+    try:
+        ka = prof.key_averages()
+
+        def _cuda_us(e):
+            # torch renamed cuda_time_total -> device_time_total across versions.
+            for attr in ("self_cuda_time_total", "self_device_time_total"):
+                v = getattr(e, attr, None)
+                if v:
+                    return v
+            return 0.0
+
+        total_cpu_us = sum(getattr(e, "self_cpu_time_total", 0.0) for e in ka)
+        total_cuda_us = sum(_cuda_us(e) for e in ka)
+        launches = sum(e.count for e in ka
+                       if "cudaLaunchKernel" in e.key or "launch" in e.key.lower())
+        ratio = (total_cpu_us / total_cuda_us) if total_cuda_us > 0 else float("inf")
+
+        print("   " + "─" * 68)
+        print(f"   [DECODE PROFILE] gen={gen_len} tok (incl. generate()'s internal prefill)")
+        print(f"     total self-CPU  = {total_cpu_us / 1e3:9.1f} ms")
+        print(f"     total self-CUDA = {total_cuda_us / 1e3:9.1f} ms")
+        print(f"     CPU/CUDA ratio  = {ratio:6.2f}x   "
+              f"({'HOST/LAUNCH-bound → eager Python overhead' if ratio > 2.0 else 'kernel-bound'})")
+        print(f"     kernel launches = {launches}  (~{launches / max(1, gen_len):.0f}/token)")
+        print("   top ops by self-CPU time:")
+        for line in ka.table(sort_by="self_cpu_time_total", row_limit=12).splitlines():
+            print("     " + line)
+    except Exception as e:  # never let profiling break the benchmark
+        print(f"   [DECODE PROFILE] summary failed: {e}")
+
+
 def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
                   full_prompt: Optional[str] = None, question: Optional[str] = None) -> Dict[str, Any]:
     """One DiffKV trial. Phase 1 does a manual prefill+compress on its own session
@@ -794,11 +835,27 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         t2 = time.perf_counter()
-        with torch.no_grad():
-            # rep-penalty 1.0 + top_p 1.0 = retrieval-safe (matches test_niah.py);
-            # generate() has its own numeric-digit protection.
-            _ = w.generate(prompt=full_prompt, max_new_tokens=gen_len, temperature=0.0,
+        # DIFFKV_TORCH_PROFILE=1 wraps decode in torch.profiler to reveal whether
+        # the cost is the Triton kernels (CUDA-bound) or per-token/per-layer Python
+        # dispatch in eager mode (host/launch-bound). See _summarize_decode_profile.
+        _prof_decode = os.environ.get("DIFFKV_TORCH_PROFILE", "0") == "1"
+        _gen_kwargs = dict(prompt=full_prompt, max_new_tokens=gen_len, temperature=0.0,
                            top_p=1.0, repetition_penalty=1.0, query_text=question)
+        if _prof_decode:
+            from torch.profiler import profile as _torch_profile, ProfilerActivity
+            _acts = [ProfilerActivity.CPU]
+            if torch.cuda.is_available():
+                _acts.append(ProfilerActivity.CUDA)
+            with torch.no_grad(), _torch_profile(activities=_acts, record_shapes=False) as _prof:
+                _ = w.generate(**_gen_kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _summarize_decode_profile(_prof, gen_len)
+        else:
+            with torch.no_grad():
+                # rep-penalty 1.0 + top_p 1.0 = retrieval-safe (matches test_niah.py);
+                # generate() has its own numeric-digit protection.
+                _ = w.generate(**_gen_kwargs)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t_gen = time.perf_counter() - t2
