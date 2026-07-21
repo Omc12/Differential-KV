@@ -1,1 +1,0 @@
-{"status": "success", "result": {"prompt_tokens": 4096, "gen_tokens": 30, "prefill_s": 8.168499166960828, "decode_s": 0.7802302499767393, "decode_tps": 38.45018826288058, "ttft_s": null, "mx_peak_gb": 1.604124544, "output_preview": "The secret passcode hidden in the document is **OMEGA-7741-DELTA**.\n\n### Consistency Models in Distributed Systems\n\n", "needle_found": true}}

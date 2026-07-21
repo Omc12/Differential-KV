@@ -40,7 +40,7 @@ produce correct hidden states, and captures each chunk's $K$/$V$ into the store.
 attention output from the compressed store via the fused decode buffer (\S\ref{sec:decode}).
 
 \paragraph{The store.} \texttt{MLXKVBlockManager} holds all persistent state, per session and per
-layer: a \emph{dense recency window} of the most recent $\dwin{+}\bs{=}1{,}024$ tokens in exact
+layer: a \emph{dense recency window} of the most recent $\dwin{=}1{,}024$ tokens in exact
 fp16, and a \emph{compressed block pool} of up to $M{=}256$ blocks, each holding the anchor,
 low-rank factors, exact residuals, and router statistics for one $256$-token span. The pool is
 pre-allocated and fixed in size, which is what bounds the runtime's memory

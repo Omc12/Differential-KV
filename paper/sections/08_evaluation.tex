@@ -175,7 +175,7 @@ $\topk{=}16$ routing headroom is sufficient for simultaneous multi-region retrie
 A two-hop probe tests whether the store preserves \emph{relational bindings}: Needle~A gives a key;
 Needle~B uses that key as the answer to a different question. The model must retrieve A, extract
 the key, and then retrieve B using it. \diffkv{} resolves the chain correctly at $4$k, $16$k, and
-$32$k---the empirical validation that the edge-capture mechanism (\\S\ref{sec:compression})
+$32$k---the empirical validation that the edge-capture mechanism (\S\ref{sec:compression})
 rescues relational connectives whose low-rank reconstruction collides with a neighbour's key.
 
 \subsection{E9 --- Language-model perplexity: zero degradation under compression}
@@ -196,7 +196,7 @@ To verify architecture-agnosticism, we load
 \texttt{mlx-community/Llama-3.2-3B-Instruct-4bit} ($28$ layers, $24$ query heads, $8$ KV heads,
 $\dhead{=}128$, a different tokenizer and RoPE schedule) and apply the \emph{same wrapper without
 modification}. The dynamic patch replaces Llama's attention class at load time; no model-specific
-code is required (\\S\ref{sec:impl}).
+code is required (\S\ref{sec:impl}).
 
 \begin{table}[h]
   \centering
@@ -219,16 +219,29 @@ required zero modifications for Llama: the patch is architecture-agnostic.
 
 \subsection{E11 --- Decode latency breakdown at 16k}
 \label{sec:e11}
-Profiling the per-step decode at $16$k ($\maxres{=}128$, $\topk{=}16$, with instrumentation)
-gives: low-rank SVD scoring $35\%$ (${\approx}378$\,ms); residual attention $28\%$
-(${\approx}302$\,ms); cache-merge $15\%$ (${\approx}162$\,ms); SRL query routing $12\%$
-(${\approx}130$\,ms); fused-buffer materialisation $10\%$ (${\approx}108$\,ms). Total step
-$\approx1{,}080$\,ms under instrumentation.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figures/g8_latency_breakdown.pdf}
+  \caption{Where a decode step goes at $16$k ($\maxres{=}128$, $\topk{=}16$), measured with
+  instrumentation active. The two largest slices---the per-token low-rank contraction and the
+  residual attend---are $63\%$ of the step between them, and are what a single fused kernel
+  would collapse. Buffer materialisation, the mechanism added to \emph{save} time
+  (\S\ref{sec:fusedbuf}), is the smallest slice at $10\%$.}
+  \label{fig:e11}
+\end{figure}
+
+Profiling the per-step decode at $16$k gives the split in Figure~\ref{fig:e11}: low-rank SVD
+scoring $35\%$ (${\approx}378$\,ms); residual attention $28\%$ (${\approx}302$\,ms); cache-merge
+$15\%$ (${\approx}162$\,ms); SRL query routing $12\%$ (${\approx}130$\,ms); fused-buffer
+materialisation $10\%$ (${\approx}108$\,ms). The total step is $\approx1{,}080$\,ms under
+instrumentation, so these percentages describe where the time goes, not the un-instrumented
+throughput reported elsewhere.
 
 The breakdown confirms the E6 diagnosis: the bottleneck is the per-token low-rank contraction
 ($q \cdot V_K$) and subsequent residual attend---not buffer materialisation. A fused
 Metal/CUDA kernel collapsing these into a single launch is the highest-leverage optimisation
-(\\S\ref{sec:limits}).
+(\S\ref{sec:limits}).
 
 \subsection{E12 --- Streaming prefill with the lego path}
 \label{sec:e12}

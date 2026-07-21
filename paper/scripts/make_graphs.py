@@ -10,6 +10,7 @@ LaTeX captions do); text is black; palette = blues + emerald.
   g1_kv_footprint   analytic KV-state growth vs the bounded pool
   g6_residual_tradeoff  residual budget: compression ratio bars + decode tok/s line
   g7_decode_ablation    compressed vs exact decode over the same store
+  g8_latency_breakdown  E11 per-step decode latency split (extruded 3-D pie)
 """
 import os
 import sys
@@ -186,9 +187,121 @@ def g7_decode_ablation():
     S.finalize(fig, os.path.join(FIG, "g7_decode_ablation.png"))
 
 
+# ── g8 · E11 decode-latency breakdown (extruded 3-D pie) ────────────────────
+def g8_latency_breakdown():
+    """E11 decode-step breakdown as an extruded 3-D pie.
+
+    Same visual grammar as F6: orthographic squash, thin black strokes, the
+    blue/emerald semantic palette. Top faces carry the percentages; the
+    right-hand key carries names, ms values, and the takeaway.
+    """
+    from matplotlib.patches import Polygon, Rectangle
+    BLACK, BLUE, BLUE_D, BLUE_L, EMERALD, GRAY_D, LEGEND_EC, WHITE = (
+        S.BLACK, S.BLUE, S.BLUE_D, S.BLUE_L, S.EMERALD, S.GRAY_D,
+        S.LEGEND_EC, S.WHITE)
+
+    parts = [
+        ("low-rank SVD scoring",           35, 378, BLUE,    WHITE),
+        ("residual attention",             28, 302, EMERALD, WHITE),
+        ("cache merge",                    15, 162, BLUE_D,  WHITE),
+        ("SRL query routing",              12, 130, GRAY_D,  WHITE),
+        ("fused-buffer materialisation",   10, 108, BLUE_L,  BLACK),
+    ]
+
+    def darken(hexcol, f=0.68):
+        h = hexcol.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return "#%02x%02x%02x" % (int(r * f), int(g * f), int(b * f))
+
+    fig = plt.figure(figsize=(7.6, 3.75))
+    ax = fig.add_axes([0.015, 0.03, 0.50, 0.94])
+    ax.set_aspect("equal"); ax.axis("off")
+    ax.set_xlim(-1.82, 1.88); ax.set_ylim(-1.42, 0.98)
+
+    SQ, DEPTH, R = 0.55, 0.22, 1.0
+
+    # slice angle ranges — clockwise from 12 o'clock, like the F6-era charts
+    edges, acc = [], 90.0
+    for _, pct, _, _, _ in parts:
+        edges.append((acc, acc - pct * 3.6))
+        acc -= pct * 3.6
+
+    def arc(th_hi, th_lo, n=None):
+        n = n or max(12, int((th_hi - th_lo) / 2.5))
+        return np.linspace(th_lo, th_hi, n)
+
+    # rims first (they sit under the top faces), front half only (sin < 0)
+    for (th1, th2), (_, _, _, c, _) in zip(edges, parts):
+        ts = arc(th1, th2, 120)
+        mask = np.sin(np.radians(ts)) < -1e-9
+        if not mask.any():
+            continue
+        runs = np.split(np.where(mask)[0], np.where(np.diff(np.where(mask)[0]) > 1)[0] + 1)
+        for run in runs:
+            tt = ts[run]
+            if len(tt) < 2:
+                continue
+            top = [(R * np.cos(np.radians(t)), SQ * R * np.sin(np.radians(t))) for t in tt]
+            bot = [(x, y - DEPTH) for x, y in reversed(top)]
+            ax.add_patch(Polygon(top + bot, closed=True, fc=darken(c), ec=BLACK,
+                                 lw=0.4, zorder=2))
+
+    # top faces
+    for (th1, th2), (_, pct, _, c, tc) in zip(edges, parts):
+        ts = arc(th1, th2)
+        pts = [(0.0, 0.0)] + [(R * np.cos(np.radians(t)), SQ * R * np.sin(np.radians(t)))
+                              for t in ts]
+        ax.add_patch(Polygon(pts, closed=True, fc=c, ec=BLACK, lw=0.45, zorder=3))
+
+    # ── elbow leaders: label in the white margin, horizontal run, then a
+    #    vertical drop (or rise) straight onto the slice ──
+    #    (x_anchor, y_touch) = where the vertical meets the slice;
+    #    y_h = the horizontal run's height; x_text = label position
+    leaders = [
+        ("35%", 0.891,  0.300,  0.62,  1.42, "left"),    # upper right, drops down
+        ("10%", -0.309, 0.575,  0.86, -0.72, "right"),   # top, drops down
+        ("12%", -0.845, 0.345,  0.62, -1.42, "right"),   # upper left, drops down
+        ("15%", -0.960, -0.425, -0.68, -1.42, "right"),  # lower left, rises to the rim
+        ("28%", 0.063,  -0.820, -1.10,  0.55, "left"),   # bottom, rises to the rim
+    ]
+    for txt, xa, y_end, y_h, x_text, ha in leaders:
+        x_line = x_text - 0.05 if ha == "left" else x_text + 0.05
+        ax.plot([x_line, xa], [y_h, y_h], color=BLACK, lw=0.7, zorder=5)
+        ax.plot([xa, xa], [y_h, y_end], color=BLACK, lw=0.7, zorder=5)
+        ax.text(x_text, y_h, txt, ha=ha, va="center", fontsize=8.6,
+                fontweight="bold", color=BLACK, zorder=6)
+
+    ax.text(0.03, -1.32, "one decode step  ≈ 1,080 ms   (instrumented, 16k)",
+            ha="center", va="center", fontsize=8.4, color=BLACK)
+
+    # ── right-hand key: swatch · component · ms ──
+    ax2 = fig.add_axes([0.545, 0.02, 0.445, 0.96]); ax2.axis("off")
+    ax2.set_xlim(0, 1); ax2.set_ylim(0, 1)
+    y = 0.955
+    for name, pct, ms, c, _ in parts:
+        ax2.add_patch(Rectangle((0.005, y - 0.030), 0.052, 0.060, fc=c, ec=BLACK, lw=0.5,
+                                transform=ax2.transAxes, clip_on=False))
+        ax2.text(0.080, y + 0.014, name, ha="left", va="center", fontsize=8.0, color=BLACK)
+        ax2.text(0.080, y - 0.040, f"{pct}%   ·   ≈{ms} ms", ha="left", va="center",
+                 fontsize=7.2, color=BLACK)
+        y -= 0.132
+    ax2.plot([0.005, 0.985], [0.275, 0.275], color=LEGEND_EC, lw=0.8,
+             transform=ax2.transAxes, clip_on=False)
+    ax2.text(0.005, 0.215,
+             "63% of the step is the per-token low-rank\n"
+             "contraction $q\\cdot V_K$ plus the residual attend —\n"
+             "not buffer materialisation. Collapsing the two\n"
+             "into one fused launch is the open optimisation.",
+             ha="left", va="top", fontsize=7.2, color=BLACK, linespacing=1.5,
+             fontstyle="italic")
+
+    S.finalize(fig, os.path.join(FIG, "g8_latency_breakdown.png"))
+
+
 if __name__ == "__main__":
     g_perf()
     g1_kv_footprint()
     g6_residual_tradeoff()
     g7_decode_ablation()
+    g8_latency_breakdown()
     print("\ngraphs done ->", FIG)

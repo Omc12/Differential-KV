@@ -3,8 +3,8 @@
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/f5_decode_attention.pdf}
-  \caption{The fused decode kernel. A cheap exact router keeps the top-\topk{} blocks. Their
+  \includegraphics[width=\linewidth]{figures/f5a_decode_attention.pdf}
+  \caption{The routed sparse decode kernel. A cheap exact router keeps the top-\topk{} blocks. Their
   contribution is computed in the rank-\rank{} subspace---anchor score plus a projected-query dot
   with $U$---without ever forming $\hat K$. In parallel, the selected blocks' exact residuals and
   the dense recency window are attended directly. The two halves are combined by a flash-style
@@ -12,9 +12,10 @@
   \label{fig:decode}
 \end{figure}
 
-Decode is where compression must pay off without materializing the cache. The fused decode
-buffer (Figure~\ref{fig:decode}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an
+Decode is where compression must pay off without materializing the cache. The decode kernel
+(Figure~\ref{fig:decode}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an
 attention output over the compressed pool and the dense window as two halves merged in log-space.
+\S\ref{sec:fusedbuf} then shows how the runtime amortizes that computation across tokens.
 
 \subsection{Routing: bound the work, not the context}
 Attending and reconstructing every block would make decode scale with context. Instead a router
@@ -76,8 +77,24 @@ systematic under-weighting of the low-rank pool for diffuse multi-fact queries; 
 no-op and does not affect the exact single-needle recall reported here.
 
 \subsection{Fused decode buffer}
+\label{sec:fusedbuf}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f5b_fused_buffer.pdf}
+  \caption{The fused decode buffer. Every $N{=}16$ tokens the routed blocks' reconstructed rows,
+  their exact residuals, and the dense recency window are written into one pre-allocated
+  contiguous buffer. Grey cells score $-\infty$ under the fixed additive mask---the low-rank twins
+  of the residual rows, and the unused tail---so each token is represented exactly once. Between
+  rewrites, a step appends the new token's $K$/$V$ as a single in-place row and issues one
+  \texttt{scaled\_dot\_product\_attention} over exact-length views. Attending the union of these
+  rows in one softmax is algebraically the log-sum-exp merge of the two halves in
+  Figure~\ref{fig:decode}.}
+  \label{fig:fusedbuf}
+\end{figure}
+
 Reconstructing the routed blocks for every token is the dominant per-token cost. To amortize
-it, the runtime uses a \emph{persistent fused buffer}: at each routing interval (default
+it, the runtime uses a \emph{persistent fused buffer} (Figure~\ref{fig:fusedbuf}): at each routing interval (default
 $N{=}16$ tokens), the selected blocks' $K$/$V$ are materialised into a contiguous static buffer
 ---one row per non-masked token---together with their exact residuals and the dense recency
 window, guarded by a fixed additive mask that gives residual positions infinite score and zeroes

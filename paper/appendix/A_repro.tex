@@ -23,7 +23,7 @@ dim $128$, trained context $32{,}768$, RoPE $\theta=10^6$.
 \paragraph{Configuration (as measured).}
 preset \texttt{mid}, \texttt{serving\_mode=balanced}, \texttt{rank=32} (the ``mid'' preset
 default; only the ``low'' preset reduces it to $16$), \texttt{block\_size=256},
-\texttt{recency\_window=768} (dense buffer $\dwin{+}\bs=1{,}024$), \texttt{max\_blocks=256},
+\texttt{recency\_window=1024} (dense buffer $\dwin{+}\bs=1{,}280$), \texttt{max\_blocks=256},
 \texttt{max\_residual=128}, top-$K{=}16$ routing with the \texttt{residual} router,
 \texttt{DIFFKV\_SVD\_SEED=1234} (deterministic). The \diffkv{} engine runs in
 the active CLI's serving configuration with the sparse path forced on at every

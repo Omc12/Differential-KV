@@ -17,7 +17,7 @@ $S=\bs-1$ & compressible tokens per block ($255$) \\
 $\rank$ & SVD target rank ($32$ base; adaptive per layer: $[0.75r, 1.5r]$) \\
 $\maxres$ & exact residual budget per block ($128$ default; $64$ memory preset) \\
 $\topk$ & top-$K$ blocks routed at decode ($16$) \\
-$\dwin$ & dense recency window ($768$; buffer $\dwin{+}\bs=1{,}024$) \\
+$\dwin$ & dense recency window ($1{,}024$; buffer $\dwin{+}\bs=1{,}280$) \\
 $M$ & compressed-pool capacity ($256$ blocks) \\
 $\anchork,\anchorv$ & anchor key / value (token $0$ of a block) \\
 $U$ & per-token coefficients $\R^{S\times\rank}$ (shared K/V) \\

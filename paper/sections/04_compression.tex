@@ -7,7 +7,9 @@
   \caption{Compression of one $256$-token block. The anchor (token $0$) is subtracted to form
   deltas; $V$ is rescaled to $K$'s RMS and the rows are $L_2$-normalized before a seeded
   randomized truncated SVD produces $U$, $V_K$, $V_V$. In parallel, per-token joint reconstruction
-  error selects the top-\maxres{} rows, kept as \emph{exact} residuals $R_K,R_V$. Key min/max are
+  error forms the \emph{base} selection signal, which three IDF-weighted boost signals
+  (owner-capture, edge-capture, coverage) inflate before the top-\maxres{} cut; the surviving rows
+  are kept as \emph{exact} residuals $R_K,R_V$. Key min/max are
   retained for the decode router. At the default $\maxres{=}128$ a block stores
   $\approx\blkTotalDefault$\,KiB vs.\ $\blkDense$\,KiB dense ($\ratioDefault\times$); the
   $\maxres{=}64$ preset stores $\approx\blkTotalPreset$\,KiB ($\ratioPreset\times$).}

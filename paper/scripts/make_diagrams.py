@@ -8,11 +8,11 @@ Visual language (matched to DeepSeek-V3.2 Figures 2 and 4):
   LaTeX caption carries the title); text otherwise always black.
 
 Structural numbers match the code at the measured config (rank 32, R=128,
-block 256, window 768, pool 256, top-K 16).
+block 256, window 1,024, pool 256, top-K 16).
 
   F1  system architecture        F2  compression pipeline
-  F4  cache lifecycle            F5  fused routed decode attention
-  F6  3D memory architecture
+  F4  cache lifecycle            F5a routed sparse decode attention
+  F5b fused decode buffer        F6  3D memory architecture
 """
 import os
 import sys
@@ -22,7 +22,7 @@ import math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import style
 from style import (BLACK, BLUE, BLUE_D, BLUE_L, BLUE_XL, EMERALD, EMER_L,
-                   GRAY_XL, GRAY_D, LEGEND_EC, WHITE)
+                   GRAY, GRAY_XL, GRAY_D, LEGEND_EC, WHITE)
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
 
@@ -45,6 +45,18 @@ def box(ax, x, y, w, h, text, fc=GRAY_XL, ec=BLACK, tc=BLACK, fs=8.4, lw=0.9,
                 color=tc, zorder=4, fontweight="bold" if bold else "normal",
                 linespacing=1.3)
     return (x, y, w, h)
+
+
+def chip(ax, x, y, w, h, title, body, fc=WHITE, ec=EMERALD, tc=BLACK,
+         fs_t=8.0, fs_b=6.9, lw=0.9):
+    """Titled chip: bold heading on top, small body below."""
+    p = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.008,rounding_size=0.035",
+                       fc=fc, ec=ec, lw=lw, zorder=3)
+    ax.add_patch(p)
+    ax.text(x + w / 2, y + h - 0.235, title, ha="center", va="center",
+            fontsize=fs_t, color=tc, fontweight="bold", zorder=4)
+    ax.text(x + w / 2, y + (h - 0.42) / 2, body, ha="center", va="center",
+            fontsize=fs_b, color=tc, zorder=4, linespacing=1.35)
 
 
 def band(ax, x, y, w, h, fc=GRAY_XL, ec=LEGEND_EC, lw=0.8, ls="-", dashed=False):
@@ -118,7 +130,7 @@ def f1_architecture():
     # store
     box(ax, 0.55, 0.5, 8.9, 1.4,
         "MLXKVBlockManager — per-session KV store  (×28 layers)\n"
-        "dense recency window  [$H_{kv}$, 768, $d$]  fp16\n"
+        "dense recency window  [$H_{kv}$, 1,280, $d$]  fp16   (newest 1,024 tokens)\n"
         "+  compressed pool  {$U$, $V_K$, $V_V$, anchors, residuals, min/max}  × 256 blocks",
         fc=GRAY_XL, fs=7.5)
     arrow(ax, (2.58, 2.78), (3.4, 1.92), rad=-0.1)
@@ -129,72 +141,92 @@ def f1_architecture():
     style.finalize(fig, os.path.join(FIG, "f1_architecture.png"))
 
 
-# ── F2 · compression pipeline ────────────────────────────────────────────────
+# ── F2 · compression pipeline (multi-signal residual selection) ─────────────
 def f2_compression():
-    fig, ax = plt.subplots(figsize=(8.6, 4.4)); clean(ax, 10, 7.2)
+    fig, ax = plt.subplots(figsize=(8.6, 6.31)); clean(ax, 10, 10.45)
 
-    y = 5.6
-    # token block
+    # ── stage 1: block → deltas → normalize → SVD ──
+    y = 9.00
     bx = 0.45
     for i in range(8):
         c = BLUE_L if i == 0 else (EMER_L if i in (5, 6) else BLUE_XL)
         ax.add_patch(Rectangle((bx + i * 0.33, y), 0.29, 0.62, fc=c, ec=BLACK,
                                lw=0.8, zorder=3))
-    note(ax, bx + 0.145, y - 0.24, "anchor\n(token 0)", fs=6.6, va="top", style_="normal")
-    note(ax, bx + 1.32, y + 0.92, "$K,V$ block  [$H_{kv}$, 256, $d$]", fs=7.8, style_="normal")
-    note(ax, bx + 2.15, y - 0.24, "outlier tokens", fs=6.6, va="top")
+    note(ax, bx + 0.145, y - 0.22, "anchor\n(token 0)", fs=6.6, va="top", style_="normal")
+    note(ax, bx + 1.32, y + 0.94, "$K,V$ block  [$H_{kv}$, 256, $d$]", fs=7.8, style_="normal")
+    note(ax, bx + 2.15, y - 0.22, "outlier tokens", fs=6.6, va="top")
 
     arrow(ax, (3.2, y + 0.31), (3.62, y + 0.31), lw=1.1)
     box(ax, 3.66, y - 0.06, 1.5, 0.74, "$\\Delta K = K - a_k$\n$\\Delta V = V - a_v$", fc=WHITE, fs=7.8)
     arrow(ax, (5.16, y + 0.31), (5.55, y + 0.31), lw=1.1)
     box(ax, 5.6, y - 0.06, 1.75, 0.74, "rescale $V$ to $K$ RMS,\nrow-normalize, concat", fc=WHITE, fs=6.8)
     arrow(ax, (7.35, y + 0.31), (7.74, y + 0.31), lw=1.1)
-    box(ax, 7.82, y - 0.06, 1.7, 0.74, "randomized\ntruncated SVD\n(rank 32, seeded)", fc=BLUE, tc=WHITE, fs=6.8, bold=True)
+    box(ax, 7.82, y - 0.06, 1.7, 0.74, "randomized\ntruncated SVD\n(rank 32, seeded)",
+        fc=BLUE, tc=WHITE, fs=6.8, bold=True)
 
-    # low-rank outputs with a clean, orthogonal bus layout
-    yo = 3.1
-    y_bus = 4.3
-    # Main trunk line going down from the SVD block to the bus level (aligned at x=8.67)
+    # ── stage 2: low-rank outputs on an orthogonal bus ──
+    yo, y_bus = 6.60, 7.68
     ax.plot([8.67, 8.67], [y - 0.06, y_bus], color=BLACK, lw=0.9, zorder=2)
-    # Label for the SVD output decomposition
-    note(ax, 8.90, 4.9, "$U\\,\\Sigma\\,V^{\\top}$", fs=7.6, ha="left", style_="normal")
-    
+    note(ax, 8.90, 8.24, "$U\\,\\Sigma\\,V^{\\top}$", fs=7.6, ha="left", style_="normal")
+
     outs = [("$U$  [255, 32]", "coefficients"),
             ("$V_K$  [2, 32, 128]", "key basis"),
             ("$V_V$  [2, 32, 128]", "value basis"),
             ("$a_k, a_v$", "anchors (exact)"),
             ("$k_{\\min}, k_{\\max}$", "router stats")]
     ox, cw = 0.45, 1.72
-    
-    # Draw horizontal bus line at y_bus
     cx_first = ox + cw / 2
     cx_last = ox + 4 * (cw + 0.12) + cw / 2
     ax.plot([cx_first, cx_last], [y_bus, y_bus], color=BLACK, lw=0.9, zorder=2)
-    
     for i, (t, sub) in enumerate(outs):
         cx_i = ox + i * (cw + 0.12) + cw / 2
         box(ax, ox + i * (cw + 0.12), yo, cw, 0.78, f"{t}\n{sub}", fc=BLUE_XL, fs=7.0)
-        # Vertical arrow dropping from the bus line down to the top of the box (no gaps)
-        arrow(ax, (cx_i, y_bus), (cx_i, yo + 0.78), lw=0.9, style_="-|>", shrinkA=0, shrinkB=0)
+        arrow(ax, (cx_i, y_bus), (cx_i, yo + 0.78), lw=0.9, shrinkA=0, shrinkB=0)
 
-    # residual branch (EXACT path → emerald): the selection signal is the
-    # reconstruction error of the low-rank factors, so the arrow leaves the
-    # OUTPUT row (U, V bases), not the router stats.
-    yr = 1.15
-    box(ax, 0.45, yr, 4.6, 0.85,
-        "rank per-token joint reconstruction error\n→ keep top-$R$ worst rows (default $R{=}128$)",
+    # ── stage 3: base error signal ──
+    ye = 5.10
+    box(ax, 1.15, ye, 7.7, 0.78,
+        "base signal — per-token joint reconstruction error\n"
+        "$e_i = \\| \\Delta K_i - \\widehat{\\Delta K}_i \\|^2 "
+        "+ g^2 \\| \\Delta V_i - \\widehat{\\Delta V}_i \\|^2$",
         fc=WHITE, ec=EMERALD, fs=7.6)
-    arrow(ax, (2.3, yo - 0.02), (2.3, yr + 0.87), color=EMERALD,
-          lw=1.1, ls=(0, (4, 3)))
-    note(ax, 2.5, (yo + yr + 0.85) / 2, "reconstruct deltas from $U, V$;\nmeasure per-token error",
+    arrow(ax, (1.31, yo), (1.31, ye + 0.80), color=EMERALD, lw=1.1, ls=(0, (4, 3)))
+    note(ax, 1.52, (yo + ye + 0.78) / 2, "reconstruct deltas from $U, V$;\nmeasure per-token error",
          fs=6.6, ha="left")
-    arrow(ax, (5.05, yr + 0.42), (5.5, yr + 0.42), color=EMERALD, lw=1.1)
-    box(ax, 5.55, yr, 3.9, 0.85,
+
+    # ── stage 4: the three IDF-weighted boost signals ──
+    yb = 2.72
+    band(ax, 0.45, yb, 9.1, 2.05, fc="#F5FBF8", ec=EMER_L)
+    note(ax, 0.72, yb + 1.83, "IDF-weighted boost signals — inflate priority before the cut  (all default on)",
+         fs=7.4, ha="left", style_="normal")
+    cw2, gp = 2.75, 0.26
+    chips = [
+        ("owner-capture",
+         "walk $\\leq 12$ tokens left of a\nhigh-error value; boost the\nnearest capitalized word\n"
+         "→ keeps entity $\\mathit{names}$"),
+        ("edge-capture",
+         "cosine-collision test flags a\nconnective whose low-rank row\ncollides with a neighbour's key\n"
+         "→ keeps $\\mathit{relations}$"),
+        ("coverage bonus",
+         "uniform bonus across block\npositions, so one hot segment\ncannot take all $R$ slots\n"
+         "→ keeps $\\mathit{spread}$"),
+    ]
+    for i, (t, b) in enumerate(chips):
+        chip(ax, 0.70 + i * (cw2 + gp), yb + 0.16, cw2, 1.50, t, b, fc=WHITE, ec=EMERALD)
+    arrow(ax, (5.0, ye), (5.0, yb + 2.05), color=EMERALD, lw=1.1)
+
+    # ── stage 5: cut → exact residuals ──
+    yr = 1.30
+    box(ax, 0.90, yr, 3.90, 0.80,
+        "priority rank  →  keep the top-$R$ rows\n(default $R{=}128$)",
+        fc=WHITE, ec=EMERALD, fs=7.6)
+    arrow(ax, (2.85, yb), (2.85, yr + 0.82), color=EMERALD, lw=1.1)
+    arrow(ax, (4.80, yr + 0.40), (5.32, yr + 0.40), color=EMERALD, lw=1.1)
+    box(ax, 5.40, yr, 4.10, 0.80,
         "exact residuals   $R_K, R_V$  [$R$, $H_{kv}$, $d$]  fp16",
         fc=EMER_L, ec=EMERALD, fs=7.8, bold=True)
-    note(ax, 7.5, yr - 0.28, "attended exactly at decode — verbatim recall", fs=6.8, va="top")
+    note(ax, 7.45, yr - 0.22, "attended exactly at decode — verbatim recall", fs=6.8, va="top")
 
-    # byte budget line
     note(ax, 5.0, 0.28,
          "stored block ≈ 178 KiB  (50 KiB low-rank + 128 KiB residuals)  vs  256 KiB dense  →  1.44× "
          "smaller   ·   $R{=}64$ preset → 114 KiB, 2.25×",
@@ -247,50 +279,122 @@ def f4_lifecycle():
     style.finalize(fig, os.path.join(FIG, "f4_lifecycle.png"))
 
 
-# ── F5 · fused routed decode attention ───────────────────────────────────────
-def f5_decode():
-    fig, ax = plt.subplots(figsize=(8.6, 5.7)); clean(ax, 10, 9.4)
+# ── F5a · routed sparse decode attention (semantics) ────────────────────────
+def f5a_decode_semantics():
+    fig, ax = plt.subplots(figsize=(8.6, 5.05)); clean(ax, 10, 8.70)
 
-    box(ax, 4.15, 8.55, 1.7, 0.55, "query $q$  [$H$, $d$]", fc=BLUE_D, tc=WHITE, fs=8.2, bold=True)
-    arrow(ax, (5.0, 8.55), (5.0, 8.15), lw=1.2)
+    box(ax, 4.15, 7.95, 1.7, 0.55, "query $q$  [$H$, $d$]", fc=BLUE_D, tc=WHITE, fs=8.2, bold=True)
+    arrow(ax, (5.0, 7.95), (5.0, 7.56), lw=1.2)
 
-    box(ax, 2.15, 7.4, 5.7, 0.7,
-        "router:  $\\rho_b = \\max(\\,q{\\cdot}a_k,\\ \\max_j\\, q{\\cdot}R_{K,j})\\cdot$scale   →   keep top-$K{=}16$ blocks",
-        fc=GRAY_XL, fs=7.8)
-    note(ax, 8.35, 7.75, "exact $q{\\cdot}k$ over anchor\n+ residual keys", fs=6.6, ha="left")
-    arrow(ax, (3.1, 7.4), (2.55, 6.75), rad=-0.12, lw=1.1)
-    arrow(ax, (6.9, 7.4), (7.45, 6.75), rad=0.12, lw=1.1)
+    box(ax, 2.00, 6.82, 6.0, 0.68,
+        "router:  $\\rho_b = \\max(\\,q{\\cdot}a_k,\\ \\max_j\\, q{\\cdot}R_{K,j})\\cdot$scale"
+        "   →   keep top-$K{=}16$ blocks", fc=GRAY_XL, fs=7.8)
+    note(ax, 8.28, 7.16, "exact $q{\\cdot}k$ over anchor\n+ residual keys", fs=6.6, ha="left")
+    arrow(ax, (3.1, 6.82), (2.60, 6.22), rad=-0.12, lw=1.1)
+    arrow(ax, (6.9, 6.82), (7.40, 6.22), rad=0.12, lw=1.1)
 
     # low-rank branch (blue)
-    band(ax, 0.35, 2.1, 4.55, 4.65, fc="#F6F9FE", ec=BLUE_L)
-    note(ax, 0.6, 6.5, "Low-rank branch  (selected blocks)", fs=7.6, ha="left", style_="normal")
-    box(ax, 0.62, 5.55, 4.0, 0.6, "anchor score   $s_{anc} = (q\\cdot a_k)\\cdot$scale", fc=WHITE, fs=7.6)
-    box(ax, 0.62, 4.72, 4.0, 0.6, "project query   $\\tilde q = (q\\,V_K^{\\top})\\cdot$scale $\\in \\mathbb{R}^{32}$", fc=WHITE, fs=7.6)
-    box(ax, 0.62, 3.89, 4.0, 0.6, "delta scores   $\\delta s = s\\,(\\tilde q\\,U^{\\top}) + s_{anc}$", fc=BLUE, tc=WHITE, fs=7.6, bold=True)
-    box(ax, 0.62, 3.06, 4.0, 0.6, "per-block softmax  →  $w$, lse$_{sp}$", fc=WHITE, fs=7.6)
-    box(ax, 0.62, 2.23, 4.0, 0.6, "$O_{sp} = \\Sigma w\\,a_v + (\\Sigma w\\,U)\\,s\\,V_V$", fc=WHITE, fs=7.6)
-    for y0 in (5.55, 4.72, 3.89, 3.06):
-        arrow(ax, (2.62, y0), (2.62, y0 - 0.23), lw=0.9)
-    note(ax, 1.6, 1.78, "$O(K\\,r\\,B)$ — never forms $\\hat K$", fs=6.8, ha="left")
+    band(ax, 0.35, 1.62, 4.55, 4.52, fc="#F6F9FE", ec=BLUE_L)
+    note(ax, 0.60, 5.88, "Low-rank branch  (selected blocks)", fs=7.6, ha="left", style_="normal")
+    lrb = [("anchor score   $s_{anc} = (q\\cdot a_k)\\cdot$scale", WHITE, BLACK, False),
+           ("project query   $\\tilde q = (q\\,V_K^{\\top})\\cdot$scale $\\in \\mathbb{R}^{32}$", WHITE, BLACK, False),
+           ("delta scores   $\\delta s = s\\,(\\tilde q\\,U^{\\top}) + s_{anc}$", BLUE, WHITE, True),
+           ("per-block softmax  →  $w$, lse$_{sp}$", WHITE, BLACK, False),
+           ("$O_{sp} = \\Sigma w\\,a_v + (\\Sigma w\\,U)\\,s\\,V_V$", WHITE, BLACK, False)]
+    ys = [5.00, 4.22, 3.44, 2.66, 1.88]
+    for (t, fc, tc, bd), y0 in zip(lrb, ys):
+        box(ax, 0.62, y0, 4.00, 0.56, t, fc=fc, tc=tc, fs=7.6, bold=bd)
+    for y0 in ys[:-1]:
+        arrow(ax, (2.62, y0), (2.62, y0 - 0.22), lw=0.9)
+    note(ax, 0.60, 1.34, "$O(K\\,r\\,B)$ — never forms $\\hat K$", fs=6.9, ha="left")
 
     # exact branch (emerald)
-    band(ax, 5.1, 2.1, 4.55, 4.65, fc="#F5FBF8", ec=EMER_L)
-    note(ax, 5.35, 6.5, "Exact branch  (residuals + recency)", fs=7.6, ha="left", style_="normal")
-    box(ax, 5.38, 5.25, 4.0, 0.85, "concat selected blocks' exact residuals\n$R_K, R_V$  ⊕  dense recency window", fc=WHITE, ec=EMERALD, fs=7.6)
-    box(ax, 5.38, 4.0, 4.0, 0.85, "exact attention over the\naugmented $\\tilde K, \\tilde V$  (full fp16)", fc=EMERALD, tc=WHITE, fs=7.6, bold=True)
-    box(ax, 5.38, 3.06, 4.0, 0.6, "softmax  →  $O_{dn}$, lse$_{dn}$", fc=WHITE, fs=7.6)
-    arrow(ax, (7.38, 5.25), (7.38, 4.88), lw=0.9); arrow(ax, (7.38, 4.0), (7.38, 3.69), lw=0.9)
-    note(ax, 8.4, 2.5, "verbatim recall of\nneedle tokens", fs=6.8)
+    band(ax, 5.10, 1.62, 4.55, 4.52, fc="#F5FBF8", ec=EMER_L)
+    note(ax, 5.35, 5.88, "Exact branch  (residuals + recency)", fs=7.6, ha="left", style_="normal")
+    box(ax, 5.38, 4.76, 4.00, 0.80,
+        "concat selected blocks' exact residuals\n$R_K, R_V$  ⊕  dense recency window",
+        fc=WHITE, ec=EMERALD, fs=7.6)
+    box(ax, 5.38, 3.52, 4.00, 0.80,
+        "exact attention over the\naugmented $\\tilde K, \\tilde V$  (full fp16)",
+        fc=EMERALD, tc=WHITE, fs=7.6, bold=True)
+    box(ax, 5.38, 2.66, 4.00, 0.56, "softmax  →  $O_{dn}$, lse$_{dn}$", fc=WHITE, fs=7.6)
+    arrow(ax, (7.38, 4.76), (7.38, 4.34), lw=0.9)
+    arrow(ax, (7.38, 3.52), (7.38, 3.24), lw=0.9)
+    note(ax, 9.42, 2.12, "verbatim recall of\nneedle tokens", fs=6.9, ha="right")
 
-    # merge
-    box(ax, 3.3, 0.5, 3.4, 1.0,
-        "flash-style LSE merge\n$m = \\max($lse$_{sp}$, lse$_{dn})$\n$o = (e^{\\cdot}O_{sp} + e^{\\cdot}O_{dn})\\,/\\,\\Sigma$",
+    box(ax, 2.85, 0.50, 4.30, 0.94,
+        "flash-style LSE merge\n$m = \\max($lse$_{sp}$, lse$_{dn})$;   "
+        "$o = (e^{\\cdot}O_{sp} + e^{\\cdot}O_{dn})\\,/\\,\\Sigma$",
         fc=BLUE_D, tc=WHITE, fs=7.4, bold=True)
-    arrow(ax, (2.62, 2.23), (3.6, 1.5), color=BLUE, rad=-0.15, lw=1.3)
-    arrow(ax, (7.38, 3.06), (6.4, 1.5), color=EMERALD, rad=0.15, lw=1.3)
-    note(ax, 5.0, 0.16, "NaN/inf-guarded: an empty compressed set contributes exactly zero weight", fs=6.6)
+    arrow(ax, (2.62, 1.88), (3.30, 1.44), color=BLUE, rad=-0.15, lw=1.3)
+    arrow(ax, (7.38, 2.66), (6.70, 1.44), color=EMERALD, rad=0.15, lw=1.3)
+    note(ax, 5.0, 0.26, "NaN/inf-guarded: an empty compressed set contributes exactly zero weight", fs=6.7)
 
-    style.finalize(fig, os.path.join(FIG, "f5_decode_attention.png"))
+    style.finalize(fig, os.path.join(FIG, "f5a_decode_attention.png"))
+
+
+# ── F5b · fused decode buffer (runtime path) ────────────────────────────────
+def f5b_fused_buffer():
+    # Wide/short figure: the two explanatory notes live in the LaTeX caption
+    # rather than in-figure, so the remaining type survives the down-scale to
+    # \linewidth at a readable size.
+    fig, ax = plt.subplots(figsize=(7.6, 2.32)); clean(ax, 10, 4.40)
+
+    note(ax, 9.85, 4.20, "persistent — re-written every $N{=}16$ tokens", fs=7.4, ha="right")
+
+    # geometry of the buffer columns (sources sit directly above their own run)
+    x0, x1 = 0.45, 9.05
+    NSEG = 15
+    sw = (x1 - x0) / NSEG
+    LR, RES, WIN, NEW = range(0, 6), range(6, 9), range(9, 13), 13
+    MASKED = (1, 4)                       # low-rank twins of residual rows
+    cx_lr = x0 + 3.0 * sw
+    cx_res = x0 + 7.5 * sw
+    cx_win = x0 + 11.0 * sw
+    cx_new = x0 + (NEW + 0.5) * sw
+
+    # sources — filled to match the strip run they feed
+    ysrc, hsrc = 3.10, 0.78
+    box(ax, cx_lr - 1.65, ysrc, 3.30, hsrc,
+        "selected blocks materialised\n$\\hat K = a_k + s\\,U V_K$,   $\\hat V = a_v + s\\,U V_V$",
+        fc=BLUE_XL, ec=BLUE_D, fs=7.4)
+    box(ax, cx_res - 0.80, ysrc, 1.60, hsrc,
+        "their exact\nresiduals $R_K, R_V$", fc=EMER_L, ec=EMERALD, fs=7.4)
+    box(ax, cx_win - 1.06, ysrc, 2.12, hsrc,
+        "dense recency window\n1,024 tokens, fp16", fc=BLUE_L, ec=BLUE_D, fs=7.4)
+
+    # the persistent buffer strip — the fixed additive mask is shown in-place
+    ystrip, hstrip = 1.78, 0.82
+    for i in range(NSEG):
+        blocked = i in MASKED or i > NEW
+        c = (GRAY if blocked else
+             BLUE_XL if i in LR else EMER_L if i in RES else
+             BLUE_L if i in WIN else WHITE)
+        ax.add_patch(Rectangle((x0 + i * sw, ystrip), sw, hstrip, fc=c,
+                               ec=BLACK, lw=0.8,
+                               ls=(0, (2, 2)) if i == NEW else "-", zorder=3))
+        if blocked:
+            note(ax, x0 + (i + 0.5) * sw, ystrip + hstrip / 2, "$-\\infty$", fs=6.8, style_="normal")
+    note(ax, cx_new, ystrip + hstrip / 2, "+1", fs=7.2, style_="normal")
+    for cx in (cx_lr, cx_res, cx_win):
+        arrow(ax, (cx, ysrc), (cx, ystrip + hstrip), lw=0.95, shrinkA=0, shrinkB=0)
+
+    # per-token fast path
+    ypt, hpt = 0.32, 0.78
+    box(ax, 0.55, ypt, 3.85, hpt, "one scaled_dot_product_attention\nover exact-length views",
+        fc=BLUE_D, tc=WHITE, fs=7.2, bold=True)
+    box(ax, 4.65, ypt, 1.30, hpt, "attention\noutput $o$", fc=WHITE, fs=7.4)
+    box(ax, 6.20, ypt, 3.10, hpt, "each step: append the new token's\n$K,V$ as one in-place row",
+        fc=WHITE, fs=7.0)
+    # read arrow drops from an unmasked column
+    arrow(ax, (x0 + 3.5 * sw, ystrip), (x0 + 3.5 * sw, ypt + hpt), lw=1.0)
+    arrow(ax, (4.40, ypt + hpt / 2), (4.65, ypt + hpt / 2), lw=1.0)
+    # append routes around the right edge, so it crosses nothing
+    ax.plot([9.30, 9.62, 9.62, cx_new], [ypt + hpt / 2, ypt + hpt / 2, 2.90, 2.90],
+            color=BLACK, lw=1.0, zorder=2)
+    arrow(ax, (cx_new, 2.90), (cx_new, ystrip + hstrip), lw=1.0, shrinkA=0, shrinkB=0)
+
+    style.finalize(fig, os.path.join(FIG, "f5b_fused_buffer.png"))
 
 
 # ── F6 · 3D memory architecture ──────────────────────────────────────────────
@@ -506,7 +610,7 @@ def f6_memory_3d():
     # to avoid piercing through the slab.
     drw_bottom_center = project_3d_to_fig(x0 + win_w/2, win_y + 0.9, 0.0)
     label_y_top = 0.135   # top of the label block (arrow tail starts here)
-    fig.text(target_recency[0], 0.065, "dense recency window — 768 exact fp16 tokens\n(acts as a sliding FIFO queue)",
+    fig.text(target_recency[0], 0.065, "dense recency window — 1,024 exact fp16 tokens\n(acts as a sliding FIFO queue)",
              ha="center", va="bottom", fontsize=8.1, color=BLACK, linespacing=1.3)
     draw_arrow((target_recency[0], label_y_top), (drw_bottom_center[0], drw_bottom_center[1] - 0.005))
 
@@ -556,6 +660,7 @@ if __name__ == "__main__":
     f1_architecture()
     f2_compression()
     f4_lifecycle()
-    f5_decode()
+    f5a_decode_semantics()
+    f5b_fused_buffer()
     f6_memory_3d()
     print("diagrams done")
