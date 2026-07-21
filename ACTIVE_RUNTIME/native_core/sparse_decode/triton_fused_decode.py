@@ -1115,13 +1115,35 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
                     res_pos is not None and res_pos_v is not None)
     if g["has_res"]:
         res_k_g = res_k[indices]                        # [N, MAX_RES, H_kv, D]
+        res_pos_g = res_pos[indices]                    # [N, MAX_RES] within-block offsets (-1 padded)
         if do_rot:
-            # Pre-rotate residual K by the block anchor's RoPE, exactly like V_K
-            # (reference rotates res_val_K identically). res_v is never rotated.
-            res_k_g = res_k_g * cos_anc + rotate_half(res_k_g) * sin_anc
+            # By default the residual K is rotated at the block ANCHOR position
+            # (like V_K) — the PTA approximation. That scrambles the high-frequency
+            # RoPE dims of tokens far from the anchor.  A skip block's exact
+            # residuals are its most position-sensitive content (digits/codes), so
+            # the borderline ones then mis-score and the digits flip/drop at decode
+            # even though K/V are value-exact.  DIFFKV_RESIDUAL_EXACT_ROPE rotates
+            # each exact-residual key at its TRUE token position (anchor + within-
+            # block offset), matching MLX which appends exact rows as real tokens at
+            # their true positions.  Cost is a [N, MAX_RES, D] cos/sin gather, cached
+            # per routing interval and non-zero only on the (rare) blocks that carry
+            # residuals — no per-token / dense-path cost.
+            if os.environ.get("DIFFKV_RESIDUAL_EXACT_ROPE", "0") == "1":
+                _abs_pos = (anchor_indices_clamped.unsqueeze(1)
+                            + res_pos_g.clamp(min=0).long())          # [N, MAX_RES]
+                _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
+                _cos_rk = cos_flat[_abs_pos].to(device=res_k_g.device,
+                                                dtype=res_k_g.dtype).unsqueeze(2)   # [N, MAX_RES, 1, D]
+                _sin_rk = sin_flat[_abs_pos].to(device=res_k_g.device,
+                                                dtype=res_k_g.dtype).unsqueeze(2)
+                res_k_g = res_k_g * _cos_rk + rotate_half(res_k_g) * _sin_rk
+            else:
+                # Pre-rotate residual K by the block anchor's RoPE, exactly like V_K
+                # (reference rotates res_val_K identically). res_v is never rotated.
+                res_k_g = res_k_g * cos_anc + rotate_half(res_k_g) * sin_anc
         g["res_k"]     = res_k_g
         g["res_v"]     = res_v[indices]
-        g["res_pos"]   = res_pos[indices]
+        g["res_pos"]   = res_pos_g
         g["res_pos_v"] = res_pos_v[indices]
         g["res_n"]     = (g["res_pos"] >= 0).sum(dim=-1).to(torch.int32)
         g["max_res_pad"] = res_pos.shape[1]
