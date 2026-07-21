@@ -750,11 +750,13 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
     with torch.no_grad():
         for cs in range(0, len(ids), CH):
             ch = ids[cs:cs + CH]
-            if hasattr(mgr, "finalize_compressed_blocks"):
-                mgr.finalize_compressed_blocks()
             out = model(input_ids=torch.tensor([ch], device=device),
                         position_ids=torch.tensor([list(range(cs, cs + len(ch)))], device=device),
                         use_cache=True)
+        # No compression inside the prefill loop. Production (run_nat_eval.py lines 377-388)
+        # explicitly defers SVD to after the full forward pass so later chunks
+        # attend raw (not reconstructed) KV. compress_deferred_prefill_blocks()
+        # runs in the compression phase below, matching production exactly.
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fwd_s = time.perf_counter() - t0
@@ -988,20 +990,43 @@ def _build_task(task_type: str, config: Dict[str, Any], tokenizer):
 
 
 def _set_diffkv_env(preset: str):
-    """Resolve preset / adaptive aliases into DIFFKV_* env; hold weights FP16.
-    Also clears the compress-lever keys so each call starts from a known state
-    (config['extra_env'] is applied AFTER this, per-call, in run_worker_task)."""
-    for k in ("DIFFKV_LAYER_ADAPTIVE_RANK", "DIFFKV_STREAMING_COMPRESS",
-              "DIFFKV_COMPRESS_GRAM_SVD", "DIFFKV_RSVD_MAX_RPROJ",
-              "DIFFKV_RSVD_OVERSAMPLES", "DIFFKV_RANK_BOOST"):
+    """Align the process env with production (run_nat_eval.py) for a fair benchmark.
+
+    Safe non-lossy opts (from _apply_fast_mode — these are recon/fp16-equivalent):
+      DIFFKV_COMPRESS_GRAM_SVD=1    Gram-eigh ≡ SVD, same reconstruction quality
+      DIFFKV_CONTIGUOUS_PREFILL=1   faster forward, same KV layout
+      DIFFKV_CONTIG_UNROTATE=1      1x-memory prefill, fp16-equivalent
+
+    Intentionally NOT set (fidelity-affecting — we benchmark at the configured rank):
+      DIFFKV_RSVD_MAX_RPROJ         caps rank → changes compression ratio
+      DIFFKV_RANK_BOOST             changes effective rank per block
+
+    Other flags match run_nat_eval.py exactly so we measure the same system.
+    config['extra_env'] in run_worker_task is applied AFTER this for per-call overrides.
+    """
+    # ── Lossy / fidelity-affecting: disable so benchmark rank is exactly as configured ──
+    for k in ("DIFFKV_RSVD_MAX_RPROJ", "DIFFKV_RSVD_OVERSAMPLES", "DIFFKV_RANK_BOOST",
+              "DIFFKV_LAYER_ADAPTIVE_RANK"):
         os.environ.pop(k, None)
+
+    # ── Match run_nat_eval.py production flags ──
+    os.environ["DIFFKV_FACTUAL_STORE"]        = "0"
+    os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
+    os.environ["DIFFKV_STREAMING_COMPRESS"]   = "0"   # no per-chunk compression (see prefill loop)
+
+    # ── Safe non-lossy production optimisations (recon/fp16-equivalent) ──
+    os.environ["DIFFKV_COMPRESS_GRAM_SVD"]   = "1"   # Gram-eigh ≡ SVD, ~2x faster compress
+    os.environ["DIFFKV_CONTIGUOUS_PREFILL"]  = "1"   # contiguous block layout, faster forward
+    os.environ["DIFFKV_CONTIG_UNROTATE"]     = "1"   # 1x-memory prefill
+
+    # ── Preset + hardware ──
     base = preset
     if preset in ADAPTIVE_PRESETS:
         base, extra = ADAPTIVE_PRESETS[preset]
         for k, v in extra.items():
             os.environ[k] = v
-    os.environ["DIFFKV_PRESET"] = base
-    os.environ["DIFFKV_QUANTIZATION"] = "fp16"
+    os.environ["DIFFKV_PRESET"]        = base
+    os.environ["DIFFKV_QUANTIZATION"]  = "fp16"
     if torch.cuda.is_available():
         os.environ["DIFFKV_GPU_COMPRESS"] = "1"
 
