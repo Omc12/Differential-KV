@@ -731,19 +731,43 @@ def _summarize_decode_profile(prof, gen_len: int) -> str:
                     return v
             return 0.0
 
+        def _count(substr):
+            return sum(e.count for e in ka if substr in e.key)
+
         total_cpu_us = sum(getattr(e, "self_cpu_time_total", 0.0) for e in ka)
         total_cuda_us = sum(_cuda_us(e) for e in ka)
-        launches = sum(e.count for e in ka
-                       if "cudaLaunchKernel" in e.key or "launch" in e.key.lower())
-        ratio = (total_cpu_us / total_cuda_us) if total_cuda_us > 0 else float("inf")
+        launches = _count("cudaLaunchKernel") or sum(
+            e.count for e in ka if "launch" in e.key.lower())
+        launches_per_tok = launches / max(1, gen_len)
+        syncs = _count("Synchronize")
+        memcpys = _count("Memcpy")
+        # Total count of the tiny view/gather/copy ops whose explosion is the
+        # signature of op-by-op reconstruction (a fused kernel emits none of these).
+        view_ops = sum(e.count for e in ka if any(
+            k in e.key for k in ("as_strided", "aten::slice", "aten::select",
+                                  "aten::index", "aten::copy_", "aten::cat")))
+
+        # Verdict is driven by launches/token, NOT the CPU/CUDA ratio: a fused
+        # decode is O(layers) launches/token (~tens). Hundreds means the work is
+        # being done op-by-op in eager Python (the PyTorch reconstruction
+        # fallback), regardless of how the CPU/CUDA totals happen to balance.
+        if launches_per_tok > 200:
+            verdict = "DISPATCH/OP-EXPLOSION -> op-by-op reconstruction, NOT a fused kernel"
+        elif launches_per_tok > 60:
+            verdict = "host/launch-bound -> eager per-layer Python overhead"
+        else:
+            verdict = "kernel-bound (few launches/token)"
 
         lines.append("─" * 68)
         lines.append(f"[DECODE PROFILE] gen={gen_len} tok (incl. generate()'s internal prefill)")
         lines.append(f"  total self-CPU  = {total_cpu_us / 1e3:9.1f} ms")
-        lines.append(f"  total self-CUDA = {total_cuda_us / 1e3:9.1f} ms")
-        lines.append(f"  CPU/CUDA ratio  = {ratio:6.2f}x   "
-                     f"({'HOST/LAUNCH-bound -> eager Python overhead' if ratio > 2.0 else 'kernel-bound'})")
-        lines.append(f"  kernel launches = {launches}  (~{launches / max(1, gen_len):.0f}/token)")
+        lines.append(f"  total self-CUDA = {total_cuda_us / 1e3:9.1f} ms  (CPU/CUDA "
+                     f"{(total_cpu_us / total_cuda_us) if total_cuda_us else float('inf'):.2f}x)")
+        lines.append(f"  kernel launches = {launches}  (~{launches_per_tok:.0f}/token)  -> {verdict}")
+        lines.append(f"  host syncs      = {syncs}   memcpys = {memcpys}   "
+                     f"(these are the CPU spikes)")
+        lines.append(f"  view/gather ops = {view_ops}  (slice/select/index/copy/cat/as_strided; "
+                     f"~{view_ops / max(1, gen_len):.0f}/token — a fused kernel emits ~0)")
         lines.append("top ops by self-CPU time:")
         lines.extend(ka.table(sort_by="self_cpu_time_total", row_limit=12).splitlines())
     except Exception as e:  # never let profiling break the benchmark
@@ -831,7 +855,21 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
     # ── Phase 2: decode + recall via the PROVEN generate() path ──
     text, gen_toks, dec_s = "", 0, 0.0
     decode_profile = ""
+    triton_available, triton_fallbacks = None, 0
     peak_decode = peak_prefill
+
+    def _triton_state():
+        # (HAS_TRITON, cumulative fallback count). If HAS_TRITON but the count
+        # climbs during decode, the fused kernel is throwing on every call and
+        # silently dropping to op-by-op PyTorch reconstruction — the real cause
+        # of the launch/op explosion the profile shows.
+        try:
+            from native_core.sparse_decode import triton_fused_decode as _tfd
+            return (bool(getattr(_tfd, "HAS_TRITON", False)),
+                    int(getattr(_tfd, "_triton_fallback_count", 0)))
+        except Exception:
+            return None, -1
+
     if full_prompt is not None:
         gen_sid = f"gen_{random.randint(10**6, 10**7)}"
         w.active_session = gen_sid
@@ -839,6 +877,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         w._session_token_ids[gen_sid] = []
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+        triton_available, _fb_before = _triton_state()
         t2 = time.perf_counter()
         # DIFFKV_TORCH_PROFILE=1 wraps decode in torch.profiler to reveal whether
         # the cost is the Triton kernels (CUDA-bound) or per-token/per-layer Python
@@ -864,6 +903,8 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t_gen = time.perf_counter() - t2
+        _, _fb_after = _triton_state()
+        triton_fallbacks = max(0, _fb_after - _fb_before)
         peak_decode = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
         # Score ONLY the generated tokens (the needle is in the prompt too).
         all_ids = w._session_token_ids.get(gen_sid, [])
@@ -894,6 +935,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         "kv_residual_tokens_layer0": kv["residual_tokens_layer0"],
         "kv_dense_window_tokens": kv["dense_window_tokens"],
         "decode_profile": decode_profile,
+        "triton_available": triton_available, "triton_fallbacks": triton_fallbacks,
         "gen_len": gen_toks, "output_text": text,
     }
 
@@ -1282,6 +1324,8 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
         # First non-empty decode profile across trials (only set when DIFFKV_TORCH_PROFILE=1).
         decode_profile = next((t.get("decode_profile", "") for t in trials
                                if t.get("decode_profile")), "")
+        triton_available = trials[-1].get("triton_available", None)
+        triton_fallbacks = max((t.get("triton_fallbacks", 0) for t in trials), default=0)
 
         # ── Quality / recall ──
         recall = answer_set_recall(last_text, answers) if answers else 0.0
@@ -1302,6 +1346,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             "pool_physical_gb": pool_phys, "kv_blocks_layer0": kv_blocks,
             "kv_residual_tokens_layer0": kv_res_tok, "kv_dense_window_tokens": kv_dense_win,
             "decode_profile": decode_profile,
+            "triton_available": triton_available, "triton_fallbacks": triton_fallbacks,
             "kv_footprint_realized": preset not in ("int8_kv", "kivi2"),
             "compression_ratio": (kv_dense / kv_phys) if kv_phys > 0 else 1.0,
             "output_text": last_text, "ground_truth": ground_truth,
@@ -1367,6 +1412,12 @@ def exp2_throughput_vs_context(model_id: str, contexts: List[int]) -> Dict[str, 
             print(f"   ctx={ctx}: dense {rd['decode_tps']:.1f}±{rd['decode_tps_ci95']:.1f} tps | "
                   f"DiffKV {rk['decode_tps']:.1f}±{rk['decode_tps_ci95']:.1f} tps | "
                   f"prefill fwd {rk['prefill_forward_s']:.2f}s + comp {rk['prefill_compress_s']:.2f}s")
+            _tav, _tfb = rk.get("triton_available"), rk.get("triton_fallbacks", 0)
+            if _tav is not None:
+                _tstate = ("kernel RAN" if (_tav and _tfb == 0)
+                           else f"SILENT FALLBACK ({_tfb} this decode) -> op-by-op PyTorch" if _tav
+                           else "HAS_TRITON=False -> PyTorch path")
+                print(f"      triton: available={_tav} fallbacks={_tfb}  [{_tstate}]")
             if rk.get("decode_profile"):
                 for _l in rk["decode_profile"].splitlines():
                     print("   " + _l)
