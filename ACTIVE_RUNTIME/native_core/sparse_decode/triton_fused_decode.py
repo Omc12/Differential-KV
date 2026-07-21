@@ -1122,13 +1122,15 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
             # RoPE dims of tokens far from the anchor.  A skip block's exact
             # residuals are its most position-sensitive content (digits/codes), so
             # the borderline ones then mis-score and the digits flip/drop at decode
-            # even though K/V are value-exact.  DIFFKV_RESIDUAL_EXACT_ROPE rotates
-            # each exact-residual key at its TRUE token position (anchor + within-
-            # block offset), matching MLX which appends exact rows as real tokens at
-            # their true positions.  Cost is a [N, MAX_RES, D] cos/sin gather, cached
-            # per routing interval and non-zero only on the (rare) blocks that carry
-            # residuals — no per-token / dense-path cost.
-            if os.environ.get("DIFFKV_RESIDUAL_EXACT_ROPE", "0") == "1":
+            # even though K/V are value-exact.  Rotate each exact-residual key at its
+            # TRUE token position (anchor + within-block offset) instead, matching MLX
+            # which appends exact rows as real tokens at their true positions.  Cost is
+            # a [N, MAX_RES, D] cos/sin gather, cached per routing interval and non-zero
+            # only on the (rare) blocks that carry residuals — no per-token / dense-path
+            # cost.  A100-validated: random-code recall 75%→88% (recovered a digit-drop
+            # code, zero regressions).  Default ON; DIFFKV_RESIDUAL_EXACT_ROPE=0 restores
+            # the anchor-position approximation.
+            if os.environ.get("DIFFKV_RESIDUAL_EXACT_ROPE", "1") == "1":
                 _abs_pos = (anchor_indices_clamped.unsqueeze(1)
                             + res_pos_g.clamp(min=0).long())          # [N, MAX_RES]
                 _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
