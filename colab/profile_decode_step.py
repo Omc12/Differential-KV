@@ -33,15 +33,25 @@ PAPER_PATH = os.path.join(ACTIVE, "nat_paper.txt")
 
 # Kernel-name substrings → bucket.  Matched case-insensitively against the op
 # name reported by the profiler; first hit wins, else "other".
+#
+# MODEL: ops that only occur in the Qwen/Llama nf4 forward pass.
 _MODEL_HINTS = ("gemm", "cutlass", "dequant", "bitsandbytes", "bnb", "nf4",
                 "ampere", "sgemm", "hgemm", "matmul", "linear", "mlp", "silu",
-                "rms", "layernorm")
-# Only kernels that are unambiguously the DiffKV decode path — the fused Triton
-# sparse-attention kernel and the reconstruction JIT.  Generic ops (softmax,
-# rope, gather, elementwise) are left in "other" rather than mis-attributed,
-# since they also occur model-side; the model-vs-diffkv split below stays honest.
+                "rms", "layernorm",
+                # Extra nf4 / bitsandbytes CUDA kernel name fragments:
+                "gemv_4bit", "kgemm_4bit", "dequantize_blockwise",
+                "kDequantizeBlockwise", "volta", "sm80", "sm86")
+# DIFFKV: ops that are unambiguously the DiffKV decode path.
+# Note: generic aten:: ops (copy_, index, mul, add, cat, gather) are left in
+# "other" because they also appear in the model forward pass and cannot be
+# reliably attributed without NVTX annotations.  Use --also-dense to see the
+# model-only baseline and subtract.
 _DIFFKV_HINTS = ("triton", "sparse_attn", "reconstruct", "attend_and_reconstruct",
-                 "decode_combined", "fused_decode", "reconstruct_and_score")
+                 "decode_combined", "fused_decode", "reconstruct_and_score",
+                 # Confirmed DiffKV Triton kernel names from triton_fused_decode.py:
+                 "_fused_decode_combined", "_triton_sparse_decode",
+                 "_dispatch_reduction", "_build_stratified_u",
+                 "_gather_routed_blocks")
 
 
 def _bucket(name: str) -> str:
@@ -63,6 +73,8 @@ def main():
     ap.add_argument("--steps", type=int, default=40, help="decode steps to profile")
     ap.add_argument("--warmup", type=int, default=8, help="decode steps before profiling")
     ap.add_argument("--topk", type=int, default=20, help="top ops to print")
+    ap.add_argument("--also-dense", action="store_true",
+                    help="also run a dense baseline and print side-by-side diff")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -154,6 +166,11 @@ def main():
     for name, ms, b in rows[:args.topk]:
         print(f"{name[:44]:<44} {ms:>9.1f} {100*ms/total_ms:>5.1f}%  {b}")
     print("=" * 78)
+    print("NOTE: 'other' bucket = generic aten:: ops (copy_, index, cat, gather, mul,\n"
+          "      add, neg) that appear in BOTH the model forward and DiffKV block-gather\n"
+          "      path. Without NVTX annotations they cannot be attributed. Run with\n"
+          "      --also-dense to see the dense baseline and estimate DiffKV overhead:")
+    print(f"      python colab/profile_decode_step.py --preset dense --steps {args.steps}")
     print("If 'model' dominates, tps is bound by the eager nf4 forward (shared with"
           "\ndense) and no DiffKV-side change moves it — do the long-context sweep"
           "\ninstead, where KV (and thus the diffkv bucket) becomes the real cost.")

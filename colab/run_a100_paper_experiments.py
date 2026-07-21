@@ -484,17 +484,36 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
 
     s0 = mgr.sessions.get(sid)
     nb = (s0["num_blocks"][0] if (s0 and "num_blocks" in s0 and s0["num_blocks"]) else 0) or (seq_len // B) or 1
-    max_dense = int(getattr(mgr, "max_active_dense_tokens", 1024) or 1024)
+    # Bug fix: max_active_dense_tokens and preset live on mgr.config, not mgr directly.
+    _cfg = getattr(mgr, "config", None)
+    max_dense = int(getattr(_cfg, "max_active_dense_tokens", None) or
+                    getattr(mgr, "max_active_dense_tokens", 1024) or 1024)
     raw_dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
     dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
     res_n0 = s0["comp_res_n"][0][:nb] if (s0 and "comp_res_n" in s0 and s0["comp_res_n"]) else []
-    res_cap = 16 if str(getattr(mgr, "preset", "mid")).lower() in ("high", "quality", "max") else 8
+    # Use cfg.max_residual_tokens directly (low=40, mid=64, high=128 per DiffKVConfig).
+    _preset_str = str(getattr(_cfg, "preset", None) or
+                      getattr(mgr, "preset", None) or
+                      os.environ.get("DIFFKV_PRESET", "mid")).lower()
+    _preset_res_defaults = {"low": 40, "mid": 64, "high": 128}
+    res_cap = int(getattr(_cfg, "max_residual_tokens", None) or
+                  _preset_res_defaults.get(_preset_str, 64))
     res_tokens_used = sum(min(int(rn), res_cap) for rn in res_n0) if res_n0 else (nb * res_cap)
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
     pool_physical = 0
     if pool is not None and hasattr(pool, "_pool_mb"):
         pool_physical = int(pool._pool_mb() * 1024 ** 2)
+    # Prefer direct streaming manager measurements when available.
+    sm = getattr(mgr, "_streaming_mgr", None)
+    if sm is not None:
+        _sparse = getattr(sm, "sparse_footprint_bytes", None)
+        _dense_fp = getattr(sm, "dense_footprint_bytes", None)
+        try:
+            if _sparse and _dense_fp:
+                store_used = int(_sparse(sid)) + int(_dense_fp(sid))
+        except Exception:
+            pass  # fall back to analytic estimate
     dense_equiv = L * seq_len * kv_tok
     return {
         "store_used_bytes": store_used,
@@ -791,7 +810,9 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         gen_only = all_ids[prompt_len:] if len(all_ids) > prompt_len else []
         text = w.tokenizer.decode(gen_only, skip_special_tokens=True)
         gen_toks = len(gen_only)
-        dec_s = max(1e-6, t_gen - (fwd_s + comp_s))   # generate total minus measured prefill
+        # Note: generate() runs its own internal prefill on gen_sid; subtracting Phase-1
+        # fwd_s+comp_s is an approximation. Guard against negative values.
+        dec_s = max(0.05, t_gen - (fwd_s + comp_s))   # generate total minus measured prefill (approx)
         mgr.clear_session(gen_sid)
         w.active_session = None
         if torch.cuda.is_available():
@@ -868,6 +889,9 @@ def _snapkv_trial(model, tokenizer, ids: List[int], device: str, gen_len: int, s
     keep = min(budget, plen)
     new_layers, total_bytes = [], 0.0
     for l, (K, V) in enumerate(legacy):
+        if out.attentions is None:
+            raise RuntimeError("SnapKV: out.attentions is None — model must be loaded with "
+                               "attn_implementation='eager' and output_attentions=True.")
         A = out.attentions[l]                                       # [B, n_q, W, prompt_len]
         prefix_scores = A[..., :plen].to(torch.float32).sum(dim=2)  # [B, n_q, plen]
         # GQA: attention is per QUERY head but the KV cache is per KV head. Pool
@@ -1134,7 +1158,9 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
                     _ = w.model(torch.zeros((1, 8), dtype=torch.long, device=device))
                 torch.cuda.synchronize()
             for _ in range(n_trials):
-                tr = _diffkv_trial(w, ids, device, gen_len, stop_ids, full_prompt=full_prompt)
+                # Pass question= so the SRL router can prioritise relevant blocks during retrieval.
+                tr = _diffkv_trial(w, ids, device, gen_len, stop_ids, full_prompt=full_prompt,
+                                   question=config.get("question", ground_truth))
                 trials.append(tr)
                 last_text = tr["output_text"]
             try:
@@ -1695,6 +1721,9 @@ def _avg_recall(model_id: str, method: str, ctx: int, ruler_task_name: str,
         kv = r.get("kv_physical_gb", 0.0)
         real = r.get("kv_footprint_realized", True)
         tps = r.get("decode_tps", 0.0)
+    if not recs:
+        print(f"   [WARN] _avg_recall: ALL {samples} trials failed for method={method} ctx={ctx} — "
+              "check worker logs above. Reporting 0% recall.")
     return {"mean_recall_pct": (sum(recs) / len(recs) if recs else 0.0),
             "kv_physical_gb": kv, "kv_footprint_realized": real, "decode_tps": tps, "n": len(recs)}
 
@@ -1845,7 +1874,9 @@ def main():
         R["pareto_accuracy_vs_memory"] = build_pareto(R["exp21_external_baselines"])
 
     out_file = args.out if os.path.isabs(args.out) else os.path.abspath(os.path.join(os.getcwd(), args.out))
-    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    _out_dir = os.path.dirname(out_file)
+    if _out_dir:
+        os.makedirs(_out_dir, exist_ok=True)
     with open(out_file, "w") as f:
         json.dump(R, f, indent=2)
     print(f"\n✅ Done. Raw JSON → {out_file}")
