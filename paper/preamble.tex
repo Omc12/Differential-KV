@@ -98,3 +98,20 @@
 
 % toggle: extended (technical report) vs conference — set by the main file.
 \providecommand{\ifextended}{}
+
+% ── Wide floats ─────────────────────────────────────────────────────────────
+% The diagrams are drawn at a fixed aspect and only stay legible near
+% \textwidth. The one-column report gets that from an ordinary float; the
+% two-column conference build needs a starred float to span both columns
+% (a \columnwidth diagram would land at ~40% scale and be unreadable).
+% \figenv/\tabenv expand inside \begin/\end, so each call site stays readable.
+% Starred floats accept only [t] and [p] placement — use [t] at every site.
+\ifext
+  \newcommand{\figenv}{figure}
+  \newcommand{\tabenv}{table}
+  \newcommand{\algenv}{algorithm}
+\else
+  \newcommand{\figenv}{figure*}
+  \newcommand{\tabenv}{table*}
+  \newcommand{\algenv}{algorithm*}
+\fi

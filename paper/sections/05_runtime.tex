@@ -1,7 +1,7 @@
 \section{Runtime and Memory Architecture}
 \label{sec:runtime}
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=0.96\linewidth]{figures/f6_memory_3d.pdf}
   \caption{The per-session KV store in three dimensions. The store is replicated across all $28$
@@ -11,7 +11,7 @@
   The dense recency window (front) holds the newest $1{,}024$ tokens uncompressed; when it overflows,
   its oldest block is flushed and compressed into a pool slot.}
   \label{fig:mem3d}
-\end{figure}
+\end{\figenv}
 
 The store's contents are defined by \S\ref{sec:compression}; this section defines its
 \emph{layout} and \emph{lifecycle}---what makes the runtime's memory bounded and its long-context
@@ -58,7 +58,7 @@ activations to the shared pool. When decode will use the compressed path, it add
 the dense window, so decode-time memory reflects the \diffkv{} footprint and not a retained
 full-context cache.
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f4_lifecycle.pdf}
   \caption{Cache lifecycle. Prefill loops over chunks (attend, capture, flush-and-compress the
@@ -67,7 +67,7 @@ full-context cache.
   Decode then loops per token: ingest the new token into the window, flush an eligible block, and
   run the fused routed attention.}
   \label{fig:life}
-\end{figure}
+\end{\figenv}
 
 \subsection{Decode ingestion and the sliding window}
 Each decode step appends the new token's $K$/$V$ to the dense window and, if the window has grown
@@ -76,7 +76,7 @@ rule as prefill. The current token is always in the exact window, so a token att
 its immediate neighbors exactly; only older context is served from the compressed pool. The
 attention itself is the subject of \S\ref{sec:decode}.
 
-\begin{algorithm}[t]
+\begin{\algenv}[t]
 \caption{Session lifecycle (one request)}
 \label{alg:runtime}
 \begin{algorithmic}[1]
@@ -93,4 +93,4 @@ attention itself is the subject of \S\ref{sec:decode}.
   \State sample next token from logits
 \EndFor
 \end{algorithmic}
-\end{algorithm}
+\end{\algenv}

@@ -1,7 +1,7 @@
 \section{Differential KV Compression}
 \label{sec:compression}
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f2_compression.pdf}
   \caption{Compression of one $256$-token block. The anchor (token $0$) is subtracted to form
@@ -14,7 +14,7 @@
   $\approx\blkTotalDefault$\,KiB vs.\ $\blkDense$\,KiB dense ($\ratioDefault\times$); the
   $\maxres{=}64$ preset stores $\approx\blkTotalPreset$\,KiB ($\ratioPreset\times$).}
   \label{fig:compress}
-\end{figure}
+\end{\figenv}
 
 A block is $\bs{=}256$ consecutive tokens' keys and values, $K,V\in\R^{\Hkv\times \bs\times
 \dhead}$. Compression (Figure~\ref{fig:compress}) runs when a block leaves the recency window. It
@@ -111,16 +111,16 @@ residual pool dominates the block at the default setting---a fact the memory lay
 matrix ($\approx2$\,ms), amortized over $256$ tokens; \S\ref{sec:eval} shows compression is a
 single-digit percentage of prefill time.
 
-\begin{table}[t]
+\begin{\tabenv}[t]
   \centering
   \caption{Per-$256$-token-block storage, computed from the model dimensions and the store's fp16
   layout. The low-rank core is fixed; the residual budget \maxres{} sets the ratio.}
   \label{tab:budget}
   \small
   \input{tables/t2_block_budget}
-\end{table}
+\end{\tabenv}
 
-\begin{algorithm}[t]
+\begin{\algenv}[t]
 \caption{Compress one block (streaming, batched across layers in the implementation)}
 \label{alg:compress}
 \begin{algorithmic}[1]
@@ -137,4 +137,4 @@ single-digit percentage of prefill time.
 \State $k_{\min},k_{\max}\gets \min_i K_i,\ \max_i K_i$ \Comment{router bounds}
 \State \Return $(\anchork,\anchorv,U,V_K,V_V,s,R_K,R_V,\mathcal R,k_{\min},k_{\max})$
 \end{algorithmic}
-\end{algorithm}
+\end{\algenv}

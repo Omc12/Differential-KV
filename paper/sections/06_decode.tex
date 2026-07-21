@@ -1,7 +1,7 @@
 \section{Fused Routed Decode Attention}
 \label{sec:decode}
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f5a_decode_attention.pdf}
   \caption{The routed sparse decode kernel. A cheap exact router keeps the top-\topk{} blocks. Their
@@ -10,7 +10,7 @@
   the dense recency window are attended directly. The two halves are combined by a flash-style
   log-sum-exp merge, guarded so an empty compressed set contributes exactly zero weight.}
   \label{fig:decode}
-\end{figure}
+\end{\figenv}
 
 Decode is where compression must pay off without materializing the cache. The decode kernel
 (Figure~\ref{fig:decode}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an
@@ -63,7 +63,7 @@ the true value.
 The two halves are combined by the standard online-softmax identity used by
 FlashAttention~\cite{dao2022flashattention}, in a numerically guarded form:
 \begin{equation}
-  m = \max(\lse_{\text{sp}}, \lse_{\text{dn}}),\qquad
+  m = \max(\lse_{\text{sp}}, \lse_{\text{dn}}),\quad
   o = \frac{e^{\lse_{\text{sp}}-m}\,O_{\text{sp}} + e^{\lse_{\text{dn}}-m}\,O_{\text{dn}}}
            {e^{\lse_{\text{sp}}-m} + e^{\lse_{\text{dn}}-m}} .
   \label{eq:merge}
@@ -79,7 +79,7 @@ no-op and does not affect the exact single-needle recall reported here.
 \subsection{Fused decode buffer}
 \label{sec:fusedbuf}
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f5b_fused_buffer.pdf}
   \caption{The fused decode buffer. Every $N{=}16$ tokens the routed blocks' reconstructed rows,
@@ -91,7 +91,7 @@ no-op and does not affect the exact single-needle recall reported here.
   rows in one softmax is algebraically the log-sum-exp merge of the two halves in
   Figure~\ref{fig:decode}.}
   \label{fig:fusedbuf}
-\end{figure}
+\end{\figenv}
 
 Reconstructing the routed blocks for every token is the dominant per-token cost. To amortize
 it, the runtime uses a \emph{persistent fused buffer} (Figure~\ref{fig:fusedbuf}): at each routing interval (default
@@ -106,7 +106,7 @@ every $N$ tokens (or when the set changes). This path (\texttt{DIFFKV\_DECODE\_F
 default on) is bit-exact to the per-token sparse kernel; its effect on throughput is part of
 the measured decode numbers in \S\ref{sec:eval}.
 
-\begin{algorithm}[t]
+\begin{\algenv}[t]
 \caption{Fused routed decode attention for query $q$ (one layer)}
 \label{alg:decode}
 \begin{algorithmic}[1]
@@ -121,4 +121,4 @@ the measured decode numbers in \S\ref{sec:eval}.
 \State $O_{\text{dn}},\lse_{\text{dn}} \gets$ exact attention over $[\,R_{K,\mathcal S}\,\|\,K_d\,],[\,R_{V,\mathcal S}\,\|\,V_d\,]$
 \State \Return flash-merge$(O_{\text{sp}},\lse_{\text{sp}},O_{\text{dn}},\lse_{\text{dn}})$ \Comment{Eq.~\eqref{eq:merge}}
 \end{algorithmic}
-\end{algorithm}
+\end{\algenv}

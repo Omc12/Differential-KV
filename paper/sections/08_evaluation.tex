@@ -17,8 +17,8 @@ engines. We report prefill time, decode throughput (greedy, a fixed $128$ tokens
 so throughput is comparable), MLX allocator peak, and whether the exact passcode appears in the
 output. Contexts span $4$k to $\reachK$k. Memory is the MLX allocator peak
 (\texttt{mx.get\_peak\_memory}), the allocator-true metric; the analytic KV-state footprint is
-computed from the store layout (Table~\ref{tab:budget}). Table~\ref{tab:main} is the headline; the
-per-run detail is in Appendix~\ref{app:tables}.
+computed from the store layout (Table~\ref{tab:budget}). Table~\ref{tab:main} is the headline\ifext{};
+the per-run detail is in Appendix~\ref{app:tables}\fi.
 
 \begin{table}[t]
   \centering
@@ -38,14 +38,14 @@ The point is not a large constant factor---the residual pool deliberately spends
 recall---but that the state is \emph{bounded}: past the pool's capacity the cache stops being the
 term that grows, which is what decides whether long context fits on a memory-constrained device.
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=0.82\linewidth]{figures/g1_kv_footprint.pdf}
   \caption{Analytic KV-state footprint vs.\ context (whole model). The dense cache grows linearly;
   the \diffkv{} store grows sub-linearly and is bounded by the pre-allocated $256$-block pool. Both
   residual presets are shown; the $\maxres{=}64$ preset stays under the pool cap through $\reachK$k.}
   \label{fig:g1}
-\end{figure}
+\end{\figenv}
 
 \subsection{E2 --- Exact recall and reach}
 Across every context from $4$k to $\reachK$k, \diffkv{} recovers the buried passcode
@@ -70,7 +70,7 @@ differently: \diffkv{} completes prefill in $\actPfSixtyFourK$\,s (heavily memor
 $8.6$\,GB host, so reported as a reach point rather than a clean timing), while the dense baseline
 does not complete at all---it exhausts memory during prefill (E2).
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/g_perf.pdf}
   \caption{Prefill and decode of \diffkv{} versus the dense full-KV baseline on identical int4
@@ -79,7 +79,7 @@ does not complete at all---it exhausts memory during prefill (E2).
   baseline runs out of memory during prefill, while \diffkv{} completes. (b)~\diffkv{} decode is
   nearly flat in context but slower than dense wherever the dense cache still fits.}
   \label{fig:perf}
-\end{figure}
+\end{\figenv}
 
 \subsection{E4 --- Decode throughput (the cost)}
 We state the cost of compression plainly. \diffkv{}'s decode reconstructs and merges a sparse
@@ -111,7 +111,7 @@ recall-preserving operating range. (We note a degenerate boundary: at $\maxres{=
 residual keys for the exact-key router to score, so that configuration is not a valid operating
 point---the method is defined for $\maxres{\ge}1$.)
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=0.82\linewidth]{figures/g6_residual_tradeoff.pdf}
   \caption{Residual-budget sweep at $16$K (forced compressed decode, rank-$32$ store). Bars:
@@ -119,7 +119,7 @@ point---the method is defined for $\maxres{\ge}1$.)
   recovered exactly at every budget in this range (Table~\ref{tab:residual}), so \maxres{} acts as
   a clean memory--speed dial, with the larger default retained for prose-fact fidelity.}
   \label{fig:g6}
-\end{figure}
+\end{\figenv}
 
 \begin{table}[t]
   \centering
@@ -138,13 +138,13 @@ gap between them is purely the overhead of scoring and merging the sparse repres
 than attending dense tensors---it isolates the reconstruction-and-merge cost from the retrieval
 quality, and shows the correctness of the sparse path is not what limits its speed.
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=0.78\linewidth]{figures/g7_decode_ablation.pdf}
   \caption{Decoding the same store two ways: compressed sparse vs.\ exact upper bound. Both recover
   the needle; the difference isolates the per-token reconstruction/merge overhead.}
   \label{fig:g7}
-\end{figure}
+\end{\figenv}
 
 \begin{table}[t]
   \centering
@@ -162,14 +162,14 @@ depths and asked the model to report all four (Table~\ref{tab:multineedle}).
 \diffkv{} recovers all four needles at every context length with $100\%$ recall, confirming that
 $\topk{=}16$ routing headroom is sufficient for simultaneous multi-region retrieval up to $32$k.
 
-\begin{table}[h]
+\begin{\tabenv}[t]
   \centering
   \caption{Multi-needle recall ($4$ simultaneous passcodes, uniform depths). Recall is exact:
   a needle is counted only if the verbatim passcode appears. Apple~M3, Qwen2.5-1.5B int4.}
   \label{tab:multineedle}
   \small
   \input{tables/t7_multi_needle}
-\end{table}
+\end{\tabenv}
 
 \subsection{E8 --- Multi-hop recall: relational-structure preservation}
 A two-hop probe tests whether the store preserves \emph{relational bindings}: Needle~A gives a key;
@@ -198,14 +198,14 @@ $\dhead{=}128$, a different tokenizer and RoPE schedule) and apply the \emph{sam
 modification}. The dynamic patch replaces Llama's attention class at load time; no model-specific
 code is required (\S\ref{sec:impl}).
 
-\begin{table}[h]
+\begin{\tabenv}[t]
   \centering
   \caption{Cross-architecture NIAH: Llama-3.2-3B-Instruct-4bit (int4, Apple~M3, $8.6$\,GB).
   Needle depth varies from $0.1$ (near the top) to $0.9$ (near the end). See swap note.}
   \label{tab:llama}
   \small
   \resizebox{\linewidth}{!}{\input{tables/t8_llama_generalization}}
-\end{table}
+\end{\tabenv}
 
 \paragraph{Swap note.} The Llama-3.2-3B run was conducted on the same host with ambient system
 processes active. macOS unified-memory pressure triggered swap at $16$k context; the observed
@@ -220,7 +220,7 @@ required zero modifications for Llama: the patch is architecture-agnostic.
 \subsection{E11 --- Decode latency breakdown at 16k}
 \label{sec:e11}
 
-\begin{figure}[h]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=0.96\linewidth]{figures/g8_latency_breakdown.pdf}
   \caption{Where a decode step goes at $16$k ($\maxres{=}128$, $\topk{=}16$), measured with
@@ -229,7 +229,7 @@ required zero modifications for Llama: the patch is architecture-agnostic.
   would collapse. Buffer materialisation, the mechanism added to \emph{save} time
   (\S\ref{sec:fusedbuf}), is the smallest slice at $10\%$.}
   \label{fig:e11}
-\end{figure}
+\end{\figenv}
 
 Profiling the per-step decode at $16$k gives the split in Figure~\ref{fig:e11}: low-rank SVD
 scoring $35\%$ (${\approx}378$\,ms); residual attention $28\%$ (${\approx}302$\,ms); cache-merge
@@ -249,7 +249,7 @@ The lego streaming-prefill path (\texttt{DIFFKV\_LEGO\_PREFILL=1}) replaces the 
 KV cache during prefill with the compressed store, bounding peak allocator pressure to
 $O(\text{sinks} + \text{ring} + \text{chunk})$ instead of $O(T)$.
 
-\begin{table}[h]
+\begin{\tabenv}[t]
   \centering
   \caption{Lego streaming prefill vs.\ standard prefill (Qwen2.5-1.5B int4, Apple~M3). The lego
   path bounds peak allocation by using the compressed store for far history. Peak savings are
@@ -257,7 +257,7 @@ $O(\text{sinks} + \text{ring} + \text{chunk})$ instead of $O(T)$.
   \label{tab:lego}
   \small
   \input{tables/t10_lego_prefill}
-\end{table}
+\end{\tabenv}
 
 Peak VRAM savings are $10.5\%$ at $32$k and $8.3\%$ at $48$k, with proportional prefill speedup
 ($71.5 \to 66.4$\,s at $32$k). At $16$k the delta is negative ($-2.7\%$, allocator noise): the
@@ -272,7 +272,7 @@ difference is generation stability: removing owner-capture triggers repetition l
 EOS forcing, while full \diffkv{} and no-edge-capture produce clean output. Owner-capture is the
 load-bearing signal for generation stability; edge-capture contributes to relational binding.
 
-\begin{table}[h]
+\begin{\tabenv}[t]
   \centering
   \caption{Residual-signal ablation (six planted-fact contexts, $8$k, compressed decode).
   Accuracy is exact-string recall. Qualitative column captures generation artifacts invisible
@@ -280,5 +280,5 @@ load-bearing signal for generation stability; edge-capture contributes to relati
   \label{tab:signabl}
   \small
   \resizebox{\linewidth}{!}{\input{tables/t9_signal_ablation}}
-\end{table}
+\end{\tabenv}
 

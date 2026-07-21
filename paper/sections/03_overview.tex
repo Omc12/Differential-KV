@@ -1,7 +1,7 @@
 \section{System Overview}
 \label{sec:overview}
 
-\begin{figure}[t]
+\begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f1_architecture.pdf}
   \caption[\diffkv{} active-runtime architecture: serving stack, monkey-patched attention,
@@ -14,7 +14,7 @@
   the per-session \texttt{MLXKVBlockManager}: a dense recency window plus a bounded compressed
   block pool.}
   \label{fig:arch}
-\end{figure}
+\end{\figenv}
 
 \diffkv{} is structured as a thin serving stack over an MLX inference core whose attention has
 been replaced (Figure~\ref{fig:arch}). We walk the components in the order data flows through
