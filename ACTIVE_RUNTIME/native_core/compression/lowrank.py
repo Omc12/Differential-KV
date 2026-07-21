@@ -1115,16 +1115,47 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         residual_V_vals = None
 
         _force_exact = bool(getattr(block, "skip_compression", False))
+
+        # Residuals are stored as (delta - recon).  For non-exact blocks `recon`
+        # is the fp16-U reconstruction (recon_K/recon_V above) and the lossy
+        # residual just captures the worst-reconstructed rows.  For force_exact
+        # blocks we need decode to rebuild `delta` bit-for-bit — but the pool
+        # stores U as int8 (write_blocks_batched:632-638) and the Triton decode
+        # reads that int8 U (the stratified fp16-U proxy is never populated on
+        # this GPU compress path, n_semantic=0).  A residual computed against the
+        # fp16 recon therefore leaves the int8-U quant error UNABSORBED at decode:
+        # int8's single per-block scale pushes low-norm rows (a passcode embedded
+        # in filler is exactly that) into a sliver of the range -> up to ~17%
+        # per-token error, enough to flip marginal digit tokens ('4657'->'46577').
+        # Recompute recon against the SAME int8-dequant U decode reads so the
+        # residual absorbs that error and reconstruction is exact.
+        recon_K_for_res, recon_V_for_res = recon_K, recon_V
+        if _force_exact and pool is not None and T_active > 0:
+            _wr = min(U_masked.shape[2], pool.U.shape[2])          # write_rank
+            _U_w = U_masked[i, :T_active, :_wr]                    # [T, wr] fp16, as written
+            _V_w = V_masked[i, :_wr, :]                            # [wr, feat] fp16, as written
+            _max_abs = _U_w.detach().abs().amax()
+            # fp16-rounded scale, matching pool store + decode dequant exactly.
+            _scale_u = torch.clamp(_max_abs / 127.0, min=1e-5).to(torch.float16).float()
+            _U_q = torch.clamp(torch.round(_U_w.float() / _scale_u), -127, 127)
+            _recon_exact = (_U_q * _scale_u) @ _V_w.float()       # int8-dequant recon
+            recon_K_for_res = _recon_exact[:, :half_d]
+            recon_V_for_res = _recon_exact[:, half_d:]
+            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                _dn = delta_K.norm(dim=1).clamp(min=1e-6)
+                _absorbed = ((recon_K_for_res - recon_K).norm(dim=1) / _dn).max().item()
+                print(f"[DiffKV DEBUG] int8-exact residual for skip block "
+                      f"anchor={getattr(block, 'anchor_idx', '?')}: absorbed up to "
+                      f"{_absorbed*100:.1f}% per-token int8-U error", flush=True)
+
         if T_active > 0 and (n_max_residual > 0 or _force_exact):
             if _force_exact:
-                # FIX (needle digits): mirror compress_lowrank(force_exact) for the
-                # A100 GPU batch path. A skip_compression (digit/formula/exact) block
-                # that the deferred path force-compresses must store EVERY token as an
-                # exact residual regardless of the 0.08 error threshold, else digits
-                # decode to garbage ('847291'->'84'). The pool truncates to
+                # A skip_compression (digit/formula/exact) block force-compressed
+                # by the deferred path must store EVERY token as an exact residual
+                # regardless of the 0.08 error threshold, else digits decode to
+                # garbage ('847291'->'84'). The pool truncates to
                 # max_residual_tokens (earliest positions, where the exact content
-                # sits). Mirrors MLX is_core.  [CPU-verified via compress_lowrank; this
-                # GPU mirror is A100-only, verify on device.]
+                # sits). Mirrors MLX is_core.
                 fact_positions_K = torch.arange(T_active, device=rel_error_K.device)
                 fact_positions_V = torch.arange(T_active, device=rel_error_V.device)
             else:
@@ -1138,14 +1169,14 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 fact_positions_V = top_k_V.indices[mask_V]
 
             if fact_positions_K.numel() > 0:
-                residual_K_vals = (delta_K - recon_K)[fact_positions_K].to(torch.float16).to(gpu_device)
+                residual_K_vals = (delta_K - recon_K_for_res)[fact_positions_K].to(torch.float16).to(gpu_device)
                 fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_K = None
                 residual_K_vals = None
 
             if fact_positions_V.numel() > 0:
-                residual_V_vals = (delta_V - recon_V)[fact_positions_V].to(torch.float16).to(gpu_device)
+                residual_V_vals = (delta_V - recon_V_for_res)[fact_positions_V].to(torch.float16).to(gpu_device)
                 fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_V = None
