@@ -1378,13 +1378,10 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        print(p.stdout)
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
         print(f"   -> nsys profiling complete! Saved trace to {trace}.nsys-rep")
-        if kernel_rows:
-            print("      Top Kernel Summary:")
-            for r in kernel_rows[:5]:
-                print(f"        {r[:80]}")
         return {"status": "success", "command": " ".join(cmd),
                 "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
     except Exception as e:
