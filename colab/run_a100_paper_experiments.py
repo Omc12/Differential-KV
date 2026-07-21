@@ -1373,31 +1373,24 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
     trace = os.path.abspath("diffkv_nsys_trace")
-    cmd = ["nsys", "profile", "-t", "cuda,nvtx,osrt", "--stats=true", "--force-overwrite=true",
+    for ext in [".qdstrm", ".sqlite", ".nsys-rep"]:
+        f = trace + ext
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    cmd = ["nsys", "profile", "-t", "cuda,nvtx", "--stats=true", "--force-overwrite=true",
            "-o", trace, sys.executable, os.path.join(HERE, "run_nat_eval.py"),
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        qdstrm_path = f"{trace}.qdstrm"
-        sqlite_path = f"{trace}.sqlite"
-        rep_path = f"{trace}.nsys-rep"
-        target_file = rep_path
-        if os.path.exists(qdstrm_path) and not os.path.exists(sqlite_path):
-            subprocess.run(["nsys", "export", "--type", "sqlite", "-o", sqlite_path, qdstrm_path],
-                           capture_output=True, text=True)
-        if os.path.exists(sqlite_path):
-            target_file = sqlite_path
-        elif os.path.exists(qdstrm_path):
-            target_file = qdstrm_path
-
-        stats_res = subprocess.run(["nsys", "stats", target_file], capture_output=True, text=True)
-        stats_output = stats_res.stdout if stats_res.stdout else p.stdout
-        print(stats_output)
-        kernel_rows = [ln.strip() for ln in stats_output.splitlines()
+        print(p.stdout)
+        kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
-        print(f"   -> nsys profiling complete! Saved trace report to {target_file}")
+        print("   -> nsys profiling complete!")
         return {"status": "success", "command": " ".join(cmd),
-                "summary_rows": kernel_rows, "stdout_tail": stats_output[-800:]}
+                "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
     except Exception as e:
         print(f"   -> nsys unavailable: {e}")
         return {"status": "cli_not_found", "command": " ".join(cmd), "error": str(e)}
