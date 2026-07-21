@@ -1124,11 +1124,14 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
             # the borderline ones then mis-score and the digits flip/drop at decode
             # even though K/V are value-exact.  Rotate each exact-residual key at its
             # TRUE token position (anchor + within-block offset) instead, matching MLX
-            # which appends exact rows as real tokens at their true positions.  Cost is
-            # a [N, MAX_RES, D] cos/sin gather, cached per routing interval and non-zero
-            # only on the (rare) blocks that carry residuals — no per-token / dense-path
-            # cost.  A100-validated: random-code recall 75%→88% (recovered a digit-drop
-            # code, zero regressions).  Default ON; DIFFKV_RESIDUAL_EXACT_ROPE=0 restores
+            # which appends exact rows as real tokens at their true positions.  Marginal
+            # cost over the anchor path this replaces: the cos/sin gather grows from
+            # [N, D] to [N, MAX_RES, D] (~sub-MB/step) and one [N, MAX_RES] index add;
+            # the residual rotate itself was already here, and the whole `if g[has_res]`
+            # block is skipped when no routed block carries residuals — so the dense/no-
+            # residual path is untouched and VRAM is unchanged (no persistent buffers).
+            # A100-validated: random-code recall 75%→88% (recovered a digit-drop code,
+            # zero NIAH regressions).  Default ON; DIFFKV_RESIDUAL_EXACT_ROPE=0 restores
             # the anchor-position approximation.
             if os.environ.get("DIFFKV_RESIDUAL_EXACT_ROPE", "1") == "1":
                 _abs_pos = (anchor_indices_clamped.unsqueeze(1)
