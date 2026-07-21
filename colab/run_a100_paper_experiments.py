@@ -1380,7 +1380,7 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
                 os.remove(f)
             except Exception:
                 pass
-    cmd = ["nsys", "profile", "-t", "cuda,nvtx", "--stats=true", "--force-overwrite=true",
+    cmd = ["nsys", "profile", "-t", "cuda,nvtx", "--export=sqlite", "--stats=true", "--force-overwrite=true",
            "-o", trace, sys.executable, os.path.join(HERE, "profile_decode_step.py"),
            "--model", "Qwen/Qwen2.5-7B-Instruct", "--preset", "mid"]
     try:
