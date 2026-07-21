@@ -1373,7 +1373,7 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
     trace = os.path.abspath("diffkv_nsys_trace")
-    for ext in [".qdstrm", ".sqlite", ".nsys-rep"]:
+    for ext in [".qdstrm", ".sqlite", ".nsys-rep", ".qdrep"]:
         f = trace + ext
         if os.path.exists(f):
             try:
@@ -1381,14 +1381,22 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
             except Exception:
                 pass
     cmd = ["nsys", "profile", "-t", "cuda,nvtx", "--stats=true", "--force-overwrite=true",
-           "-o", trace, sys.executable, os.path.join(HERE, "run_nat_eval.py"),
-           "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
+           "-o", trace, sys.executable, os.path.join(HERE, "profile_decode_step.py"),
+           "--model", "Qwen/Qwen2.5-7B-Instruct", "--preset", "mid"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         print(p.stdout)
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
-        print("   -> nsys profiling complete!")
+        rep_file = None
+        for ext in [".nsys-rep", ".qdrep", ".sqlite"]:
+            if os.path.exists(trace + ext):
+                rep_file = trace + ext
+                break
+        if rep_file:
+            print(f"   -> nsys profiling complete! Saved trace report to {rep_file}")
+        else:
+            print("   -> nsys profiling complete!")
         return {"status": "success", "command": " ".join(cmd),
                 "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
     except Exception as e:
