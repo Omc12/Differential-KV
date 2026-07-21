@@ -12,10 +12,9 @@
   \label{fig:decode}
 \end{figure}
 
-Decode is where compression must pay off without materializing the cache. The kernel
-(Figure~\ref{fig:decode}; \texttt{compute\_decode\_attention\_static}, compiled with
-\texttt{mx.compile}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an attention output
-over the compressed pool and the dense window as two halves merged in log-space.
+Decode is where compression must pay off without materializing the cache. The fused decode
+buffer (Figure~\ref{fig:decode}) computes, for a single query $q\in\R^{\Hq\times\dhead}$, an
+attention output over the compressed pool and the dense window as two halves merged in log-space.
 
 \subsection{Routing: bound the work, not the context}
 Attending and reconstructing every block would make decode scale with context. Instead a router
@@ -76,15 +75,19 @@ recasting the merge to fp32 was measured to perturb long-context retrieval and i
 systematic under-weighting of the low-rank pool for diffuse multi-fact queries; it defaults to a
 no-op and does not affect the exact single-needle recall reported here.
 
-\subsection{Decompress-and-cache}
-Reconstructing the routed blocks \emph{once} and reusing them across several decode steps trades a
-little memory for throughput. When enabled (the default in the serving configuration used for our
-measurements), the kernel materializes the selected blocks' $K$/$V$ into a contiguous buffer via
-Eq.~\eqref{eq:recon}, overwrites the residual rows with their exact copies, and attends
-$[\text{cached blocks}\,\|\,\text{window}]$ with a single fused attention; it re-routes and
-re-materializes every $N$ tokens (or whenever the block set changes). This is bit-exact to the
-per-token kernel and reduces per-token work, at the cost of a buffer bounded by \topk{} (not by
-context). Its effect on throughput is part of the measured decode numbers in \S\ref{sec:eval}.
+\subsection{Fused decode buffer}
+Reconstructing the routed blocks for every token is the dominant per-token cost. To amortize
+it, the runtime uses a \emph{persistent fused buffer}: at each routing interval (default
+$N{=}16$ tokens), the selected blocks' $K$/$V$ are materialised into a contiguous static buffer
+---one row per non-masked token---together with their exact residuals and the dense recency
+window, guarded by a fixed additive mask that gives residual positions infinite score and zeroes
+out the low-rank twins of residual rows so each token is represented once. Per-token decode then
+appends the new token's $K$/$V$ as a single in-place row and runs one
+\texttt{scaled\_dot\_product\_attention} call over exact-length views, without any per-token
+concatenation or buffer re-allocation. The block set is re-routed and the buffer re-written
+every $N$ tokens (or when the set changes). This path (\texttt{DIFFKV\_DECODE\_FUSED},
+default on) is bit-exact to the per-token sparse kernel; its effect on throughput is part of
+the measured decode numbers in \S\ref{sec:eval}.
 
 \begin{algorithm}[t]
 \caption{Fused routed decode attention for query $q$ (one layer)}

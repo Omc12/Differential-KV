@@ -33,10 +33,16 @@ $K$ and $V$ are compressed \emph{jointly}: for each token we stack $[\Delta K_i 
 and factor the $(\bs{-}1)\times 2\Hkv\dhead$ delta matrix once, so a single set of coefficients
 $U$ drives both reconstructions. Two normalizations make the joint factorization well-posed. In
 Qwen2.5 the key norms dominate the value norms, so before factoring we rescale $V$'s deltas to
-$K$'s RMS energy (a per-block gain $g$, undone on the stored $V_V$); without this the SVD spends
-its budget on $K$ and the $V$ reconstruction is poor. We then $L_2$-normalize each token's stacked
-delta row so the factorization is not dominated by a few high-norm tokens, folding the norms back
-into $U$ afterwards.
+$K$'s RMS energy via a per-block gain
+\begin{equation}
+  g = \operatorname{clip}\!\left(\sqrt{\frac{\|\Delta K\|_F^2}{\|\Delta V\|_F^2}},\;1,\;10^4\right),
+  \label{eq:vgain}
+\end{equation}
+which is then undone on the stored $V_V$. The lower clamp ($g\ge 1$) prevents artificial
+de-weighting of $V$ on well-balanced blocks; the upper clamp ($g\le 10^4$) guards degenerate
+blocks where $\|\Delta V\|_F\approx 0$. Without this rescaling the SVD spends its budget on $K$
+and the $V$ reconstruction is poor. We then $L_2$-normalize each token's stacked delta row so the
+factorization is not dominated by a few high-norm tokens, folding the norms back into $U$ afterwards.
 
 The factorization is a \emph{randomized truncated SVD}~\cite{halko2011randomized} with a fixed
 seed (default $1234$): a Gaussian range finder with power iterations, a QR step, and a small dense
@@ -55,20 +61,35 @@ so that the implicit reconstruction of any non-anchor token is
 with $s$ the stored per-block scale. Crucially, decode never forms $\hat K_i$ explicitly
 (\S\ref{sec:decode}); Eq.~\eqref{eq:recon} is the semantics, not the runtime path.
 
-\subsection{Exact residuals: rescuing the outliers}
+\subsection{Exact residuals: selecting the outliers}
 The low-rank basis reconstructs the shared structure well but, by construction, mis-reconstructs
 low-energy outliers---which are the distinctive tokens recall depends on. \diffkv{} measures this
 directly. For every token it computes the joint reconstruction error
 $e_i = \big\lVert \Delta K_i - \widehat{\Delta K}_i \big\rVert^2 + g^2\big\lVert \Delta V_i -
-\widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ used above), and
-keeps the \maxres{} highest-error tokens as \emph{exact} fp16 residuals $R_K,R_V\in\R^{\maxres
-\times\Hkv\times\dhead}$. Their low-rank twins are later excluded from the reconstruction pool so
-each such token is represented once, exactly (\S\ref{sec:decode}). Selecting by measured error,
-rather than by a token-type heuristic, is what makes the residual mechanism content- and
-model-agnostic. We validate empirically (\S\ref{sec:eval}, E5--E6) that (i) residuals are what
-make a buried passcode survive compression exactly, and (ii) the residual reconstruction \emph{K}
-must be stored exactly---using a low-rank-reconstructed key for a residual token was measured to
-break recall.
+\widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ used above).
+
+Selection is \emph{multi-signal}: reconstruction error is the base signal, but three
+IDF-weighted boost signals inflate certain tokens' priority before the top-\maxres{} cut.
+\textbf{Owner-capture} (default on): for each high-error segment, the algorithm walks left up
+to 12 tokens and boosts the nearest capitalized word into the residual set alongside its
+value---preserving entity \emph{names} that are low-energy prose yet essential for
+attribute-binding queries. \textbf{Edge-capture} (default on): relational connectives
+("grows to'', ``needs~$X$ because~$Y$'') are low-energy prose whose low-rank reconstruction
+collides with a neighbouring token's key; a direct cosine-collision test detects this and
+boosts such tokens before the residual cut, so the model cannot substitute a neighbour's
+relation. \textbf{Coverage bonus} (default on): a uniform bonus across block positions prevents
+a single high-error segment from monopolising all \maxres{} slots, spreading exact coverage
+across the block.
+
+After applying boosts, the \maxres{} highest-priority tokens are kept as \emph{exact} fp16
+residuals $R_K,R_V\in\R^{\maxres\times\Hkv\times\dhead}$. Their low-rank twins are excluded
+from the reconstruction pool so each such token is represented once, exactly
+(\S\ref{sec:decode}). Selecting by measured error and collision signal, rather than by a
+token-type heuristic, is what makes the residual mechanism content- and model-agnostic. We
+validate empirically (\S\ref{sec:eval}, E5--E6) that (i) residuals are what make a buried
+passcode survive compression exactly, and (ii) the residual reconstruction $K$ must be stored
+exactly---using a low-rank-reconstructed key for a residual token was measured to break recall.
+
 
 \subsection{Router statistics}
 Two cheap summaries per block support decode-time routing (\S\ref{sec:decode}): the element-wise
@@ -103,12 +124,13 @@ single-digit percentage of prefill time.
 \Require block keys/values $K,V\in\R^{\Hkv\times \bs\times \dhead}$; rank \rank{}; residual budget \maxres{}
 \State $\anchork,\anchorv \gets K_0, V_0$ \Comment{anchor kept exact}
 \State $\Delta K \gets K_{1:}-\anchork$;\quad $\Delta V \gets V_{1:}-\anchorv$
-\State $g \gets \sqrt{\lVert\Delta K\rVert^2 / \lVert\Delta V\rVert^2}$ \Comment{rescale $V$ to $K$'s RMS}
+\State $g \gets \operatorname{clip}\!\left(\sqrt{\lVert\Delta K\rVert_F^2 / \lVert\Delta V\rVert_F^2},\;1,\;10^4\right)$ \Comment{rescale $V$ to $K$'s RMS; clamp guards degenerate blocks}
 \State $D \gets \text{rownorm}\big([\,\Delta K \,\|\, g\,\Delta V\,]\big)$; keep norms in $U$
 \State $U, \Sigma, V^{\!\top} \gets \textsc{RandTruncSVD}(D,\ \rank,\ \text{seed}{=}1234,\ 99.9\%)$
 \State split $V^{\!\top}\!\to V_K, V_V$; undo $g$ on $V_V$; store scale $s$
 \State $e_i \gets \lVert\Delta K_i - \widehat{\Delta K}_i\rVert^2 + g^2\lVert\Delta V_i - \widehat{\Delta V}_i\rVert^2$ \Comment{joint error}
-\State $\mathcal{R}\gets$ indices of the \maxres{} largest $e_i$; $R_K,R_V \gets K_{\mathcal R}, V_{\mathcal R}$ \Comment{exact}
+\State apply IDF-weighted boosts: owner-capture, edge-capture, coverage (\S\ref{sec:compression})
+\State $\mathcal{R}\gets$ indices of the \maxres{} highest-priority $e_i$; $R_K,R_V \gets K_{\mathcal R}, V_{\mathcal R}$ \Comment{exact}
 \State $k_{\min},k_{\max}\gets \min_i K_i,\ \max_i K_i$ \Comment{router bounds}
 \State \Return $(\anchork,\anchorv,U,V_K,V_V,s,R_K,R_V,\mathcal R,k_{\min},k_{\max})$
 \end{algorithmic}

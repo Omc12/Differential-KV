@@ -58,6 +58,6 @@ during compression can run in NumPy on the CPU while the attention kernels run o
 no marshalling cost. Second, ``freeing'' memory means returning it to a single shared pool that
 the rest of the system is contending for, so bounding \emph{peak} allocation matters as much as
 bounding steady state. \diffkv{} is built on MLX: it monkey-patches the attention of an
-\texttt{mlx\_lm} model, keeps its compressed store in MLX fp16 arrays, compiles the decode kernel
-with \texttt{mx.compile}, and explicitly releases the prefill cache at the prefill$\to$decode
-boundary (\S\ref{sec:runtime}).
+\texttt{mlx\_lm} model, keeps its compressed store in MLX fp16 arrays, uses a persistent fused
+decode buffer, and explicitly releases the prefill cache at the prefill$\to$decode boundary
+(\S\ref{sec:runtime}).

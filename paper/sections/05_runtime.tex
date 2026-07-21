@@ -8,7 +8,7 @@
   layers (left). Within a layer, the compressed pool is a bounded array of $M{=}256$ block slots;
   each occupied slot holds a small low-rank core and---at the default budget---a much larger
   block of exact residuals (residuals dominate the per-block bytes, cf.\ Table~\ref{tab:budget}).
-  The dense recency window (front) holds the newest $768$ tokens uncompressed; when it overflows,
+  The dense recency window (front) holds the newest $1{,}024$ tokens uncompressed; when it overflows,
   its oldest block is flushed and compressed into a pool slot.}
   \label{fig:mem3d}
 \end{figure}
@@ -19,12 +19,15 @@ prefill affordable.
 
 \subsection{Session state}
 Each session holds, per layer (Figure~\ref{fig:mem3d}): a dense recency window---fixed-capacity
-fp16 buffers $[\Hkv,\;\dwin{+}\bs,\;\dhead]$ for the newest $768$ tokens---and a compressed pool
-of $M{=}256$ block slots, pre-allocated for $U$, $V_K$, $V_V$, anchors, residuals $R_K,R_V$,
-key min/max, and per-block scalars. Because the pool is pre-allocated at its maximum size, the
-store's footprint is \emph{bounded and context-independent} up to the pool's capacity of
-$256\times256=65{,}536$ compressed tokens; adding context fills empty slots rather than growing
-the allocation. This is the structural source of the bounded-memory behavior in \S\ref{sec:eval}.
+fp16 buffers $[\Hkv,\;\dwin{+}\bs,\;\dhead]$ for the newest $\dwin{=}1{,}024$ tokens---and a
+compressed pool of $M{=}256$ block slots, pre-allocated for $U$, $V_K$, $V_V$, anchors,
+residuals $R_K,R_V$, key min/max, and per-block scalars. The window size scales with model
+capacity: $\dwin = \text{round}_{512}(N_{\text{layers}}\times\dhead\times 0.25)$, which yields
+$1{,}024$ for Qwen2.5-1.5B ($28$ layers, $\dhead{=}128$). Because the pool is pre-allocated at
+its maximum size, the store's footprint is \emph{bounded and context-independent} up to the
+pool's capacity of $256\times256=65{,}536$ compressed tokens; adding context fills empty slots
+rather than growing the allocation. This is the structural source of the bounded-memory behavior
+in \S\ref{sec:eval}.
 
 \subsection{Chunked, streaming prefill}
 Prefill consumes the prompt in fixed chunks (default $512$ tokens). Each chunk runs causal

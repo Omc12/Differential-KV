@@ -2413,6 +2413,8 @@ def native_triton_sparse_attn_decode_combined(
     cos:                  Optional[torch.Tensor] = None,
     sin:                  Optional[torch.Tensor] = None,
     dense_len:            Optional[int] = None,  # actual valid dense tokens
+    gather_cache:         Optional[dict] = None,  # {gather_key: (pool_for_kernel, g)} — see below
+    gather_key=None,                              # cache key; None disables caching
 ) -> torch.Tensor:
     """
     Single-dispatch fused attention over both compressed blocks and dense window tokens.
@@ -2517,9 +2519,24 @@ def native_triton_sparse_attn_decode_combined(
         # ── Gather + rotate the N routed rows (identical semantics to
         # native_triton_sparse_attn_decode; see F2 helper). Issue 1 fix included:
         # stratified U is pre-reconstructed before dispatch for CUDA/MPS parity.
-        pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
-        g = _gather_routed_blocks_for_kernel(
-            pool_for_kernel, block_indices, anchor_indices, cos, sin)
+        #
+        # DECODE-CACHE (DIFFKV_DECODE_CACHE_CUDA): this gather is QUERY-INDEPENDENT
+        # — it depends only on the routed block set + their anchor RoPE positions,
+        # both stable between block flushes. So within an interval it is IDENTICAL
+        # every decode token, yet the current code recomputes ~20 index/rotate ops
+        # per token per layer (the launch explosion the profiler showed). When the
+        # caller passes a (cache, key) whose key only changes on a block flush, we
+        # compute it once and reuse — the kernel still runs every token with the
+        # fresh query, so output is bit-identical to the uncached path.
+        _cached = gather_cache.get(gather_key) if (gather_cache is not None and gather_key is not None) else None
+        if _cached is not None:
+            pool_for_kernel, g = _cached
+        else:
+            pool_for_kernel, _used_strat = _build_stratified_U_for_triton(pool, block_indices)
+            g = _gather_routed_blocks_for_kernel(
+                pool_for_kernel, block_indices, anchor_indices, cos, sin)
+            if gather_cache is not None and gather_key is not None:
+                gather_cache[gather_key] = (pool_for_kernel, g)
 
         # ── Dense window tensors ──
         # Caller provides pre-RoPE-rotated dense_k/dense_v as [1, H_kv, L_dense, D].

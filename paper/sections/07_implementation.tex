@@ -1,7 +1,7 @@
 \section{Implementation Notes}
 \label{sec:impl}
 
-\diffkv{}'s active runtime is $\approx3{,}500$ lines of Python over MLX~\cite{mlx2023}, evaluated on
+\diffkv{}'s active runtime is $\approx6{,}000$ lines of Python over MLX~\cite{mlx2023}, evaluated on
 Qwen2.5-1.5B~\cite{qwen25}. A few implementation choices are load-bearing and worth recording,
 because they are where correctness or performance was actually won or lost.
 
@@ -30,16 +30,34 @@ configuration and is enforced by a parity oracle in the test suite.
 \paragraph{Router/attention decoupling.} The number of residuals the router \emph{scores}
 (Eq.~\eqref{eq:router}) is a separate knob from the number a block \emph{stores}. The router cost
 is $O(\text{nb}\cdot R_{\text{route}}\cdot\dhead)$ per token and dominates long-context decode, so
-$R_{\text{route}}$ defaults below the storage budget \maxres{}; raising \maxres{} for prose
-fidelity therefore does not automatically inflate router cost.
+$R_{\text{route}}$ defaults to $\min(64, \maxres{})$ rather than the full storage budget; raising
+\maxres{} for prose fidelity therefore does not automatically inflate router cost.
+
+\paragraph{Layer-adaptive rank.} By default, the SVD rank assigned to each layer varies with
+depth: early layers ($\leq 25\%$) use $0.75r$, middle layers ($25$--$75\%$) use $1.5r$, and late
+layers ($\geq 75\%$) use $0.5r$, where $r{=}32$ is the base rank. The pool is sized at the
+maximum rank $1.5r{=}48$; layers use only what they need. Attention quality is more
+rank-sensitive in middle layers (higher information density), while early and late layers tolerate
+more aggressive compression. The base rank $r{=}32$ is the value cited throughout.
+
+\paragraph{Multi-signal residual selection.} Residual tokens are selected by a boosted-priority
+ranking rather than plain reconstruction error. Three IDF-weighted boost signals are active by
+default: \emph{owner-capture} (entity names accompanying high-error values), \emph{edge-capture}
+(relational connectives whose low-rank reconstruction collides with a neighbour's key, detected
+by a cosine-collision test), and a \emph{coverage bonus} (uniform spread across block positions
+so a single high-error segment cannot monopolise all slots). All three are individually
+controllable via environment flags; together they preserve the entity-name and relational
+structure that the error signal alone cannot reliably surface.
 
 \paragraph{Configuration.} Behavior is controlled by environment flags with safe defaults, so new
 paths ship disabled until validated. The defaults used throughout this report are: compressed
-sparse decode on; decompress-and-cache on; block-sparse prefill on; rank $\rank{=}32$;
-$\maxres{=}128$; top-\topk{} $=16$; residual-key router; SVD seed $1234$. The dense baseline is
-\texttt{mlx\_lm} with a full KV cache on the same int4 weights.
+sparse decode on; fused decode buffer on (\texttt{DIFFKV\_DECODE\_FUSED}); block-sparse prefill
+on; base rank $\rank{=}32$ with layer-adaptive variation; $\maxres{=}128$; top-\topk{} $=16$;
+residual-key router; SVD seed $1234$. The dense baseline is \texttt{mlx\_lm} with a full KV
+cache on the same int4 weights.
 
-\paragraph{Gated subsystems.} A factual-store / semantic-retrieval module and a speculative-decode
+\paragraph{Gated subsystems.} A factual-store / semantic-retrieval module, a lego streaming
+prefill (memory-bounded prefill that drops raw KV after block compression), and a speculative-decode
 draft path exist in the codebase but are disabled by default (they are no-ops in the configuration
 measured here) and are not part of the evaluated system. We mention them only to be exact about
 what is and is not exercised.

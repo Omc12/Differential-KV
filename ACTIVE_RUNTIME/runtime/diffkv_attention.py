@@ -70,6 +70,15 @@ _SRL_THRESHOLD      = int(os.environ.get("DIFFKV_SRL_THRESHOLD",    "50"))
 _SRL_VALIDATE       = os.environ.get("DIFFKV_VALIDATE_SRL",         "0") == "1"
 _SRL_VALIDATE_EVERY = int(os.environ.get("DIFFKV_VALIDATE_EVERY", "50"))
 
+# ── Decode gather-cache (MLX-parity, DIFFKV_DECODE_CACHE_CUDA) ─────────────────
+# The per-token block gather+rotate fed to the combined Triton kernel is
+# QUERY-INDEPENDENT — it only changes when the routed block set changes (a block
+# flush). Caching it per (session, layer) keyed on the streaming metadata version
+# recomputes it once per flush instead of every token, eliminating the launch
+# explosion the profiler showed. Output is bit-identical (kernel still runs each
+# token with the fresh query). Default OFF until A100-validated (NIAH parity).
+_DECODE_CACHE_CUDA = os.environ.get("DIFFKV_DECODE_CACHE_CUDA", "0") == "1"
+
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
 _SPARSE_BIAS_ENV = os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower()
 if _SPARSE_BIAS_ENV.startswith("auto"):
@@ -2068,6 +2077,19 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                     attn_outputs.append(None)
                                     continue  # skip the attn_outputs.append(attn_out_b) below
                                 else:
+                                    # Gather-cache key: (layer, streaming metadata version).
+                                    # metadata_version bumps exactly when a block is
+                                    # flushed into the pool, which is the only event that
+                                    # changes the query-independent gather. So the cached
+                                    # gather is reused for every token until the next flush.
+                                    _gc = _gk = None
+                                    if _DECODE_CACHE_CUDA:
+                                        _smgr = getattr(kv_manager, "_streaming_mgr", None)
+                                        _mdver = (_smgr._metadata_versions.get(sid, {}).get(captured_layer_idx, 0)
+                                                  if _smgr is not None else 0)
+                                        _gc = kv_manager.decode_workspace.setdefault(sid, {}).setdefault(
+                                            "_gather_cache_cuda", {})
+                                        _gk = (captured_layer_idx, _mdver)
                                     attn_out_b = native_triton_sparse_attn_decode_combined(
                                         q=query_states[b_idx:b_idx+1],
                                         block_indices=block_indices,
@@ -2081,6 +2103,8 @@ def apply_diffkv_attention_patch(model, kv_manager):
                                         cos=cos_all,
                                         sin=sin_all,
                                         dense_len=dense_len,
+                                        gather_cache=_gc,
+                                        gather_key=_gk,
                                     )
                             else:
                                 attn_out_b = native_triton_sparse_attn_decode(

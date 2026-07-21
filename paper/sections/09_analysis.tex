@@ -16,15 +16,15 @@ decode is no decode at all.
 
 \subsection{Why decode is flat but slow}
 Two facts from \S\ref{sec:eval} explain the decode shape. It is \emph{flat} in context because
-top-\topk{} routing bounds the expensive work to a constant number of blocks and the
-decompress-and-cache path reconstructs them once per interval rather than per token; adding context
-adds pool slots but not per-token work. It is \emph{slower than dense} because that constant of
-work---projecting the query into the rank subspace, contracting with $U$ and $V_V$, attending the
-residual pool, and merging two log-sum-exp halves---is simply more per-token arithmetic than a
-single fused attention over a cache that still fits. The E6 ablation confirms the gap is
-reconstruction-and-merge overhead, not a correctness compromise. This is why the highest-leverage
-optimization is a single fused decode kernel (or a GPU-native CUDA/Triton one), not a change to the
-representation.
+top-\topk{} routing bounds the expensive work to a constant number of blocks and the fused
+decode buffer (\S\ref{sec:decode}) reconstructs them once per interval and appends new tokens
+in-place rather than per token; adding context adds pool slots but not per-token work. It is
+\emph{slower than dense} because that constant of work---projecting the query into the rank
+subspace, contracting with $U$ and $V_V$, attending the residual pool, and merging two
+log-sum-exp halves---is simply more per-token arithmetic than a single fused attention over a
+cache that still fits. The E6 ablation confirms the gap is reconstruction-and-merge overhead,
+not a correctness compromise. This is why the highest-leverage optimization is a single fused
+decode kernel (or a GPU-native CUDA/Triton one), not a change to the representation.
 
 \subsection{The memory story, stated carefully}
 We are deliberately careful about memory because it is the easiest claim to overstate. The

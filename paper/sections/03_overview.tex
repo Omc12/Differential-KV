@@ -37,12 +37,12 @@ compressed store rather than a retained full-context cache (\S\ref{sec:runtime})
 attention---optionally block-sparse (\S\ref{sec:runtime})---over the growing native cache to
 produce correct hidden states, and captures each chunk's $K$/$V$ into the store. During decode
 ($L{=}1$) it ingests the newly generated token's $K$/$V$ into the dense window and computes the
-attention output from the compressed store via the fused routed kernel (\S\ref{sec:decode}).
+attention output from the compressed store via the fused decode buffer (\S\ref{sec:decode}).
 
 \paragraph{The store.} \texttt{MLXKVBlockManager} holds all persistent state, per session and per
-layer: a \emph{dense recency window} of the most recent $\dwin{+}\bs{=}768$ tokens in exact fp16,
-and a \emph{compressed block pool} of up to $M{=}256$ blocks, each holding the anchor, low-rank
-factors, exact residuals, and router statistics for one $256$-token span. The pool is
+layer: a \emph{dense recency window} of the most recent $\dwin{+}\bs{=}1{,}024$ tokens in exact
+fp16, and a \emph{compressed block pool} of up to $M{=}256$ blocks, each holding the anchor,
+low-rank factors, exact residuals, and router statistics for one $256$-token span. The pool is
 pre-allocated and fixed in size, which is what bounds the runtime's memory
 (\S\ref{sec:runtime}, Figure~\ref{fig:mem3d}).
 

@@ -23,13 +23,15 @@ dim $128$, trained context $32{,}768$, RoPE $\theta=10^6$.
 \paragraph{Configuration (as measured).}
 preset \texttt{mid}, \texttt{serving\_mode=balanced}, \texttt{rank=32} (the ``mid'' preset
 default; only the ``low'' preset reduces it to $16$), \texttt{block\_size=256},
-\texttt{recency\_window=512} (dense buffer~$768$), \texttt{max\_blocks=256},
+\texttt{recency\_window=768} (dense buffer $\dwin{+}\bs=1{,}024$), \texttt{max\_blocks=256},
 \texttt{max\_residual=128}, top-$K{=}16$ routing with the \texttt{residual} router,
 \texttt{DIFFKV\_SVD\_SEED=1234} (deterministic). The \diffkv{} engine runs in
 the active CLI's serving configuration with the sparse path forced on at every
 context: \texttt{DIFFKV\_COMPRESSED\_DECODE=1} (so DiffKV's compressed decode is
 what is measured at all lengths, not the adaptive dense-below-threshold policy),
-\texttt{DIFFKV\_DECODE\_CACHE=1} (decompress-and-cache; bit-exact),
+\texttt{DIFFKV\_DECODE\_FUSED=1} (persistent fused-buffer decode, default on;
+\texttt{DIFFKV\_DECODE\_CACHE} is \emph{off} by default since Jul 2026 and was not
+used in the reported measurements),
 \texttt{DIFFKV\_SPARSE\_PREFILL=1} (block-sparse prefill),
 \texttt{DIFFKV\_SPARSE\_BIAS=auto} (adaptive merge bias, as the CLI ships).
 The dense baseline is \texttt{mlx\_lm} with a full KV cache on the same int4

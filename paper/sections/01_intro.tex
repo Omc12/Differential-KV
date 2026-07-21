@@ -25,15 +25,16 @@ low-bit representation reconstructs worst.
 window of recent tokens exact, and compresses each older block of \bs${=}256$ tokens into three
 parts: an \emph{anchor} (the block's first token, kept exact and used as the baseline for the
 rest), a rank-\rank{} joint $K\!\mid\!V$ truncated-SVD \emph{delta} that captures the structure
-the block's tokens share, and a small budget of \emph{exact residual tokens}---selected as the
-rows with the largest reconstruction error, which are precisely the distinctive tokens the
-low-rank basis fails to represent. The anchor-plus-delta captures the smooth, shared part of the
-block cheaply; the residuals rescue the outliers exactly. Decode never materializes the full
-cache: a fused kernel scores the query against each block in the rank-\rank{} subspace, attends
-the exact residuals and the recency window directly, and combines the two contributions with a
-numerically stable log-sum-exp merge. A cheap per-block router restricts the expensive part of
-this computation to the top-\topk{} relevant blocks, so decode cost scales with \topk{} rather
-than with the context length.
+the block's tokens share, and a small budget of \emph{exact residual tokens}---selected by a
+multi-signal ranking: reconstruction error identifies the outliers the low-rank basis fails to
+represent; owner-capture preserves the entity names that own those values; edge-capture rescues
+relational connectives whose reconstruction collides with a neighbour's key. The
+anchor-plus-delta captures the smooth, shared part of the block cheaply; the residuals rescue
+the outliers exactly. Decode never materializes the full cache: a fused buffer scores the query
+against each block in the rank-\rank{} subspace, attends the exact residuals and the recency
+window directly, and combines the two contributions with a numerically stable log-sum-exp merge.
+A cheap per-block router restricts the expensive part of this computation to the top-\topk{}
+relevant blocks, so decode cost scales with \topk{} rather than with the context length.
 
 \paragraph{What this paper claims, and what it does not.}
 We are deliberate about the trade-off, because it is easy to overstate. On our host---an
@@ -56,11 +57,13 @@ report the full picture---including where \diffkv{} loses---and we treat the res
   \item An \textbf{anchor + low-rank + exact-residual} block representation
     (\S\ref{sec:compression}) that decouples the smooth, shared part of a KV block (compressed)
     from its distinctive outlier tokens (kept exact), giving a tunable compression ratio while
-    preserving verbatim recall.
-  \item A \textbf{fused, routed decode kernel} (\S\ref{sec:decode}) that scores queries in the
-    low-rank subspace without decompressing $K$, attends residuals and recency exactly, and
-    merges the halves with a flash-style reduction---so decode cost scales with the routed block
-    count \topk{}, not the context length.
+    preserving verbatim recall. Residual selection is multi-signal: reconstruction error, entity
+    name preservation (owner-capture), and relational-connective rescue (edge-capture).
+  \item A \textbf{fused routed decode kernel with persistent buffer} (\S\ref{sec:decode}) that
+    scores queries in the low-rank subspace without decompressing $K$, attends residuals and
+    recency exactly, merges the halves with a flash-style reduction, and amortises block
+    materialisation across a configurable interval---so decode cost scales with \topk{}, not
+    context length.
   \item A \textbf{bounded-memory runtime} (\S\ref{sec:runtime}) with streaming prefill
     compression, a fixed block pool, a prefill-to-decode memory release, and a training-free
     block-sparse prefill, implemented entirely in MLX for Apple unified memory.

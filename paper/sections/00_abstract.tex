@@ -8,11 +8,12 @@ reduced to an \emph{anchor} token (kept exact), a rank-\rank{} joint $K\!\mid\!V
 \emph{delta} that captures the block's shared structure, and a budget of \maxres{} \emph{exact
 residual tokens}---the rows the low-rank basis reconstructs worst, which are precisely the
 distinctive tokens (digits, names, codes) that verbatim recall depends on. A bounded dense
-recency window holds the newest tokens uncompressed. At decode time a fused, \texttt{mx.compile}d
-kernel routes to the top-\topk{} relevant blocks, scores the query against them \emph{in
+recency window holds the newest tokens uncompressed. At decode time a fused decode buffer
+routes to the top-\topk{} relevant blocks, scores the query against them \emph{in
 low-rank space without ever decompressing $K$}, attends the residuals and recency window exactly,
-and merges the two halves with a flash-style log-sum-exp reduction. Prefill uses a
-training-free block-sparse attention so its cost grows sub-quadratically.
+and merges the two halves with a flash-style log-sum-exp reduction; the selected blocks are
+materialised once per routing interval into a persistent buffer and appended to per token.
+Prefill uses a training-free block-sparse attention so its cost grows sub-quadratically.
 
 We implement \diffkv{} entirely in MLX and evaluate it on Qwen2.5-1.5B (int4) against a dense
 full-KV baseline on the \emph{same} weights, on an Apple~M3 with 8.6\,GB of unified memory.

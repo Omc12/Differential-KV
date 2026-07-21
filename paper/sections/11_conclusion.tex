@@ -3,11 +3,13 @@
 
 \diffkv{} is a KV-cache compression runtime that separates a block's smooth, shared structure---captured
 by an anchor and a rank-\rank{} joint $K\!\mid\!V$ delta---from its distinctive outlier tokens, kept
-as exact residuals selected by measured reconstruction error. A fused, routed decode kernel scores
-queries in the low-rank subspace without ever decompressing the cache, attends the residuals and a
-recency window exactly, and merges the two in log-space; a training-free block-sparse prefill makes
-long-context prefill sub-quadratic; and a fixed block pool bounds the memory. Implemented entirely
-in MLX and measured on Qwen2.5-1.5B (int4) on an $8.6$\,GB Apple~M3, \diffkv{} holds a bounded KV
+as exact residuals selected by a multi-signal ranking: reconstruction error, entity-name owner-capture,
+and relational edge-capture. A fused decode buffer routes queries in the low-rank subspace without
+ever decompressing the cache, attends the residuals and a recency window exactly, and merges the
+two in log-space, materialising the selected blocks once per interval into a persistent buffer;
+a training-free block-sparse prefill makes long-context prefill sub-quadratic; and a fixed block
+pool bounds the memory. Implemented entirely in MLX and measured on Qwen2.5-1.5B (int4) on an
+$8.6$\,GB Apple~M3, \diffkv{} holds a bounded KV
 state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, recovers a
 buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where the dense full-KV cache
 runs out of memory, and overtakes dense on long-context prefill---at a measured cost in decode
