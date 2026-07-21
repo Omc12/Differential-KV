@@ -822,6 +822,15 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         "peak_prefill_vram_gb": peak_prefill, "peak_decode_vram_gb": peak_decode,
         "kv_physical_gb": pool_phys, "kv_dense_equiv_gb": dense_eq,
         "kv_logical_gb": kv["store_used_bytes"] / 1e9, "kv_blocks_layer0": kv["blocks_layer0"],
+        # Diagnostics for the "KV_phys frozen across contexts" investigation.
+        # pool_physical_gb is the REAL allocated pool (native_pool._pool_mb());
+        # kv_physical_gb above is the ANALYTIC store formula. If the analytic
+        # value freezes across contexts but pool_physical_gb grows, the bug is in
+        # the mgr.sessions block accounting, not in the actual storage — and vice
+        # versa. blocks/residual/dense are the three terms of the analytic sum.
+        "pool_physical_gb": kv["pool_physical_bytes"] / 1e9,
+        "kv_residual_tokens_layer0": kv["residual_tokens_layer0"],
+        "kv_dense_window_tokens": kv["dense_window_tokens"],
         "gen_len": gen_toks, "output_text": text,
     }
 
@@ -1202,6 +1211,11 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
         dec_vram = max(t["peak_decode_vram_gb"] for t in trials)
         kv_phys = trials[-1]["kv_physical_gb"]
         kv_dense = trials[-1]["kv_dense_equiv_gb"]
+        # DiffKV-only storage diagnostics (0.0 for dense/baseline trials).
+        pool_phys = trials[-1].get("pool_physical_gb", 0.0)
+        kv_blocks = trials[-1].get("kv_blocks_layer0", 0)
+        kv_res_tok = trials[-1].get("kv_residual_tokens_layer0", 0)
+        kv_dense_win = trials[-1].get("kv_dense_window_tokens", 0)
 
         # ── Quality / recall ──
         recall = answer_set_recall(last_text, answers) if answers else 0.0
@@ -1219,6 +1233,8 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             "decode_tps": tps["mean"], "decode_tps_ci95": tps["ci95_margin"],
             "peak_prefill_vram_gb": pf_vram, "peak_decode_vram_gb": dec_vram,
             "kv_physical_gb": kv_phys, "kv_dense_equiv_gb": kv_dense,
+            "pool_physical_gb": pool_phys, "kv_blocks_layer0": kv_blocks,
+            "kv_residual_tokens_layer0": kv_res_tok, "kv_dense_window_tokens": kv_dense_win,
             "kv_footprint_realized": preset not in ("int8_kv", "kivi2"),
             "compression_ratio": (kv_dense / kv_phys) if kv_phys > 0 else 1.0,
             "output_text": last_text, "ground_truth": ground_truth,
@@ -1251,6 +1267,20 @@ def exp1_memory_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]
             if res.get("status") == "success":
                 print(f"      peak_prefill={res['peak_prefill_vram_gb']:.2f}GB | "
                       f"KV_phys={res['kv_physical_gb']:.3f}GB | ratio={res['compression_ratio']:.2f}x")
+                # Prefill timing split — isolates the DiffKV forward (ingest) cost
+                # from the SVD compression barrier (the ~6x vs baselines lives in
+                # one of these two; baselines do a cheap elementwise KV transform).
+                print(f"      prefill: fwd={res['prefill_forward_s']:.2f}s + "
+                      f"comp={res['prefill_compress_s']:.2f}s = {res['prefill_time_s']:.2f}s")
+                # Storage diagnostics for the "KV_phys frozen across contexts" bug.
+                # analytic(KV_phys) vs real pool_physical, plus the 3 analytic terms.
+                # If nb/pool do not grow with ctx, that is the freeze to root-cause.
+                if m in ("low", "mid", "high"):
+                    print(f"      diag: nb(L0)={res.get('kv_blocks_layer0', 0)} "
+                          f"res_tok={res.get('kv_residual_tokens_layer0', 0)} "
+                          f"dense_win={res.get('kv_dense_window_tokens', 0)} | "
+                          f"pool_real={res.get('pool_physical_gb', 0.0):.3f}GB "
+                          f"vs analytic={res['kv_physical_gb']:.3f}GB")
             else:
                 print(f"      [FAILED] {res.get('error', 'unknown error')[:120]}")
     return results
