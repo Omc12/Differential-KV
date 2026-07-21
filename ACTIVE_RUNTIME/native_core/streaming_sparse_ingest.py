@@ -89,6 +89,21 @@ _STOP_WORDS_COMPRESS = {
 # Narrow precision patterns: ONLY match patterns that (a) appear rarely in
 # normal prose and (b) require exact attention for faithful reproduction.
 _RE_LONG_DIGITS     = re.compile(r'\d{5,}')          # 5+ digit codes / IDs (rare)
+# Alphanumeric IDENTIFIER codes: hyphenated alnum (SIGMA-1409-ZETA, GPT-4,
+# COVID-19) or a contiguous mixed run with >=2 letters + a digit (SKU9910,
+# AB12CD, iPhone12X). These are rare in prose but REQUIRE exact reconstruction
+# (a single wrong token corrupts the whole code). The \d{5,} rule above only
+# caught 5+ pure-digit runs, so short/hyphenated codes (e.g. a 4-digit PIN in a
+# code, the common ID form) fell through to lossy SVD and decoded to garbage —
+# the CUDA-only gap vs MLX (which captures exact residuals uniformly, no digit-
+# length gate). Deliberately EXCLUDES bare years/decades/counts/dates ("1409",
+# "2010s", "100k", "2020-01-01", "Table 2") to keep the narrow-ruleset RAM
+# guarantee: the hyphenated form needs a letter AND a digit (dates have no
+# letter); the contiguous form needs >=2 letters (decades have one).
+_RE_ALNUM_CODE      = re.compile(
+    r'\b(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*[0-9])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b'
+    r'|\b(?=(?:[A-Za-z0-9]*[A-Za-z]){2})(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{4,}\b'
+)
 # Scientific notation: 1.23e+4, 2.998e8, 6.02E23 — never in prose
 _RE_SCI_NOTATION    = re.compile(r'\d+\.?\d*[eE][+\-]?\d+')
 # Unicode-only math symbols: π, ∑, ∞, ≤, ±, etc. — NEVER in normal prose
@@ -799,6 +814,13 @@ class StreamingSparseIngestManager:
             if _RE_LONG_DIGITS.search(block_text):
                 if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
                     print(f"[DiffKV DEBUG] Rule 1 skip block anchor={anchor_idx}: '{block_text}'")
+                _result = True
+            # Rule 1b: Alphanumeric identifier codes (SIGMA-1409-ZETA, SKU9910,
+            # GPT-4) — always exempt. Catches short/hyphenated codes the \d{5,}
+            # rule missed (the CUDA-vs-MLX random-code retrieval gap).
+            elif _RE_ALNUM_CODE.search(block_text):
+                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    print(f"[DiffKV DEBUG] Rule 1b skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 2: Scientific notation — always exempt (1.23e+4, 2.998e8)
             elif _RE_SCI_NOTATION.search(block_text):
