@@ -1378,13 +1378,26 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        print(p.stdout)
-        kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
+        qdstrm_path = f"{trace}.qdstrm"
+        sqlite_path = f"{trace}.sqlite"
+        rep_path = f"{trace}.nsys-rep"
+        target_file = rep_path
+        if os.path.exists(qdstrm_path) and not os.path.exists(sqlite_path):
+            subprocess.run(["nsys", "export", "--type", "sqlite", "-o", sqlite_path, qdstrm_path],
+                           capture_output=True, text=True)
+        if os.path.exists(sqlite_path):
+            target_file = sqlite_path
+        elif os.path.exists(qdstrm_path):
+            target_file = qdstrm_path
+
+        stats_res = subprocess.run(["nsys", "stats", target_file], capture_output=True, text=True)
+        stats_output = stats_res.stdout if stats_res.stdout else p.stdout
+        print(stats_output)
+        kernel_rows = [ln.strip() for ln in stats_output.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
-        actual_trace = f"{trace}.qdstrm" if os.path.exists(f"{trace}.qdstrm") else f"{trace}.nsys-rep"
-        print(f"   -> nsys profiling complete! Saved trace to {actual_trace}")
+        print(f"   -> nsys profiling complete! Saved trace report to {target_file}")
         return {"status": "success", "command": " ".join(cmd),
-                "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
+                "summary_rows": kernel_rows, "stdout_tail": stats_output[-800:]}
     except Exception as e:
         print(f"   -> nsys unavailable: {e}")
         return {"status": "cli_not_found", "command": " ".join(cmd), "error": str(e)}
