@@ -1373,7 +1373,7 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
     trace = os.path.abspath("diffkv_nsys_trace")
-    cmd = ["nsys", "profile", "-t", "cuda,nvtx,osrt", "-s", "cpu", "--stats=true", "--force-overwrite=true",
+    cmd = ["nsys", "profile", "-t", "cuda,nvtx,osrt", "--stats=true", "--force-overwrite=true",
            "-o", trace, sys.executable, os.path.join(HERE, "run_nat_eval.py"),
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
     try:
@@ -1381,7 +1381,8 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
         print(p.stdout)
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
-        print(f"   -> nsys profiling complete! Saved trace to {trace}.nsys-rep")
+        actual_trace = f"{trace}.qdstrm" if os.path.exists(f"{trace}.qdstrm") else f"{trace}.nsys-rep"
+        print(f"   -> nsys profiling complete! Saved trace to {actual_trace}")
         return {"status": "success", "command": " ".join(cmd),
                 "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
     except Exception as e:
