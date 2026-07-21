@@ -501,19 +501,15 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     res_tokens_used = sum(min(int(rn), res_cap) for rn in res_n0) if res_n0 else (nb * res_cap)
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
+    _debug = os.environ.get("DIFFKV_KV_DEBUG", "0") == "1"
+    if _debug:
+        print(f"[analytic_kv_bytes] sid={sid} B={B} r={r} nb={nb} dl={dl} "
+              f"res_cap={res_cap} res_tokens_used={res_tokens_used} "
+              f"lowrank_block={lowrank_block} store_used={store_used/1e9:.4f}GB "
+              f"s0_keys={list(s0.keys()) if s0 else None}")
     pool_physical = 0
     if pool is not None and hasattr(pool, "_pool_mb"):
         pool_physical = int(pool._pool_mb() * 1024 ** 2)
-    # Prefer direct streaming manager measurements when available.
-    sm = getattr(mgr, "_streaming_mgr", None)
-    if sm is not None:
-        _sparse = getattr(sm, "sparse_footprint_bytes", None)
-        _dense_fp = getattr(sm, "dense_footprint_bytes", None)
-        try:
-            if _sparse and _dense_fp:
-                store_used = int(_sparse(sid)) + int(_dense_fp(sid))
-        except Exception:
-            pass  # fall back to analytic estimate
     dense_equiv = L * seq_len * kv_tok
     return {
         "store_used_bytes": store_used,
