@@ -1372,7 +1372,7 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
 
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
-    trace = os.path.join(REPO, "diffkv_nsys_trace")
+    trace = os.path.abspath("diffkv_nsys_trace")
     cmd = ["nsys", "profile", "-t", "cuda,nvtx,osrt", "-s", "cpu", "--stats=true", "--force-overwrite=true",
            "-o", trace, sys.executable, os.path.join(HERE, "run_nat_eval.py"),
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
