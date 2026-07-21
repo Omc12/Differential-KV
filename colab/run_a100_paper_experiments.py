@@ -706,8 +706,8 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
     }
 
 
-def _summarize_decode_profile(prof, gen_len: int) -> None:
-    """Print a compact CPU-vs-CUDA breakdown of a profiled generate() call.
+def _summarize_decode_profile(prof, gen_len: int) -> str:
+    """Return a compact CPU-vs-CUDA breakdown of a profiled generate() call.
 
     The question this answers: is DiffKV decode kernel-bound or host-bound?
     If self-CPU time and the cudaLaunchKernel count dwarf total CUDA time, the
@@ -715,7 +715,11 @@ def _summarize_decode_profile(prof, gen_len: int) -> None:
     eager mode with no CUDA-graph capture) — the structural gap vs MLX's fused
     lazy-eval graph — NOT the Triton kernels themselves. If CUDA time dominates,
     the kernels are the cost and the fix is in the kernel, not the dispatch.
+
+    Returns the summary as a string so it can travel back through the worker's
+    result JSON (the worker's stdout goes to DEVNULL unless DIFFKV_WORKER_VERBOSE=1).
     """
+    lines = []
     try:
         ka = prof.key_averages()
 
@@ -733,18 +737,18 @@ def _summarize_decode_profile(prof, gen_len: int) -> None:
                        if "cudaLaunchKernel" in e.key or "launch" in e.key.lower())
         ratio = (total_cpu_us / total_cuda_us) if total_cuda_us > 0 else float("inf")
 
-        print("   " + "─" * 68)
-        print(f"   [DECODE PROFILE] gen={gen_len} tok (incl. generate()'s internal prefill)")
-        print(f"     total self-CPU  = {total_cpu_us / 1e3:9.1f} ms")
-        print(f"     total self-CUDA = {total_cuda_us / 1e3:9.1f} ms")
-        print(f"     CPU/CUDA ratio  = {ratio:6.2f}x   "
-              f"({'HOST/LAUNCH-bound → eager Python overhead' if ratio > 2.0 else 'kernel-bound'})")
-        print(f"     kernel launches = {launches}  (~{launches / max(1, gen_len):.0f}/token)")
-        print("   top ops by self-CPU time:")
-        for line in ka.table(sort_by="self_cpu_time_total", row_limit=12).splitlines():
-            print("     " + line)
+        lines.append("─" * 68)
+        lines.append(f"[DECODE PROFILE] gen={gen_len} tok (incl. generate()'s internal prefill)")
+        lines.append(f"  total self-CPU  = {total_cpu_us / 1e3:9.1f} ms")
+        lines.append(f"  total self-CUDA = {total_cuda_us / 1e3:9.1f} ms")
+        lines.append(f"  CPU/CUDA ratio  = {ratio:6.2f}x   "
+                     f"({'HOST/LAUNCH-bound -> eager Python overhead' if ratio > 2.0 else 'kernel-bound'})")
+        lines.append(f"  kernel launches = {launches}  (~{launches / max(1, gen_len):.0f}/token)")
+        lines.append("top ops by self-CPU time:")
+        lines.extend(ka.table(sort_by="self_cpu_time_total", row_limit=12).splitlines())
     except Exception as e:  # never let profiling break the benchmark
-        print(f"   [DECODE PROFILE] summary failed: {e}")
+        lines.append(f"[DECODE PROFILE] summary failed: {e}")
+    return "\n".join(lines)
 
 
 def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
@@ -826,6 +830,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
 
     # ── Phase 2: decode + recall via the PROVEN generate() path ──
     text, gen_toks, dec_s = "", 0, 0.0
+    decode_profile = ""
     peak_decode = peak_prefill
     if full_prompt is not None:
         gen_sid = f"gen_{random.randint(10**6, 10**7)}"
@@ -850,7 +855,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
                 _ = w.generate(**_gen_kwargs)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            _summarize_decode_profile(_prof, gen_len)
+            decode_profile = _summarize_decode_profile(_prof, gen_len)
         else:
             with torch.no_grad():
                 # rep-penalty 1.0 + top_p 1.0 = retrieval-safe (matches test_niah.py);
@@ -888,6 +893,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
         "pool_physical_gb": kv["pool_physical_bytes"] / 1e9,
         "kv_residual_tokens_layer0": kv["residual_tokens_layer0"],
         "kv_dense_window_tokens": kv["dense_window_tokens"],
+        "decode_profile": decode_profile,
         "gen_len": gen_toks, "output_text": text,
     }
 
@@ -1273,6 +1279,9 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
         kv_blocks = trials[-1].get("kv_blocks_layer0", 0)
         kv_res_tok = trials[-1].get("kv_residual_tokens_layer0", 0)
         kv_dense_win = trials[-1].get("kv_dense_window_tokens", 0)
+        # First non-empty decode profile across trials (only set when DIFFKV_TORCH_PROFILE=1).
+        decode_profile = next((t.get("decode_profile", "") for t in trials
+                               if t.get("decode_profile")), "")
 
         # ── Quality / recall ──
         recall = answer_set_recall(last_text, answers) if answers else 0.0
@@ -1292,6 +1301,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             "kv_physical_gb": kv_phys, "kv_dense_equiv_gb": kv_dense,
             "pool_physical_gb": pool_phys, "kv_blocks_layer0": kv_blocks,
             "kv_residual_tokens_layer0": kv_res_tok, "kv_dense_window_tokens": kv_dense_win,
+            "decode_profile": decode_profile,
             "kv_footprint_realized": preset not in ("int8_kv", "kivi2"),
             "compression_ratio": (kv_dense / kv_phys) if kv_phys > 0 else 1.0,
             "output_text": last_text, "ground_truth": ground_truth,
@@ -1338,6 +1348,9 @@ def exp1_memory_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]
                           f"dense_win={res.get('kv_dense_window_tokens', 0)} | "
                           f"pool_real={res.get('pool_physical_gb', 0.0):.3f}GB "
                           f"vs analytic={res['kv_physical_gb']:.3f}GB")
+                if res.get("decode_profile"):
+                    for _l in res["decode_profile"].splitlines():
+                        print("      " + _l)
             else:
                 print(f"      [FAILED] {res.get('error', 'unknown error')[:120]}")
     return results
@@ -1354,6 +1367,9 @@ def exp2_throughput_vs_context(model_id: str, contexts: List[int]) -> Dict[str, 
             print(f"   ctx={ctx}: dense {rd['decode_tps']:.1f}±{rd['decode_tps_ci95']:.1f} tps | "
                   f"DiffKV {rk['decode_tps']:.1f}±{rk['decode_tps_ci95']:.1f} tps | "
                   f"prefill fwd {rk['prefill_forward_s']:.2f}s + comp {rk['prefill_compress_s']:.2f}s")
+            if rk.get("decode_profile"):
+                for _l in rk["decode_profile"].splitlines():
+                    print("   " + _l)
     return results
 
 
