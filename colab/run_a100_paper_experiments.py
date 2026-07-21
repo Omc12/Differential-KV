@@ -1371,36 +1371,24 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
 
 
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
-    trace = os.path.abspath("diffkv_nsys_trace")
-    for ext in [".qdstrm", ".sqlite", ".nsys-rep", ".qdrep"]:
-        f = trace + ext
-        if os.path.exists(f):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
-    cmd = ["nsys", "profile", "-t", "cuda,nvtx", "--export=sqlite", "--stats=true", "--force-overwrite=true",
-           "-o", trace, sys.executable, os.path.join(HERE, "profile_decode_step.py"),
-           "--model", "Qwen/Qwen2.5-7B-Instruct", "--preset", "mid"]
+    print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems / torch.profiler kernel breakdown (best-effort)\n" + "=" * 80)
+    # profile_decode_step.py already has a full torch.profiler loop built in.
+    # Running it under `nsys profile` intercepts the CUDA driver hooks and causes
+    # torch.profiler to record 0.0 ms for every kernel.  Just run it directly.
+    cmd = [sys.executable, os.path.join(HERE, "profile_decode_step.py"),
+           "--model", "Qwen/Qwen2.5-7B-Instruct", "--preset", "mid", "--steps", "40"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         print(p.stdout)
+        if p.returncode != 0:
+            print(f"   -> stderr: {p.stderr[-400:]}")
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
-                       if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
-        rep_file = None
-        for ext in [".nsys-rep", ".qdrep", ".sqlite"]:
-            if os.path.exists(trace + ext):
-                rep_file = trace + ext
-                break
-        if rep_file:
-            print(f"   -> nsys profiling complete! Saved trace report to {rep_file}")
-        else:
-            print("   -> nsys profiling complete!")
+                       if re.search(r"\d+\.\d+\s+\d+\s+\d+|\d+\.\d+%", ln)][:15]
+        print("   -> torch.profiler kernel breakdown complete!")
         return {"status": "success", "command": " ".join(cmd),
-                "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
+                "summary_rows": kernel_rows, "stdout_tail": p.stdout[-1200:]}
     except Exception as e:
-        print(f"   -> nsys unavailable: {e}")
+        print(f"   -> profiler unavailable: {e}")
         return {"status": "cli_not_found", "command": " ".join(cmd), "error": str(e)}
 
 
