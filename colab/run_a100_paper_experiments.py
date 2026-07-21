@@ -1370,16 +1370,31 @@ def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
     return results
 
 
+def _find_cli(binary: str) -> str:
+    import shutil
+    path = shutil.which(binary)
+    if path:
+        return path
+    candidates = [
+        f"/usr/local/cuda/bin/{binary}",
+        f"/opt/nvidia/nsight-systems/bin/{binary}",
+        f"/opt/nvidia/nsight-compute/bin/{binary}",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return binary
+
+
 def exp9_nsight_systems_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 9: Nsight Systems timeline (best-effort)\n" + "=" * 80)
     trace = os.path.join(REPO, "diffkv_nsys_trace")
-    cmd = ["nsys", "profile", "-t", "cuda,nvtx,osrt", "-s", "cpu", "--stats=true", "--force-overwrite=true",
+    nsys_bin = _find_cli("nsys")
+    cmd = [nsys_bin, "profile", "-t", "cuda,nvtx,osrt", "-s", "cpu", "--stats=true", "--force-overwrite=true",
            "-o", trace, sys.executable, os.path.join(HERE, "run_nat_eval.py"),
            "--worker", "mid_preset", "--model", "Qwen/Qwen2.5-7B-Instruct"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        # nsys --stats prints tables like "Time (%)  Total Time (ns)  ... Name".
-        # Grab the CUDA-kernel and memops summary rows rather than a bespoke string.
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
         return {"status": "success", "command": " ".join(cmd),
@@ -1392,7 +1407,8 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
 def exp10_nsight_compute_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 10: Nsight Compute occupancy (best-effort)\n" + "=" * 80)
     out_csv = os.path.join(REPO, "diffkv_ncu_report.csv")
-    cmd = ["ncu", "--csv", "--log-file", out_csv, "--target-processes", "all",
+    ncu_bin = _find_cli("ncu")
+    cmd = [ncu_bin, "--csv", "--log-file", out_csv, "--target-processes", "all",
            "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,"
                         "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,"
                         "sm__warps_active.avg.pct_of_peak_sustained_active",
