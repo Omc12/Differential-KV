@@ -66,7 +66,8 @@ The low-rank basis reconstructs the shared structure well but, by construction, 
 low-energy outliers---which are the distinctive tokens recall depends on. \diffkv{} measures this
 directly. For every token it computes the joint reconstruction error
 $e_i = \big\lVert \Delta K_i - \widehat{\Delta K}_i \big\rVert^2 + g^2\big\lVert \Delta V_i -
-\widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ used above).
+\widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ from
+Eq.~\eqref{eq:vgain}, so both halves are on a comparable scale when ranking outliers).
 
 Selection is \emph{multi-signal}: reconstruction error is the base signal, but three
 IDF-weighted boost signals inflate certain tokens' priority before the top-\maxres{} cut.
