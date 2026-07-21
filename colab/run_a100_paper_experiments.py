@@ -1380,6 +1380,11 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         kernel_rows = [ln.strip() for ln in p.stdout.splitlines()
                        if re.search(r"\d+\.\d+\s+\d+\s+\d+", ln)][:15]
+        print(f"   -> nsys profiling complete! Saved trace to {trace}.nsys-rep")
+        if kernel_rows:
+            print("      Top Kernel Summary:")
+            for r in kernel_rows[:5]:
+                print(f"        {r[:80]}")
         return {"status": "success", "command": " ".join(cmd),
                 "summary_rows": kernel_rows, "stdout_tail": p.stdout[-800:]}
     except Exception as e:
@@ -1407,6 +1412,9 @@ def exp10_nsight_compute_profiling() -> Dict[str, Any]:
                 m = re.search(r"([\d\.]+)\s*$", ln)
                 if m:
                     metrics["dram_throughput_pct"] = float(m.group(1))
+        print(f"   -> ncu profiling complete! Saved report to {out_csv}")
+        if metrics:
+            print(f"      Structured Metrics: {metrics}")
         return {"status": "success", "command": " ".join(cmd), "structured_metrics": metrics,
                 "stdout_tail": p.stdout[-800:]}
     except Exception as e:
