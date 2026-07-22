@@ -129,7 +129,7 @@ class OpenAICompatibleAPIGateway:
                 await resolver.stop()
                 print("Continuous Batching Engine stopped.")
 
-        self.app = FastAPI(title="Differential KV API", lifespan=lifespan)
+        self.app = FastAPI(title="DKV API", lifespan=lifespan)
         self.resolver = resolver
         self.session_manager = session_manager
         self._setup_routes()
@@ -636,7 +636,7 @@ class OpenAICompatibleAPIGateway:
         @self.app.get("/")
         async def root():
             """Root endpoint — returns service identity for discoverability."""
-            return {"service": "Differential KV API", "status": "running", "docs": "/docs"}
+            return {"service": "DKV API", "status": "running", "docs": "/docs"}
 
     # -----------------------------------------------------------------------
     # Streaming helper

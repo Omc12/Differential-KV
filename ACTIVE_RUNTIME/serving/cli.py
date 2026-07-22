@@ -100,7 +100,7 @@ def show_banner():
             color_code = colors[color_idx]
             colored_line += f"\033[38;5;{color_code}m{char}"
         print(colored_line + "\033[0m")
-    print(f"      {COLOR_SKY_BLUE}Differential KV Cache — High-Performance Inference{COLOR_RESET}")
+    print(f"      {COLOR_SKY_BLUE}DKV — High-Performance Inference{COLOR_RESET}")
     print(f"      {COLOR_DEEP_BLUE}Serving Engine & Runtime Context CLI{COLOR_RESET}\n")
 
 class ThemedStdout:

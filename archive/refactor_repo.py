@@ -46,7 +46,7 @@ def get_category(path_str):
     return "RESEARCH_PROTOTYPES"
 
 def main():
-    base_dir = Path(r"d:\Codes\Projects\Differential KV")
+    base_dir = Path(__file__).resolve().parent.parent  # repo root
     
     layers = ["ACTIVE_RUNTIME", "EXPERIMENTAL_RUNTIME", "RESEARCH_PROTOTYPES", "ARCHIVED_SYNTHETIC_SYSTEMS"]
     for l in layers:

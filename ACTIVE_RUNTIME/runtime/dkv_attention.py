@@ -2737,4 +2737,4 @@ def apply_dkv_attention_patch(model, kv_manager):
             return original_lm_head_forward(hidden_states)
         model.lm_head.forward = last_token_lm_head_forward
 
-    print("Differential KV Attention Interception Applied. [Phase 29: Zero-overhead decode active]")
+    print("DKV Attention Interception Applied. [Phase 29: Zero-overhead decode active]")

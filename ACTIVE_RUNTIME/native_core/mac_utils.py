@@ -1,7 +1,7 @@
 """
 native_core/mac_utils.py
 
-Apple Silicon (MPS / Metal) compatibility layer for Differential KV.
+Apple Silicon (MPS / Metal) compatibility layer for DKV.
 
 Provides unified device detection and helpers so every other module can call
 `get_best_device()` instead of hard-coding "cuda".

@@ -3,7 +3,7 @@ native_core/kv_runtime_manager.py
 
 Minimal Runtime — KV Session Manager.
 
-Manages KV cache residency and on-demand reconstruction for Differential KV.
+Manages KV cache residency and on-demand reconstruction for DKV.
 
   - PagedKVStore: GPU -> CPU RAM spillover under memory pressure.
   - ReconstructionCache: LRU cache of recently reconstructed dense blocks.

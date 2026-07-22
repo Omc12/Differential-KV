@@ -1,7 +1,7 @@
 """
 native_core/sparse_decode/triton_fused_decode.py
 
-Triton-optimized fused reconstruction & sparse attention kernels for Differential KV.
+Triton-optimized fused reconstruction & sparse attention kernels for DKV.
 Provides maximum memory bandwidth efficiency for DeltaKV = U @ V.T + anchor.
 Falls back to pure-PyTorch on any system where Triton is unavailable.
 

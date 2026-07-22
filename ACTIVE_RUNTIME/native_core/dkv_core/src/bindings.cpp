@@ -33,7 +33,7 @@ namespace py = pybind11;
 using namespace dkv;
 
 PYBIND11_MODULE(dkv_core, m) {
-    m.doc() = "Differential KV native runtime core — C++/CUDA/Metal extension";
+    m.doc() = "DKV native runtime core — C++/CUDA/Metal extension";
 
     // ── BlockState enum ──────────────────────────────────────────────────────
     py::enum_<BlockState>(m, "BlockState")
