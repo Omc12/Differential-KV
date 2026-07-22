@@ -44,7 +44,7 @@ class ComparativeRuntimeLauncher:
         elif name == "vllm":
             from vllm import LLM
             self.vllm_engine = LLM(model=model_id, quantization="awq", dtype="half")
-        elif name == "diffkv":
+        elif name == "dkv":
             from transformers import BitsAndBytesConfig
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -70,7 +70,7 @@ class ComparativeRuntimeLauncher:
             
         start = time.perf_counter()
         
-        if self.active_runtime in ["transformers", "diffkv"]:
+        if self.active_runtime in ["transformers", "dkv"]:
             inputs = self.tokenizer(prompt, return_tensors="pt").to("cuda")
             ttft_start = time.perf_counter()
             with torch.no_grad():
@@ -106,5 +106,5 @@ class ComparativeRuntimeLauncher:
 
 if __name__ == "__main__":
     launcher = ComparativeRuntimeLauncher()
-    launcher.initialize_runtime("diff_kv", "qwen-7b")
+    launcher.initialize_runtime("dkv", "qwen-7b")
     print(launcher.generate("Hello"))

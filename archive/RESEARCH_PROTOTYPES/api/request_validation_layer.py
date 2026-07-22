@@ -18,7 +18,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    # DiffKV specific extensions
+    # DKV specific extensions
     session_id: Optional[str] = None
     sparse_config: Optional[Dict[str, Any]] = None
 

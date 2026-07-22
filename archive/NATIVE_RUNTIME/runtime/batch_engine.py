@@ -111,7 +111,7 @@ class ContinuousBatchEngine:
             position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long, device=self.wrapper.device).unsqueeze(0)
             
             # Differential KV Ownership: Inject session ID into model
-            self.wrapper.model._diffkv_session_ids = [req.session_id]
+            self.wrapper.model._dkv_session_ids = [req.session_id]
             
             with torch.no_grad():
                 out = self.wrapper.model(
@@ -148,7 +148,7 @@ class ContinuousBatchEngine:
             position_ids[b_idx, 0] = slen           # position of the new token
             
         # 3. Inject session IDs for the interceptor
-        self.wrapper.model._diffkv_session_ids = [r.session_id for r in decode_reqs]
+        self.wrapper.model._dkv_session_ids = [r.session_id for r in decode_reqs]
 
         # 4. Fire Batched Decode!
         # Notice: We NO LONGER pass past_key_values! Differential KV owns the cache!

@@ -49,7 +49,7 @@ CMD ["bash", "start_serving.sh"]
             
         compose_content = """version: '3.8'
 services:
-  diffkv-serving:
+  dkv-serving:
     build: .
     ports:
       - "8000:8000"
@@ -62,7 +62,7 @@ services:
               count: 1
               capabilities: [gpu]
     environment:
-      - DIFFKV_RUNTIME_DEVICE=cuda
+      - DKV_RUNTIME_DEVICE=cuda
       - CUDA_VISIBLE_DEVICES=0
     volumes:
       - ./configs:/app/configs

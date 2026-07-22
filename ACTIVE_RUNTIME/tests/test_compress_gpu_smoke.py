@@ -10,7 +10,7 @@ import os
 import types
 import torch
 
-os.environ.setdefault("DIFFKV_MAX_RESIDUAL_TOKENS", "64")
+os.environ.setdefault("DKV_MAX_RESIDUAL_TOKENS", "64")
 
 import sys
 HERE = os.path.dirname(os.path.abspath(__file__))

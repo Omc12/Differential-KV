@@ -5,11 +5,11 @@ echo "==========================================================================
 echo "    DIFFERENTIAL KV: NATIVE C++ CLI 1.5B Q4 BENCHMARK (4K - 32K)"
 echo "================================================================================"
 
-export DIFFKV_MPS_APPROXIMATE_ATTN=0  # Exact attention on MPS/Metal!
-export DIFFKV_NATIVE_ATTN=1
-export DIFFKV_MAX_TOKENS=32
-export DIFFKV_GPU_BUDGET_GB=1.5       # Budget GPU VRAM to prevent allocator hangs!
-export DIFFKV_VERBOSE=0
+export DKV_MPS_APPROXIMATE_ATTN=0  # Exact attention on MPS/Metal!
+export DKV_NATIVE_ATTN=1
+export DKV_MAX_TOKENS=32
+export DKV_GPU_BUDGET_GB=1.5       # Budget GPU VRAM to prevent allocator hangs!
+export DKV_VERBOSE=0
 
 # Define context lengths
 contexts=(4096 8192 16384)
@@ -27,9 +27,9 @@ do
     num_words=$((ctx * 3 / 4))
     python3 -c "print('The quick brown fox jumps over the lazy dog. ' * ($num_words // 9))" > temp_prompt.txt
     
-    # Run using the DiffKV CLI and capture output
-    cd diffkv_native
-    cat ../temp_prompt.txt | ../diffkv_venv/bin/python3 serving/cli.py \
+    # Run using the DKV CLI and capture output
+    cd dkv_native
+    cat ../temp_prompt.txt | ../dkv_venv/bin/python3 serving/cli.py \
         --model 1.5b \
         --preset high \
         --context $ctx \

@@ -37,11 +37,11 @@ class PDMResolver:
         self.logger.info(f"Deployment Reproducibility: {'PASSED' if is_reproducible else 'FAILED'}")
         
         # 2. Setup REAL serving stack
-        from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+        from runtime.hf_dkv_wrapper import DKVHFWrapper
         from serving.openai_compatible_api_gateway import OpenAICompatibleAPIGateway
         
         model_id = "Qwen/Qwen2.5-0.5B-Instruct"
-        wrapper = DiffKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16})
+        wrapper = DKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16})
         
         async def pdm_runtime_executor(session_ids, payloads):
             # Record heartbeats

@@ -5,7 +5,7 @@ Cut over from the PyTorch-native `batched_sparse_attn_decode()` (Phase 8 batched
 
 ## Cutover Implementation
 1. **Decoder Wiring**:
-   - Modified `ACTIVE_RUNTIME/runtime/diffkv_attention.py` inside the decode branch.
+   - Modified `ACTIVE_RUNTIME/runtime/dkv_attention.py` inside the decode branch.
    - Checked for the existence of `kv_manager.native_pool`.
    - If present, extracted all `pool_idx` from the active `history_blocks` list.
    - Built a static `block_indices` tensor containing these native pool indices on the GPU device.

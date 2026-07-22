@@ -76,7 +76,7 @@ class FusedResonanceAttention:
         
         return output, metrics
 
-class FlashDiffKVAttention(nn.Module):
+class FlashDKVAttention(nn.Module):
     """
     Simulation of FlashAttention-compatible stabilized KV execution.
     Fuses anchor restoration and resonance directly into the tiling logic.

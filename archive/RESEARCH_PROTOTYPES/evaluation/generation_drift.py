@@ -2,7 +2,7 @@
 evaluation/generation_drift.py — Phase 2.5 Objective 1
 
 Measures generation drift: how much does greedy decoding diverge
-when using DiffKV-reconstructed KV caches vs full FP16 baseline?
+when using DKV-reconstructed KV caches vs full FP16 baseline?
 
 Metrics:
   - First divergence token (longer = better)
@@ -32,7 +32,7 @@ class GenerationResult:
     edit_distance_ratio: float      # 0=identical, 1=completely different
     # Sequences
     baseline_tokens: List[int]
-    diffkv_tokens: List[int]
+    dkv_tokens: List[int]
     # Memory
     compression_ratio: float
 
@@ -77,7 +77,7 @@ def _token_overlap(a: List[int], b: List[int]) -> float:
 
 class GenerationDriftEvaluator:
     """
-    Generates text with both baseline and DiffKV-reconstructed KV caches
+    Generates text with both baseline and DKV-reconstructed KV caches
     and measures divergence.
 
     Parameters
@@ -136,7 +136,7 @@ class GenerationDriftEvaluator:
         return generated
 
     def _compress_kv(self, past_kv, strategy_label: str):
-        """Compress past_kv with DiffKV; returns reconstructed tuple + stats."""
+        """Compress past_kv with DKV; returns reconstructed tuple + stats."""
         from anchor_logic.anchor_manager import AnchorManager
         from anchor_logic.strategies import PeriodicAnchorStrategy
         from anchor_logic.adaptive_policies import EMAPolicy, RollingVariancePolicy
@@ -240,18 +240,18 @@ class GenerationDriftEvaluator:
                     recon_kv, ratio = self._compress_kv(
                         self._get_fresh_kv(prefix_ids), strat
                     )
-                    diffkv_tokens = self._greedy_generate(prefix_ids, recon_kv,
+                    dkv_tokens = self._greedy_generate(prefix_ids, recon_kv,
                                                           self.max_new_tokens)
 
                     # First divergence
                     first_div = -1
-                    for k, (bt, dt) in enumerate(zip(base_tokens, diffkv_tokens)):
+                    for k, (bt, dt) in enumerate(zip(base_tokens, dkv_tokens)):
                         if bt != dt:
                             first_div = k
                             break
 
-                    overlap = _token_overlap(base_tokens, diffkv_tokens)
-                    edit_r  = _levenshtein_ratio(base_tokens, diffkv_tokens)
+                    overlap = _token_overlap(base_tokens, dkv_tokens)
+                    edit_r  = _levenshtein_ratio(base_tokens, dkv_tokens)
 
                     r = GenerationResult(
                         label=strat, text_type=ttype,
@@ -261,7 +261,7 @@ class GenerationDriftEvaluator:
                         token_overlap=overlap,
                         edit_distance_ratio=edit_r,
                         baseline_tokens=base_tokens,
-                        diffkv_tokens=diffkv_tokens,
+                        dkv_tokens=dkv_tokens,
                         compression_ratio=ratio,
                     )
                     results.append(r)

@@ -25,8 +25,8 @@ os.environ["PYTORCH_KERNEL_CACHE_PATH"] = os.path.join(CACHE_DIR, "torch_kernel"
 
 def compile_active():
     """Compile the CPython Active CUDA extension using setup.py."""
-    print("\n🔨 Compiling DiffKV Active (CPython CUDA Extension)...")
-    ext_dir = os.path.join(REPO_ROOT, "ACTIVE_RUNTIME", "native_core", "diffkv_core")
+    print("\n🔨 Compiling DKV Active (CPython CUDA Extension)...")
+    ext_dir = os.path.join(REPO_ROOT, "ACTIVE_RUNTIME", "native_core", "dkv_core")
     
     # Run setup.py build_ext --inplace
     cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
@@ -39,8 +39,8 @@ def compile_active():
 
 def compile_native():
     """Compile the Native C++ executable using CMake with CUDA enabled."""
-    print("\n🔨 Compiling DiffKV Native C++ (with CUDA)...")
-    native_dir = os.path.join(REPO_ROOT, "diffkv_native")
+    print("\n🔨 Compiling DKV Native C++ (with CUDA)...")
+    native_dir = os.path.join(REPO_ROOT, "dkv_native")
     build_dir = os.path.join(native_dir, "build")
     
     # Remove old build directory if exists to ensure clean compile
@@ -159,14 +159,14 @@ def download_models(model_id, gguf_repo, gguf_filename):
 # ──────────────────────────── Benchmarking Runners ────────────────────────────
 
 def run_active_benchmark(model_id, prompt_text, gen_len):
-    """Run DiffKV Active (PyTorch/Triton) benchmark and record metrics."""
-    print("\n🏃 Running DiffKV Active Telemetry Sweep...")
+    """Run DKV Active (PyTorch/Triton) benchmark and record metrics."""
+    print("\n🏃 Running DKV Active Telemetry Sweep...")
     # Add Active Runtime directory to Python path
     active_runtime_dir = os.path.join(REPO_ROOT, "ACTIVE_RUNTIME")
     sys.path.insert(0, active_runtime_dir)
     
     import torch
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
     # Measure memory baseline
     torch.cuda.empty_cache()
@@ -177,7 +177,7 @@ def run_active_benchmark(model_id, prompt_text, gen_len):
     # Load wrapper (forces compilation of Triton/CUDA if needed)
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id=model_id, config=cfg, device="cuda")
+    wrapper = DKVHFWrapper(model_id=model_id, config=cfg, device="cuda")
     wrapper.ensure_loaded()
     
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
@@ -190,7 +190,7 @@ def run_active_benchmark(model_id, prompt_text, gen_len):
     wrapper._session_token_ids[wsid] = []
     mgr.init_session(wsid, prefill_len=1)
     mgr.register_prefill_tokens(wsid, torch.tensor([ids[0]], dtype=torch.long, device="cuda"))
-    model._diffkv_session_ids = [wsid]
+    model._dkv_session_ids = [wsid]
     with torch.no_grad():
         _w = model(torch.tensor([[ids[0]]], dtype=torch.long, device="cuda"),
                    torch.tensor([[0]], dtype=torch.long, device="cuda"))
@@ -205,7 +205,7 @@ def run_active_benchmark(model_id, prompt_text, gen_len):
     wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device="cuda"))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     
     # Prefill timing
     CH = 512
@@ -343,28 +343,28 @@ def run_dense_benchmark(model_id, prompt_text, gen_len):
 
 def run_native_benchmark(gguf_path, prompt_text, gen_len, ctx_len):
     """Run C++ Native binary over stdin/stdout and capture telemetry."""
-    print("\n🏃 Running DiffKV Native Telemetry Sweep...")
+    print("\n🏃 Running DKV Native Telemetry Sweep...")
     import re
-    binary_path = os.path.join(REPO_ROOT, "diffkv_native", "build", "diffkv_native")
+    binary_path = os.path.join(REPO_ROOT, "dkv_native", "build", "dkv_native")
     
     if not os.path.exists(binary_path):
         raise FileNotFoundError(f"Native binary not found at {binary_path}. Did you compile it?")
         
     env = os.environ.copy()
     env.update({
-        "DIFFKV_MAX_CTX_TK": str(ctx_len + gen_len + 512),
-        "DIFFKV_MICRO_BLOCK_SIZE": "256",
-        "DIFFKV_PREFILL_CHUNK_SIZE": "512",
-        "DIFFKV_MAX_TOKENS": str(gen_len),
-        "DIFFKV_USE_GPU": "1",
-        "DIFFKV_NATIVE_ATTN": "1",
-        "DIFFKV_TEMPERATURE": "0.0",
-        "DIFFKV_TOP_P": "1.0",
-        "DIFFKV_REPETITION_PENALTY": "1.0",
-        "DIFFKV_DBG_PREFILL_TIME": "1",
-        "DIFFKV_TIME_DECODE": "1",
-        "DIFFKV_COMPRESSOR_THREADS": "4",
-        "DIFFKV_ENABLE_FACTUAL": "1",
+        "DKV_MAX_CTX_TK": str(ctx_len + gen_len + 512),
+        "DKV_MICRO_BLOCK_SIZE": "256",
+        "DKV_PREFILL_CHUNK_SIZE": "512",
+        "DKV_MAX_TOKENS": str(gen_len),
+        "DKV_USE_GPU": "1",
+        "DKV_NATIVE_ATTN": "1",
+        "DKV_TEMPERATURE": "0.0",
+        "DKV_TOP_P": "1.0",
+        "DKV_REPETITION_PENALTY": "1.0",
+        "DKV_DBG_PREFILL_TIME": "1",
+        "DKV_TIME_DECODE": "1",
+        "DKV_COMPRESSOR_THREADS": "4",
+        "DKV_ENABLE_FACTUAL": "1",
     })
     
     # Launch subprocess
@@ -482,9 +482,9 @@ def perform_cleanup():
         shutil.rmtree(CACHE_DIR, ignore_errors=True)
         
     # 2. Clean Active runtime build artifacts
-    active_core_dir = os.path.join(REPO_ROOT, "ACTIVE_RUNTIME", "native_core", "diffkv_core")
+    active_core_dir = os.path.join(REPO_ROOT, "ACTIVE_RUNTIME", "native_core", "dkv_core")
     active_build = os.path.join(active_core_dir, "build")
-    active_egg = os.path.join(active_core_dir, "diffkv_core.egg-info")
+    active_egg = os.path.join(active_core_dir, "dkv_core.egg-info")
     
     for folder in (active_build, active_egg):
         if os.path.exists(folder):
@@ -499,7 +499,7 @@ def perform_cleanup():
             os.remove(path)
             
     # 3. Clean Native C++ build artifacts
-    native_build = os.path.join(REPO_ROOT, "diffkv_native", "build")
+    native_build = os.path.join(REPO_ROOT, "dkv_native", "build")
     if os.path.exists(native_build):
         print(f"👉 Deleting native build folder: {native_build}")
         shutil.rmtree(native_build, ignore_errors=True)
@@ -514,7 +514,7 @@ def perform_cleanup():
 # ─────────────────────────────────── Main ───────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="DiffKV Remote CUDA Benchmark Orchestrator")
+    parser = argparse.ArgumentParser(description="DKV Remote CUDA Benchmark Orchestrator")
     parser.add_argument("--compile", action="store_true", help="Compile both Active and Native engines")
     parser.add_argument("--cleanup", action="store_true", help="Perform secure cleanup/destruct")
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-1.5B-Instruct", help="HF Model ID for Active/Dense")

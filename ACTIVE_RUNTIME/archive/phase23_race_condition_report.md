@@ -7,7 +7,7 @@ This report documents every race condition identified during Phase 23 stress tes
 ### RC-1: Compression vs. Eviction (Previously Fatal)
 **Scenario:** The Python LRU eviction thread detects VRAM pressure and calls `paged_kv_store.evict(block_id)` while the Python compressor thread is mid-SVD on the same block.
 **Previous failure:** Both operations write to the block. The eviction copies stale half-computed data to CPU RAM. The eviction completes; the compressor then writes the compressed result to a GPU slot that has already been freed. **Silent data corruption.**
-**Phase 23 fix:** `DiffKVBlockStateTable.transition()` uses `compare_exchange_strong`. The eviction calls `transition(block_id, CompressedResident, PagingOut)`. This CAS **fails** because the block is currently `Compressing`. Eviction is rejected. The block remains in `Compressing` state until the SVD completes and commits to `CompressedResident`. Only then is it eligible for eviction.
+**Phase 23 fix:** `DKVBlockStateTable.transition()` uses `compare_exchange_strong`. The eviction calls `transition(block_id, CompressedResident, PagingOut)`. This CAS **fails** because the block is currently `Compressing`. Eviction is rejected. The block remains in `Compressing` state until the SVD completes and commits to `CompressedResident`. Only then is it eligible for eviction.
 **Result: ELIMINATED.**
 
 ### RC-2: Stale Metadata Read During Graph Replay

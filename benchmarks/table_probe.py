@@ -3,7 +3,7 @@
 
 The binding_probe plants prose facts ("The X facility processes N samples per
 day"); this probe plants a TABLE — the failure surface reported 2026-07-12:
-DiffKV retains concepts and values from a paper's ablation tables (NA,
+DKV retains concepts and values from a paper's ablation tables (NA,
 Swin-Tiny, kernel sizes, 83.2, throughput) but re-attaches them to the wrong
 rows/metrics (83.2 moved from 7x7 to 3x3, a fabricated 4x4 row, imgs/sec
 replaced by invented G/s numbers).
@@ -20,8 +20,8 @@ correct / swap (another planted value) / miss, plus fabricated-value and
 fabricated-row detection.
 
 Usage:
-  python3 benchmarks/table_probe.py --ctx 8192 --modes dense diffkv
-  python3 benchmarks/table_probe.py --ctx 8192 --modes diffkv --full-matrix
+  python3 benchmarks/table_probe.py --ctx 8192 --modes dense dkv
+  python3 benchmarks/table_probe.py --ctx 8192 --modes dkv --full-matrix
 (Each cell runs in its own subprocess; the driver aggregates.)
 """
 import os, sys, json, argparse, subprocess, re, time
@@ -147,12 +147,12 @@ def run_cell(mode, ctx, question, max_tokens):
     import torch
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
-    os.environ["DIFFKV_LEGO_PREFILL"] = "1" if mode == "lego" else "0"
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    os.environ["DKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
+    os.environ["DKV_LEGO_PREFILL"] = "1" if mode == "lego" else "0"
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
+    wrapper = DKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
     prompt = build_prompt(tok, ctx, question)
@@ -162,7 +162,7 @@ def run_cell(mode, ctx, question, max_tokens):
     wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     import numpy as np
     CH = 512
     output = None
@@ -190,7 +190,7 @@ def run_cell(mode, ctx, question, max_tokens):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctx", type=int, default=8192)
-    ap.add_argument("--modes", nargs="+", default=["dense", "diffkv"])
+    ap.add_argument("--modes", nargs="+", default=["dense", "dkv"])
     ap.add_argument("--full-matrix", action="store_true",
                     help="also run per-row fwd/thr/rev questions (slow)")
     ap.add_argument("--single", nargs=3, metavar=("MODE", "KIND", "ARG"))

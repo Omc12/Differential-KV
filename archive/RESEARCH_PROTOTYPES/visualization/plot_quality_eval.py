@@ -56,7 +56,7 @@ def plot_quality(data: dict, output_dir: Path):
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"DiffKV Quality Evaluation — {data.get('model_name', '?')}",
+    fig.suptitle(f"DKV Quality Evaluation — {data.get('model_name', '?')}",
                  fontsize=14, color="#F0F6FC", fontweight="bold")
     fig.patch.set_facecolor("#0D1117")
 

@@ -141,7 +141,7 @@ class PagedKVStore:
     def prefetch(self, session_id: str, layer_idx: int, block_idx: int) -> None:
         """Issue an asynchronous prefetch request for a block if it is on CPU."""
         import os
-        if os.environ.get("DIFFKV_PREDICTIVE_PAGING", "0") != "1":
+        if os.environ.get("DKV_PREDICTIVE_PAGING", "0") != "1":
             return
 
         key = (session_id, layer_idx, block_idx)

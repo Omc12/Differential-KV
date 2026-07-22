@@ -1,6 +1,6 @@
 # Paper Outline — derived from the implementation
 
-**Title (working):** *DiffKV: Anchor + Low-Rank Differential KV-Cache Compression for
+**Title (working):** *DKV: Anchor + Low-Rank Differential KV-Cache Compression for
 Long-Context Inference on Commodity Unified-Memory Hardware*
 
 **Thesis (what the code actually does and the data actually shows):** compressing each
@@ -41,8 +41,8 @@ decode kernel → evaluation.
    (E5) needle correctness (RECOVERED via residuals), (E6) residual-budget trade-off (Fig: g6,
    Table: t4). active vs dense (same engine/weights = clean ablation).
    (Tables: main results; residual sweep; per-run detail.)
-10. **Analysis & Discussion** — what DiffKV buys vs costs; prefill-SVD cost; flat-slope
-    explanation tied to O(r) per token; when DiffKV wins.
+10. **Analysis & Discussion** — what DKV buys vs costs; prefill-SVD cost; flat-slope
+    explanation tied to O(r) per token; when DKV wins.
 11. **Limitations & Future Work** — throughput gap; CUDA/Triton fused decode (placeholder
     for future eval, no fabricated numbers); larger models; quality beyond NIAH; SRL eval.
 12. **Conclusion**
@@ -67,7 +67,7 @@ decode kernel → evaluation.
 - CUDA placeholder panel reserved in G3/G4 design.
 
 ## Tables
-- T1 model & DiffKV configuration (from code)
+- T1 model & DKV configuration (from code)
 - T2 per-block storage budget & compression ratio (derived from dims)
 - T3 main results: active vs dense across 4k–64k (prefill, tps, mem, needle) [data]
 - T4 reproducibility env/versions

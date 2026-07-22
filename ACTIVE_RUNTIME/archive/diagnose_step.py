@@ -1,5 +1,5 @@
 """
-Isolated diagnostic for the KVRuntimeManager + DiffKV Attention forward pass.
+Isolated diagnostic for the KVRuntimeManager + DKV Attention forward pass.
 Runs a single forward pass through the model with patched attention and prints
 exactly where it hangs or errors.
 """
@@ -32,9 +32,9 @@ mgr = KVRuntimeManager(
 print(f"    KVRuntimeManager ready. heads={mgr.heads}, head_dim={mgr.head_dim}")
 
 # 3. Apply attention patch
-print("\n[3] Applying diffkv_attention patch...")
-from runtime.diffkv_attention import apply_diffkv_attention_patch
-apply_diffkv_attention_patch(model, mgr)
+print("\n[3] Applying dkv_attention patch...")
+from runtime.dkv_attention import apply_dkv_attention_patch
+apply_dkv_attention_patch(model, mgr)
 print("    Patch applied.")
 
 # 4. Run PREFILL
@@ -43,7 +43,7 @@ prompt = "Hello, my name is"
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
 print(f"\n[4] Running PREFILL | prompt={repr(prompt)} | tokens={input_ids.shape[1]}")
 
-model._diffkv_session_ids = [session_id]
+model._dkv_session_ids = [session_id]
 position_ids = torch.arange(0, input_ids.shape[1], device="cuda").unsqueeze(0)
 
 t0 = time.time()
@@ -72,7 +72,7 @@ decode_input = torch.tensor([[next_token]], device="cuda")
 attention_mask = torch.ones((1, seq_len + 1), dtype=torch.long, device="cuda")
 decode_position_ids = torch.tensor([[seq_len]], device="cuda")
 
-model._diffkv_session_ids = [session_id]
+model._dkv_session_ids = [session_id]
 
 t0 = time.time()
 with torch.no_grad():

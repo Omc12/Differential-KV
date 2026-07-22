@@ -6,7 +6,7 @@
 set -e
 
 echo "═══════════════════════════════════════════════════════════════════"
-echo "  DiffKV Native - Performance Fix Verification"
+echo "  DKV Native - Performance Fix Verification"
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
 
@@ -17,9 +17,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Check if binary exists
-if [ ! -f "diffkv_native/build/diffkv_native" ]; then
+if [ ! -f "dkv_native/build/dkv_native" ]; then
     echo -e "${RED}❌ Binary not found. Building...${NC}"
-    cd diffkv_native
+    cd dkv_native
     cmake -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build --config Release -j$(sysctl -n hw.ncpu)
     cd ..
@@ -28,15 +28,15 @@ fi
 
 # Check for model
 MODEL=""
-if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
+if [ -f "dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q4_k_m.gguf"
-elif [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
+elif [ -f "dkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q8_0.gguf"
-elif [ -f "diffkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
+elif [ -f "dkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
     MODEL="qwen2.5-0.5b-instruct.gguf"
 else
     echo -e "${RED}❌ No model found${NC}"
-    echo "Please place a GGUF model in diffkv_native/"
+    echo "Please place a GGUF model in dkv_native/"
     exit 1
 fi
 
@@ -44,15 +44,15 @@ echo -e "${GREEN}✓ Using model: $MODEL${NC}"
 echo ""
 
 # Test configuration
-export DIFFKV_MAX_CTX_TK=8192  # Smaller for quick test
-export DIFFKV_PRESET=mid
-export DIFFKV_PREFILL_CHUNK_SIZE=512
-export DIFFKV_MICRO_BLOCK_SIZE=256
-export DIFFKV_RANK=16
-export DIFFKV_GPU_BUDGET_GB=1.5
-export DIFFKV_MPS_APPROXIMATE_ATTN=1
-export DIFFKV_MAX_TOKENS=128
-export DIFFKV_VERBOSE=1  # Enable verbose logging
+export DKV_MAX_CTX_TK=8192  # Smaller for quick test
+export DKV_PRESET=mid
+export DKV_PREFILL_CHUNK_SIZE=512
+export DKV_MICRO_BLOCK_SIZE=256
+export DKV_RANK=16
+export DKV_GPU_BUDGET_GB=1.5
+export DKV_MPS_APPROXIMATE_ATTN=1
+export DKV_MAX_TOKENS=128
+export DKV_VERBOSE=1  # Enable verbose logging
 
 echo "Configuration:"
 echo "  Context: 8192 tokens"
@@ -63,9 +63,9 @@ echo "  Max generation: 128 tokens"
 echo ""
 
 # Create test prompt
-if [ -f "diffkv_native/scratch_longprompt.txt" ]; then
-    TEST_PROMPT=$(cat diffkv_native/scratch_longprompt.txt | tr '\n' ' ')
-    echo "✓ Loaded long prompt from scratch_longprompt.txt ($(wc -c < diffkv_native/scratch_longprompt.txt) bytes)"
+if [ -f "dkv_native/scratch_longprompt.txt" ]; then
+    TEST_PROMPT=$(cat dkv_native/scratch_longprompt.txt | tr '\n' ' ')
+    echo "✓ Loaded long prompt from scratch_longprompt.txt ($(wc -c < dkv_native/scratch_longprompt.txt) bytes)"
 else
     TEST_PROMPT="Write a detailed summary of the major events in World War II, including the key battles, turning points, and outcomes."
 fi
@@ -74,17 +74,17 @@ echo "════════════════════════�
 echo "  Test 1: With Native Attention (OPTIMIZED)"
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
-export DIFFKV_NATIVE_ATTN=1
+export DKV_NATIVE_ATTN=1
 
 echo "Test prompt: $TEST_PROMPT"
 echo ""
 echo "Running... (this may take a moment for first-time initialization)"
 echo ""
 
-cd diffkv_native
-echo "$TEST_PROMPT" | ../diffkv_venv/bin/python3 serving/cli.py \
+cd dkv_native
+echo "$TEST_PROMPT" | ../dkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
-    --binary-path build/diffkv_native \
+    --binary-path build/dkv_native \
     --preset mid \
     --max-tokens 128 \
     2>&1 | tee ../test_native_on.log || true
@@ -95,12 +95,12 @@ echo "════════════════════════�
 echo "  Test 2: Without Native Attention (for comparison)"
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
-export DIFFKV_NATIVE_ATTN=0
+export DKV_NATIVE_ATTN=0
 
-cd diffkv_native
-echo "$TEST_PROMPT" | ../diffkv_venv/bin/python3 serving/cli.py \
+cd dkv_native
+echo "$TEST_PROMPT" | ../dkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
-    --binary-path build/diffkv_native \
+    --binary-path build/dkv_native \
     --preset mid \
     --max-tokens 128 \
     2>&1 | tee ../test_native_off.log || true

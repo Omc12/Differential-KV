@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace diffkv {
+namespace dkv {
 
 NativeDecodeScheduler::NativeDecodeScheduler(int max_batch_size,
                                                double starvation_threshold_ms)
@@ -165,4 +165,4 @@ std::string NativeDecodeScheduler::get_stats_json() const {
     return oss.str();
 }
 
-} // namespace diffkv
+} // namespace dkv

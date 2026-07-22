@@ -9,13 +9,13 @@
 #include "ggml-cpu.h"
 
 // Declare execute_cpu_attention so we can invoke it
-namespace diffkv {
+namespace dkv {
 void execute_cpu_attention(
     const float* Q,
     const int32_t* slots,
     float* cpu_output,
     float* lse_sparse,
-    diffkv::NativeBlockPool* kv_engine,
+    dkv::NativeBlockPool* kv_engine,
     int n_q_heads, int n_kv_heads, int rank, int S_max, int K, int D, float scale,
     bool has_rope, float rope_freq_base, bool approximate_attn
 );
@@ -114,7 +114,7 @@ int main() {
         const float* expected_lse = reinterpret_cast<const float*>(arrays["expected_lse"].data.data());
         
         // Initialize pool
-        diffkv::NativeBlockPool pool;
+        dkv::NativeBlockPool pool;
         ggml_backend_t backend_cpu = ggml_backend_cpu_init();
         ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend_cpu);
         
@@ -126,9 +126,9 @@ int main() {
         
         // Set states of slots 0, 1, 2 to CompressedResident so execute_cpu_attention processes them
         for (int s = 0; s < 3; ++s) {
-            pool.get_state_table().transition(s, diffkv::BlockState::Freed, diffkv::BlockState::DenseResident);
-            pool.get_state_table().transition(s, diffkv::BlockState::DenseResident, diffkv::BlockState::Compressing);
-            pool.get_state_table().transition(s, diffkv::BlockState::Compressing, diffkv::BlockState::CompressedResident);
+            pool.get_state_table().transition(s, dkv::BlockState::Freed, dkv::BlockState::DenseResident);
+            pool.get_state_table().transition(s, dkv::BlockState::DenseResident, dkv::BlockState::Compressing);
+            pool.get_state_table().transition(s, dkv::BlockState::Compressing, dkv::BlockState::CompressedResident);
         }
         
         // Populate the pool tensors from loaded arrays
@@ -156,7 +156,7 @@ int main() {
         std::vector<float> lse_sparse(H_q, 0.0f);
         
         std::cout << "Executing C++ CPU sparse attention..." << std::endl;
-        diffkv::execute_cpu_attention(Q, slots, cpu_output.data(), lse_sparse.data(), &pool,
+        dkv::execute_cpu_attention(Q, slots, cpu_output.data(), lse_sparse.data(), &pool,
                               H_q, H_kv, rank, S_max, K_active, D, scale,
                               has_rope, rope_freq_base, approximate_attn);
                               

@@ -28,7 +28,7 @@ Measures per model × domain:
   - compression ratio (EMA-balanced)
   - reconstruction error
 
-Goal: determine universality of DiffKV statistical assumptions
+Goal: determine universality of DKV statistical assumptions
 """
 
 import sys

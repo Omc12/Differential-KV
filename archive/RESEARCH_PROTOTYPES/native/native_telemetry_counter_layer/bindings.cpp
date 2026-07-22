@@ -5,7 +5,7 @@
 #include "native_telemetry_counter_layer.hpp"
 
 namespace py = pybind11;
-using namespace diffkv;
+using namespace dkv;
 
 PYBIND11_MODULE(native_telemetry_counter_layer, m) {
     m.doc() = "RCO-N: Native Telemetry Counter Layer — lock-free atomic counters";

@@ -4,7 +4,7 @@ This is the definitive structure of the Differential KV project following Phase 
 
 ## `native_core` (The Execution Engine)
 The heavily-optimized, physically executing core runtime.
-- `/sparse_decode`: `triton_sparse_attn.py`, `triton_diffkv.py`
+- `/sparse_decode`: `triton_sparse_attn.py`, `triton_dkv.py`
 - `/compression`: `async_compressor.py`, `lowrank.py`
 - `/paging`: `paged_kv_store.py`
 - `/metadata_pool`: `metadata_pool.py`
@@ -13,7 +13,7 @@ The heavily-optimized, physically executing core runtime.
 
 ## `serving` (Orchestration & Integration)
 The API and token scheduling layers.
-- `/`: `batch_engine.py`, `hf_diffkv_wrapper.py`
+- `/`: `batch_engine.py`, `hf_dkv_wrapper.py`
 
 ## `research` (Experimental R&D)
 Mathematically valid systems awaiting native C++ integration (e.g., vLLM or FlashAttention-3) to overcome Python orchestration bottlenecks.

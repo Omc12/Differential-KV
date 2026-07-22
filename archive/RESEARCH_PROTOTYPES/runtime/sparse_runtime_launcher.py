@@ -34,7 +34,7 @@ class SparseRuntimeLauncher:
             print(f"[WARNING] VRAM limit {config['vram_limit_gb']}GB exceeds hardware {hw['vram_total_gb']:.2f}GB. Capping.")
             config["vram_limit_gb"] = hw["vram_total_gb"] * 0.9
             
-        print(f"[INFO] Launching DiffKV Runtime with config: {config}")
+        print(f"[INFO] Launching DKV Runtime with config: {config}")
         self.runtime = RealSparseServingRuntime(model_name=config["model"])
         return self.runtime
 

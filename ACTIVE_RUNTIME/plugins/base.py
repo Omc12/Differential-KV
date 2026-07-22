@@ -7,7 +7,7 @@ class DraftModelPlugin(ABC):
     
     Licensees can implement this class to integrate any custom draft model
     (e.g., Jacobi/lookahead drafts, eagle, custom small transformers, MLX-powered drafts)
-    with the DiffKV continuous batch engine.
+    with the DKV continuous batch engine.
     """
     
     @abstractmethod

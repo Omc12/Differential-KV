@@ -21,7 +21,7 @@
 |---|---|---|---|
 | OpenAI-Compatible API Gateway | `ACTIVE_RUNTIME/serving/openai_compatible_api_gateway.py` | **IMPLEMENTED + EXECUTING** | FastAPI app wired in launch_real_serving.py; routes /v1/chat/completions; SSE streaming |
 | ContinuousBatchEngine | `ACTIVE_RUNTIME/serving/batch_engine.py` | **IMPLEMENTED + EXECUTING** | 227 lines; asyncio loop, prefill/decode split, real sampler (temp/top-p/rep-pen) |
-| DiffKVHFWrapper | `ACTIVE_RUNTIME/serving/hf_diffkv_wrapper.py` | **IMPLEMENTED + EXECUTING** | Loads real HF model; calls apply_diffkv_attention_patch(); imports KVRuntimeManager |
+| DKVHFWrapper | `ACTIVE_RUNTIME/serving/hf_dkv_wrapper.py` | **IMPLEMENTED + EXECUTING** | Loads real HF model; calls apply_dkv_attention_patch(); imports KVRuntimeManager |
 | ProductionSessionManager | `ACTIVE_RUNTIME/serving/production_session_manager.py` | **IMPLEMENTED + EXECUTING** | Imported by gateway; 5 KB session history logic |
 | Launch entrypoint | `ACTIVE_RUNTIME/launch_real_serving.py` | **IMPLEMENTED + EXECUTING** | 29-line entrypoint: Qwen2.5-0.5B, uvicorn on :8080 |
 
@@ -47,17 +47,17 @@
 
 | System | File | Status | Evidence |
 |---|---|---|---|
-| DiffKV Attention Patch (Qwen2) | `runtime/diffkv_attention.py` | **IMPLEMENTED + EXECUTING** | 279 lines; monkey-patches all layer.self_attn.forward; wired in DiffKVHFWrapper.__init__ |
+| DKV Attention Patch (Qwen2) | `runtime/dkv_attention.py` | **IMPLEMENTED + EXECUTING** | 279 lines; monkey-patches all layer.self_attn.forward; wired in DKVHFWrapper.__init__ |
 | Batched Sparse Attention Decode (Phase 8) | `runtime/batched_sparse_attn.py` | **IMPLEMENTED + EXECUTING** | 281 lines; build_sparse_batch() + batched_sparse_attn_decode(); 3 batched GPU einsum ops; active decode kernel |
-| SDPA/FlashAttention Prefill (Phase 24.9) | `runtime/diffkv_attention.py` L224-248 | **IMPLEMENTED + EXECUTING** | F.scaled_dot_product_attention() called unconditionally for prefill; PyTorch dispatches Flash/SDPA backend |
-| LM Head Last-Token Patch (Phase 25) | `runtime/diffkv_attention.py` L267-275 | **IMPLEMENTED + EXECUTING** | lm_head patched to project only hidden_states[:, -1:, :] when seq_len > 1 |
-| TritonDiffKV LowRank Recon Kernel | `native_core/sparse_decode/triton_diffkv.py` | **IMPLEMENTED + EXECUTING** | Real @triton.jit lowrank_recon_kernel; called from TritonDiffKV.reconstruct_lowrank(); has PyTorch fallback |
-| Triton Fused Sparse Decode Kernel | `native_core/sparse_decode/triton_sparse_attn.py` | **IMPLEMENTED BUT DISCONNECTED** | Real @triton.jit _fused_sparse_decode_kernel (234 lines); wrapper native_triton_sparse_attn_decode() requires NativeBlockPool which needs compiled diffkv_core.so — NEVER COMPILED |
+| SDPA/FlashAttention Prefill (Phase 24.9) | `runtime/dkv_attention.py` L224-248 | **IMPLEMENTED + EXECUTING** | F.scaled_dot_product_attention() called unconditionally for prefill; PyTorch dispatches Flash/SDPA backend |
+| LM Head Last-Token Patch (Phase 25) | `runtime/dkv_attention.py` L267-275 | **IMPLEMENTED + EXECUTING** | lm_head patched to project only hidden_states[:, -1:, :] when seq_len > 1 |
+| TritonDKV LowRank Recon Kernel | `native_core/sparse_decode/triton_dkv.py` | **IMPLEMENTED + EXECUTING** | Real @triton.jit lowrank_recon_kernel; called from TritonDKV.reconstruct_lowrank(); has PyTorch fallback |
+| Triton Fused Sparse Decode Kernel | `native_core/sparse_decode/triton_sparse_attn.py` | **IMPLEMENTED BUT DISCONNECTED** | Real @triton.jit _fused_sparse_decode_kernel (234 lines); wrapper native_triton_sparse_attn_decode() requires NativeBlockPool which needs compiled dkv_core.so — NEVER COMPILED |
 | Fused Sparse Attention Decode (Phase 6) | `runtime/sparse_attention.py` | **IMPLEMENTED + EXECUTING** | Fallback when no compressed history; called from decode path |
-| Retrieval-Aware Sparse Prefill (Phase 25) | `runtime/diffkv_attention.py` L233-240 | **PARTIAL PROTOTYPE** | RetrievalAwareSparsePrefill imported from research.sparse_prefill_anchors only when q_len > 1024 and key_len == q_len; file existence not confirmed; conditional import with live risk |
+| Retrieval-Aware Sparse Prefill (Phase 25) | `runtime/dkv_attention.py` L233-240 | **PARTIAL PROTOTYPE** | RetrievalAwareSparsePrefill imported from research.sparse_prefill_anchors only when q_len > 1024 and key_len == q_len; file existence not confirmed; conditional import with live risk |
 | CUDA Graph Replay (StaticSparseDecodeGraph) | `native_core/graph_runtime/static_decode_graph.py` | **IMPLEMENTED BUT DISCONNECTED** | Real CUDA graph capture/replay (58 lines); never instantiated in serving path |
 | Sparse FFN / Tiered FFN | `RESEARCH_PROTOTYPES/` | **PARTIAL PROTOTYPE** | sparse_mlp_router.py, block_sparse_ffn_executor.py exist — not imported in serving |
-| Chunked Prefill | `runtime/diffkv_attention.py` | **PARTIAL PROTOTYPE** | Implicit via RetrievalAwareSparsePrefill conditional; not a standalone tested path |
+| Chunked Prefill | `runtime/dkv_attention.py` | **PARTIAL PROTOTYPE** | Implicit via RetrievalAwareSparsePrefill conditional; not a standalone tested path |
 
 ---
 
@@ -65,10 +65,10 @@
 
 | System | File | Status | Evidence |
 |---|---|---|---|
-| DiffKVBlockStateTable (C++) | `native_core/diffkv_core/include/block_state.hpp` | **ARCHITECTURE ONLY** | Header exists; bindings.cpp complete; CMakeLists.txt present — ZERO compiled artifacts |
-| DiffKVCompressorThread (C++) | `native_core/diffkv_core/src/compressor_thread.cpp` | **ARCHITECTURE ONLY** | 3.7 KB source; never compiled; never loaded by Python |
-| DiffKVPagingStream (CUDA) | `native_core/diffkv_core/src/paging_stream.cu` | **ARCHITECTURE ONLY** | Real CUDA code with cudaMemcpyAsync and event polling; never compiled into .pyd/.so |
-| PyBind11 Bindings | `native_core/diffkv_core/src/bindings.cpp` | **ARCHITECTURE ONLY** | PYBIND11_MODULE written; module never built |
+| DKVBlockStateTable (C++) | `native_core/dkv_core/include/block_state.hpp` | **ARCHITECTURE ONLY** | Header exists; bindings.cpp complete; CMakeLists.txt present — ZERO compiled artifacts |
+| DKVCompressorThread (C++) | `native_core/dkv_core/src/compressor_thread.cpp` | **ARCHITECTURE ONLY** | 3.7 KB source; never compiled; never loaded by Python |
+| DKVPagingStream (CUDA) | `native_core/dkv_core/src/paging_stream.cu` | **ARCHITECTURE ONLY** | Real CUDA code with cudaMemcpyAsync and event polling; never compiled into .pyd/.so |
+| PyBind11 Bindings | `native_core/dkv_core/src/bindings.cpp` | **ARCHITECTURE ONLY** | PYBIND11_MODULE written; module never built |
 | native_core/kernels/ | Directory | **INVALIDATED** | EMPTY directory — no files |
 | native_core/residency/ | Directory | **INVALIDATED** | EMPTY directory — no files |
 | native_core/vllm_bridge/ | Directory | **ARCHITECTURE ONLY** | Contains 4 .md mapping documents ONLY — no Python code |
@@ -106,6 +106,6 @@
 ## Key Finding
 
 The live serving hotpath is real and executable:
-`launch → FastAPI gateway → ContinuousBatchEngine → DiffKV attention patch → StreamingSparseIngest → AsyncCompressor → SDPA prefill / batched-einsum decode`
+`launch → FastAPI gateway → ContinuousBatchEngine → DKV attention patch → StreamingSparseIngest → AsyncCompressor → SDPA prefill / batched-einsum decode`
 
 The native C++ extension, all distributed systems, the Triton fused-decode kernel, and CUDA graph replay are **source-only or architecture-only** — they have never been compiled or dispatched.

@@ -17,7 +17,7 @@ import json, os, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RESULTS = os.path.join(HERE, "results")
-VENV_PY = os.path.join(REPO, "diffkv_venv", "bin", "python3")
+VENV_PY = os.path.join(REPO, "dkv_venv", "bin", "python3")
 MODEL_ID = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 CTX = 65536
 GEN = 128
@@ -38,15 +38,15 @@ sys.path.insert(0, os.path.join(REPO, "benchmarks"))
 
 import mlx.core as mx
 
-os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-os.environ["DIFFKV_MAX_RESIDUAL"] = "128"
-os.environ["DIFFKV_SPARSE_PREFILL"] = "1"
-os.environ["DIFFKV_DECODE_CACHE"] = "1"
-os.environ["DIFFKV_SPARSE_BIAS"] = "auto"
-os.environ["DIFFKV_SEED"] = "1234"
+os.environ["DKV_COMPRESSED_DECODE"] = "1"
+os.environ["DKV_MAX_RESIDUAL"] = "128"
+os.environ["DKV_SPARSE_PREFILL"] = "1"
+os.environ["DKV_DECODE_CACHE"] = "1"
+os.environ["DKV_SPARSE_BIAS"] = "auto"
+os.environ["DKV_SEED"] = "1234"
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
-wrapper = MLXDiffKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
+wrapper = MLXDKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
 wrapper.ensure_loaded()
 
 pfile = os.path.join(REPO, "benchmarks", "results", "prompt_65536.txt")

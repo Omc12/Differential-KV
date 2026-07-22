@@ -15,12 +15,12 @@ def setup_cluster():
 version: '3.8'
 services:
   orchestrator:
-    image: diff_kv/orchestrator:latest
+    image: dkv/orchestrator:latest
     ports:
       - "8000:8000"
   
   edge_node_1:
-    image: diff_kv/runtime:latest
+    image: dkv/runtime:latest
     environment:
       - ROLE=coder
       - ORCHESTRATOR_URL=http://orchestrator:8000

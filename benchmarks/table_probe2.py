@@ -2,7 +2,7 @@
 """Table-row binding probe v2 — realistic conditions (ACTIVE_RUNTIME / MLX).
 
 v1 (table_probe.py) planted a small 4-row table in REPEATED fluffy filler at 8k
-and found diffkv == dense everywhere. But the reported failure (2026-07-12,
+and found dkv == dense everywhere. But the reported failure (2026-07-12,
 NAT-style paper: 83.2 moved from 7x7 to 3x3, fabricated 4x4 row, imgs/sec ->
 invented G/s) happened on a real paper. v2 models what v1 didn't:
 
@@ -17,9 +17,9 @@ invented G/s) happened on a real paper. v2 models what v1 didn't:
   4. ctx 8192/16384 — routing retrieves topk=16 of 32/64 blocks.
 
 Usage:
-  python3 benchmarks/table_probe2.py --ctx 16384 --modes dense diffkv
-  python3 benchmarks/table_probe2.py --ctx 16384 --modes diffkv \
-      --extra-env DIFFKV_MAX_RESIDUAL=256 DIFFKV_TOPK_BLOCKS=32
+  python3 benchmarks/table_probe2.py --ctx 16384 --modes dense dkv
+  python3 benchmarks/table_probe2.py --ctx 16384 --modes dkv \
+      --extra-env DKV_MAX_RESIDUAL=256 DKV_TOPK_BLOCKS=32
 (Each cell runs in its own subprocess; the driver aggregates.)
 """
 import os, sys, json, argparse, subprocess, re, time
@@ -280,12 +280,12 @@ def run_cell(mode, ctx, question, max_tokens):
     import torch
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
-    os.environ.setdefault("DIFFKV_LEGO_PREFILL", "0")
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    os.environ["DKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
+    os.environ.setdefault("DKV_LEGO_PREFILL", "0")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
+    wrapper = DKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
     prompt = build_prompt(tok, ctx, question)
@@ -295,7 +295,7 @@ def run_cell(mode, ctx, question, max_tokens):
     wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     import numpy as np
     CH = 512
     output = None
@@ -327,7 +327,7 @@ KINDS = {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctx", type=int, default=16384)
-    ap.add_argument("--modes", nargs="+", default=["dense", "diffkv"])
+    ap.add_argument("--modes", nargs="+", default=["dense", "dkv"])
     ap.add_argument("--full-matrix", action="store_true")
     ap.add_argument("--extra-env", nargs="*", default=[],
                     help="KEY=VAL pairs forwarded to cell subprocesses")

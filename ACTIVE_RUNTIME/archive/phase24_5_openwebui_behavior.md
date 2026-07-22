@@ -2,7 +2,7 @@
 
 ## Setup
 
-- Model: `Qwen/Qwen2.5-0.5B-Instruct` (via DiffKV serving stack)
+- Model: `Qwen/Qwen2.5-0.5B-Instruct` (via DKV serving stack)
 - Frontend: Open WebUI on Docker → `http://host.docker.internal:8080/v1`
 - Backend: `launch_real_serving.py` with Phase 24.5 streaming ingest active
 - `micro_block_size=16`, `streaming_ingest=True`
@@ -77,7 +77,7 @@ Returning to a session after inactivity
 ## Known Behavior Quirks in OpenWebUI Integration
 
 ### 1. Model Name Display
-OpenWebUI will show the model as `diffkv-Qwen/Qwen2.5-0.5B-Instruct` — the prefix is added by the gateway's `/v1/models` endpoint.
+OpenWebUI will show the model as `dkv-Qwen/Qwen2.5-0.5B-Instruct` — the prefix is added by the gateway's `/v1/models` endpoint.
 
 ### 2. Session Continuity
 Each OpenWebUI conversation has a stable `session_id` via `ProductionSessionManager`. KV history is preserved across follow-up messages in the same tab.

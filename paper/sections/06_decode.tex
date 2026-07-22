@@ -102,7 +102,7 @@ out the low-rank twins of residual rows so each token is represented once. Per-t
 appends the new token's $K$/$V$ as a single in-place row and runs one
 \texttt{scaled\_dot\_product\_attention} call over exact-length views, without any per-token
 concatenation or buffer re-allocation. The block set is re-routed and the buffer re-written
-every $N$ tokens (or when the set changes). This path (\texttt{DIFFKV\_DECODE\_FUSED},
+every $N$ tokens (or when the set changes). This path (\texttt{DKV\_DECODE\_FUSED},
 default on) is bit-exact to the per-token sparse kernel; its effect on throughput is part of
 the measured decode numbers in \S\ref{sec:eval}.
 

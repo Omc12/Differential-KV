@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Context Sweep (4K-128K) Evaluation for Qwen2.5-14B in 4-bit.
 
-This script benchmarks 4-bit Dense against 4-bit DiffKV across various context lengths
+This script benchmarks 4-bit Dense against 4-bit DKV across various context lengths
 (4K, 8K, 16K, 32K, 64K, 128K) on an A100 GPU, logging hardware metrics (power draw, temp) via nvidia-smi.
 """
 
@@ -36,7 +36,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
 ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
-CORE_DIR = os.path.join(ACTIVE, "native_core", "diffkv_core")
+CORE_DIR = os.path.join(ACTIVE, "native_core", "dkv_core")
 
 if ACTIVE not in sys.path:
     sys.path.insert(0, ACTIVE)
@@ -148,11 +148,11 @@ def build_prompt_for_len(tokenizer, target_len):
 
 
 def run_worker(mode, model_id, target_len):
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-    os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_EARLY_LAYER_RANK_BOOST"] = "0"
     
     is_compressed = (mode == "compressed")
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
@@ -183,7 +183,7 @@ def run_worker(mode, model_id, target_len):
 
     with torch.inference_mode():
         if is_compressed:
-            from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+            from serving.hf_dkv_wrapper import DKVHFWrapper
             config = {
                 "mode": "fp16",
                 "quantization": "nf4",
@@ -196,7 +196,7 @@ def run_worker(mode, model_id, target_len):
                 "preset": "mid",
                 "serving_mode": "balanced"
             }
-            w = DiffKVHFWrapper(
+            w = DKVHFWrapper(
                 model_id=model_id,
                 config=config,
                 torch_dtype=torch.float16,
@@ -220,7 +220,7 @@ def run_worker(mode, model_id, target_len):
 
             mgr.init_session(sid, prefill_len=prompt_len)
             mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
-            model._diffkv_session_ids = [sid]
+            model._dkv_session_ids = [sid]
 
             # Prefill.  Use the runtime's chunk size so CUDA receives a useful
             # batch of blocks per compression dispatch.  CH=128 with the 64-token
@@ -294,7 +294,7 @@ def run_worker(mode, model_id, target_len):
                 )
 
             _barrier_start = time.perf_counter()
-            _barrier_timeout = float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30"))
+            _barrier_timeout = float(os.environ.get("DKV_COMPRESSION_TIMEOUT_S", "30"))
             _prev_pending = -1
             while True:
                 _pending = _count_in_flight(mgr, sid)

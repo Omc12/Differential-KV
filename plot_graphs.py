@@ -9,7 +9,7 @@ os.makedirs(out_dir, exist_ok=True)
 
 # Colors
 DENSE_COLOR = "#FF007F"  # Electric Magenta
-DIFFKV_COLOR = "#00F5D4"  # Electric Cyan/Teal
+DKV_COLOR = "#00F5D4"  # Electric Cyan/Teal
 GRID_COLOR = "#E5E5E5"
 TEXT_COLOR = "#2B2D42"
 ACCENT_COLOR = "#7209B7"  # Deep Purple
@@ -39,16 +39,16 @@ contexts_str = ["1K", "2K", "4K", "8K"]
 # 1. LATENCY & THROUGHPUT GRAPH
 # ==========================================
 prefill_dense = [0.048, 0.953, 2.856, None]
-prefill_diffkv = [0.040, 0.908, 9.584, 42.452]
+prefill_dkv = [0.040, 0.908, 9.584, 42.452]
 
 tps_dense = [31.6, 24.1, 8.1, None]
-tps_diffkv = [37.9, 27.3, 6.6, 4.2]
+tps_dkv = [37.9, 27.3, 6.6, 4.2]
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
 
 # Left: Prefill Latency
 ax1.plot(contexts[:3], prefill_dense[:3], 'o-', label='Dense (Baseline)', color=DENSE_COLOR, linewidth=2.5, markersize=8)
-ax1.plot(contexts, prefill_diffkv, 's-', label='DiffKV (Compressed)', color=DIFFKV_COLOR, linewidth=2.5, markersize=8)
+ax1.plot(contexts, prefill_dkv, 's-', label='DKV (Compressed)', color=DKV_COLOR, linewidth=2.5, markersize=8)
 # Mark OOM
 ax1.plot(8192, 10, 'x', color=DENSE_COLOR, markersize=10, markeredgewidth=2.5)
 ax1.text(8192, 12, "Dense\nOOM", color=DENSE_COLOR, ha='center', va='bottom', fontsize=9, fontweight='bold')
@@ -64,7 +64,7 @@ ax1.grid(True, which="both", ls="--")
 
 # Right: Decode TPS
 ax2.plot(contexts[:3], tps_dense[:3], 'o-', label='Dense (Baseline)', color=DENSE_COLOR, linewidth=2.5, markersize=8)
-ax2.plot(contexts, tps_diffkv, 's-', label='DiffKV (Zero-Sync)', color=DIFFKV_COLOR, linewidth=2.5, markersize=8)
+ax2.plot(contexts, tps_dkv, 's-', label='DKV (Zero-Sync)', color=DKV_COLOR, linewidth=2.5, markersize=8)
 # Mark OOM
 ax2.plot(8192, 0.5, 'x', color=DENSE_COLOR, markersize=10, markeredgewidth=2.5)
 ax2.text(8192, 1.5, "Dense\nOOM", color=DENSE_COLOR, ha='center', va='bottom', fontsize=9, fontweight='bold')
@@ -86,17 +86,17 @@ plt.close()
 # ==========================================
 # 2. QUALITY (FIDELITY) GRAPH
 # ==========================================
-cos_sim_diffkv = [0.9993, 0.9991, 0.9993, 0.9994]
+cos_sim_dkv = [0.9993, 0.9991, 0.9993, 0.9994]
 
 plt.figure(figsize=(8, 5))
 plt.axhline(y=1.0, color=DENSE_COLOR, linestyle='-', linewidth=2.0, label='Dense Baseline (100% Fidelity)')
-plt.plot(contexts, cos_sim_diffkv, 's-', color=DIFFKV_COLOR, linewidth=2.5, markersize=8, label='DiffKV Compressed')
+plt.plot(contexts, cos_sim_dkv, 's-', color=DKV_COLOR, linewidth=2.5, markersize=8, label='DKV Compressed')
 
 plt.xscale('log', base=2)
 plt.xticks(contexts, contexts_str)
 plt.xlabel('Context Length (tokens)', fontsize=11, fontweight='bold', labelpad=8)
 plt.ylabel('Cosine Similarity (Keys & Values)', fontsize=11, fontweight='bold')
-plt.title('DiffKV Cosine Similarity to Dense Baseline', fontsize=13, fontweight='bold', pad=15)
+plt.title('DKV Cosine Similarity to Dense Baseline', fontsize=13, fontweight='bold', pad=15)
 plt.ylim(0.9980, 1.0005)
 plt.legend(frameon=True, facecolor='white', edgecolor=GRID_COLOR, loc='lower right')
 plt.grid(True, which="both", ls="--")
@@ -108,16 +108,16 @@ plt.close()
 # 3. MEMORY FOOTPRINT GRAPH
 # ==========================================
 peak_dense_mb = [1254.1, 1561.3, 2459.1, None]
-peak_diffkv_mb = [958.8, 969.7, 1166.2, 1434.4]
+peak_dkv_mb = [958.8, 969.7, 1166.2, 1434.4]
 
 kv_dense_mb = [309.0, 321.0, 642.0, None]
-kv_diffkv_mb = [13.0, 24.0, 306.0, 882.0]
+kv_dkv_mb = [13.0, 24.0, 306.0, 882.0]
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
 
 # Left: Peak System Memory
 ax1.plot(contexts[:3], [x/1024.0 for x in peak_dense_mb[:3]], 'o-', label='Dense (Baseline)', color=DENSE_COLOR, linewidth=2.5, markersize=8)
-ax1.plot(contexts, [x/1024.0 for x in peak_diffkv_mb], 's-', label='DiffKV (Compressed)', color=DIFFKV_COLOR, linewidth=2.5, markersize=8)
+ax1.plot(contexts, [x/1024.0 for x in peak_dkv_mb], 's-', label='DKV (Compressed)', color=DKV_COLOR, linewidth=2.5, markersize=8)
 # Mark OOM
 ax1.plot(8192, 4.0, 'x', color=DENSE_COLOR, markersize=10, markeredgewidth=2.5)
 ax1.text(8192, 4.2, "Dense\nOOM", color=DENSE_COLOR, ha='center', va='bottom', fontsize=9, fontweight='bold')
@@ -133,7 +133,7 @@ ax1.grid(True, which="both", ls="--")
 
 # Right: KV Cache Memory
 ax2.plot(contexts[:3], kv_dense_mb[:3], 'o-', label='Dense (Baseline)', color=DENSE_COLOR, linewidth=2.5, markersize=8)
-ax2.plot(contexts, kv_diffkv_mb, 's-', label='DiffKV (Compressed)', color=DIFFKV_COLOR, linewidth=2.5, markersize=8)
+ax2.plot(contexts, kv_dkv_mb, 's-', label='DKV (Compressed)', color=DKV_COLOR, linewidth=2.5, markersize=8)
 # Mark OOM
 ax2.plot(8192, 100, 'x', color=DENSE_COLOR, markersize=10, markeredgewidth=2.5)
 ax2.text(8192, 150, "Dense\nOOM", color=DENSE_COLOR, ha='center', va='bottom', fontsize=9, fontweight='bold')

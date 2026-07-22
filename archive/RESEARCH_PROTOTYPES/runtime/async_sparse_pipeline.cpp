@@ -2,7 +2,7 @@
 #include <vector>
 #include <iostream>
 
-namespace diffkv {
+namespace dkv {
 namespace runtime {
 
 class AsyncSparsePipeline {
@@ -24,4 +24,4 @@ private:
 };
 
 } // namespace runtime
-} // namespace diffkv
+} // namespace dkv

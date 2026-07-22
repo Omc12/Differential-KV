@@ -40,9 +40,9 @@ class QuickstartEnvironmentGenerator:
     def create_env_template(self):
         """Generates a .env template."""
         content = """# Differential KV Environment Variables
-DIFFKV_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
-DIFFKV_VRAM_LIMIT_GB=12
-DIFFKV_LOG_LEVEL=INFO
+DKV_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
+DKV_VRAM_LIMIT_GB=12
+DKV_LOG_LEVEL=INFO
 """
         env_path = os.path.join(self.workspace_path, ".env.example")
         with open(env_path, "w") as f:

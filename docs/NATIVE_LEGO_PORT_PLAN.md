@@ -5,7 +5,7 @@
 Everything below this section is kept as historical planning context; this section
 is the current state.
 
-**What landed** (all inside `DIFFKV_LEGO_PREFILL=1`, still default OFF):
+**What landed** (all inside `DKV_LEGO_PREFILL=1`, still default OFF):
 - `k_activations`/`v_activations` are allocated at `lego_buf_rows` (identity zone +
   window ring, same `lego_map_span` geometry as the stage-1 device ring) instead of
   full `[L]`. Chunk captures write through the SAME ring spans the device cache
@@ -13,7 +13,7 @@ is the current state.
   `lego_map_span` (window ring capacity ≥ 2048 always covers the 768-row dense
   window). `k_rotated_activations` was ALREADY skipped under sparse decode
   (allocation gated `!decode_use_sparse`) — plan step 1 was free, verify-only.
-- **Far field default = STUDS (`DIFFKV_LEGO_FAR=studs`)** — the MLX studs-only
+- **Far field default = STUDS (`DKV_LEGO_FAR=studs`)** — the MLX studs-only
   port, made possible by forcing UNIFORM residual sets: routed far blocks
   contribute ONLY rows that come out EXACT — the anchor + the block's
   residual-corrected rows (1 + 128 per block; `lego_emit_block_studs`, recon
@@ -36,7 +36,7 @@ is the current state.
   native's adaptive residual budget (lowrank.cpp OPT-A) is LAYER-dependent
   (per-layer error medians) → per-layer stud counts, which the single shared
   prefill mask/klen cannot express. Resolution: under lego studs the native
-  runtime sets `DIFFKV_RESIDUAL_UNIFORM=1`, which skips the adaptive cap so every
+  runtime sets `DKV_RESIDUAL_UNIFORM=1`, which skips the adaptive cap so every
   full prefill block carries the full MAX_RESIDUAL=128 set (uniform across layers
   AND blocks). This is MLX parity ("prefill blocks always carry full residual
   sets") and costs no memory — pool residual tensors are pre-allocated at
@@ -44,7 +44,7 @@ is the current state.
   exact for easy blocks.
 - Consumers gated: `factual_store.build` force-disabled under lego (reads
   ring-evicted mirror positions; it is net-negative and default-off anyway),
-  `DIFFKV_DBG_RECON_POS` gated off under lego (`DBG_EXPORT_CHECK` already was),
+  `DKV_DBG_RECON_POS` gated off under lego (`DBG_EXPORT_CHECK` already was),
   the sparse→dense 0-blocks fallback hard-aborts under lego instead of backfilling
   from mirrors that no longer hold the data.
 
@@ -99,7 +99,7 @@ synthesis facts under studs (e.g. residual selection tuned for linkage tokens).
 
 ## STAGE 1 LANDED (2026-07-12) — correctness ✓, measured RAM win ✗ (see findings)
 
-`DIFFKV_LEGO_PREFILL=1` (native, default OFF) implements the ring:
+`DKV_LEGO_PREFILL=1` (native, default OFF) implements the ring:
 identity zone `[0, base_end=max(sp_min, sink+window))` + modular window zone
 (`wnd_cap = window + 2·chunk`) for the persistent device prefill cache; routed
 far blocks are gathered from the raw host mirrors (k_activations rotated
@@ -107,7 +107,7 @@ on-the-fly + v_activations — EXACT raw rows) into per-layer FAR tensors and
 concatenated ahead of the range views. Gated on sparse decode + cached_len==0;
 auto-disables when the ring wouldn't shrink anything (short prompts).
 
-**Validated**: needle 3/3 (4k/8k/16k, 128-token decode, DIFFKV_ENGAGE_THRESHOLD=4096),
+**Validated**: needle 3/3 (4k/8k/16k, 128-token decode, DKV_ENGAGE_THRESHOLD=4096),
 prefill time within noise of baseline, engages as designed (32k: 6144+2048
 device rows vs 32865 — 81% device-cache reduction), zero stderr errors.
 
@@ -161,21 +161,21 @@ are read by more than the graph):
   — check if these read arbitrary absolute positions or only recently-ingested
   ones; if arbitrary, they need the ENGINE (compressed pool) as the source for
   far positions instead, matching what stage 1 did for the graph's far tensors
-- `DIFFKV_DBG_EXPORT_CHECK` / `RECON_POS` debug paths — these already sample
+- `DKV_DBG_EXPORT_CHECK` / `RECON_POS` debug paths — these already sample
   `k_activations` at arbitrary absolute positions for verification; either gate
   them off under lego (simplest) or read through the engine like the graph does
 
 **Validation**: repeat exactly the stage-1 protocol (needle 3/3, margins vs
 baseline, synthesis identical) PLUS `benchmarks/native_mem_profile.py`
 (phase-tagged `phys_footprint` sampling; `PROF_CTX=16384 python
-benchmarks/native_mem_profile.py` with/without `DIFFKV_LEGO_PREFILL=1`) to
+benchmarks/native_mem_profile.py` with/without `DKV_LEGO_PREFILL=1`) to
 confirm the peak actually drops this time before calling it done. Do not skip
 the profiler step — that is exactly the check stage 1 skipped and how the
 "no measured win" surprise happened.
 
 Status: PLAN (2026-07-11), STAGE 2 SCOPED (2026-07-12). The MLX reference implementation landed in
-`ACTIVE_RUNTIME/serving/mlx_diffkv_wrapper.py` (`DIFFKV_LEGO_PREFILL`); this doc
-maps it onto `diffkv_native/src/main.cpp`. Read the MLX flag comments first —
+`ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py` (`DKV_LEGO_PREFILL`); this doc
+maps it onto `dkv_native/src/main.cpp`. Read the MLX flag comments first —
 all fidelity findings (studs-only default, knife-edge margins, synthesis
 sensitivity) were measured there and apply here.
 
@@ -233,11 +233,11 @@ reimplement it. See `_lego_prefill_attend`-equivalent additions in
 
 ## CUDA
 
-The torch/CUDA path (`hf_diffkv_wrapper` + Triton kernels) cannot be tested on
+The torch/CUDA path (`hf_dkv_wrapper` + Triton kernels) cannot be tested on
 this Mac. Port ONLY behind default-OFF env gates and add cert items to
 `CUDA_TRITON_AUDIT.md`'s GPU checklist. The MLX session-pool growth
 (`_ensure_block_capacity`) has a direct torch analogue if the HF wrapper's
-session store pre-allocates (check `DiffKVHFWrapper` before porting — on Mac it
+session store pre-allocates (check `DKVHFWrapper` before porting — on Mac it
 aliases to MLX, so the torch store is only exercised on CUDA machines). Lego is
 NOT implemented on the torch/CUDA path at all (design notes only, C9 in
 `CUDA_TRITON_AUDIT.md`) — nothing to default there yet.
@@ -262,17 +262,17 @@ entirely on synthesis (real-paper narrative fidelity) and, on native, margins
 by ~1 unit. This is a genuine memory-for-fidelity trade, not a strict
 improvement in either direction.
 
-**Decision: `DIFFKV_LEGO_PREFILL` defaults to OFF on both runtimes** (native
-already was; MLX flipped back — see `mlx_diffkv_wrapper.py` comment at
+**Decision: `DKV_LEGO_PREFILL` defaults to OFF on both runtimes** (native
+already was; MLX flipped back — see `mlx_dkv_wrapper.py` comment at
 `self._lego_prefill`). Quality-by-default; opt in explicitly
-(`DIFFKV_LEGO_PREFILL=1`) for memory-constrained long-context runs where the
+(`DKV_LEGO_PREFILL=1`) for memory-constrained long-context runs where the
 prefill-peak reduction is worth the documented synthesis/margin cost. Don't
 re-flip either default without a fresh A/B — residual-selection changes (like
 owner-capture) can silently invalidate a prior lego measurement, as happened
 here.
 
 **RC8 default (both runtimes) — already resolved, restated for completeness**:
-`DIFFKV_RC8_LICENSE` stays OFF on both. Validated end-to-end this session
+`DKV_RC8_LICENSE` stays OFF on both. Validated end-to-end this session
 (commit `fe30621`, AFTER coverage-0.25 became the native default, so the
 verdict already reflects current residual-selection defaults — no re-test
 needed): RC5/RC8 target comparison-interleave inversions already fixed by

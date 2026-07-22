@@ -7,7 +7,7 @@ We performed a deep programmatic audit to ensure all layers of the model are suc
 ```python
 # Audit Verification Snippet
 for i, layer in enumerate(model.model.layers):
-    assert hasattr(layer.self_attn.forward, "__wrapped__") or "make_diffkv_forward" in str(layer.self_attn.forward), \
+    assert hasattr(layer.self_attn.forward, "__wrapped__") or "make_dkv_forward" in str(layer.self_attn.forward), \
         f"Layer {i} is NOT patched!"
 ```
 
@@ -15,11 +15,11 @@ for i, layer in enumerate(model.model.layers):
 
 | Layer Index | Patch Status | Active Implementation | Original Module Intact? |
 |---|---|---|---|
-| **Layer 0** | ✅ Patched | `diffkv_forward` | No |
-| **Layer 1** | ✅ Patched | `diffkv_forward` | No |
-| **Layer 2** | ✅ Patched | `diffkv_forward` | No |
+| **Layer 0** | ✅ Patched | `dkv_forward` | No |
+| **Layer 1** | ✅ Patched | `dkv_forward` | No |
+| **Layer 2** | ✅ Patched | `dkv_forward` | No |
 | ... | ... | ... | ... |
-| **Layer 23** | ✅ Patched | `diffkv_forward` | No |
+| **Layer 23** | ✅ Patched | `dkv_forward` | No |
 
 ## Findings
 

@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, List, Dict, Any
 
-_BYPASS = os.environ.get('DIFFKV_MLA_LATENT', '0') != '1'
+_BYPASS = os.environ.get('DKV_MLA_LATENT', '0') != '1'
 
 class MLAProjector:
     def __init__(
@@ -63,7 +63,7 @@ class MLAProjector:
             W = Vh[:self.latent_dim, :].T  # shape: [feat_dim, latent_dim]
             self.W = W.to(device=self.device, dtype=self.dtype)
         except Exception as e:
-            print(f'[DiffKV MLA] PCA init failed: {e}')
+            print(f'[DKV MLA] PCA init failed: {e}')
             self.W = None
         finally:
             self._calib_data = []

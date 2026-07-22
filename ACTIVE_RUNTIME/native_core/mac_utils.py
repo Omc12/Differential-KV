@@ -13,7 +13,7 @@ Priority order:
 
 MLX note:
   Apple MLX (https://ml-explore.github.io/mlx) is a separate array library.
-  DiffKV keeps its core in PyTorch; MLX is bridged here for SVD acceleration
+  DKV keeps its core in PyTorch; MLX is bridged here for SVD acceleration
   when running on Apple Silicon without CUDA.  The bridge is optional — if
   `mlx` is not installed, everything falls back to PyTorch on MPS.
 """
@@ -228,7 +228,7 @@ def get_default_dtype(device: Optional[str] = None) -> torch.dtype:
 # Monkeypatch torch.mps.capture_to_graph to prevent graph compilation memory leaks on dynamic shapes
 if hasattr(torch, "mps"):
     import os
-    if os.environ.get("DIFFKV_MPS_CAPTURE_GRAPH", "0") != "1" or not hasattr(torch.mps, "capture_to_graph"):
+    if os.environ.get("DKV_MPS_CAPTURE_GRAPH", "0") != "1" or not hasattr(torch.mps, "capture_to_graph"):
         class _CaptureToGraphContext:
             def __init__(self):
                 pass
@@ -243,7 +243,7 @@ if hasattr(torch, "mps"):
         torch.mps.capture_to_graph = _capture_to_graph
 
 
-def get_true_diffkv_memory_mb() -> dict:
+def get_true_dkv_memory_mb() -> dict:
     """
     Get true allocated/reserved memory in MB.
     Returns:

@@ -45,12 +45,12 @@ class EnvironmentConfigurationManager:
     def _apply_env_overrides(self):
         """
         Applies environment variable overrides.
-        Example: DIFFKV_RUNTIME__DEVICE=cpu overrides runtime.device
+        Example: DKV_RUNTIME__DEVICE=cpu overrides runtime.device
         Nesting is handled via double underscores (__).
         """
         for key, value in os.environ.items():
-            if key.startswith("DIFFKV_"):
-                parts = key.replace("DIFFKV_", "").lower().split("__")
+            if key.startswith("DKV_"):
+                parts = key.replace("DKV_", "").lower().split("__")
                 self._update_nested_config(self.config, parts, value)
 
     def _update_nested_config(self, d, keys, value):

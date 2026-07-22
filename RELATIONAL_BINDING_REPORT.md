@@ -17,12 +17,12 @@ rank-r reconstruction. The decoder then emits real values bound to CORRUPTED
 names ("Okazaki"→"Okinawa"/"Okapi", "Brancusi"→"Bruckner"/"Brancos"):
 - MLX list-all: dense 5/6 vs compressed 1/6 (no swaps — the names are corrupted,
   not exchanged); entity→value 4/4 (query carries the name) vs value→entity 1/4.
-- Fix: `DIFFKV_RESIDUAL_OWNER_CAPTURE` (default ON) — for each core segment walk
+- Fix: `DKV_RESIDUAL_OWNER_CAPTURE` (default ON) — for each core segment walk
   left to the nearest capitalized non-function word, expand to the full surface
   run (subword continuations + multi-word names), boost those rows into the
   exact-residual set; plus a budget floor (boosted_count+4) so the adaptive
   8/16 cap can't evict the owner. `_apply_owner_capture` in
-  mlx_diffkv_wrapper.py (both capture sites) + the mirrored block in lowrank.cpp.
+  mlx_dkv_wrapper.py (both capture sites) + the mirrored block in lowrank.cpp.
 - After: MLX list-all 6/6 (beats dense), corruption class ELIMINATED both
   runtimes; native OC0 "Brancos/Okla/Pierre/Rochester" → OC1 all six names
   surface-perfect. Recall gates all green (MLX NIAH 4k-32k exact incl. 16k/0.9
@@ -43,7 +43,7 @@ C10.
 With owner-capture in, the cross-runtime probe found the next layer precisely:
 - Native retrieval binding is EXACT in both directions (fwd 3/3, rev 3/3 —
   native rev beats MLX, whose rev swaps 2/4 even DENSE → that residue is the
-  4-bit model's own margin, not DiffKV).
+  4-bit model's own margin, not DKV).
 - But native list-all ENUMERATION transposed adjacent names (3/6; values walked
   document order, names didn't) — dense native enumerates correctly, so the
   compressed context was missing the positional scaffold through filler that
@@ -60,7 +60,7 @@ scrambled). Two structural bugs found and fixed on the way:
    selected but APPENDED after the ranked rows, both runtimes.
 2. **Coverage-vs-floor eviction**: the boosted-row budget floor now reserves
    room for the scaffold too (need/(1-cov_frac); margin env
-   DIFFKV_RESIDUAL_FLOOR_MARGIN, default 4). Also aligned the quota semantics
+   DKV_RESIDUAL_FLOOR_MARGIN, default 4). Also aligned the quota semantics
    (fraction of block budget) across runtimes, ASCII→Latin-1 uppercase parity
    in the C++ owner walk.
 
@@ -114,7 +114,7 @@ a DENSE control. Findings:
    second entity's own name licensed away.
 
 **Decision (evidence-directed): RC5/RC8 stay OPT-IN, and the cross-runtime
-divergence is resolved.** RC8 is unified behind `DIFFKV_RC8_LICENSE` (default
+divergence is resolved.** RC8 is unified behind `DKV_RC8_LICENSE` (default
 OFF) in BOTH runtimes — uncommented+gated in native (main.cpp), wrapped in MLX
 (batch_engine.py). Default OFF changes nothing (it only ever fired under the
 default-OFF factual store) and is now consistent + runnable for anyone A/B-ing
@@ -125,7 +125,7 @@ default list-all unchanged 5/6, recall gates green.
 Bottom line for the "which noun owned which number" thesis: retention and the
 capture-layer binding are SOLVED (owner-capture + coverage). The residual
 value→entity swaps are Qwen2.5-1.5B's own reverse-lookup ceiling, proven by the
-dense control — not something DiffKV can or should paper over with generation
+dense control — not something DKV can or should paper over with generation
 gates that regress other cases.
 
 ## 2026-07-13 — Layer 3 closed: TABLE binding (capture) + the serving sampler was a second, independent killer
@@ -137,7 +137,7 @@ Controlled reproduction (`benchmarks/table_probe2.py`: 6-row × 3-metric
 kernel-size table STRADDLING a 256-token block boundary + a second
 ablation-path table, planted in real paper text at 16k; scored per row
 correct / mixed / swap / fab / miss): dense 6/6, compressed **3/6** (cross-
-table value migration + a vanished row) — DiffKV-specific, reproduced.
+table value migration + a vanished row) — DKV-specific, reproduced.
 
 **Root cause A — capture (compression side).** Tables break both existing
 capture rules at once: (1) the digit cells are all is_core, so a block
@@ -147,14 +147,14 @@ drops table fragments structure-blind; (2) header/unit/row-name cells
 ('Kernel', 'imgs', '/sec', 'Swin-T baseline') are prose → never boosted →
 rank-r smear (hence fabricated units and lost row names — Table B decoded
 as bare values: "variant: 78.6"). Fix: **table capture**
-(`DIFFKV_RESIDUAL_TABLE_CAPTURE`, default ON; priority
-`DIFFKV_RESIDUAL_TABLE_PRIORITY`=4): every token on a table-like LINE
+(`DKV_RESIDUAL_TABLE_CAPTURE`, default ON; priority
+`DKV_RESIDUAL_TABLE_PRIORITY`=4): every token on a table-like LINE
 (>= 2 standalone '|'/'&' separators + shape guard: line-initial separator,
 LaTeX `\\` terminator, or density >= 1/12 — rejects prose with inline |x−y|
 math, which otherwise marked 19 false-positive blocks) gets the core boost ×
 priority; native also skips the coverage quota for saturated table blocks.
-Implemented in `mlx_diffkv_wrapper.py` (both capture sites, + debug dial
-`DIFFKV_DBG_TABLE`), `lowrank.cpp`, and — closing audit item C10 — the
+Implemented in `mlx_dkv_wrapper.py` (both capture sites, + debug dial
+`DKV_DBG_TABLE`), `lowrank.cpp`, and — closing audit item C10 — the
 torch/CUDA batched path via the new shared
 `native_core/compression/residual_capture.py` (token boost + owner capture +
 table capture; CPU-tested end-to-end in `tests/test_residual_capture.py`).
@@ -183,12 +183,12 @@ main.cpp):
      KEYS still penalized — the two-line lookback fixed the row starts.
 Both are suspended while a repetition LOOP is detected, so the escalated
 1.3×/256 recovery still breaks digit loops ("7741-7741");
-`DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0` restores the old behavior.
+`DKV_REP_PENALTY_PROTECT_NUMERIC=0` restores the old behavior.
 
 **End-to-end (the user's exact invocation** — `serving/cli.py --preset mid
 --serving-mode balanced`, 12k paper + both tables, temp 0): compressed
 0/6 → **5 correct + 1 mixed**, byte-matching the dense CLI control (same
-single 3x3-cell bleed) — i.e. DiffKV == dense through the full serving path;
+single 3x3-cell bleed) — i.e. DKV == dense through the full serving path;
 the residue is the 4-bit 1.5B model's own envelope.
 
 Gates (all green, both runtimes): MLX NIAH 16k d0.5+d0.9 exact, MN 3/3,
@@ -201,7 +201,7 @@ the capture change is a provable no-op there (unit-tested).
 
 Remaining tail: Table B row-name reversal (value→name) fabricates under
 BOTH dense and compressed ("Core Vector Machine" — an entity from the
-filler paper) — base-model ceiling, not DiffKV. CUDA GPU cert for the
+filler paper) — base-model ceiling, not DKV. CUDA GPU cert for the
 C10 port still owed (see CUDA_TRITON_AUDIT.md C10/C11).
 
 ## 2026-07-13 (later) — PDF-paste tables (no pipes) + the multi-turn boundary
@@ -224,9 +224,9 @@ line):
    ("[3] D. Achlioptas, ..., 2001.") also end in digits and marking them
    STOLE residual slots from a markdown table sharing the block (6/6 → 1/6).
 2. **Tiered priority**: separator-rule lines at full
-   DIFFKV_RESIDUAL_TABLE_PRIORITY, columnar lines at half — under
+   DKV_RESIDUAL_TABLE_PRIORITY, columnar lines at half — under
    saturation the explicit table always outranks incidental numeric lines.
-3. **Caption capture, COLUMNAR RUNS ONLY** (DIFFKV_RESIDUAL_TABLE_CAPTION,
+3. **Caption capture, COLUMNAR RUNS ONLY** (DKV_RESIDUAL_TABLE_CAPTION,
    default ON): an aligned table's rows are anonymous numbers — the caption
    ("Table 4 reports ...") is its only identity anchor, and without it the
    decoder finds exact numeric rows but not which table they belong to
@@ -240,7 +240,7 @@ line):
    'KxK: top1=NUMBER' record output has no pipes.
 
 Measured end state (raw harness, 16k, temp 0): markdown 6/6, aligned 6/6
-(diffkv BEATS dense's 5-partial+1-mixed on aligned), aligned@4k 6/6.
+(dkv BEATS dense's 5-partial+1-mixed on aligned), aligned@4k 6/6.
 Native: markdown 6/6 + aligned 6/6 at the DEFAULT 1.15 sampler. Gates
 green: MLX NIAH 16k d0.5/d0.9 exact, MN 3/3 (13.3 tps — the earlier 5.9
 reading was concurrent-load, re-measured clean), synthesis 6.7 == baseline;
@@ -249,13 +249,13 @@ byte-identical (1.31 GB) capture on/off — residual arrays are statically
 allocated; the observed wall delta is generation length (a full table vs a
 collapsed answer), not per-token cost.
 
-**Multi-turn boundary (dense-shared, NOT DiffKV):** paste-paper-then-ask
+**Multi-turn boundary (dense-shared, NOT DKV):** paste-paper-then-ask
 fails even with prefix sharing disabled (fresh full re-prefill) — and the
 DENSE control refuses identically ("it's not provided in the current
 context"): Qwen2.5-1.5B-4bit cannot reach back across an intervening
-assistant turn for row-level table detail, compressed or not. DiffKV
+assistant turn for row-level table detail, compressed or not. DKV
 matches dense in this regime; the compressed session-reuse path itself was
 verified healthy (turn-2 TTFT 313ms, cache hit, prose questions about the
 same paper answered correctly). Practical guidance: ask table questions in
 the same message as the pasted document, or re-paste. New diagnostic dial:
-DIFFKV_PREFIX_SHARING=0 forces fresh prefill per turn (batch_engine).
+DKV_PREFIX_SHARING=0 forces fresh prefill per turn (batch_engine).

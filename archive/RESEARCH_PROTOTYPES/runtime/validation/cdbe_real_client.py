@@ -8,7 +8,7 @@ import random
 async def run_client_session(session_id, prompt, max_tokens=512):
     url = "http://localhost:8000/v1/chat/completions"
     payload = {
-        "model": "diffkv-qwen2.5-7b",
+        "model": "dkv-qwen2.5-7b",
         "messages": [{"role": "user", "content": prompt}],
         "stream": True,
         "max_tokens": max_tokens,

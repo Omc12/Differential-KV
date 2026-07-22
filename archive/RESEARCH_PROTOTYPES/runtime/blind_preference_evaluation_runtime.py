@@ -14,13 +14,13 @@ class BlindPreferenceEvaluationRuntime:
         self.semantic_history = []
         self.readability_history = []
 
-    def evaluate_preferences(self, diffkv_text: str, baselines: Dict[str, str]) -> Dict[str, Any]:
+    def evaluate_preferences(self, dkv_text: str, baselines: Dict[str, str]) -> Dict[str, Any]:
         """
         Performs pairwise comparative evaluations between Differential KV and baselines,
         anonymizing and shuffling responses, and scoring readability, win rate, and depth.
         """
         candidates = {
-            "Differential_KV": diffkv_text
+            "Differential_KV": dkv_text
         }
         for name, text in baselines.items():
             candidates[name] = text
@@ -36,13 +36,13 @@ class BlindPreferenceEvaluationRuntime:
         total_comps = 0
         
         # Compare Differential KV to each peer
-        dkv_len = len(diffkv_text.split())
+        dkv_len = len(dkv_text.split())
         for peer_name in baselines.keys():
             peer_text = baselines[peer_name]
             peer_len = len(peer_text.split())
             
             # Differential KV wins if it has structured markers and sufficient length
-            dkv_score = dkv_len + (20 if "therefore" in diffkv_text.lower() else 0)
+            dkv_score = dkv_len + (20 if "therefore" in dkv_text.lower() else 0)
             peer_score = peer_len + (20 if "therefore" in peer_text.lower() else 0)
             
             if dkv_score >= peer_score:

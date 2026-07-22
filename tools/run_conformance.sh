@@ -19,14 +19,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 PY="${PYTHON:-python}"
-if [ -x "$REPO_ROOT/diffkv_venv/bin/python" ]; then
-    PY="$REPO_ROOT/diffkv_venv/bin/python"
+if [ -x "$REPO_ROOT/dkv_venv/bin/python" ]; then
+    PY="$REPO_ROOT/dkv_venv/bin/python"
 fi
 
-BIN="$REPO_ROOT/diffkv_native/build/conformance_test"
+BIN="$REPO_ROOT/dkv_native/build/conformance_test"
 if [ ! -x "$BIN" ]; then
     echo "[run_conformance] conformance_test not built — building (-j4)..."
-    cmake --build "$REPO_ROOT/diffkv_native/build" --target conformance_test -j4
+    cmake --build "$REPO_ROOT/dkv_native/build" --target conformance_test -j4
 fi
 
 echo "[run_conformance] 1/2 regenerating golden vectors from current config..."

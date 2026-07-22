@@ -8,7 +8,7 @@ across different batch sizes and context lengths.
 import torch
 import numpy as np
 import pandas as pd
-from runtime.flash_diffkv_attention import FlashDiffKVAttention
+from runtime.flash_dkv_attention import FlashDKVAttention
 
 def run_scaling_study():
     batch_sizes = [1, 4, 8, 16, 32]

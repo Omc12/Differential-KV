@@ -1,5 +1,5 @@
 """Decode TPS + MLX peak-memory A/B for Relational Edge Capture (REC).
-Same prompt/context both runs; only DIFFKV_RESIDUAL_EDGE_CAPTURE differs, so the
+Same prompt/context both runs; only DKV_RESIDUAL_EDGE_CAPTURE differs, so the
 delta is REC's cost. Run once per --rec value in separate processes (env is read
 at manager construction)."""
 import os, sys, json, time, argparse
@@ -30,13 +30,13 @@ def main():
     ap.add_argument("--gen", type=int, default=96)
     args = ap.parse_args()
 
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-    os.environ["DIFFKV_RESIDUAL_EDGE_CAPTURE"] = args.rec
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_RESIDUAL_EDGE_CAPTURE"] = args.rec
 
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from transformers import AutoTokenizer
     import mlx.core as mx
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
@@ -52,7 +52,7 @@ def main():
         tokenize=False, add_generation_prompt=True)
 
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256, "preset": "mid"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
+    w = DKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
     w.ensure_loaded()
     w.active_session = f"cost_{args.rec}"
 

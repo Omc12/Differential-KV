@@ -13,7 +13,7 @@ During `ContinuousBatchEngine.step()`, the runtime invokes **no** semantic routi
 
 The `KVRuntimeManager.append_tokens()` function invokes **only** the `AsyncCompressor` and the `PagedKVStore`.
 
-The `TritonDiffKV.forward()` function invokes **only** statically compiled block-sparse matrix multiplications against the `PersistentMetadataPool`.
+The `TritonDKV.forward()` function invokes **only** statically compiled block-sparse matrix multiplications against the `PersistentMetadataPool`.
 
 ## 3. Orchestration Safety
 - **No `torch.stack()` in the Hot Path:** Validated. Static metadata pools handle all buffer updates in-place.

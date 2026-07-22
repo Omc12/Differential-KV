@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 
 class TransformerKVRouter:
     """
-    Routes KV requests between the dense (standard) and sparse (DiffKV) paths.
+    Routes KV requests between the dense (standard) and sparse (DKV) paths.
     Ensures that the model receives the correct KV state regardless of sparsity level.
     """
     def __init__(self, manager):

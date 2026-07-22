@@ -7,7 +7,7 @@ vLLM requires a custom backend to implement two primary operations:
 1. `forward_prefill` (Handled by standard FlashAttention or our experimental chunked routing)
 2. `forward_decode` (The target for Differential KV integration)
 
-## The Differential KV Implementation (`DiffKVAttentionBackend`)
+## The Differential KV Implementation (`DKVAttentionBackend`)
 
 ### Metadata Assembly (`make_metadata`)
 vLLM builds `AttentionMetadata` on every step. Our backend intercepts this:

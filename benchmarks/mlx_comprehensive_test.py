@@ -6,11 +6,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../ACTIVE_RUNTIME"))
 
 # Force compressed decode
-os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
+os.environ["DKV_COMPRESSED_DECODE"] = "1"
 # Ensure we set a default max residual of 128
-os.environ.setdefault("DIFFKV_MAX_RESIDUAL", "128")
+os.environ.setdefault("DKV_MAX_RESIDUAL", "128")
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 import mlx.core as mx
 
 NEEDLE = "The secret passcode is OMEGA-7741-DELTA."
@@ -131,8 +131,8 @@ def run_test_case(wrapper, ctx_len: int, depth: float):
 
 def main():
     model_id = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-    print("Initializing MLXDiffKVWrapper...")
-    wrapper = MLXDiffKVWrapper(
+    print("Initializing MLXDKVWrapper...")
+    wrapper = MLXDKVWrapper(
         model_id=model_id,
         config={"rank": 16, "block_size": 256},
     )

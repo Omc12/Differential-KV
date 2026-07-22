@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clean, instrumented re-measurement of the DiffKV ACTIVE runtime for the paper.
+"""Clean, instrumented re-measurement of the DKV ACTIVE runtime for the paper.
 
 For each context length and each decode mode it records, from INSIDE the worker
 process (authoritative MLX metrics):
@@ -9,16 +9,16 @@ process (authoritative MLX metrics):
   * mx_decode_peak_gb     : MLX peak DURING DECODE only (peak reset at the
                             prefill->decode boundary) -> steady-state decode mem
   * mx_active_end_gb      : MLX live/active memory at end of decode
-  * kv_store_bytes        : analytic DiffKV store footprint (compressed pool + dense)
+  * kv_store_bytes        : analytic DKV store footprint (compressed pool + dense)
   * kv_dense_full_bytes   : analytic full-KV cache footprint for the same seq_len
   * num_blocks, dense_len : store occupancy at end (per layer 0; ×L for totals)
 
 Modes:
-  compressed : DIFFKV_COMPRESSED_DECODE=1  (the real DiffKV sparse decode)
-  exact      : DIFFKV_COMPRESSED_DECODE=0  (full-KV decode; upper-bound ablation)
+  compressed : DKV_COMPRESSED_DECODE=1  (the real DKV sparse decode)
+  exact      : DKV_COMPRESSED_DECODE=0  (full-KV decode; upper-bound ablation)
 
 Usage:
-  diffkv_venv/bin/python3 paper/scripts/measure_active.py --ctx 4096 8192 16384 32768 65536 \
+  dkv_venv/bin/python3 paper/scripts/measure_active.py --ctx 4096 8192 16384 32768 65536 \
        --modes compressed exact --gen 128 --out paper/generated/active_modes_sweep.json
 """
 import os, sys, json, time, argparse, gc
@@ -39,9 +39,9 @@ if ACTIVE not in sys.path:
     sys.path.insert(0, ACTIVE)
 if BENCH not in sys.path:
     sys.path.insert(0, BENCH)
-diffkv_core_path = os.path.join(ACTIVE, "native_core", "diffkv_core")
-if diffkv_core_path not in sys.path:
-    sys.path.insert(0, diffkv_core_path)
+dkv_core_path = os.path.join(ACTIVE, "native_core", "dkv_core")
+if dkv_core_path not in sys.path:
+    sys.path.insert(0, dkv_core_path)
 
 
 import torch
@@ -86,7 +86,7 @@ def _get_active_gb():
 
 
 def analytic_kv_bytes(mgr, seq_len):
-    """DiffKV store footprint (fixed pre-allocated pool + dense) vs full-KV, in bytes.
+    """DKV store footprint (fixed pre-allocated pool + dense) vs full-KV, in bytes.
 
     Pools are pre-allocated at max_blocks, so the store footprint is BOUNDED &
     context-independent; we report both the allocated (real) and used footprint.
@@ -135,16 +135,16 @@ def run_cell(ctx, gen, prompt_text, model_id):
     import numpy as np, torch
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import os
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
 
-    is_compressed = os.environ.get("DIFFKV_COMPRESSED_DECODE", "1") != "0"
+    is_compressed = os.environ.get("DKV_COMPRESSED_DECODE", "1") != "0"
     _reset_peak()
 
     if is_compressed:
-        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+        from serving.hf_dkv_wrapper import DKVHFWrapper
         cfg = {"quantization": None, "rank": 32, "block_size": 256,
                "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
-        w = DiffKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.float16)
+        w = DKVHFWrapper(model_id=model_id, config=cfg, torch_dtype=torch.float16)
         w.ensure_loaded()
         tok, mgr, model = w.tokenizer, w.manager, w.model
         dev = w.device
@@ -158,7 +158,7 @@ def run_cell(ctx, gen, prompt_text, model_id):
             mgr.clear_session("warm"); w._session_token_ids["warm"] = []
             mgr.init_session("warm", prefill_len=1)
             mgr.register_prefill_tokens("warm", torch.tensor([ids[0]], dtype=torch.long, device=dev))
-            model._diffkv_session_ids = ["warm"]
+            model._dkv_session_ids = ["warm"]
             _ = model(torch.tensor([[ids[0]]], device=dev), torch.tensor([[0]], device=dev)).logits[0, -1].float().cpu().numpy()
             mgr.clear_session("warm")
         except Exception:
@@ -170,7 +170,7 @@ def run_cell(ctx, gen, prompt_text, model_id):
         w._session_token_ids[sid] = []
         mgr.init_session(sid, prefill_len=len(ids))
         mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=dev))
-        model._diffkv_session_ids = [sid]
+        model._dkv_session_ids = [sid]
 
         CH = 512; out = None
         t0 = time.perf_counter()
@@ -184,7 +184,7 @@ def run_cell(ctx, gen, prompt_text, model_id):
         # Load standard un-patched Transformers model
         from transformers import BitsAndBytesConfig as _BnBConfig
         quantization_config = None
-        _quant = os.environ.get("DIFFKV_QUANTIZATION")
+        _quant = os.environ.get("DKV_QUANTIZATION")
         if _quant == "nf4":
             quantization_config = _BnBConfig(
                 load_in_4bit=True,
@@ -315,7 +315,7 @@ def main():
 
     if args.single:
         mode, ctx = args.single.split(","); ctx = int(ctx)
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if mode == "compressed" else "0"
+        os.environ["DKV_COMPRESSED_DECODE"] = "1" if mode == "compressed" else "0"
         text, _ = build_niah_prompt(ctx, tok)
         r = run_cell(ctx, args.gen, text, args.model)
         r.update({"mode": mode, "ctx": ctx})

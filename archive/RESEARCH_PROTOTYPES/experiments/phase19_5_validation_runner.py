@@ -59,7 +59,7 @@ class Phase19_5_ValidationEngine:
             needle_ev = NeedleHaystackEvaluator(ev)
             tracker = ReasoningTrajectoryTracker(model_id=model_id)
             
-            modes = ["FP16", "INT8-DiffKV", "Rank8-Uniform", "SAM-Adaptive", "ACTR-Stabilized", "LCG-Repair"]
+            modes = ["FP16", "INT8-DKV", "Rank8-Uniform", "SAM-Adaptive", "ACTR-Stabilized", "LCG-Repair"]
             
             # 1. Retrieval Survival (Needle)
             print("  Running Retrieval Battery...")

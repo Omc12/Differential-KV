@@ -267,8 +267,8 @@ def test_metal_residual_and_fact_parity():
         print("Metal not available, skipping Metal parity test.")
         return
         
-    from runtime.diffkv_attention import _decode_attention_metal, _DIFFKV_HAS_METAL_ATTN
-    if not _DIFFKV_HAS_METAL_ATTN:
+    from runtime.dkv_attention import _decode_attention_metal, _DKV_HAS_METAL_ATTN
+    if not _DKV_HAS_METAL_ATTN:
         print("Metal extension bindings not compiled, skipping.")
         return
 

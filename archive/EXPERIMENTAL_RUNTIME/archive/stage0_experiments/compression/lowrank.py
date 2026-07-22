@@ -163,7 +163,7 @@ def decompress_kv_sequence_lowrank(
 
 def estimate_memory(seq_len: int, heads: int, dim: int,
                     rank: int, interval: int = 64) -> dict:
-    """Compare memory for FP16 / INT8-DiffKV / LowRank-DiffKV."""
+    """Compare memory for FP16 / INT8-DKV / LowRank-DKV."""
     feat   = 2 * heads * dim
     n_anc  = max(1, seq_len // interval)
     n_del  = seq_len - n_anc

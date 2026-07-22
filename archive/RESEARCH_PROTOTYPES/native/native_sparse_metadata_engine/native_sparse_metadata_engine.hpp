@@ -11,7 +11,7 @@
 #include <cstring>
 #include <chrono>
 
-namespace diffkv {
+namespace dkv {
 
 // -------------------------------------------------------------------------
 // Compact sparse metadata layout (64 bytes per session — cache-friendly)
@@ -101,4 +101,4 @@ private:
     mutable uint64_t repair_triggered_{0};
 };
 
-} // namespace diffkv
+} // namespace dkv

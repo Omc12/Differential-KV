@@ -24,25 +24,25 @@ class ServingObservabilityBridge:
         uptime = time.time() - self.start_time
         
         lines = [
-            f"# HELP diffkv_uptime_seconds Total system uptime",
-            f"# TYPE diffkv_uptime_seconds counter",
-            f"diffkv_uptime_seconds {uptime}",
+            f"# HELP dkv_uptime_seconds Total system uptime",
+            f"# TYPE dkv_uptime_seconds counter",
+            f"dkv_uptime_seconds {uptime}",
             
-            f"# HELP diffkv_active_sessions Number of currently active sessions",
-            f"# TYPE diffkv_active_sessions gauge",
-            f"diffkv_active_sessions {len(self.session_manager.list_sessions())}",
+            f"# HELP dkv_active_sessions Number of currently active sessions",
+            f"# TYPE dkv_active_sessions gauge",
+            f"dkv_active_sessions {len(self.session_manager.list_sessions())}",
             
-            f"# HELP diffkv_processed_requests_total Total requests processed",
-            f"# TYPE diffkv_processed_requests_total counter",
-            f"diffkv_processed_requests_total {sched_metrics['processed_requests']}",
+            f"# HELP dkv_processed_requests_total Total requests processed",
+            f"# TYPE dkv_processed_requests_total counter",
+            f"dkv_processed_requests_total {sched_metrics['processed_requests']}",
             
-            f"# HELP diffkv_average_latency_ms Average request latency in milliseconds",
-            f"# TYPE diffkv_average_latency_ms gauge",
-            f"diffkv_average_latency_ms {sched_metrics['average_latency_ms']}",
+            f"# HELP dkv_average_latency_ms Average request latency in milliseconds",
+            f"# TYPE dkv_average_latency_ms gauge",
+            f"dkv_average_latency_ms {sched_metrics['average_latency_ms']}",
             
-            f"# HELP diffkv_recovery_rate_ratio Successful recovery rate (0.0 to 1.0)",
-            f"# TYPE diffkv_recovery_rate_ratio gauge",
-            f"diffkv_recovery_rate_ratio {rec_metrics['recovery_rate']}"
+            f"# HELP dkv_recovery_rate_ratio Successful recovery rate (0.0 to 1.0)",
+            f"# TYPE dkv_recovery_rate_ratio gauge",
+            f"dkv_recovery_rate_ratio {rec_metrics['recovery_rate']}"
         ]
         
         return "\n".join(lines) + "\n"

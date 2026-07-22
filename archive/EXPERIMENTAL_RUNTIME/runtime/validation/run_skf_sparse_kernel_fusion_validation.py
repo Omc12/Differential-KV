@@ -16,7 +16,7 @@ if not os.path.exists(msvc_bin):
 if msvc_bin not in os.environ.get("PATH", ""):
     os.environ["PATH"] = msvc_bin + ";" + os.environ.get("PATH", "")
 
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 from runtime.raw_nvidia_smi_capture_system import RawNvidiaSmiCaptureSystem
 from runtime.raw_torch_profiler_recorder import RawTorchProfilerRecorder
 from runtime.scaling_integrity_guard import ScalingIntegrityGuard
@@ -51,7 +51,7 @@ def run_ndx_baseline_mode(model_id: str, context_target: int, max_new_tokens: in
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n[Comparative Base] Running Stage 3C.1.5 (NDX) baseline on {model_id}...")
     
-    wrapper = DiffKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16}, device=device)
+    wrapper = DKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16}, device=device)
     
     base_text = "The quick brown fox jumps over the lazy dog. NDX baseline context. "
     repetitions = (context_target // len(wrapper.tokenizer.tokenize(base_text))) + 1
@@ -116,7 +116,7 @@ def run_skf_native_runtime(
     auditor.log_call("PersistentSparseKernelRuntime")
     
     # 2. Load wrapper model
-    wrapper = DiffKVHFWrapper(model_id, {
+    wrapper = DKVHFWrapper(model_id, {
         "mode": "lowrank_sparse",
         "block_size": 16,  # Tensor-core friendly block sizing
         "rank": 16

@@ -1,10 +1,10 @@
 #!/bin/zsh
-# Clean, sequential, authoritative measurement batch for the DiffKV paper.
+# Clean, sequential, authoritative measurement batch for the DKV paper.
 # Run with nothing else competing for CPU (the NumPy SVD during prefill is
 # CPU-bound; concurrent processes inflate prefill time ~2x).
 set -e
 cd "$(dirname "$0")/../.."
-PY=diffkv_venv/bin/python3
+PY=dkv_venv/bin/python3
 echo "=== [1/3] decode-mode ablation 4k-32k (compressed + exact) ==="
 $PY paper/scripts/measure_active.py --ctx 4096 8192 16384 32768 \
     --modes compressed exact --gen 128 \

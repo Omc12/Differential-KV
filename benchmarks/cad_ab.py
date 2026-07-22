@@ -1,6 +1,6 @@
-"""Context-Aware Decoding A/B in the REAL DiffKV compressed setting.
+"""Context-Aware Decoding A/B in the REAL DKV compressed setting.
 Prior-contradicting relational claims buried in real paper filler; compares
-DIFFKV_CAD_ALPHA off vs on. Forced-choice 2-word answers (no scorer contamination).
+DKV_CAD_ALPHA off vs on. Forced-choice 2-word answers (no scorer contamination).
 """
 import os, sys, argparse, re
 
@@ -46,13 +46,13 @@ def main():
     ap.add_argument("--depth", type=float, default=0.1)
     args = ap.parse_args()
 
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-    os.environ["DIFFKV_CAD_ALPHA"] = str(args.alpha)
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_CAD_ALPHA"] = str(args.alpha)
 
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
     with open(os.path.join(HERE, "random_features_paper.txt")) as f:
@@ -69,7 +69,7 @@ def main():
         return full, q + " " + instr
 
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256, "preset": "mid"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
+    w = DKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
     w.ensure_loaded()
 
     n_ok = 0

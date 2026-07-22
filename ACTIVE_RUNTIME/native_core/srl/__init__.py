@@ -11,7 +11,7 @@ to under 1s for simple queries.
 Usage (called by KVRuntimeManager):
     from native_core.srl import build_srl_for_session, SessionSRLState
 
-Usage (called by diffkv_attention.py decode path):
+Usage (called by dkv_attention.py decode path):
     from native_core.srl import route_query
 """
 

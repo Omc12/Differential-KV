@@ -1,9 +1,9 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 import logging
 
-class QwenSparseIntegration(DiffKVHFWrapper):
+class QwenSparseIntegration(DKVHFWrapper):
     """
     Integrates Qwen models with Differential KV sparse attention.
     Specifically tuned for Qwen's architecture and attention patterns.
@@ -28,7 +28,7 @@ class QwenSparseIntegration(DiffKVHFWrapper):
         self.logger.info("Injecting sparse attention hooks into Qwen layers...")
         # In a full implementation, we would iterate through self.model.model.layers
         # and wrap the self_attn module.
-        # For now, we rely on the DiffKVHFWrapper's custom generate loop.
+        # For now, we rely on the DKVHFWrapper's custom generate loop.
         pass
 
     def run_sparse_inference(self, prompt, max_new_tokens=100):

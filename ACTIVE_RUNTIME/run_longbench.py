@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_longbench.py — LongBench Evaluation for DiffKV ACTIVE_RUNTIME
+run_longbench.py — LongBench Evaluation for DKV ACTIVE_RUNTIME
 ==================================================================
 Runs N examples each from: NarrativeQA, GovReport, Qasper, HotpotQA
 
@@ -29,8 +29,8 @@ Options:
     --output             JSON output path       (default: longbench_results.json)
     --datasets           comma-separated list   (default: narrativeqa,govreport,qasper,hotpotqa)
     --temperature        generation temperature (default: 0.0 = greedy)
-    --dense              Run vanilla dense model only (no DiffKV compression)
-    --compare            Run BOTH dense and DiffKV then print a side-by-side comparison table
+    --dense              Run vanilla dense model only (no DKV compression)
+    --compare            Run BOTH dense and DKV then print a side-by-side comparison table
 """
 
 import os
@@ -50,7 +50,7 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("DIFFKV_USE_TORCH_COMPILE", "0")
+os.environ.setdefault("DKV_USE_TORCH_COMPILE", "0")
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 
 # ── Dataset config ─────────────────────────────────────────────────────────────
@@ -404,11 +404,11 @@ def dense_generate(mlx_model, mlx_tokenizer, prompt_str, max_new_tokens, tempera
 def run_evaluation(args):
     import torch
 
-    mode_label = "Dense" if getattr(args, "dense", False) else ("Dense + DiffKV" if getattr(args, "compare", False) else "DiffKV")
+    mode_label = "Dense" if getattr(args, "dense", False) else ("Dense + DKV" if getattr(args, "compare", False) else "DKV")
 
     print()
     print("╔" + "═" * 68 + "╗")
-    print("║   DiffKV LongBench Evaluation" + " " * 38 + "║")
+    print("║   DKV LongBench Evaluation" + " " * 38 + "║")
     print("╠" + "═" * 68 + "╣")
     print(f"║  Model        : {args.model:<51}║")
     print(f"║  Mode         : {mode_label:<51}║")
@@ -436,20 +436,20 @@ def run_evaluation(args):
     print(f"  Device : {device}")
 
     if device == "mps":
-        os.environ.setdefault("DIFFKV_MPS_APPROXIMATE_ATTN", "1")
+        os.environ.setdefault("DKV_MPS_APPROXIMATE_ATTN", "1")
 
     run_dense  = getattr(args, "dense",   False)
-    run_diffkv = not run_dense  # True for normal or --compare
+    run_dkv = not run_dense  # True for normal or --compare
     run_compare = getattr(args, "compare", False)
     if run_compare:
         run_dense  = True
-        run_diffkv = True
+        run_dkv = True
 
     # ── Load dense model (mlx_lm) when needed ─────────────────────────────────
     mlx_model = None
     mlx_tokenizer = None
     if run_dense:
-        print(f"\n[1/{3 if run_diffkv and run_compare else 3}] Loading dense model (mlx_lm) …")
+        print(f"\n[1/{3 if run_dkv and run_compare else 3}] Loading dense model (mlx_lm) …")
         try:
             from mlx_lm import load as mlx_load_fn
             # Prefer 4-bit quant to keep memory reasonable on MacBook
@@ -461,14 +461,14 @@ def run_evaluation(args):
             print(f"[ERROR] Could not load dense mlx_lm model: {e}")
             sys.exit(1)
 
-    # ── Load DiffKV wrapper when needed ───────────────────────────────────────
+    # ── Load DKV wrapper when needed ───────────────────────────────────────
     wrapper = None
     tokenizer = None
-    if run_diffkv:
-        print(f"\n[{'2' if run_dense and run_compare else '1'}/3] Loading DiffKV model …")
+    if run_dkv:
+        print(f"\n[{'2' if run_dense and run_compare else '1'}/3] Loading DKV model …")
         t0 = time.perf_counter()
-        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-        wrapper = DiffKVHFWrapper(
+        from serving.hf_dkv_wrapper import DKVHFWrapper
+        wrapper = DKVHFWrapper(
             model_id=args.model,
             config={
                 "rank":             args.rank,
@@ -481,7 +481,7 @@ def run_evaluation(args):
             device=device,
         )
         load_time = time.perf_counter() - t0
-        print(f"  DiffKV loaded in {load_time:.1f}s")
+        print(f"  DKV loaded in {load_time:.1f}s")
         tokenizer = wrapper.tokenizer
 
     # If dense-only, still need a tokenizer for prompt building
@@ -529,7 +529,7 @@ def run_evaluation(args):
 
     # Track dense results separately for comparison table
     dense_summary_rows   = []  # list of dicts per dataset
-    diffkv_summary_rows  = []
+    dkv_summary_rows  = []
 
     summary_rows = []
 
@@ -635,18 +635,18 @@ def run_evaluation(args):
                 "total_time_s": round(d_time, 2), "per_example": d_per,
             }
 
-            # Flush between dense and DiffKV passes
+            # Flush between dense and DKV passes
             import mlx.core as mx
             try: mx.clear_cache()
             except Exception: pass
             gc.collect(); gc.collect()
 
-        # ── DiffKV pass ──────────────────────────────────────────────────────
-        if not run_diffkv:
+        # ── DKV pass ──────────────────────────────────────────────────────
+        if not run_dkv:
             continue
 
         print()
-        print(f"  ┌─ {'[DiffKV] ' if run_compare else ''}{cfg['description']}")
+        print(f"  ┌─ {'[DKV] ' if run_compare else ''}{cfg['description']}")
         print(f"  │  {len(examples)} examples | max_gen={max_gen}")
         print(f"  │")
 
@@ -692,7 +692,7 @@ def run_evaluation(args):
                     if prediction.startswith(prompt_clean):
                         prediction = prediction[len(prompt_clean):]
                     else:
-                        from serving.hf_diffkv_wrapper import _normalize_references
+                        from serving.hf_dkv_wrapper import _normalize_references
                         prompt_clean_norm = _normalize_references(prompt_clean)
                         if prediction.startswith(prompt_clean_norm):
                             prediction = prediction[len(prompt_clean_norm):]
@@ -778,7 +778,7 @@ def run_evaluation(args):
         # Schema matching the requested format
         summary_entry = {
             "dataset":       cfg["description"],
-            "method":        "DiffKV",
+            "method":        "DKV",
             "EM":            avg_em,
             "F1":            avg_f1,
             "Rouge_L":       avg_rl,
@@ -789,7 +789,7 @@ def run_evaluation(args):
         }
         all_results["summary"].append(summary_entry)
         summary_rows.append(summary_entry)
-        diffkv_summary_rows.append(summary_entry)
+        dkv_summary_rows.append(summary_entry)
 
         all_results["datasets"][ds_key] = {
             "description":  cfg["description"],
@@ -812,7 +812,7 @@ def run_evaluation(args):
 
     # ── Final summary table ───────────────────────────────────────────────────
     print()
-    if run_dense and not run_diffkv:
+    if run_dense and not run_dkv:
         # Dense-only table
         print("╔" + "═" * 88 + "╗")
         print("║   FINAL RESULTS SUMMARY (Dense)" + " " * 56 + "║")
@@ -828,7 +828,7 @@ def run_evaluation(args):
             print(f"║{row:<88}║")
         print("╚" + "═" * 88 + "╝")
     elif not run_compare:
-        # Normal DiffKV-only table
+        # Normal DKV-only table
         print("╔" + "═" * 88 + "╗")
         print("║   FINAL RESULTS SUMMARY" + " " * 64 + "║")
         print("╠" + "═" * 88 + "╣")
@@ -843,15 +843,15 @@ def run_evaluation(args):
             print(f"║{row:<88}║")
         print("╚" + "═" * 88 + "╝")
     else:
-        # ── Comparison table: Dense vs DiffKV ─────────────────────────────
+        # ── Comparison table: Dense vs DKV ─────────────────────────────
         # Build lookup by dataset name
         d_map = {r["dataset"]: r for r in dense_summary_rows}
-        k_map = {r["dataset"]: r for r in diffkv_summary_rows}
+        k_map = {r["dataset"]: r for r in dkv_summary_rows}
         datasets_in_order = [r["dataset"] for r in dense_summary_rows]
 
         W = 108
         print("╔" + "═" * W + "╗")
-        print("║   COMPARISON: Dense vs DiffKV" + " " * (W - 30) + "║")
+        print("║   COMPARISON: Dense vs DKV" + " " * (W - 30) + "║")
         print("╠" + "═" * W + "╣")
         hdr = (f"  {'Dataset':<28} {'Method':<8}"
                f" {'EM':>6} {'F1':>6} {'RL':>6}"
@@ -862,7 +862,7 @@ def run_evaluation(args):
         for dname in datasets_in_order:
             dr = d_map.get(dname)
             kr = k_map.get(dname)
-            for r, method in [(dr, "Dense"), (kr, "DiffKV")]:
+            for r, method in [(dr, "Dense"), (kr, "DKV")]:
                 if r is None:
                     continue
                 name = dname[:26]
@@ -878,7 +878,7 @@ def run_evaluation(args):
                 drl  = kr["Rouge_L"]  - dr["Rouge_L"]
                 dem  = kr["EM"]       - dr["EM"]
                 dspd = kr["decode_tps"] - dr["decode_tps"]
-                delta = (f"  {'  Δ DiffKV-Dense':<36}"
+                delta = (f"  {'  Δ DKV-Dense':<36}"
                          f" {_sgn(dem)}{dem:>5.4f} {_sgn(df1)}{df1:>5.4f} {_sgn(drl)}{drl:>5.4f}"
                          f"  {'':>8}  {_sgn(dspd)}{dspd:>7.1f}t/s"
                          f"  {'':>7}  {'':>7}")
@@ -900,7 +900,7 @@ def run_evaluation(args):
 # ── Argument parser ───────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(
-        description="DiffKV LongBench Evaluation — NarrativeQA, GovReport, Qasper, HotpotQA",
+        description="DKV LongBench Evaluation — NarrativeQA, GovReport, Qasper, HotpotQA",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--model",        type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
@@ -921,11 +921,11 @@ def parse_args():
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
         "--dense", action="store_true", default=False,
-        help="Run only vanilla dense mlx_lm model (no DiffKV compression)"
+        help="Run only vanilla dense mlx_lm model (no DKV compression)"
     )
     mode.add_argument(
         "--compare", action="store_true", default=False,
-        help="Run BOTH dense and DiffKV sequentially and print a side-by-side delta table"
+        help="Run BOTH dense and DKV sequentially and print a side-by-side delta table"
     )
     return p.parse_args()
 

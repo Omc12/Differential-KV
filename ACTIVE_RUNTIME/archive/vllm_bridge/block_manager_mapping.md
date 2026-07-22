@@ -24,4 +24,4 @@ class PhysicalTokenBlock:
     compressed_u_ptr: int = -1
     compressed_v_ptr: int = -1
 ```
-vLLM's scheduler remains completely unaware of the internal math. It simply passes the extended `BlockTable` to the `diffkv` attention backend.
+vLLM's scheduler remains completely unaware of the internal math. It simply passes the extended `BlockTable` to the `dkv` attention backend.

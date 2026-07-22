@@ -11,12 +11,12 @@ from typing import Dict, Any, Optional
 from integrations.runtime_hook_manager import RuntimeHookManager
 
 class LlamaCppAdapter:
-    def __init__(self, model_path: str, diffkv_config: Dict[str, Any]):
+    def __init__(self, model_path: str, dkv_config: Dict[str, Any]):
         self.model_path = model_path
-        self.hook_manager = RuntimeHookManager(diffkv_config)
+        self.hook_manager = RuntimeHookManager(dkv_config)
         
         # In a real scenario, we'd initialize the Llama object from llama-cpp-python
-        # self.llm = Llama(model_path=model_path, n_ctx=diffkv_config.get("n_ctx", 2048), ...)
+        # self.llm = Llama(model_path=model_path, n_ctx=dkv_config.get("n_ctx", 2048), ...)
         self.llm = None 
         
     def _kv_hook(self, layer_idx: int, k_ptr: Any, v_ptr: Any, seq_len: int):

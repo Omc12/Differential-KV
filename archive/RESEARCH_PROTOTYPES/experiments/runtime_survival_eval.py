@@ -2,7 +2,7 @@
 experiments/runtime_survival_eval.py
 
 Measures token-level survival and reasoning continuity over extreme horizons.
-Compares FP16, Vanilla Quantized, and DiffKV-enabled runtimes.
+Compares FP16, Vanilla Quantized, and DKV-enabled runtimes.
 """
 
 import torch
@@ -21,7 +21,7 @@ def run_survival_eval():
     modes = [
         {"name": "FP16 (Baseline)", "config": {"mode": "fp16"}},
         {"name": "Int4 (Vanilla)", "config": {"mode": "int4"}},
-        {"name": "DiffKV (Adaptive)", "config": {"mode": "diffkv_adaptive", "target_compression": 20.0}}
+        {"name": "DKV (Adaptive)", "config": {"mode": "dkv_adaptive", "target_compression": 20.0}}
     ]
     
     results = {mode["name"]: [] for mode in modes}
@@ -40,7 +40,7 @@ def run_survival_eval():
             elif mode["name"] == "FP16 (Baseline)" and horizon > 65536:
                 score = 0.8 # VRAM pressure/drift
             else:
-                score = 0.95 # DiffKV stability
+                score = 0.95 # DKV stability
                 
             results[mode["name"]].append(score)
             

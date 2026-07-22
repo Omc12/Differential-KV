@@ -43,7 +43,7 @@ def handle_serve(args):
     if args.real_hardware:
         print("\n--- STARTING SUSTAINED REAL EXECUTION LOOP ---")
         import time
-        from runtime.triton_diffkv import TritonDiffKV
+        from runtime.triton_dkv import TritonDKV
         
         # We'll use a large batch to actually stress the GPU
         batch_size = args.batch_size if hasattr(args, 'batch_size') else 1
@@ -64,7 +64,7 @@ def handle_serve(args):
                 # Real Triton Kernel Execution
                 # We run multiple times per step to ensure utilization
                 for _ in range(10):
-                    _ = TritonDiffKV.reconstruct_lowrank(U, V, anchor)
+                    _ = TritonDKV.reconstruct_lowrank(U, V, anchor)
                 
                 step += 1
                 if step % 100 == 0:
@@ -104,7 +104,7 @@ def handle_doctor(args):
             print(f"- {s}")
 
 def main():
-    parser = argparse.ArgumentParser(prog="diffkv", description="Differential KV CLI")
+    parser = argparse.ArgumentParser(prog="dkv", description="Differential KV CLI")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Serve

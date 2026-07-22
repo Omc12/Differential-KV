@@ -55,7 +55,7 @@ first decode step the runtime resolves the decode policy once, flushes pending w
 \texttt{mx.eval}, and calls \texttt{mx.clear\_cache} to return the peak GQA-expanded prefill
 activations to the shared pool. When decode will use the compressed path, it additionally
 \emph{drops the native prefill KV cache} entirely: decode runs solely on the compressed store plus
-the dense window, so decode-time memory reflects the \diffkv{} footprint and not a retained
+the dense window, so decode-time memory reflects the \dkv{} footprint and not a retained
 full-context cache.
 
 \begin{\figenv}[t]

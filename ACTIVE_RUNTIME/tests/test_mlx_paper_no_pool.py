@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
 # Read the paper text
 with open("ACTIVE_RUNTIME/nat_paper_with_needle.txt", "r") as f:
@@ -26,8 +26,8 @@ prompt = (
     "<|im_start|>assistant\n"
 )
 
-# Initialize MLX DiffKV wrapper
-wrapper = MLXDiffKVWrapper(
+# Initialize MLX DKV wrapper
+wrapper = MLXDKVWrapper(
     model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit",
     config={"rank": 16, "block_size": 256},
 )

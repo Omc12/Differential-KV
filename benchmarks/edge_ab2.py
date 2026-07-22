@@ -59,19 +59,19 @@ def main():
     ap.add_argument("--gen", type=int, default=40)
     args = ap.parse_args()
 
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0" if args.mode == "dense" else "1"
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-    os.environ["DIFFKV_RESIDUAL_EDGE_CAPTURE"] = "0" if args.mode == "sparse_off" else "1"
+    os.environ["DKV_COMPRESSED_DECODE"] = "0" if args.mode == "dense" else "1"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_RESIDUAL_EDGE_CAPTURE"] = "0" if args.mode == "sparse_off" else "1"
 
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 
     body, templ = build_prompt(tok, args.target)
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256, "preset": "mid"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
+    w = DKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
     w.ensure_loaded()
 
     results = []

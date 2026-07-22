@@ -7,24 +7,24 @@ import time
 
 # Define base sweep env
 env_base = {
-    "DIFFKV_ENGAGE_THRESHOLD": "1024",
-    "DIFFKV_NATIVE_ATTN": "0",  # default path (triggers execute_cpu_attention)
-    "DIFFKV_FORCE_CPU_ATTN": "1",  # force CPU to print LSE2
-    "DIFFKV_MPS_APPROXIMATE_ATTN": "1",
-    "DIFFKV_DENSE_DIRECT": "1",
-    "DIFFKV_POOL_ABS_ROT": "1",
-    "DIFFKV_TEMPERATURE": "0",
-    "DIFFKV_DISABLE_VSL": "1",
-    "DIFFKV_ENABLE_FACTUAL": "0",
-    "DIFFKV_MAX_TOKENS": "40",
-    "DIFFKV_REPETITION_PENALTY": "1.0",
-    "DIFFKV_DBG_LSE2": "1",
+    "DKV_ENGAGE_THRESHOLD": "1024",
+    "DKV_NATIVE_ATTN": "0",  # default path (triggers execute_cpu_attention)
+    "DKV_FORCE_CPU_ATTN": "1",  # force CPU to print LSE2
+    "DKV_MPS_APPROXIMATE_ATTN": "1",
+    "DKV_DENSE_DIRECT": "1",
+    "DKV_POOL_ABS_ROT": "1",
+    "DKV_TEMPERATURE": "0",
+    "DKV_DISABLE_VSL": "1",
+    "DKV_ENABLE_FACTUAL": "0",
+    "DKV_MAX_TOKENS": "40",
+    "DKV_REPETITION_PENALTY": "1.0",
+    "DKV_DBG_LSE2": "1",
     "HF_HUB_OFFLINE": "1"
 }
 
-binary = "../diffkv_native/build/diffkv_native"
-model = "../diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
-make_prompt_script = "../diffkv_native/tests/make_niah_prompt.py"
+binary = "../dkv_native/build/dkv_native"
+model = "../dkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+make_prompt_script = "../dkv_native/tests/make_niah_prompt.py"
 
 needle = "The secret passcode is OMEGA-7741-DELTA."
 question = "What is the secret passcode? Repeat it exactly."
@@ -32,7 +32,7 @@ question = "What is the secret passcode? Repeat it exactly."
 def run_cell(ctx, depth, gqa_on):
     env = os.environ.copy()
     env.update(env_base)
-    env["DIFFKV_CB_GQA_ROUTE"] = "1" if gqa_on else "0"
+    env["DKV_CB_GQA_ROUTE"] = "1" if gqa_on else "0"
     
     # Generate prompt
     cmd_prompt = [

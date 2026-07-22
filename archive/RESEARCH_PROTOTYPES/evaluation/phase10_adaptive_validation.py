@@ -144,7 +144,7 @@ class Phase10Validator:
                 # Low-rank approximation: Ur Vr^T
                 # Delta relative to start? Phase 8 logic used periodic anchors.
                 # For this validation, we'll just do a straight LR on the whole head KV.
-                # Actually, to be consistent with DiffKV, we should use the Delta.
+                # Actually, to be consistent with DKV, we should use the Delta.
                 # But for a quick validation of the scheduler, direct LR is a good proxy.
                 
                 # Flatten for SVD

@@ -14,13 +14,13 @@ peak actually moves before declaring a win.
 
 Usage:
     PROF_CTX=16384 python benchmarks/native_mem_profile.py
-    PROF_CTX=16384 DIFFKV_LEGO_PREFILL=1 python benchmarks/native_mem_profile.py
+    PROF_CTX=16384 DKV_LEGO_PREFILL=1 python benchmarks/native_mem_profile.py
 """
 import os, sys, time, threading, subprocess, ctypes
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(REPO, "diffkv_native/build/diffkv_native")
-MODEL = os.path.join(REPO, "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf")
+BIN = os.path.join(REPO, "dkv_native/build/dkv_native")
+MODEL = os.path.join(REPO, "dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf")
 sys.path.insert(0, os.path.join(REPO, "benchmarks"))
 from bench_common import build_niah_prompt  # noqa
 
@@ -41,8 +41,8 @@ if isinstance(prompt_text, tuple):
     prompt_text = prompt_text[0]
 
 env = dict(os.environ)
-env.setdefault("DIFFKV_ENGAGE_THRESHOLD", "4096")
-env["DIFFKV_MAX_TOKENS"] = "8"
+env.setdefault("DKV_ENGAGE_THRESHOLD", "4096")
+env["DKV_MAX_TOKENS"] = "8"
 
 proc = subprocess.Popen([BIN, MODEL, "-"], stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -57,7 +57,7 @@ def rd_stderr():
         line = raw.decode("utf-8", errors="replace").rstrip()
         if any(s in line for s in ("Prefill Progress", "LEGO_PREFILL", "DEBUG_CAP",
                                    "engage_threshold", "Prefill Phase", "auto engage",
-                                   "[DiffKV", "Loading", "loaded", "Step 1 ")):
+                                   "[DKV", "Loading", "loaded", "Step 1 ")):
             events.append((time.time() - t0, line[:110]))
 
 def rd_stdout():

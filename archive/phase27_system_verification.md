@@ -17,8 +17,8 @@ For each system:
 **Verdict: EXECUTES**
 
 - File: `ACTIVE_RUNTIME/native_core/streaming_sparse_ingest.py` (319 lines)
-- Import chain: `launch_real_serving.py` → `DiffKVHFWrapper` → `KVRuntimeManager.__init__` → `StreamingSparseIngestManager()` instantiated
-- Call site: `kv_manager.ingest_streaming(sid, layer_idx, k, v)` — called in `diffkv_attention.py` L86 (decode) and L159 (prefill)
+- Import chain: `launch_real_serving.py` → `DKVHFWrapper` → `KVRuntimeManager.__init__` → `StreamingSparseIngestManager()` instantiated
+- Call site: `kv_manager.ingest_streaming(sid, layer_idx, k, v)` — called in `dkv_attention.py` L86 (decode) and L159 (prefill)
 - Behavior: micro-block accumulation → compression trigger on fill → delegate to AsyncCompressor
 - **CONFIRMED EXECUTING**
 
@@ -55,7 +55,7 @@ For each system:
 
 - File: `RESEARCH_PROTOTYPES/compression/shared_basis.py` (4 KB)
 - No import chain from `launch_real_serving.py` or any file in `ACTIVE_RUNTIME/serving/`
-- Not referenced in `kv_runtime_manager.py`, `diffkv_attention.py`, or `batch_engine.py`
+- Not referenced in `kv_runtime_manager.py`, `dkv_attention.py`, or `batch_engine.py`
 - Code exists and may be correct; it is simply never called
 - **CONFIRMED DISCONNECTED**
 
@@ -68,8 +68,8 @@ For each system:
 - File: `ACTIVE_RUNTIME/native_core/sparse_decode/triton_sparse_attn.py` (234 lines)
 - The Triton kernel `_fused_sparse_decode_kernel` with `@triton.jit` is real and complete
 - Wrapper `native_triton_sparse_attn_decode()` requires argument `pool: NativeBlockPool`
-- `NativeBlockPool` requires `diffkv_core` Python extension to be compiled (bindings.cpp → .pyd/.so)
-- `diffkv_core/` directory: CMakeLists.txt present, source files present, **zero compiled artifacts**
+- `NativeBlockPool` requires `dkv_core` Python extension to be compiled (bindings.cpp → .pyd/.so)
+- `dkv_core/` directory: CMakeLists.txt present, source files present, **zero compiled artifacts**
 - The actual decode path calls `batched_sparse_attn_decode()` (Phase 8 PyTorch batched einsum) — not this kernel
 - **CONFIRMED: TRITON FUSED DECODE KERNEL NEVER DISPATCHES IN PRODUCTION**
 
@@ -79,7 +79,7 @@ For each system:
 
 **Verdict: EXECUTES**
 
-- Call site: `runtime/diffkv_attention.py` L224-248
+- Call site: `runtime/dkv_attention.py` L224-248
 - `F.scaled_dot_product_attention(query_states, key_states, value_states, is_causal=(q_len > 1))`
 - PyTorch 2.x SDPA dispatcher: selects FlashAttention2 if available, else efficient attention, else math
 - This is called on every prefill token batch regardless of context length
@@ -91,7 +91,7 @@ For each system:
 
 **Verdict: PARTIAL PROTOTYPE — conditional import with live risk**
 
-- Call site: `runtime/diffkv_attention.py` L232-240
+- Call site: `runtime/dkv_attention.py` L232-240
 - Condition: `elif q_len > 1024 and key_len == q_len:` — only for long same-length prefill
 - Import: `from research.sparse_prefill_anchors import RetrievalAwareSparsePrefill`
 - The `research/` module directory in `ACTIVE_RUNTIME/` was not directly audited for this file
@@ -129,7 +129,7 @@ For each system:
 
 - File: `ACTIVE_RUNTIME/native_core/graph_runtime/static_decode_graph.py` (58 lines)
 - Code is real: `torch.cuda.CUDAGraph()`, `with torch.cuda.graph(self.graph):`, `self.graph.replay()`
-- Never instantiated in `launch_real_serving.py`, `batch_engine.py`, or `diffkv_attention.py`
+- Never instantiated in `launch_real_serving.py`, `batch_engine.py`, or `dkv_attention.py`
 - Depends on a `decode_fn` and `NativeBlockPool` which are not wired in
 - **CONFIRMED: CUDA GRAPH NEVER CAPTURED OR REPLAYED**
 
@@ -162,8 +162,8 @@ For each system:
 
 **Verdict: EXECUTES**
 
-- File: `ACTIVE_RUNTIME/runtime/diffkv_attention.py` L267-275
-- Applied in `apply_diffkv_attention_patch()` called at wrapper init:
+- File: `ACTIVE_RUNTIME/runtime/dkv_attention.py` L267-275
+- Applied in `apply_dkv_attention_patch()` called at wrapper init:
   ```python
   def last_token_lm_head_forward(hidden_states):
       if hidden_states.shape[1] > 1:

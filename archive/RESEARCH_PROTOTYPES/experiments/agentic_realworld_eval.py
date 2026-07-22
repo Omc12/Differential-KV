@@ -7,7 +7,7 @@ Tasks include codebase editing and autonomous tool chains.
 
 import json
 import os
-from agents.diffkv_agent_runtime import DiffKVAgentRuntime
+from agents.dkv_agent_runtime import DKVAgentRuntime
 from integrations.vllm_runtime_adapter import VLLMAdapter
 
 def run_agentic_eval():
@@ -21,9 +21,9 @@ def run_agentic_eval():
     
     results = []
     
-    config = {"mode": "diffkv_adaptive", "device": "cuda"}
+    config = {"mode": "dkv_adaptive", "device": "cuda"}
     adapter = VLLMAdapter("facebook/opt-125m", config) # Placeholder model
-    agent = DiffKVAgentRuntime(adapter, config)
+    agent = DKVAgentRuntime(adapter, config)
     
     for task in tasks:
         print(f"\nRunning Task: {task['name']}...")

@@ -8,12 +8,12 @@ pip install -e .[gpu]
 ## 2. Diagnostics
 Check your environment:
 ```bash
-diffkv doctor
+dkv doctor
 ```
 
 ## 3. Launch Server
 ```bash
-diffkv serve --model Qwen/Qwen2.5-7B-Instruct
+dkv serve --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 ## 4. Run Examples

@@ -13,10 +13,10 @@ from typing import Dict, Any
 from integrations.runtime_hook_manager import RuntimeHookManager
 
 class OllamaAdapter:
-    def __init__(self, model_name: str, diffkv_config: Dict[str, Any], base_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str, dkv_config: Dict[str, Any], base_url: str = "http://localhost:11434"):
         self.model_name = model_name
         self.base_url = base_url
-        self.hook_manager = RuntimeHookManager(diffkv_config)
+        self.hook_manager = RuntimeHookManager(dkv_config)
         
     def generate(self, prompt: str, max_tokens: int = 128):
         print(f"[OllamaAdapter] Generating with model {self.model_name}...")
@@ -31,7 +31,7 @@ class OllamaAdapter:
         # For validation, we simulate the streaming response
         # Ollama doesn't naturally expose KV cache via API, so we often
         # pair it with a "sidecar" monitor that watches the process memory
-        # or uses a modified Ollama build with DiffKV hooks.
+        # or uses a modified Ollama build with DKV hooks.
         
         for i in range(max_tokens):
             self.hook_manager.on_token_start(i)

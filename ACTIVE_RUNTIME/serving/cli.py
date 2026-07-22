@@ -136,9 +136,9 @@ class ThemedStdout:
         if data != "\n":
             self._skip_next_newline = False
             
-        # Bypass buffering for engine-level [DiffKV] warnings/updates
+        # Bypass buffering for engine-level [DKV] warnings/updates
         # so they print immediately when they occur (e.g. before prefill starts).
-        is_engine_warning = "[DiffKV]" in data
+        is_engine_warning = "[DKV]" in data
         
         if self._buffering_enabled and not is_engine_warning:
             formatted_data = self._format_themed_output(data)
@@ -154,12 +154,12 @@ class ThemedStdout:
 
     def _format_themed_output(self, data):
         # Don't double color if escape sequences are already present in system messages
-        if "\033[" in data and not any(tag in data for tag in ["[System]", "[Warning]", "[Error]", "[DiffKV]"]):
+        if "\033[" in data and not any(tag in data for tag in ["[System]", "[Warning]", "[Error]", "[DKV]"]):
             return data
             
         lines = data.split("\n")
         processed_lines = []
-        is_verbose = os.environ.get("DIFFKV_VERBOSE") == "1"
+        is_verbose = os.environ.get("DKV_VERBOSE") == "1"
         
         for line in lines:
             stripped = line.strip()
@@ -169,10 +169,10 @@ class ThemedStdout:
                 
             # Filter developer telemetry logs if not in verbose mode
             is_telemetry = any(tag in stripped for tag in [
-                "[DiffKV BatchEngine]", 
-                "[DiffKV Telemetry]", 
-                "[DiffKV VRAM]", 
-                "[DiffKV Step]"
+                "[DKV BatchEngine]", 
+                "[DKV Telemetry]", 
+                "[DKV VRAM]", 
+                "[DKV Step]"
             ])
             is_important = any(tag in stripped for tag in [
                 "WARNING:", "Warning:", "ERROR:", "Error:", "[Warning]", "[Error]"
@@ -187,7 +187,7 @@ class ThemedStdout:
                 continue
                 
             # Check if this is a bullet point line (starts with spaces and "- ")
-            # e.g. "  - DIFFKV_MPS_APPROXIMATE_ATTN = 1"
+            # e.g. "  - DKV_MPS_APPROXIMATE_ATTN = 1"
             if line.startswith("  - ") or line.startswith("    - "):
                 idx = line.find("- ")
                 if idx != -1:
@@ -199,13 +199,13 @@ class ThemedStdout:
                 continue
                 
             replacements = [
-                ("[DiffKV MLX Wrapper]", "\033[38;5;27m\033[1m[DiffKV MLX Wrapper]\033[0m\033[38;5;27m"),
-                ("[DiffKV BatchEngine]", "\033[38;5;27m\033[1m[DiffKV BatchEngine]\033[0m\033[38;5;27m"),
-                ("[DiffKV Telemetry]", "\033[38;5;27m\033[1m[DiffKV Telemetry]\033[0m\033[38;5;27m"),
-                ("[DiffKV VRAM]", "\033[38;5;27m\033[1m[DiffKV VRAM]\033[0m\033[38;5;27m"),
-                ("[DiffKV Step]", "\033[38;5;27m\033[1m[DiffKV Step]\033[0m\033[38;5;27m"),
-                ("[DiffKV MLX]", "\033[38;5;81m\033[1m[DiffKV MLX]\033[0m\033[38;5;81m"),
-                ("[DiffKV]", "\033[38;5;81m\033[1m[DiffKV]\033[0m\033[38;5;81m"),
+                ("[DKV MLX Wrapper]", "\033[38;5;27m\033[1m[DKV MLX Wrapper]\033[0m\033[38;5;27m"),
+                ("[DKV BatchEngine]", "\033[38;5;27m\033[1m[DKV BatchEngine]\033[0m\033[38;5;27m"),
+                ("[DKV Telemetry]", "\033[38;5;27m\033[1m[DKV Telemetry]\033[0m\033[38;5;27m"),
+                ("[DKV VRAM]", "\033[38;5;27m\033[1m[DKV VRAM]\033[0m\033[38;5;27m"),
+                ("[DKV Step]", "\033[38;5;27m\033[1m[DKV Step]\033[0m\033[38;5;27m"),
+                ("[DKV MLX]", "\033[38;5;81m\033[1m[DKV MLX]\033[0m\033[38;5;81m"),
+                ("[DKV]", "\033[38;5;81m\033[1m[DKV]\033[0m\033[38;5;81m"),
                 ("[System]", "\033[38;5;33m\033[1m[System]\033[0m\033[38;5;33m"),
                 ("[Warning]", "\033[38;5;214m\033[1m[Warning]\033[0m\033[38;5;214m"),
                 ("[Error]", "\033[38;5;203m\033[1m[Error]\033[0m\033[38;5;203m"),
@@ -507,7 +507,7 @@ async def run_client_mode(args):
     
     show_banner()
     
-    print_system(f"Connecting to DiffKV Gateway at {COLOR_BOLD}{api_url}{COLOR_RESET}...")
+    print_system(f"Connecting to DKV Gateway at {COLOR_BOLD}{api_url}{COLOR_RESET}...")
     print_system(f"Session ID: {COLOR_BOLD}{session_id}{COLOR_RESET}")
     print_system("Type /help to see all available commands.")
     print("-" * 80)
@@ -560,12 +560,12 @@ async def run_client_mode(args):
                     print_system("No text pasted. Cancelled.")
                     continue
                 _est_tokens = len(pasted_text) // 4
-                _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                _limit = int(os.environ.get("DKV_MAX_INPUT_TOKENS", "32768"))
                 if _est_tokens > _limit:
                     print_warning(
                         f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
                         f"It will be truncated on submit. Raise the limit with: "
-                        f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                        f"DKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
                     )
                 else:
                     print_system(f"Captured ~{_est_tokens:,} tokens (limit: {_limit:,}). Submitting...")
@@ -596,12 +596,12 @@ async def run_client_mode(args):
                     continue
 
                 _est_tokens = len(pasted_text) // 4
-                _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                _limit = int(os.environ.get("DKV_MAX_INPUT_TOKENS", "32768"))
                 if _est_tokens > _limit:
                     print_warning(
                         f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
                         f"It will be truncated on submit. Raise the limit with: "
-                        f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                        f"DKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
                     )
                 else:
                     print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} (~{_est_tokens:,} tokens). Submitting...")
@@ -611,7 +611,7 @@ async def run_client_mode(args):
                 print("  /reset, /new       : Clear chat history and start a new session.")
                 print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                 print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
-                print("                       Raise token limit: DIFFKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
+                print("                       Raise token limit: DKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
                 print("  /file <path>       : Load a text file directly from disk as the prompt.")
                 print("                       Format: /file <path> | [optional question]")
                 print("  /stats             : Fetch live runtime & memory stats from the server.")
@@ -785,9 +785,9 @@ def json_loads(s):
 # ---------------------------------------------------------------------------
 async def run_direct_mode(args):
     show_banner()
-    print_system("Starting DiffKV in Direct Mode. Loading wrappers and tokenizer...")
+    print_system("Starting DKV in Direct Mode. Loading wrappers and tokenizer...")
     
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from serving.batch_engine import ContinuousBatchEngine
     from serving.production_session_manager import ProductionSessionManager
 
@@ -801,37 +801,37 @@ async def run_direct_mode(args):
 
     # Wire platform settings
     if _best_device == "mps":
-        if os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
-            os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
-        if os.environ.get("DIFFKV_USE_TORCH_COMPILE") is None:
-            os.environ["DIFFKV_USE_TORCH_COMPILE"] = "0"
+        if os.environ.get("DKV_MPS_APPROXIMATE_ATTN") is None:
+            os.environ["DKV_MPS_APPROXIMATE_ATTN"] = "1"
+        if os.environ.get("DKV_USE_TORCH_COMPILE") is None:
+            os.environ["DKV_USE_TORCH_COMPILE"] = "0"
         print_system("Apple Silicon/MPS environment configuration:")
-        print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
-        print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
+        print(f"  - DKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DKV_MPS_APPROXIMATE_ATTN')}")
+        print(f"  - DKV_USE_TORCH_COMPILE     = {os.environ.get('DKV_USE_TORCH_COMPILE')}")
 
     if _best_device == "cuda":
         # ── CUDA ↔ MLX parity defaults (explicit env still wins) ──
         # V-side rebalancing before the joint K|V SVD, matching MLX's
         # v_scale_on.  It is already the code default in
         # compress_layer_blocks_gpu; set here too so the CLI surfaces it and a
-        # profile/A-B can flip it with DIFFKV_V_SCALE=0.
-        os.environ.setdefault("DIFFKV_V_SCALE", "1")
+        # profile/A-B can flip it with DKV_V_SCALE=0.
+        os.environ.setdefault("DKV_V_SCALE", "1")
         print_system("CUDA ↔ MLX parity configuration:")
-        print(f"  - DIFFKV_V_SCALE              = {os.environ.get('DIFFKV_V_SCALE')} (V rebalanced before joint SVD)")
+        print(f"  - DKV_V_SCALE              = {os.environ.get('DKV_V_SCALE')} (V rebalanced before joint SVD)")
         # CAD (relational accuracy) auto-enables for high/quality/max presets in
-        # DiffKVHFWrapper — matching MLX (mlx_diffkv_wrapper); reported there.
-        # Streaming compression (long-context peak VRAM, DIFFKV_STREAMING_COMPRESS)
-        # and lower engagement (DIFFKV_ENGAGE_THRESHOLD) are left opt-in: MLX
-        # engages DiffKV from token 1 by design (slower short-context), while the
+        # DKVHFWrapper — matching MLX (mlx_dkv_wrapper); reported there.
+        # Streaming compression (long-context peak VRAM, DKV_STREAMING_COMPRESS)
+        # and lower engagement (DKV_ENGAGE_THRESHOLD) are left opt-in: MLX
+        # engages DKV from token 1 by design (slower short-context), while the
         # CUDA default bypasses to dense below the threshold for faster short
         # prompts.  Flip either explicitly to match MLX's always-on behavior.
         print(f"  - CAD                        = auto for high/quality/max preset (see wrapper)")
 
-    # ── BEST DiffKV decode config (shared with the serving gateway) ──
-    # setdefault the user-optimal serving policy: fast exact-dense for short prompts, DiffKV
+    # ── BEST DKV decode config (shared with the serving gateway) ──
+    # setdefault the user-optimal serving policy: fast exact-dense for short prompts, DKV
     # sparse at >=8k, decompress-and-cache fast decode + adaptive bias when sparse. Single
-    # source of truth in serving/decode_config.py (an explicit env still wins). Force DiffKV
-    # always-on with DIFFKV_COMPRESSED_DECODE=1.
+    # source of truth in serving/decode_config.py (an explicit env still wins). Force DKV
+    # always-on with DKV_COMPRESSED_DECODE=1.
     from serving.decode_config import apply_best_decode_defaults
     apply_best_decode_defaults(log=print_system)
 
@@ -871,8 +871,8 @@ async def run_direct_mode(args):
 
     if _best_device == "mps" and args.preset:
         try:
-            from native_core.config import DiffKVConfig
-            cfg = DiffKVConfig({"preset": args.preset})
+            from native_core.config import DKVConfig
+            cfg = DKVConfig({"preset": args.preset})
             watermark = cfg.mps_watermark
             if watermark > 0.0:
                 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
@@ -883,7 +883,7 @@ async def run_direct_mode(args):
             print_warning(f"Could not configure MPS memory limits: {e}")
 
     print_system(f"Loading Model: {COLOR_BOLD}{args.model}{COLOR_RESET}...")
-    wrapper = DiffKVHFWrapper(
+    wrapper = DKVHFWrapper(
         args.model,
         config={
             'rank':             args.rank,
@@ -901,7 +901,7 @@ async def run_direct_mode(args):
     draft_wrapper = None
     if args.draft_model:
         print_system(f"Loading Speculative Draft Model: {args.draft_model}...")
-        draft_wrapper = DiffKVHFWrapper(
+        draft_wrapper = DKVHFWrapper(
             args.draft_model,
             config={
                 'rank':             args.rank,
@@ -980,12 +980,12 @@ async def run_direct_mode(args):
                         print_system("No text pasted. Cancelled.")
                         continue
                     _est_tokens = len(pasted_text) // 4
-                    _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                    _limit = int(os.environ.get("DKV_MAX_INPUT_TOKENS", "32768"))
                     if _est_tokens > _limit:
                         print_warning(
                             f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
                             f"It will be truncated on submit. Raise the limit with: "
-                            f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                            f"DKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
                         )
                     else:
                         print_system(f"Captured ~{_est_tokens:,} tokens (limit: {_limit:,}). Submitting...")
@@ -1016,12 +1016,12 @@ async def run_direct_mode(args):
                         continue
 
                     _est_tokens = len(pasted_text) // 4
-                    _limit = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+                    _limit = int(os.environ.get("DKV_MAX_INPUT_TOKENS", "32768"))
                     if _est_tokens > _limit:
                         print_warning(
                             f"Input is ~{_est_tokens:,} tokens, which exceeds the limit of {_limit:,}. "
                             f"It will be truncated on submit. Raise the limit with: "
-                            f"DIFFKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
+                            f"DKV_MAX_INPUT_TOKENS={_est_tokens + 2048} python serving/cli.py ..."
                         )
                     else:
                         print_system(f"Loaded file {COLOR_BOLD}{filepath}{COLOR_RESET} (~{_est_tokens:,} tokens). Submitting...")
@@ -1031,7 +1031,7 @@ async def run_direct_mode(args):
                     print("  /reset, /new       : Reset current conversation and release KV cache.")
                     print("  /system <prompt>   : Set a custom system prompt to guide the AI.")
                     print("  /paste, /multiline : Enter multiline mode for pasting papers or long text.")
-                    print("                       Raise token limit: DIFFKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
+                    print("                       Raise token limit: DKV_MAX_INPUT_TOKENS=65536 (default: 32768)")
                     print("  /file <path>       : Load a text file directly from disk as the prompt.")
                     print("                       Format: /file <path> | [optional question]")
                     print("  /stats             : Print model details, VRAM, and KV compression diagnostics.")
@@ -1266,7 +1266,7 @@ async def run_direct_mode(args):
 def main():
     sys.stdout = ThemedStdout(sys.stdout)
     sys.stderr = ThemedStdout(sys.stderr, buffer_stderr=True)
-    parser = argparse.ArgumentParser(description="DiffKV CLI: Interactive terminal interface for testing models running with DiffKV.")
+    parser = argparse.ArgumentParser(description="DKV CLI: Interactive terminal interface for testing models running with DKV.")
     
     # Mode selection
     parser.add_argument('--api-url', type=str, default=None,

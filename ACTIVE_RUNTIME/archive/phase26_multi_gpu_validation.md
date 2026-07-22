@@ -6,7 +6,7 @@ We evaluated the architectural simulation under heavy OpenWebUI serving concurre
 
 ### Metrics Comparison
 
-| Metric | Dense Baseline | Single-GPU DiffKV | Distributed Sparse Runtime |
+| Metric | Dense Baseline | Single-GPU DKV | Distributed Sparse Runtime |
 |---|---|---|---|
 | **Total Context Handled** | 1,000,000 tokens | 1,000,000 tokens | **1,000,000 tokens** |
 | **VRAM per GPU** | OOM (Failed at 30k) | OOM (Failed at 150k) | **< 6.5 GB per GPU** |

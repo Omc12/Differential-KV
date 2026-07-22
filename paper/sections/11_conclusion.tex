@@ -1,7 +1,7 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-\diffkv{} is a KV-cache compression runtime that separates a block's smooth, shared structure---captured
+\dkv{} is a KV-cache compression runtime that separates a block's smooth, shared structure---captured
 by an anchor and a rank-\rank{} joint $K\!\mid\!V$ delta---from its distinctive outlier tokens, kept
 as exact residuals selected by a multi-signal ranking: reconstruction error, entity-name owner-capture,
 and relational edge-capture. A fused decode buffer routes queries in the low-rank subspace without
@@ -9,7 +9,7 @@ ever decompressing the cache, attends the residuals and a recency window exactly
 two in log-space, materialising the selected blocks once per interval into a persistent buffer;
 a training-free block-sparse prefill makes long-context prefill sub-quadratic; and a fixed block
 pool bounds the memory. Implemented entirely in MLX and measured on Qwen2.5-1.5B (int4) on an
-$8.6$\,GB Apple~M3, \diffkv{} holds a bounded KV
+$8.6$\,GB Apple~M3, \dkv{} holds a bounded KV
 state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, recovers a
 buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where a standard PyTorch full-KV
 cache runs out of memory at $\ptOOMK$k, and overtakes even a memory-optimized dense on long-context
@@ -23,5 +23,5 @@ decode kernels~\cite{tillet2019triton}, and an optional MLA-style latent pre-pro
 DeepSeek-V2~\cite{deepseekv2}. These are implemented and CPU-verified but await GPU hardware
 validation; the remaining next steps are a fused single-launch CUDA decode kernel and a broader
 evaluation across models, hardware, and standard long-context suites. We have been careful
-to claim only what the measurements support: \diffkv{} is a memory-and-prefill instrument for
+to claim only what the measurements support: \dkv{} is a memory-and-prefill instrument for
 long context on commodity unified-memory hardware, not a universally faster one.

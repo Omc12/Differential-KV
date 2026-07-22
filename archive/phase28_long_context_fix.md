@@ -4,7 +4,7 @@
 Fix the unguarded import path for `RetrievalAwareSparsePrefill` which could crash any prompt with `q_len > 1024`.
 
 ## Action Taken
-- Modified `ACTIVE_RUNTIME/runtime/diffkv_attention.py`.
+- Modified `ACTIVE_RUNTIME/runtime/dkv_attention.py`.
 - Wrapped the import of `research.sparse_prefill_anchors.RetrievalAwareSparsePrefill` in a `try/except` block.
 - If the import fails (which it often would, as the module might be missing or experimental), it catches the exception and cleanly falls back to `F.scaled_dot_product_attention`, passing `is_causal=(q_len > 1)`.
 

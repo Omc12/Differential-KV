@@ -86,10 +86,10 @@ def run_ablation_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
     print("--- Running Residual Signal Ablation Benchmark ---", flush=True)
 
     arms = [
-        ("Dense Baseline", {"DIFFKV_COMPRESSED_DECODE": "0"}),
-        ("Full DiffKV", {"DIFFKV_COMPRESSED_DECODE": "1", "DIFFKV_RESIDUAL_OWNER_CAPTURE": "1", "DIFFKV_RESIDUAL_EDGE_CAPTURE": "1"}),
-        ("No Owner Capture", {"DIFFKV_COMPRESSED_DECODE": "1", "DIFFKV_RESIDUAL_OWNER_CAPTURE": "0", "DIFFKV_RESIDUAL_EDGE_CAPTURE": "1"}),
-        ("No Edge Capture", {"DIFFKV_COMPRESSED_DECODE": "1", "DIFFKV_RESIDUAL_OWNER_CAPTURE": "1", "DIFFKV_RESIDUAL_EDGE_CAPTURE": "0"}),
+        ("Dense Baseline", {"DKV_COMPRESSED_DECODE": "0"}),
+        ("Full DKV", {"DKV_COMPRESSED_DECODE": "1", "DKV_RESIDUAL_OWNER_CAPTURE": "1", "DKV_RESIDUAL_EDGE_CAPTURE": "1"}),
+        ("No Owner Capture", {"DKV_COMPRESSED_DECODE": "1", "DKV_RESIDUAL_OWNER_CAPTURE": "0", "DKV_RESIDUAL_EDGE_CAPTURE": "1"}),
+        ("No Edge Capture", {"DKV_COMPRESSED_DECODE": "1", "DKV_RESIDUAL_OWNER_CAPTURE": "1", "DKV_RESIDUAL_EDGE_CAPTURE": "0"}),
     ]
 
     results = []
@@ -100,8 +100,8 @@ def run_ablation_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
             os.environ[k] = v
 
         # Import/re-init wrapper
-        from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
-        wrapper = MLXDiffKVWrapper(
+        from serving.mlx_dkv_wrapper import MLXDKVWrapper
+        wrapper = MLXDKVWrapper(
             model_id=model_id,
             config={"rank": 32, "block_size": 256},
         )

@@ -49,7 +49,7 @@ from runtime.sparse_arithmetic_participation_meter import SparseArithmeticPartic
 # ---------------------------------------------------------------------------
 # Runtime infrastructure
 # ---------------------------------------------------------------------------
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 from decode_pipeline_fusion_engine import DecodePipelineFusionEngine
 from runtime.cdbe_resolver import CDBEResolver
 
@@ -391,7 +391,7 @@ async def run_sat_attention_validation() -> None:
 
     resolver: Optional[CDBEResolver] = None
     try:
-        wrapper = DiffKVHFWrapper(
+        wrapper = DKVHFWrapper(
             MODEL_ID,
             {"mode": "lowrank_sparse", "block_size": BLOCK_SIZE, "rank": RANK},
             quantization_config=bnb_config,

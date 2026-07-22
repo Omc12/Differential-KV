@@ -150,7 +150,7 @@ torch.cuda.empty_cache()
 s_pre_load = mem_snapshot("pre-load")
 
 from native_core.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -178,7 +178,7 @@ kv_manager = KVRuntimeManager(
     micro_block_size=16,
     async_compression=True,
 )
-apply_diffkv_attention_patch(model, kv_manager)
+apply_dkv_attention_patch(model, kv_manager)
 patch_kv_manager_instrumentation(kv_manager)
 
 torch.cuda.synchronize()
@@ -203,7 +203,7 @@ def run_session(label: str, prompt_tokens: int, decode_steps: int):
 
     session_id = f"audit_{label}"
     kv_manager.init_session(session_id)
-    model._diffkv_session_ids = [session_id]
+    model._dkv_session_ids = [session_id]
 
     # Reset instrumentation logs for this session
     reconstruction_log.clear()
@@ -362,12 +362,12 @@ print(f"  StreamingSparseIngestManager active: {has_streaming}")
 print(f"  get_streaming_blocks() available:    {has_streaming_blocks}")
 print(f"  micro_block_size:                    {kv_manager.micro_block_size}")
 
-# Check if hf_diffkv_wrapper.generate() bypasses DiffKV (it uses past_key_values)
-print(f"\n  WARNING: hf_diffkv_wrapper.generate() uses past_key_values=past_kv directly.")
-print(f"  This BYPASSES the DiffKV attention patch. HuggingFace native KV cache is used.")
+# Check if hf_dkv_wrapper.generate() bypasses DKV (it uses past_key_values)
+print(f"\n  WARNING: hf_dkv_wrapper.generate() uses past_key_values=past_kv directly.")
+print(f"  This BYPASSES the DKV attention patch. HuggingFace native KV cache is used.")
 print(f"  HOWEVER: batch_engine._step() does NOT pass past_key_values.")
-print(f"  -> OpenWebUI serving (via batch_engine) correctly routes through DiffKV patch.")
-print(f"  -> hf_diffkv_wrapper.generate() is legacy/unused in production serving path.")
+print(f"  -> OpenWebUI serving (via batch_engine) correctly routes through DKV patch.")
+print(f"  -> hf_dkv_wrapper.generate() is legacy/unused in production serving path.")
 
 
 # ── Summary table ─────────────────────────────────────────────────────────────

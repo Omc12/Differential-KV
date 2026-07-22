@@ -7,7 +7,7 @@ Ablation design:
   A. FP16 deltas + anchors        (quantization_error = 0 baseline)
   B. INT8 deltas, no chaining     (pure quantization noise)
   C. FP16 chained reconstruction  (chain error without quantization)
-  D. INT8 chained (full DiffKV)   (both errors combined)
+  D. INT8 chained (full DKV)   (both errors combined)
   E. Varying anchor spacing       (anchor_spacing_error)
   F. Layer sensitivity ablation   (layer_sensitivity_error)
 
@@ -95,8 +95,8 @@ def ablation_int8_no_chain(kv: torch.Tensor, interval: int) -> float:
     return _rms_error(kv, out.half())
 
 
-def ablation_full_diffkv(kv: torch.Tensor, interval: int) -> float:
-    """D. Full DiffKV: INT8 deltas + chained reconstruction."""
+def ablation_full_dkv(kv: torch.Tensor, interval: int) -> float:
+    """D. Full DKV: INT8 deltas + chained reconstruction."""
     strategy = PeriodicAnchorStrategy(interval=interval)
     manager  = AnchorManager(strategy=strategy)
     manager.compress(kv)
@@ -109,7 +109,7 @@ def ablation_spacing_sweep(kv: torch.Tensor, intervals: list) -> dict:
     """E. Vary anchor spacing, measure error at each level."""
     results = {}
     for interval in intervals:
-        err = ablation_full_diffkv(kv, interval)
+        err = ablation_full_dkv(kv, interval)
         results[interval] = round(err, 6)
     return results
 
@@ -164,8 +164,8 @@ def main():
         # B: INT8 no chain (quantization error only)
         err_b = ablation_int8_no_chain(kv, interval=64)
 
-        # D: Full DiffKV (combined)
-        err_d = ablation_full_diffkv(kv, interval=64)
+        # D: Full DKV (combined)
+        err_d = ablation_full_dkv(kv, interval=64)
 
         # E: Spacing sweep
         spacing = ablation_spacing_sweep(kv, intervals)
@@ -182,7 +182,7 @@ def main():
             "mode":          mode,
             "fp16_chain":    round(err_a, 6),
             "int8_no_chain": round(err_b, 6),
-            "full_diffkv":   round(err_d, 6),
+            "full_dkv":   round(err_d, 6),
             "attribution": {
                 "chain_error_contribution":   round(chain_error, 6),
                 "quantization_contribution":  round(quant_error, 6),
@@ -199,7 +199,7 @@ def main():
 
         print(f"  FP16 chain error (chain only):     {err_a:.6f}")
         print(f"  INT8 quant error (no chain):       {err_b:.6f}")
-        print(f"  Full DiffKV (combined):            {err_d:.6f}")
+        print(f"  Full DKV (combined):            {err_d:.6f}")
         print(f"  Dominant factor: {result['attribution']['dominant_factor']}")
         print(f"  Adaptive policy delta err:         {adap['adaptive_delta']:+.6f}")
         print(f"  Spacing sweep: "

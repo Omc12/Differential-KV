@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""NIAH recall + decode-TPS harness for the DiffKV active runtime.
+"""NIAH recall + decode-TPS harness for the DKV active runtime.
 
 Loads the wrapper ONCE and loops over (ctx, depth), building a needle prompt at
 each, running greedy decode, and checking the needle in the GENERATED tokens only
 (NOT the prompt-inclusive response — that would false-positive on the planted
-needle). The decode path is selected by DIFFKV_COMPRESSED_DECODE in the env,
+needle). The decode path is selected by DKV_COMPRESSED_DECODE in the env,
 exactly as in production. Run once per mode:
 
-    DIFFKV_COMPRESSED_DECODE=1 python benchmarks/niah_recall.py --ctx 4096 8192 16384 --depths 0.1 0.5 0.9
-    DIFFKV_COMPRESSED_DECODE=0 python benchmarks/niah_recall.py --ctx 4096 8192 16384 --depths 0.1 0.5 0.9
+    DKV_COMPRESSED_DECODE=1 python benchmarks/niah_recall.py --ctx 4096 8192 16384 --depths 0.1 0.5 0.9
+    DKV_COMPRESSED_DECODE=0 python benchmarks/niah_recall.py --ctx 4096 8192 16384 --depths 0.1 0.5 0.9
 
 TPS here is approximate (model reused across cells, per-cell kernel recompiles);
 use bench_worker.py for authoritative TPS. This harness's job is the recall gate.
@@ -115,18 +115,18 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=
         from bench_common import build_niah_prompt  # the harder, on-topic NIAH prompt
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
 
     quant_val = None if (model_id.startswith(".") or model_id.startswith("/")) else "int4"
     cfg = {"quantization": quant_val, "rank": rank, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id=model_id, config=cfg)
+    wrapper = DKVHFWrapper(model_id=model_id, config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
 
-    mode = os.environ.get("DIFFKV_COMPRESSED_DECODE", "auto")
+    mode = os.environ.get("DKV_COMPRESSED_DECODE", "auto")
     src = "multi-needle" if multi_needle else ("bench_common" if use_bench else "ai-history")
-    print(f"DIFFKV_COMPRESSED_DECODE={mode}  gen={gen}  prompt={src}", flush=True)
+    print(f"DKV_COMPRESSED_DECODE={mode}  gen={gen}  prompt={src}", flush=True)
     print(f"{'ctx':>7} {'depth':>5} {'recall':>6} {'tps':>6}   sample", flush=True)
 
     iter_depths = [0.5] if (use_bench or multi_needle) else depths
@@ -156,7 +156,7 @@ def run(model_id, contexts, depths, gen, use_bench=False, rank=16, multi_needle=
             wrapper._session_token_ids[sid] = []
             mgr.init_session(sid, prefill_len=len(ids))
             mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-            model._diffkv_session_ids = [sid]
+            model._dkv_session_ids = [sid]
 
             CH = 512
             output = None

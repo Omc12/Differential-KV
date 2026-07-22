@@ -1,4 +1,4 @@
-"""CPU parity test for the DIFFKV_DECODE_CACHE_CUDA gather cache.
+"""CPU parity test for the DKV_DECODE_CACHE_CUDA gather cache.
 
 The optimization caches the output of _gather_routed_blocks_for_kernel across
 decode tokens. That is correct ONLY if the gather is deterministic and
@@ -10,7 +10,7 @@ identical cached object.
 """
 import os, sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-os.environ.setdefault("DIFFKV_RESIDUAL_EXACT_ROPE", "1")  # exercise the exact-position path
+os.environ.setdefault("DKV_RESIDUAL_EXACT_ROPE", "1")  # exercise the exact-position path
 
 import torch
 from native_core.sparse_decode.triton_fused_decode import _gather_routed_blocks_for_kernel

@@ -198,7 +198,7 @@ class LowRankScheduleSelector:
             if isinstance(r, str) and (r == "fp16" or r == "dense"):
                 self._strategies[i] = PeriodicAnchorStrategy(interval=16)
             elif isinstance(r, str) and r == "int8":
-                self._strategies[i] = "int8_diffkv" # Placeholder for int8 delta mode
+                self._strategies[i] = "int8_dkv" # Placeholder for int8 delta mode
             else:
                 # Store the rank itself, we'll handle low-rank compression in the evaluator
                 self._strategies[i] = f"lowrank_{r}"

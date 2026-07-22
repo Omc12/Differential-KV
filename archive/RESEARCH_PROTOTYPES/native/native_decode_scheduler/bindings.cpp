@@ -6,7 +6,7 @@
 #include "native_decode_scheduler.hpp"
 
 namespace py = pybind11;
-using namespace diffkv;
+using namespace dkv;
 
 PYBIND11_MODULE(native_decode_scheduler, m) {
     m.doc() = "RCO-N: Native Decode Scheduler — persistent batch management in C++";

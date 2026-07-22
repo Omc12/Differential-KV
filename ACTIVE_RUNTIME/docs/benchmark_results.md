@@ -4,7 +4,7 @@
 
 ## Methodology
 
-All benchmarks run on single GPU. Baseline = dense HF inference (no DiffKV).
+All benchmarks run on single GPU. Baseline = dense HF inference (no DKV).
 
 ## Format
 
@@ -14,7 +14,7 @@ Model:       Qwen2-7B
 GPU:         RTX 4090 / A100 / etc.
 Context:     25K tokens
 
-| Metric          | Baseline | DiffKV | Delta |
+| Metric          | Baseline | DKV | Delta |
 |-----------------|----------|--------|-------|
 | Peak VRAM (GB)  |          |        |       |
 | Prefill (s)     |          |        |       |

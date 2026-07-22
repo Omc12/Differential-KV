@@ -15,20 +15,20 @@ import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def test_session_deletion():
-    orig_engage = os.environ.get("DIFFKV_ENGAGE_THRESHOLD")
-    os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "0"
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    orig_engage = os.environ.get("DKV_ENGAGE_THRESHOLD")
+    os.environ["DKV_ENGAGE_THRESHOLD"] = "0"
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from serving.production_session_manager import ProductionSessionManager
     from serving.batch_engine import ContinuousBatchEngine
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     print(f"\n[Test Session Deletion] Initializing model {MODEL}...")
     try:
         from native_core.mac_utils import get_best_device
         device = get_best_device()
     except ImportError:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 8}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 8}, device=device)
     kv_mgr = wrapper.manager
     pool = kv_mgr.native_pool
     
@@ -121,9 +121,9 @@ async def test_session_deletion():
         
     await engine.stop()
     if orig_engage is not None:
-        os.environ["DIFFKV_ENGAGE_THRESHOLD"] = orig_engage
+        os.environ["DKV_ENGAGE_THRESHOLD"] = orig_engage
     else:
-        os.environ.pop("DIFFKV_ENGAGE_THRESHOLD", None)
+        os.environ.pop("DKV_ENGAGE_THRESHOLD", None)
     print("\n[PASS] test_session_deletion verified complete reclamation successfully!")
 
 if __name__ == "__main__":

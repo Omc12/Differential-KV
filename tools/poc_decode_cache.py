@@ -1,10 +1,12 @@
-"""POC: materialize routed blocks' K/V from low-rank form, SDPA, compare to reference DiffKV."""
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent  # repo root
+"""POC: materialize routed blocks' K/V from low-rank form, SDPA, compare to reference DKV."""
 import sys, os, math, time, numpy as np
-sys.path.insert(0, "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME")
+sys.path.insert(0, str(ROOT / "ACTIVE_RUNTIME"))
 import mlx.core as mx
-from serving.mlx_diffkv_wrapper import compute_decode_attention_static, MLXKVBlockManager
-sys.path.insert(0, "/Users/omchimurkar1/Desktop/Differential-KV/ACTIVE_RUNTIME/tests")
-from test_diffkv_kernel_parity import exact_attention, build_diffkv_store_from_kv, cosine_sim
+from serving.mlx_dkv_wrapper import compute_decode_attention_static, MLXKVBlockManager
+sys.path.insert(0, str(ROOT / "ACTIVE_RUNTIME/tests"))
+from test_dkv_kernel_parity import exact_attention, build_dkv_store_from_kv, cosine_sim
 
 H_kv, H_q, D = 2, 12, 128
 RANK, BLOCK_SIZE, RECENCY = 32, 256, 512
@@ -22,15 +24,15 @@ mgr = MLXKVBlockManager(num_layers=1, heads=H_q, kv_heads=H_kv, head_dim=D,
                         rank=RANK, block_size=BLOCK_SIZE, recency_window=RECENCY)
 mgr.max_blocks = 256; mgr.max_dense_len = RECENCY + BLOCK_SIZE
 sid = "poc"; mgr.init_session(sid)
-build_diffkv_store_from_kv(mgr, sid, 0, K, V)
+build_dkv_store_from_kv(mgr, sid, 0, K, V)
 sess = mgr.sessions[sid]; nb = sess["num_blocks"][0]
 print(f"nb={nb}, dense_len={sess['dense_lens'][0]}")
 
-# reference DiffKV output
+# reference DKV output
 out_ref4d = mgr.execute_decode_attention(sid, 0, Q.reshape(1, H_q, 1, D), rope=None,
                                          scale=scale, num_key_value_groups=H_q//H_kv)
 out_ref = out_ref4d[0, :, 0, :]; mx.eval(out_ref)
-print(f"[reference DiffKV]  cosine vs exact = {cosine_sim(out_exact, out_ref):.5f}")
+print(f"[reference DKV]  cosine vs exact = {cosine_sim(out_exact, out_ref):.5f}")
 
 # --- POC: MATERIALIZE recon K/V (anchor + U@VK, residual override) then SDPA ---
 U   = sess["comp_U"][0][:nb]          # [nb, S_comp, rank]
@@ -95,7 +97,7 @@ vs = fv.reshape(1, H_kv, L, D)
 mask4d = add_mask.reshape(1,1,1,L)
 out_poc = mx.fast.scaled_dot_product_attention(qs, ks, vs, scale=scale, mask=mask4d)[0,:,0,:]; mx.eval(out_poc)
 print(f"[POC materialize+SDPA] cosine vs exact = {cosine_sim(out_exact, out_poc):.5f}")
-print(f"[POC vs reference DiffKV] cosine = {cosine_sim(out_ref, out_poc):.5f}")
+print(f"[POC vs reference DKV] cosine = {cosine_sim(out_ref, out_poc):.5f}")
 
 # --- speed: materialize+SDPA per 'token' vs the reference decode ---
 def timeit(fn, iters=200):

@@ -82,10 +82,10 @@ def plot_all(results_file: str, output_dir: str):
     H, D, R, B = 32, 128, 16, 64
     feat_dim = 2 * H * D
     fp16_b = [ctx * feat_dim * 2 / (1024**2) for ctx in contexts]
-    diffkv_b = [( (ctx // B) * feat_dim * 2 + ctx * R * 2 + (ctx // B) * R * feat_dim * 4 ) / (1024**2) for ctx in contexts]
+    dkv_b = [( (ctx // B) * feat_dim * 2 + ctx * R * 2 + (ctx // B) * R * feat_dim * 4 ) / (1024**2) for ctx in contexts]
     
     plt.plot(contexts, fp16_b, 'r--', label="FP16 (Theoretical)")
-    plt.plot(contexts, diffkv_b, 'g-', label="DiffKV (Theoretical)")
+    plt.plot(contexts, dkv_b, 'g-', label="DKV (Theoretical)")
     plt.title("KV Fetch Traffic (Theoretical)")
     plt.xlabel("Context Length (tokens)")
     plt.ylabel("Traffic (MB)")
@@ -97,12 +97,12 @@ def plot_all(results_file: str, output_dir: str):
     
     # 6. Scaling Efficiency (Reduction Ratio)
     plt.figure(figsize=(10, 6))
-    ratios = [fp / dk for fp, dk in zip(fp16_b, diffkv_b)]
+    ratios = [fp / dk for fp, dk in zip(fp16_b, dkv_b)]
     plt.plot(contexts, ratios, 'b-o', label="Compression Ratio")
     plt.axhline(y=1.0, color='k', linestyle='--')
     plt.title("Scaling Efficiency (Reduction x)")
     plt.xlabel("Context Length (tokens)")
-    plt.ylabel("Ratio (FP16 / DiffKV)")
+    plt.ylabel("Ratio (FP16 / DKV)")
     plt.xscale('log')
     plt.legend()
     plt.grid(True, alpha=0.3)

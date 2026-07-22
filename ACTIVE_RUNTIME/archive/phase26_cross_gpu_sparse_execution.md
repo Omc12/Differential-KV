@@ -8,7 +8,7 @@
 ### 1. Dense All-Gather (The Baseline to Avoid)
 In standard Ring-Attention or Megatron Context-Parallelism, GPUs must all-gather the dense $K$ and $V$ tensors from all other GPUs. This requires massive PCIe/NVLink bandwidth. For a 1M token context, transferring dense KV caches saturates the bus entirely, halting execution.
 
-### 2. Compressed Transfer (The DiffKV Method)
+### 2. Compressed Transfer (The DKV Method)
 Instead of executing attention across the network, Differential KV operates on a **Pull-Based Sparse Fetch** model.
 - The compute GPU identifies exactly which 2 chunks it needs from the remote GPU.
 - It initiates a transfer of ONLY the compressed $U$ and $V$ tensors for those 2 chunks.

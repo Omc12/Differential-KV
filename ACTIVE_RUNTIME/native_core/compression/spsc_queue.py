@@ -5,7 +5,7 @@ Lock-free Single-Producer Single-Consumer (SPSC) ring buffer.
 
 CPython's GIL makes integer reads/writes atomic — no locks needed between
 one producer thread and one consumer thread. This is the theoretically
-optimal queue for the diffkv use case:
+optimal queue for the dkv use case:
   - Producer: attention forward pass (or compress_prefill_kv) on main thread
   - Consumer: AsyncCompressor background SVD worker thread
 

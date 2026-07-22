@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Measured-data graphs for the DiffKV paper — DeepSeek-report aesthetics (style v2).
+"""Measured-data graphs for the DKV paper — DeepSeek-report aesthetics (style v2).
 
 All numbers come from paper/scripts/data.py (clean measured JSON) or are derived
 from the runtime dimensions in the code. Charts carry no in-figure titles (the
 LaTeX captions do); text is black; palette = blues + emerald.
 
   g_perf      two panels: (a) prefill time, (b) decode throughput — three engines
-              (DiffKV, optimized mlx_lm dense, standard PyTorch dense); the naive
+              (DKV, optimized mlx_lm dense, standard PyTorch dense); the naive
               PyTorch baseline OOMs at 16K+ (✗ markers, no fabricated value)
   g1_kv_footprint   analytic KV-state growth vs the bounded pool
   g6_residual_tradeoff  residual budget: compression ratio bars + decode tok/s line
-  g7_decode_ablation    DiffKV compressed vs dense full-KV decode (primary sweep)
+  g7_decode_ablation    DKV compressed vs dense full-KV decode (primary sweep)
   g8_latency_breakdown  E11 per-step decode latency split (extruded 3-D pie)
 """
 import os
@@ -58,7 +58,7 @@ def g_perf():
              label="Optimized dense (mlx_lm)", markerfacecolor="white")
     ax1.plot(CTX_PT, p_pf, "-^", color=C_PT, label="Standard PyTorch dense",
              markerfacecolor="white", markeredgecolor=C_PT)
-    ax1.plot(CTX_ACT, a_pf, "-o", color=S.BLUE, label="DiffKV")
+    ax1.plot(CTX_ACT, a_pf, "-o", color=S.BLUE, label="DKV")
     ax1.set_yscale("log")
     ax1.set_ylabel("Prefill time (s)")
     S.context_ticks(ax1, CTX_ACT, "Context length")
@@ -79,7 +79,7 @@ def g_perf():
              label="Optimized dense (mlx_lm)", markerfacecolor="white")
     ax2.plot(CTX_PT, p_tp, "-^", color=C_PT, label="Standard PyTorch dense",
              markerfacecolor="white", markeredgecolor=C_PT)
-    ax2.plot(CTX_ACT, a_tp, "-o", color=S.BLUE, label="DiffKV")
+    ax2.plot(CTX_ACT, a_tp, "-o", color=S.BLUE, label="DKV")
     ax2.set_ylabel("Decode throughput (tokens/s)")
     ax2.set_ylim(0, max(d_tp) * 1.18)
     for i, c in enumerate(PT_OOM_CTX):
@@ -114,8 +114,8 @@ def g1_kv_footprint():
     fig, ax = plt.subplots(figsize=(4.9, 3.05))
     ax.plot(ctxs, dense, "-o", color=S.C_DENSE_LN, label="Dense full KV",
             markerfacecolor="white")
-    ax.plot(ctxs, s128, "-o", color=S.BLUE, label="DiffKV store ($R{=}128$, default)")
-    ax.plot(ctxs, s64, "--s", color=S.BLUE_L, label="DiffKV store ($R{=}64$ preset)",
+    ax.plot(ctxs, s128, "-o", color=S.BLUE, label="DKV store ($R{=}128$, default)")
+    ax.plot(ctxs, s64, "--s", color=S.BLUE_L, label="DKV store ($R{=}64$ preset)",
             markerfacecolor="white", markeredgecolor=S.BLUE)
     ax.axhline(cap, color=S.EMERALD, lw=1.3, ls=(0, (4, 3)),
                label=f"Pool capacity bound ({cap:.2f} GB)")
@@ -174,13 +174,13 @@ def g6_residual_tradeoff():
 # ── g7 · decode throughput of the three engines (primary sweep) ──────────────
 def g7_decode_ablation():
     # Three-engine decode-throughput comparison (shipping config, 4k..64k):
-    # optimized mlx_lm dense, DiffKV compressed sparse, and the raw PyTorch dense
+    # optimized mlx_lm dense, DKV compressed sparse, and the raw PyTorch dense
     # (which OOMs at 16k+). Complements the same-store compressed-vs-exact
     # mechanism ablation in Table 4 (t6_decode_ablation).
     prim = D.load_primary()
     ctx = [c for c in D.CONTEXTS if c in prim["active"] and c in prim["dense"]]
     e_tps = [prim["dense"][c]["decode_tps"] for c in ctx]     # optimized dense
-    c_tps = [prim["active"][c]["decode_tps"] for c in ctx]    # DiffKV compressed
+    c_tps = [prim["active"][c]["decode_tps"] for c in ctx]    # DKV compressed
     p_tps = [prim["normal_dense"][c]["decode_tps"] if c in prim["normal_dense"]
              else None for c in ctx]                          # raw PyTorch dense
     x = np.arange(len(ctx)); w = 0.26
@@ -189,7 +189,7 @@ def g7_decode_ablation():
     b1 = ax.bar(x - w, e_tps, w, color=S.BLUE_L, edgecolor=S.BLACK,
                 linewidth=0.7, label="Optimized dense (full KV)")
     b2 = ax.bar(x, c_tps, w, color=S.BLUE, edgecolor=S.BLACK,
-                linewidth=0.7, hatch="//", label="DiffKV compressed sparse")
+                linewidth=0.7, hatch="//", label="DKV compressed sparse")
     p_x = [x[i] + w for i, v in enumerate(p_tps) if v is not None]
     p_y = [v for v in p_tps if v is not None]
     b3 = ax.bar(p_x, p_y, w, color=C_PT, edgecolor=S.BLACK, linewidth=0.7,

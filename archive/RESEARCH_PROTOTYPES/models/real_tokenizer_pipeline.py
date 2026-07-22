@@ -5,7 +5,7 @@ import hashlib
 class RealTokenizerPipeline:
     """
     Standardized tokenizer pipeline for Phase 18 benchmarks.
-    Ensures identical tokenization across DiffKV and public baselines.
+    Ensures identical tokenization across DKV and public baselines.
     """
     def __init__(self, model_id: str = "Qwen/Qwen2.5-0.5B-Instruct"):
         self.model_id = model_id

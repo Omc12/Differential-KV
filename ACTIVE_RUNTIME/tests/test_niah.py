@@ -47,9 +47,9 @@ def make_niah_prompt(tokenizer, context_length, depth, needle, question):
 @pytest.mark.parametrize("depth", [0.1, 0.5, 0.9])
 @pytest.mark.parametrize("context_len", [4000, 8000])
 def test_niah_depths(depth, context_len):
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # Validate the SHIPPING decode path. The default router is "residual" (the
@@ -58,25 +58,25 @@ def test_niah_depths(depth, context_len):
     # decode with "tensors used as indices must be long, int, byte or bool
     # tensors" — the exception is swallowed, routing silently returns nothing,
     # and deep needles are lost. This test previously FORCED that broken path
-    # via DIFFKV_SRL_THRESHOLD=5 and failed at 8000/0.1 with garbage output,
+    # via DKV_SRL_THRESHOLD=5 and failed at 8000/0.1 with garbage output,
     # even though the residual router retrieves the needle (verified via
-    # colab/diffkv_isolate.py --depth 0.1 --ctxs 8000). Pin the shipping router
+    # colab/dkv_isolate.py --depth 0.1 --ctxs 8000). Pin the shipping router
     # and do NOT lower the SRL threshold (a low threshold builds the SRL index,
     # which is what triggers the crashing code path).
-    os.environ["DIFFKV_ROUTER"] = "residual"
-    os.environ.pop("DIFFKV_SRL_THRESHOLD", None)
+    os.environ["DKV_ROUTER"] = "residual"
+    os.environ.pop("DKV_SRL_THRESHOLD", None)
 
     # Routed-budget parity with MLX is now the AUTOMATIC default: the manager
     # stamps pool.routing_topk_default = 4096 // block_size (= 64 on CUDA's
     # block_size=64), matching MLX's 16*256=4096 routed-token budget. We do NOT
-    # set DIFFKV_TOPK_BLOCKS here on purpose — this validates the production
+    # set DKV_TOPK_BLOCKS here on purpose — this validates the production
     # default a user gets with no env var. (Previously the flat default of 16
     # covered only 16*64=1024 tokens and dropped a distant needle's block.)
-    os.environ.pop("DIFFKV_TOPK_BLOCKS", None)
+    os.environ.pop("DKV_TOPK_BLOCKS", None)
 
-    # rank=32 matches the wrapper default and DIFFKV_RSVD_MAX_RPROJ=32;
+    # rank=32 matches the wrapper default and DKV_RSVD_MAX_RPROJ=32;
     # rank=16 is too low for 14B models with RANK_BOOST=off (loses digit blocks).
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 32}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 32}, device=device)
     
     needle = "The special code is 847291."
     question = "What is the special code? Answer in exactly the 6-digit code number."
@@ -126,6 +126,6 @@ def test_niah_depths(depth, context_len):
         f"  response_tail (after question): {response_tail[:200]!r}\n"
         f"  Total session tokens: {len(all_ids)} (prompt={prompt_toks}, new={len(gen_ids)})\n"
         f"  Hint: if new_tokens==1 and gen_text=='' the model predicted EOS immediately —"
-        f" this is a KV recall regression (try higher rank or re-enable DIFFKV_RANK_BOOST)."
+        f" this is a KV recall regression (try higher rank or re-enable DKV_RANK_BOOST)."
     )
     wrapper.stop()

@@ -40,6 +40,6 @@ To avoid dense reconstruction (i.e., avoiding $U_k V_k \to T \times D$), we mani
 ## Conclusion
 
 **YES.** Prefill attention can execute natively and directly over compressed historical blocks.
-By maintaining a running maximum $m$ and denominator $l$ (using the online softmax trick from FlashAttention), we can loop through the list of `KVBlock` objects, execute the sequence above, and accumulate the final $O$ output without EVER materializing the dense $K$ or $V$ tensors, and without ever running `TritonDiffKV.reconstruct_lowrank`.
+By maintaining a running maximum $m$ and denominator $l$ (using the online softmax trick from FlashAttention), we can loop through the list of `KVBlock` objects, execute the sequence above, and accumulate the final $O$ output without EVER materializing the dense $K$ or $V$ tensors, and without ever running `TritonDKV.reconstruct_lowrank`.
 
 This proves that Differential KV can be an end-to-end sparse memory runtime across both decoding AND multi-turn prefill.

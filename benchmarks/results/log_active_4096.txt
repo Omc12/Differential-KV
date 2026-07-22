@@ -1,4 +1,4 @@
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-[DiffKV MLX] Loaded model in 0.67s
+[DKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+[DKV MLX] Loaded model in 0.67s
 
 __BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 128, "prefill_s": 6.152350999996997, "decode_s": 3.832731250033248, "decode_tps": 33.39654978388835, "ttft_s": null, "mx_peak_gb": 1.552875652, "output_preview": " consistency, eventual consistency, and read-your-writes.\n\n#### Linearizable Consistency\nLinearizability is one of the strongest consistency guarantees available in distributed systems. It ensures that every operation takes effect atomically at some instant between its invocation and response to all", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 4096, "gen_target": 128, "worker_wall_s": 14.52512658300111}

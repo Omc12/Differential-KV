@@ -1,12 +1,12 @@
 from typing import Any, List, Optional
 import requests
 
-class DiffKVLangChainAdapter:
+class DKVLangChainAdapter:
     """
     A simple adapter for LangChain-like usage of Differential KV.
     Points to the OpenAI-compatible endpoint.
     """
-    def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "diff-kv"):
+    def __init__(self, base_url: str = "http://localhost:8000/v1", model: str = "dkv"):
         self.base_url = base_url
         self.model = model
 
@@ -44,6 +44,6 @@ class DiffKVLangChainAdapter:
 
 if __name__ == "__main__":
     # Example usage (assuming server is running)
-    # adapter = DiffKVLangChainAdapter()
+    # adapter = DKVLangChainAdapter()
     # print(adapter.predict("Explain quantum computing."))
     pass

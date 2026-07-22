@@ -52,7 +52,7 @@ pool = NativeBlockPool(max_blocks=256, num_kv_heads=4, head_dim=128, rank=16, ma
 layer = model.model.layers[0]
 original_forward = layer.forward
 
-def static_diffkv_attention_forward(
+def static_dkv_attention_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -98,7 +98,7 @@ def static_diffkv_attention_forward(
 
 # Apply patch
 import types
-model.model.layers[0].self_attn.forward = types.MethodType(static_diffkv_attention_forward, model.model.layers[0].self_attn)
+model.model.layers[0].self_attn.forward = types.MethodType(static_dkv_attention_forward, model.model.layers[0].self_attn)
 
 # Prepare inputs
 N = 64

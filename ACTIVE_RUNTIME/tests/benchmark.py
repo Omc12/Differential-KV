@@ -8,7 +8,7 @@ Measures:
   - Cosine similarity (compression quality)
 
 Run with:
-  DIFFKV_MODEL=Qwen/Qwen2-7B-Instruct python tests/benchmark.py
+  DKV_MODEL=Qwen/Qwen2-7B-Instruct python tests/benchmark.py
 """
 import time
 import torch
@@ -20,9 +20,9 @@ CONTEXTS = [4096, 8192, 16384, 25000]
 MAX_NEW_TOKENS = 128
 
 def run_benchmark():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    wrapper = DKVHFWrapper(MODEL, config={}, device="cuda")
     
     print(f"Model: {MODEL}")
     print(f"{'Context':>10} | {'Prefill(s)':>10} | {'Decode(tok/s)':>13} | {'PeakVRAM(GB)':>12} | {'AvgCosSim':>10}")

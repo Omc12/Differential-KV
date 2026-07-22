@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Differential-KV (DiffKV) Comprehensive MLSys Research Evaluation Suite.
+Differential-KV (DKV) Comprehensive MLSys Research Evaluation Suite.
 
 REWRITE 16.0 — CORRECT MEASUREMENT CORE + FAITHFUL BASELINES + RULER.
 ================================================================================
@@ -10,7 +10,7 @@ long-context benchmarks / baselines the field expects in 2025-2026.
 
 WHAT CHANGED vs REWRITE 15.0 (and WHY it matters for the paper)
 --------------------------------------------------------------------------------
-FIXED — Showstopper 1 (DiffKV memory was always reported as an error):
+FIXED — Showstopper 1 (DKV memory was always reported as an error):
     15.0 summed tensors from `wrapper.manager.session_blocks`, which is the
     EMPTY legacy dict on CUDA — the streaming path stores blocks in
     `manager._streaming_mgr.session_blocks`. Every low/mid/high run therefore
@@ -20,11 +20,11 @@ FIXED — Showstopper 1 (DiffKV memory was always reported as an error):
     pool allocation. The compression ratio we report is dense_equiv / pool
     physical — the honest 1.4-2.5x, not the old ~26x fake counter.
 
-FIXED — Showstopper 2 (DiffKV decode TPS secretly included a 2nd full prefill):
+FIXED — Showstopper 2 (DKV decode TPS secretly included a 2nd full prefill):
     15.0 measured prefill on a hand-built session `bench_XXXX` but then called
     `wrapper.generate(prompt=full_prompt)`, which runs on session "default",
     CLEARS it, and re-prefills the entire prompt before decoding — so decode_tps
-    was gen_len / (full_prefill + decode) and biased massively against DiffKV,
+    was gen_len / (full_prefill + decode) and biased massively against DKV,
     while the dense branch measured pure incremental decode. We now prefill,
     compress, and decode on ONE session with a token-by-token loop (ported from
     `run_nat_eval.py`) — no `generate()`, no double prefill. The dense/baseline
@@ -32,7 +32,7 @@ FIXED — Showstopper 2 (DiffKV decode TPS secretly included a 2nd full prefill)
     timings are like-for-like.
 
 FIXED — Confounds:
-    * Weight dtype is now held at FP16 for EVERY method (DiffKV low preset used
+    * Weight dtype is now held at FP16 for EVERY method (DKV low preset used
       to silently switch weights to 4-bit NF4, so "memory vs preset" conflated
       4-bit weights with KV compression). Quantization is orthogonal/composable
       and is called out as future work, not folded into the KV numbers.
@@ -50,7 +50,7 @@ ADDED — Faithful baselines (through the identical harness):
     Dense FP16 | INT8-KV (per-token) | KIVI-style 2/3/4-bit (per-channel K,
     per-token V) | StreamingLLM (attention sink + recency) | SnapKV (REAL
     accumulated-attention eviction) | KeyNorm-HH (H2O-style key-norm proxy,
-    labeled honestly) | DiffKV (ours).
+    labeled honestly) | DKV (ours).
     SnapKV is faithful: it ranks prefix tokens by real attention mass from a
     small observation window, materializing only the [B,H,window,S] map (never
     the infeasible [H,S,S]), via a model loaded with attn_implementation="eager".
@@ -59,11 +59,11 @@ ADDED — Faithful baselines (through the identical harness):
 
 ADDED — The two experiments that decide the paper:
     exp22 (accuracy/KV-memory FRONTIER at fixed long context): sweeps every
-    method across its memory dial (DiffKV presets, KIVI 2/3/4-bit, SnapKV/HH/
-    Streaming budgets). DiffKV is a contribution ONLY if it is un-dominated —
+    method across its memory dial (DKV presets, KIVI 2/3/4-bit, SnapKV/HH/
+    Streaming budgets). DKV is a contribution ONLY if it is un-dominated —
     matches dense quality at a budget where the strong baselines have degraded.
-    exp23 (quality-vs-context curve): recall vs context for dense/DiffKV/KIVI/
-    SnapKV/Streaming; the claim holds iff DiffKV tracks dense out to long context
+    exp23 (quality-vs-context curve): recall vs context for dense/DKV/KIVI/
+    SnapKV/Streaming; the claim holds iff DKV tracks dense out to long context
     while the others peel away. Run these TWO first — they are cheap and tell you
     whether the full grid is worth the A100 hours.
 
@@ -72,7 +72,7 @@ PERF — The prefill-compress lever (the conceded axis) lives in a SEPARATE
     CPU-verifies Gram-eigh ≡ SVD, then (with --gpu-ab) A/Bs compress time + NIAH
     recall for baseline SVD vs Gram-eigh vs the r_proj<=32 recipe, and prints
     whether it is safe to make Gram-eigh the default. The config['extra_env']
-    passthrough below (per-call DIFFKV_* overrides) is what that script uses.
+    passthrough below (per-call DKV_* overrides) is what that script uses.
     Everything else about decode/prefill speed: measure from this harness first.
 
 ADDED — RULER-style long-context suite (synthetic, dataset-free): single-key,
@@ -106,7 +106,7 @@ from typing import Dict, List, Any, Tuple, Optional
 
 # Enable PyTorch CUDA Allocator expandable segments
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ.setdefault("DIFFKV_DIAG", "0")
+os.environ.setdefault("DKV_DIAG", "0")
 
 # Setup Repository Paths
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -134,14 +134,14 @@ BERRY_PAPER_PATH = os.path.join(BENCHMARKS, "berry_paper.txt")
 RANDOM_PAPER_PATH = os.path.join(BENCHMARKS, "random_features_paper.txt")
 
 # Methods that run on a plain HuggingFace model + a post-prefill KV transform.
-# Everything else ("low"/"mid"/"high" and the adaptive_* aliases) is DiffKV and
-# runs through PyTorchDiffKVHFWrapper.
+# Everything else ("low"/"mid"/"high" and the adaptive_* aliases) is DKV and
+# runs through PyTorchDKVHFWrapper.
 DENSE_FAMILY_METHODS = ("dense", "int8_kv", "kivi2", "streaming", "keynorm_hh", "snapkv")
 
-# Adaptive presets map onto a base DiffKV preset + extra env flags.
+# Adaptive presets map onto a base DKV preset + extra env flags.
 ADAPTIVE_PRESETS = {
-    "adaptive_rank": ("low", {"DIFFKV_LAYER_ADAPTIVE_RANK": "1"}),
-    "adaptive_stream": ("low", {"DIFFKV_LAYER_ADAPTIVE_RANK": "1", "DIFFKV_STREAMING_COMPRESS": "1"}),
+    "adaptive_rank": ("low", {"DKV_LAYER_ADAPTIVE_RANK": "1"}),
+    "adaptive_stream": ("low", {"DKV_LAYER_ADAPTIVE_RANK": "1", "DKV_STREAMING_COMPRESS": "1"}),
 }
 
 
@@ -465,7 +465,7 @@ _BASELINE_KERNELS = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DiffKV physical-memory accounting — ported from run_nat_eval.py::analytic_kv_bytes
+# DKV physical-memory accounting — ported from run_nat_eval.py::analytic_kv_bytes
 # (the GPU-validated version). Reads the CORRECTED mgr.sessions property and the
 # real pool allocation; does NOT touch the empty legacy `manager.session_blocks`.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -491,17 +491,17 @@ def analytic_kv_bytes(mgr, seq_len: int, sid: str) -> Dict[str, float]:
     raw_dl = s0["dense_lens"][0] if (s0 and "dense_lens" in s0 and s0["dense_lens"]) else 0
     dl = min(raw_dl, max_dense) if raw_dl > 0 else min(seq_len, max_dense)
     res_n0 = s0["comp_res_n"][0][:nb] if (s0 and "comp_res_n" in s0 and s0["comp_res_n"]) else []
-    # Use cfg.max_residual_tokens directly (low=40, mid=64, high=128 per DiffKVConfig).
+    # Use cfg.max_residual_tokens directly (low=40, mid=64, high=128 per DKVConfig).
     _preset_str = str(getattr(_cfg, "preset", None) or
                       getattr(mgr, "preset", None) or
-                      os.environ.get("DIFFKV_PRESET", "mid")).lower()
+                      os.environ.get("DKV_PRESET", "mid")).lower()
     _preset_res_defaults = {"low": 40, "mid": 64, "high": 128}
     res_cap = int(getattr(_cfg, "max_residual_tokens", None) or
                   _preset_res_defaults.get(_preset_str, 64))
     res_tokens_used = sum(min(int(rn), res_cap) for rn in res_n0) if res_n0 else (nb * res_cap)
 
     store_used = L * (nb * lowrank_block + res_tokens_used * kv_tok + dl * kv_tok)
-    _debug = os.environ.get("DIFFKV_KV_DEBUG", "0") == "1"
+    _debug = os.environ.get("DKV_KV_DEBUG", "0") == "1"
     if _debug:
         print(f"[analytic_kv_bytes] sid={sid} B={B} r={r} nb={nb} dl={dl} "
               f"res_cap={res_cap} res_tokens_used={res_tokens_used} "
@@ -525,7 +525,7 @@ def wait_for_compression(mgr, session_id: str) -> bool:
     streaming_mgr = getattr(mgr, "_streaming_mgr", None)
     if streaming_mgr is None:
         return True
-    timeout_s = float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30"))
+    timeout_s = float(os.environ.get("DKV_COMPRESSION_TIMEOUT_S", "30"))
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if hasattr(mgr, "finalize_compressed_blocks"):
@@ -692,10 +692,10 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
     # harness dequantizes to fp16 for the decode forward (no fused quant-attention
     # kernel), so peak_decode_vram_gb reflects fp16, not the quantized bytes —
     # i.e. kv_physical_gb is the *theoretical* KV memory for quant methods, while
-    # for DiffKV it is the *realized* pool allocation and for dense/eviction it is
+    # for DKV it is the *realized* pool allocation and for dense/eviction it is
     # the realized fp16 KV. Report kv_physical_gb as the KV-footprint axis (the
     # standard axis in KV-compression papers); use peak VRAM only where the method
-    # actually realizes its footprint (dense, eviction, DiffKV).
+    # actually realizes its footprint (dense, eviction, DKV).
     return {
         "prefill_forward_s": fwd_s, "prefill_compress_s": comp_s, "decode_time_s": dec_s,
         "decode_tps": len(gen_ids) / dec_s if dec_s > 0 else 0.0,
@@ -709,7 +709,7 @@ def _dense_family_trial(model, tokenizer, ids: List[int], method: str, device: s
 def _summarize_decode_profile(prof, gen_len: int) -> str:
     """Return a compact CPU-vs-CUDA breakdown of a profiled generate() call.
 
-    The question this answers: is DiffKV decode kernel-bound or host-bound?
+    The question this answers: is DKV decode kernel-bound or host-bound?
     If self-CPU time and the cudaLaunchKernel count dwarf total CUDA time, the
     decode is launch/orchestration-bound (per-token, per-layer Python running in
     eager mode with no CUDA-graph capture) — the structural gap vs MLX's fused
@@ -717,7 +717,7 @@ def _summarize_decode_profile(prof, gen_len: int) -> str:
     the kernels are the cost and the fix is in the kernel, not the dispatch.
 
     Returns the summary as a string so it can travel back through the worker's
-    result JSON (the worker's stdout goes to DEVNULL unless DIFFKV_WORKER_VERBOSE=1).
+    result JSON (the worker's stdout goes to DEVNULL unless DKV_WORKER_VERBOSE=1).
     """
     lines = []
     try:
@@ -775,9 +775,9 @@ def _summarize_decode_profile(prof, gen_len: int) -> str:
     return "\n".join(lines)
 
 
-def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
+def _dkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
                   full_prompt: Optional[str] = None, question: Optional[str] = None) -> Dict[str, Any]:
-    """One DiffKV trial. Phase 1 does a manual prefill+compress on its own session
+    """One DKV trial. Phase 1 does a manual prefill+compress on its own session
     to get ISOLATED forward/compress timings + KV footprint + peak prefill VRAM
     (what the paper's 'sacrifices prefill' + memory claims need). Phase 2 does the
     DECODE + recall through the wrapper's PROVEN generate() path — a hand-rolled
@@ -796,7 +796,7 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
     mgr.init_session(sid, prefill_len=prompt_len)
     if hasattr(mgr, "register_prefill_tokens"):
         mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     if hasattr(w, "_cuda_graph_runner") and getattr(w, "_cuda_graph_runner") is not None:
         try:
             w._cuda_graph_runner.invalidate()
@@ -879,10 +879,10 @@ def _diffkv_trial(w, ids: List[int], device: str, gen_len: int, stop_ids: set,
             torch.cuda.reset_peak_memory_stats()
         triton_available, _fb_before = _triton_state()
         t2 = time.perf_counter()
-        # DIFFKV_TORCH_PROFILE=1 wraps decode in torch.profiler to reveal whether
+        # DKV_TORCH_PROFILE=1 wraps decode in torch.profiler to reveal whether
         # the cost is the Triton kernels (CUDA-bound) or per-token/per-layer Python
         # dispatch in eager mode (host/launch-bound). See _summarize_decode_profile.
-        _prof_decode = os.environ.get("DIFFKV_TORCH_PROFILE", "0") == "1"
+        _prof_decode = os.environ.get("DKV_TORCH_PROFILE", "0") == "1"
         _gen_kwargs = dict(prompt=full_prompt, max_new_tokens=gen_len, temperature=0.0,
                            top_p=1.0, repetition_penalty=1.0, query_text=question)
         if _prof_decode:
@@ -1103,35 +1103,35 @@ def _build_task(task_type: str, config: Dict[str, Any], tokenizer):
     return build_prompt(tokenizer, ctx, "Summarize the text."), "", [], "substring"
 
 
-def _set_diffkv_env(preset: str):
+def _set_dkv_env(preset: str):
     """Align the process env with production (run_nat_eval.py) for a fair benchmark.
 
     Safe non-lossy opts (from _apply_fast_mode — these are recon/fp16-equivalent):
-      DIFFKV_COMPRESS_GRAM_SVD=1    Gram-eigh ≡ SVD, same reconstruction quality
-      DIFFKV_CONTIGUOUS_PREFILL=1   faster forward, same KV layout
-      DIFFKV_CONTIG_UNROTATE=1      1x-memory prefill, fp16-equivalent
+      DKV_COMPRESS_GRAM_SVD=1    Gram-eigh ≡ SVD, same reconstruction quality
+      DKV_CONTIGUOUS_PREFILL=1   faster forward, same KV layout
+      DKV_CONTIG_UNROTATE=1      1x-memory prefill, fp16-equivalent
 
     Intentionally NOT set (fidelity-affecting — we benchmark at the configured rank):
-      DIFFKV_RSVD_MAX_RPROJ         caps rank → changes compression ratio
-      DIFFKV_RANK_BOOST             changes effective rank per block
+      DKV_RSVD_MAX_RPROJ         caps rank → changes compression ratio
+      DKV_RANK_BOOST             changes effective rank per block
 
     Other flags match run_nat_eval.py exactly so we measure the same system.
     config['extra_env'] in run_worker_task is applied AFTER this for per-call overrides.
     """
     # ── Lossy / fidelity-affecting: disable so benchmark rank is exactly as configured ──
-    for k in ("DIFFKV_RSVD_MAX_RPROJ", "DIFFKV_RSVD_OVERSAMPLES", "DIFFKV_RANK_BOOST",
-              "DIFFKV_LAYER_ADAPTIVE_RANK"):
+    for k in ("DKV_RSVD_MAX_RPROJ", "DKV_RSVD_OVERSAMPLES", "DKV_RANK_BOOST",
+              "DKV_LAYER_ADAPTIVE_RANK"):
         os.environ.pop(k, None)
 
     # ── Match run_nat_eval.py production flags ──
-    os.environ["DIFFKV_FACTUAL_STORE"]        = "0"
-    os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
-    os.environ["DIFFKV_STREAMING_COMPRESS"]   = "0"   # no per-chunk compression (see prefill loop)
+    os.environ["DKV_FACTUAL_STORE"]        = "0"
+    os.environ["DKV_EARLY_LAYER_RANK_BOOST"] = "0"
+    os.environ["DKV_STREAMING_COMPRESS"]   = "0"   # no per-chunk compression (see prefill loop)
 
     # ── Safe non-lossy production optimisations (recon/fp16-equivalent) ──
-    os.environ["DIFFKV_COMPRESS_GRAM_SVD"]   = "1"   # Gram-eigh ≡ SVD, ~2x faster compress
-    os.environ["DIFFKV_CONTIGUOUS_PREFILL"]  = "1"   # contiguous block layout, faster forward
-    os.environ["DIFFKV_CONTIG_UNROTATE"]     = "1"   # 1x-memory prefill
+    os.environ["DKV_COMPRESS_GRAM_SVD"]   = "1"   # Gram-eigh ≡ SVD, ~2x faster compress
+    os.environ["DKV_CONTIGUOUS_PREFILL"]  = "1"   # contiguous block layout, faster forward
+    os.environ["DKV_CONTIG_UNROTATE"]     = "1"   # 1x-memory prefill
 
     # ── Preset + hardware ──
     base = preset
@@ -1139,26 +1139,26 @@ def _set_diffkv_env(preset: str):
         base, extra = ADAPTIVE_PRESETS[preset]
         for k, v in extra.items():
             os.environ[k] = v
-    os.environ["DIFFKV_PRESET"]        = base
-    os.environ["DIFFKV_QUANTIZATION"]  = "fp16"
+    os.environ["DKV_PRESET"]        = base
+    os.environ["DKV_QUANTIZATION"]  = "fp16"
     if torch.cuda.is_available():
-        os.environ["DIFFKV_GPU_COMPRESS"] = "1"
+        os.environ["DKV_GPU_COMPRESS"] = "1"
 
 
 def _spawn_and_collect(cmd: List[str], out_path: str, timeout: float) -> Dict[str, Any]:
     """Run `cmd` (a worker that writes its result ATOMICALLY to out_path) and
-    return the parsed JSON. Robust to two DiffKV quirks:
+    return the parsed JSON. Robust to two DKV quirks:
       * console spam — the child's stdout/stderr go to DEVNULL (results come from
         the file), so N sequential worker loads don't look like an infinite loop.
-        Set DIFFKV_WORKER_VERBOSE=1 to see child logs.
-      * hang-at-exit — the DiffKV binary has a known intermittent hang AFTER the
+        Set DKV_WORKER_VERBOSE=1 to see child logs.
+      * hang-at-exit — the DKV binary has a known intermittent hang AFTER the
         work + result are done, so we poll for the result file and KILL the child
         once it appears instead of waiting for a clean exit.
-    The child inherits _DIFFKV_IN_WORKER=1 so it runs in-process (no re-spawn)."""
+    The child inherits _DKV_IN_WORKER=1 so it runs in-process (no re-spawn)."""
     import time as _t
     env = os.environ.copy()
-    env["_DIFFKV_IN_WORKER"] = "1"
-    quiet = os.environ.get("DIFFKV_WORKER_VERBOSE", "0") != "1"
+    env["_DKV_IN_WORKER"] = "1"
+    quiet = os.environ.get("DKV_WORKER_VERBOSE", "0") != "1"
     stream = subprocess.DEVNULL if quiet else None
     if os.path.exists(out_path):
         try:
@@ -1196,17 +1196,17 @@ def _spawn_and_collect(cmd: List[str], out_path: str, timeout: float) -> Dict[st
 
 def _run_worker_isolated(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """Run one worker task in a FRESH SUBPROCESS so all GPU memory is released on
-    exit. The DiffKV wrapper does not fully free on del/close, so reloading per
+    exit. The DKV wrapper does not fully free on del/close, so reloading per
     config in-process OOMs a 40GB card (observed: 24.9GB free -> 10.1GB -> OOM).
-    Opt in with DIFFKV_ISOLATE_WORKERS=1."""
+    Opt in with DKV_ISOLATE_WORKERS=1."""
     import tempfile
-    fd, out_path = tempfile.mkstemp(prefix="diffkv_worker_", suffix=".json")
+    fd, out_path = tempfile.mkstemp(prefix="dkv_worker_", suffix=".json")
     os.close(fd)
     os.remove(out_path)               # child creates it atomically; must not pre-exist
     cmd = [sys.executable, os.path.abspath(__file__),
            "--worker-task", task_type, "--worker-config", json.dumps(config),
            "--worker-out", out_path]
-    timeout = float(os.environ.get("DIFFKV_WORKER_TIMEOUT_S", "1800"))
+    timeout = float(os.environ.get("DKV_WORKER_TIMEOUT_S", "1800"))
     try:
         return _spawn_and_collect(cmd, out_path, timeout)
     finally:
@@ -1219,9 +1219,9 @@ def _run_worker_isolated(task_type: str, config: Dict[str, Any]) -> Dict[str, An
 def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     # Process isolation (enabled by default) — run in a subprocess so the GPU is fully freed
     # between configs on memory-tight cards (e.g. 40GB A100). The child sets
-    # _DIFFKV_IN_WORKER=1 so it runs the body in-process rather than re-spawning.
-    if (os.environ.get("DIFFKV_ISOLATE_WORKERS", "1") != "0"
-            and os.environ.get("_DIFFKV_IN_WORKER") != "1"):
+    # _DKV_IN_WORKER=1 so it runs the body in-process rather than re-spawning.
+    if (os.environ.get("DKV_ISOLATE_WORKERS", "1") != "0"
+            and os.environ.get("_DKV_IN_WORKER") != "1"):
         return _run_worker_isolated(task_type, config)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1232,7 +1232,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     preset_ranks = {"low": 12, "mid": 20, "high": 32}
     rank = config.get("rank", preset_ranks.get(preset, 20))
     block_size = config.get("block_size", 256)
-    n_trials = config.get("n_trials", int(os.environ.get("DIFFKV_BENCH_TRIALS", "3")))
+    n_trials = config.get("n_trials", int(os.environ.get("DKV_BENCH_TRIALS", "3")))
 
     try:
         from transformers import AutoTokenizer
@@ -1258,7 +1258,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
             model.eval()
             stop_ids |= _derive_stop_ids(tokenizer)
-            CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
+            CH = int(os.environ.get("DKV_PREFILL_CHUNK_SIZE", "1024"))
             if torch.cuda.is_available():  # warm-up
                 with torch.no_grad():
                     _ = model(torch.zeros((1, 8), dtype=torch.long, device=device))
@@ -1275,16 +1275,16 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         else:
-            _set_diffkv_env(preset)
-            # Per-call DIFFKV_* overrides (e.g. the Gram-eigh compress recipe,
+            _set_dkv_env(preset)
+            # Per-call DKV_* overrides (e.g. the Gram-eigh compress recipe,
             # used by colab/gram_eigh_decision.py). Applied after the clean slate.
             for _k, _v in config.get("extra_env", {}).items():
                 os.environ[_k] = str(_v)
-            from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
-            diffkv_config = {"preset": ADAPTIVE_PRESETS.get(preset, (preset,))[0],
+            from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
+            dkv_config = {"preset": ADAPTIVE_PRESETS.get(preset, (preset,))[0],
                              "rank": rank, "block_size": block_size, "micro_block_size": block_size,
                              "quantization": "fp16"}
-            w = PyTorchDiffKVHFWrapper(model_id=model_id, config=diffkv_config,
+            w = PyTorchDKVHFWrapper(model_id=model_id, config=dkv_config,
                                        torch_dtype=torch.float16, device=device)
             w.ensure_loaded()
             stop_ids |= getattr(w, "stop_token_ids", set())
@@ -1294,7 +1294,7 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
                 torch.cuda.synchronize()
             for _ in range(n_trials):
                 # Pass question= so the SRL router can prioritise relevant blocks during retrieval.
-                tr = _diffkv_trial(w, ids, device, gen_len, stop_ids, full_prompt=full_prompt,
+                tr = _dkv_trial(w, ids, device, gen_len, stop_ids, full_prompt=full_prompt,
                                    question=config.get("question", ground_truth))
                 trials.append(tr)
                 last_text = tr["output_text"]
@@ -1316,12 +1316,12 @@ def run_worker_task(task_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
         dec_vram = max(t["peak_decode_vram_gb"] for t in trials)
         kv_phys = trials[-1]["kv_physical_gb"]
         kv_dense = trials[-1]["kv_dense_equiv_gb"]
-        # DiffKV-only storage diagnostics (0.0 for dense/baseline trials).
+        # DKV-only storage diagnostics (0.0 for dense/baseline trials).
         pool_phys = trials[-1].get("pool_physical_gb", 0.0)
         kv_blocks = trials[-1].get("kv_blocks_layer0", 0)
         kv_res_tok = trials[-1].get("kv_residual_tokens_layer0", 0)
         kv_dense_win = trials[-1].get("kv_dense_window_tokens", 0)
-        # First non-empty decode profile across trials (only set when DIFFKV_TORCH_PROFILE=1).
+        # First non-empty decode profile across trials (only set when DKV_TORCH_PROFILE=1).
         decode_profile = next((t.get("decode_profile", "") for t in trials
                                if t.get("decode_profile")), "")
         triton_available = trials[-1].get("triton_available", None)
@@ -1379,7 +1379,7 @@ def exp1_memory_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]
             if res.get("status") == "success":
                 print(f"      peak_prefill={res['peak_prefill_vram_gb']:.2f}GB | "
                       f"KV_phys={res['kv_physical_gb']:.3f}GB | ratio={res['compression_ratio']:.2f}x")
-                # Prefill timing split — isolates the DiffKV forward (ingest) cost
+                # Prefill timing split — isolates the DKV forward (ingest) cost
                 # from the SVD compression barrier (the ~6x vs baselines lives in
                 # one of these two; baselines do a cheap elementwise KV transform).
                 print(f"      prefill: fwd={res['prefill_forward_s']:.2f}s + "
@@ -1402,15 +1402,15 @@ def exp1_memory_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]
 
 
 def exp2_throughput_vs_context(model_id: str, contexts: List[int]) -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 2: Throughput vs Context (dense vs DiffKV-mid, matched decode loop)\n" + "=" * 80)
+    print("\n" + "=" * 80 + "\n🔥 EXP 2: Throughput vs Context (dense vs DKV-mid, matched decode loop)\n" + "=" * 80)
     results = {}
     for ctx in contexts:
         rd = run_worker_task("tps_ctx", {"model_id": model_id, "preset": "dense", "ctx_len": ctx, "gen_len": 64})
         rk = run_worker_task("tps_ctx", {"model_id": model_id, "preset": "mid", "ctx_len": ctx, "gen_len": 64})
-        results[ctx] = {"dense": rd, "diffkv_mid": rk}
+        results[ctx] = {"dense": rd, "dkv_mid": rk}
         if rk.get("status") == "success" and rd.get("status") == "success":
             print(f"   ctx={ctx}: dense {rd['decode_tps']:.1f}±{rd['decode_tps_ci95']:.1f} tps | "
-                  f"DiffKV {rk['decode_tps']:.1f}±{rk['decode_tps_ci95']:.1f} tps | "
+                  f"DKV {rk['decode_tps']:.1f}±{rk['decode_tps_ci95']:.1f} tps | "
                   f"prefill fwd {rk['prefill_forward_s']:.2f}s + comp {rk['prefill_compress_s']:.2f}s")
             _tav, _tfb = rk.get("triton_available"), rk.get("triton_fallbacks", 0)
             if _tav is not None:
@@ -1470,10 +1470,10 @@ def exp4_end_to_end_tradeoff(model_id: str, ctx: int = 16384) -> Dict[str, Any]:
 
 
 def exp5_needle_in_haystack(model_id: str) -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 5: NIAH grid — dense vs DiffKV, multi-needle + Wilson CI\n" + "=" * 80)
+    print("\n" + "=" * 80 + "\n🔥 EXP 5: NIAH grid — dense vs DKV, multi-needle + Wilson CI\n" + "=" * 80)
     depths = [0.10, 0.30, 0.50, 0.70, 0.90]
     contexts = [4096, 8192, 16384, 32768, 65536]
-    samples = int(os.environ.get("DIFFKV_NIAH_SAMPLES", "3"))
+    samples = int(os.environ.get("DKV_NIAH_SAMPLES", "3"))
     needles = generate_random_needles(len(depths) * len(contexts) * samples * 2 + 10)
     results = {}
     for method in ("dense", "mid"):
@@ -1504,10 +1504,10 @@ def exp5_needle_in_haystack(model_id: str) -> Dict[str, Any]:
 
 
 def exp5b_ruler(model_id: str) -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 5b: RULER-style suite (dense vs DiffKV-mid) + Wilson CI\n" + "=" * 80)
+    print("\n" + "=" * 80 + "\n🔥 EXP 5b: RULER-style suite (dense vs DKV-mid) + Wilson CI\n" + "=" * 80)
     tasks = ["niah_single", "niah_multikey", "niah_multivalue", "niah_multiquery", "vt", "fwe"]
     contexts = [8192, 16384, 32768]
-    samples = int(os.environ.get("DIFFKV_RULER_SAMPLES", "5"))
+    samples = int(os.environ.get("DKV_RULER_SAMPLES", "5"))
     results = {}
     for method in ("dense", "mid"):
         results[method] = {}
@@ -1559,7 +1559,7 @@ def exp7_ablation_study(model_id: str) -> Dict[str, Any]:
 
 
 def exp8_decode_length_scaling(model_id: str) -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 8: Decode-length scaling (dense vs DiffKV-mid)\n" + "=" * 80)
+    print("\n" + "=" * 80 + "\n🔥 EXP 8: Decode-length scaling (dense vs DKV-mid)\n" + "=" * 80)
     results = {}
     for gen_l in [128, 256, 512, 1024]:
         results[gen_l] = {}
@@ -1595,7 +1595,7 @@ def exp9_nsight_systems_profiling() -> Dict[str, Any]:
 
 def exp10_nsight_compute_profiling() -> Dict[str, Any]:
     print("\n" + "=" * 80 + "\n🔥 EXP 10: Nsight Compute occupancy (best-effort)\n" + "=" * 80)
-    out_csv = os.path.join(REPO, "diffkv_ncu_report.csv")
+    out_csv = os.path.join(REPO, "dkv_ncu_report.csv")
     cmd = ["ncu", "--csv", "--log-file", out_csv, "--target-processes", "all",
            "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,"
                         "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,"
@@ -1759,7 +1759,7 @@ def exp15_batch_size_scaling(model_id: str) -> Dict[str, Any]:
 
 
 def exp16_long_conversations(model_id: str) -> Dict[str, Any]:
-    print("\n" + "=" * 80 + "\n🔥 EXP 16: Multi-turn growth (DiffKV-mid)\n" + "=" * 80)
+    print("\n" + "=" * 80 + "\n🔥 EXP 16: Multi-turn growth (DKV-mid)\n" + "=" * 80)
     turns = 10
     metrics = []
     for t in range(1, turns + 1):
@@ -1905,13 +1905,13 @@ def _avg_recall(model_id: str, method: str, ctx: int, ruler_task_name: str,
 
 def exp22_memory_quality_frontier(model_id: str, ctx: int = 32768) -> Dict[str, Any]:
     """THE make-or-break comparison: sweep each method across its memory dial at a
-    fixed long context and plot accuracy vs KV footprint. DiffKV is a real
+    fixed long context and plot accuracy vs KV footprint. DKV is a real
     contribution ONLY if it occupies a point the strong baselines (KIVI, SnapKV)
     do NOT dominate — i.e. matches dense quality at a memory budget where they
     have already degraded. Uses niah_multikey (the discriminating retrieval task).
     """
     print("\n" + "=" * 80 + f"\n🔥 EXP 22: Accuracy / KV-memory FRONTIER @ {ctx} (niah_multikey)\n" + "=" * 80)
-    samples = int(os.environ.get("DIFFKV_FRONTIER_SAMPLES", "3"))
+    samples = int(os.environ.get("DKV_FRONTIER_SAMPLES", "3"))
     task = "niah_multikey"
     points = []
 
@@ -1925,7 +1925,7 @@ def exp22_memory_quality_frontier(model_id: str, ctx: int = 32768) -> Dict[str, 
 
     add("dense", "dense")                                             # reference (max mem, target quality)
     for p in ["high", "mid", "low"]:
-        add(f"DiffKV-{p}", p)
+        add(f"DKV-{p}", p)
     for bits in [4, 3, 2]:
         add(f"KIVI-{bits}bit", "kivi2", {"bits": bits})
     for b in [1024, 512, 256]:
@@ -1939,12 +1939,12 @@ def exp22_memory_quality_frontier(model_id: str, ctx: int = 32768) -> Dict[str, 
 
 def exp23_quality_vs_context(model_id: str) -> Dict[str, Any]:
     """The headline curve: recall vs context length for dense and the strong
-    baselines. The claim survives iff DiffKV tracks dense out to long context
+    baselines. The claim survives iff DKV tracks dense out to long context
     while KIVI/SnapKV/streaming peel away."""
-    print("\n" + "=" * 80 + "\n🔥 EXP 23: Quality vs Context (dense vs DiffKV vs strong baselines)\n" + "=" * 80)
-    samples = int(os.environ.get("DIFFKV_CURVE_SAMPLES", "3"))
+    print("\n" + "=" * 80 + "\n🔥 EXP 23: Quality vs Context (dense vs DKV vs strong baselines)\n" + "=" * 80)
+    samples = int(os.environ.get("DKV_CURVE_SAMPLES", "3"))
     contexts = [8192, 16384, 32768, 65536]
-    methods = [("dense", "dense", None), ("DiffKV-mid", "mid", None),
+    methods = [("dense", "dense", None), ("DKV-mid", "mid", None),
                ("KIVI-2bit", "kivi2", {"bits": 2}), ("SnapKV-512", "snapkv", {"budget": 512}),
                ("Streaming-512", "streaming", {"recency_window": 512})]
     task = "niah_multikey"
@@ -1975,11 +1975,11 @@ def build_pareto(exp21: Dict[str, Any]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="DiffKV research paper benchmark runner (REWRITE 16.0)")
+    parser = argparse.ArgumentParser(description="DKV research paper benchmark runner (REWRITE 16.0)")
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--model-14b", dest="model_b", default="meta-llama/Llama-3.1-8B-Instruct",
                         help="Second model FAMILY for generalization (default: Llama-3.1-8B, not just a bigger Qwen).")
-    parser.add_argument("--out", default="diffkv_paper_benchmark_results.json")
+    parser.add_argument("--out", default="dkv_paper_benchmark_results.json")
     parser.add_argument("--only", default="", help="comma-separated experiment ids to run (e.g. 1,5,21). Empty = all.")
     parser.add_argument("--skip", default="", help="comma-separated experiment ids to skip (e.g. 1,11).")
     parser.add_argument("--worker-task", default="")
@@ -1990,7 +1990,7 @@ def main():
     if args.worker_task:
         res = run_worker_task(args.worker_task, json.loads(args.worker_config))
         if args.worker_out:
-            # Atomic write, then EXIT IMMEDIATELY via os._exit: the DiffKV binary
+            # Atomic write, then EXIT IMMEDIATELY via os._exit: the DKV binary
             # can hang at exit, and letting the parent SIGKILL us can leak GPU
             # memory that accumulates across runs (-> the "39GB already used" OOM).
             # os._exit terminates now; the OS frees all GPU memory this process held.
@@ -2006,7 +2006,7 @@ def main():
         return
 
     print("=" * 73)
-    print("  DIFFERENTIAL-KV (DiffKV) A100 RESEARCH PAPER BENCHMARK — REWRITE 16.0")
+    print("  DIFFERENTIAL-KV (DKV) A100 RESEARCH PAPER BENCHMARK — REWRITE 16.0")
     print(f"  Primary: {args.model}  |  Second family: {args.model_b}")
     print("=" * 73)
 

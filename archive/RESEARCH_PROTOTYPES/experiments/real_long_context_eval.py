@@ -26,7 +26,7 @@ def run_long_context_suite():
             
             config = {
                 "n_ctx": ctx_len,
-                "mode": "diffkv_adaptive",
+                "mode": "dkv_adaptive",
                 "target_compression": 20.0
             }
             

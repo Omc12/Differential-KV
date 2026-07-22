@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Orchestrator for the DiffKV multi-engine context-length benchmark.
+Orchestrator for the DKV multi-engine context-length benchmark.
 
 Sweeps {native, active, dense, ollama} x {4k..128k} on Qwen2.5-1.5B-Instruct (Q4).
 Each (engine, context) measurement runs in an isolated worker subprocess
@@ -36,15 +36,15 @@ import psutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-VENV_PY = os.path.join(REPO, "diffkv_venv/bin/python3")
+VENV_PY = os.path.join(REPO, "dkv_venv/bin/python3")
 WORKER = os.path.join(HERE, "bench_worker.py")
 RESULTS_DIR = os.path.join(HERE, "results")
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 32768, 65536, 131072]
 DEFAULT_ENGINES = ["native", "active", "dense", "ollama"]
 ENGINE_LABEL = {
-    "native": "DiffKV native (C++, GGUF Q4_K_M)",
-    "active": "DiffKV active runtime (MLX int4)",
+    "native": "DKV native (C++, GGUF Q4_K_M)",
+    "active": "DKV active runtime (MLX int4)",
     "dense": "Dense (mlx_lm int4, full KV)",
     "ollama": "Ollama / llama.cpp (GGUF Q4_K_M)",
 }
@@ -312,7 +312,7 @@ def write_outputs(meta, records, json_path, md_path, latest_path):
             json.dump(blob, f, indent=2)
 
     lines = []
-    lines.append("# DiffKV multi-engine benchmark — Qwen2.5-1.5B-Instruct (Q4)\n")
+    lines.append("# DKV multi-engine benchmark — Qwen2.5-1.5B-Instruct (Q4)\n")
     lines.append(f"- Host: {meta['host']} · {meta['ram_gb']:.1f} GB RAM · {meta['chip']}")
     lines.append(f"- Started: {meta['started']}  |  Decode tokens/test: {meta['gen']}")
     lines.append(f"- Per-test timeout: {meta['timeout']}s · RAM kill-cap: {meta['ram_cap_gb']} GB")
@@ -392,9 +392,9 @@ def main():
     ap.add_argument("--ram-cap-gb", type=float, default=7.5,
                     help="kill a worker if process-tree RSS exceeds this (8 GB box guard)")
     ap.add_argument("--native-binary",
-                    default=os.path.join(REPO, "diffkv_native/build/diffkv_native"))
+                    default=os.path.join(REPO, "dkv_native/build/dkv_native"))
     ap.add_argument("--native-model",
-                    default=os.path.join(REPO, "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"))
+                    default=os.path.join(REPO, "dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"))
     ap.add_argument("--dense-model-id", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
     ap.add_argument("--ollama-model", default="qwen2.5:1.5b-instruct")
     args = ap.parse_args()

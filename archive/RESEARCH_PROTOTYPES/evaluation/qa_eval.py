@@ -73,7 +73,7 @@ def run_qa_benchmark(model_id="Qwen/Qwen2-0.5B", n_samples=5):
     qa_ev = QAEvaluator(ev)
     
     samples = qa_ev.get_data(n_samples=n_samples)
-    modes = ["FP16", "INT8-DiffKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
+    modes = ["FP16", "INT8-DKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
     
     results = {}
     for mode in modes:

@@ -10,7 +10,7 @@ This is the only fully integrated and end-to-end active path in the repository.
 `run_real_sparse_stress_test.py` or `batch_engine.py` receives a text prompt.
 
 **2. Prefill Phase (Dense):**
-- Hits `hf_diffkv_wrapper.py:DiffKVAttention.forward()`
+- Hits `hf_dkv_wrapper.py:DKVAttention.forward()`
 - Executes standard Dense SDPA for initial token ingestion.
 - Emits uncompressed Key/Value tensors.
 
@@ -27,7 +27,7 @@ This is the only fully integrated and end-to-end active path in the repository.
 
 **5. Continuous Decode Phase:**
 - `batch_engine.py:ContinuousBatchEngine.step()` loops over active sessions.
-- `hf_diffkv_wrapper.py` routes decode tokens to `TritonDiffKV.forward()`.
+- `hf_dkv_wrapper.py` routes decode tokens to `TritonDKV.forward()`.
 - **Triton Sparse Decode Kernel**: Executes $O(1)$ block-sparse attention directly from the compressed SVD matrices ($U \Sigma V^T$) WITHOUT reconstructing the dense KV cache in VRAM.
 
 ---

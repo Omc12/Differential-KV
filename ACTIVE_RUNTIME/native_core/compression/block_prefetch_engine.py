@@ -81,7 +81,7 @@ class BlockPrefetchEngine:
                     if cold_slots:
                         warming = self.tiered_store.ensure_warm(cold_slots)
                         
-                        if os.environ.get("DIFFKV_TELEMETRY") == "1":
+                        if os.environ.get("DKV_TELEMETRY") == "1":
                             print(f"[Prefetch] session={session_id} warmed {len(warming)} slots")
             except Exception as e:
                 # Log or handle worker exceptions gracefully

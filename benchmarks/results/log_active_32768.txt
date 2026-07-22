@@ -1,4 +1,4 @@
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-[DiffKV MLX] Loaded model in 0.68s
+[DKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+[DKV MLX] Loaded model in 0.68s
 
 __BENCH_RESULT__ {"prompt_tokens": 32865, "gen_tokens": 128, "prefill_s": 93.82000954198884, "decode_s": 4.200263125007041, "decode_tps": 30.474281298694933, "ttft_s": null, "mx_peak_gb": 3.120119093, "output_preview": "ried when conflicts arise during concurrent writes by multiple users.\n\n#### Linearizability\nLinearizability is one of the strongest consistency models, ensuring **serializable** behavior for all executions while maintaining correctness under certain conditions. It requires a data store to provide an", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 32768, "gen_target": 128, "worker_wall_s": 103.4351799589931}

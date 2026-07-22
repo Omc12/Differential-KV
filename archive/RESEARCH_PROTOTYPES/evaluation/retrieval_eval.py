@@ -84,7 +84,7 @@ def run_retrieval_benchmark(model_id="Qwen/Qwen2-0.5B", n_trials=5):
     ev = Phase8PerplexityEvaluator(model_id=model_id)
     ret_ev = RetrievalEvaluator(ev)
     
-    modes = ["FP16", "INT8-DiffKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
+    modes = ["FP16", "INT8-DKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
     
     results = {}
     for mode in modes:

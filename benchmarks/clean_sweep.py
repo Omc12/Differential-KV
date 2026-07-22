@@ -2,7 +2,7 @@
 """
 clean_sweep.py — Fresh paper benchmark. Direct single-pass timing, no hacks.
 
-For active (DiffKV):
+For active (DKV):
   - Use wrapper.generate() for a 1-token warmup (compiles Metal kernels)
   - Clear session, then time wrapper.generate(max_new_tokens=1) → prefill_s
   - Clear session, then run SEPARATE decode-only pass using wrapper.generate()
@@ -28,7 +28,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RESULTS = os.path.join(HERE, "results")
-VENV_PY = os.path.join(REPO, "diffkv_venv", "bin", "python3")
+VENV_PY = os.path.join(REPO, "dkv_venv", "bin", "python3")
 
 CONTEXTS_DEFAULT = [4096, 8192, 16384, 32768, 65536]
 GEN_DEFAULT = 128
@@ -65,17 +65,17 @@ def mx_reset():
                 except: pass
     except: pass
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 import mlx.core as mx
 
-os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-os.environ["DIFFKV_MAX_RESIDUAL"] = "128"
-os.environ["DIFFKV_SPARSE_PREFILL"] = "1"
-os.environ["DIFFKV_DECODE_CACHE"] = "1"
-os.environ["DIFFKV_SPARSE_BIAS"] = "auto"
-os.environ["DIFFKV_SEED"] = "1234"
+os.environ["DKV_COMPRESSED_DECODE"] = "1"
+os.environ["DKV_MAX_RESIDUAL"] = "128"
+os.environ["DKV_SPARSE_PREFILL"] = "1"
+os.environ["DKV_DECODE_CACHE"] = "1"
+os.environ["DKV_SPARSE_BIAS"] = "auto"
+os.environ["DKV_SEED"] = "1234"
 
-wrapper = MLXDiffKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
+wrapper = MLXDKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
 wrapper.ensure_loaded()
 
 # Build prompt — build_niah_prompt returns (text, token_count)

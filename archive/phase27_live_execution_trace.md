@@ -45,12 +45,12 @@ This trace was constructed by reading the actual call chain in source files — 
 
   input_ids = torch.tensor([req.prompt_ids], device=cuda)
   position_ids = torch.arange(0, seq_len)
-  model._diffkv_session_ids = [req.session_id]           ← session injection
+  model._dkv_session_ids = [req.session_id]           ← session injection
 
   model(input_ids=input_ids, position_ids=position_ids, use_cache=True)
   ↓
-  [DiffKV patched forward in every Qwen2 layer]
-  (runtime/diffkv_attention.py :: diffkv_forward())
+  [DKV patched forward in every Qwen2 layer]
+  (runtime/dkv_attention.py :: dkv_forward())
 
     is_decode = (use_cache and q_len == 1 and bsz == 1)  → FALSE for prefill
 
@@ -98,11 +98,11 @@ This trace was constructed by reading the actual call chain in source files — 
 ─── DECODE STEP ─────────────────────────────────────────
 
   input_ids = [[last_generated_token_id]]                  ← shape [B, 1]
-  model._diffkv_session_ids = [sid for each decode req]
+  model._dkv_session_ids = [sid for each decode req]
 
   model(input_ids, attention_mask, position_ids, use_cache=True)
   ↓
-  [diffkv_forward() — every layer]
+  [dkv_forward() — every layer]
 
     is_decode = True (q_len == 1, bsz can be > 1)
 
@@ -170,7 +170,7 @@ This trace was constructed by reading the actual call chain in source files — 
 | o_proj linear | PyTorch aten | Real CUDA via cuBLAS |
 | F.scaled_dot_product_attention (prefill) | PyTorch SDPA | Real Flash/SDPA CUDA kernel |
 | lm_head linear (last token) | PyTorch aten | Real CUDA via cuBLAS |
-| TritonDiffKV.reconstruct_lowrank | Triton JIT | Real Triton GPU kernel (with PyTorch fallback) |
+| TritonDKV.reconstruct_lowrank | Triton JIT | Real Triton GPU kernel (with PyTorch fallback) |
 
 ---
 
@@ -178,8 +178,8 @@ This trace was constructed by reading the actual call chain in source files — 
 
 | Kernel | Reason |
 |---|---|
-| _fused_sparse_decode_kernel (Triton, triton_sparse_attn.py) | Requires NativeBlockPool; diffkv_core.so never compiled |
-| DiffKVPagingStream CUDA stream transfers | paging_stream.cu never compiled |
+| _fused_sparse_decode_kernel (Triton, triton_sparse_attn.py) | Requires NativeBlockPool; dkv_core.so never compiled |
+| DKVPagingStream CUDA stream transfers | paging_stream.cu never compiled |
 | StaticSparseDecodeGraph graph.replay() | Never instantiated in serving path |
 | NCCL all_reduce / all_gather | Code commented out in stubs; never called |
 | Any dist.* call | torch.distributed never initialized |

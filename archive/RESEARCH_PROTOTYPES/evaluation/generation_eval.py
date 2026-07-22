@@ -120,7 +120,7 @@ def run_gen_benchmark(model_id="Qwen/Qwen2-0.5B", n_prompts=3):
         "Once upon a time, in a galaxy far, far away,"
     ]
     
-    modes = ["FP16", "INT8-DiffKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
+    modes = ["FP16", "INT8-DKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
     
     results = []
     for prompt in prompts:

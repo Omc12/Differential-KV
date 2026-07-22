@@ -1,7 +1,7 @@
 \section{Implementation Notes}
 \label{sec:impl}
 
-\diffkv{}'s active runtime is $\approx6{,}000$ lines of Python over MLX~\cite{mlx2023}, evaluated on
+\dkv{}'s active runtime is $\approx6{,}000$ lines of Python over MLX~\cite{mlx2023}, evaluated on
 Qwen2.5-1.5B~\cite{qwen25}. A few implementation choices are load-bearing and worth recording,
 because they are where correctness or performance was actually won or lost.
 
@@ -51,7 +51,7 @@ structure that the error signal alone cannot reliably surface.
 
 \paragraph{Configuration.} Behavior is controlled by environment flags with safe defaults, so new
 paths ship disabled until validated. The defaults used throughout this report are: compressed
-sparse decode on; fused decode buffer on (\texttt{DIFFKV\_DECODE\_FUSED}); block-sparse prefill
+sparse decode on; fused decode buffer on (\texttt{DKV\_DECODE\_FUSED}); block-sparse prefill
 on; base rank $\rank{=}32$ with layer-adaptive variation; $\maxres{=}128$; top-\topk{} $=16$;
 residual-key router; SVD seed $1234$. The optimized dense baseline is \texttt{mlx\_lm} with a full
 KV cache (chunked prefill, prefill-to-decode allocator release) on the same int4 weights; the
@@ -67,7 +67,7 @@ what is and is not exercised.
 \paragraph{Runtime optimizations inspired by kTransformers.}
 \label{par:ktransformers}
 The active runtime incorporates four throughput and memory optimizations whose design is informed
-by the kTransformers inference framework~\cite{yang2025ktransformers}, adapted to \diffkv{}'s
+by the kTransformers inference framework~\cite{yang2025ktransformers}, adapted to \dkv{}'s
 compressed-block layout.
 
 \emph{(i) Tiered CPU--GPU KV offloading.}
@@ -77,7 +77,7 @@ RAM~\cite{yang2025ktransformers}. We apply the analogous idea at the \emph{block
 pool slot carries a heat score $h \leftarrow 0.7\,h\,\gamma + 0.3\,\rho$ (decay $\gamma{=}0.95$,
 routing signal $\rho{\in}[0,1]$) updated at every decode step.
 When pool occupancy exceeds a threshold (default $80\%$), the coldest slots are evicted
-to pinned CPU RAM and their GPU memory is reclaimed. Because \diffkv{}'s SRL chunk-graph router
+to pinned CPU RAM and their GPU memory is reclaimed. Because \dkv{}'s SRL chunk-graph router
 selects the same block neighborhood across consecutive decode steps, the same $\topk$ blocks
 remain hot and almost never enter the cold tier during steady-state generation; offloading
 triggers only for blocks that have not been routed for many steps, i.e.\ genuinely irrelevant
@@ -120,7 +120,7 @@ are unprojected back to full $d_{\mathrm{feat}}$ before pool storage so the atte
 interface is unchanged. Before $W$ converges the projection is the identity, preserving
 correctness during warm-up. Because the additional reconstruction error (${\approx}0.1$--$0.5\%$)
 compounds with the SVD approximation, this feature is disabled by default
-(\path{DIFFKV_MLA_LATENT=0}) and requires NIAH recall validation before production use.
+(\path{DKV_MLA_LATENT=0}) and requires NIAH recall validation before production use.
 
 \paragraph{Testing.} A kernel-parity oracle checks the fused decode kernel against a reference
 implementation on seeded sessions; the needle and relational-binding harnesses guard recall. The

@@ -65,7 +65,7 @@ with $s$ the stored per-block scale. Crucially, decode never forms $\hat K_i$ ex
 
 \subsection{Exact residuals: selecting the outliers}
 The low-rank basis reconstructs the shared structure well but, by construction, mis-reconstructs
-low-energy outliers---which are the distinctive tokens recall depends on. \diffkv{} measures this
+low-energy outliers---which are the distinctive tokens recall depends on. \dkv{} measures this
 directly. For every token it computes the joint reconstruction error
 $e_i = \big\lVert \Delta K_i - \widehat{\Delta K}_i \big\rVert^2 + g^2\big\lVert \Delta V_i -
 \widehat{\Delta V}_i\big\rVert^2$ (the $V$ term reweighted by the same gain $g$ from

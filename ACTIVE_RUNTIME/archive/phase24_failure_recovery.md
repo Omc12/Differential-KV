@@ -6,7 +6,7 @@ This document outlines the validation of the system's ability to recover from in
 
 ### 1. Session Disconnect Mid-Generation
 - **Test:** User closes browser tab while generating a long response.
-- **Result:** vLLM's `abort_request` signals the DiffKV backend. The `DiffKVBlockStateTable.force_invalidate` is called. Any in-flight background compressions or paging reloads complete harmlessly (data is discarded). VRAM is cleanly reclaimed. **PASS.**
+- **Result:** vLLM's `abort_request` signals the DKV backend. The `DKVBlockStateTable.force_invalidate` is called. Any in-flight background compressions or paging reloads complete harmlessly (data is discarded). VRAM is cleanly reclaimed. **PASS.**
 
 ### 2. Reconnect After Eviction
 - **Test:** Chat session is left idle until evicted to CPU, then the user resumes.

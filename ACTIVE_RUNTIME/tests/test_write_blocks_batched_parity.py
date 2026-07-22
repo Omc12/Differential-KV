@@ -12,7 +12,7 @@ import os
 import sys
 import torch
 
-os.environ.setdefault("DIFFKV_MAX_RESIDUAL_TOKENS", "64")
+os.environ.setdefault("DKV_MAX_RESIDUAL_TOKENS", "64")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTIVE = os.path.abspath(os.path.join(HERE, ".."))
 if ACTIVE not in sys.path:

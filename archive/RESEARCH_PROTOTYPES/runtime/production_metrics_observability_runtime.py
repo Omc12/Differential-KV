@@ -31,14 +31,14 @@ class ProductionMetricsObservabilityRuntime:
         Returns Prometheus-formatted metrics plain-text.
         """
         lines = [
-            "# HELP diffkv_requests_total Total input queries processed.",
-            "# TYPE diffkv_requests_total counter",
-            f"diffkv_requests_total {len(self.metrics_history) * 10}",
-            "# HELP diffkv_throughput_tps Current real output speed.",
-            "# TYPE diffkv_throughput_tps gauge",
-            "diffkv_throughput_tps 375.40",
-            "# HELP diffkv_gpu_occupancy Speculative serve graphics SM occupancy.",
-            "# TYPE diffkv_gpu_occupancy gauge",
-            "diffkv_gpu_occupancy 98.60"
+            "# HELP dkv_requests_total Total input queries processed.",
+            "# TYPE dkv_requests_total counter",
+            f"dkv_requests_total {len(self.metrics_history) * 10}",
+            "# HELP dkv_throughput_tps Current real output speed.",
+            "# TYPE dkv_throughput_tps gauge",
+            "dkv_throughput_tps 375.40",
+            "# HELP dkv_gpu_occupancy Speculative serve graphics SM occupancy.",
+            "# TYPE dkv_gpu_occupancy gauge",
+            "dkv_gpu_occupancy 98.60"
         ]
         return "\n".join(lines) + "\n"

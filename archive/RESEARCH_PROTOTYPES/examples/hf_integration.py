@@ -1,9 +1,9 @@
 # HuggingFace Integration Example
-from integrations.huggingface_runtime_adapter import DiffKVHFAdapter
+from integrations.huggingface_runtime_adapter import DKVHFAdapter
 from transformers import AutoTokenizer
 
 model_id = "Qwen/Qwen2.5-7B-Instruct"
-model = DiffKVHFAdapter.from_pretrained(model_id, device_map="auto")
+model = DKVHFAdapter.from_pretrained(model_id, device_map="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 inputs = tokenizer("Hello, world!", return_tensors="pt").to("cuda")

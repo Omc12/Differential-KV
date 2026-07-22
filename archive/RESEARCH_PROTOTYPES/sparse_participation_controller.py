@@ -4,10 +4,10 @@ from typing import Dict, Any
 class SparseParticipationController:
     """
     Manages global sparse participation limits and pressure.
-    Enforces DIFFKV_AGGRESSIVE_SPARSE_MODE.
+    Enforces DKV_AGGRESSIVE_SPARSE_MODE.
     """
     def __init__(self):
-        self.aggressive_mode = os.environ.get("DIFFKV_AGGRESSIVE_SPARSE_MODE") == "1"
+        self.aggressive_mode = os.environ.get("DKV_AGGRESSIVE_SPARSE_MODE") == "1"
         self.config = {
             "max_participation_ratio": 0.05 if self.aggressive_mode else 0.2,
             "eviction_pressure": 0.9 if self.aggressive_mode else 0.5,

@@ -279,12 +279,12 @@ def main():
                         "real_tps": real_tps
                     })
 
-            diffkv_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            dkv_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             total_tokens_decoded += max_tokens_limit
 
             # Print LIVE summary of kernel fusion and compute-density saturation metrics
             print("\n---------------------------------------------------------")
-            print(f"LIVE TEXT ({mode.upper()}): {diffkv_text[:120]}...")
+            print(f"LIVE TEXT ({mode.upper()}): {dkv_text[:120]}...")
             print(f" -> Real Emitted TPS: {real_tps:.2f} TPS")
             print(f" -> TTFT: {ttft_ms:.2f} ms")
             print(f" -> p50/p95/p99 Latency: {p50:.1f} / {p95:.1f} / {p99:.1f} ms")

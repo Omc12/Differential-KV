@@ -4,14 +4,14 @@
 Runs the SAME setup as run_nat_eval (nat_paper prompt, a chosen preset), prefills,
 then decodes N tokens under torch.profiler and reports the top CUDA kernels by
 self-time — grouped into MODEL (the eager nf4 GEMM/dequant, shared with dense) vs
-DIFFKV (routing + KV reconstruction + the fused sparse-attention kernel) vs other.
+DKV (routing + KV reconstruction + the fused sparse-attention kernel) vs other.
 
 This answers, empirically, why tps is what it is: if the nf4-model bucket
-dominates, no DiffKV-side change moves tps (that was the 2026-07-18 finding).
+dominates, no DKV-side change moves tps (that was the 2026-07-18 finding).
 
 Usage (Lightning A100):
     python colab/profile_decode_step.py --model Qwen/Qwen2.5-14B-Instruct --preset low
-    python colab/profile_decode_step.py --preset dense   # baseline, no DiffKV
+    python colab/profile_decode_step.py --preset dense   # baseline, no DKV
 Run it per preset to compare where the time goes.
 """
 import os
@@ -41,14 +41,14 @@ _MODEL_HINTS = ("gemm", "cutlass", "dequant", "bitsandbytes", "bnb", "nf4",
                 # Extra nf4 / bitsandbytes CUDA kernel name fragments:
                 "gemv_4bit", "kgemm_4bit", "dequantize_blockwise",
                 "kDequantizeBlockwise", "volta", "sm80", "sm86")
-# DIFFKV: ops that are unambiguously the DiffKV decode path.
+# DKV: ops that are unambiguously the DKV decode path.
 # Note: generic aten:: ops (copy_, index, mul, add, cat, gather) are left in
 # "other" because they also appear in the model forward pass and cannot be
 # reliably attributed without NVTX annotations.  Use --also-dense to see the
 # model-only baseline and subtract.
-_DIFFKV_HINTS = ("triton", "sparse_attn", "reconstruct", "attend_and_reconstruct",
+_DKV_HINTS = ("triton", "sparse_attn", "reconstruct", "attend_and_reconstruct",
                  "decode_combined", "fused_decode", "reconstruct_and_score",
-                 # Confirmed DiffKV Triton kernel names from triton_fused_decode.py:
+                 # Confirmed DKV Triton kernel names from triton_fused_decode.py:
                  "_fused_decode_combined", "_triton_sparse_decode",
                  "_dispatch_reduction", "_build_stratified_u",
                  "_gather_routed_blocks")
@@ -56,9 +56,9 @@ _DIFFKV_HINTS = ("triton", "sparse_attn", "reconstruct", "attend_and_reconstruct
 
 def _bucket(name: str) -> str:
     n = name.lower()
-    for h in _DIFFKV_HINTS:
+    for h in _DKV_HINTS:
         if h in n:
-            return "diffkv"
+            return "dkv"
     for h in _MODEL_HINTS:
         if h in n:
             return "model"
@@ -69,7 +69,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--preset", default="low",
-                    help="low|mid|high, or 'dense' for the no-DiffKV baseline")
+                    help="low|mid|high, or 'dense' for the no-DKV baseline")
     ap.add_argument("--steps", type=int, default=40, help="decode steps to profile")
     ap.add_argument("--warmup", type=int, default=8, help="decode steps before profiling")
     ap.add_argument("--topk", type=int, default=20, help="top ops to print")
@@ -110,19 +110,19 @@ def main():
             device_map="auto", trust_remote_code=True).eval()
         _decode = _make_dense_decode(model, ids, device)
     else:
-        os.environ["DIFFKV_PRESET"] = args.preset
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
+        os.environ["DKV_PRESET"] = args.preset
+        os.environ["DKV_COMPRESSED_DECODE"] = "1"
         # Same validated defaults as the eval (overridable by the caller's env).
-        for _k, _v in (("DIFFKV_COMPRESS_GRAM_SVD", "1"), ("DIFFKV_RANK_BOOST", "off"),
-                       ("DIFFKV_RSVD_MAX_RPROJ", "32"), ("DIFFKV_CONTIGUOUS_PREFILL", "1"),
-                       ("DIFFKV_CONTIG_UNROTATE", "1")):
+        for _k, _v in (("DKV_COMPRESS_GRAM_SVD", "1"), ("DKV_RANK_BOOST", "off"),
+                       ("DKV_RSVD_MAX_RPROJ", "32"), ("DKV_CONTIGUOUS_PREFILL", "1"),
+                       ("DKV_CONTIG_UNROTATE", "1")):
             os.environ.setdefault(_k, _v)
-        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-        w = DiffKVHFWrapper(model_id=args.model, config={"preset": args.preset,
+        from serving.hf_dkv_wrapper import DKVHFWrapper
+        w = DKVHFWrapper(model_id=args.model, config={"preset": args.preset,
                             "serving_mode": "balanced"}, torch_dtype=torch.float16,
                             device=device, quantization_config=quantization_config)
         w.ensure_loaded()
-        _decode = _make_diffkv_decode(w, ids, device)
+        _decode = _make_dkv_decode(w, ids, device)
 
     # ── Warm up decode (JIT/allocator) then profile ──
     last = _decode.prefill()
@@ -151,13 +151,13 @@ def main():
         rows.append((e.key, cuda_us / 1000.0, _bucket(e.key)))   # ms
     rows.sort(key=lambda r: -r[1])
     total_ms = sum(r[1] for r in rows) or 1.0
-    buckets = {"model": 0.0, "diffkv": 0.0, "other": 0.0}
+    buckets = {"model": 0.0, "dkv": 0.0, "other": 0.0}
     for _, ms, b in rows:
         buckets[b] += ms
 
     print("=" * 78)
     print(f"CUDA time by bucket (self-time over {args.steps} decode steps):")
-    for b in ("model", "diffkv", "other"):
+    for b in ("model", "dkv", "other"):
         print(f"  {b:<8} {buckets[b]:9.1f} ms total   {100*buckets[b]/total_ms:5.1f}%   "
               f"{buckets[b]/args.steps:6.2f} ms/token")
     print("-" * 78)
@@ -167,13 +167,13 @@ def main():
         print(f"{name[:44]:<44} {ms:>9.1f} {100*ms/total_ms:>5.1f}%  {b}")
     print("=" * 78)
     print("NOTE: 'other' bucket = generic aten:: ops (copy_, index, cat, gather, mul,\n"
-          "      add, neg) that appear in BOTH the model forward and DiffKV block-gather\n"
+          "      add, neg) that appear in BOTH the model forward and DKV block-gather\n"
           "      path. Without NVTX annotations they cannot be attributed. Run with\n"
-          "      --also-dense to see the dense baseline and estimate DiffKV overhead:")
+          "      --also-dense to see the dense baseline and estimate DKV overhead:")
     print(f"      python colab/profile_decode_step.py --preset dense --steps {args.steps}")
     print("If 'model' dominates, tps is bound by the eager nf4 forward (shared with"
-          "\ndense) and no DiffKV-side change moves it — do the long-context sweep"
-          "\ninstead, where KV (and thus the diffkv bucket) becomes the real cost.")
+          "\ndense) and no DKV-side change moves it — do the long-context sweep"
+          "\ninstead, where KV (and thus the dkv bucket) becomes the real cost.")
 
 
 # ── decode drivers ──
@@ -205,7 +205,7 @@ def _make_dense_decode(model, ids, device):
     return _Driver(prefill, step)
 
 
-def _make_diffkv_decode(w, ids, device):
+def _make_dkv_decode(w, ids, device):
     tok, mgr, model = w.tokenizer, w.manager, w.model
     sid = "profile_session"
     state = {}
@@ -216,7 +216,7 @@ def _make_diffkv_decode(w, ids, device):
         w._session_token_ids[sid] = []
         mgr.init_session(sid, prefill_len=len(ids))
         mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
-        model._diffkv_session_ids = [sid]
+        model._dkv_session_ids = [sid]
         CH = int(getattr(getattr(mgr, "config", None), "prefill_chunk_size", 1024))
         if hasattr(mgr, "get_session_micro_block_size"):
             _bc = max(2, int(mgr.get_session_micro_block_size(sid)) + 1)

@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from runtime.fused_reconstruction import fused_lowrank_reconstruct
-from runtime.triton_diffkv import TritonDiffKV
+from runtime.triton_dkv import TritonDKV
 from compression.quantization import dequantize_int8
 
 @dataclass
@@ -103,7 +103,7 @@ class KVRuntimeManager:
                     V = self.basis_cache.get(layer_idx, {}).get(block.basis_id)
                 
                 if block.U is not None and V is not None:
-                    recon_deltas = TritonDiffKV.reconstruct_lowrank_sparse(
+                    recon_deltas = TritonDKV.reconstruct_lowrank_sparse(
                         block.U, V, block.anchor_kv.reshape(-1),
                         block.sparse_indices, block.sparse_values, scale=block.scale
                     )

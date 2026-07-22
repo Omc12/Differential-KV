@@ -4,7 +4,7 @@ import torch
 import time
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from runtime.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 
 print("=== PHASE 4: RECONSTRUCTION STABILITY TEST ===")
 
@@ -23,13 +23,13 @@ mgr = KVRuntimeManager(
 )
 mgr.block_size = 32
 mgr.rank = 16
-apply_diffkv_attention_patch(model, mgr)
+apply_dkv_attention_patch(model, mgr)
 
 session_id = "quality_test"
 prompt = "Write a highly detailed, 500-word essay on the fall of the Roman Empire, including dates, key figures, and economic factors."
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
 
-model._diffkv_session_ids = [session_id]
+model._dkv_session_ids = [session_id]
 position_ids = torch.arange(0, input_ids.shape[1], device="cuda").unsqueeze(0)
 
 print(f"\n[1] Running Prefill ({input_ids.shape[1]} tokens)...")

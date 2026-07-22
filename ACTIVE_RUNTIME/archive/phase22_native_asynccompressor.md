@@ -3,12 +3,12 @@
 ## Why Pure Python Is Insufficient
 The Python `threading.Thread` + `queue.Queue` model releases the GIL during `torch.linalg.svd` LAPACK calls but holds it during all orchestration: queue pops, dict updates, pool writes, and state transitions. Under 100+ concurrent sessions, this creates millisecond-scale GIL stalls on the main decode thread.
 
-## Native Design: `DiffKVCompressorThread` (C++ Extension)
+## Native Design: `DKVCompressorThread` (C++ Extension)
 
 ### 1. Thread Lifecycle
 ```cpp
-// diffkv_compressor.cpp
-class DiffKVCompressorThread {
+// dkv_compressor.cpp
+class DKVCompressorThread {
     std::thread worker_;
     std::atomic<bool> running_;
     SPSCRingBuffer<CompressJob> queue_;  // Lock-free Single-Producer Single-Consumer

@@ -3,7 +3,7 @@
 This document outlines precisely which systems from `NATIVE_RUNTIME` are ready to be packaged as a C++/CUDA PyBind extension or integrated directly into a production serving engine like vLLM.
 
 ## 1. Ready for PyBind/C++ Extraction
-- **Triton Sparse Decode (`triton_diffkv.py`):** The kernel is stable and mathematically verified. It can be compiled ahead-of-time (AOT) and exposed as a raw `torch.ops.diffkv.sparse_decode` C++ operation, completely bypassing Triton's JIT overhead during deployment.
+- **Triton Sparse Decode (`triton_dkv.py`):** The kernel is stable and mathematically verified. It can be compiled ahead-of-time (AOT) and exposed as a raw `torch.ops.dkv.sparse_decode` C++ operation, completely bypassing Triton's JIT overhead during deployment.
 - **Persistent Metadata Pool (`metadata_pool.py`):** The pre-allocated tensor logic maps perfectly to a C++ Struct/Class holding raw device pointers. Moving this to C++ prevents the Python garbage collector from ever touching critical runtime memory arrays.
 
 ## 2. Ready for vLLM Integration

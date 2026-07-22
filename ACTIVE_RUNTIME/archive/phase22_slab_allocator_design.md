@@ -12,7 +12,7 @@ The Adaptive Rank Selector (dynamic rank 4–64) is officially deprecated. It is
 | Slab-32 | 32 | Same formula, rank=32 | Complex, high-entropy context (recent but evicted) |
 
 ## Allocation Rules
-1. **At compression time**, the `DiffKVCompressionWorker` executes truncated SVD, retains the top-K singular values by a fixed threshold, then **rounds up** to the nearest slab tier.
+1. **At compression time**, the `DKVCompressionWorker` executes truncated SVD, retains the top-K singular values by a fixed threshold, then **rounds up** to the nearest slab tier.
 2. **All blocks in a slab are identical in size.** No heterogeneous allocation within a slab.
 3. **Pre-allocated Slab Pools:** At engine startup, three separate GPU memory pools are allocated, each sized for a fixed number of blocks.
 

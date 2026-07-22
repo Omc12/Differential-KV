@@ -64,7 +64,7 @@ def main():
     else:
         mac("decRatioFourK", "--")
 
-    # DiffKV prefill speedup over the optimized dense baseline at 64k
+    # DKV prefill speedup over the optimized dense baseline at 64k
     if 65536 in both:
         a, d = prim["active"][65536], prim["dense"][65536]
         mac("pfSpeedupSixtyFourK", num(d["prefill_s"] / a["prefill_s"], "%.2f"))

@@ -6,7 +6,7 @@
 #include "native_sparse_metadata_engine.hpp"
 
 namespace py = pybind11;
-using namespace diffkv;
+using namespace dkv;
 
 PYBIND11_MODULE(native_sparse_metadata_engine, m) {
     m.doc() = "RCO-N: Native Sparse Metadata Engine — compact C++ metadata storage";

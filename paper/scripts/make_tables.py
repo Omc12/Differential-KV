@@ -2,9 +2,9 @@
 """Emit every LaTeX table for the paper straight from data.py (measured JSON or
 code-derived dimensions). No hand-typed numbers. Outputs -> paper/tables/*.tex
 
-  T1  Model + DiffKV configuration (code-derived)
+  T1  Model + DKV configuration (code-derived)
   T2  Per-block byte budget & compression ratio (code-derived; R=128 & R=64)
-  T3  Main results — DiffKV (active) vs dense (fresh primary sweep)
+  T3  Main results — DKV (active) vs dense (fresh primary sweep)
   T4  Residual-budget accuracy/memory sweep (measured)
   T5  Per-run detail (appendix; fresh primary)
   T6  Compressed-vs-exact decode ablation (measured modes)
@@ -76,8 +76,8 @@ def t2_block_budget():
          r"exact residuals $R{=}128$ & %d & (%s KiB) \\" % (b128["residuals"], kib(b128["residuals"])),
          r"exact residuals $R{=}64$ & %d & (%s KiB) \\" % (b64["residuals"], kib(b64["residuals"])),
          r"\midrule",
-         r"\textbf{DiffKV block} ($R{=}128$) & \textbf{%d} & \textbf{%s KiB} \\" % (b128["total"], kib(b128["total"])),
-         r"\textbf{DiffKV block} ($R{=}64$) & \textbf{%d} & \textbf{%s KiB} \\" % (b64["total"], kib(b64["total"])),
+         r"\textbf{DKV block} ($R{=}128$) & \textbf{%d} & \textbf{%s KiB} \\" % (b128["total"], kib(b128["total"])),
+         r"\textbf{DKV block} ($R{=}64$) & \textbf{%d} & \textbf{%s KiB} \\" % (b64["total"], kib(b64["total"])),
          r"Dense block $[256,2,128]{\times}2$ & %d & %s KiB \\" % (b128["dense"], kib(b128["dense"])),
          r"\midrule",
          r"Compression ratio ($R{=}128$) & \multicolumn{2}{r}{$%.2f\times$} \\" % b128["ratio"],
@@ -106,7 +106,7 @@ def t3_main():
 
     L = [r"\begin{tabular}{l" + "r" * len(ctx) + "}", r"\toprule",
          r"Metric & " + hdr + r" \\", r"\midrule",
-         r"\multicolumn{%d}{l}{\textit{DiffKV active runtime (compressed sparse decode)}}\\" % (len(ctx) + 1),
+         r"\multicolumn{%d}{l}{\textit{DKV active runtime (compressed sparse decode)}}\\" % (len(ctx) + 1),
          row(r"\quad Prefill (s)", "active", "prefill_s"),
          row(r"\quad Decode (tok/s)", "active", "decode_tps"),
          row(r"\quad KV cache footprint (GB)", "active", "kv_mem_gb", "%.2f"),
@@ -182,7 +182,7 @@ def t6_ablation():
         return label + " & " + " & ".join(cells) + r" \\"
 
     L = [r"\begin{tabular}{l" + "r" * len(ctx) + "}", r"\toprule",
-         r"Decode over the same DiffKV store & " + hdr + r" \\", r"\midrule",
+         r"Decode over the same DKV store & " + hdr + r" \\", r"\midrule",
          row(r"Compressed sparse decode (tok/s)", comp, "decode_tps"),
          row(r"Exact decode, upper bound (tok/s)", exact, "decode_tps"),
          r"\midrule",

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from runtime.sat_run_manager import SATRunManager
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 from decode_pipeline_fusion_engine import DecodePipelineFusionEngine
 from runtime.cdbe_resolver import CDBEResolver
 
@@ -21,7 +21,7 @@ class ScalingRuntimeLifecycleManager:
         self.stage = stage
         self.logger = logging.getLogger("SGC_Lifecycle")
         self.current_resolver: Optional[CDBEResolver] = None
-        self.current_wrapper: Optional[DiffKVHFWrapper] = None
+        self.current_wrapper: Optional[DKVHFWrapper] = None
         self.current_run_mgr: Optional[SATRunManager] = None
 
     def create_run_manager(self, model_id: str, concurrency: int, duration_sec: int) -> SATRunManager:
@@ -52,7 +52,7 @@ class ScalingRuntimeLifecycleManager:
             await self.shutdown()
 
         try:
-            self.current_wrapper = DiffKVHFWrapper(
+            self.current_wrapper = DKVHFWrapper(
                 model_id,
                 {"mode": "lowrank_sparse", "block_size": block_size, "rank": rank},
                 quantization_config=bnb_config,

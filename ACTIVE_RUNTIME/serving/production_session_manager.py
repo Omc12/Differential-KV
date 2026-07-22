@@ -15,10 +15,10 @@ class ProductionSessionManager:
                  max_resident_sessions: int = None,
                  kv_manager=None):
         # Default: 4 resident sessions to support concurrent workflows (like title generation) without swapping.
-        # Override with DIFFKV_MAX_SESSIONS env var for multi-user deployments.
+        # Override with DKV_MAX_SESSIONS env var for multi-user deployments.
         if max_resident_sessions is None:
             try:
-                max_resident_sessions = int(os.environ.get("DIFFKV_MAX_SESSIONS", "4"))
+                max_resident_sessions = int(os.environ.get("DKV_MAX_SESSIONS", "4"))
             except (ValueError, TypeError):
                 max_resident_sessions = 4
 

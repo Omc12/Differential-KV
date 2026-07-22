@@ -4,7 +4,7 @@
 
 1. **Request Ingestion**: `OpenAICompatibleAPIGateway` receives incoming HTTP/vLLM requests.
 2. **Scheduling**: `SparseRequestScheduler` groups requests into occupancy-aware batches.
-3. **Model Wrapper**: `DiffKVHFWrapper` intercepts standard HuggingFace calls.
+3. **Model Wrapper**: `DKVHFWrapper` intercepts standard HuggingFace calls.
 4. **Residency Check**: `ActiveGPUResidencyController` ensures KV caches are GPU-resident.
 5. **Fused Decode**: `DecodePipelineFusionEngine` executes Triton kernels for:
     - Sparse Attention calculation.

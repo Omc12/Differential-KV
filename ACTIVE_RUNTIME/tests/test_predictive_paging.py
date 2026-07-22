@@ -27,7 +27,7 @@ class MockBlock:
         self.active_v = None
 
 def test_predictive_paging():
-    os.environ["DIFFKV_PREDICTIVE_PAGING"] = "1"
+    os.environ["DKV_PREDICTIVE_PAGING"] = "1"
     
     # Init store with small budget (roughly 2 blocks worth of memory)
     store = PagedKVStore(gpu_budget_gb=0.0001, device="cuda")

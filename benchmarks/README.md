@@ -7,13 +7,13 @@ length it is skipped at larger ones).
 
 | engine   | what it is                                  | weights        |
 |----------|---------------------------------------------|----------------|
-| `native` | DiffKV C++ / ggml binary                    | GGUF Q4_K_M    |
-| `active` | DiffKV ACTIVE_RUNTIME (MLX) — compressed KV | MLX int4       |
+| `native` | DKV C++ / ggml binary                    | GGUF Q4_K_M    |
+| `active` | DKV ACTIVE_RUNTIME (MLX) — compressed KV | MLX int4       |
 | `dense`  | plain `mlx_lm` with a **full** KV cache     | MLX int4       |
 | `ollama` | llama.cpp via the ollama server             | GGUF Q4_K_M    |
 
 `dense` shares the exact int4 weights + MLX engine with `active`, so
-`active` vs `dense` isolates the DiffKV compression algorithm.
+`active` vs `dense` isolates the DKV compression algorithm.
 
 ## Files
 - `bench_common.py` — builds the per-length NIAH chat prompt (exact token count).
@@ -27,18 +27,18 @@ length it is skipped at larger ones).
 ## Run
 ```bash
 # full sweep (≈45–90 min on an 8 GB M3; many high-context cells OOM/skip)
-./diffkv_venv/bin/python3 benchmarks/run_bench.py \
+./dkv_venv/bin/python3 benchmarks/run_bench.py \
     --contexts 4096 8192 16384 32768 65536 131072 \
     --gen 128 --timeout 1500 --ram-cap-gb 7.2
 
 # regenerate the polished report from the latest results
-./diffkv_venv/bin/python3 benchmarks/make_report.py
+./dkv_venv/bin/python3 benchmarks/make_report.py
 ```
 Subset example: `--engines active dense --contexts 4096 16384`.
 
 Requires the ollama server running (`qwen2.5:1.5b-instruct` pulled), the native
-binary at `diffkv_native/build/diffkv_native`, the GGUF at
-`diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf`, and the MLX model
+binary at `dkv_native/build/dkv_native`, the GGUF at
+`dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf`, and the MLX model
 `mlx-community/Qwen2.5-1.5B-Instruct-4bit` (auto-downloaded by mlx_lm).
 
 ## Outputs (in `results/`)
@@ -50,7 +50,7 @@ binary at `diffkv_native/build/diffkv_native`, the GGUF at
 
 ```bash
 # regenerate plots from existing results
-./diffkv_venv/bin/python3 benchmarks/plot_graphs.py
+./dkv_venv/bin/python3 benchmarks/plot_graphs.py
 ```
 
 ## Honesty notes

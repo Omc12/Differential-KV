@@ -19,11 +19,11 @@ ACTIVE_RUNTIME/
 ├── launch_real_serving.py                          ← entrypoint
 ├── serving/
 │   ├── batch_engine.py                             ← LIVE
-│   ├── hf_diffkv_wrapper.py                        ← LIVE
+│   ├── hf_dkv_wrapper.py                        ← LIVE
 │   ├── openai_compatible_api_gateway.py             ← LIVE
 │   └── production_session_manager.py               ← LIVE
 ├── runtime/
-│   ├── diffkv_attention.py                         ← LIVE (patched into model)
+│   ├── dkv_attention.py                         ← LIVE (patched into model)
 │   ├── batched_sparse_attn.py                      ← LIVE (decode kernel)
 │   ├── sparse_attention.py                         ← LIVE (fallback path)
 │   └── lgs_resolver.py                             ← CHECK (may be unused)
@@ -37,7 +37,7 @@ ACTIVE_RUNTIME/
 │   ├── paging/
 │   │   └── paged_kv_store.py                       ← LIVE
 │   └── sparse_decode/
-│       ├── triton_diffkv.py                        ← LIVE (with fallback)
+│       ├── triton_dkv.py                        ← LIVE (with fallback)
 │       └── triton_sparse_attn.py                   ← DEAD (needs unbuilt C++)
 └── RESEARCH_PROTOTYPES/compression/
     └── adaptive.py                                 ← LIVE (via try/except import)
@@ -72,11 +72,11 @@ These were created but never populated — pure migration artifacts:
 
 | Path | Status |
 |---|---|
-| `ACTIVE_RUNTIME/native_core/diffkv_core/src/bindings.cpp` | Source only — no .pyd/.so |
-| `ACTIVE_RUNTIME/native_core/diffkv_core/src/compressor_thread.cpp` | Source only |
-| `ACTIVE_RUNTIME/native_core/diffkv_core/src/paging_stream.cu` | Source only — never compiled |
-| `ACTIVE_RUNTIME/native_core/diffkv_core/include/*.hpp` (4 headers) | Source only |
-| `ACTIVE_RUNTIME/native_core/diffkv_core/CMakeLists.txt` | Build config — never run |
+| `ACTIVE_RUNTIME/native_core/dkv_core/src/bindings.cpp` | Source only — no .pyd/.so |
+| `ACTIVE_RUNTIME/native_core/dkv_core/src/compressor_thread.cpp` | Source only |
+| `ACTIVE_RUNTIME/native_core/dkv_core/src/paging_stream.cu` | Source only — never compiled |
+| `ACTIVE_RUNTIME/native_core/dkv_core/include/*.hpp` (4 headers) | Source only |
+| `ACTIVE_RUNTIME/native_core/dkv_core/CMakeLists.txt` | Build config — never run |
 
 **Action: Either build or move to `RESEARCH_PROTOTYPES/native_core_src/`. Do not delete — building this is the primary next engineering step.**
 
@@ -126,7 +126,7 @@ The vast majority is dead research residue:
 - `enable_execution_audit.py` (7.2 KB) — meta-audit script, not serving code
 - `deployment_reproducibility_manager.py` (4 KB) — deployment tooling
 - `real_multiuser_serving_orchestrator.py` (4.5 KB) — duplicate serving path
-- `patch_hf_decode_bypass.py` (5 KB) — alternative patch, superseded by diffkv_attention.py
+- `patch_hf_decode_bypass.py` (5 KB) — alternative patch, superseded by dkv_attention.py
 - `legacy_system_classifier.py` (6 KB) — classification tool, not runtime
 - `differential_kv_cli.py` (7 KB) — CLI tool
 - Dozens of single-purpose controller files (`sparse_qos_stabilizer.py`, `memory_pressure_safety_system.py`, etc.) — none imported in serving

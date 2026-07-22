@@ -4,7 +4,7 @@
 
 ## Justification
 
-Phase 23 proved that the three native components (`DiffKVBlockStateTable`, `DiffKVCompressorThread`, `DiffKVPagingStream`) are production-safe, race-condition-free, and mechanically stable. The runtime is no longer a Python threading experiment — it is a compiled native subsystem.
+Phase 23 proved that the three native components (`DKVBlockStateTable`, `DKVCompressorThread`, `DKVPagingStream`) are production-safe, race-condition-free, and mechanically stable. The runtime is no longer a Python threading experiment — it is a compiled native subsystem.
 
 The next highest-leverage move is to stop operating as a **standalone runtime** and instead integrate directly into **vLLM** as a proper backend.
 
@@ -21,8 +21,8 @@ Multi-GPU coherence requires tensor parallelism, which requires vLLM integration
 Still blocked by hardware SRAM limits. Not an orchestration problem.
 
 ## Phase 24 Deliverable
-A functional `vllm.attention.backends.diffkv` module, registered via vLLM's backend registry, that:
-1. Uses `DiffKVBlockStateTable` for block state tracking.
+A functional `vllm.attention.backends.dkv` module, registered via vLLM's backend registry, that:
+1. Uses `DKVBlockStateTable` for block state tracking.
 2. Dispatches to `TritonSparseDecode` for compressed blocks.
-3. Registers `DiffKVCompressorThread` as a background vLLM worker.
-4. Uses `DiffKVPagingStream` for all block evictions/reloads.
+3. Registers `DKVCompressorThread` as a background vLLM worker.
+4. Uses `DKVPagingStream` for all block evictions/reloads.

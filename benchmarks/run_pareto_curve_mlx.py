@@ -12,7 +12,7 @@ sys.path.insert(0, ACTIVE)
 
 import mlx.core as mx
 import mlx.nn as nn
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 import torch
 
 SAMPLE_TEXT = """
@@ -40,8 +40,8 @@ def generate_eval_corpus(tokenizer, target_tokens: int):
 
 def compute_ppl_for_residual(wrapper, token_ids, max_residual: int):
     wrapper.ensure_loaded()
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_MAX_RESIDUAL"] = str(max_residual)
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_MAX_RESIDUAL"] = str(max_residual)
 
     sid = f"pareto_res_{max_residual}"
     wrapper.manager.clear_session(sid)
@@ -52,7 +52,7 @@ def compute_ppl_for_residual(wrapper, token_ids, max_residual: int):
     input_ids = torch.tensor([token_ids[:-1]], dtype=torch.long)
     target_ids = mx.array(token_ids[1:])
 
-    wrapper.model._diffkv_session_ids = [sid]
+    wrapper.model._dkv_session_ids = [sid]
     wrapper.manager.init_session(sid, prefill_len=len(token_ids)-1)
 
     logits_list = []
@@ -86,7 +86,7 @@ def calculate_compression_ratio(rank=32, block_size=256, max_residual=128, dim=2
 
 def run_pareto_sweep(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
     print("--- Running Compression Ratio vs Quality Pareto Curve Benchmark ---", flush=True)
-    wrapper = MLXDiffKVWrapper(
+    wrapper = MLXDKVWrapper(
         model_id=model_id,
         config={"rank": 32, "block_size": 256},
     )

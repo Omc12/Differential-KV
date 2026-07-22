@@ -10,7 +10,7 @@ def package_edge_bundle():
     """
     logger.info("Packaging Local Edge Runtime Bundle...")
     logger.info("Including: llama.cpp bindings, Metal-optimized kernels, Differential KV core.")
-    logger.info("Bundle 'diff_kv_edge_macos.tar.gz' created successfully.")
+    logger.info("Bundle 'dkv_edge_macos.tar.gz' created successfully.")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

@@ -3,7 +3,7 @@ import os
 
 class PublicRuntimeMatrix:
     """
-    Phase 18C: Manages the comparison matrix between DiffKV and public runtimes.
+    Phase 18C: Manages the comparison matrix between DKV and public runtimes.
     Ensures identical checkpoint/quantization for fair comparison.
     """
     def __init__(self, export_dir: str = "results/reconstruction_18/"):

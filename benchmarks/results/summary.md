@@ -1,4 +1,4 @@
-# DiffKV multi-engine benchmark — Qwen2.5-1.5B-Instruct (Q4)
+# DKV multi-engine benchmark — Qwen2.5-1.5B-Instruct (Q4)
 
 - Host: Oms-MacBook-Pro-2.local · 8.6 GB RAM · Apple M3
 - Started: 2026-07-22T01:41:33  |  Decode tokens/test: 128
@@ -7,7 +7,7 @@
 - **Memory** = peak of per-process `max(phys_footprint, RSS)` summed over the engine's process tree, sampled at 20 Hz. Rationale: MLX (active/dense) keeps weights/KV in Metal buffers counted by `phys_footprint` but not RSS; llama.cpp/ggml (ollama, native) mmap their GGUF weights, counted by RSS but not `phys_footprint`. Taking the larger per process avoids undercounting either family. The `(RSS GB)` column is plain resident set, for reference. ollama is measured on its `llama-server` process tree.
 
 **Engines**
-- `active` — DiffKV active runtime (MLX int4)
+- `active` — DKV active runtime (MLX int4)
 - `dense` — Dense (mlx_lm int4, full KV)
 
 ## Prefill time (s)

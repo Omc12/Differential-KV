@@ -44,7 +44,7 @@ def rotate_half(x):
 
 if HAS_TRITON:
     @triton.jit
-    def diffkv_fused_decode_kernel(
+    def dkv_fused_decode_kernel(
         # Inputs already in pool (indexed by slot)
         Q_ptr,           # [num_q_heads, head_dim]
         U_ptr,           # [pool_size, MAX_S, RANK]          INT8
@@ -749,7 +749,7 @@ _IS_MPS_AVAILABLE = (hasattr(torch, "backends") and
                      torch.backends.mps.is_available())
 _IS_CUDA_AVAILABLE = torch.cuda.is_available()
 
-use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+use_compile = os.environ.get("DKV_USE_TORCH_COMPILE", "auto")
 if use_compile == "auto":
     use_compile = "1" if _IS_CUDA_AVAILABLE else "0"
 elif _IS_MPS_AVAILABLE and not _IS_CUDA_AVAILABLE:
@@ -769,7 +769,7 @@ if use_compile == "1":
     # that's a win — but the prefill history-attention's compressed-block count
     # (N_blocks) GROWS with context, and under streaming compression it changes
     # on every prefill chunk.  reduce-overhead then re-records the graph each
-    # chunk → the ~5s/chunk recompile storm that made DIFFKV_STREAMING_COMPRESS
+    # chunk → the ~5s/chunk recompile storm that made DKV_STREAMING_COMPRESS
     # ~5x slower than deferred (fwd 8.5s → 74s at 13k).  "default" compiles once
     # for dynamic shapes (dynamic=True) and never re-records, which is what
     # streaming (the MLX-parity long-context VRAM path) needs.  Deferred prefill
@@ -779,7 +779,7 @@ if use_compile == "1":
 
     try:
         _backend = "inductor"
-        print(f"[DiffKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
+        print(f"[DKV JIT] Compiling _reconstruct_and_score with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
         _reconstruct_and_score = torch.compile(
             _reconstruct_and_score_compiled,
             backend=_backend,
@@ -788,12 +788,12 @@ if use_compile == "1":
             dynamic=True,
         )
     except Exception as e:
-        print(f"[DiffKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
+        print(f"[DKV JIT] torch.compile of _reconstruct_and_score failed ({e}). Falling back to eager.")
         _reconstruct_and_score = _reconstruct_and_score_compiled
         
     try:
         _backend = "inductor"
-        print(f"[DiffKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
+        print(f"[DKV JIT] Compiling _attend_and_reconstruct_v with backend={_backend}, mode={_decode_compile_mode} (dynamic=True) ...")
         _attend_and_reconstruct_v = torch.compile(
             _attend_and_reconstruct_v_compiled,
             backend=_backend,
@@ -802,11 +802,11 @@ if use_compile == "1":
             dynamic=True,
         )
     except Exception as e:
-        print(f"[DiffKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
+        print(f"[DKV JIT] torch.compile of _attend_and_reconstruct_v failed ({e}). Falling back to eager.")
         _attend_and_reconstruct_v = _attend_and_reconstruct_v_compiled
     try:
         _backend = "inductor"
-        print(f"[DiffKV JIT] Compiling _prefill_fused_history_attend with backend={_backend}, mode={_prefill_compile_mode} (dynamic=True) ...")
+        print(f"[DKV JIT] Compiling _prefill_fused_history_attend with backend={_backend}, mode={_prefill_compile_mode} (dynamic=True) ...")
         _prefill_fused_history_attend = torch.compile(
             _prefill_fused_history_attend_compiled,
             backend=_backend,
@@ -815,7 +815,7 @@ if use_compile == "1":
             dynamic=True,
         )
     except Exception as e:
-        print(f"[DiffKV JIT] torch.compile of _prefill_fused_history_attend failed ({e}). Falling back to JIT script.")
+        print(f"[DKV JIT] torch.compile of _prefill_fused_history_attend failed ({e}). Falling back to JIT script.")
         try:
             _prefill_fused_history_attend = torch.jit.script(_prefill_fused_history_attend_compiled)
         except Exception:
@@ -839,7 +839,7 @@ else:
 # see steady-state performance from the very first real call — matching how
 # MLX's @mx.compile compiles at definition time.
 #
-# Called from DiffKVHFWrapper.ensure_loaded() once weights are on-device.
+# Called from DKVHFWrapper.ensure_loaded() once weights are on-device.
 
 def warm_up_jit(
     device: str = "cuda",
@@ -910,11 +910,11 @@ def warm_up_jit(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        print("[DiffKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
+        print("[DKV JIT] Decode kernel warmup complete — Inductor compilation finished.", flush=True)
 
     except Exception as e:
         # Non-fatal: warmup failure just means first real call will compile.
-        print(f"[DiffKV JIT] WARNING: decode kernel warmup failed ({e}). "
+        print(f"[DKV JIT] WARNING: decode kernel warmup failed ({e}). "
               "First decode request will trigger JIT compilation.", flush=True)
 
 
@@ -1151,9 +1151,9 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
             # block is skipped when no routed block carries residuals — so the dense/no-
             # residual path is untouched and VRAM is unchanged (no persistent buffers).
             # A100-validated: random-code recall 75%→88% (recovered a digit-drop code,
-            # zero NIAH regressions).  Default ON; DIFFKV_RESIDUAL_EXACT_ROPE=0 restores
+            # zero NIAH regressions).  Default ON; DKV_RESIDUAL_EXACT_ROPE=0 restores
             # the anchor-position approximation.
-            if os.environ.get("DIFFKV_RESIDUAL_EXACT_ROPE", "1") == "1":
+            if os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1") == "1":
                 _abs_pos = (anchor_indices_clamped.unsqueeze(1)
                             + res_pos_g.clamp(min=0).long())          # [N, MAX_RES]
                 _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
@@ -1536,7 +1536,7 @@ def _pytorch_vectorized_sparse_attn_decode(
 
     N = block_indices.shape[0] if block_indices is not None else 0
     block_capacity = 0
-    diagnostics = (os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1")
+    diagnostics = (os.environ.get("DKV_DIAGNOSTICS", "0") == "1")
 
     # ── Features 1 & 2: Heat update + step-ahead prefetch (MPS/CPU path) ──
     if N > 0 and session_id is not None:
@@ -1570,7 +1570,7 @@ def _pytorch_vectorized_sparse_attn_decode(
     # pool.gather() is expensive.  On CUDA the pool tensors are already contiguous
     # GPU memory and gather is cheap; caching stale tensors across block
     # evictions/reallocations causes silent accuracy bugs.  Disable the cache
-    # on CUDA by default; enable explicitly with DIFFKV_DECODE_CACHE_ENABLED=1.
+    # on CUDA by default; enable explicitly with DKV_DECODE_CACHE_ENABLED=1.
     config = getattr(pool, "config", None)
     _on_cuda = (str(getattr(pool, "device", "")) == "cuda" or
                 (hasattr(pool, "device") and str(pool.device).startswith("cuda")))
@@ -1636,7 +1636,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                 if diagnostics:
                     cpu_anc_check = anchor_indices.cpu()
                     if (cpu_anc_check >= cos_flat.shape[0]).any():
-                        print(f"[DiffKV DEBUG] Out of bounds check: layer_idx={layer_idx} anchor_indices={cpu_anc_check.tolist()} cos_flat.shape={list(cos_flat.shape)}", flush=True)
+                        print(f"[DKV DEBUG] Out of bounds check: layer_idx={layer_idx} anchor_indices={cpu_anc_check.tolist()} cos_flat.shape={list(cos_flat.shape)}", flush=True)
                 
                 # Clamp anchor_indices to prevent GPU out of bounds
                 anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
@@ -1899,24 +1899,24 @@ def _pytorch_vectorized_sparse_attn_decode(
             update_term = update_term.masked_fill(~mask_expanded, 0.0)
             O_final = O_final + torch.sum(update_term, dim=(0, 1)).to(O_final.dtype)
 
-    # Issue 4 fix: Layer-0 NaN diagnostics gated behind DIFFKV_LAYER0_DEBUG=1.
+    # Issue 4 fix: Layer-0 NaN diagnostics gated behind DKV_LAYER0_DEBUG=1.
     # Previously fired every decode step for every session, burning CPU time and
     # polluting logs.  Enable during bring-up / NaN debugging only.
-    if layer_idx == 0 and os.environ.get("DIFFKV_LAYER0_DEBUG", "0") == "1":
-        print(f"[DiffKV DEBUG] layer 0 check - q has nan: {torch.isnan(q).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - block_indices has nan: {torch.isnan(block_indices).any().item() if block_indices is not None else False}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - U has nan: {torch.isnan(U).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - V_K has nan: {torch.isnan(V_K).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - V_V has nan: {torch.isnan(V_V).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - anchors_K has nan: {torch.isnan(anchors_K).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - anchors_V has nan: {torch.isnan(anchors_V).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - scales has nan: {torch.isnan(scales).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - scores_anchor has nan: {torch.isnan(scores_anchor).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - scores_compressed has nan: {torch.isnan(scores_compressed).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - scores_dense has nan: {torch.isnan(scores_dense).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - scores_all has nan: {torch.isnan(scores_all).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - probs_all has nan: {torch.isnan(probs_all).any().item()}", flush=True)
-        print(f"[DiffKV DEBUG] layer 0 check - O_final has nan: {torch.isnan(O_final).any().item()}", flush=True)
+    if layer_idx == 0 and os.environ.get("DKV_LAYER0_DEBUG", "0") == "1":
+        print(f"[DKV DEBUG] layer 0 check - q has nan: {torch.isnan(q).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - block_indices has nan: {torch.isnan(block_indices).any().item() if block_indices is not None else False}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - U has nan: {torch.isnan(U).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - V_K has nan: {torch.isnan(V_K).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - V_V has nan: {torch.isnan(V_V).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - anchors_K has nan: {torch.isnan(anchors_K).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - anchors_V has nan: {torch.isnan(anchors_V).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - scales has nan: {torch.isnan(scales).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - scores_anchor has nan: {torch.isnan(scores_anchor).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - scores_compressed has nan: {torch.isnan(scores_compressed).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - scores_dense has nan: {torch.isnan(scores_dense).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - scores_all has nan: {torch.isnan(scores_all).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - probs_all has nan: {torch.isnan(probs_all).any().item()}", flush=True)
+        print(f"[DKV DEBUG] layer 0 check - O_final has nan: {torch.isnan(O_final).any().item()}", flush=True)
 
     return O_final.to(q.dtype).unsqueeze(0).unsqueeze(2)
 
@@ -2084,7 +2084,7 @@ def native_triton_sparse_attn_decode(
                     # padded, token_count != padded_len so rotation was silently
                     # skipped, leaving the dense keys UNROTATED — corrupting the recent-
                     # window attention and producing garbage decode (the deep-needle bug
-                    # in the DIFFKV_SPARSE_BIAS=auto production path).
+                    # in the DKV_SPARSE_BIAS=auto production path).
                     _alen = active_len if (active_len and active_len > 0) else active_k.shape[2]
                     k_kv = active_k[:, :, :_alen].float()
                     v_kv = active_v[:, :, :_alen].float()
@@ -2134,7 +2134,7 @@ def native_triton_sparse_attn_decode(
                     s = torch.bmm(q_reshaped, k_permuted).view(H_q, -1) * inv_scale
                     
                     # ── Sparse LSE Bias (Ported from MLX) ────────────────────
-                    bias_env = os.environ.get("DIFFKV_SPARSE_BIAS", "0.0").strip().lower()
+                    bias_env = os.environ.get("DKV_SPARSE_BIAS", "0.0").strip().lower()
                     if bias_env.startswith("auto"):
                         bias_parts = bias_env.split(",")
                         try:
@@ -2180,7 +2180,7 @@ def native_triton_sparse_attn_decode(
             # On a GPU box this is the only positive signal that you're measuring
             # Triton and not the silent PyTorch fallback below.
             if not getattr(native_triton_sparse_attn_decode, "_triton_active_logged", False):
-                print("[DiffKV] Triton fused-decode path ACTIVE (CUDA).")
+                print("[DKV] Triton fused-decode path ACTIVE (CUDA).")
                 native_triton_sparse_attn_decode._triton_active_logged = True
             return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
         except Exception as e:
@@ -2188,26 +2188,26 @@ def native_triton_sparse_attn_decode(
             # the slow PyTorch fallback. Use during GPU bring-up / validation so a
             # compile or numerics failure is loud. Default (unset) preserves the
             # historical silent-fallback behavior exactly.
-            if os.environ.get("DIFFKV_TRITON_STRICT") == "1":
+            if os.environ.get("DKV_TRITON_STRICT") == "1":
                 raise
             global _triton_fallback_count
             _triton_fallback_count += 1
             if _triton_fallback_count == 1:
                 print(
-                    f"[DiffKV] WARNING: Triton sparse kernel failed: {e}. "
+                    f"[DKV] WARNING: Triton sparse kernel failed: {e}. "
                     "Falling back to PyTorch vectorized decoder. "
-                    "Set DIFFKV_TRITON_STRICT=1 to surface the full error.",
+                    "Set DKV_TRITON_STRICT=1 to surface the full error.",
                     flush=True,
                 )
             elif _triton_fallback_count == 10:
                 print(
-                    f"[DiffKV] WARNING: Triton fallback has now occurred 10 times "
+                    f"[DKV] WARNING: Triton fallback has now occurred 10 times "
                     f"(last error: {e}). Check kernel compilation and CUDA version.",
                     flush=True,
                 )
             elif _triton_fallback_count == 100:
                 print(
-                    f"[DiffKV] ERROR: Triton fallback count reached 100. The Triton "
+                    f"[DKV] ERROR: Triton fallback count reached 100. The Triton "
                     "sparse kernel appears persistently broken — all decode steps are "
                     "running the slow PyTorch fallback. Investigate immediately.",
                     flush=True,
@@ -2584,7 +2584,7 @@ def native_triton_sparse_attn_decode_combined(
         # native_triton_sparse_attn_decode; see F2 helper). Issue 1 fix included:
         # stratified U is pre-reconstructed before dispatch for CUDA/MPS parity.
         #
-        # DECODE-CACHE (DIFFKV_DECODE_CACHE_CUDA): this gather is QUERY-INDEPENDENT
+        # DECODE-CACHE (DKV_DECODE_CACHE_CUDA): this gather is QUERY-INDEPENDENT
         # — it depends only on the routed block set + their anchor RoPE positions,
         # both stable between block flushes. So within an interval it is IDENTICAL
         # every decode token, yet the current code recomputes ~20 index/rotate ops
@@ -2650,33 +2650,33 @@ def native_triton_sparse_attn_decode_combined(
             )
 
         if not getattr(native_triton_sparse_attn_decode_combined, "_logged", False):
-            print("[DiffKV] Triton fused-decode COMBINED path ACTIVE (CUDA). "
+            print("[DKV] Triton fused-decode COMBINED path ACTIVE (CUDA). "
                   f"N_sparse={N}, L_dense={L_dense}")
             native_triton_sparse_attn_decode_combined._logged = True
 
         return out.unsqueeze(0).unsqueeze(2).to(q.dtype)
 
     except Exception as e:
-        if os.environ.get("DIFFKV_TRITON_STRICT") == "1":
+        if os.environ.get("DKV_TRITON_STRICT") == "1":
             raise
         global _triton_fallback_count
         _triton_fallback_count += 1
         if _triton_fallback_count == 1:
             print(
-                f"[DiffKV] WARNING: combined Triton kernel failed: {e}. "
+                f"[DKV] WARNING: combined Triton kernel failed: {e}. "
                 "Falling back to native_triton_sparse_attn_decode. "
-                "Set DIFFKV_TRITON_STRICT=1 to surface the full error.",
+                "Set DKV_TRITON_STRICT=1 to surface the full error.",
                 flush=True,
             )
         elif _triton_fallback_count == 10:
             print(
-                f"[DiffKV] WARNING: Triton fallback count reached 10 "
+                f"[DKV] WARNING: Triton fallback count reached 10 "
                 f"(last error: {e}). Check kernel compilation and CUDA version.",
                 flush=True,
             )
         elif _triton_fallback_count == 100:
             print(
-                "[DiffKV] ERROR: Triton fallback count reached 100. The combined "
+                "[DKV] ERROR: Triton fallback count reached 100. The combined "
                 "Triton kernel appears persistently broken — investigate immediately.",
                 flush=True,
             )
@@ -2688,7 +2688,7 @@ def native_triton_sparse_attn_decode_combined(
         )
 
 
-# ── 4. TritonDiffKV Low-Rank Reconstruction ───────────────────────────────────
+# ── 4. TritonDKV Low-Rank Reconstruction ───────────────────────────────────
 
 
 def triton_fused_reconstruct(
@@ -2738,7 +2738,7 @@ def triton_fused_reconstruct(
     return out
 
 
-class TritonDiffKV:
+class TritonDKV:
     _recon_buffers = {}
 
     @classmethod
@@ -2758,7 +2758,7 @@ class TritonDiffKV:
         anchor: torch.Tensor,
         scale: float = 1.0,
     ) -> torch.Tensor:
-        out_buf = TritonDiffKV._get_recon_buffer(
+        out_buf = TritonDKV._get_recon_buffer(
             U.shape[0], V.shape[1], U.device, U.dtype
         )
         try:
@@ -2776,7 +2776,7 @@ class TritonDiffKV:
         sparse_values: Optional[torch.Tensor],
         scale: float = 1.0,
     ) -> torch.Tensor:
-        out = TritonDiffKV.reconstruct_lowrank(U, V, anchor, scale)
+        out = TritonDKV.reconstruct_lowrank(U, V, anchor, scale)
         if sparse_indices is not None and sparse_indices.numel() > 0:
             out.view(-1).index_add_(
                 0, sparse_indices.long(), sparse_values.to(out.dtype)

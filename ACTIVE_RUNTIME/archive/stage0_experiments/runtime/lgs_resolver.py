@@ -38,12 +38,12 @@ class LGSResolver:
 
     def setup_runtime(self):
         """Initializes the model wrapper and fusion engine."""
-        from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+        from runtime.hf_dkv_wrapper import DKVHFWrapper
         from decode_pipeline_fusion_engine import DecodePipelineFusionEngine
         
         if self.wrapper is None:
             model_id = "Qwen/Qwen2.5-0.5B-Instruct"
-            self.wrapper = DiffKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16})
+            self.wrapper = DKVHFWrapper(model_id, {"mode": "lowrank_sparse", "block_size": 64, "rank": 16})
             self.fusion_engine = DecodePipelineFusionEngine(self.wrapper)
 
     async def lgs_runtime_executor(self, session_ids, payloads):

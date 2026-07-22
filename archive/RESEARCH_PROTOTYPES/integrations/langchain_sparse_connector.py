@@ -18,12 +18,12 @@ except ImportError:
         def __init__(self, **kwargs): pass
     CallbackManagerForLLMRun = Any
 
-class DiffKVSparseLLM(LLM):
+class DKVSparseLLM(LLM):
     """
     Differential KV Sparse LLM for LangChain.
     """
     endpoint_url: str = "http://localhost:8000/v1/chat/completions"
-    model_name: str = "diff-kv"
+    model_name: str = "dkv"
     temperature: float = 0.7
     max_tokens: int = 256
     
@@ -87,5 +87,5 @@ class DiffKVSparseLLM(LLM):
                             run_manager.on_llm_new_token(chunk)
 
 if __name__ == "__main__":
-    llm = DiffKVSparseLLM()
-    print("DiffKVSparseLLM connector initialized.")
+    llm = DKVSparseLLM()
+    print("DKVSparseLLM connector initialized.")

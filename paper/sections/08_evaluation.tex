@@ -4,7 +4,7 @@
 \subsection{Setup}
 All numbers are measured on one host: an Apple~M3 with $8.6$\,GB of unified memory, running
 Qwen2.5-1.5B at int4. We compare three engines on the \emph{same} quantized
-weights: \textbf{\diffkv{}} (the active runtime in its default serving configuration---compressed
+weights: \textbf{\dkv{}} (the active runtime in its default serving configuration---compressed
 sparse decode, fused decode buffer, block-sparse prefill, base rank $\rank{=}32$ with
 layer-adaptive variation, $\maxres{=}128$, $\topk{=}16$); \textbf{optimized dense}
 (\texttt{mlx\_lm} with a full KV cache, chunked prefill, and a prefill-to-decode allocator
@@ -28,7 +28,7 @@ the per-run detail is in Appendix~\ref{app:tables}\fi.
 
 \begin{\tabenv}[t]
   \centering
-  \caption{Main results: \diffkv{} vs.\ an optimized \texttt{mlx\_lm} dense baseline and a standard
+  \caption{Main results: \dkv{} vs.\ an optimized \texttt{mlx\_lm} dense baseline and a standard
   PyTorch dense baseline, all on identical int4 weights
   (Apple~M3, $8.6$\,GB; greedy, $128$ decode tokens). All cells measured.}
   \label{tab:main}
@@ -38,7 +38,7 @@ the per-run detail is in Appendix~\ref{app:tables}\fi.
 
 \subsection{E1 --- KV-state footprint}
 Figure~\ref{fig:g1} plots the analytic KV state against context. A dense cache grows linearly and
-without bound; \diffkv{}'s store grows more slowly and is capped by the fixed $256$-block pool. At
+without bound; \dkv{}'s store grows more slowly and is capped by the fixed $256$-block pool. At
 the default $\maxres{=}128$ the per-block ratio is $\ratioDefault\times$; the $\maxres{=}64$ memory
 preset reaches $\ratioPreset\times$ and keeps the whole store under the pool cap even at $\reachK$k.
 The point is not a large constant factor---the residual pool deliberately spends bytes to preserve
@@ -49,71 +49,71 @@ term that grows, which is what decides whether long context fits on a memory-con
   \centering
   \includegraphics[width=0.82\linewidth]{figures/g1_kv_footprint.pdf}
   \caption{Analytic KV-state footprint vs.\ context (whole model). The dense cache grows linearly;
-  the \diffkv{} store grows sub-linearly and is bounded by the pre-allocated $256$-block pool. Both
+  the \dkv{} store grows sub-linearly and is bounded by the pre-allocated $256$-block pool. Both
   residual presets are shown; the $\maxres{=}64$ preset stays under the pool cap through $\reachK$k.}
   \label{fig:g1}
 \end{\figenv}
 
 \subsection{E2 --- Exact recall and reach}
-Across every context from $4$k to $\reachK$k, \diffkv{} recovers the buried passcode
+Across every context from $4$k to $\reachK$k, \dkv{} recovers the buried passcode
 \emph{exactly} (Table~\ref{tab:main}, ``Needle recovered''); both dense baselines also recover it
-wherever they run. This is the load-bearing correctness result for \diffkv{}: compression to a
+wherever they run. This is the load-bearing correctness result for \dkv{}: compression to a
 low-rank basis would ordinarily corrupt such a token, and the residual mechanism
 (\S\ref{sec:compression}) is what preserves it. The \emph{reach}, however, differs sharply by engine.
 The standard PyTorch full-KV baseline \emph{exhausts the host's $8.6$\,GB and does not complete beyond
 $\ptMaxK$k}---a reproducible out-of-memory at $\ptOOMK$k, where its uncompressed cache and unchunked
 prefill overrun the machine. The optimized \texttt{mlx\_lm} dense cache, with chunked prefill and a
-prefill-to-decode allocator release, stretches all the way to $\reachK$k; \diffkv{} reaches
+prefill-to-decode allocator release, stretches all the way to $\reachK$k; \dkv{} reaches
 $\reachK$k as well, finishing with the passcode intact at a $\actMxSixtyFourK$\,GB allocator peak.
 So on this host a naive dense cache gives out at $\ptOOMK$k---a $4\times$ shorter reach---while
-\diffkv{}'s bounded store runs to $\reachK$k, the same context a carefully memory-managed dense can
+\dkv{}'s bounded store runs to $\reachK$k, the same context a carefully memory-managed dense can
 also hold but which it prefills markedly more slowly (E3).
 
 \subsection{E3 --- Prefill scaling and the crossover}
-\diffkv{}'s prefill does less attention work than dense (block-sparse, $O(L\cdot K)$ vs.\ $O(L^2)$),
+\dkv{}'s prefill does less attention work than dense (block-sparse, $O(L\cdot K)$ vs.\ $O(L^2)$),
 so its cost grows sub-quadratically while dense grows quadratically (Figure~\ref{fig:perf}a). At short
-context the fixed cost of streaming SVD compression makes \diffkv{} slightly slower
+context the fixed cost of streaming SVD compression makes \dkv{} slightly slower
 ($\actPfFourK$\,s vs.\ $\dnPfFourK$\,s at $4$k); the two are essentially matched by $16$k
-($\actPfSixteenK$\,s vs.\ $\dnPfSixteenK$\,s), and \diffkv{} pulls ahead by $32$k, prefilling in
+($\actPfSixteenK$\,s vs.\ $\dnPfSixteenK$\,s), and \dkv{} pulls ahead by $32$k, prefilling in
 $\actPfThirtyTwoK$\,s versus dense's $\dnPfThirtyTwoK$\,s ($\pfSpeedupThirtyTwoK\times$). The
 crossover is where the quadratic term in dense attention overtakes the fixed compression overhead,
 and it moves earlier as either the model or the context grows. At $64$k the gap widens into
-\diffkv{}'s clearest prefill win: it completes prefill in $\actPfSixtyFourK$\,s against the optimized
+\dkv{}'s clearest prefill win: it completes prefill in $\actPfSixtyFourK$\,s against the optimized
 dense baseline's $\dnPfSixtyFourK$\,s---a $\pfSpeedupSixtyFourK\times$ speedup---both engines heavily
 memory-bound on this $8.6$\,GB host, so the absolute $64$k seconds are reach points more than clean
 timings. The standard PyTorch dense never enters this regime at all: it OOMs at $\ptOOMK$k (E2), so
-the only engines still prefilling at $64$k are \diffkv{} and the memory-optimized dense, with
-\diffkv{} the faster of the two.
+the only engines still prefilling at $64$k are \dkv{} and the memory-optimized dense, with
+\dkv{} the faster of the two.
 
 \begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/g_perf.pdf}
-  \caption{Prefill and decode of \diffkv{} against an optimized \texttt{mlx\_lm} dense baseline and a
+  \caption{Prefill and decode of \dkv{} against an optimized \texttt{mlx\_lm} dense baseline and a
   standard PyTorch dense baseline on identical int4 weights (Apple M3, $8.6$\,GB; greedy, $128$
   decode tokens). (a)~Block-sparse prefill grows sub-quadratically, overtakes the optimized dense
   baseline by $32$K, and prefills $\pfSpeedupSixtyFourK\times$ faster at $64$K; the standard PyTorch
   dense is fast at short context but runs out of memory at $\ptOOMK$K+ ({\color{red}$\times$}).
-  (b)~\diffkv{} decode is nearly flat in context but slower than the optimized dense wherever that
+  (b)~\dkv{} decode is nearly flat in context but slower than the optimized dense wherever that
   cache still fits; the standard PyTorch dense decodes at only ${\approx}\ptTps$\,tok/s and OOMs at
   $\ptOOMK$K+.}
   \label{fig:perf}
 \end{\figenv}
 
 \subsection{E4 --- Decode throughput (the cost)}
-We state the cost of compression plainly. \diffkv{}'s decode reconstructs and merges a sparse
+We state the cost of compression plainly. \dkv{}'s decode reconstructs and merges a sparse
 representation every token, which a dense cache does not; where the optimized dense cache still fits
 in memory---which, for this $1.5$B model on $8.6$\,GB, holds through $\reachK$k---dense decodes
 faster at the lengths it is comfortable at (Figure~\ref{fig:perf}b, Table~\ref{tab:main}). With the
-fused decode buffer enabled, \diffkv{} decode is nearly \emph{flat} across context
+fused decode buffer enabled, \dkv{} decode is nearly \emph{flat} across context
 ($\actTpsFourK\to\actTpsThirtyTwoK$\,tok/s from $4$k to $32$k---the top-\topk{} routing bounds the
 per-token work independent of length and the buffer is re-materialised once per interval), while the
 optimized dense declines steadily ($\dnTpsFourK\to\dnTpsThirtyTwoK$\,tok/s as its cache grows). The
 gap therefore \emph{narrows} as context grows---from over $3\times$ at $4$k to
-$\decRatioThirtyTwoK\times$ at $32$k, and by $\reachK$k \diffkv{}'s flat curve and the
+$\decRatioThirtyTwoK\times$ at $32$k, and by $\reachK$k \dkv{}'s flat curve and the
 still-declining dense curve essentially meet ($\actTpsSixtyFourK$ vs.\ $\dnTpsSixtyFourK$\,tok/s).
 Through $32$k---the regime where a dense cache is the natural choice---dense remains the faster
 decoder; the standard PyTorch dense, by contrast, decodes at only ${\approx}\ptTps$\,tok/s even
-where it fits, so its full-KV cache is neither fast nor far-reaching. \diffkv{}'s value proposition
+where it fits, so its full-KV cache is neither fast nor far-reaching. \dkv{}'s value proposition
 is bounded memory, exact recall, and prefill scaling---not decode speed---and a faster decode path
 (a fused kernel; a CUDA/Triton port, \S\ref{sec:limits}) is the clearest avenue to narrow the
 short-context decode gap further.
@@ -164,7 +164,7 @@ context, comparing the end-to-end decode throughput of all three engines.
 \begin{\figenv}[t]
   \centering
   \includegraphics[width=0.78\linewidth]{figures/g7_decode_ablation.pdf}
-  \caption{Decode throughput of the three engines vs.\ context. \diffkv{}'s compressed sparse decode
+  \caption{Decode throughput of the three engines vs.\ context. \dkv{}'s compressed sparse decode
   is slower than the optimized dense wherever that cache fits, and the two converge by $64$k; the
   standard PyTorch dense decodes at only ${\approx}\ptTps$\,tok/s and OOMs at $\ptOOMK$k+. The
   same-store compressed-vs-exact mechanism ablation is in Table~\ref{tab:ablation}.}
@@ -173,7 +173,7 @@ context, comparing the end-to-end decode throughput of all three engines.
 
 \begin{table}[t]
   \centering
-  \caption{Compressed-vs-exact decode over the same \diffkv{} store (mechanism ablation).}
+  \caption{Compressed-vs-exact decode over the same \dkv{} store (mechanism ablation).}
   \label{tab:ablation}
   \small
   \adjustbox{max width=\linewidth}{\input{tables/t6_decode_ablation}}
@@ -184,7 +184,7 @@ context, comparing the end-to-end decode throughput of all three engines.
 Single-needle NIAH probes one retrieval event. To stress the top-\topk{} router's ability to
 cover multiple disjoint memory regions, we planted four distinct passcodes at uniformly spaced
 depths and asked the model to report all four (Table~\ref{tab:multineedle}).
-\diffkv{} recovers all four needles at every context length with $100\%$ recall, confirming that
+\dkv{} recovers all four needles at every context length with $100\%$ recall, confirming that
 $\topk{=}16$ routing headroom is sufficient for simultaneous multi-region retrieval up to $32$k.
 
 \begin{\tabenv}[t]
@@ -199,14 +199,14 @@ $\topk{=}16$ routing headroom is sufficient for simultaneous multi-region retrie
 \subsection{E8 --- Multi-hop recall: relational-structure preservation}
 A two-hop probe tests whether the store preserves \emph{relational bindings}: Needle~A gives a key;
 Needle~B uses that key as the answer to a different question. The model must retrieve A, extract
-the key, and then retrieve B using it. \diffkv{} resolves the chain correctly at $4$k, $16$k, and
+the key, and then retrieve B using it. \dkv{} resolves the chain correctly at $4$k, $16$k, and
 $32$k---the empirical validation that the edge-capture mechanism (\S\ref{sec:compression})
 rescues relational connectives whose low-rank reconstruction collides with a neighbour's key.
 
 \subsection{E9 --- Language-model perplexity: zero degradation under compression}
 \label{sec:e9}
 We measure next-token NLL and perplexity on a standard validation chunk at $4$k, $8$k, and $16$k,
-running the same prompt through the optimized dense baseline and \diffkv{} in compressed-decode mode.
+running the same prompt through the optimized dense baseline and \dkv{} in compressed-decode mode.
 The loss and perplexity are bit-identical at every context ($\Delta = 0.00\%$). Under the
 default $\maxres{=}128$, $\rank{=}32$ configuration, compression introduces \emph{no measurable
 distributional shift} beyond the existing int4 quantisation noise.
@@ -238,7 +238,7 @@ TPS at $16$k ($19$--$39$\,tok/s) includes swap-induced stalls and should be read
 \emph{lower bound} on hardware-native throughput. Needle recall, which depends only on output
 correctness, is unaffected. A swap-free run would be required for clean $16$k latency numbers.
 
-\diffkv{} achieves $100\%$ recall at every tested context and burial depth, including depth $0.1$
+\dkv{} achieves $100\%$ recall at every tested context and burial depth, including depth $0.1$
 (needle near position $0$, where routing must correctly score a very early block). The wrapper
 required zero modifications for Llama: the patch is architecture-agnostic.
 
@@ -270,7 +270,7 @@ Metal/CUDA kernel collapsing these into a single launch is the highest-leverage 
 
 \subsection{E12 --- Streaming prefill with the lego path}
 \label{sec:e12}
-The lego streaming-prefill path (\texttt{DIFFKV\_LEGO\_PREFILL=1}) replaces the full accumulated
+The lego streaming-prefill path (\texttt{DKV\_LEGO\_PREFILL=1}) replaces the full accumulated
 KV cache during prefill with the compressed store, bounding peak allocator pressure to
 $O(\text{sinks} + \text{ring} + \text{chunk})$ instead of $O(T)$.
 
@@ -294,7 +294,7 @@ it is included here to show that bounded-peak streaming prefill is operational.
 Table~\ref{tab:signabl} isolates individual residual-selection signals. All arms achieve $100\%$
 needle recall (exact string match on six planted-fact contexts at $8$k). The qualitative
 difference is generation stability: removing owner-capture triggers repetition loops that require
-EOS forcing, while full \diffkv{} and no-edge-capture produce clean output. Owner-capture is the
+EOS forcing, while full \dkv{} and no-edge-capture produce clean output. Owner-capture is the
 load-bearing signal for generation stability; edge-capture contributes to relational binding.
 
 \begin{\tabenv}[t]

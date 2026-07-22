@@ -3,7 +3,7 @@
 #include <memory>
 #include <iostream>
 
-namespace diffkv {
+namespace dkv {
 namespace runtime {
 
 struct RouterConfig {
@@ -37,4 +37,4 @@ private:
 };
 
 } // namespace runtime
-} // namespace diffkv
+} // namespace dkv

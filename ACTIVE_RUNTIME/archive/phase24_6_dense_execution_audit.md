@@ -24,7 +24,7 @@ from compressed U/V blocks -- was instrumented with a CUDA memory allocation wra
 
 ## Why get_kv() is Not Called
 
-Tracing the execution path in `diffkv_attention.py` (Phase 24.5 version):
+Tracing the execution path in `dkv_attention.py` (Phase 24.5 version):
 
 ### Prefill path (q_len > 1):
 ```python

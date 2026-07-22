@@ -24,7 +24,7 @@ class WebUIStreamingIntegrationLayer:
                     "id": f"chatcmpl-{session_id}",
                     "object": "chat.completion.chunk",
                     "created": 0,
-                    "model": "diffkv-production",
+                    "model": "dkv-production",
                     "choices": [{
                         "delta": {"content": token},
                         "index": 0,
@@ -38,7 +38,7 @@ class WebUIStreamingIntegrationLayer:
                 "id": f"chatcmpl-{session_id}",
                 "object": "chat.completion.chunk",
                 "created": 0,
-                "model": "diffkv-production",
+                "model": "dkv-production",
                 "choices": [{
                     "delta": {},
                     "index": 0,

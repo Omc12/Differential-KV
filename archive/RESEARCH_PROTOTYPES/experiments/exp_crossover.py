@@ -6,10 +6,10 @@ THE DEFINING EXPERIMENT.
 Question: "At what context length does Differential KV become worthwhile?"
 
 This script sweeps context lengths from 4k to 128k tokens and measures:
-  - memory bytes: DiffKV vs FP16/FP8/INT8
+  - memory bytes: DKV vs FP16/FP8/INT8
   - reconstruction overhead: added compute cost
   - effective bandwidth savings: (bytes_saved - recon_cost_bytes_equiv)
-  - crossover point: where DiffKV first beats INT8 in effective bandwidth
+  - crossover point: where DKV first beats INT8 in effective bandwidth
 
 The crossover plot is the central result of Phase 1.
 
@@ -60,12 +60,12 @@ def run_crossover_for_seq(seq_len: int, mode: str, heads: int, head_dim: int,
     int8 = bl.run_int8_naive(kv)
     int8_bytes = int8.total_bytes * num_layers
 
-    # --- DiffKV strategies ---
+    # --- DKV strategies ---
     strategies = {
-        "DiffKV-P32":  PeriodicAnchorStrategy(interval=32),
-        "DiffKV-P64":  PeriodicAnchorStrategy(interval=64),
-        "DiffKV-P128": PeriodicAnchorStrategy(interval=128),
-        "DiffKV-Adapt": AdaptiveAnchorStrategy(
+        "DKV-P32":  PeriodicAnchorStrategy(interval=32),
+        "DKV-P64":  PeriodicAnchorStrategy(interval=64),
+        "DKV-P128": PeriodicAnchorStrategy(interval=128),
+        "DKV-Adapt": AdaptiveAnchorStrategy(
             max_interval=64, delta_norm_threshold=2.0,
             error_estimate_threshold=0.05, min_interval=8
         ),
@@ -103,9 +103,9 @@ def run_crossover_for_seq(seq_len: int, mode: str, heads: int, head_dim: int,
             total_error += err["mean_relative"]
 
         summary = profiler.summarize()
-        diffkv_bytes = stats.total_compressed_bytes * num_layers
+        dkv_bytes = stats.total_compressed_bytes * num_layers
 
-        result[f"{label}_bytes"] = diffkv_bytes
+        result[f"{label}_bytes"] = dkv_bytes
         result[f"{label}_ratio"] = round(stats.compression_ratio, 4)
         result[f"{label}_anchor_density"] = round(stats.anchor_density, 4)
         result[f"{label}_error"] = round(summary.mean_error, 6)
@@ -114,8 +114,8 @@ def run_crossover_for_seq(seq_len: int, mode: str, heads: int, head_dim: int,
         result[f"{label}_tok_per_sec"] = round(summary.tokens_per_second, 1)
 
         # Effective bandwidth ratio vs INT8:
-        # positive = DiffKV uses less memory than INT8
-        bw_saving_vs_int8 = (int8_bytes - diffkv_bytes) / int8_bytes
+        # positive = DKV uses less memory than INT8
+        bw_saving_vs_int8 = (int8_bytes - dkv_bytes) / int8_bytes
         result[f"{label}_bw_saving_vs_int8"] = round(bw_saving_vs_int8, 4)
 
     return result
@@ -158,10 +158,10 @@ def main(args):
     for r in all_results:
         fp16_mb = r["FP16_bytes"] / 1024**2
         int8_mb = r["INT8_bytes"] / 1024**2
-        p64_mb  = r.get("DiffKV-P64_bytes", 0) / 1024**2
-        adap_mb = r.get("DiffKV-Adapt_bytes", 0) / 1024**2
-        p64_rat = r.get("DiffKV-P64_ratio", 0)
-        p64_err = r.get("DiffKV-P64_error", 0)
+        p64_mb  = r.get("DKV-P64_bytes", 0) / 1024**2
+        adap_mb = r.get("DKV-Adapt_bytes", 0) / 1024**2
+        p64_rat = r.get("DKV-P64_ratio", 0)
+        p64_err = r.get("DKV-P64_error", 0)
         print(f"  {r['seq_len']:>10,} | {fp16_mb:>8.1f} | {int8_mb:>8.1f} | "
               f"{p64_mb:>8.1f} | {adap_mb:>8.1f} | {p64_rat:>9.3f} | {p64_err:>8.5f}")
 

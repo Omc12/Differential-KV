@@ -9,7 +9,7 @@ pip install torch transformers triton accelerate
 ## Native C++ Extension (optional, for NativeBlockPool)
 
 ```bash
-cd ACTIVE_RUNTIME/native_core/diffkv_core
+cd ACTIVE_RUNTIME/native_core/dkv_core
 python setup.py build_ext --inplace
 ```
 

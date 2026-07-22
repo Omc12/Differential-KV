@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Architecture / dataflow diagrams for the DiffKV paper — DeepSeek-report style.
+"""Architecture / dataflow diagrams for the DKV paper — DeepSeek-report style.
 
 Visual language (matched to DeepSeek-V3.2 Figures 2 and 4):
   flat rounded rectangles, thin black strokes, light fills; medium blue with
@@ -95,7 +95,7 @@ def f1_architecture():
     arrow(ax, (3.25, 8.83), (3.75, 8.83)); arrow(ax, (6.25, 8.83), (6.75, 8.83))
 
     box(ax, 1.6, 7.35, 6.8, 0.62,
-        "MLXDiffKVWrapper  —  generate(): chunked prefill + decode loop",
+        "MLXDKVWrapper  —  generate(): chunked prefill + decode loop",
         fc=BLUE, tc=WHITE, fs=8.6, bold=True)
     arrow(ax, (5.0, 8.35), (5.0, 8.0))
 
@@ -257,7 +257,7 @@ def f4_lifecycle():
     # boundary
     box(ax, 1.05, 4.28, 7.9, 0.82,
         "prefill → decode boundary:   mx.eval  ·  mx.clear_cache  ·  resolve decode policy\n"
-        "compressed decode → drop the native prefill cache (footprint = DiffKV store only)",
+        "compressed decode → drop the native prefill cache (footprint = DKV store only)",
         fc=BLUE, tc=WHITE, fs=7.2, bold=True)
     arrow(ax, (5.0, 5.5), (5.0, 5.12), lw=1.2)
 

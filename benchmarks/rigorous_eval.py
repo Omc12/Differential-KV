@@ -227,11 +227,11 @@ def load_model_and_tokenizer(model_id, mode):
         return model, tokenizer, None
     else:
         sys.path.insert(0, ACTIVE)
-        from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+        from serving.hf_dkv_wrapper import DKVHFWrapper
         
         cfg = {"quantization": quant, "rank": 16, "block_size": 256,
                "micro_block_size": 256, "preset": "mid"}
-        w = DiffKVHFWrapper(model_id=model_id, config=cfg)
+        w = DKVHFWrapper(model_id=model_id, config=cfg)
         w.ensure_loaded()
         return w.model, w.tokenizer, w.manager
 
@@ -299,7 +299,7 @@ def run_multi_needle_sub(model_id, mode, ctx, gen=64):
         manager._session_token_ids[sid] = []
         manager.init_session(sid, prefill_len=len(ids))
         manager.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-        model._diffkv_session_ids = [sid]
+        model._dkv_session_ids = [sid]
         
         t0 = time.perf_counter()
         CH = 512
@@ -374,7 +374,7 @@ def run_synthesis_sub(model_id, mode, ctx, gen=250):
     filler_tokens = tok.encode(filler_text, add_special_tokens=False)
     
     if mode == "active":
-        os.environ["DIFFKV_SPARSE_BIAS"] = "2.0"
+        os.environ["DKV_SPARSE_BIAS"] = "2.0"
         
     prompt = build_synthesis_prompt(tok, paper_text, filler_tokens, ctx, is_llama=is_llama)
     ids = tok.encode(prompt)
@@ -419,7 +419,7 @@ def run_synthesis_sub(model_id, mode, ctx, gen=250):
         manager._session_token_ids[sid] = []
         manager.init_session(sid, prefill_len=len(ids))
         manager.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-        model._diffkv_session_ids = [sid]
+        model._dkv_session_ids = [sid]
         
         CH = 512
         output = None
@@ -507,7 +507,7 @@ def run_relational_sub(model_id, mode, gen=24):
             
             manager.init_session(sid, prefill_len=len(prompt_ids))
             manager.register_prefill_tokens(sid, torch.tensor(prompt_ids, dtype=torch.long))
-            model._diffkv_session_ids = [sid]
+            model._dkv_session_ids = [sid]
             
             CH = 512
             output = None
@@ -606,13 +606,13 @@ def main():
     if args.run_sub:
         # Set environment variables BEFORE importing/loading anything
         if args.mode == "active":
-            os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-            os.environ["DIFFKV_ENGAGE_THRESHOLD"] = "1024"
+            os.environ["DKV_COMPRESSED_DECODE"] = "1"
+            os.environ["DKV_ENGAGE_THRESHOLD"] = "1024"
         else:
-            os.environ["DIFFKV_COMPRESSED_DECODE"] = "0"
+            os.environ["DKV_COMPRESSED_DECODE"] = "0"
             
         if args.test == "synthesis" and args.mode == "active":
-            os.environ["DIFFKV_SPARSE_BIAS"] = "2.0"
+            os.environ["DKV_SPARSE_BIAS"] = "2.0"
 
         if args.test == "multi_needle":
             result = run_multi_needle_sub(args.model, args.mode, args.ctx)

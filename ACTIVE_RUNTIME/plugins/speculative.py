@@ -46,7 +46,7 @@ class SpeculativeDecodingPlugin:
         ).unsqueeze(0)
         
         # Inject main session ID
-        self.main_wrapper.model._diffkv_session_ids = [session_id]
+        self.main_wrapper.model._dkv_session_ids = [session_id]
         
         self.main_wrapper.model._disable_lm_head_slicing = True
         try:

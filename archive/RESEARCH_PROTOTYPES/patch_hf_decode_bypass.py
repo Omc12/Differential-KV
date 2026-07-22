@@ -17,15 +17,15 @@ def patch_file(target_path, flags, export_path):
         
         custom_generate = r'''def generate(self, prompt: str, max_new_tokens: int = 50):
         """
-        HARD BYPASS: Native Sparse Decode Loop (Owner: diffkv)
+        HARD BYPASS: Native Sparse Decode Loop (Owner: dkv)
         Uses Triton dispatch and custom sampling.
         """
         import time
         # from triton_kernels.sparse_attention import triton_sparse_attention
         
-        print(f"[DIFFKV] Starting Native Sparse Decode (max_tokens={max_new_tokens})")
-        print(f"[DIFFKV] KV Virtualization: ACTIVE")
-        print(f"[DIFFKV] Triton Dispatch: ACTIVE")
+        print(f"[DKV] Starting Native Sparse Decode (max_tokens={max_new_tokens})")
+        print(f"[DKV] KV Virtualization: ACTIVE")
+        print(f"[DKV] Triton Dispatch: ACTIVE")
         
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
         input_ids = inputs.input_ids
@@ -36,25 +36,25 @@ def patch_file(target_path, flags, export_path):
             "num_layers": self.num_layers,
             "device": self.device,
             "dtype": torch.float16,
-            "owner": "diffkv"
+            "owner": "dkv"
         }
         
         start_time = time.time()
         
         for i in range(max_new_tokens):
             # DISPATCH: Use custom Triton kernels if enabled
-            if os.environ.get('DIFFKV_FORCE_TRITON_DECODE') == '1':
+            if os.environ.get('DKV_FORCE_TRITON_DECODE') == '1':
                 pass
             
             # BYPASS: Custom forward logic
-            if os.environ.get('DIFFKV_BYPASS_HF_FORWARD') == '1':
+            if os.environ.get('DKV_BYPASS_HF_FORWARD') == '1':
                 logits = self._native_sparse_forward(input_ids)
             else:
                 outputs = self.model(input_ids=input_ids, use_cache=True)
                 logits = outputs.logits[:, -1, :]
 
             # CUSTOM SAMPLER
-            if os.environ.get('DIFFKV_FORCE_CUSTOM_SAMPLER') == '1':
+            if os.environ.get('DKV_FORCE_CUSTOM_SAMPLER') == '1':
                 next_token_id = self._custom_sample(logits)
             else:
                 next_token_id = torch.argmax(logits, dim=-1)
@@ -69,7 +69,7 @@ def patch_file(target_path, flags, export_path):
         duration = end_time - start_time
         tps = len(generated) / duration
         
-        print(f"[DIFFKV] Generation complete. Tokens: {len(generated)}, TPS: {tps:.2f}")
+        print(f"[DKV] Generation complete. Tokens: {len(generated)}, TPS: {tps:.2f}")
         return self.tokenizer.decode(generated)
 
     def _native_sparse_forward(self, input_ids):
@@ -94,7 +94,7 @@ def patch_file(target_path, flags, export_path):
         "status": "success",
         "target": target_path,
         "patches_applied": patches,
-        "decode_owner": "diffkv" if "replace_generate_loop" in patches else "transformers"
+        "decode_owner": "dkv" if "replace_generate_loop" in patches else "transformers"
     }
     
     with open(export_path, 'w') as f:

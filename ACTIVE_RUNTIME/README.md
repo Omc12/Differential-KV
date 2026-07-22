@@ -1,7 +1,7 @@
 # Differential KV Cache — ACTIVE_RUNTIME
 
 > **What it is:** a **sparse KV-cache inference runtime** for transformer models. Instead of keeping
-> the full dense KV history, DiffKV compresses each 256-token block to an anchor token (exact) + a
+> the full dense KV history, DKV compresses each 256-token block to an anchor token (exact) + a
 > rank-16 low-rank delta (`U @ Vᵀ`) + the top-64 highest-error tokens kept **exact** (residuals), so
 > long-context inference runs in a fraction of the memory. A top-K residual router attends only the
 > most relevant blocks per decode step.
@@ -14,22 +14,22 @@ There are **two** implementations of the same concepts; which one runs depends o
 
 | Backend | Runs on | Entry | Notes |
 |---|---|---|---|
-| **MLX** (this doc's focus) | **Apple Silicon** | `serving/mlx_diffkv_wrapper.py` | On macOS, `DiffKVHFWrapper` is aliased to `MLXDiffKVWrapper`. Uses `MLXKVBlockManager`. |
-| **PyTorch / Triton** | Linux + CUDA | `serving/hf_diffkv_wrapper.py` → `native_core/kv_runtime_manager.py` | Full SRL/chunk-graph path; Triton fused decode (`native_core/sparse_decode/triton_fused_decode.py`). |
+| **MLX** (this doc's focus) | **Apple Silicon** | `serving/mlx_dkv_wrapper.py` | On macOS, `DKVHFWrapper` is aliased to `MLXDKVWrapper`. Uses `MLXKVBlockManager`. |
+| **PyTorch / Triton** | Linux + CUDA | `serving/hf_dkv_wrapper.py` → `native_core/kv_runtime_manager.py` | Full SRL/chunk-graph path; Triton fused decode (`native_core/sparse_decode/triton_fused_decode.py`). |
 
 > ⚠️ **MLX is Apple-only.** There is no fast portable CPU/Windows Python sparse path. For non-Apple,
-> use the PyTorch/CUDA backend or the C++ native binary in `diffkv_native/`.
+> use the PyTorch/CUDA backend or the C++ native binary in `dkv_native/`.
 
 ---
 
 ## Decode paths & the factual store (current behavior)
 
-**Decode routing** — `DIFFKV_COMPRESSED_DECODE`:
-- `1` (**default**): DiffKV **sparse decode from token 1** — the architecture is always exercised.
+**Decode routing** — `DKV_COMPRESSED_DECODE`:
+- `1` (**default**): DKV **sparse decode from token 1** — the architecture is always exercised.
   Trade-off: at short context this is slower than fused dense (~16 vs ~36 tps @4k) and pre-allocates
   the block pool, with no accuracy change; the memory/reach win is at long context.
-- `auto` (**opt-in adaptive**): dense below `DIFFKV_COMPRESSED_MIN_CTX` (16k), sparse above — avoids the
-  short-context regression when raw short-prompt throughput matters more than always engaging DiffKV.
+- `auto` (**opt-in adaptive**): dense below `DKV_COMPRESSED_MIN_CTX` (16k), sparse above — avoids the
+  short-context regression when raw short-prompt throughput matters more than always engaging DKV.
 - `0` = always dense (exact full-KV).
 
 **Accuracy:** on realistic prompts, sparse decode recalls facts exactly (single-needle and spread
@@ -37,7 +37,7 @@ multi-entity both pass). The one weak spot is **content-dense blocks** (e.g. a t
 near-identical facts crammed into one 256-token block), where the residual budget overflows and
 digits can corrupt — that's what the optional factual store targets.
 
-**Factual store (opt-in, `DIFFKV_FACTUAL_STORE=1`, default OFF):** builds an entity/value index at
+**Factual store (opt-in, `DKV_FACTUAL_STORE=1`, default OFF):** builds an entity/value index at
 the prefill→decode boundary and biases decode toward the queried entity's own fact span (positional
 query→value linking over an inverted index). It **helps only dense-fact/table retrieval** (e.g. a
 crammed table: bare-value recall 1/5 → 4/5); on ordinary prose plain sparse is already correct, so
@@ -50,18 +50,18 @@ table/multi-entity fact extraction.
 
 | flag | default | meaning |
 |---|---|---|
-| `DIFFKV_COMPRESSED_DECODE` | **`1`** | sparse-always (default, from token 1); `auto` = adaptive opt-in; `0` = dense |
-| `DIFFKV_COMPRESSED_MIN_CTX` | `16384` | auto sparse threshold (tokens) |
-| `DIFFKV_MAX_RESIDUAL` | `64` | exact residual tokens kept per block (memory ↔ accuracy) |
-| `DIFFKV_TOPK_BLOCKS` | `16` | top-K compressed blocks attended per decode step |
-| `DIFFKV_ROUTER` | `residual` | block router: `residual` (tight) or `minmax` (cheap) |
-| `DIFFKV_FACTUAL_STORE` | `0` | enable factual store / entity binding (dense-fact retrieval; opt-in) |
-| `DIFFKV_FACTUAL_MAX_OCC` | `4` | max total occurrences for a query token to anchor positional linking |
-| `DIFFKV_FACTUAL_WINDOW` | `40` | token window for the nearest fact span to an anchor |
-| `DIFFKV_FACTUAL_IDF_MIN` | `3.0` | min block-IDF for a positional anchor (bypassed for ≤2-occ tokens) |
-| `DIFFKV_RESIDUAL_EXCLUDE_SVD` | `0` | drop residual positions from the SVD pool (experimental, marginal) |
-| `DIFFKV_TELEMETRY` | `0` | print `[SRL]`/`[FACTUAL]` build lines |
-| `DIFFKV_FACTUAL_DBG` | `0` | verbose factual-store traces (`[FDBG]`, `[FENTRY]`, per-token) |
+| `DKV_COMPRESSED_DECODE` | **`1`** | sparse-always (default, from token 1); `auto` = adaptive opt-in; `0` = dense |
+| `DKV_COMPRESSED_MIN_CTX` | `16384` | auto sparse threshold (tokens) |
+| `DKV_MAX_RESIDUAL` | `64` | exact residual tokens kept per block (memory ↔ accuracy) |
+| `DKV_TOPK_BLOCKS` | `16` | top-K compressed blocks attended per decode step |
+| `DKV_ROUTER` | `residual` | block router: `residual` (tight) or `minmax` (cheap) |
+| `DKV_FACTUAL_STORE` | `0` | enable factual store / entity binding (dense-fact retrieval; opt-in) |
+| `DKV_FACTUAL_MAX_OCC` | `4` | max total occurrences for a query token to anchor positional linking |
+| `DKV_FACTUAL_WINDOW` | `40` | token window for the nearest fact span to an anchor |
+| `DKV_FACTUAL_IDF_MIN` | `3.0` | min block-IDF for a positional anchor (bypassed for ≤2-occ tokens) |
+| `DKV_RESIDUAL_EXCLUDE_SVD` | `0` | drop residual positions from the SVD pool (experimental, marginal) |
+| `DKV_TELEMETRY` | `0` | print `[SRL]`/`[FACTUAL]` build lines |
+| `DKV_FACTUAL_DBG` | `0` | verbose factual-store traces (`[FDBG]`, `[FENTRY]`, per-token) |
 
 Factual-store heuristic constants are tuned against the relational eval and may need adjustment on
 other document shapes.
@@ -72,8 +72,8 @@ other document shapes.
 
 **MLX (Apple Silicon), one-shot generation:**
 ```bash
-# from repo root; diffkv_venv has mlx installed
-diffkv_venv/bin/python paper/scripts/measure_active.py \
+# from repo root; dkv_venv has mlx installed
+dkv_venv/bin/python paper/scripts/measure_active.py \
     --single compressed,16384 --gen 40 --ctx 16384 --out /tmp/x.json
 ```
 
@@ -97,7 +97,7 @@ See **[docs/open_webui_integration.md](docs/open_webui_integration.md)** for the
 
 ```bash
 # multi-entity fact binding, factual store on, realistic layout:
-diffkv_venv/bin/python benchmarks/relational_ab.py --mode sparse_factual --natural --spread --target 6000 --gen 16
+dkv_venv/bin/python benchmarks/relational_ab.py --mode sparse_factual --natural --spread --target 6000 --gen 16
 ```
 `relational_ab.py` reports both exact-key and `n_num_correct` (bare value) so binding accuracy is
 separated from generation quality.
@@ -109,9 +109,9 @@ separated from generation quality.
 ```
 ACTIVE_RUNTIME/
 ├── serving/
-│   ├── mlx_diffkv_wrapper.py            ← MLX runtime: patched attention, MLXKVBlockManager,
+│   ├── mlx_dkv_wrapper.py            ← MLX runtime: patched attention, MLXKVBlockManager,
 │   │                                       compressed decode kernel, factual store (opt-in)
-│   ├── hf_diffkv_wrapper.py             ← PyTorch/CUDA wrapper (aliases to MLX on macOS)
+│   ├── hf_dkv_wrapper.py             ← PyTorch/CUDA wrapper (aliases to MLX on macOS)
 │   ├── openai_compatible_api_gateway.py ← FastAPI OpenAI-compatible server
 │   └── batch_engine.py                  ← continuous-batching decode loop
 ├── native_core/
@@ -133,9 +133,9 @@ ACTIVE_RUNTIME/
 - **Decode is dispatch-bound** on MLX (per-layer Python orchestration), not FLOP-bound — WS1 sync
   removal captured the safe +20%; router knobs give only ~% (within noise). Real short-ctx parity with
   dense needs a **fused Metal / batched-layer decode** kernel.
-- **Sparse-from-start is now the default** (`DIFFKV_COMPRESSED_DECODE=1`). Known cost at short context:
+- **Sparse-from-start is now the default** (`DKV_COMPRESSED_DECODE=1`). Known cost at short context:
   slower than fused dense and pre-allocates the full block pool (memory scales to the prompt is a
-  deferred follow-up); use `DIFFKV_COMPRESSED_DECODE=auto` if short-prompt throughput matters more.
+  deferred follow-up); use `DKV_COMPRESSED_DECODE=auto` if short-prompt throughput matters more.
 - **Factual store:** binding works on realistic (4/4) + dense-table (4/5 value) retrieval (opt-in);
   remaining gap is verbatim emission of shared synthetic-code prefixes (a VSL in-order-emission item).
 
@@ -147,6 +147,6 @@ current-state writeup, benchmark numbers, and prioritized next steps.
 ## Running tests
 
 ```bash
-diffkv_venv/bin/python -m pytest tests/test_diffkv_kernel_parity.py -q   # kernel parity gate
-diffkv_venv/bin/python -m pytest tests/ -v                               # full suite
+dkv_venv/bin/python -m pytest tests/test_dkv_kernel_parity.py -q   # kernel parity gate
+dkv_venv/bin/python -m pytest tests/ -v                               # full suite
 ```

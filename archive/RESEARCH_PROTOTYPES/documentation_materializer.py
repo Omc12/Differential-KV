@@ -33,12 +33,12 @@ pip install -e .[gpu]
 ## 2. Diagnostics
 Check your environment:
 ```bash
-diffkv doctor
+dkv doctor
 ```
 
 ## 3. Launch Server
 ```bash
-diffkv serve --model Qwen/Qwen2.5-7B-Instruct
+dkv serve --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 ## 4. Run Examples
@@ -51,14 +51,14 @@ Check the `examples/` directory for integrations with LangChain, LlamaIndex, and
         content = """# API Reference
 
 ## CLI
-- `diffkv serve`: Launch inference gateway.
-- `diffkv benchmark`: Run OBS suite.
-- `diffkv doctor`: Run environment checks.
+- `dkv serve`: Launch inference gateway.
+- `dkv benchmark`: Run OBS suite.
+- `dkv doctor`: Run environment checks.
 
 ## Python Adapters
-- `DiffKVHFAdapter`: HuggingFace compatibility.
-- `DiffKVSparseLLM`: LangChain integration.
-- `DiffKVLlamaIndexAdapter`: LlamaIndex support.
+- `DKVHFAdapter`: HuggingFace compatibility.
+- `DKVSparseLLM`: LangChain integration.
+- `DKVLlamaIndexAdapter`: LlamaIndex support.
 """
         with open(os.path.join(self.output_dir, "API_REFERENCE.md"), "w") as f:
             f.write(content)

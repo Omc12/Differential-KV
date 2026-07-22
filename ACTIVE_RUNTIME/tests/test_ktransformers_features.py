@@ -141,7 +141,7 @@ def test_simd_expand_import():
 
 # --- Feature 4 (MLAProjector) Tests ---
 def test_mla_projector_identity_bypass():
-    os.environ['DIFFKV_MLA_LATENT'] = '0'
+    os.environ['DKV_MLA_LATENT'] = '0'
     import native_core.compression.mla_projector as mla_module
     import importlib
     importlib.reload(mla_module)  # Refresh _BYPASS based on env
@@ -152,7 +152,7 @@ def test_mla_projector_identity_bypass():
     assert torch.allclose(out, x)
 
 def test_mla_projector_calibration():
-    os.environ['DIFFKV_MLA_LATENT'] = '1'
+    os.environ['DKV_MLA_LATENT'] = '1'
     import native_core.compression.mla_projector as mla_module
     import importlib
     importlib.reload(mla_module)
@@ -169,7 +169,7 @@ def test_mla_projector_calibration():
     assert projector.W.shape == (feat_dim, projector.latent_dim)
 
 def test_mla_projector_project_unproject_shape():
-    os.environ['DIFFKV_MLA_LATENT'] = '1'
+    os.environ['DKV_MLA_LATENT'] = '1'
     import native_core.compression.mla_projector as mla_module
     import importlib
     importlib.reload(mla_module)
@@ -187,7 +187,7 @@ def test_mla_projector_project_unproject_shape():
     assert unproj.shape == (10, feat_dim)
 
 def test_mla_projector_roundtrip_energy():
-    os.environ['DIFFKV_MLA_LATENT'] = '1'
+    os.environ['DKV_MLA_LATENT'] = '1'
     import native_core.compression.mla_projector as mla_module
     import importlib
     importlib.reload(mla_module)
@@ -238,7 +238,7 @@ def test_full_pipeline_cpu():
             
     manager = MockKVRuntimeManager(device='cpu')
     
-    os.environ['DIFFKV_MLA_LATENT'] = '1'
+    os.environ['DKV_MLA_LATENT'] = '1'
     import native_core.compression.mla_projector as mla_module
     import importlib
     importlib.reload(mla_module)

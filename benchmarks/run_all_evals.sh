@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# run_all_evals.sh — Full DiffKV Evaluation Suite (MLX Active Runtime)
+# run_all_evals.sh — Full DKV Evaluation Suite (MLX Active Runtime)
 # ============================================================================
 # Runs ALL benchmarks for the paper in a fixed sequence:
 #
@@ -10,7 +10,7 @@
 #  Phase B — Extended paper evals (already in paper sections E7–E12)
 #    B1: Multi-needle NIAH (4 needles @ 4k/16k/32k)
 #    B2: Multi-hop NIAH (chain recall @ 4k/16k/32k)
-#    B3: Perplexity eval (dense vs DiffKV @ 4k/8k/16k)
+#    B3: Perplexity eval (dense vs DKV @ 4k/8k/16k)
 #    B4: Llama-3.2-3B cross-arch NIAH (@ 4k/8k/16k, depths 0.1/0.5/0.9)
 #    B5: Residual signal ablation (owner/edge capture @ 8k)
 #    B6: Lego prefill peak memory (@ 16k/32k/48k)
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_PY="$REPO/diffkv_venv/bin/python3"
+VENV_PY="$REPO/dkv_venv/bin/python3"
 BENCH="$REPO/benchmarks"
 ACTIVE="$REPO/ACTIVE_RUNTIME"
 RESULTS="$BENCH/results"
@@ -68,7 +68,7 @@ run_phase() {
 
 # ── Check venv ────────────────────────────────────────────────────────────────
 if [[ ! -x "$VENV_PY" ]]; then
-    fail "diffkv_venv not found. Run: cd $REPO && make setup"
+    fail "dkv_venv not found. Run: cd $REPO && make setup"
     exit 1
 fi
 log "Using Python: $VENV_PY"
@@ -84,13 +84,13 @@ should_run() {
 }
 
 # ── Env defaults for all runs ─────────────────────────────────────────────────
-export DIFFKV_COMPRESSED_DECODE=1
-export DIFFKV_MAX_RESIDUAL=128
-export DIFFKV_SPARSE_PREFILL=1
-export DIFFKV_DECODE_CACHE=1
-export DIFFKV_SPARSE_BIAS=auto
+export DKV_COMPRESSED_DECODE=1
+export DKV_MAX_RESIDUAL=128
+export DKV_SPARSE_PREFILL=1
+export DKV_DECODE_CACHE=1
+export DKV_SPARSE_BIAS=auto
 export TOKENIZERS_PARALLELISM=false
-export DIFFKV_SEED=1234
+export DKV_SEED=1234
 
 # ============================================================================
 # PHASE A1 — Main NIAH sweep (active vs dense, 4k–64k)
@@ -126,11 +126,11 @@ if should_run "B2"; then
 fi
 
 # ============================================================================
-# PHASE B3 — Perplexity (dense vs DiffKV @ 4k/8k/16k)
+# PHASE B3 — Perplexity (dense vs DKV @ 4k/8k/16k)
 # Paper section E9
 # ============================================================================
 if should_run "B3"; then
-    run_phase "B3" "Perplexity eval (dense vs DiffKV)" \
+    run_phase "B3" "Perplexity eval (dense vs DKV)" \
         "$VENV_PY" "$BENCH/run_ppl_mlx.py"
 fi
 
@@ -174,7 +174,7 @@ fi
 # ============================================================================
 # PHASE C1 — LongBench (NarrativeQA, Qasper, HotpotQA, GovReport)
 # NEW: not yet in paper — grant-critical for broader credibility
-# Uses run_longbench.py in ACTIVE_RUNTIME with --compare (dense vs DiffKV)
+# Uses run_longbench.py in ACTIVE_RUNTIME with --compare (dense vs DKV)
 # ============================================================================
 if should_run "C1"; then
     LONGBENCH_OUT="$RESULTS/longbench_compare_${TIMESTAMP}.json"

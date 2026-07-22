@@ -2,13 +2,13 @@
 agents/long_horizon_task_runner.py
 
 Orchestrates extremely long-running tasks (hours/days of inference) 
-using DiffKV's persistent cognitive state reservoir.
+using DKV's persistent cognitive state reservoir.
 """
 
 import time
 import torch
 from typing import Dict, Any, List
-from agents.diffkv_agent_runtime import DiffKVAgentRuntime
+from agents.dkv_agent_runtime import DKVAgentRuntime
 from integrations.llamacpp_runtime_adapter import LlamaCppAdapter
 
 class LongHorizonTaskRunner:
@@ -16,7 +16,7 @@ class LongHorizonTaskRunner:
         self.config = agent_config
         # Initialize with a real adapter (simulated here)
         self.adapter = LlamaCppAdapter("models/llama-3-8b-q4.gguf", agent_config)
-        self.agent = DiffKVAgentRuntime(self.adapter, agent_config)
+        self.agent = DKVAgentRuntime(self.adapter, agent_config)
         
     def run_continuous_session(self, goal: str, max_tokens_per_burst: int = 1024):
         """

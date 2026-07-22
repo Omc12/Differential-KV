@@ -8,7 +8,7 @@ This trace defines the final, highly optimized execution path for the extracted 
 - The request is placed in `incoming_queue`.
 
 ## 2. Prefill Phase
-- `ContinuousBatchEngine._step()` executes dense prefill via PyTorch SDPA (`hf_diffkv_wrapper.py`).
+- `ContinuousBatchEngine._step()` executes dense prefill via PyTorch SDPA (`hf_dkv_wrapper.py`).
 - Key/Value tensors are generated densely for the entire prompt.
 - Tokens are appended to the `KVRuntimeManager`.
 

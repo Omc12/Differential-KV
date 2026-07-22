@@ -84,19 +84,19 @@ def run_binding_table_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
 
     configs = [
         ("Dense Baseline", "0", "0"),
-        ("DiffKV without Owner Capture", "1", "0"),
-        ("DiffKV with Owner Capture", "1", "1"),
+        ("DKV without Owner Capture", "1", "0"),
+        ("DKV with Owner Capture", "1", "1"),
     ]
 
     results = []
 
     for name, compressed, owner_cap in configs:
-        os.environ["DIFFKV_COMPRESSED_DECODE"] = compressed
-        os.environ["DIFFKV_RESIDUAL_OWNER_CAPTURE"] = owner_cap
-        os.environ["DIFFKV_RESIDUAL_EDGE_CAPTURE"] = "1"
+        os.environ["DKV_COMPRESSED_DECODE"] = compressed
+        os.environ["DKV_RESIDUAL_OWNER_CAPTURE"] = owner_cap
+        os.environ["DKV_RESIDUAL_EDGE_CAPTURE"] = "1"
 
-        from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
-        wrapper = MLXDiffKVWrapper(
+        from serving.mlx_dkv_wrapper import MLXDKVWrapper
+        wrapper = MLXDKVWrapper(
             model_id=model_id,
             config={"rank": 32, "block_size": 256},
         )

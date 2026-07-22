@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 
 BASE_URL = "http://localhost:8000/v1"
-MODEL   = "diffkv-serving"
+MODEL   = "dkv-serving"
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ async def run_all():
         except Exception as e:
             print(f"\nERROR: Cannot reach server at {BASE_URL}")
             print(f"  {e}")
-            print("  Start the server first: python run_diffkv_webui_server.py")
+            print("  Start the server first: python run_dkv_webui_server.py")
             return
 
         results: Dict[str, bool] = {}

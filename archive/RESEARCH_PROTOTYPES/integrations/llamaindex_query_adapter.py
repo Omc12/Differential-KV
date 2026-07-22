@@ -25,13 +25,13 @@ except ImportError:
     def llm_completion_callback():
         return lambda x: x
 
-class DiffKVLlamaIndexAdapter(CustomLLM):
+class DKVLlamaIndexAdapter(CustomLLM):
     """
     LlamaIndex adapter for Differential KV.
     """
     context_window: int = 16384
     num_output: int = 512
-    model_name: str = "diff-kv"
+    model_name: str = "dkv"
     endpoint_url: str = "http://localhost:8000/v1/chat/completions"
 
     @property
@@ -96,5 +96,5 @@ class DiffKVLlamaIndexAdapter(CustomLLM):
         return gen()
 
 if __name__ == "__main__":
-    adapter = DiffKVLlamaIndexAdapter()
-    print("DiffKVLlamaIndexAdapter module loaded.")
+    adapter = DKVLlamaIndexAdapter()
+    print("DKVLlamaIndexAdapter module loaded.")

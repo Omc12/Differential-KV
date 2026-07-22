@@ -2,14 +2,14 @@ import asyncio
 import torch
 import time
 from typing import List, Dict, Any, Optional
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 
 class HeavyConcurrentDecodeEngine:
     """
     HSM System 2: Heavy Concurrent Decode Engine.
     Executes true concurrent decode loops with real transformer compute.
     """
-    def __init__(self, wrapper: DiffKVHFWrapper):
+    def __init__(self, wrapper: DKVHFWrapper):
         self.wrapper = wrapper
         self.active_requests: Dict[str, asyncio.Task] = {}
         self.total_tokens_generated = 0

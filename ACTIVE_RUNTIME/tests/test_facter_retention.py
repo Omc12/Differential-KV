@@ -426,7 +426,7 @@ def test_transition_biasing_and_temp_scaling():
     # Mock logits
     logits = torch.zeros((1, 100))
 
-    # Test logic matching hf_diffkv_wrapper.py
+    # Test logic matching hf_dkv_wrapper.py
     # 1. Apply static bias
     for tok_id in srl_state.current_step_factual_tokens:
         logits[0, tok_id] += 1.5

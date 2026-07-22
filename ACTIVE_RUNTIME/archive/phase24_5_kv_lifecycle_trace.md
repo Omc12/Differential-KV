@@ -6,7 +6,7 @@
 Token(s) arrive via attention forward
       │
       ▼
-[SITE 1] diffkv_attention.py:177 — set_kv(sid, layer, new_k, new_v)
+[SITE 1] dkv_attention.py:177 — set_kv(sid, layer, new_k, new_v)
   - On prefill: new_k = cat([past_dense_k, curr_k])  ← full dense concat FIRST
   - On decode:  new_k = key_states (single token)
       │
@@ -81,7 +81,7 @@ For a 256-token prompt:
    - Submits for compression AFTER the full loop completes
    - Dense allocation precedes compression eligibility by the entire loop duration
 
-2. **`diffkv_attention.py:171–175` (prefill branch)**:
+2. **`dkv_attention.py:171–175` (prefill branch)**:
    - `new_k = cat([past_k, curr_k])` — reconstructs full dense KV via `get_kv()` first
    - Then writes entire sequence back via `set_kv()`
    - This means every prefill token causes a growing dense accumulation

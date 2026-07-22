@@ -20,4 +20,4 @@ This document explicitly defines the boundaries between the Differential KV nati
 
 ## 5. Custom Attention Injection Points
 - **vLLM Owns:** The model forward pass and the dispatch call to `vllm.attention.ops.paged_attention`.
-- **Differential KV Owns:** A drop-in replacement backend (`vllm.attention.backends.diffkv`) that substitutes standard PagedAttention with our `TritonSparseDecode` kernel when operating on compressed blocks, while falling back to standard PagedAttention for the Dense Recency Window.
+- **Differential KV Owns:** A drop-in replacement backend (`vllm.attention.backends.dkv`) that substitutes standard PagedAttention with our `TritonSparseDecode` kernel when operating on compressed blocks, while falling back to standard PagedAttention for the Dense Recency Window.

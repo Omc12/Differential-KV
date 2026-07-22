@@ -34,7 +34,7 @@ kTransformers~\cite{yang2025ktransformers} keep hot operators on the GPU while o
 operators and KV state to CPU memory, extending effective capacity at the cost of host--device
 transfer latency. DeepSeek-V2's Multi-head Latent Attention (MLA)~\cite{deepseekv2} takes
 a different angle: it re-trains the model to project keys and values into a shared low-rank latent
-space at the architecture level, reducing KV cache footprint without post-hoc compression. \diffkv{}
+space at the architecture level, reducing KV cache footprint without post-hoc compression. \dkv{}
 draws on both ideas: it adapts kTransformers' tiered CPU--GPU offloading to the compressed-block
 level (\S\ref{par:ktransformers}), and incorporates an optional MLA-style latent projection as a
 pre-SVD step (\S\ref{sec:impl}), without requiring model re-training.
@@ -46,7 +46,7 @@ only compresses the shared structure will paraphrase fluently and misquote the o
 mattered.
 
 \subsection{Design principle: separate the smooth part from the outliers}
-\diffkv{} responds to that tension directly by splitting each block into two representations
+\dkv{} responds to that tension directly by splitting each block into two representations
 with complementary strengths. The bulk of a block---the smooth, correlated variation shared by
 its tokens---is captured by an anchor and a rank-\rank{} joint $K\!\mid\!V$ delta, which is cheap
 and reconstructs the shared structure at low error. The residual outliers---the handful of rows
@@ -65,7 +65,7 @@ a tensor produced on the GPU is visible to NumPy without a transfer, so the rand
 during compression can run in NumPy on the CPU while the attention kernels run on the GPU, with
 no marshalling cost. Second, ``freeing'' memory means returning it to a single shared pool that
 the rest of the system is contending for, so bounding \emph{peak} allocation matters as much as
-bounding steady state. \diffkv{} is built on MLX: it monkey-patches the attention of an
+bounding steady state. \dkv{} is built on MLX: it monkey-patches the attention of an
 \texttt{mlx\_lm} model, keeps its compressed store in MLX fp16 arrays, uses a persistent fused
 decode buffer, and explicitly releases the prefill cache at the prefill$\to$decode boundary
 (\S\ref{sec:runtime}).

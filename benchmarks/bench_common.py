@@ -1,5 +1,5 @@
 """
-Shared helpers for the DiffKV multi-engine context-length benchmark.
+Shared helpers for the DKV multi-engine context-length benchmark.
 
 The only job of this module (when imported by the orchestrator) is to build a
 single, deterministic Needle-In-A-Haystack (NIAH) chat prompt whose total token

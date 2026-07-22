@@ -11,11 +11,11 @@ def get_category(path_str):
         "openai_compatible_api_gateway.py", 
         "production_session_manager.py",
         "lgs_resolver.py",
-        "hf_diffkv_wrapper.py",
+        "hf_dkv_wrapper.py",
         "kv_runtime_manager.py",
         "requirements.txt",
         "README.md",
-        "triton_diffkv.py"
+        "triton_dkv.py"
     ]
     if name in active_files:
         return "ACTIVE_RUNTIME"

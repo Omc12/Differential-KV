@@ -9,9 +9,9 @@ name — exactly the case the factual store's entity machinery is meant to fix a
 that SVD+residuals alone can blur.
 
 Three arms (selected by --mode, which sets the env the manager reads):
-  exact          : DIFFKV_COMPRESSED_DECODE=0  DIFFKV_FACTUAL_STORE=0  (full-KV upper bound)
-  sparse         : DIFFKV_COMPRESSED_DECODE=1  DIFFKV_FACTUAL_STORE=0  (does compression mis-bind?)
-  sparse_factual : DIFFKV_COMPRESSED_DECODE=1  DIFFKV_FACTUAL_STORE=1  (does the store restore it?)
+  exact          : DKV_COMPRESSED_DECODE=0  DKV_FACTUAL_STORE=0  (full-KV upper bound)
+  sparse         : DKV_COMPRESSED_DECODE=1  DKV_FACTUAL_STORE=0  (does compression mis-bind?)
+  sparse_factual : DKV_COMPRESSED_DECODE=1  DKV_FACTUAL_STORE=1  (does the store restore it?)
 
 Facts are placed EARLY and padded with filler so they fall outside the dense
 recency window (i.e. they must be reached through compressed blocks, where the
@@ -130,18 +130,18 @@ def main():
     args = ap.parse_args()
 
     # Env MUST be set before the wrapper/manager is constructed.
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0" if args.mode == "exact" else "1"
-    os.environ["DIFFKV_FACTUAL_STORE"] = "1" if args.mode == "sparse_factual" else "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "0" if args.mode == "exact" else "1"
+    os.environ["DKV_FACTUAL_STORE"] = "1" if args.mode == "sparse_factual" else "0"
 
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 
-    cfg = {"quantization": "int4", "rank": int(os.environ.get("DIFFKV_RANK", "16")),
+    cfg = {"quantization": "int4", "rank": int(os.environ.get("DKV_RANK", "16")),
            "block_size": 256, "preset": "mid"}
-    w = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
+    w = DKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
     w.ensure_loaded()
 
     entities = NATURAL if args.natural else MODULES

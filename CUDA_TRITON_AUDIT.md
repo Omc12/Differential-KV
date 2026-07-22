@@ -17,8 +17,8 @@ cleanup; the checklist below is still pending, so it stays at the repo root.
 
 Scope: the active CUDA/Triton decode surface only —
 - `ACTIVE_RUNTIME/native_core/sparse_decode/triton_fused_decode.py` (Triton kernels + PyTorch/MPS fallbacks)
-- `diffkv_native/native_core/diffkv_core/src/diffkv_decode.cu` (native GGML CUDA decode kernel)
-- `diffkv_native/CMakeLists.txt` (`-DGGML_CUDA=ON` build)
+- `dkv_native/native_core/dkv_core/src/dkv_decode.cu` (native GGML CUDA decode kernel)
+- `dkv_native/CMakeLists.txt` (`-DGGML_CUDA=ON` build)
 
 The `archive/`, `EXPERIMENTAL_RUNTIME/`, and `RESEARCH_PROTOTYPES/` Triton/CUDA trees are
 parked (see `PARKED_SYSTEMS.md`) and out of scope.
@@ -28,7 +28,7 @@ parked (see `PARKED_SYSTEMS.md`) and out of scope.
 ## Dispatch map (verified statically)
 
 ```
-diffkv_attention.py:1517/1618
+dkv_attention.py:1517/1618
   └─ native_triton_sparse_attn_decode()          triton_fused_decode.py:1344   ← unified CUDA entry
        ├─ HAS_TRITON & N>0 → _fused_sparse_decode_kernel[grid]      (line 164)  ← THE live kernel
        │                     + _fused_sparse_decode_reduction_kernel (line 347) when num_chunks>1
@@ -37,7 +37,7 @@ diffkv_attention.py:1517/1618
        └─ except Exception → _pytorch_vectorized_sparse_attn_decode (line 1555) ← silent fallback
 
 MPS path: fused_decode_mps() (line 705) — separate, already validated on Mac.
-Native C++/GGML CUDA: execute_cuda_attention() → decode_attention_cuda_kernel (diffkv_decode.cu)
+Native C++/GGML CUDA: execute_cuda_attention() → decode_attention_cuda_kernel (dkv_decode.cu)
 ```
 
 Reference of record for the Triton kernel = `_pytorch_vectorized_sparse_attn_decode`.
@@ -101,10 +101,10 @@ box — asserts the real Triton kernel ≈ reference ≈ dense (skips on Mac).
   that Triton is actually running, and a numerically-wrong-but-non-throwing kernel is invisible.
 - On a GPU box you cannot currently tell from logs whether you are measuring Triton or the
   slow PyTorch fallback. **Applied fix (Mac-safe, see below):** one-time "Triton path ACTIVE"
-  confirmation + `DIFFKV_TRITON_STRICT=1` to re-raise instead of falling back.
+  confirmation + `DKV_TRITON_STRICT=1` to re-raise instead of falling back.
 
 ### F4 — 🟡 DEAD CODE (landmines inside the active file)
-- `diffkv_fused_decode_kernel` (lines 42-160): unreferenced anywhere. Also contains a
+- `dkv_fused_decode_kernel` (lines 42-160): unreferenced anywhere. Also contains a
   **hardcoded `kv_heads==2`** assumption (`slot * tl.constexpr(2) * HEAD_DIM`, lines 113/120)
   — if anyone wires it up thinking it's the live kernel, it silently mis-indexes for any model
   whose KV-head count ≠ 2.
@@ -123,7 +123,7 @@ box — asserts the real Triton kernel ≈ reference ≈ dense (skips on Mac).
 
 ---
 
-## Findings — native CUDA kernel (`diffkv_decode.cu`)
+## Findings — native CUDA kernel (`dkv_decode.cu`)
 
 ### F6 — 🔴 CORRECTNESS/SAFETY: hardcoded scratch dimensions
 - Lines 333-335: `cudaMalloc(&d_split_out, 64 * 8 * 128 * sizeof(float))` (and `_m`, `_d`).
@@ -141,16 +141,16 @@ box — asserts the real Triton kernel ≈ reference ≈ dense (skips on Mac).
 
 ### F8 — 🟠 PERF — ✅ APPLIED 2026-07-10 (pending GPU cert)
 - Was: `cudaDeviceSynchronize()` on **every** decode call — a full device barrier per token.
-- **Fix:** `DIFFKV_CUDA_CHECK(cudaStreamSynchronize(0))` — all launches in
+- **Fix:** `DKV_CUDA_CHECK(cudaStreamSynchronize(0))` — all launches in
   `execute_cuda_attention` go to the legacy default stream, so stream-sync(0) is the
   minimal barrier that still guarantees `d_out` is ready for the host read that follows.
   Going fully async (sync only when the caller consumes dst) requires plumbing the ggml
   CUDA stream through the custom-op callback — deliberately NOT attempted blind; measure
   the stream-sync win first (checklist C5).
 
-### F10/F11 — ✅ IMPLEMENTED (pending GPU cert): full DiffKV native CUDA kernel
-New kernel `diffkv_full_decode_kernel` ([diffkv_decode.cu](diffkv_native/native_core/diffkv_core/src/diffkv_decode.cu))
-replaces the anchor-only stub as the **CUDA default**. It implements the complete DiffKV decode
+### F10/F11 — ✅ IMPLEMENTED (pending GPU cert): full DKV native CUDA kernel
+New kernel `dkv_full_decode_kernel` ([dkv_decode.cu](dkv_native/native_core/dkv_core/src/dkv_decode.cu))
+replaces the anchor-only stub as the **CUDA default**. It implements the complete DKV decode
 attention, ported line-by-line from the validated CPU reference (`execute_cpu_attention`,
 approximate_attn path) + the ACTIVE Triton kernel:
 - anchor score + **low-rank delta tokens** (project-then-attend: `q_proj[r]=q·VK[r]`,
@@ -164,34 +164,34 @@ Targets the native default **POOL_ROT_ABS** scheme (pool pre-rotated → no in-k
 `has_rope=1` (legacy rotation) is **not** handled by the delta path — use CPU there.
 **Verification status: written blind (no CUDA on this Mac); NOT compiled or run.** Every memory
 layout is documented at the kernel head and mirrors the CPU indexing, but must be certified on
-a GPU (procedure C7 below). Safety valves: `DIFFKV_CUDA_ANCHOR_ONLY=1` (old stub, A/B) and
-`DIFFKV_FORCE_CPU_ATTN=1` (exact CPU reference).
+a GPU (procedure C7 below). Safety valves: `DKV_CUDA_ANCHOR_ONLY=1` (old stub, A/B) and
+`DKV_FORCE_CPU_ATTN=1` (exact CPU reference).
 
 ### F10-orig — context: why the stub was wrong
 Original `decode_attention_cuda_kernel` is a STUB (not just missing residuals)
-**Upgraded finding.** `decode_attention_cuda_kernel` ([diffkv_decode.cu](diffkv_native/native_core/diffkv_core/src/diffkv_decode.cu:64))
+**Upgraded finding.** `decode_attention_cuda_kernel` ([dkv_decode.cu](dkv_native/native_core/dkv_core/src/dkv_decode.cu:64))
 attends to **block anchors + dense window ONLY**. `U_pool`, `VK_pool`, `VV_pool`, `U_scale_pool`,
 `rank`, `S_max` are passed in but **never used in the kernel body** (verified) — so the entire
 low-rank *delta-token* content of every compressed block is ignored (each 256-token block
 collapses to its single anchor). Residuals and fact overrides are absent too. The native **CPU**
-path ([diffkv_attention.cpp:62-460](diffkv_native/runtime/diffkv_attention.cpp:62)) implements the
-full DiffKV attention (project-then-attend deltas + residuals + facts); the CUDA path
-([diffkv_attention.cpp:1055](diffkv_native/runtime/diffkv_attention.cpp:1055)) does not, yet is the
-**default** on a CUDA build (unless `DIFFKV_FORCE_CPU_ATTN=1`). → native CUDA output would be far
-from Mac/CPU (severe recall loss). **Making native DiffKV attention correct on CUDA = a from-scratch
+path ([dkv_attention.cpp:62-460](dkv_native/runtime/dkv_attention.cpp:62)) implements the
+full DKV attention (project-then-attend deltas + residuals + facts); the CUDA path
+([dkv_attention.cpp:1055](dkv_native/runtime/dkv_attention.cpp:1055)) does not, yet is the
+**default** on a CUDA build (unless `DKV_FORCE_CPU_ATTN=1`). → native CUDA output would be far
+from Mac/CPU (severe recall loss). **Making native DKV attention correct on CUDA = a from-scratch
 kernel port of the full CPU/Triton math, which cannot be verified on a Mac.** GPU device buffers for
 residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing is available.
 
 ### F11 — 🔴 native `.cu` kernel: `block(64)` threads but D=128 → half the output dims unwritten
-- Launch uses `dim3 block(64,...)` ([diffkv_decode.cu:352](diffkv_native/native_core/diffkv_core/src/diffkv_decode.cu:352))
-  while the value accumulation writes `out_buf[... + tid]` for `tid < 64` ([line 253](diffkv_native/native_core/diffkv_core/src/diffkv_decode.cu:253)).
+- Launch uses `dim3 block(64,...)` ([dkv_decode.cu:352](dkv_native/native_core/dkv_core/src/dkv_decode.cu:352))
+  while the value accumulation writes `out_buf[... + tid]` for `tid < 64` ([line 253](dkv_native/native_core/dkv_core/src/dkv_decode.cu:253)).
   For head_dim=128 (all current models) only dims 0-63 are computed; 64-127 are left uninitialized.
   Must launch `block(D)` (and bound `thread_val[D]`). Part of the from-scratch rewrite (F10).
 
 ### F6/F7/F9 — ✅ APPLIED this pass (safe, mechanical; still need GPU compile)
 - F6: split-K scratch now sized from actual `n_q_heads * S_split_max * D` (+ realloc on growth),
   replacing the hardcoded `64*8*128` (was OOB for >64 heads / D>128).
-- F7: `DIFFKV_CUDA_CHECK` macro on `cudaMalloc`/`cudaMemcpy` + `cudaGetLastError()` after both
+- F7: `DKV_CUDA_CHECK` macro on `cudaMalloc`/`cudaMemcpy` + `cudaGetLastError()` after both
   kernel launches.
 - F9: split-K scratch is freed before re-alloc on growth (no leak on model change).
 
@@ -206,7 +206,7 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
 **Environment**
 - [ ] `-DGGML_CUDA=ON` builds clean (`find_package(CUDAToolkit)`, cusolver/cublas/cudart link — CMake 73-107).
 - [ ] `python -c "import triton; print(triton.__version__)"` inside the serving venv; confirm `HAS_TRITON` is True at import.
-- [ ] Start serving with the applied `DIFFKV_TRITON_STRICT=1` (below) and confirm the one-time
+- [ ] Start serving with the applied `DKV_TRITON_STRICT=1` (below) and confirm the one-time
       **"Triton path ACTIVE"** log fires and **no** fallback warning appears.
 
 **C1 — 🔴 Certify the F1 residual-alignment fix (kernel unit test)**
@@ -218,7 +218,7 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
       sanity on GPU.
 
 **C2 — 🔴 End-to-end recall parity (the real gate)**
-- [ ] `DIFFKV_COMPRESSED_DECODE=auto python benchmarks/niah_recall.py --bench --ctx 4096 8192 16384 32768`
+- [ ] `DKV_COMPRESSED_DECODE=auto python benchmarks/niah_recall.py --bench --ctx 4096 8192 16384 32768`
       on CUDA. Must match the Mac baseline: exact needle recall (`OMEGA-7741-DELTA`) at every ctx.
 - [ ] `benchmarks/niah_recall.py --multi-needle` and `benchmarks/relational_ab.py` — no regression vs Mac.
 
@@ -236,12 +236,12 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
 - [ ] `compute-sanitizer --tool memcheck` over one decode — zero out-of-bounds / illegal accesses.
 - [ ] Before/after F8 sync reduction: decode tps + `nsys` timeline (per-token device barrier gone).
 
-**C7 — 🔴 certify the new native DiffKV CUDA kernel (F10/F11)**
-- [ ] Build native with `-DGGML_CUDA=ON`; confirm `diffkv_decode.cu` compiles (all pool accessors +
+**C7 — 🔴 certify the new native DKV CUDA kernel (F10/F11)**
+- [ ] Build native with `-DGGML_CUDA=ON`; confirm `dkv_decode.cu` compiles (all pool accessors +
       `NativeBlockPool::MAX_RESIDUAL` resolve; shared-mem size fits).
 - [ ] `compute-sanitizer --tool memcheck` over one decode — zero races / OOB (the kernel is blind-written).
-- [ ] **3-way A/B on one needle prompt:** default (new CUDA) vs `DIFFKV_CUDA_ANCHOR_ONLY=1` (old stub)
-      vs `DIFFKV_FORCE_CPU_ATTN=1` (exact CPU reference). Assert **default ≈ CPU** per-token (the new
+- [ ] **3-way A/B on one needle prompt:** default (new CUDA) vs `DKV_CUDA_ANCHOR_ONLY=1` (old stub)
+      vs `DKV_FORCE_CPU_ATTN=1` (exact CPU reference). Assert **default ≈ CPU** per-token (the new
       kernel is correct) and **anchor-only ≠ CPU** (confirms deltas/residuals now matter). Default must
       recall the needle; anchor-only should not.
 - [ ] Decode tps: new CUDA kernel vs CPU path — confirm the "faster" claim (and vs F8 sync fix below).
@@ -268,7 +268,7 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
 - **F1 residual alignment (Triton kernel + dispatcher)** — full fix described above. Math
   Mac-verified; Triton compile/run certified by `test_triton_matches_reference_on_gpu` on GPU.
   Mac path provably unaffected (kernel only runs under `HAS_TRITON`, i.e. CUDA).
-- **F3 observability (Mac-verified)** — one-time "Triton path ACTIVE" log + `DIFFKV_TRITON_STRICT=1`
+- **F3 observability (Mac-verified)** — one-time "Triton path ACTIVE" log + `DKV_TRITON_STRICT=1`
   re-raise instead of silent PyTorch fallback. Default behavior byte-unchanged.
 
 ## Recommended but NOT applied (need GPU compile/verify — your call)
@@ -278,13 +278,13 @@ residuals exist (`pool.get_res_K_pos/val()`, `get_res_V_pos/val()`), so plumbing
   cannot compile-verify on Mac; propose applying together behind a single GPU build+memcheck pass.
 
 **C9 — LEGO prefill port (torch/CUDA path) — design notes, 2026-07-12**
-The MLX reference (`mlx_diffkv_wrapper.py`, `DIFFKV_LEGO_PREFILL`) and native C++
+The MLX reference (`mlx_dkv_wrapper.py`, `DKV_LEGO_PREFILL`) and native C++
 stage 1 (`main.cpp`, same flag) both exist; see `docs/NATIVE_LEGO_PORT_PLAN.md`.
 Before porting to the torch path, note what the two implementations taught us:
 - The torch `KVRuntimeManager` already right-sizes its pool from a memory budget
   (`dynamic_max_blocks`) — the MLX pool-growth fix has no CUDA equivalent to port.
 - The HF wrapper's prefill retains full `past_key_values` (raw) alongside the
-  DiffKV store — the same duplication MLX had. A lego port = windowed
+  DKV store — the same duplication MLX had. A lego port = windowed
   `past_key_values` + far blocks materialised from the manager's pool (the
   torch equivalent of `materialize_routed_kv` already exists in the decode fill).
 - NATIVE STAGE-1 LESSON (2026-07-12): shrinking ONE raw copy may not move the
@@ -299,8 +299,8 @@ Before porting to the torch path, note what the two implementations taught us:
 
 **C10 — Owner-capture residual selection (torch path) — design note, 2026-07-12**
 MLX + native C++ now boost the OWNER of a fact into the exact-residual set
-(`DIFFKV_RESIDUAL_OWNER_CAPTURE`, default ON; `_apply_owner_capture` in
-`mlx_diffkv_wrapper.py`, mirrored block in `lowrank.cpp`). Root cause it fixes:
+(`DKV_RESIDUAL_OWNER_CAPTURE`, default ON; `_apply_owner_capture` in
+`mlx_dkv_wrapper.py`, mirrored block in `lowrank.cpp`). Root cause it fixes:
 values (digits) were captured exactly while entity names (title-case → is_prose)
 survived only as rank-r recon — the MLX binding probe (`benchmarks/binding_probe.py`)
 showed compressed list-all 1/6 vs dense 5/6 with real values bound to CORRUPTED
@@ -317,17 +317,17 @@ so it also still has the ORIGINAL failure this fixed, plus the digit-boost gap.
       block-rank heuristic) now applies the full capture stack via the new
       shared module `native_core/compression/residual_capture.py` (token
       boost + owner capture + TABLE capture + window pass; keep in sync with
-      `mlx_diffkv_wrapper.py` helpers and `lowrank.cpp`). Boosts multiply the
+      `mlx_dkv_wrapper.py` helpers and `lowrank.cpp`). Boosts multiply the
       rel-error ranking AFTER the tier medians (parity with MLX), budget
       floor = boosted+margin capped at T_active; the pool's
-      `max_residual_tokens` truncation (default 8, `DIFFKV_MAX_RESIDUAL_TOKENS`)
+      `max_residual_tokens` truncation (default 8, `DKV_MAX_RESIDUAL_TOKENS`)
       keeps the highest-ranked rows, so boosted value/owner/table rows are
       what survives. CPU tests: `tests/test_residual_capture.py` (11 pass,
       incl. an end-to-end `compress_layer_blocks_gpu` CPU integration test).
       NOTE: the single-block CPU `compress_lowrank` path is still unported.
 - [ ] On the GPU box: run the binding_probe + table_probe2 patterns against
       the torch path end-to-end; table fidelity needs
-      DIFFKV_MAX_RESIDUAL_TOKENS raised toward the table span size (8 slots
+      DKV_MAX_RESIDUAL_TOKENS raised toward the table span size (8 slots
       cannot hold a table row set — see table-capture notes in
       RELATIONAL_BINDING_REPORT.md).
 
@@ -340,8 +340,8 @@ paper text) and the err-ranked cut drops table fragments structure-blind —
 values migrate across rows/tables when the decoder reassembles; (2)
 header/unit/row-name cells ('Kernel', 'imgs', '/sec', 'Swin-T baseline') are
 prose → never boosted → rank-r smear (fabricated units, lost row names).
-Fix (`DIFFKV_RESIDUAL_TABLE_CAPTURE`, default ON all three impls;
-`DIFFKV_RESIDUAL_TABLE_PRIORITY` default 4): tokens on table-like LINES
+Fix (`DKV_RESIDUAL_TABLE_CAPTURE`, default ON all three impls;
+`DKV_RESIDUAL_TABLE_PRIORITY` default 4): tokens on table-like LINES
 (>= 2 standalone '|'/'&' separators + shape guard: line-initial separator,
 LaTeX `\\` terminator, or separator density >= 1/12 — the guard rejects
 prose with inline |x−y| math) get the core boost × priority; native also
@@ -351,7 +351,7 @@ table, temp 0): MLX list-all 3/6 → 6/6 == dense; native 4/6 (row-shift swap
 16k/0.9, MN 3/3, synthesis == same-day controls, native margins 12.48/14.26).
 
 **C12 — 🔴 certify CUDA High-Quality-Routing gate (2026-07-13) on GPU**
-Cross-runtime `DIFFKV_HIGH_QUALITY_ROUTING` toggle added: fast bounded-K
+Cross-runtime `DKV_HIGH_QUALITY_ROUTING` toggle added: fast bounded-K
 pruning is now the DEFAULT, dynamic graph routing is opt-in. Native (C++) and
 MLX are implemented + Mac-validated (native NIAH 6/6 @4/8/16k×depth 0.5/0.9 +
 3/3 multi-fact, sparse now engages ~8k, 2.2× dense @32k; MLX default fast /

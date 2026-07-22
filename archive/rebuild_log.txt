@@ -313,26 +313,26 @@ FINAL MANIFEST ù Files that remain alive
   LIVE  ACTIVE_RUNTIME/native_core\streaming_sparse_ingest.py
   LIVE  ACTIVE_RUNTIME/native_core\compression\async_compressor.py
   LIVE  ACTIVE_RUNTIME/native_core\compression\lowrank.py
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\build_log.txt
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\CMakeLists.txt
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\diffkv_core.cp313-win_amd64.pyd
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\setup.py
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\test_native_stress.py
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\block_state.hpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\compressor_thread.hpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\paging_stream.hpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\include\spsc_ring_buffer.hpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\bindings.cpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\compressor_thread.cpp
-  LIVE  ACTIVE_RUNTIME/native_core\diffkv_core\src\paging_stream.cu
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\build_log.txt
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\CMakeLists.txt
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\dkv_core.cp313-win_amd64.pyd
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\setup.py
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\test_native_stress.py
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\include\block_state.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\include\compressor_thread.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\include\paging_stream.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\include\spsc_ring_buffer.hpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\src\bindings.cpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\src\compressor_thread.cpp
+  LIVE  ACTIVE_RUNTIME/native_core\dkv_core\src\paging_stream.cu
   LIVE  ACTIVE_RUNTIME/native_core\graph_runtime\static_decode_graph.py
   LIVE  ACTIVE_RUNTIME/native_core\paging\paged_kv_store.py
-  LIVE  ACTIVE_RUNTIME/native_core\sparse_decode\triton_diffkv.py
+  LIVE  ACTIVE_RUNTIME/native_core\sparse_decode\triton_dkv.py
   LIVE  ACTIVE_RUNTIME/native_core\sparse_decode\triton_sparse_attn.py
-  LIVE  ACTIVE_RUNTIME/runtime\diffkv_attention.py
+  LIVE  ACTIVE_RUNTIME/runtime\dkv_attention.py
   LIVE  ACTIVE_RUNTIME/runtime\native_block_pool.py
   LIVE  ACTIVE_RUNTIME/serving\batch_engine.py
-  LIVE  ACTIVE_RUNTIME/serving\hf_diffkv_wrapper.py
+  LIVE  ACTIVE_RUNTIME/serving\hf_dkv_wrapper.py
   LIVE  ACTIVE_RUNTIME/serving\openai_compatible_api_gateway.py
   LIVE  ACTIVE_RUNTIME/serving\production_session_manager.py
   LIVE  ACTIVE_RUNTIME/tests\benchmark.py
@@ -350,12 +350,12 @@ REBUILD COMPLETE
 ======================================================================
 
 Surviving execution-grounded systems:
-  [1] SDPA/FlashAttention prefill    (diffkv_attention.py)
+  [1] SDPA/FlashAttention prefill    (dkv_attention.py)
   [2] StreamingSparseIngestManager   (streaming_sparse_ingest.py)
   [3] AsyncCompressor                (async_compressor.py)
   [4] NativeBlockPool                (native_block_pool.py)
   [5] Triton Sparse Decode Kernel    (triton_sparse_attn.py)
-  [6] Last-Token Logits Projection   (diffkv_attention.py)
+  [6] Last-Token Logits Projection   (dkv_attention.py)
   [7] Geometry-preserving SVD        (lowrank.py)
   [8] ContinuousBatchEngine          (batch_engine.py)
   [9] OpenAI-compatible API          (openai_compatible_api_gateway.py)

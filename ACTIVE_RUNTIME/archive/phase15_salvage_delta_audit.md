@@ -1,7 +1,7 @@
 # Phase 15 Salvage Delta Audit
 
 ## Overview
-This audit traces the actual integration points of all systems revived from salvage or developed in Phases 11-14 into `ACTIVE_RUNTIME`. The harsh reality is that most recent systems were validated in isolated microbenchmarks but remain disconnected from the live `batch_engine.py` and `hf_diffkv_wrapper.py` execution paths.
+This audit traces the actual integration points of all systems revived from salvage or developed in Phases 11-14 into `ACTIVE_RUNTIME`. The harsh reality is that most recent systems were validated in isolated microbenchmarks but remain disconnected from the live `batch_engine.py` and `hf_dkv_wrapper.py` execution paths.
 
 ## Revived Systems & Integration Status
 
@@ -19,7 +19,7 @@ This audit traces the actual integration points of all systems revived from salv
 | **Global Memory Anchors (Retrieval)** | `runtime/sparse_prefill_anchors.py` | Tested in Phase 14 harness | **DISCONNECTED** |
 
 ## Remaining Disconnected Systems (To be Fused)
-The entire Sparse Transformer stack (MLP routing, tiered weights, sparse prefill attention, anchor routing) is mathematically verified but un-orchestrated. To become real, they must be fused into the live transformer forward pass (via `hf_diffkv_wrapper.py` and `batch_engine.py`).
+The entire Sparse Transformer stack (MLP routing, tiered weights, sparse prefill attention, anchor routing) is mathematically verified but un-orchestrated. To become real, they must be fused into the live transformer forward pass (via `hf_dkv_wrapper.py` and `batch_engine.py`).
 
 ## Architecture Theater (Rejected)
 - Fake semantic cognition networks

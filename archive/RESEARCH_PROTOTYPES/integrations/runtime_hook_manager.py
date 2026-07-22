@@ -1,7 +1,7 @@
 """
 integrations/runtime_hook_manager.py
 
-Central manager for intercepting KV cache and applying DiffKV stabilization
+Central manager for intercepting KV cache and applying DKV stabilization
 during real-world inference across different runtimes.
 """
 

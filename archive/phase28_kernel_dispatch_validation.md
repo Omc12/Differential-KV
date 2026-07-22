@@ -20,7 +20,7 @@ Prefill done in 29.24s
 
 | Layer / Component | Execution Status | Evidence / Verification Method |
 |---|---|---|
-| **C++ / CUDA Extension** | **ACTIVE** | `diffkv_core.cp313-win_amd64.pyd` built successfully via MSVC compiler with links to `cusolver` and `cublas`. Import succeeded in Python. |
+| **C++ / CUDA Extension** | **ACTIVE** | `dkv_core.cp313-win_amd64.pyd` built successfully via MSVC compiler with links to `cusolver` and `cublas`. Import succeeded in Python. |
 | **Native Block Pool** | **ACTIVE** | contiguous GPU memory pools pre-allocated; successfully registered allocation of 16,774 blocks during prefill. |
 | **Triton Fused Decode Kernel** | **ACTIVE** | `[Phase 28] TRITON FUSED SPARSE DECODE KERNEL FIRED!` printed to console at first decode step of the live sequence. |
 | **Async Compression** | **ACTIVE** | SVD compression triggered asynchronously; blocks committed directly to the `NativeBlockPool` via `.write_block()`. |

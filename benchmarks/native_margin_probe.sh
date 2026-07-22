@@ -6,26 +6,26 @@ import sys
 
 # Define standard sweep env
 env = os.environ.copy()
-env["DIFFKV_ENGAGE_THRESHOLD"] = "1024"
+env["DKV_ENGAGE_THRESHOLD"] = "1024"
 # Probe the DEFAULT decode path (NATIVE_ATTN=0), the same path as the honest 6-cell
 # sweep and what users run. NATIVE_ATTN=1 (the fused-ggml path W7 removed) does NOT
 # degrade gracefully — it emits gibberish at 16k ("The secret secretTheThe unary…"),
 # which made this probe report a false 16k failure. Fixed 2026-07-04.
-env["DIFFKV_NATIVE_ATTN"] = "0"
-env["DIFFKV_FORCE_CPU_ATTN"] = "0"
-env["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
-env["DIFFKV_DENSE_DIRECT"] = "1"
-env["DIFFKV_POOL_ABS_ROT"] = "1"
-env["DIFFKV_TEMPERATURE"] = "0"
-env["DIFFKV_DISABLE_VSL"] = "1"
-env["DIFFKV_ENABLE_FACTUAL"] = "0"
-env["DIFFKV_REPETITION_PENALTY"] = "1.0"
-env["DIFFKV_MAX_TOKENS"] = "20"
+env["DKV_NATIVE_ATTN"] = "0"
+env["DKV_FORCE_CPU_ATTN"] = "0"
+env["DKV_MPS_APPROXIMATE_ATTN"] = "1"
+env["DKV_DENSE_DIRECT"] = "1"
+env["DKV_POOL_ABS_ROT"] = "1"
+env["DKV_TEMPERATURE"] = "0"
+env["DKV_DISABLE_VSL"] = "1"
+env["DKV_ENABLE_FACTUAL"] = "0"
+env["DKV_REPETITION_PENALTY"] = "1.0"
+env["DKV_MAX_TOKENS"] = "20"
 env["HF_HUB_OFFLINE"] = "1"
 
-binary = "../diffkv_native/build/diffkv_native"
-model = "../diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
-make_prompt_script = "../diffkv_native/tests/make_niah_prompt.py"
+binary = "../dkv_native/build/dkv_native"
+model = "../dkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"
+make_prompt_script = "../dkv_native/tests/make_niah_prompt.py"
 
 needle = "The secret passcode is OMEGA-7741-DELTA."
 question = "What is the secret passcode? Repeat it exactly."

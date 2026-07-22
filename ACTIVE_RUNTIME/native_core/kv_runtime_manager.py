@@ -19,7 +19,7 @@ import time
 import sys, os
 import threading
 
-from native_core.sparse_decode.triton_fused_decode import TritonDiffKV
+from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from native_core.compression.lowrank import compress_lowrank, LowRankDelta
 from native_core.paging.paged_kv_store import PagedKVStore
 from native_core.compression.async_compressor import AsyncCompressor
@@ -69,7 +69,7 @@ def get_layer_rank(
     Boosted schedule (early_boost=True):
       Layers 0-15%:  min(2 * base_rank, max_rank_early or 2 * base_rank)
                      Allows early syntactic layers to retain more KV fidelity.
-                     Enable via DIFFKV_EARLY_LAYER_RANK_BOOST=1 or config dict.
+                     Enable via DKV_EARLY_LAYER_RANK_BOOST=1 or config dict.
       Layers 15%+:   Same as normal schedule.
 
     Parameters
@@ -82,8 +82,8 @@ def get_layer_rank(
     """
     # ── Layer-Adaptive Rank Allocation (middle-boost allocator) ──
     # Assign lower rank to early and late layers, and higher rank to middle layers.
-    # Enable via DIFFKV_LAYER_ADAPTIVE_RANK=1 or config.layer_adaptive_rank=True.
-    if os.environ.get("DIFFKV_LAYER_ADAPTIVE_RANK", "1") == "1":
+    # Enable via DKV_LAYER_ADAPTIVE_RANK=1 or config.layer_adaptive_rank=True.
+    if os.environ.get("DKV_LAYER_ADAPTIVE_RANK", "1") == "1":
         ratio = layer_idx / max(num_layers, 1)
         if ratio < 0.25:       # Early layers (25%) -> lower rank (e.g. 12 if base is 16)
             return max(8, round(0.75 * base_rank))
@@ -436,10 +436,10 @@ class KVRuntimeManager:
         tokenizer                  = None,   # HuggingFace tokenizer (for SRL stop words)
         config:              dict  = None,
     ):
-        from native_core.config import DiffKVConfig
-        self.config      = DiffKVConfig(config)
+        from native_core.config import DKVConfig
+        self.config      = DKVConfig(config)
         if getattr(self.config, "layer_adaptive_rank", False):
-            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
+            os.environ["DKV_LAYER_ADAPTIVE_RANK"] = "1"
         self.num_layers  = num_layers
         self.heads       = heads
         self.kv_heads    = kv_heads if kv_heads is not None else heads
@@ -493,7 +493,7 @@ class KVRuntimeManager:
         self.block_size           = 64
         if rank >= head_dim:
             self.rank = head_dim // 2
-            print(f"[DiffKV] WARNING: Configured SVD rank {rank} is >= head_dim {head_dim}. "
+            print(f"[DKV] WARNING: Configured SVD rank {rank} is >= head_dim {head_dim}. "
                   f"Capping SVD rank to {self.rank} (head_dim // 2) to preserve accuracy and avoid memory waste.")
         else:
             self.rank = rank
@@ -532,10 +532,10 @@ class KVRuntimeManager:
         _early_boost = getattr(_cfg, "early_layer_rank_boost", False)
         _max_rank_early = getattr(_cfg, "max_rank_early", 0)
         if not _early_boost:
-            _early_boost = os.environ.get("DIFFKV_EARLY_LAYER_RANK_BOOST", "0") == "1"
+            _early_boost = os.environ.get("DKV_EARLY_LAYER_RANK_BOOST", "0") == "1"
         if _max_rank_early == 0:
             try:
-                _max_rank_early = int(os.environ.get("DIFFKV_MAX_RANK_EARLY", "0"))
+                _max_rank_early = int(os.environ.get("DKV_MAX_RANK_EARLY", "0"))
             except ValueError:
                 _max_rank_early = 0
 
@@ -545,19 +545,19 @@ class KVRuntimeManager:
         )
         import math
         # The 1.5x is headroom for the CONTENT rank-boost (_block_boost_rank
-        # promotes a block to ceil(rank*1.5)).  When DIFFKV_RANK_BOOST=off that
+        # promotes a block to ceil(rank*1.5)).  When DKV_RANK_BOOST=off that
         # boost never fires, so no block's stored rank exceeds max_possible_rank,
         # and the 1.5x would over-allocate every V_KV/U slot by 50% for capacity
         # that cannot fill — the pool_rank=48 seen with rank 32 even when boost is
         # off.  Drop the multiplier to 1.0 in that case.  (max_possible_rank
         # already covers the per-layer schedule, incl. early_layer_rank_boost.)
-        _content_boost_on = os.environ.get("DIFFKV_RANK_BOOST", "auto").lower() != "off"
+        _content_boost_on = os.environ.get("DKV_RANK_BOOST", "auto").lower() != "off"
         pool_rank = int(math.ceil(max_possible_rank * (1.5 if _content_boost_on else 1.0)))
-        # A hard r_proj cap (DIFFKV_RSVD_MAX_RPROJ) caps every block's stored rank
+        # A hard r_proj cap (DKV_RSVD_MAX_RPROJ) caps every block's stored rank
         # in the compress path, so the pool never needs to be wider than the cap.
         # Safe: compress clamps dynamic_rank to r_proj <= this cap.
         try:
-            _pool_rproj_cap = int(os.environ.get("DIFFKV_RSVD_MAX_RPROJ", "0"))
+            _pool_rproj_cap = int(os.environ.get("DKV_RSVD_MAX_RPROJ", "0"))
         except ValueError:
             _pool_rproj_cap = 0
         if _pool_rproj_cap > 0:
@@ -594,13 +594,13 @@ class KVRuntimeManager:
         is_low_preset = (self.config is not None and getattr(self.config, "preset", "mid") == "low")
         
         # Debug: always log device and preset detection
-        print(f"[DiffKV Memory] Device: {self.device} (is_mps={is_mps}), Preset: {getattr(self.config, 'preset', 'unknown')} (is_low={is_low_preset})")
+        print(f"[DKV Memory] Device: {self.device} (is_mps={is_mps}), Preset: {getattr(self.config, 'preset', 'unknown')} (is_low={is_low_preset})")
         
         if is_mps and is_low_preset:
             # For MPS + low preset: cap pool at 256MB (more aggressive) and reduce expected tokens by 75%
             pool_budget_bytes = min(pool_budget_bytes, 256 * 1024 ** 2)
             expected_tokens = expected_tokens // 4  # 75% reduction
-            print(f"[DiffKV] MPS + low preset detected: reducing pool budget to {pool_budget_bytes // (1024**2)}MB "
+            print(f"[DKV] MPS + low preset detected: reducing pool budget to {pool_budget_bytes // (1024**2)}MB "
                   f"for {expected_tokens} expected tokens to fit 4GB MPS limit")
         else:
             # Clamp pool between 128MB and the budget ceiling.
@@ -615,18 +615,18 @@ class KVRuntimeManager:
             # than OOM.
             #
             # The ceiling is chosen in priority order:
-            #   1. DIFFKV_POOL_BUDGET_GB — explicit override, always wins.
+            #   1. DKV_POOL_BUDGET_GB — explicit override, always wins.
             #   2. CUDA: a fraction of the VRAM actually free right now.  The
             #      model weights are already resident by the time the manager is
             #      built, so mem_get_info()'s free figure is post-weights.  We
-            #      keep DIFFKV_POOL_VRAM_FRAC (default 0.5) of that for the pool
+            #      keep DKV_POOL_VRAM_FRAC (default 0.5) of that for the pool
             #      and leave the rest for prefill activations, decode
             #      workspaces, and the compression staging tensors.  This scales
             #      the context ceiling to the card — a hardcoded 8GB throttled
             #      an 80GB A100 to ~215K tokens while risking OOM on a 24GB card.
             #   3. Fallback (CPU, or mem query fails): 8GB, the old fixed value.
             # A 4GB floor keeps context usable even when free VRAM is tight.
-            _explicit_gb = os.environ.get("DIFFKV_POOL_BUDGET_GB")
+            _explicit_gb = os.environ.get("DKV_POOL_BUDGET_GB")
             _ceiling_bytes = None
             if _explicit_gb is not None:
                 try:
@@ -641,7 +641,7 @@ class KVRuntimeManager:
                 try:
                     _dev = self.device if isinstance(self.device, torch.device) else torch.device(self.device)
                     _free, _total = torch.cuda.mem_get_info(_dev)
-                    _frac = float(os.environ.get("DIFFKV_POOL_VRAM_FRAC", "0.5"))
+                    _frac = float(os.environ.get("DKV_POOL_VRAM_FRAC", "0.5"))
                     # Floor at 4GB (or all of free if free < 4GB) so a busy card
                     # still gets a usable context window.
                     _ceiling_bytes = max(min(4 * 1024 ** 3, _free), int(_free * _frac))
@@ -650,15 +650,15 @@ class KVRuntimeManager:
                     )
                 except Exception as _mem_err:
                     _ceiling_bytes = None
-                    print(f"[DiffKV] VRAM query for pool budget failed ({_mem_err}); "
-                          f"falling back to 8 GB. Set DIFFKV_POOL_BUDGET_GB to override.")
+                    print(f"[DKV] VRAM query for pool budget failed ({_mem_err}); "
+                          f"falling back to 8 GB. Set DKV_POOL_BUDGET_GB to override.")
             if _ceiling_bytes is None:
                 _ceiling_bytes = 8 * 1024 ** 3
                 if not hasattr(self, "_pool_budget_source"):
                     self._pool_budget_source = "8 GB fallback"
             else:
                 if _explicit_gb is not None:
-                    self._pool_budget_source = f"DIFFKV_POOL_BUDGET_GB={_explicit_gb}"
+                    self._pool_budget_source = f"DKV_POOL_BUDGET_GB={_explicit_gb}"
                 elif not hasattr(self, "_pool_budget_source"):
                     self._pool_budget_source = "8 GB fallback"
             pool_budget_bytes = max(
@@ -686,7 +686,7 @@ class KVRuntimeManager:
         _true_bpb = bytes_per_block + _res_bytes
         _blocks_per_layer = max(1, dynamic_max_blocks // max(self.num_layers, 1))
         print(
-            f"[DiffKV Memory] Pool: max_blocks={dynamic_max_blocks} "
+            f"[DKV Memory] Pool: max_blocks={dynamic_max_blocks} "
             f"({_blocks_per_layer}/layer x {self.num_layers} layers "
             f"~= {_blocks_per_layer * pool_block_size:,} tokens max context), "
             f"rank={self.rank} (pool_rank={pool_rank}), "
@@ -722,9 +722,9 @@ class KVRuntimeManager:
         # 4096 // 64 = 64. The old flat default of 16 covered only 16*64=1024
         # tokens — 4× less — so a distant needle's block fell outside the top-16
         # and deep-context retrieval failed for any user who never set
-        # DIFFKV_TOPK_BLOCKS. Deriving it from block_size makes the correct budget
+        # DKV_TOPK_BLOCKS. Deriving it from block_size makes the correct budget
         # automatic (no env var required) and scales if block_size ever changes.
-        # An explicit DIFFKV_TOPK_BLOCKS still overrides this (see query_router.py).
+        # An explicit DKV_TOPK_BLOCKS still overrides this (see query_router.py).
         self.native_pool.routing_topk_default = max(16, 4096 // max(1, self.block_size))
 
         # ── SRL: Initialize random projection matrix W_proj ──────────────
@@ -744,18 +744,18 @@ class KVRuntimeManager:
 
         # On Apple Silicon/MPS, we enable async background SVD with safe CPU-offloaded SVD preprocessing
         if self.device == "mps" or (isinstance(self.device, torch.device) and self.device.type == "mps") or "mps" in str(self.device):
-            print("[DiffKV] Auto-detected Apple Silicon / MPS device. Enabling CPU-offloaded async background SVD.")
+            print("[DKV] Auto-detected Apple Silicon / MPS device. Enabling CPU-offloaded async background SVD.")
             self._async = self.config.async_svd
             # Default MPS approximate attention to ON for Apple Silicon.
             # The fused_decode_mps Project-Then-Attend path avoids per-token RoPE
             # reconstruction over compressed blocks (the main decode bottleneck on MPS).
             # Dense window tokens still receive exact pre-rotated attention.
-            # Override with DIFFKV_MPS_APPROXIMATE_ATTN=0 to disable.
+            # Override with DKV_MPS_APPROXIMATE_ATTN=0 to disable.
             import os as _local_os
-            if _local_os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
-                _local_os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
-                print("[DiffKV] Enabled MPS approximate attention fast-path (fused_decode_mps). "
-                      "Set DIFFKV_MPS_APPROXIMATE_ATTN=0 to disable.")
+            if _local_os.environ.get("DKV_MPS_APPROXIMATE_ATTN") is None:
+                _local_os.environ["DKV_MPS_APPROXIMATE_ATTN"] = "1"
+                print("[DKV] Enabled MPS approximate attention fast-path (fused_decode_mps). "
+                      "Set DKV_MPS_APPROXIMATE_ATTN=0 to disable.")
         else:
             self._async = self.config.async_svd
 
@@ -776,13 +776,13 @@ class KVRuntimeManager:
                 # exact attention, compressing everything older. This is sufficient for
                 # typical response lengths and yields clear VRAM savings at 4K+ contexts.
                 # Increase to 1024 via recency_window=1024 if generation quality drifts.
-                recency_window=int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512")),
+                recency_window=int(os.environ.get("DKV_RECENCY_WINDOW", "512")),
             )
             self._streaming_mgr.manager = self
         else:
             self._streaming_mgr = None
 
-        _recency_window = int(os.environ.get("DIFFKV_RECENCY_WINDOW", "512"))
+        _recency_window = int(os.environ.get("DKV_RECENCY_WINDOW", "512"))
         # Compute a generous upper bound for the dense window workspace.
         # During chunked prefill, active_k can temporarily hold up to 2*block_size − 1 tokens
         # per block (e.g. 127 for block_size=64).  Formula:
@@ -794,7 +794,7 @@ class KVRuntimeManager:
         _n_max_blocks = (_recency_window + self.block_size - 1) // self.block_size + 3
         _max_per_block = 2 * self.block_size + 1
         self.max_dense_len = int(
-            os.environ.get("DIFFKV_MAX_DENSE_LEN", str(_n_max_blocks * _max_per_block))
+            os.environ.get("DKV_MAX_DENSE_LEN", str(_n_max_blocks * _max_per_block))
         )
 
         self.max_residual = self.native_pool.max_residual_tokens
@@ -833,14 +833,14 @@ class KVRuntimeManager:
         self._kt_mla_projectors: dict = {}  # Feature 4: {layer_idx: MLAProjector}
 
         # Feature 1: Tiered CPU-GPU KV Offloading
-        _tier_env = os.environ.get("DIFFKV_TIER_ENABLED", "auto").lower()
+        _tier_env = os.environ.get("DKV_TIER_ENABLED", "auto").lower()
         _is_gpu = str(self.device).startswith("cuda") or "mps" in str(self.device)
         _tier_on = (_tier_env == "1") or (_tier_env == "auto" and _is_gpu)
         if _tier_on:
             try:
                 from native_core.paging.tiered_block_store import TieredBlockStore
-                _evict_thresh = float(os.environ.get("DIFFKV_TIER_EVICT_THRESH", "0.80"))
-                _evict_batch  = int(os.environ.get("DIFFKV_TIER_EVICT_BATCH", "32"))
+                _evict_thresh = float(os.environ.get("DKV_TIER_EVICT_THRESH", "0.80"))
+                _evict_batch  = int(os.environ.get("DKV_TIER_EVICT_BATCH", "32"))
                 self._kt_tiered_store = TieredBlockStore(
                     pool=self.native_pool,
                     pager=self.pager,
@@ -848,35 +848,35 @@ class KVRuntimeManager:
                     evict_threshold=_evict_thresh,
                     evict_batch=_evict_batch,
                 )
-                print(f"[DiffKV kT] Feature 1 — TieredBlockStore enabled "
+                print(f"[DKV kT] Feature 1 — TieredBlockStore enabled "
                       f"(evict_thresh={_evict_thresh:.0%}, batch={_evict_batch})")
             except Exception as _e:
-                print(f"[DiffKV kT] Feature 1 — TieredBlockStore init failed: {_e}")
+                print(f"[DKV kT] Feature 1 — TieredBlockStore init failed: {_e}")
 
         # Feature 2: Async Block Prefetching
-        _prefetch_on = os.environ.get("DIFFKV_BLOCK_PREFETCH", "1") == "1"
+        _prefetch_on = os.environ.get("DKV_BLOCK_PREFETCH", "1") == "1"
         if _prefetch_on:
             try:
                 from native_core.compression.block_prefetch_engine import BlockPrefetchEngine
-                _lookahead = int(os.environ.get("DIFFKV_PREFETCH_LOOKAHEAD", "1"))
+                _lookahead = int(os.environ.get("DKV_PREFETCH_LOOKAHEAD", "1"))
                 self._kt_prefetch_engine = BlockPrefetchEngine(
                     tiered_store=self._kt_tiered_store,
                     device=str(self.device),
                     lookahead=_lookahead,
                 )
                 self._kt_prefetch_engine.start()
-                print(f"[DiffKV kT] Feature 2 — BlockPrefetchEngine enabled "
+                print(f"[DKV kT] Feature 2 — BlockPrefetchEngine enabled "
                       f"(lookahead={_lookahead}, active={self._kt_prefetch_engine.is_enabled()})")
             except Exception as _e:
-                print(f"[DiffKV kT] Feature 2 — BlockPrefetchEngine init failed: {_e}")
+                print(f"[DKV kT] Feature 2 — BlockPrefetchEngine init failed: {_e}")
 
         # Feature 4: MLA Latent Projection (experimental)
-        _mla_on = os.environ.get("DIFFKV_MLA_LATENT", "0") == "1"
+        _mla_on = os.environ.get("DKV_MLA_LATENT", "0") == "1"
         if _mla_on:
             try:
                 from native_core.compression.mla_projector import MLAProjector
-                _mla_latent_dim = int(os.environ.get("DIFFKV_MLA_LATENT_DIM", "0"))
-                _mla_calib     = int(os.environ.get("DIFFKV_MLA_CALIB_BLOCKS", "16"))
+                _mla_latent_dim = int(os.environ.get("DKV_MLA_LATENT_DIM", "0"))
+                _mla_calib     = int(os.environ.get("DKV_MLA_CALIB_BLOCKS", "16"))
                 for _li in range(self.num_layers):
                     self._kt_mla_projectors[_li] = MLAProjector(
                         head_dim=self.head_dim,
@@ -886,10 +886,10 @@ class KVRuntimeManager:
                         n_calib_blocks=_mla_calib,
                     )
                 _ld = self._kt_mla_projectors[0].latent_dim
-                print(f"[DiffKV kT] Feature 4 — MLAProjector enabled "
+                print(f"[DKV kT] Feature 4 — MLAProjector enabled "
                       f"(latent_dim={_ld}, calib_blocks={_mla_calib})")
             except Exception as _e:
-                print(f"[DiffKV kT] Feature 4 — MLAProjector init failed: {_e}")
+                print(f"[DKV kT] Feature 4 — MLAProjector init failed: {_e}")
 
     # ── Session management ────────────────────────────────────────────────────
 
@@ -921,7 +921,7 @@ class KVRuntimeManager:
                     _is_cuda
                     and hint is not None
                     and prefill_len > 1
-                    and os.environ.get("DIFFKV_DEFER_PREFILL_POOL", "1")
+                    and os.environ.get("DKV_DEFER_PREFILL_POOL", "1")
                     not in ("0", "false", "off")
                 )
                 if not _defer_pool:
@@ -938,7 +938,7 @@ class KVRuntimeManager:
                         * self.num_layers
                     )
                 if needed_blocks > pool.current_blocks:
-                    print(f"[DiffKV] Growing block pool from {pool.current_blocks} → "
+                    print(f"[DKV] Growing block pool from {pool.current_blocks} → "
                           f"{needed_blocks} blocks for session {session_id}")
                     pool._grow_pool(new_blocks=needed_blocks)
 
@@ -1076,12 +1076,12 @@ class KVRuntimeManager:
 
             # Get session config if any to dynamically set values on SessionSRLState
             session_config = getattr(self, "session_configs", {}).setdefault(session_id, {})
-            default_k_min = int(_os.environ.get("DIFFKV_SRL_K_MIN", "20"))
-            default_k_max = int(_os.environ.get("DIFFKV_SRL_K_MAX", "200"))
+            default_k_min = int(_os.environ.get("DKV_SRL_K_MIN", "20"))
+            default_k_max = int(_os.environ.get("DKV_SRL_K_MAX", "200"))
             default_threshold = self.config.srl_threshold
-            default_overlap_threshold = float(_os.environ.get("DIFFKV_SRL_OVERLAP_THRESHOLD", "0.15"))
+            default_overlap_threshold = float(_os.environ.get("DKV_SRL_OVERLAP_THRESHOLD", "0.15"))
 
-            default_graph_hop_decay = float(_os.environ.get("DIFFKV_SRL_GRAPH_HOP_DECAY", "0.5"))
+            default_graph_hop_decay = float(_os.environ.get("DKV_SRL_GRAPH_HOP_DECAY", "0.5"))
             default_srl_age_penalty = self.config.srl_age_penalty
 
             k_min = session_config.get("srl_k_min", default_k_min)
@@ -1204,16 +1204,16 @@ class KVRuntimeManager:
             self._session_srl[session_id] = srl_state
 
             # ── 6. Assemble and Build Factual Store (Solution 4) ──
-            # Gated by DIFFKV_FACTUAL_STORE=1.  Default is OFF to match the MLX
+            # Gated by DKV_FACTUAL_STORE=1.  Default is OFF to match the MLX
             # wrapper and the documented default behaviour.  When disabled:
             #   - No CPU KV duplicate is retained (_prefill_kv_capture is empty).
             #   - No FactualExactStore is built or queried during decode.
-            #   - The factual-logit machinery in hf_diffkv_wrapper.py is skipped
+            #   - The factual-logit machinery in hf_dkv_wrapper.py is skipped
             #     because kv_manager._factual_stores will not contain this session.
-            _factual_enabled = _os.environ.get("DIFFKV_FACTUAL_STORE", "0") == "1"
+            _factual_enabled = _os.environ.get("DKV_FACTUAL_STORE", "0") == "1"
             if not getattr(self, "_factual_store_logged", False):
-                _tag = "ENABLED" if _factual_enabled else "DISABLED (set DIFFKV_FACTUAL_STORE=1 to enable)"
-                print(f"[DiffKV] Factual store: {_tag}")
+                _tag = "ENABLED" if _factual_enabled else "DISABLED (set DKV_FACTUAL_STORE=1 to enable)"
+                print(f"[DKV] Factual store: {_tag}")
                 self._factual_store_logged = True
             try:
                 from native_core.srl.factual_store import FactualExactStore
@@ -1250,8 +1250,8 @@ class KVRuntimeManager:
             n = len(slot_ids)
             desc_kb = n * 64 * 2 / 1024
             graph_kb = n * 8 * 4 / 1024
-            if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1" or \
-               _os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
+            if _os.environ.get("DKV_TELEMETRY", "0") == "1" or \
+               _os.environ.get("DKV_SRL_VERBOSE", "0") == "1":
                 print(
                     f"[SRL] Index built: session={session_id} "
                     f"blocks={n} desc={desc_kb:.1f}KB graph={graph_kb:.1f}KB "
@@ -1261,7 +1261,7 @@ class KVRuntimeManager:
         except Exception as e:
             import traceback
             print(f"[SRL] WARNING: finalize_srl_index failed for session {session_id}: {e}")
-            if _os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1":
+            if _os.environ.get("DKV_SRL_VERBOSE", "0") == "1":
                 traceback.print_exc()
 
     def get_srl_state(self, session_id: str):
@@ -1293,12 +1293,12 @@ class KVRuntimeManager:
           3. Keeps the ingest representation block-aligned for one final SVD batch.
 
         Factual KV capture: CPU copies of K/V are only retained when
-        DIFFKV_FACTUAL_STORE=1.  When the flag is absent/"0" the factual-store
+        DKV_FACTUAL_STORE=1.  When the flag is absent/"0" the factual-store
         path is skipped entirely, saving O(context_len) host RAM and the
         associated D2H traffic.  This matches the MLX wrapper's gating and the
         documented default behaviour.
         """
-        _factual_enabled = os.environ.get("DIFFKV_FACTUAL_STORE", "0") == "1"
+        _factual_enabled = os.environ.get("DKV_FACTUAL_STORE", "0") == "1"
 
         # Only accumulate CPU KV copies when the factual store is enabled.
         # This avoids retaining a full host-RAM duplicate of every prefill K/V
@@ -1319,8 +1319,8 @@ class KVRuntimeManager:
         # store setting.
         self.ingest_streaming(session_id, layer_idx, K, V)
 
-        # Compress during the forward pass if DIFFKV_STREAMING_COMPRESS=1 is enabled:
-        if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" and self._streaming_mgr is not None:
+        # Compress during the forward pass if DKV_STREAMING_COMPRESS=1 is enabled:
+        if os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1" and self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks_for_layer(session_id, layer_idx)
 
     def compress_prefill_kv(self, session_id: str) -> None:
@@ -1341,14 +1341,14 @@ class KVRuntimeManager:
         # CUDA behaviour.  The cost is that all raw prefill K/V co-resides with
         # the growing pool until the boundary, which is the long-context peak
         # VRAM spike (raw-KV/pool co-residency).
-        # With DIFFKV_STREAMING_COMPRESS=1 we compress every block that has
+        # With DKV_STREAMING_COMPRESS=1 we compress every block that has
         # already cleared the recency window after each chunk — exactly what
-        # mlx_diffkv_wrapper.generate() does per chunk (line 4704).  Peak
+        # mlx_dkv_wrapper.generate() does per chunk (line 4704).  Peak
         # uncompressed KV is then bounded by ~(recency_window + chunk) instead
         # of the whole prompt.  Trade-off: later chunks attend the compressed
         # (lossy) form of far-back blocks rather than raw KV, so it is opt-in
         # and A/B-gated — validate retrieval (NIAH) before defaulting it on.
-        if _os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" \
+        if _os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1" \
                 and self._streaming_mgr is not None:
             self._streaming_mgr.compress_deferred_blocks(session_id)
 
@@ -1364,21 +1364,21 @@ class KVRuntimeManager:
             if pending <= 0:
                 self.finalize_srl_index(session_id)
 
-        if _os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+        if _os.environ.get("DKV_TELEMETRY", "0") == "1":
             if _has_cuda():
                 alloc = torch.cuda.memory_allocated() / 1024**3
-                print(f"[DiffKV] Post-prefill flush. VRAM: {alloc:.2f} GB")
+                print(f"[DKV] Post-prefill flush. VRAM: {alloc:.2f} GB")
             else:
-                print("[DiffKV] Post-prefill flush (MPS/CPU).")
+                print("[DKV] Post-prefill flush (MPS/CPU).")
 
     def finalize_contiguous_prefill(self, session_id: str) -> None:
-        """1x-memory contiguous prefill (DIFFKV_CONTIG_UNROTATE): build the blocks
+        """1x-memory contiguous prefill (DKV_CONTIG_UNROTATE): build the blocks
         NOW, from the rotated attention buffer, instead of duplicating KV into
         blocks during the forward.
 
-        The contiguous-prefill forward (diffkv_attention.py) keeps only a rotated
+        The contiguous-prefill forward (dkv_attention.py) keeps only a rotated
         K/V buffer per (session, layer) for its single-SDPA attention.  With
-        DIFFKV_CONTIG_UNROTATE it does NOT also capture unrotated KV into blocks
+        DKV_CONTIG_UNROTATE it does NOT also capture unrotated KV into blocks
         each chunk — so prefill holds 1x raw KV (the buffer) instead of 2x.  Here,
         at the compression boundary, we recover the unrotated K the pool needs by
         applying inverse RoPE (rotation is orthogonal: unrot = rot·cos −
@@ -1393,7 +1393,7 @@ class KVRuntimeManager:
         if not bufs or rotary is None or not chunk_lens:
             return
         try:
-            from runtime.diffkv_attention import rotate_half
+            from runtime.dkv_attention import rotate_half
         except Exception:
             return
         for layer_idx in sorted(bufs.keys()):
@@ -1558,7 +1558,7 @@ class KVRuntimeManager:
                             self._streaming_mgr.update_metadata_state(session_id, layer_idx, block)
                         except Exception as e:
                             import traceback
-                            print(f"[DiffKV WARNING] Failed to finalize CPU-compressed block: {e}")
+                            print(f"[DKV WARNING] Failed to finalize CPU-compressed block: {e}")
                             traceback.print_exc()
                             # Decrement on failure too to avoid infinite loops
                             with self._pending_lock:
@@ -1567,8 +1567,8 @@ class KVRuntimeManager:
         # Log only when genuinely doing upload work (> 2ms) and telemetry is enabled.
         # Consistent < 1ms readings confirm the stall was pure lock overhead (now fixed).
         _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-        if _elapsed_ms > 2.0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            print(f"[DiffKV] finalize_compressed_blocks: {_elapsed_ms:.1f}ms "
+        if _elapsed_ms > 2.0 and os.environ.get("DKV_TELEMETRY", "0") == "1":
+            print(f"[DKV] finalize_compressed_blocks: {_elapsed_ms:.1f}ms "
                   f"(was pending={_pending_before})")
 
     def clear_session(self, session_id: str):
@@ -1638,7 +1638,7 @@ class KVRuntimeManager:
             self.attention_score_cache.clear_session(session_id)
         if hasattr(self, "_last_prefill_q"):
             self._last_prefill_q.pop(session_id, None)
-        # Contiguous-prefill rotated buffers (DIFFKV_CONTIGUOUS_PREFILL); normally
+        # Contiguous-prefill rotated buffers (DKV_CONTIGUOUS_PREFILL); normally
         # freed at the prefill→decode boundary, but drop here too so an aborted
         # prefill can't leak the ~2x raw KV buffer.
         if hasattr(self, "_contig_prefill"):
@@ -1740,7 +1740,7 @@ class KVRuntimeManager:
             "token_ids": token_ids_snap,
             "configs": configs_snap
         }
-        print(f"[DiffKV] Session snapshot captured: {session_id} -> {checkpoint_id}")
+        print(f"[DKV] Session snapshot captured: {session_id} -> {checkpoint_id}")
 
     def get_session_sequence_length(self, session_id: str) -> int:
         """
@@ -1778,7 +1778,7 @@ class KVRuntimeManager:
     def log_block_states(self, session_id: str) -> None:
         """
         Emit a per-layer block state summary for *session_id* when
-        DIFFKV_TELEMETRY=1.  Counts blocks in each lifecycle state:
+        DKV_TELEMETRY=1.  Counts blocks in each lifecycle state:
           ACCUMULATING — dense, not yet eligible for compression
           SUBMITTED    — queued for async SVD, still holding active_k/v in VRAM
           COMPRESSED   — U/V set, active_k/v freed, minimal VRAM footprint
@@ -1786,7 +1786,7 @@ class KVRuntimeManager:
         This is the primary diagnostic for VRAM anomalies.
         """
         import os
-        if os.environ.get("DIFFKV_TELEMETRY", "0") != "1":
+        if os.environ.get("DKV_TELEMETRY", "0") != "1":
             return
 
         streaming_mgr = getattr(self, "_streaming_mgr", None)
@@ -1796,7 +1796,7 @@ class KVRuntimeManager:
             src = self.session_blocks.get(session_id, {})
 
         if not src:
-            print(f"[DiffKV BlockStates] session={session_id}: no blocks found")
+            print(f"[DKV BlockStates] session={session_id}: no blocks found")
             return
 
         # Aggregate across all layers
@@ -1824,7 +1824,7 @@ class KVRuntimeManager:
                     total_uv_vram_mb += block.V.numel() * block.V.element_size() / 1e6
 
         print(
-            f"[DiffKV BlockStates] session={session_id} "
+            f"[DKV BlockStates] session={session_id} "
             f"total_blocks={total_blocks} "
             f"ACCUMULATING={state_counts['ACCUMULATING']} "
             f"SUBMITTED={state_counts['SUBMITTED']} "
@@ -1950,7 +1950,7 @@ class KVRuntimeManager:
 
         # Invalidate cached categorized structures
         self.pager.evict_session(session_id)
-        print(f"[DiffKV] Session restored from checkpoint: {checkpoint_id} -> {session_id}")
+        print(f"[DKV] Session restored from checkpoint: {checkpoint_id} -> {session_id}")
 
     def clone_session(self, src_session_id: str, dest_session_id: str):
         """
@@ -2267,9 +2267,9 @@ class KVRuntimeManager:
             # Drop oldest blocks until L_dense fits.  Emit a one-time warning so it's visible.
             if not getattr(self, "_dense_trim_warned", False):
                 print(
-                    f"[DiffKV] WARNING: dense window ({L_dense} tokens) exceeds workspace "
+                    f"[DKV] WARNING: dense window ({L_dense} tokens) exceeds workspace "
                     f"({self.max_dense_len}).  Trimming oldest blocks to fit.  "
-                    f"Set DIFFKV_MAX_DENSE_LEN={L_dense + 64} to suppress.",
+                    f"Set DKV_MAX_DENSE_LEN={L_dense + 64} to suppress.",
                     flush=True,
                 )
                 self._dense_trim_warned = True
@@ -2436,7 +2436,7 @@ class KVRuntimeManager:
         """
         Vectorized KV assembly for the decode hot path.
 
-        Design goals vs. the old block-by-block loop in diffkv_attention.py:
+        Design goals vs. the old block-by-block loop in dkv_attention.py:
           1. Single workspace tensor reused across decode steps (no per-step malloc).
           2. Anchor tokens copied via vectorized index_put_ (not a Python for-loop).
           3. Compressed blocks satisfied from ReconstructionPool where possible
@@ -2711,7 +2711,7 @@ class KVRuntimeManager:
         to avoid repeat GEMM for already-reconstructed blocks.
         """
         if self.get_seq_len(session_id, layer_idx) > 16384:
-            raise RuntimeError(f"[DIFFKV] FATAL MEMORY GUARD: get_kv() called for sequence > 16k tokens (session {session_id}). Full-sequence dense reconstruction bypassed to prevent 20GB OOM spike.")
+            raise RuntimeError(f"[DKV] FATAL MEMORY GUARD: get_kv() called for sequence > 16k tokens (session {session_id}). Full-sequence dense reconstruction bypassed to prevent 20GB OOM spike.")
 
         if session_id not in self.session_blocks or \
            not self.session_blocks[session_id][layer_idx]:
@@ -2729,7 +2729,7 @@ class KVRuntimeManager:
 
             if block.U is not None and block.V is not None:
                 anchor_flat = block.anchor_kv.reshape(-1).to(torch.float16)
-                recon = TritonDiffKV.reconstruct_lowrank(
+                recon = TritonDKV.reconstruct_lowrank(
                     block.U, block.V, anchor_flat, scale=block.scale
                 )
                 hds  = block.anchor_kv.shape[2]
@@ -2856,11 +2856,11 @@ class KVRuntimeManager:
             if anchor_kv_local is not None:
                 anchor_kv_local = anchor_kv_local.to(input_device)
                 # Restore to block.anchor_kv if on main thread
-                is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+                is_background = threading.current_thread().name.startswith("DKV-Compressor")
                 if not is_background:
                     block.anchor_kv = anchor_kv_local
         if anchor_kv_local is None:
-            print(f"[DiffKV DEBUG] _compress_block_sync: anchor_kv_local is None! block={getattr(block, 'anchor_idx', 'unknown')}, skip={getattr(block, 'skip_compression', 'unknown')}, anchor_kv={getattr(block, 'anchor_kv', 'unknown')}, anchor_kv_cpu={getattr(block, 'anchor_kv_cpu', 'unknown')}")
+            print(f"[DKV DEBUG] _compress_block_sync: anchor_kv_local is None! block={getattr(block, 'anchor_idx', 'unknown')}, skip={getattr(block, 'skip_compression', 'unknown')}, anchor_kv={getattr(block, 'anchor_kv', 'unknown')}, anchor_kv_cpu={getattr(block, 'anchor_kv_cpu', 'unknown')}")
 
         # ── Learned Landmark Scoring ──
         # Form full block including the old anchor
@@ -2868,7 +2868,7 @@ class KVRuntimeManager:
         full_v = torch.cat([anchor_kv_local[:, 1].unsqueeze(2), v], dim=2)
         S_total = full_k.shape[2]
 
-        # ── PER-TOKEN ROTATION FIX (gated: DIFFKV_ROTATE_AT_INGEST) ────────────────────────────────
+        # ── PER-TOKEN ROTATION FIX (gated: DKV_ROTATE_AT_INGEST) ────────────────────────────────
         # Rotate each token t in full_k by its within-block offset t (K only)
         has_rope = True
         if has_rope:
@@ -2942,7 +2942,7 @@ class KVRuntimeManager:
             
             # Update local anchor
             anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
-            is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+            is_background = threading.current_thread().name.startswith("DKV-Compressor")
             if input_device.type == "cpu" or is_background:
                 block.anchor_kv_cpu = anchor_kv_local
                 if not is_background:
@@ -2957,7 +2957,7 @@ class KVRuntimeManager:
         else:
             # Update local anchor with the unrotated version of the original anchor
             anchor_kv_local = torch.stack([full_k[:, :, 0], full_v[:, :, 0]], dim=1)
-            is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+            is_background = threading.current_thread().name.startswith("DKV-Compressor")
             if input_device.type == "cpu" or is_background:
                 block.anchor_kv_cpu = anchor_kv_local
                 if not is_background:
@@ -3037,7 +3037,7 @@ class KVRuntimeManager:
                                      fact_anchors_K_val: torch.Tensor, fact_anchors_V_val: torch.Tensor,
                                      fact_anchor_positions_val: torch.Tensor,
                                      k_orig: torch.Tensor, v_orig: torch.Tensor, anchor_kv_local: torch.Tensor, rank: int):
-        is_background = threading.current_thread().name.startswith("DiffKV-Compressor")
+        is_background = threading.current_thread().name.startswith("DKV-Compressor")
 
         if is_background:
             # CPU-only background SVD to guarantee thread safety
@@ -3187,7 +3187,7 @@ class KVRuntimeManager:
                         block.fact_anchors_V = None
                         block.fact_anchor_positions = None
                     except Exception as e:
-                        print(f"[DiffKV] WARNING: Failed to write block to NativeBlockPool: {e}")
+                        print(f"[DKV] WARNING: Failed to write block to NativeBlockPool: {e}")
 
                 if self._streaming_mgr is not None and getattr(block, 'session_id', None) is not None and getattr(block, 'layer_idx', None) is not None:
                     self._streaming_mgr.update_metadata_state(block.session_id, block.layer_idx, block)
@@ -3432,7 +3432,7 @@ class KVRuntimeManager:
                             rel_error_K = rel_error_K * _bt
                             rel_error_V = rel_error_V * _bt
                             try:
-                                _margin = int(_os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+                                _margin = int(_os.environ.get("DKV_RESIDUAL_FLOOR_MARGIN", "4"))
                             except Exception:
                                 _margin = 4
                             n_max_residual = max(n_max_residual, min(n, n_boosted + _margin))
@@ -3624,7 +3624,7 @@ class KVRuntimeManager:
             try:
                 self.native_pool.reset()
             except Exception as e:
-                print(f"[DiffKV] Warning during pool reset: {e}")
+                print(f"[DKV] Warning during pool reset: {e}")
             self.native_pool = None
             
         # 2. Break block references to pool

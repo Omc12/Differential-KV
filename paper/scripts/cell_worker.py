@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Isolated single-cell measurement worker for the DiffKV paper (CLEAN protocol).
+"""Isolated single-cell measurement worker for the DKV paper (CLEAN protocol).
 
 Runs ONE (engine, context) measurement in its own process so memory is
 attributable and an OOM kills only this cell. Matches the ACTIVE CLI's real
-configuration: preset=mid, serving_mode=balanced, rank=32, int4, with DiffKV's
-sparse path FORCED ON at every context (DIFFKV_COMPRESSED_DECODE=1) so the
-measurement reflects the full DiffKV path, plus the shipping decode-cache /
+configuration: preset=mid, serving_mode=balanced, rank=32, int4, with DKV's
+sparse path FORCED ON at every context (DKV_COMPRESSED_DECODE=1) so the
+measurement reflects the full DKV path, plus the shipping decode-cache /
 sparse-prefill / adaptive sparse-bias. The exact config is written into the
 result JSON so every number is self-describing.
 
@@ -26,18 +26,18 @@ ACTIVE_RUNTIME_DIR = os.path.join(REPO, "ACTIVE_RUNTIME")
 BENCH = os.path.join(REPO, "benchmarks")
 NEEDLE = "OMEGA-7741-DELTA"
 
-# ── The DiffKV active configuration under test (matches the CLI: mid/balanced) ──
+# ── The DKV active configuration under test (matches the CLI: mid/balanced) ──
 # Set BEFORE importing the wrapper (the manager reads these at construction).
 ACTIVE_ENV = {
-    "DIFFKV_COMPRESSED_DECODE": "1",   # force the sparse path at EVERY context (complete DiffKV)
-    "DIFFKV_DECODE_CACHE": "1",         # decompress-and-cache fast decode (bit-exact)
-    "DIFFKV_SPARSE_PREFILL": "1",       # block-sparse prefill
-    "DIFFKV_SPARSE_BIAS": "auto",       # adaptive merge bias (as the CLI ships)
-    "DIFFKV_MAX_RESIDUAL": "128",       # default residual budget
-    "DIFFKV_ROUTER": "residual",        # residual-key router
-    "DIFFKV_TOPK_BLOCKS": "16",         # top-K routed blocks
-    "DIFFKV_SVD_SEED": "1234",          # deterministic SVD
-    "DIFFKV_PRESET": "mid",
+    "DKV_COMPRESSED_DECODE": "1",   # force the sparse path at EVERY context (complete DKV)
+    "DKV_DECODE_CACHE": "1",         # decompress-and-cache fast decode (bit-exact)
+    "DKV_SPARSE_PREFILL": "1",       # block-sparse prefill
+    "DKV_SPARSE_BIAS": "auto",       # adaptive merge bias (as the CLI ships)
+    "DKV_MAX_RESIDUAL": "128",       # default residual budget
+    "DKV_ROUTER": "residual",        # residual-key router
+    "DKV_TOPK_BLOCKS": "16",         # top-K routed blocks
+    "DKV_SVD_SEED": "1234",          # deterministic SVD
+    "DKV_PRESET": "mid",
 }
 ACTIVE_CFG = {"quantization": "int4", "rank": 32, "block_size": 256,
               "micro_block_size": 256, "preset": "mid", "serving_mode": "balanced"}
@@ -72,10 +72,10 @@ def run_active(ctx, gen, prompt_text):
     import numpy as np
     import torch
     import mlx.core as mx  # noqa: F401
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
 
     _mx_reset_peak()
-    wrapper = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=dict(ACTIVE_CFG))
+    wrapper = DKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=dict(ACTIVE_CFG))
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
     ids = tok.encode(prompt_text)
@@ -85,7 +85,7 @@ def run_active(ctx, gen, prompt_text):
         wsid = "warmup"; mgr.clear_session(wsid); wrapper._session_token_ids[wsid] = []
         mgr.init_session(wsid, prefill_len=1)
         mgr.register_prefill_tokens(wsid, torch.tensor([ids[0]], dtype=torch.long))
-        model._diffkv_session_ids = [wsid]
+        model._dkv_session_ids = [wsid]
         _w = model(torch.tensor([[ids[0]]], dtype=torch.long), torch.tensor([[0]], dtype=torch.long))
         _ = _w.logits[0, -1].cpu().numpy(); mgr.clear_session(wsid)
     except Exception:
@@ -94,7 +94,7 @@ def run_active(ctx, gen, prompt_text):
     sid = "cell"; mgr.clear_session(sid); wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
 
     CH = 512
     output = None

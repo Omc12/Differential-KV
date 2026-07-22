@@ -15,7 +15,7 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RESULTS = os.path.join(HERE, "results")
-VENV_PY = os.path.join(REPO, "diffkv_venv", "bin", "python3")
+VENV_PY = os.path.join(REPO, "dkv_venv", "bin", "python3")
 WORKER = os.path.join(HERE, "bench_worker.py")
 MODEL_ID = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 

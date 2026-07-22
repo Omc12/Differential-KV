@@ -1,7 +1,7 @@
 # Phase 28 — Native Build Report
 
 ## Objective
-Build the native C++ and CUDA extension `diffkv_core.so` (or `.pyd` on Windows) inside `ACTIVE_RUNTIME/native_core/diffkv_core/`.
+Build the native C++ and CUDA extension `dkv_core.so` (or `.pyd` on Windows) inside `ACTIVE_RUNTIME/native_core/dkv_core/`.
 
 ## Execution Process
 1. **Initial CMake Attempt**: Attempted to build using the existing `CMakeLists.txt` via `cmake -B build` and `cmake --build build`. This failed because MSVC 2022 (version 17.10.3) was rejected by the CUDA 12.1 toolkit header `host_config.h` due to version constraints.
@@ -12,10 +12,10 @@ Build the native C++ and CUDA extension `diffkv_core.so` (or `.pyd` on Windows) 
    - Added `-allow-unsupported-compiler` to `nvcc` flags to override the MSVC version check.
    - Initialized the Microsoft Visual Studio environment via `vcvars64.bat` and set `DISTUTILS_USE_SDK=1`.
    - Added `cusolver` and `cublas` to the PyTorch extension linked libraries, as the native compressor and paging threads depend on these CUDA solver routines.
-4. **Compilation**: Ran `python setup.py build_ext --inplace`. The build succeeded and generated `diffkv_core.cp313-win_amd64.pyd`.
+4. **Compilation**: Ran `python setup.py build_ext --inplace`. The build succeeded and generated `dkv_core.cp313-win_amd64.pyd`.
 5. **Import Validation**: Verified the built artifact could be successfully imported in Python using `os.add_dll_directory` for the CUDA bin path.
 
 ## Artifacts Generated
-- `diffkv_core.cp313-win_amd64.pyd` (Successfully compiled Native Library)
+- `dkv_core.cp313-win_amd64.pyd` (Successfully compiled Native Library)
 
 **Status**: SUCCESS

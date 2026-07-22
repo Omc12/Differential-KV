@@ -16,7 +16,7 @@ config = {
 
 class SKO7BResolver(LGSResolver):
     def setup_runtime(self):
-        from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+        from runtime.hf_dkv_wrapper import DKVHFWrapper
         from decode_pipeline_fusion_engine import DecodePipelineFusionEngine
         
         if self.wrapper is None:
@@ -24,7 +24,7 @@ class SKO7BResolver(LGSResolver):
             print(f"[*] SKO PHASE: Loading REAL 7B Model -> {model_id}")
             # Use 4-bit if possible, otherwise FP16 with offload
             # Since bitsandbytes isn't in requirements, we'll try FP16
-            self.wrapper = DiffKVHFWrapper(model_id, {
+            self.wrapper = DKVHFWrapper(model_id, {
                 "mode": "lowrank_sparse", 
                 "block_size": 64, 
                 "rank": 16

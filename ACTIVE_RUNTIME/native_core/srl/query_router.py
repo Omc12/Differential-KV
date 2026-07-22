@@ -24,9 +24,9 @@ Total cost: ~0.5ms for 781 blocks on a modern GPU.
 from __future__ import annotations
 import sys
 import os
-# Add the build directory containing diffkv_core.so to sys.path
+# Add the build directory containing dkv_core.so to sys.path
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_core_dir = os.path.abspath(os.path.join(_script_dir, "../diffkv_core"))
+_core_dir = os.path.abspath(os.path.join(_script_dir, "../dkv_core"))
 if _core_dir not in sys.path:
     sys.path.insert(0, _core_dir)
 
@@ -44,15 +44,15 @@ if TYPE_CHECKING:
 
 
 # ── Config (overridable via env vars) ─────────────────────────────────────────
-_DEFAULT_K_MIN     = int(os.environ.get("DIFFKV_SRL_K_MIN",     "20"))
-_DEFAULT_K_MAX     = int(os.environ.get("DIFFKV_SRL_K_MAX",     "200"))
-_SEM_FRAC          = float(os.environ.get("DIFFKV_SRL_SEM_FRAC",  "0.50"))
-_LEX_FRAC          = float(os.environ.get("DIFFKV_SRL_LEX_FRAC",  "0.15"))
-_GRAPH_FRAC        = float(os.environ.get("DIFFKV_SRL_GRAPH_FRAC", "0.15"))
-_RECENCY_FRAC      = float(os.environ.get("DIFFKV_SRL_REC_FRAC",  "0.20"))
-_ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "50"))
+_DEFAULT_K_MIN     = int(os.environ.get("DKV_SRL_K_MIN",     "20"))
+_DEFAULT_K_MAX     = int(os.environ.get("DKV_SRL_K_MAX",     "200"))
+_SEM_FRAC          = float(os.environ.get("DKV_SRL_SEM_FRAC",  "0.50"))
+_LEX_FRAC          = float(os.environ.get("DKV_SRL_LEX_FRAC",  "0.15"))
+_GRAPH_FRAC        = float(os.environ.get("DKV_SRL_GRAPH_FRAC", "0.15"))
+_RECENCY_FRAC      = float(os.environ.get("DKV_SRL_REC_FRAC",  "0.20"))
+_ROUTING_THRESHOLD = int(os.environ.get("DKV_SRL_THRESHOLD",  "50"))
 # High-Quality Mode (cross-runtime toggle; mirrors native src/main.cpp +
-# mlx_diffkv_wrapper.py). When OFF (default = fast bounded-K), the router keeps
+# mlx_dkv_wrapper.py). When OFF (default = fast bounded-K), the router keeps
 # only the semantic + lexical + recency + sink channels — the same channels that
 # preserved NIAH 6/6 + multi-fact recall in native & MLX fast mode. When ON, it
 # also runs the dynamic graph routing: 2-hop chunk-graph expansion + dynamic /
@@ -61,10 +61,10 @@ _ROUTING_THRESHOLD = int(os.environ.get("DIFFKV_SRL_THRESHOLD",  "50"))
 # channels, not an attend-all switch. NOTE: this path is GPU-only and could not be
 # validated on the Mac dev machine — see CUDA_TRITON_AUDIT.md GPU cert checklist.
 _HIGH_QUALITY_ROUTING = os.environ.get(
-    "DIFFKV_HIGH_QUALITY_ROUTING", "0").strip().lower() not in ("0", "", "false", "off", "auto")
+    "DKV_HIGH_QUALITY_ROUTING", "0").strip().lower() not in ("0", "", "false", "off", "auto")
 # Topic-switch: if the best semantic match falls below this cosine similarity,
 # the query is treated as a new topic and stale rare-lexical seeds are suppressed.
-_TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DIFFKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.30"))
+_TOPIC_SWITCH_THRESHOLD = float(os.environ.get("DKV_SRL_TOPIC_SWITCH_THRESHOLD", "0.30"))
 
 
 # ── Level-1 Anchor Screening ──────────────────────────────────────────────────
@@ -92,9 +92,9 @@ def two_level_gate(
     if srl_state is not None:
         age_penalty_factor = getattr(srl_state, "srl_age_penalty", 0.01)
     else:
-        age_penalty_factor = float(os.environ.get("DIFFKV_SRL_AGE_PENALTY", "0.0"))
+        age_penalty_factor = float(os.environ.get("DKV_SRL_AGE_PENALTY", "0.0"))
     try:
-        import diffkv_core as _dkv_core
+        import dkv_core as _dkv_core
         if getattr(_dkv_core, "HAS_SRL_ROUTER", False) and (srl_state is None or age_penalty_factor == 0.0):
             return _dkv_core.anchor_screen(Q, pool.anchors_K, slot_ids, scale, k_pass)
     except Exception:
@@ -148,14 +148,14 @@ def two_level_gate(
             anchor_scores = anchor_scores + boosts_t
 
     # ── Edge-aware routing propagation (Python fallback) ──────────────────────
-    er_on = os.environ.get("DIFFKV_EDGE_ROUTING", "1").strip().lower() not in ("0", "", "false", "off", "auto")
+    er_on = os.environ.get("DKV_EDGE_ROUTING", "1").strip().lower() not in ("0", "", "false", "off", "auto")
     if er_on and N >= 3:
         try:
-            er_beta = float(os.environ.get("DIFFKV_EDGE_ROUTE_BETA", "0.25"))
+            er_beta = float(os.environ.get("DKV_EDGE_ROUTE_BETA", "0.25"))
         except ValueError:
             er_beta = 0.25
         try:
-            er_maxnb = int(os.environ.get("DIFFKV_EDGE_ROUTE_MAXNB", "512"))
+            er_maxnb = int(os.environ.get("DKV_EDGE_ROUTE_MAXNB", "512"))
         except ValueError:
             er_maxnb = 512
 
@@ -271,7 +271,7 @@ def route_query(
 
     # ── Step 1: Adaptive K ────────────────────────────────────────────────
     try:
-        import diffkv_core as _dkv_core
+        import dkv_core as _dkv_core
         if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
             q_desc = _dkv_core.compute_query_desc(Q, pool.W_proj)
         else:
@@ -312,7 +312,7 @@ def route_query(
         L = max(all_abs_positions)
         slot_scores = defaultdict(float)
         slot_matched_toks = defaultdict(set)
-        decay_factor = float(os.environ.get("DIFFKV_SRL_DECAY_FACTOR", "1.0"))
+        decay_factor = float(os.environ.get("DKV_SRL_DECAY_FACTOR", "1.0"))
         
         for tok in recent_toks:
             if tok in inv_index.occurrences:
@@ -781,7 +781,7 @@ def route_query(
     # expansion are the "dynamic graph routing" — HQ-only, mirroring native's
     # route_decode_slots sections 3–4.5. In fast bounded-K mode (default) drop
     # them; semantic + lexical + recency + sink remain (recall-validated on
-    # native & MLX). Cross-runtime toggle: DIFFKV_HIGH_QUALITY_ROUTING=1.
+    # native & MLX). Cross-runtime toggle: DKV_HIGH_QUALITY_ROUTING=1.
     if not _HIGH_QUALITY_ROUTING:
         graph_slots = []
         dynamic_routed_slots = []
@@ -866,7 +866,7 @@ def route_query(
 
 
 # ── Static Shape Routing ──────────────────────────────────────────────────────
-K_FIXED = int(os.environ.get("DIFFKV_SRL_K_FIXED", "64"))
+K_FIXED = int(os.environ.get("DKV_SRL_K_FIXED", "64"))
 
 
 def route_blocks_relevance(
@@ -881,20 +881,20 @@ def route_blocks_relevance(
 ) -> torch.Tensor:                  # [K<=N] selected slot IDs, best-first, distinct
     """MLX-parity block router: rank blocks by exact q·k relevance, take top-K.
 
-    Direct port of mlx_diffkv_wrapper._block_relevance_residual: a block's
+    Direct port of mlx_dkv_wrapper._block_relevance_residual: a block's
     relevance is the max over query heads of max(q·anchor, max over its stored
     residual keys of q·k), fp16 products with fp32 accumulation, then plain
-    top-K (DIFFKV_TOPK_BLOCKS; default = pool.routing_topk_default = 4096 // block_size
+    top-K (DKV_TOPK_BLOCKS; default = pool.routing_topk_default = 4096 // block_size
     = 64 on CUDA; K = max(topk, topk_frac·N, k_min)).
     """
     N = block_indices.numel()
-    # DIFFKV_TOPK_BLOCKS: an explicit env value always wins. When unset, use the
+    # DKV_TOPK_BLOCKS: an explicit env value always wins. When unset, use the
     # block_size-derived default the manager stamped on the pool (MLX routed-token-
     # budget parity: 4096 // block_size = 64 on CUDA's block_size=64). The old flat
     # "16" covered only 16*64=1024 tokens and dropped a distant needle's block from
     # the top-K, breaking deep-context retrieval unless the user knew to set K=64.
     _pool_default = int(getattr(pool, "routing_topk_default", 16) or 16)
-    _topk_env = os.environ.get("DIFFKV_TOPK_BLOCKS")
+    _topk_env = os.environ.get("DKV_TOPK_BLOCKS")
     if _topk_env is None or _topk_env.strip() == "":
         topk = _pool_default
     else:
@@ -903,7 +903,7 @@ def route_blocks_relevance(
         except ValueError:
             topk = _pool_default
     try:
-        topk_frac = float(os.environ.get("DIFFKV_TOPK_FRAC", "0.0"))
+        topk_frac = float(os.environ.get("DKV_TOPK_FRAC", "0.0"))
     except ValueError:
         topk_frac = 0.0
     if topk <= 0:
@@ -913,16 +913,16 @@ def route_blocks_relevance(
     if N <= k_eff:
         return block_indices
 
-    # DIFFKV_ROUTER_ROPE (default 1 = original behaviour). NOTE: MLX is NOT a
-    # raw-key router — MLX captures keys POST-RoPE (mlx_diffkv_wrapper.py:4448
+    # DKV_ROUTER_ROPE (default 1 = original behaviour). NOTE: MLX is NOT a
+    # raw-key router — MLX captures keys POST-RoPE (mlx_dkv_wrapper.py:4448
     # keys_rot = rope(keys)) and its _block_relevance_residual scores
     # q_rot · k_rot, i.e. it is ALSO position-aware. So CUDA's per-key rotation
     # here is architecturally correct parity, NOT the divergence — do not assume
     # removing it "matches MLX". This flag exists only as an A/B knob: setting
-    # DIFFKV_ROUTER_ROPE=0 makes routing SELECTION content-only (no relative-
+    # DKV_ROUTER_ROPE=0 makes routing SELECTION content-only (no relative-
     # position decay), a heuristic that could keep a distant needle's block in
     # the top-K better than the decayed score — worth measuring, not a proven fix.
-    _route_rope = os.environ.get("DIFFKV_ROUTER_ROPE", "1") == "1"
+    _route_rope = os.environ.get("DKV_ROUTER_ROPE", "1") == "1"
 
     # Promote Q to 3D if it is 2D
     is_3d = (Q.dim() == 3)
@@ -968,10 +968,10 @@ def route_blocks_relevance(
     res_scores = None
     res_k = getattr(pool, "residual_K_values", None)
     res_pos = getattr(pool, "residual_K_positions", None)
-    route_prefill_res = (os.environ.get("DIFFKV_ROUTE_PREFILL_RESID", "0") == "1")
+    route_prefill_res = (os.environ.get("DKV_ROUTE_PREFILL_RESID", "0") == "1")
     if res_k is not None and res_pos is not None and res_k.numel() > 0 and (not is_3d or route_prefill_res):
         try:
-            r_route = int(os.environ.get("DIFFKV_ROUTE_RESIDUALS", "0"))
+            r_route = int(os.environ.get("DKV_ROUTE_RESIDUALS", "0"))
         except ValueError:
             r_route = 0
         R_all = res_k.shape[1]
@@ -1033,7 +1033,7 @@ def route_query_fixed_k(
     This used to pad the selection up to exactly K_FIXED by repeating
     ``selected[-1]``, to hand the decode kernel a static block count.  The
     padding is unsound: the caller feeds this list straight into
-    ``block_indices`` (diffkv_attention.py:676), and the sparse kernel scores
+    ``block_indices`` (dkv_attention.py:676), and the sparse kernel scores
     every entry independently, so a repeated block enters the softmax once per
     copy.  Padding repeats the *lowest-ranked* selected block, so that block was
     the one whose weight got inflated.

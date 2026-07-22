@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """STANDALONE Gram-eigh decision test — run this now, then decide the default.
 
-The Gram-eigh compress path (lowrank.py, opt-in DIFFKV_COMPRESS_GRAM_SVD=1)
+The Gram-eigh compress path (lowrank.py, opt-in DKV_COMPRESS_GRAM_SVD=1)
 replaces the wide per-block SVD (cuSOLVER batched cap = 32x32 → ~2,352 sequential
 decompositions/prefill) with an eigendecomposition of the small [r_proj,r_proj]
 Gram matrix. This script answers, in ONE run, "where do things stand?":
@@ -148,7 +148,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     # ONE subprocess PER RECIPE (not per sample): the model loads once inside it
     # and all N samples reuse it (no in-process reload → no OOM), so this is 3
     # loads total, not 3*samples. The child writes its aggregate result to a file
-    # and _spawn_and_collect silences its console + kills it once done (the DiffKV
+    # and _spawn_and_collect silences its console + kills it once done (the DKV
     # binary can hang at exit — that repeating-log hang is what looked like a loop).
     import tempfile
     import json as _json
@@ -158,12 +158,12 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     recipes = [
         ("dense_ref", {"__mode__": "dense"}),     # is the needle prompt retrievable AT ALL?
         ("baseline_svd", {}),
-        ("gram_eigh", {"DIFFKV_COMPRESS_GRAM_SVD": "1"}),
-        ("gram_rproj32", {"DIFFKV_COMPRESS_GRAM_SVD": "1", "DIFFKV_RANK_BOOST": "off",
-                          "DIFFKV_RSVD_MAX_RPROJ": "32", "DIFFKV_RSVD_OVERSAMPLES": "0"}),
+        ("gram_eigh", {"DKV_COMPRESS_GRAM_SVD": "1"}),
+        ("gram_rproj32", {"DKV_COMPRESS_GRAM_SVD": "1", "DKV_RANK_BOOST": "off",
+                          "DKV_RSVD_MAX_RPROJ": "32", "DKV_RSVD_OVERSAMPLES": "0"}),
     ]
     timeout = float(os.environ.get("GRAM_AB_TIMEOUT_S", "2400"))
-    print(f"  (one subprocess per recipe; child logs hidden — set DIFFKV_WORKER_VERBOSE=1 to show)\n")
+    print(f"  (one subprocess per recipe; child logs hidden — set DKV_WORKER_VERBOSE=1 to show)\n")
     table = {}
     for name, env in recipes:
         fd, out = tempfile.mkstemp(prefix=f"gram_ab_{name}_", suffix=".json")
@@ -208,7 +208,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     # code (didn't re-sync) — the device_map load fix isn't deployed.
     print(f"  [worker build = {_rev or 'MISSING → STALE CODE on Lightning, re-sync the repo!'}]")
 
-    # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DiffKV bug ──
+    # ── Diagnosis: dense_ref isolates a prompt/eval bug from a DKV bug ──
     dref = table.get("dense_ref", {})
     base = table.get("baseline_svd", {})
     print()
@@ -220,26 +220,26 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
     if dref.get("n_ok", 0) == 0:
         print("  ⚠ dense_ref CRASHED (0 samples) — no reference for the prompt. Its errors:")
         _errs("dense_ref")
-        # still report the DiffKV outputs so we can see if they're garbage vs wrong
-        print("    DiffKV baseline outputs (for context):")
+        # still report the DKV outputs so we can see if they're garbage vs wrong
+        print("    DKV baseline outputs (for context):")
         _snips("baseline_svd")
         return False
     if dref.get("recall", 0.0) <= 0:
         print("  ✗ PROMPT/EVAL BUG: plain dense HF also gets 0% recall — the NIAH prompt or the")
-        print("    substring match is broken, NOT DiffKV. Dense outputs:")
+        print("    substring match is broken, NOT DKV. Dense outputs:")
         _snips("dense_ref")
-        print("    → fix the needle prompt / eval before judging DiffKV or Gram-eigh.\n")
+        print("    → fix the needle prompt / eval before judging DKV or Gram-eigh.\n")
         return False
     if base.get("n_ok", 0) < samples or base.get("compress_s", 0.0) <= 0:
         print("  ✗ INCONCLUSIVE: baseline_svd did not complete all samples (likely OOM).")
         print("    → lower --ctx / --samples, or free the GPU, then re-run.\n")
         return False
     if base.get("recall", 0.0) <= 0:
-        print(f"  ✗ DiffKV RETRIEVAL BUG: dense retrieves ({dref.get('recall', 0):.0f}%) but DiffKV")
-        print("    baseline is 0% at this ctx — DiffKV decode/routing drops the needle. This is a")
-        print("    real DiffKV bug, SEPARATE from Gram-eigh (which only touches compress). DiffKV outputs:")
+        print(f"  ✗ DKV RETRIEVAL BUG: dense retrieves ({dref.get('recall', 0):.0f}%) but DKV")
+        print("    baseline is 0% at this ctx — DKV decode/routing drops the needle. This is a")
+        print("    real DKV bug, SEPARATE from Gram-eigh (which only touches compress). DKV outputs:")
         _snips("baseline_svd")
-        print("    → fix DiffKV retrieval; Gram-eigh can't be judged against a broken baseline.\n")
+        print("    → fix DKV retrieval; Gram-eigh can't be judged against a broken baseline.\n")
         return False
 
     base_t, base_r, base_rci = base["compress_s"], base["recall"], base["recall_ci"]
@@ -262,7 +262,7 @@ def part2_gpu_ab(model_id: str, ctx: int, samples: int):
 
 
 def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, out_path: str):
-    """Subprocess entry: load the DiffKV model ONCE for this recipe, run `samples`
+    """Subprocess entry: load the DKV model ONCE for this recipe, run `samples`
     NIAH prompts (different needles) reusing that model, and write the aggregate
     {compress_times, passes, n_ok} atomically. Recipe env (Gram-eigh flags) is set
     before load and kept set — the compress-lever flags are read at compress time.
@@ -270,18 +270,18 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
     import json as _json
     import torch
     sys.path.insert(0, HERE)
-    from run_a100_paper_experiments import (_diffkv_trial, _dense_family_trial, _derive_stop_ids,
+    from run_a100_paper_experiments import (_dkv_trial, _dense_family_trial, _derive_stop_ids,
                                             _build_task, generate_random_needles)
     from transformers import AutoTokenizer
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = dict(env)
-    mode = env.pop("__mode__", "diffkv")     # "dense" = plain HF reference, "diffkv" = DiffKV
+    mode = env.pop("__mode__", "dkv")     # "dense" = plain HF reference, "dkv" = DKV
     if mode != "dense":
-        os.environ["DIFFKV_PRESET"] = "mid"
-        os.environ["DIFFKV_QUANTIZATION"] = "fp16"
-        os.environ.pop("DIFFKV_LAYER_ADAPTIVE_RANK", None)
-        os.environ.pop("DIFFKV_STREAMING_COMPRESS", None)
+        os.environ["DKV_PRESET"] = "mid"
+        os.environ["DKV_QUANTIZATION"] = "fp16"
+        os.environ.pop("DKV_LAYER_ADAPTIVE_RANK", None)
+        os.environ.pop("DKV_STREAMING_COMPRESS", None)
         for k, v in env.items():
             os.environ[k] = str(v)
 
@@ -290,14 +290,14 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
               "outputs": [], "transformers": _tfm.__version__, "worker_rev": "nodevmap-r1"}
 
     # ── Fail fast on the WRONG transformers version ───────────────────────────
-    # DiffKV's attention patch needs the 4.x Qwen2Attention signature, AND 5.x
+    # DKV's attention patch needs the 4.x Qwen2Attention signature, AND 5.x
     # ignores torch_dtype (renamed to `dtype`) so the model silently loads in
     # fp32 (~30GB → OOM on a 40GB card). Both symptoms = wrong version. Catch it
     # here, BEFORE the load, so the message is clear instead of an fp32 OOM.
     if not _tfm.__version__.startswith("4."):
         result["status"] = "error"
         result["errors"] = [
-            f"WRONG transformers {_tfm.__version__} (subprocess sees this version). DiffKV needs 4.x: "
+            f"WRONG transformers {_tfm.__version__} (subprocess sees this version). DKV needs 4.x: "
             "5.x garbles output (attention signature) AND loads the model in fp32 (~30GB → this OOM). "
             "The pin didn't take in THIS python env. Fix: `pip install \"transformers==4.46.3\"` in the "
             "SAME env, then RESTART THE KERNEL (re-importing isn't enough), and verify with "
@@ -345,7 +345,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
 
         if mode == "dense":
             # Plain HF reference: does the NEEDLE PROMPT retrieve at all? Isolates a
-            # prompt/eval bug (dense also 0%) from a DiffKV-specific bug (dense OK).
+            # prompt/eval bug (dense also 0%) from a DKV-specific bug (dense OK).
             from transformers import AutoModelForCausalLM
             # Load WITHOUT device_map, then .to(device): device_map triggers
             # transformers' caching_allocator_warmup (4.46), which holds a warmup
@@ -359,19 +359,19 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
                 model = AutoModelForCausalLM.from_pretrained(model_id, **_kw)
             model = model.to(device).eval()
             stop_ids |= _derive_stop_ids(tokenizer)
-            CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
+            CH = int(os.environ.get("DKV_PREFILL_CHUNK_SIZE", "1024"))
             runner = lambda fp, ids: _dense_family_trial(model, tokenizer, ids, "dense", device, 32, stop_ids, CH)
             closer = lambda: None                # subprocess exit frees the dense model
         else:
-            from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper
-            w = PyTorchDiffKVHFWrapper(
+            from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
+            w = PyTorchDKVHFWrapper(
                 model_id=model_id,
                 config={"preset": "mid", "rank": 32, "block_size": 256, "micro_block_size": 256,
                         "quantization": "fp16"},
                 torch_dtype=torch.float16, device=device)
             w.ensure_loaded()
             stop_ids |= getattr(w, "stop_token_ids", set())
-            runner = lambda fp, ids: _diffkv_trial(w, ids, device, 32, stop_ids, full_prompt=fp)
+            runner = lambda fp, ids: _dkv_trial(w, ids, device, 32, stop_ids, full_prompt=fp)
             closer = lambda: w.close()
 
         for code, fp, ids in prompts:
@@ -403,7 +403,7 @@ def _recipe_worker(name: str, env: dict, model_id: str, ctx: int, samples: int, 
         _json.dump(result, f)
     os.replace(tmp, out_path)
     # Exit immediately: frees this subprocess's GPU memory now and skips the
-    # DiffKV hang-at-exit (so the parent never has to SIGKILL us, which can leak
+    # DKV hang-at-exit (so the parent never has to SIGKILL us, which can leak
     # GPU memory that accumulates into the "39GB already used" OOM across runs).
     sys.stdout.flush()
     sys.stderr.flush()
@@ -452,8 +452,8 @@ def main():
         print("VERDICT: SAFE to make Gram-eigh the default.")
         print("  - Math equivalent to SVD (Part 1); compress faster + recall held (Part 2).")
         print("  TO MAKE DEFAULT: in lowrank.py:_compress_layer_blocks_gpu_inner change the gate")
-        print("    `if os.environ.get('DIFFKV_COMPRESS_GRAM_SVD','0')=='1'` so Gram-eigh runs")
-        print("    unless DIFFKV_COMPRESS_GRAM_SVD=0 is explicitly set (i.e. default to '1').")
+        print("    `if os.environ.get('DKV_COMPRESS_GRAM_SVD','0')=='1'` so Gram-eigh runs")
+        print("    unless DKV_COMPRESS_GRAM_SVD=0 is explicitly set (i.e. default to '1').")
         print("    The r_proj<=32 recipe is a fidelity trade — default it ONLY if gram_rproj32")
         print("    also showed SAFE above.")
         ok = True

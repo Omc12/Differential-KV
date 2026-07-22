@@ -36,7 +36,7 @@ class RealDecodeLoop:
             
             generated_ids.append(next_token_id.item())
             
-            # Sync KV cache with DiffKV connector
+            # Sync KV cache with DKV connector
             past_key_values = self.kv_connector.update(outputs.past_key_values)
             
             current_input_ids = next_token_id

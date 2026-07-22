@@ -11,7 +11,7 @@ OpenWebUI is connected to the vLLM OpenAI-compatible API server running the Diff
   - `d-ffkv-qwen2.5-7b-Instruct`
 
 ## Mandatory Prefix Routing
-The `d-ffkv-` prefix is successfully registered and visible in the OpenWebUI model selector. This guarantees that requests routed to these models invoke the `diffkv` attention backend within vLLM, rather than standard PagedAttention.
+The `d-ffkv-` prefix is successfully registered and visible in the OpenWebUI model selector. This guarantees that requests routed to these models invoke the `dkv` attention backend within vLLM, rather than standard PagedAttention.
 
 ## Feature Verification
 

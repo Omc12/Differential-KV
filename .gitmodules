@@ -1,3 +1,3 @@
-[submodule "diffkv_native/third_party/llama.cpp"]
-	path = diffkv_native/third_party/llama.cpp
+[submodule "dkv_native/third_party/llama.cpp"]
+	path = dkv_native/third_party/llama.cpp
 	url = https://github.com/ggerganov/llama.cpp.git

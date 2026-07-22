@@ -28,10 +28,10 @@ class DormantSystemRegistry:
                 self._set_dormant(module)
 
     def _set_dormant(self, module_name):
-        env_var = f"DIFFKV_{module_name.upper()}_ACTIVE"
+        env_var = f"DKV_{module_name.upper()}_ACTIVE"
         os.environ[env_var] = "0"
         # We also set a sentinel for the runtime resolver
-        os.environ[f"DIFFKV_{module_name.upper()}_DORMANT"] = "1"
+        os.environ[f"DKV_{module_name.upper()}_DORMANT"] = "1"
 
     def get_status(self):
-        return {m: os.environ.get(f"DIFFKV_{m.upper()}_ACTIVE", "0") == "1" for m in self.dormant_modules}
+        return {m: os.environ.get(f"DKV_{m.upper()}_ACTIVE", "0") == "1" for m in self.dormant_modules}

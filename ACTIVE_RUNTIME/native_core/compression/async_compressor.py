@@ -118,7 +118,7 @@ class AsyncCompressor:
             t = threading.Thread(
                 target=self._worker_loop,
                 args=(i,),
-                name=f"DiffKV-Compressor-{i}",
+                name=f"DKV-Compressor-{i}",
                 daemon=True,
             )
             t.start()

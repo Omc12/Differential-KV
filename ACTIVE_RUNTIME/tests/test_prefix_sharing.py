@@ -13,16 +13,16 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_prefix_sharing():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={}, device=device)
     
     # 1. Run prompt prefill on common prefix
     prefix = "Once upon a time, in a deep blue ocean, there lived a small dolphin named Sparky."
     
     # Run prefill on session A
-    wrapper.model._diffkv_session_ids = ["sess_a"]
+    wrapper.model._dkv_session_ids = ["sess_a"]
     wrapper.manager.clear_session("sess_a")
     wrapper.manager.init_session("sess_a", prefill_len=len(prefix))
     
@@ -41,7 +41,7 @@ def test_prefix_sharing():
     
     # 4. Generate in session A with prompt extension 1
     prompt_a = " Sparky wanted to fly into the sky."
-    wrapper.model._diffkv_session_ids = ["sess_a"]
+    wrapper.model._dkv_session_ids = ["sess_a"]
     input_ids_a = wrapper.tokenizer(prompt_a, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
     position_ids_a = torch.arange(input_ids.shape[1], input_ids.shape[1] + input_ids_a.shape[1], dtype=torch.long, device=device).unsqueeze(0)
     
@@ -51,7 +51,7 @@ def test_prefix_sharing():
     
     # 5. Generate in session B with prompt extension 2
     prompt_b = " Sparky wanted to find a hidden treasure."
-    wrapper.model._diffkv_session_ids = ["sess_b"]
+    wrapper.model._dkv_session_ids = ["sess_b"]
     input_ids_b = wrapper.tokenizer(prompt_b, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
     position_ids_b = torch.arange(input_ids.shape[1], input_ids.shape[1] + input_ids_b.shape[1], dtype=torch.long, device=device).unsqueeze(0)
     

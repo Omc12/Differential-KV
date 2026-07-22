@@ -1,7 +1,7 @@
 import torch
 import time
 from typing import Dict, Any, List, Optional, Callable
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 
 class SustainedSparseDecodeEngine:
     """
@@ -10,7 +10,7 @@ class SustainedSparseDecodeEngine:
     """
     def __init__(
         self, 
-        wrapper: DiffKVHFWrapper,
+        wrapper: DKVHFWrapper,
         min_duration_sec: float = 120.0,
         batch_size: int = 4
     ):

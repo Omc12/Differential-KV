@@ -23,7 +23,7 @@ def run_extreme_context_benchmark(
     loader = RealModelLoader()
     model, tokenizer = loader.load(model_id)
     
-    # Mock manager for now, in a real run this would be the actual DiffKV manager
+    # Mock manager for now, in a real run this would be the actual DKV manager
     from runtime.kv_runtime_manager import KVRuntimeManager
     config = {"block_size": 64, "mode": "lowrank_sparse" if sparse_mode else "fp16"}
     manager = KVRuntimeManager(config, device="cuda")

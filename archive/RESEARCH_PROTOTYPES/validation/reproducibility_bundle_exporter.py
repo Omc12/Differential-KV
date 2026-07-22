@@ -21,7 +21,7 @@ class ReproducibilityBundleExporter:
         return False
 
     def export_bundle(self):
-        bundle_name = f"diffkv_repro_bundle_{self.run_id}_{int(time.time())}.tar.gz"
+        bundle_name = f"dkv_repro_bundle_{self.run_id}_{int(time.time())}.tar.gz"
         bundle_path = os.path.join(self.results_dir, bundle_name)
         
         with tarfile.open(bundle_path, "w:gz") as tar:

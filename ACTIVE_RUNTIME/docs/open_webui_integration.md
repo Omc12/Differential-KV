@@ -1,11 +1,11 @@
-# DiffKV — Open WebUI Integration Guide
+# DKV — Open WebUI Integration Guide
 
-DiffKV exposes a fully OpenAI-compatible REST API. Connecting it to **Open WebUI** requires
-two steps: start the DiffKV server, then add it as an external API connection in Open WebUI.
+DKV exposes a fully OpenAI-compatible REST API. Connecting it to **Open WebUI** requires
+two steps: start the DKV server, then add it as an external API connection in Open WebUI.
 
 ---
 
-## Step 1 — Start the DiffKV Gateway
+## Step 1 — Start the DKV Gateway
 
 Open a terminal in the `ACTIVE_RUNTIME/` directory and run:
 
@@ -40,8 +40,8 @@ python -m serving.openai_compatible_api_gateway `
 ### Optional Environment Variables
 
 ```powershell
-$env:DIFFKV_TELEMETRY   = "1"          # Enable per-step timing logs
-$env:DIFFKV_USE_TORCH_COMPILE = "1"   # torch.compile fusion (requires PyTorch 2.1+)
+$env:DKV_TELEMETRY   = "1"          # Enable per-step timing logs
+$env:DKV_USE_TORCH_COMPILE = "1"   # torch.compile fusion (requires PyTorch 2.1+)
 $env:TOKENIZERS_PARALLELISM = "false"  # Suppress HF warning (set automatically by gateway)
 ```
 
@@ -64,11 +64,11 @@ Invoke-WebRequest http://localhost:8000/v1/models | Select-Object -ExpandPropert
 3. Under **OpenAI API**, click **Add connection** (or edit the existing one).
 4. Set:
    - **API Base URL**: `http://localhost:8000/v1`
-   - **API Key**: `none` (or any non-empty string — DiffKV ignores auth)
+   - **API Key**: `none` (or any non-empty string — DKV ignores auth)
 5. Click **Save** and then **Verify Connection**.
-6. The model `diffkv-<your-model-name>` will now appear in the model dropdown.
+6. The model `dkv-<your-model-name>` will now appear in the model dropdown.
 
-> **Tip**: If Open WebUI is running inside Docker and DiffKV is on the host,
+> **Tip**: If Open WebUI is running inside Docker and DKV is on the host,
 > use `http://host.docker.internal:8000/v1` instead of `localhost`.
 
 ---

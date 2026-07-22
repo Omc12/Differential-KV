@@ -1,7 +1,7 @@
 """
 native_core/graph_runtime/static_decode_graph.py
 
-CUDA Graph wrapper for the DiffKV decode step.
+CUDA Graph wrapper for the DKV decode step.
 
 Eliminates Python dispatch overhead, kernel launch scheduling, and driver API
 overhead from the decode hot-path. After one-time capture, each decode step
@@ -31,7 +31,7 @@ def _is_cuda_available():
 
 class CUDAGraphDecodeRunner:
     """
-    CUDA Graph wrapper for the DiffKV batch decode step.
+    CUDA Graph wrapper for the DKV batch decode step.
 
     API (used by batch_engine.py):
         runner = CUDAGraphDecodeRunner()
@@ -62,22 +62,22 @@ class CUDAGraphDecodeRunner:
         self._model_ref              = None   # weak ref to the model (non-owning)
         # CUDA graph capture is DISABLED by default.
         #
-        # The DiffKV attention patch mutates Python/session state on every decode
+        # The DKV attention patch mutates Python/session state on every decode
         # forward (routing slots, dense-window layout, SRL state, session IDs).
         # A captured graph replays without executing any of this Python — the
         # graph becomes stale after the first routing change and silently produces
         # incorrect outputs.  The graph ABI must be redesigned around static,
         # device-resident state buffers before it can be safely re-enabled.
         #
-        # `DIFFKV_DISABLE_CUDA_GRAPH=0` remains accepted for compatibility, but
-        # it is not sufficient to make a DiffKV model capturable.  The model
+        # `DKV_DISABLE_CUDA_GRAPH=0` remains accepted for compatibility, but
+        # it is not sufficient to make a DKV model capturable.  The model
         # must explicitly advertise a static-state ABI (see capture()).
-        _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
+        _disable_graph = os.environ.get("DKV_DISABLE_CUDA_GRAPH", "1")
         self._capture_enabled = _is_cuda_available() and _disable_graph != "1"
         if _is_cuda_available() and not self._capture_enabled:
             import sys as _sys
             print(
-                "[DiffKV] CUDA graph capture DISABLED (mutable routing state "
+                "[DKV] CUDA graph capture DISABLED (mutable routing state "
                 "prevents correct replay; the compatibility opt-in is still ABI-guarded).",
                 file=_sys.stderr,
             )
@@ -108,7 +108,7 @@ class CUDAGraphDecodeRunner:
         if not self._capture_enabled:
             return
 
-        # A full DiffKV model is not a static CUDA-graph workload yet.  Its
+        # A full DKV model is not a static CUDA-graph workload yet.  Its
         # attention interception updates Python/session state (KV blocks,
         # routing slots, dense-window membership and SRL state) on every
         # forward.  CUDA Graph replay records kernels only, so replaying this
@@ -117,12 +117,12 @@ class CUDAGraphDecodeRunner:
         # are pure array functions with all state passed explicitly.  Refuse
         # capture until the CUDA path has the same ABI instead of exposing a
         # switch that silently changes model semantics.
-        if not getattr(model, "_diffkv_cuda_graph_safe", False):
+        if not getattr(model, "_dkv_cuda_graph_safe", False):
             if not self._unsafe_capture_warned:
                 import sys as _sys
                 print(
-                    "[DiffKV] CUDA graph capture skipped: the current stateful "
-                    "DiffKV forward has no static-state graph ABI; using eager "
+                    "[DKV] CUDA graph capture skipped: the current stateful "
+                    "DKV forward has no static-state graph ABI; using eager "
                     "decode for correctness.",
                     file=_sys.stderr,
                 )

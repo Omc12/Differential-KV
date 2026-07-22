@@ -37,9 +37,9 @@ class ComparativeMemoryEconomicsAnalyzer:
         return {
             "transformers": "16k",
             "vllm": "64k",
-            "diff_kv": "256k"
+            "dkv": "256k"
         }
 
 if __name__ == "__main__":
     analyzer = ComparativeMemoryEconomicsAnalyzer()
-    print(analyzer.analyze_vram_efficiency({"diff_kv": {"peak_vram_gb": 4.5}, "transformers": {"peak_vram_gb": 12.0}}))
+    print(analyzer.analyze_vram_efficiency({"dkv": {"peak_vram_gb": 4.5}, "transformers": {"peak_vram_gb": 12.0}}))

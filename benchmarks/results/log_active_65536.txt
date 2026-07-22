@@ -1,4 +1,4 @@
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-[DiffKV MLX] Loaded model in 0.59s
+[DKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+[DKV MLX] Loaded model in 0.59s
 
 __BENCH_RESULT__ {"prompt_tokens": 65615, "gen_tokens": 128, "prefill_s": 224.93815908301622, "decode_s": 5.5855365410097875, "decode_tps": 22.916330250497186, "ttft_s": null, "mx_peak_gb": 5.042611822, "output_preview": "ency models, focusing on linearizability, sequential consistency, causal consistency, and eventual consistency.\n\n### Linearizability\nLinearizability is a property where operations appear sequentially in time when they were executed concurrently. This ensures that no process perceives an operation as", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 65536, "gen_target": 128, "worker_wall_s": 235.60942029202124}

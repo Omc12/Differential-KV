@@ -2,7 +2,7 @@
 #include <vector>
 #include <iostream>
 
-namespace diffkv {
+namespace dkv {
 namespace runtime {
 
 class LowOverheadDecodeRuntime {
@@ -23,4 +23,4 @@ public:
 };
 
 } // namespace runtime
-} // namespace diffkv
+} // namespace dkv

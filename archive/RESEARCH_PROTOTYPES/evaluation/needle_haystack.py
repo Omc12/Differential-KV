@@ -87,7 +87,7 @@ def run_needle_benchmark(model_id="Qwen/Qwen2-0.5B", context_lens=[1024, 2048, 4
     question = "What is the secret passkey?"
     answer = "ALBATROSS-99"
     
-    modes = ["FP16", "INT8-DiffKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
+    modes = ["FP16", "INT8-DKV", "Layer-Shared Rank16", "Hybrid-S1%", "Hybrid-S5%"]
     
     results = []
     for cl in context_lens:

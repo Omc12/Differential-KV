@@ -14,7 +14,7 @@ sse-starlette
 psutil
 pyyaml
 httpx>=0.27.0
-# CUDA attention interception (runtime/diffkv_attention.py) monkeypatches the
+# CUDA attention interception (runtime/dkv_attention.py) monkeypatches the
 # 4.x Qwen2Attention.forward signature. transformers 4.48+/5.x reorder the args
 # (position_embeddings positional; use_cache/position_ids removed) → SILENT
 # GARBAGE output. Keep transformers on 4.x until the patch is ported to 5.x.

@@ -1,5 +1,5 @@
 # ============================================================
-#  DiffKV — Triton Fused Decode Kernel Benchmark
+#  DKV — Triton Fused Decode Kernel Benchmark
 #  Self-contained Google Colab benchmark
 #
 #  Usage:

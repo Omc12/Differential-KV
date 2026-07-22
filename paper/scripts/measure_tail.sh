@@ -3,12 +3,12 @@
 # measure the 64k reach point for both engines. Sequential, isolated (8 GB-safe).
 set -u
 cd "$(dirname "$0")/../.."
-source diffkv_venv/bin/activate 2>/dev/null
+source dkv_venv/bin/activate 2>/dev/null
 RES=benchmarks/results
 LOG=$RES/fresh_tail.log
 : > "$LOG"
-ACTIVE_ENV="DIFFKV_COMPRESSED_DECODE=1 DIFFKV_DECODE_CACHE=1 DIFFKV_SPARSE_PREFILL=1 \
-DIFFKV_MAX_RESIDUAL=128 DIFFKV_ROUTER=residual DIFFKV_TOPK_BLOCKS=16 DIFFKV_SVD_SEED=1234"
+ACTIVE_ENV="DKV_COMPRESSED_DECODE=1 DKV_DECODE_CACHE=1 DKV_SPARSE_PREFILL=1 \
+DKV_MAX_RESIDUAL=128 DKV_ROUTER=residual DKV_TOPK_BLOCKS=16 DKV_SVD_SEED=1234"
 
 run() {  # engine ctx outfile
   local engine=$1 ctx=$2 out=$3

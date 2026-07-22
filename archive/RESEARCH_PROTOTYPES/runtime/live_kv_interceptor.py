@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class LiveKVInterceptor(nn.Module):
     """
     Intercepts KV tensors during the live forward pass of a transformer.
-    Allows DiffKV to observe and modify the KV stream without breaking the model.
+    Allows DKV to observe and modify the KV stream without breaking the model.
     """
     def __init__(self, original_module: nn.Module, layer_idx: int, runtime_manager: Any):
         super().__init__()

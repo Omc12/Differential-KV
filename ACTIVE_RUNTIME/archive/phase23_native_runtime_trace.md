@@ -1,6 +1,6 @@
 # Phase 23 Native Runtime Trace
 
-Following the extraction of `libdiffkv_core`, the runtime trace is now definitively split between native and Python responsibilities.
+Following the extraction of `libdkv_core`, the runtime trace is now definitively split between native and Python responsibilities.
 
 ## Authoritative Execution Trace (Post Phase 23)
 
@@ -25,7 +25,7 @@ Async Compression Worker Loop  ← ENTIRELY NATIVE
     ▼
 Decode Step
     │ [Python] CUDA Graph replay (StaticSparseDecodeGraph)
-    │   → Pre-check: diffkv_core.are_replay_safe(block_ids) ← C++ atomic read
+    │   → Pre-check: dkv_core.are_replay_safe(block_ids) ← C++ atomic read
     │ [GPU] TritonSparseDecode reads U,V from stable MetadataPool addresses
     ▼
 Paging Eviction (when VRAM pressure detected)

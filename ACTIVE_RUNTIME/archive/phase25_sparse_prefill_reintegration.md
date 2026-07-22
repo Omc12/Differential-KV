@@ -4,7 +4,7 @@
 Revive the `RetrievalAwareSparsePrefill` logic from archival research and inject it into the active serving path to avoid computing $O(N^2)$ attention FLOPs on long contexts.
 
 ## Integration
-In `diffkv_attention.py`, we replaced the generic SDPA block for long queries (`q_len > 1024`) with an instantiation of the sparse prefill engine:
+In `dkv_attention.py`, we replaced the generic SDPA block for long queries (`q_len > 1024`) with an instantiation of the sparse prefill engine:
 
 ```python
 from research.sparse_prefill_anchors import RetrievalAwareSparsePrefill

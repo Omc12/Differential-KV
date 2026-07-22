@@ -32,11 +32,11 @@ class ExampleProjectRegistry:
 
     def _get_hf_example(self) -> str:
         return """# HuggingFace Integration Example
-from integrations.huggingface_runtime_adapter import DiffKVHFAdapter
+from integrations.huggingface_runtime_adapter import DKVHFAdapter
 from transformers import AutoTokenizer
 
 model_id = "Qwen/Qwen2.5-7B-Instruct"
-model = DiffKVHFAdapter.from_pretrained(model_id, device_map="auto")
+model = DKVHFAdapter.from_pretrained(model_id, device_map="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 inputs = tokenizer("Hello, world!", return_tensors="pt").to("cuda")
@@ -50,7 +50,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="sk-unused")
 response = client.chat.completions.create(
-    model="diff-kv",
+    model="dkv",
     messages=[{"role": "user", "content": "How does sparse KV work?"}]
 )
 print(response.choices[0].message.content)
@@ -58,15 +58,15 @@ print(response.choices[0].message.content)
 
     def _get_langchain_example(self) -> str:
         return """# LangChain Agent Example
-from integrations.langchain_sparse_connector import DiffKVSparseLLM
-llm = DiffKVSparseLLM()
+from integrations.langchain_sparse_connector import DKVSparseLLM
+llm = DKVSparseLLM()
 print(llm.invoke("What is the capital of France?"))
 """
 
     def _get_llamaindex_example(self) -> str:
         return """# LlamaIndex RAG Example
-from integrations.llamaindex_query_adapter import DiffKVLlamaIndexAdapter
-llm = DiffKVLlamaIndexAdapter()
+from integrations.llamaindex_query_adapter import DKVLlamaIndexAdapter
+llm = DKVLlamaIndexAdapter()
 print(llm.complete("Summarize the Differential KV paper."))
 """
 

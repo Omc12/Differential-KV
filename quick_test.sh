@@ -10,22 +10,22 @@ echo "╚═══════════════════════�
 echo ""
 
 # Configuration
-export DIFFKV_NATIVE_ATTN=1
-export DIFFKV_VERBOSE=1
-export DIFFKV_MAX_CTX_TK=8192
-export DIFFKV_PRESET=mid
-export DIFFKV_MAX_TOKENS=50
+export DKV_NATIVE_ATTN=1
+export DKV_VERBOSE=1
+export DKV_MAX_CTX_TK=8192
+export DKV_PRESET=mid
+export DKV_MAX_TOKENS=50
 
 # Find model
 MODEL=""
-if [ -f "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
+if [ -f "dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q4_k_m.gguf"
-elif [ -f "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
+elif [ -f "dkv_native/qwen2.5-1.5b-instruct-q8_0.gguf" ]; then
     MODEL="qwen2.5-1.5b-instruct-q8_0.gguf"
-elif [ -f "diffkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
+elif [ -f "dkv_native/qwen2.5-0.5b-instruct.gguf" ]; then
     MODEL="qwen2.5-0.5b-instruct.gguf"
 else
-    echo "❌ No model found. Place a GGUF model in diffkv_native/"
+    echo "❌ No model found. Place a GGUF model in dkv_native/"
     exit 1
 fi
 
@@ -35,10 +35,10 @@ echo ""
 echo "Paste your prompt and press Ctrl+D (or type a prompt):"
 echo "───────────────────────────────────────────────────────────────────"
 
-cd diffkv_native
-../diffkv_venv/bin/python3 serving/cli.py \
+cd dkv_native
+../dkv_venv/bin/python3 serving/cli.py \
     --model "$MODEL" \
-    --binary-path build/diffkv_native \
+    --binary-path build/dkv_native \
     --preset mid \
     --max-tokens 50 \
     2>&1 | tee -a ../quick_test.log

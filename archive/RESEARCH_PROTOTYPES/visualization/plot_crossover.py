@@ -6,7 +6,7 @@ Plots the defining crossover experiment result.
 Generates:
   1. Memory bytes vs context length (log scale) — all strategies
   2. Compression ratio vs context length
-  3. Bandwidth savings vs INT8 — where does DiffKV win?
+  3. Bandwidth savings vs INT8 — where does DKV win?
   4. Reconstruction error vs context length
 
 Usage:
@@ -32,19 +32,19 @@ PALETTE = {
     "FP16":          "#E74C3C",
     "FP8":           "#F39C12",
     "INT8":          "#27AE60",
-    "DiffKV-P32":    "#3498DB",
-    "DiffKV-P64":    "#2980B9",
-    "DiffKV-P128":   "#1A5276",
-    "DiffKV-Adapt":  "#8E44AD",
+    "DKV-P32":    "#3498DB",
+    "DKV-P64":    "#2980B9",
+    "DKV-P128":   "#1A5276",
+    "DKV-Adapt":  "#8E44AD",
 }
 LINESTYLES = {
     "FP16":          "--",
     "FP8":           "--",
     "INT8":          "--",
-    "DiffKV-P32":    "-",
-    "DiffKV-P64":    "-",
-    "DiffKV-P128":   "-",
-    "DiffKV-Adapt":  "-",
+    "DKV-P32":    "-",
+    "DKV-P64":    "-",
+    "DKV-P128":   "-",
+    "DKV-Adapt":  "-",
 }
 
 def setup_style():
@@ -101,9 +101,9 @@ def plot_crossover(data, output_dir: Path):
         "FP16":         [r["FP16_bytes"] for r in data],
         "FP8":          [r["FP8_bytes"] for r in data],
         "INT8":         [r["INT8_bytes"] for r in data],
-        "DiffKV-P64":   [r.get("DiffKV-P64_bytes", 0) for r in data],
-        "DiffKV-P128":  [r.get("DiffKV-P128_bytes", 0) for r in data],
-        "DiffKV-Adapt": [r.get("DiffKV-Adapt_bytes", 0) for r in data],
+        "DKV-P64":   [r.get("DKV-P64_bytes", 0) for r in data],
+        "DKV-P128":  [r.get("DKV-P128_bytes", 0) for r in data],
+        "DKV-Adapt": [r.get("DKV-Adapt_bytes", 0) for r in data],
     }
     for label, ys in configs.items():
         ax.plot(x, np.array(ys) / 1024**2, label=label,
@@ -124,7 +124,7 @@ def plot_crossover(data, output_dir: Path):
     ax.axhline(y=2.0, color="#27AE60", linestyle="--", linewidth=1, alpha=0.6, label="FP8 target (2x)")
     ax.axhline(y=1.0, color="#8B949E", linestyle=":", linewidth=1, alpha=0.5, label="No compression")
 
-    for label in ["DiffKV-P32", "DiffKV-P64", "DiffKV-P128", "DiffKV-Adapt"]:
+    for label in ["DKV-P32", "DKV-P64", "DKV-P128", "DKV-Adapt"]:
         key = f"{label}_ratio"
         ys  = [r.get(key, 1.0) for r in data]
         ax.plot(x, ys, label=label, color=PALETTE.get(label, "#AAAAAA"),
@@ -142,7 +142,7 @@ def plot_crossover(data, output_dir: Path):
     ax.axhline(y=0.0, color="#E74C3C", linestyle="--", linewidth=1.5,
                alpha=0.8, label="Break-even with INT8")
 
-    for label in ["DiffKV-P32", "DiffKV-P64", "DiffKV-P128", "DiffKV-Adapt"]:
+    for label in ["DKV-P32", "DKV-P64", "DKV-P128", "DKV-Adapt"]:
         key = f"{label}_bw_saving_vs_int8"
         ys  = [r.get(key, 0.0) for r in data]
         ax.plot(x, np.array(ys) * 100, label=label,
@@ -154,7 +154,7 @@ def plot_crossover(data, output_dir: Path):
     ax.set_xscale("log", base=2)
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
     ax.legend(fontsize=8)
-    ax.fill_between(x, 0, 100, alpha=0.05, color="#27AE60")   # DiffKV winning region
+    ax.fill_between(x, 0, 100, alpha=0.05, color="#27AE60")   # DKV winning region
 
     # ── Plot 4: Reconstruction error ─────────────────────────────────────────
     ax = axes[1, 1]
@@ -162,7 +162,7 @@ def plot_crossover(data, output_dir: Path):
     ax.axhline(y=0.01, color="#F39C12", linestyle="--", linewidth=1,
                alpha=0.7, label="1% error threshold")
 
-    for label in ["DiffKV-P32", "DiffKV-P64", "DiffKV-P128", "DiffKV-Adapt"]:
+    for label in ["DKV-P32", "DKV-P64", "DKV-P128", "DKV-Adapt"]:
         key = f"{label}_error"
         ys  = [r.get(key, 0.0) for r in data]
         ax.plot(x, ys, label=label, color=PALETTE.get(label, "#AAAAAA"),

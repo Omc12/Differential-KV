@@ -9,11 +9,11 @@ REPO = os.path.dirname(HERE)
 ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
 sys.path.insert(0, ACTIVE)
 
-os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-os.environ.setdefault("DIFFKV_MAX_RESIDUAL", "128")
-os.environ["DIFFKV_MAX_BLOCKS"] = "600"
+os.environ["DKV_COMPRESSED_DECODE"] = "1"
+os.environ.setdefault("DKV_MAX_RESIDUAL", "128")
+os.environ["DKV_MAX_BLOCKS"] = "600"
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
 NEEDLE = "PHOENIX-9942-ULTRA"
 NEEDLE_SENT = f"The master key for emergency override is {NEEDLE}."
@@ -49,7 +49,7 @@ def make_extreme_prompt(tokenizer, target_tokens: int, depth=0.5):
 
 def run_extreme_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
     print("--- Running Extreme Context Stress Test (48k & 64k) ---", flush=True)
-    wrapper = MLXDiffKVWrapper(
+    wrapper = MLXDKVWrapper(
         model_id=model_id,
         config={"rank": 32, "block_size": 256},
     )

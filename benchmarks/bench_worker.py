@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Single-measurement worker for the DiffKV multi-engine benchmark.
+Single-measurement worker for the DKV multi-engine benchmark.
 
 Runs ONE (engine, context_length) measurement in an isolated process so that
 (a) RAM is attributable to exactly one engine, and (b) an OOM kills only this
@@ -8,13 +8,13 @@ worker, not the orchestrator. Writes a JSON result to --result-file on success.
 
 Engines
 -------
-  native : C++ DiffKV binary (GGUF Q4_K_M) driven over its stdin/stdout protocol.
+  native : C++ DKV binary (GGUF Q4_K_M) driven over its stdin/stdout protocol.
            Prefill seconds come from the binary's own [PREFILL_TIME] stderr line;
-           decode token count from [Timing Step N] lines (DIFFKV_TIME_DECODE=1).
-  active : DiffKV ACTIVE_RUNTIME — MLXDiffKVWrapper (int4), the reference DiffKV
+           decode token count from [Timing Step N] lines (DKV_TIME_DECODE=1).
+  active : DKV ACTIVE_RUNTIME — MLXDKVWrapper (int4), the reference DKV
            impl. Compressed KV. Prefill + decode timed with perf_counter / mx.eval.
   dense  : Plain mlx_lm (same int4 weights, same engine) with a FULL KV cache —
-           the no-compression control. Isolates exactly what DiffKV buys.
+           the no-compression control. Isolates exactly what DKV buys.
   ollama : llama.cpp via the ollama server (GGUF Q4_K_M). Exact prefill/decode
            timings + token counts from /api/generate (prompt_eval_*/eval_*).
            Its RAM is measured externally by the orchestrator (server process).
@@ -69,7 +69,7 @@ def _mx_reset_peak():
                 pass
 
 
-# ───────────────────────────── native (C++ DiffKV) ──────────────────────────
+# ───────────────────────────── native (C++ DKV) ──────────────────────────
 def run_native(args, prompt_text):
     import re
     import threading
@@ -79,20 +79,20 @@ def run_native(args, prompt_text):
     # Single-threaded BLAS (see cli.py rationale: keeps the Mac responsive during
     # the SVD-heavy prefill and avoids core starvation).
     env.update({
-        "DIFFKV_MAX_CTX_TK": str(args.ctx + args.gen + 512),
-        "DIFFKV_MICRO_BLOCK_SIZE": "256",
-        "DIFFKV_PREFILL_CHUNK_SIZE": "512",
-        "DIFFKV_MAX_TOKENS": str(args.gen),
-        "DIFFKV_USE_GPU": "1",
-        "DIFFKV_NATIVE_ATTN": "1",
-        "DIFFKV_TEMPERATURE": "0.0",
-        "DIFFKV_TOP_P": "1.0",
-        "DIFFKV_REPETITION_PENALTY": "1.0",
-        "DIFFKV_DBG_PREFILL_TIME": "1",
-        "DIFFKV_TIME_DECODE": "1",
-        "DIFFKV_MPS_APPROXIMATE_ATTN": "1",
-        "DIFFKV_COMPRESSOR_THREADS": "4",
-        "DIFFKV_ENABLE_FACTUAL": "1",
+        "DKV_MAX_CTX_TK": str(args.ctx + args.gen + 512),
+        "DKV_MICRO_BLOCK_SIZE": "256",
+        "DKV_PREFILL_CHUNK_SIZE": "512",
+        "DKV_MAX_TOKENS": str(args.gen),
+        "DKV_USE_GPU": "1",
+        "DKV_NATIVE_ATTN": "1",
+        "DKV_TEMPERATURE": "0.0",
+        "DKV_TOP_P": "1.0",
+        "DKV_REPETITION_PENALTY": "1.0",
+        "DKV_DBG_PREFILL_TIME": "1",
+        "DKV_TIME_DECODE": "1",
+        "DKV_MPS_APPROXIMATE_ATTN": "1",
+        "DKV_COMPRESSOR_THREADS": "4",
+        "DKV_ENABLE_FACTUAL": "1",
     })
 
     proc = subprocess.Popen(
@@ -199,26 +199,26 @@ def run_native(args, prompt_text):
     }
 
 
-# ────────────────────────── active (DiffKV MLX int4) ─────────────────────────
-# ────────────────────────── active (DiffKV MLX int4) ─────────────────────────
+# ────────────────────────── active (DKV MLX int4) ─────────────────────────
+# ────────────────────────── active (DKV MLX int4) ─────────────────────────
 def run_active(args, prompt_text):
     sys.path.insert(0, ACTIVE_RUNTIME_DIR)
     import gc as _gc
     import torch
     import numpy as np
     import mlx.core as mx
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
     _mx_reset_peak()
 
-    os.environ.setdefault("DIFFKV_COMPRESSED_DECODE", "1")
-    os.environ.setdefault("DIFFKV_MAX_RESIDUAL", "128")
-    os.environ.setdefault("DIFFKV_SPARSE_PREFILL", "1")
-    os.environ.setdefault("DIFFKV_DECODE_CACHE", "1")
-    os.environ.setdefault("DIFFKV_SPARSE_BIAS", "auto")
-    os.environ.setdefault("DIFFKV_SEED", "1234")
+    os.environ.setdefault("DKV_COMPRESSED_DECODE", "1")
+    os.environ.setdefault("DKV_MAX_RESIDUAL", "128")
+    os.environ.setdefault("DKV_SPARSE_PREFILL", "1")
+    os.environ.setdefault("DKV_DECODE_CACHE", "1")
+    os.environ.setdefault("DKV_SPARSE_BIAS", "auto")
+    os.environ.setdefault("DKV_SEED", "1234")
 
-    wrapper = MLXDiffKVWrapper(
+    wrapper = MLXDKVWrapper(
         model_id=args.dense_model_id,
         config={"rank": 32, "block_size": 256},
     )
@@ -232,7 +232,7 @@ def run_active(args, prompt_text):
 
     wrapper.manager.init_session(session_id, prefill_len=len(prompt_ids))
     wrapper.manager.register_prefill_tokens(session_id, torch.tensor(prompt_ids, dtype=torch.long))
-    wrapper.model._diffkv_session_ids = [session_id]
+    wrapper.model._dkv_session_ids = [session_id]
     wrapper.model._get_or_create_prefill_cache((session_id,), total_tokens=len(prompt_ids))
 
     # ── Direct Prefill Timing ──
@@ -273,9 +273,9 @@ def run_active(args, prompt_text):
 
     text = wrapper.tokenizer.decode(generated)
 
-    # Calculate exact KV cache memory footprint for DiffKV Active
+    # Calculate exact KV cache memory footprint for DKV Active
     # Qwen2.5-1.5B: L=28 layers, H_kv=2 heads, D=128 head_dim
-    # DiffKV uses rank-32 low-rank compression with bounded block budget (max 256 blocks)
+    # DKV uses rank-32 low-rank compression with bounded block budget (max 256 blocks)
     total_tokens = prompt_tokens + len(generated)
     num_blocks = min((total_tokens + 255) // 256, 256)
     # Each block stores U (256 x 32) + V (128 x 32) + anchor (256 x 2 x 128) per layer in FP16 (2 bytes)
@@ -461,9 +461,9 @@ def main():
     ap.add_argument("--result-file", required=True)
     ap.add_argument("--pid-file", default=None)
     ap.add_argument("--native-binary",
-                    default=os.path.join(REPO, "diffkv_native/build/diffkv_native"))
+                    default=os.path.join(REPO, "dkv_native/build/dkv_native"))
     ap.add_argument("--native-model",
-                    default=os.path.join(REPO, "diffkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"))
+                    default=os.path.join(REPO, "dkv_native/qwen2.5-1.5b-instruct-q4_k_m.gguf"))
     ap.add_argument("--dense-model-id", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
     ap.add_argument("--ollama-model", default="qwen2.5:1.5b-instruct")
     ap.add_argument("--ollama-url", default="http://localhost:11434")

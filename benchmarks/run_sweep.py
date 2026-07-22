@@ -4,7 +4,7 @@ run_sweep.py — Calls bench_worker.py directly (the existing, tested worker)
 for each (engine, ctx) cell and writes results to clean_{engine}_{ctx}.json.
 
 bench_worker.py already handles:
-  - active: MLXDiffKVWrapper with two-pass TTFT timing (isolated process)
+  - active: MLXDKVWrapper with two-pass TTFT timing (isolated process)
   - dense:  mlx_lm direct forward + decode loop (isolated process)
 
 Run order: active 4k→64k, then dense 4k→64k.
@@ -14,7 +14,7 @@ import json, os, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RESULTS = os.path.join(HERE, "results")
-VENV_PY = os.path.join(REPO, "diffkv_venv", "bin", "python3")
+VENV_PY = os.path.join(REPO, "dkv_venv", "bin", "python3")
 WORKER = os.path.join(HERE, "bench_worker.py")
 MODEL_ID = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 CONTEXTS = [4096, 8192, 16384, 32768, 65536]

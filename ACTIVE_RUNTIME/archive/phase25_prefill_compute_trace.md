@@ -17,7 +17,7 @@ We used `F.scaled_dot_product_attention` on the full `[1, 14, 25000, 64]` tensor
 - Total standard linear layer compute: $\sim 15$ TFLOPs (takes **< 0.5 seconds**).
 
 ### 3. The True Bottleneck: Synchronous SVD Backpressure
-Inside `diffkv_attention.py`, the streaming ingest manager executes:
+Inside `dkv_attention.py`, the streaming ingest manager executes:
 ```python
 kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 ```

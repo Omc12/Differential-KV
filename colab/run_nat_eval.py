@@ -2,7 +2,7 @@
 """Neighborhood Attention Transformer Paper Evaluation Script.
 
 This script runs comparative prompt evaluations of standard Dense attention against
-various DiffKV (Differential KV) configurations (presets, early rank boost, factual store)
+various DKV (Differential KV) configurations (presets, early rank boost, factual store)
 using Qwen/Qwen2.5-14B-Instruct in 4-bit weights.
 """
 
@@ -34,13 +34,13 @@ requests.Session.merge_environment_settings = patched_merge_settings
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # Diagnostics are opt-in.  The old unconditional setting printed every block
 # decision during 4K–128K sweeps and added noticeable host/I/O overhead.
-os.environ.setdefault("DIFFKV_DIAG", "0")
+os.environ.setdefault("DKV_DIAG", "0")
 
 # Ensure active runtime path and C++ compiled library directory are in sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
 ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
-CORE_DIR = os.path.join(ACTIVE, "native_core", "diffkv_core")
+CORE_DIR = os.path.join(ACTIVE, "native_core", "dkv_core")
 
 if ACTIVE not in sys.path:
     sys.path.insert(0, ACTIVE)
@@ -115,7 +115,7 @@ def build_prompt(tokenizer, paper_content, prompt_instructions):
 
 
 def analytic_kv_bytes(mgr, seq_len, sid):
-    """Footprint of the DiffKV cache, both logical (ideal) and physical (real).
+    """Footprint of the DKV cache, both logical (ideal) and physical (real).
 
     `store_used_bytes` is the LOGICAL number: what a perfectly packed store
     would hold.  It is what the paper quotes, and it is NOT what the GPU
@@ -181,7 +181,7 @@ def wait_for_compression(mgr, session_id: str) -> bool:
     streaming_mgr = getattr(mgr, "_streaming_mgr", None)
     if streaming_mgr is None:
         return True
-    timeout_s = float(os.environ.get("DIFFKV_COMPRESSION_TIMEOUT_S", "30"))
+    timeout_s = float(os.environ.get("DKV_COMPRESSION_TIMEOUT_S", "30"))
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if hasattr(mgr, "finalize_compressed_blocks"):
@@ -199,54 +199,54 @@ def wait_for_compression(mgr, session_id: str) -> bool:
     return False
 
 def run_worker(config_name, model_id):
-    os.environ["DIFFKV_FACTUAL_STORE"] = "0"
-    os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "0"
-    os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "0"
-    os.environ["DIFFKV_STREAMING_COMPRESS"] = "0"
+    os.environ["DKV_FACTUAL_STORE"] = "0"
+    os.environ["DKV_EARLY_LAYER_RANK_BOOST"] = "0"
+    os.environ["DKV_LAYER_ADAPTIVE_RANK"] = "0"
+    os.environ["DKV_STREAMING_COMPRESS"] = "0"
 
     # Default this eval to the A/B'd speed+memory combo via the single toggle
-    # (the wrapper's _apply_fast_mode expands DIFFKV_FAST into the individual
-    # flags; see its docstring).  setdefault so an explicit DIFFKV_FAST=0 or any
+    # (the wrapper's _apply_fast_mode expands DKV_FAST into the individual
+    # flags; see its docstring).  setdefault so an explicit DKV_FAST=0 or any
     # individual flag still wins.  DECODE_PRUNE is NOT bundled (confirmed dead
     # end).  The rank knobs it enables are fidelity-affecting — validate
     # test_niah.py before relying on FAST for number-heavy retrieval.
-    os.environ.setdefault("DIFFKV_FAST", "1")
+    os.environ.setdefault("DKV_FAST", "1")
 
     is_compressed = (config_name != "dense")
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1" if is_compressed else "0"
 
     if is_compressed:
         if config_name == "low_preset":
-            os.environ["DIFFKV_PRESET"] = "low"
+            os.environ["DKV_PRESET"] = "low"
         elif config_name == "adaptive_rank":
-            os.environ["DIFFKV_PRESET"] = "low"
-            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
+            os.environ["DKV_PRESET"] = "low"
+            os.environ["DKV_LAYER_ADAPTIVE_RANK"] = "1"
         elif config_name == "adaptive_stream":
-            os.environ["DIFFKV_PRESET"] = "low"
-            os.environ["DIFFKV_LAYER_ADAPTIVE_RANK"] = "1"
-            os.environ["DIFFKV_STREAMING_COMPRESS"] = "1"
+            os.environ["DKV_PRESET"] = "low"
+            os.environ["DKV_LAYER_ADAPTIVE_RANK"] = "1"
+            os.environ["DKV_STREAMING_COMPRESS"] = "1"
         elif config_name == "mid_preset":
-            os.environ["DIFFKV_PRESET"] = "mid"
+            os.environ["DKV_PRESET"] = "mid"
         elif config_name == "high_preset":
-            os.environ["DIFFKV_PRESET"] = "high"
+            os.environ["DKV_PRESET"] = "high"
         elif config_name == "early_boost":
-            os.environ["DIFFKV_PRESET"] = "mid"
-            os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
+            os.environ["DKV_PRESET"] = "mid"
+            os.environ["DKV_EARLY_LAYER_RANK_BOOST"] = "1"
         elif config_name == "factual_store":
-            os.environ["DIFFKV_PRESET"] = "mid"
-            os.environ["DIFFKV_FACTUAL_STORE"] = "1"
+            os.environ["DKV_PRESET"] = "mid"
+            os.environ["DKV_FACTUAL_STORE"] = "1"
         elif config_name == "combined":
-            os.environ["DIFFKV_PRESET"] = "mid"
-            os.environ["DIFFKV_EARLY_LAYER_RANK_BOOST"] = "1"
-            os.environ["DIFFKV_FACTUAL_STORE"] = "1"
+            os.environ["DKV_PRESET"] = "mid"
+            os.environ["DKV_EARLY_LAYER_RANK_BOOST"] = "1"
+            os.environ["DKV_FACTUAL_STORE"] = "1"
 
         # NOTE (defaults audit): intentionally NOT calling apply_best_decode_defaults
-        # here.  On CUDA it sets DIFFKV_SPARSE_BIAS=auto, but the fast fused
+        # here.  On CUDA it sets DKV_SPARSE_BIAS=auto, but the fast fused
         # combined Triton decode kernel only runs when the bias is 0
-        # (diffkv_attention.py: combined-path gate) — auto would silently drop
-        # decode onto the slower separate path.  And DIFFKV_DECODE_CACHE=1 (the
+        # (dkv_attention.py: combined-path gate) — auto would silently drop
+        # decode onto the slower separate path.  And DKV_DECODE_CACHE=1 (the
         # "~2x tps" default) is a no-op on CUDA: CUDA's decode cache is the
-        # separate, accuracy-gated DIFFKV_DECODE_CACHE_ENABLED (off by default).
+        # separate, accuracy-gated DKV_DECODE_CACHE_ENABLED (off by default).
         # So the "production decode defaults" would hurt, not help, CUDA here.
         # Keep the eval on the fast combined path (bias unset → 0.0).
 
@@ -296,20 +296,20 @@ def run_worker(config_name, model_id):
         if _tid is not None and _tid != tok.unk_token_id:
             _stop_ids.add(_tid)
 
-    # Prefill chunk size.  The DiffKV branch overwrites this from the active
+    # Prefill chunk size.  The DKV branch overwrites this from the active
     # preset and then rounds it up to the block capacity; the dense branch used
     # to keep the 128 default, so dense ran ~105 forwards over a 13K prompt
-    # while DiffKV ran ~13.  That is a per-forward-overhead difference, not an
+    # while DKV ran ~13.  That is a per-forward-overhead difference, not an
     # attention difference, and it silently inflated the dense prefill baseline.
     # Both branches now start from the same value.
-    CH = int(os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE", "1024"))
+    CH = int(os.environ.get("DKV_PREFILL_CHUNK_SIZE", "1024"))
 
     with torch.inference_mode():
         if is_compressed:
-            # ── Load DiffKV wrapper ONCE, iterate over all prompts ──────────
-            from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+            # ── Load DKV wrapper ONCE, iterate over all prompts ──────────
+            from serving.hf_dkv_wrapper import DKVHFWrapper
             cfg = {
-                "preset": os.environ.get("DIFFKV_PRESET", "mid"),
+                "preset": os.environ.get("DKV_PRESET", "mid"),
                 "serving_mode": "balanced",
             }
             if config_name in ["early_boost", "combined"]:
@@ -317,7 +317,7 @@ def run_worker(config_name, model_id):
             if config_name in ["factual_store", "combined"]:
                 cfg["factual_store"] = True
 
-            w = DiffKVHFWrapper(
+            w = DKVHFWrapper(
                 model_id=model_id,
                 config=cfg,
                 torch_dtype=torch.float16,
@@ -352,7 +352,7 @@ def run_worker(config_name, model_id):
 
                 mgr.init_session(sid, prefill_len=prompt_len)
                 mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long, device=device))
-                model._diffkv_session_ids = [sid]
+                model._dkv_session_ids = [sid]
 
                 if torch.cuda.is_available() and hasattr(mgr, "get_session_micro_block_size"):
                     _mbs = mgr.get_session_micro_block_size(sid)
@@ -382,11 +382,11 @@ def run_worker(config_name, model_id):
                     # available through the whole prefill and only switches to the
                     # compressed store at the prefill->decode boundary.
                     #
-                    # Fix 4 (opt-in): DIFFKV_STREAMING_COMPRESS=1 streams the
+                    # Fix 4 (opt-in): DKV_STREAMING_COMPRESS=1 streams the
                     # compression per chunk (MLX-parity) to bound peak VRAM at
                     # long context — at the cost of later chunks attending the
                     # lossy form of far-back blocks.  A/B against the default.
-                    if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1" \
+                    if os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1" \
                             and hasattr(mgr, "compress_deferred_prefill_blocks"):
                         mgr.compress_deferred_prefill_blocks(sid)
                         # MLX-parity: after compressing out-of-window blocks, the
@@ -399,7 +399,7 @@ def run_worker(config_name, model_id):
                             torch.cuda.empty_cache()
 
                 # The forward passes are done; everything after this point is
-                # DiffKV-specific cache construction.  Time it separately —
+                # DKV-specific cache construction.  Time it separately —
                 # folding it into prefill_time made a 17s number that is really
                 # "forward + SVD + SRL index" look like a like-for-like
                 # comparison against dense's forward-only prefill.
@@ -448,11 +448,11 @@ def run_worker(config_name, model_id):
                     _pct = 100.0 * _bs["boosted"] / _bs["total"]
                     print(f"[DIAG] rank boost fired on {_bs['boosted']}/{_bs['total']} "
                           f"blocks = {_pct:.1f}%  (100% => flat 1.5x rank; "
-                          f"set DIFFKV_RANK_BOOST=off for MLX parity)", flush=True)
+                          f"set DKV_RANK_BOOST=off for MLX parity)", flush=True)
 
                 # Verbose per-block state dump removed — the kv_logical / block-
                 # accounting investigation it served is resolved.  Set
-                # DIFFKV_DIAG=1 for the runtime's own [DIAG compress_deferred] trace
+                # DKV_DIAG=1 for the runtime's own [DIAG compress_deferred] trace
                 # if block eligibility ever needs re-checking.
 
                 # Excludes the block-state diagnostic dump above, which is
@@ -545,7 +545,7 @@ def run_worker(config_name, model_id):
                 # the free list (native_pool.free_block) so the next prompt reuses
                 # them instead of growing the pool.  Dense's per-prompt state is
                 # already independent (fresh past_key_values), so this makes the
-                # DiffKV rows a like-for-like single-session comparison.
+                # DKV rows a like-for-like single-session comparison.
                 mgr.clear_session(sid)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -640,7 +640,7 @@ def run_worker(config_name, model_id):
                     "prefill_forward_vram_gb": 0.0,
                     "prefill_compress_vram_gb": 0.0,
                     "peak_decode_vram_gb": peak_decode_vram,
-                    "pool_physical_mb": 0.0,   # dense baseline has no DiffKV pool
+                    "pool_physical_mb": 0.0,   # dense baseline has no DKV pool
                     "kv_cache_vram_gb": kv_vram,
                     "output_text": generated_text,
                 }
@@ -661,7 +661,7 @@ def generate_report(all_results, model_id):
     
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(f"# Neighborhood Attention Paper Evaluation Report ({model_id})\n\n")
-        f.write("This report compares the performance, memory usage, and generation quality of standard **Dense Attention** against **Differential KV (DiffKV)** under various presets, early layer rank boosting, and factual store routing on an A100 GPU.\n\n")
+        f.write("This report compares the performance, memory usage, and generation quality of standard **Dense Attention** against **Differential KV (DKV)** under various presets, early layer rank boosting, and factual store routing on an A100 GPU.\n\n")
         
         for p_idx in [1]:
             p_key = f"prompt{p_idx}"
@@ -752,7 +752,7 @@ def main():
             for p_key in ["prompt1"]:
                 p_res = res.get(p_key, {})
 
-                # PEAK VRAM is the number that matters for "does DiffKV save RAM":
+                # PEAK VRAM is the number that matters for "does DKV save RAM":
                 # torch.cuda.max_memory_allocated across prefill / decode, which
                 # includes weights + raw KV + pool + workspaces.
                 #
@@ -791,10 +791,10 @@ def main():
                 # Show the actual generated text so runs are judged on OUTPUT, not
                 # just metrics — essential for A/B'ing the numerics-changing paths
                 # (Gram, contiguous/un-rotate prefill, and any future CUDA-graph
-                # decode).  Full text unless DIFFKV_EVAL_OUTPUT_CHARS caps it.
+                # decode).  Full text unless DKV_EVAL_OUTPUT_CHARS caps it.
                 _otext = p_res.get("output_text", "").strip().replace("\n", " ")
                 try:
-                    _cap = int(os.environ.get("DIFFKV_EVAL_OUTPUT_CHARS", "0"))
+                    _cap = int(os.environ.get("DKV_EVAL_OUTPUT_CHARS", "0"))
                 except ValueError:
                     _cap = 0
                 if _cap > 0 and len(_otext) > _cap:

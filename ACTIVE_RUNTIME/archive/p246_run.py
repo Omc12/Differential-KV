@@ -28,7 +28,7 @@ torch.cuda.reset_peak_memory_stats(DEVICE)
 s0 = snap("pre-load")
 
 from native_core.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -48,7 +48,7 @@ kvm = KVRuntimeManager(
     device=DEVICE, streaming_ingest=True,
     micro_block_size=16, async_compression=True,
 )
-apply_diffkv_attention_patch(model, kvm)
+apply_dkv_attention_patch(model, kvm)
 
 s_loaded = snap("weights loaded")
 weight_mb = round(s_loaded["alloc"] - s0["alloc"], 2)
@@ -79,7 +79,7 @@ for ptoks in [32, 128, 512]:
     recon_log.clear()
     sid = "sess_" + str(ptoks)
     kvm.init_session(sid)
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
 
     # Build exactly ptoks tokens
     raw = "The quick brown fox jumps over the lazy dog. " * ((ptoks // 9) + 1)

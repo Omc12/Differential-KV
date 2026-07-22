@@ -1,4 +1,4 @@
-"""DiffKV paper visual identity v2 — DeepSeek-report aesthetics.
+"""DKV paper visual identity v2 — DeepSeek-report aesthetics.
 
 Principles (matched to the DeepSeek-V3.2 report):
   * charts carry NO in-figure title — the LaTeX caption does that job;
@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 # ── palette ─────────────────────────────────────────────────────────────────
 BLACK    = "#111111"   # all text + box strokes
-BLUE     = "#3D6FD1"   # primary series (DiffKV)
+BLUE     = "#3D6FD1"   # primary series (DKV)
 BLUE_D   = "#274F9E"   # darker blue (lines, emphasis)
 BLUE_L   = "#A9C4EF"   # light blue fill
 BLUE_XL  = "#DDE7F8"   # very light blue (panel fills)
@@ -30,7 +30,7 @@ WHITE    = "#FFFFFF"
 OOM_RED  = "#C0392B"   # only for failure markers (OOM ✗)
 
 # semantic roles
-C_DIFFKV = BLUE
+C_DKV = BLUE
 C_DENSE  = GRAY
 C_DENSE_LN = GRAY_D    # dense as a line
 C_EXACT  = EMERALD

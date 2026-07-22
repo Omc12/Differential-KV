@@ -1,7 +1,7 @@
 """
-Phase 3 — MLX NIAH smoke test for the real DiffKV compressed decode path.
+Phase 3 — MLX NIAH smoke test for the real DKV compressed decode path.
 
-Tests the MLXDiffKVWrapper (active runtime) directly, with DIFFKV_COMPRESSED_DECODE=1 (default).
+Tests the MLXDKVWrapper (active runtime) directly, with DKV_COMPRESSED_DECODE=1 (default).
 The prompt is built to exactly the target context length and the needle is planted at a
 specified depth. Success = the needle passcode appears in the generated output.
 
@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Default: real compressed decode
-os.environ.setdefault("DIFFKV_COMPRESSED_DECODE", "1")
+os.environ.setdefault("DKV_COMPRESSED_DECODE", "1")
 
 NEEDLE = "The secret passcode is OMEGA-7741-DELTA."
 QUESTION = "What is the secret passcode? Repeat it exactly."
@@ -60,15 +60,15 @@ def make_mlx_niah_prompt(tokenizer, target_tokens: int, depth: float) -> str:
 
 
 def run_niah(ctx_len: int, depth: float, model_id: str) -> bool:
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
     print(f"\n{'='*60}")
     print(f"MLX NIAH Test — ctx={ctx_len} tokens, depth={depth:.1f}")
-    use_compressed = os.environ.get("DIFFKV_COMPRESSED_DECODE", "1")
-    print(f"DIFFKV_COMPRESSED_DECODE={use_compressed}")
+    use_compressed = os.environ.get("DKV_COMPRESSED_DECODE", "1")
+    print(f"DKV_COMPRESSED_DECODE={use_compressed}")
     print(f"{'='*60}")
 
-    wrapper = MLXDiffKVWrapper(
+    wrapper = MLXDKVWrapper(
         model_id=model_id,
         config={"rank": 16, "block_size": 256},
     )

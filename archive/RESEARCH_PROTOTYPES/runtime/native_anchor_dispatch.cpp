@@ -2,7 +2,7 @@
 #include <iostream>
 #include <omp.h>
 
-namespace diffkv {
+namespace dkv {
 namespace runtime {
 
 class NativeAnchorDispatch {
@@ -25,4 +25,4 @@ private:
 };
 
 } // namespace runtime
-} // namespace diffkv
+} // namespace dkv

@@ -40,7 +40,7 @@ class EcosystemCompatibilitySweep:
 
     def _check_hf_compatibility(self) -> bool:
         try:
-            from integrations.huggingface_runtime_adapter import DiffKVHFAdapter
+            from integrations.huggingface_runtime_adapter import DKVHFAdapter
             return True
         except ImportError as e:
             self.logger.error(f"HF compatibility check failed: {e}")
@@ -56,7 +56,7 @@ class EcosystemCompatibilitySweep:
 
     def _check_langchain_compatibility(self) -> bool:
         try:
-            from integrations.langchain_adapter import DiffKVLangChainAdapter
+            from integrations.langchain_adapter import DKVLangChainAdapter
             return True
         except ImportError as e:
             self.logger.error(f"LangChain compatibility check failed: {e}")
@@ -64,7 +64,7 @@ class EcosystemCompatibilitySweep:
 
     def _check_llamaindex_compatibility(self) -> bool:
         try:
-            from integrations.llamaindex_query_adapter import DiffKVLlamaIndexAdapter
+            from integrations.llamaindex_query_adapter import DKVLlamaIndexAdapter
             return True
         except ImportError as e:
             self.logger.error(f"LlamaIndex compatibility check failed: {e}")

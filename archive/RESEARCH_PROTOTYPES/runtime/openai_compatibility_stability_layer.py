@@ -45,7 +45,7 @@ class OpenAICompatibilityStabilityLayer:
             "id": f"chatcmpl-{session_id}",
             "object": "chat.completion",
             "created": 0,
-            "model": "diffkv-production",
+            "model": "dkv-production",
             "choices": [{
                 "message": {"role": "assistant", "content": "Stable response."},
                 "finish_reason": "stop",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Active-side twin of native's DIFFKV_RECON_CMP probe.
+Active-side twin of native's DKV_RECON_CMP probe.
 
 Generates the IDENTICAL deterministic high-rank synthetic block (smooth low-rank
 filler made of NCOMP cosine components + an overwhelmingly dominant landmark at
@@ -9,9 +9,9 @@ through the live active (MLX) compression path (compress_mlx_block: joint [K|V]
 rank-r rSVD, NO residuals) and reports per-token relative reconstruction error.
 
 Diff the NEEDLE line against native's:
-    DIFFKV_RECON_CMP=1            ./diffkv_native/build/diffkv_native   (native, residuals ON)
-    DIFFKV_RECON_NORESID=1 ...    (native, pure lowrank — apples-to-apples)
-    ./diffkv_venv/bin/python3 benchmarks/recon_cmp.py                   (active)
+    DKV_RECON_CMP=1            ./dkv_native/build/dkv_native   (native, residuals ON)
+    DKV_RECON_NORESID=1 ...    (native, pure lowrank — apples-to-apples)
+    ./dkv_venv/bin/python3 benchmarks/recon_cmp.py                   (active)
 
 If native (pure lowrank) ≈ active here, the compression is equivalent and the
 benchmark gap lives in the DECODE attention. If active is much lower, active's
@@ -26,7 +26,7 @@ S, KVH, D = 256, 2, 128
 F = KVH * D            # 256
 NCOMP = 28
 NEEDLE = 128
-RANK = int(os.environ.get("DIFFKV_RANK", "16"))
+RANK = int(os.environ.get("DKV_RANK", "16"))
 
 ACTIVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ACTIVE_RUNTIME")
 
@@ -52,9 +52,9 @@ def build_block():
 
 def main():
     K, V = build_block()
-    # Use the SAME anchor native picked (printed as landmark=L; pass via DIFFKV_RECON_ANCHOR).
+    # Use the SAME anchor native picked (printed as landmark=L; pass via DKV_RECON_ANCHOR).
     # Row order doesn't affect per-token reconstruction error, so we list originals excluding A.
-    A = int(os.environ.get("DIFFKV_RECON_ANCHOR", "208"))
+    A = int(os.environ.get("DKV_RECON_ANCHOR", "208"))
     orig = [i for i in range(S) if i != A]
     anchor_k, anchor_v = K[A], V[A]
     dK = K[orig] - anchor_k
@@ -64,7 +64,7 @@ def main():
     sys.path.insert(0, ACTIVE_DIR)
     try:
         import mlx.core as mx
-        from serving.mlx_diffkv_wrapper import compress_mlx_block
+        from serving.mlx_dkv_wrapper import compress_mlx_block
         backend = "compress_mlx_block (live MLX active path)"
         U_k, Vh_k, scale, k = compress_mlx_block(mx.array(deltas), RANK)
         U_k = np.array(U_k, dtype=np.float32)

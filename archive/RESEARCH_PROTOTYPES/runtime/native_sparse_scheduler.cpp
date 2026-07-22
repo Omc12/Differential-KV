@@ -5,7 +5,7 @@
 #include <thread>
 #include <atomic>
 
-namespace diffkv {
+namespace dkv {
 namespace runtime {
 
 class NativeSparseScheduler {
@@ -66,4 +66,4 @@ private:
 };
 
 } // namespace runtime
-} // namespace diffkv
+} // namespace dkv

@@ -4,7 +4,7 @@
 
 When a user submits a 25,000 token prompt, it enters the `ContinuousBatchEngine`. The prefill step invokes `model(input_ids, use_cache=True)`.
 
-Inside `diffkv_attention.py` (Phase 24.5 architecture), the execution proceeds as follows:
+Inside `dkv_attention.py` (Phase 24.5 architecture), the execution proceeds as follows:
 
 ### 1. KV State Ingestion
 ```python
@@ -20,7 +20,7 @@ kv_manager.ingest_streaming(sid, captured_layer_idx, curr_k, curr_v)
 past_k, past_v = kv_manager.get_kv(sid, captured_layer_idx)
 ```
 - Because this is the first turn, `get_kv()` returns `None`.
-- For multi-turn, this rebuilds the compressed slabs back into dense representations using `TritonDiffKV.reconstruct_lowrank`.
+- For multi-turn, this rebuilds the compressed slabs back into dense representations using `TritonDKV.reconstruct_lowrank`.
 
 ### 3. Eager Attention Materialization (The Bottleneck)
 ```python

@@ -22,14 +22,14 @@ def verify_triton(args):
     anchor = torch.randn(128, device=args.device, dtype=torch.float16)
     
     # This should trigger the audit log via the patch
-    from runtime.triton_diffkv import TritonDiffKV
-    res = TritonDiffKV.reconstruct_lowrank(U, V, anchor)
+    from runtime.triton_dkv import TritonDKV
+    res = TritonDKV.reconstruct_lowrank(U, V, anchor)
     
     # 2. Test sparse reconstruction
     print("Testing Sparse Triton Path...")
     sparse_indices = torch.tensor([0, 10, 20], device=args.device)
     sparse_values = torch.tensor([1.0, 2.0, 3.0], device=args.device, dtype=torch.float16)
-    res_sparse = TritonDiffKV.reconstruct_lowrank_sparse(U, V, anchor, sparse_indices, sparse_values)
+    res_sparse = TritonDKV.reconstruct_lowrank_sparse(U, V, anchor, sparse_indices, sparse_values)
 
     # Analyze logs
     triton_launches = [e for e in auditor.trace_log if e["category"] == "triton" and e["event_type"] == "launch"]

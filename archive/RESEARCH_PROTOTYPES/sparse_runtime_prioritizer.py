@@ -13,9 +13,9 @@ class SparseRuntimePrioritizer:
         """
         Force-sets environment variables and runtime flags for sparse dominance.
         """
-        os.environ['DIFFKV_BYPASS_HF_FORWARD'] = '1'
-        os.environ['DIFFKV_FORCE_TRITON_DECODE'] = '1'
-        os.environ['DIFFKV_FORCE_CUSTOM_SAMPLER'] = '1'
+        os.environ['DKV_BYPASS_HF_FORWARD'] = '1'
+        os.environ['DKV_FORCE_TRITON_DECODE'] = '1'
+        os.environ['DKV_FORCE_CUSTOM_SAMPLER'] = '1'
         
         # In a real system, this would also tune the KVRuntimeManager
         # to be more aggressive with sparsity when load is high.

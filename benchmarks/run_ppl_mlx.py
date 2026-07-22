@@ -12,7 +12,7 @@ sys.path.insert(0, ACTIVE)
 
 import mlx.core as mx
 import mlx.nn as nn
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 import torch
 
 SAMPLE_TEXT = """
@@ -40,7 +40,7 @@ def generate_eval_corpus(tokenizer, target_tokens: int):
 
 def compute_ppl_for_mode(wrapper, token_ids, compressed_decode=True):
     wrapper.ensure_loaded()
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if compressed_decode else "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1" if compressed_decode else "0"
     
     sid = "ppl_eval"
     wrapper.manager.clear_session(sid)
@@ -51,7 +51,7 @@ def compute_ppl_for_mode(wrapper, token_ids, compressed_decode=True):
     input_ids = torch.tensor([token_ids[:-1]], dtype=torch.long)
     target_ids = mx.array(token_ids[1:])
 
-    wrapper.model._diffkv_session_ids = [sid]
+    wrapper.model._dkv_session_ids = [sid]
     wrapper.manager.init_session(sid, prefill_len=len(token_ids)-1)
 
     # Simple sample decoding / logits cross entropy evaluation
@@ -79,8 +79,8 @@ def compute_ppl_for_mode(wrapper, token_ids, compressed_decode=True):
     return loss_val, ppl
 
 def run_ppl_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
-    print("--- Running Perplexity Evaluation (Dense vs DiffKV) ---", flush=True)
-    wrapper = MLXDiffKVWrapper(
+    print("--- Running Perplexity Evaluation (Dense vs DKV) ---", flush=True)
+    wrapper = MLXDKVWrapper(
         model_id=model_id,
         config={"rank": 32, "block_size": 256},
     )
@@ -95,19 +95,19 @@ def run_ppl_eval(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit"):
         # Dense PPL
         loss_dense, ppl_dense = compute_ppl_for_mode(wrapper, token_ids, compressed_decode=False)
 
-        # DiffKV PPL
-        loss_diffkv, ppl_diffkv = compute_ppl_for_mode(wrapper, token_ids, compressed_decode=True)
+        # DKV PPL
+        loss_dkv, ppl_dkv = compute_ppl_for_mode(wrapper, token_ids, compressed_decode=True)
 
         res = {
             "context_tokens": ctx,
             "loss_dense": round(loss_dense, 4),
             "ppl_dense": round(ppl_dense, 4),
-            "loss_diffkv": round(loss_diffkv, 4),
-            "ppl_diffkv": round(ppl_diffkv, 4),
-            "ppl_delta_pct": round(((ppl_diffkv - ppl_dense) / ppl_dense) * 100.0, 2),
+            "loss_dkv": round(loss_dkv, 4),
+            "ppl_dkv": round(ppl_dkv, 4),
+            "ppl_delta_pct": round(((ppl_dkv - ppl_dense) / ppl_dense) * 100.0, 2),
         }
         results.append(res)
-        print(f"Context {ctx:>5} tokens | Dense PPL: {ppl_dense:.4f} (Loss: {loss_dense:.4f}) | DiffKV PPL: {ppl_diffkv:.4f} (Loss: {loss_diffkv:.4f}) | Delta: {res['ppl_delta_pct']:+.2f}%", flush=True)
+        print(f"Context {ctx:>5} tokens | Dense PPL: {ppl_dense:.4f} (Loss: {loss_dense:.4f}) | DKV PPL: {ppl_dkv:.4f} (Loss: {loss_dkv:.4f}) | Delta: {res['ppl_delta_pct']:+.2f}%", flush=True)
 
     out_dir = os.path.join(REPO, "benchmarks", "results")
     os.makedirs(out_dir, exist_ok=True)

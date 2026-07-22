@@ -7,7 +7,7 @@
 #           Re-verifies consistency_report.md §6 headline numbers.
 #
 # Phase C1: LongBench (NarrativeQA, Qasper, HotpotQA, GovReport)
-#           20 samples each, compare dense vs DiffKV.
+#           20 samples each, compare dense vs DKV.
 #
 # Phase C2: RULER (NIAH-single, NIAH-multi-keys, NIAH-multi-values,
 #           NIAH-multi-queries, variable-tracking, CWE, FWE, QA)
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_PY="$REPO/diffkv_venv/bin/python3"
+VENV_PY="$REPO/dkv_venv/bin/python3"
 BENCH="$REPO/benchmarks"
 ACTIVE="$REPO/ACTIVE_RUNTIME"
 RESULTS="$BENCH/results"
@@ -50,7 +50,7 @@ run_phase() {
 }
 
 if [[ ! -x "$VENV_PY" ]]; then
-    fail "diffkv_venv not found. Run: cd $REPO && make setup && pip install mlx mlx-lm datasets"
+    fail "dkv_venv not found. Run: cd $REPO && make setup && pip install mlx mlx-lm datasets"
     exit 1
 fi
 "$VENV_PY" -c "import mlx.core" || { fail "MLX not installed. Run: pip install mlx mlx-lm"; exit 1; }
@@ -64,12 +64,12 @@ should_run() {
 }
 
 # Paper-config env for all runs
-export DIFFKV_COMPRESSED_DECODE=1
-export DIFFKV_MAX_RESIDUAL=128
-export DIFFKV_SPARSE_PREFILL=1
-export DIFFKV_DECODE_CACHE=1
-export DIFFKV_SPARSE_BIAS=auto
-export DIFFKV_SEED=1234
+export DKV_COMPRESSED_DECODE=1
+export DKV_MAX_RESIDUAL=128
+export DKV_SPARSE_PREFILL=1
+export DKV_DECODE_CACHE=1
+export DKV_SPARSE_BIAS=auto
+export DKV_SEED=1234
 export TOKENIZERS_PARALLELISM=false
 
 # ============================================================================
@@ -89,12 +89,12 @@ fi
 
 # ============================================================================
 # C1 — LongBench: NarrativeQA, Qasper, HotpotQA, GovReport
-#      20 examples each, dense vs DiffKV side-by-side (--compare).
+#      20 examples each, dense vs DKV side-by-side (--compare).
 #      Output: results/longbench_compare_<timestamp>.json
 # ============================================================================
 if should_run "C1"; then
     LONGBENCH_OUT="$RESULTS/longbench_compare_${TIMESTAMP}.json"
-    run_phase "C1" "LongBench — NarrativeQA / Qasper / HotpotQA / GovReport (dense vs DiffKV)" \
+    run_phase "C1" "LongBench — NarrativeQA / Qasper / HotpotQA / GovReport (dense vs DKV)" \
         "$VENV_PY" "$ACTIVE/run_longbench.py" \
             --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
             --preset mid \

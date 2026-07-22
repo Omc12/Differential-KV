@@ -2,7 +2,7 @@
 
 ## Hard-Disabling Eager Fallback
 
-To prevent any possibility of the system silently falling back to un-patched, eager attention paths, we enforced strict measures in `diffkv_attention.py`:
+To prevent any possibility of the system silently falling back to un-patched, eager attention paths, we enforced strict measures in `dkv_attention.py`:
 
 1. **Eliminated `torch.matmul(Q, K.T)` entirely:** The code has been physically modified to replace the GQA dense path with a direct call to `torch.nn.functional.scaled_dot_product_attention`.
 2. **Explicit Mask Handling:** 

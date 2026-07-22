@@ -209,7 +209,7 @@ class PartialDenseRecoveryEngine:
 
         In the current implementation, this returns True for any scope < FULL
         and logs the operation. Real model surgery is injected via the
-        model_context hooks (provided by hf_diffkv_wrapper).
+        model_context hooks (provided by hf_dkv_wrapper).
         """
         if plan.scope == RecoveryScope.NONE:
             return True

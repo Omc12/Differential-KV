@@ -2,7 +2,7 @@ import torch
 
 class SparseAttentionBridge:
     """
-    Bridges the gap between standard attention implementations and DiffKV sparse kernels.
+    Bridges the gap between standard attention implementations and DKV sparse kernels.
     Handles tensor layout conversions and alignment for Triton/CUDA kernels.
     """
     def __init__(self, use_triton=True):
@@ -22,8 +22,8 @@ class SparseAttentionBridge:
         Dispatches to the appropriate sparse attention kernel.
         """
         if self.use_triton:
-            from runtime.triton_diffkv import TritonDiffKV
-            # return TritonDiffKV.forward(q, k, v, mask)
+            from runtime.triton_dkv import TritonDKV
+            # return TritonDKV.forward(q, k, v, mask)
             pass
         else:
             # Fallback to torch-native sparse

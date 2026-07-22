@@ -5,14 +5,14 @@ This file used a 4-layer randomly-initialised TransformerEncoder as the model.
 It is NOT connected to any real LLM. Its outputs are meaningless random tokens.
 
 The real serving entry point is:
-    python run_diffkv_webui_server.py
+    python run_dkv_webui_server.py
 
-which uses LGSResolver + DiffKVHFWrapper (real HuggingFace model).
+which uses LGSResolver + DKVHFWrapper (real HuggingFace model).
 """
 
 raise RuntimeError(
     "api/openai_compatible_server.py is deprecated and must not be run. "
-    "Use: python run_diffkv_webui_server.py"
+    "Use: python run_dkv_webui_server.py"
 )
 
 from fastapi.responses import StreamingResponse

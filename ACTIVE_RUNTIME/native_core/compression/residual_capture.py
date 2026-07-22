@@ -1,7 +1,7 @@
 """Content-aware residual capture for the torch/CUDA compression path.
 
 Pure-Python port of the three capture layers that the MLX wrapper
-(serving/mlx_diffkv_wrapper.py) and the native runtime (lowrank.cpp) already
+(serving/mlx_dkv_wrapper.py) and the native runtime (lowrank.cpp) already
 apply when ranking residual candidates — closing CUDA_TRITON_AUDIT.md C10
 ("the torch/CUDA path lacks the boost machinery entirely"):
 
@@ -15,9 +15,9 @@ apply when ranking residual candidates — closing CUDA_TRITON_AUDIT.md C10
 KEEP IN SYNC with the MLX helpers (_apply_owner_capture,
 _detect_table_rows, _apply_table_capture, and the inline is_core/is_prose
 classification) and with lowrank.cpp's mirrored block. Env dials are shared:
-DIFFKV_RESIDUAL_TOKEN_BOOST (default 8), DIFFKV_RESIDUAL_OWNER_CAPTURE
-(default on), DIFFKV_RESIDUAL_OWNER_DIST (12), DIFFKV_RESIDUAL_TABLE_CAPTURE
-(default on), DIFFKV_RESIDUAL_TABLE_PRIORITY (4).
+DKV_RESIDUAL_TOKEN_BOOST (default 8), DKV_RESIDUAL_OWNER_CAPTURE
+(default on), DKV_RESIDUAL_OWNER_DIST (12), DKV_RESIDUAL_TABLE_CAPTURE
+(default on), DKV_RESIDUAL_TABLE_PRIORITY (4).
 
 No torch/mlx imports here: callable from any backend and unit-testable on CPU.
 """
@@ -124,7 +124,7 @@ def _detect_table_rows(tok_strs):
     # exact, stayed row-correct). Walk up to 3 lines above the first fired
     # line of each run; a line mentioning 'table'/'tab.' followed by a digit
     # nearby joins the exact set.
-    if os.environ.get("DIFFKV_RESIDUAL_TABLE_CAPTION", "1") != "1":
+    if os.environ.get("DKV_RESIDUAL_TABLE_CAPTION", "1") != "1":
         return marked
 
     def _is_caption(ln):
@@ -160,10 +160,10 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
 
     tok_strs: decoded surface string per token; tids: token ids; counts:
     session token-id -> count; total_tokens: session length. Returns None
-    instead of a list when boosting is disabled (DIFFKV_RESIDUAL_TOKEN_BOOST
+    instead of a list when boosting is disabled (DKV_RESIDUAL_TOKEN_BOOST
     <= 1)."""
     try:
-        tok_boost = float(os.environ.get("DIFFKV_RESIDUAL_TOKEN_BOOST", "8.0"))
+        tok_boost = float(os.environ.get("DKV_RESIDUAL_TOKEN_BOOST", "8.0"))
     except ValueError:
         tok_boost = 8.0
     if tok_boost <= 1.0:
@@ -203,9 +203,9 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
                 boost[i] = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0)
 
     # Owner capture (layer 1b)
-    if os.environ.get("DIFFKV_RESIDUAL_OWNER_CAPTURE", "1") == "1":
+    if os.environ.get("DKV_RESIDUAL_OWNER_CAPTURE", "1") == "1":
         try:
-            owner_dist = int(os.environ.get("DIFFKV_RESIDUAL_OWNER_DIST", "12"))
+            owner_dist = int(os.environ.get("DKV_RESIDUAL_OWNER_DIST", "12"))
         except ValueError:
             owner_dist = 12
         for seg in segments:
@@ -242,9 +242,9 @@ def compute_boost_multipliers(tok_strs, tids, counts, total_tokens):
                 boost[i] = tok_boost * (_idf_weight(tids[i], counts, total_tokens) / 2.0)
 
     # Table capture (layer 3)
-    if os.environ.get("DIFFKV_RESIDUAL_TABLE_CAPTURE", "1") == "1":
+    if os.environ.get("DKV_RESIDUAL_TABLE_CAPTURE", "1") == "1":
         try:
-            priority = float(os.environ.get("DIFFKV_RESIDUAL_TABLE_PRIORITY", "4.0"))
+            priority = float(os.environ.get("DKV_RESIDUAL_TABLE_PRIORITY", "4.0"))
         except ValueError:
             priority = 4.0
         marked = _detect_table_rows(tok_strs)

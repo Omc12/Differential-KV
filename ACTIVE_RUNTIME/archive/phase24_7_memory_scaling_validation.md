@@ -16,7 +16,7 @@ We measured actual peak VRAM consumption on an NVIDIA GPU running Qwen2.5-0.5B:
 
 ## Analysis of the 25K Failure
 
-At 25,000 tokens, the KV cache itself (compressed via DiffKV) is incredibly tiny:
+At 25,000 tokens, the KV cache itself (compressed via DKV) is incredibly tiny:
 - ~1,562 micro-blocks compressed to rank 8.
 - **Estimated KV storage size: ~340 MB**.
 

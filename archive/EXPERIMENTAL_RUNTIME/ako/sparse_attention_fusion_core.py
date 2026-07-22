@@ -31,7 +31,7 @@ class SparseAttentionFusionCore:
         
         # Implementation using PyTorch fused primitives (simulated)
         with torch.cuda.nvtx.range("fused_sparse_attention"):
-            # In production, this would use a Triton kernel like triton_diffkv.py
+            # In production, this would use a Triton kernel like triton_dkv.py
             return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
     def get_fusion_metrics(self) -> Dict[str, float]:

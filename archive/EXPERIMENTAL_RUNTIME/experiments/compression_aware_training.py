@@ -54,7 +54,7 @@ class CompressionAwareTrainer:
         
         # We need to run the model step-by-step to apply compression to the cache
         # OR we can just inject noise into the hidden states during forward pass.
-        # Injecting noise into KV is more specific to DiffKV.
+        # Injecting noise into KV is more specific to DKV.
         
         outputs = self.model(input_ids, labels=labels)
         loss = outputs.loss

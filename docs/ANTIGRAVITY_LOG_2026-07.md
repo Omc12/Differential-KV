@@ -6,10 +6,10 @@ This log records the implementation details and benchmark measurements for the n
 
 | Command | Baseline Result |
 |---|---|
-| `python -m pytest ACTIVE_RUNTIME/tests/test_diffkv_kernel_parity.py -q` | 4 passed |
+| `python -m pytest ACTIVE_RUNTIME/tests/test_dkv_kernel_parity.py -q` | 4 passed |
 | `python niah_recall.py --ctx 4096 --depths 0.1 0.5 0.9 --model mlx-community/Qwen2.5-1.5B-Instruct-4bit` | 3/3, 20.5 / 20.5 / 21.1 tps |
 | `python relational_ab.py --mode sparse --natural --spread` | 4/4, 0 misbound |
-| `cd diffkv_native/tests && ./test_niah_native.sh` | 1/6 passed (4k/0.9 only) |
+| `cd dkv_native/tests && ./test_niah_native.sh` | 1/6 passed (4k/0.9 only) |
 
 ---
 
@@ -17,10 +17,10 @@ This log records the implementation details and benchmark measurements for the n
 
 ### D1: Native needle-capture root cause (correctness)
 - Fixed: Pre-registered full prompt token IDs into `session_token_ids_` at the beginning of prefill ingestion (when `position_start == 0`), preventing dangling pointer data races on the async compression thread and ensuring IDF counts are computed against the full prompt corpus.
-- Ported: Stride-stratified residual coverage bonus `DIFFKV_RESIDUAL_COVERAGE_FRAC` from MLX wrapper to C++ `lowrank.cpp` compressor.
+- Ported: Stride-stratified residual coverage bonus `DKV_RESIDUAL_COVERAGE_FRAC` from MLX wrapper to C++ `lowrank.cpp` compressor.
 - Measurement:
   - Without coverage bonus: 1/6 (4k/0.9 only)
-  - With `DIFFKV_RESIDUAL_COVERAGE_FRAC=0.25`: 1/6 passed grep check, but 16k/0.9 output improved from corrupted `OMEOMA-G741DELDelta` to highly recognizable `OMEOMA-7741-DDelta`.
+  - With `DKV_RESIDUAL_COVERAGE_FRAC=0.25`: 1/6 passed grep check, but 16k/0.9 output improved from corrupted `OMEOMA-G741DELDelta` to highly recognizable `OMEOMA-7741-DDelta`.
 
 ### D2: LSE-gated block re-expansion (novel direction)
 - Phase A Measurement: Logged the LSE share of the compressed pool vs the dense window.
@@ -29,7 +29,7 @@ This log records the implementation details and benchmark measurements for the n
 
 ### D3: MLX fused single-dispatch decode kernel
 - Design: Implemented a single-dispatch custom Metal JIT kernel using Online Softmax (Flash-style) in MSL, eliminating the dynamic memory overhead of static arrays and supporting arbitrary context sizes.
-- Verification: The kernel passed the parity checks on randomized sessions (`test_diffkv_kernel_parity.py` green) with a max output difference of < `1e-5` in fp32 and `0.015` in fp16 (matching standard fp16 precision limits).
+- Verification: The kernel passed the parity checks on randomized sessions (`test_dkv_kernel_parity.py` green) with a max output difference of < `1e-5` in fp32 and `0.015` in fp16 (matching standard fp16 precision limits).
 - Benchmarking:
   - Default compiled path: **19.5 tps**
   - Fused Metal JIT path: **0.8 tps**
@@ -88,7 +88,7 @@ This log records the implementation details and benchmark measurements for the n
 #### D6.2: 32k Prefill Scaling & Timing Note
 - **Runnable Status:** Successfully ran a 32,000-token context prefill + decode step on the 8GB RAM Apple M3 dev machine without crashes or memory OOMs.
 - **Mechanism:**
-  - **Prefill Chunking:** Automatically divides the 32k prompt into 512-token chunks (`DIFFKV_PREFILL_CHUNK_SIZE=512`). It recreates the GGML backend scheduler per-chunk to prevent memory leaks and graph node accumulation.
+  - **Prefill Chunking:** Automatically divides the 32k prompt into 512-token chunks (`DKV_PREFILL_CHUNK_SIZE=512`). It recreates the GGML backend scheduler per-chunk to prevent memory leaks and graph node accumulation.
   - **Early Activation Reclamation:** Right after prefill completes and before the decode loop starts, `main.cpp` reclaims prefill activation memory (`k_activations`/`v_activations` vector swap), returning substantial memory back to the system.
 - **Timing:** Running a full 32k prefill takes ~150 seconds because of the quadratic attention mapping cost across 64 sequential chunks. However, Peak RSS memory is capped under **3.2 GB**, which safely avoids memory OOMs on low-resource (8GB) hardware.
 

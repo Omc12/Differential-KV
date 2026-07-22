@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# CLEAN DiffKV measurement: one isolated process at a time, nothing else running.
-# Config = ACTIVE CLI (mid / balanced / rank 32 / int4) with DiffKV sparse forced
+# CLEAN DKV measurement: one isolated process at a time, nothing else running.
+# Config = ACTIVE CLI (mid / balanced / rank 32 / int4) with DKV sparse forced
 # on at every context; see paper/scripts/cell_worker.py for the exact flags.
 set -u
 cd "$(dirname "$0")/../.."
-source diffkv_venv/bin/activate 2>/dev/null
+source dkv_venv/bin/activate 2>/dev/null
 RES=benchmarks/results
 LOG=$RES/clean_${TAG:-sweep}.log
 : > "$LOG"

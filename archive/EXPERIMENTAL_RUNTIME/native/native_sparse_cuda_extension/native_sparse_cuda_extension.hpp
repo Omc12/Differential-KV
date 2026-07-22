@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace diffkv {
+namespace dkv {
 
 class NativeSparseCudaExtension {
 public:
@@ -21,4 +21,4 @@ public:
     std::vector<int> index_sparse_blocks(const std::vector<float>& scores, float threshold);
 };
 
-} // namespace diffkv
+} // namespace dkv

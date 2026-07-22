@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_ruler_mlx.py — RULER benchmark for DiffKV ACTIVE_RUNTIME (MLX)
+run_ruler_mlx.py — RULER benchmark for DKV ACTIVE_RUNTIME (MLX)
 ====================================================================
 RULER (Realistic, Unified, Long-context Evaluation and Retrieval) tests 8 task
 types that go well beyond simple NIAH:
@@ -29,7 +29,7 @@ We implement a clean, self-contained subset:
 Reference: Hsieh et al. (2024) "RULER: What's the Real Context Window Size
 of Your LLM?" https://arxiv.org/abs/2404.06654
 
-Runs DiffKV (COMPRESSED_DECODE=1) vs Dense (COMPRESSED_DECODE=0) side-by-side
+Runs DKV (COMPRESSED_DECODE=1) vs Dense (COMPRESSED_DECODE=0) side-by-side
 on the same examples. Saves full per-example details plus aggregate scores.
 """
 import sys
@@ -201,25 +201,25 @@ def run_ruler(
     if tasks is None:
         tasks = list(TASK_BUILDERS.keys())
 
-    print(f"RULER — DiffKV vs Dense", flush=True)
+    print(f"RULER — DKV vs Dense", flush=True)
     print(f"Model:    {model_id}", flush=True)
     print(f"Contexts: {contexts}", flush=True)
     print(f"Tasks:    {tasks}", flush=True)
     print(f"Samples:  {num_samples} per (task × context × mode)\n", flush=True)
 
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
     # Load wrapper once (shared model weights)
-    wrapper = MLXDiffKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
+    wrapper = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
     wrapper.ensure_loaded()
     tokenizer = wrapper.tokenizer
 
     all_results = {}
     modes = [
-        ("diffkv", {"DIFFKV_COMPRESSED_DECODE": "1", "DIFFKV_MAX_RESIDUAL": "128",
-                    "DIFFKV_SPARSE_PREFILL": "1", "DIFFKV_DECODE_CACHE": "1",
-                    "DIFFKV_SPARSE_BIAS": "auto", "DIFFKV_SEED": "1234"}),
-        ("dense",  {"DIFFKV_COMPRESSED_DECODE": "0"}),
+        ("dkv", {"DKV_COMPRESSED_DECODE": "1", "DKV_MAX_RESIDUAL": "128",
+                    "DKV_SPARSE_PREFILL": "1", "DKV_DECODE_CACHE": "1",
+                    "DKV_SPARSE_BIAS": "auto", "DKV_SEED": "1234"}),
+        ("dense",  {"DKV_COMPRESSED_DECODE": "0"}),
     ]
 
     for task_name in tasks:
@@ -281,10 +281,10 @@ def run_ruler(
 
     # ── Summary table ──────────────────────────────────────────────────────
     print("\n" + "=" * 70, flush=True)
-    print("RULER Summary — DiffKV vs Dense accuracy (%)", flush=True)
+    print("RULER Summary — DKV vs Dense accuracy (%)", flush=True)
     print("=" * 70, flush=True)
     header = f"{'Task':<22}" + "".join(
-        f"  {ctx//1024}k DiffKV  {ctx//1024}k Dense" for ctx in contexts
+        f"  {ctx//1024}k DKV  {ctx//1024}k Dense" for ctx in contexts
     )
     print(header, flush=True)
     print("-" * len(header), flush=True)
@@ -292,7 +292,7 @@ def run_ruler(
         row = f"{task_name:<22}"
         for ctx in contexts:
             d = all_results[task_name].get(ctx, {})
-            dk = d.get("diffkv", {}).get("accuracy", float("nan"))
+            dk = d.get("dkv", {}).get("accuracy", float("nan"))
             dn = d.get("dense", {}).get("accuracy", float("nan"))
             row += f"  {dk:>8.1f}  {dn:>8.1f}"
         print(row, flush=True)

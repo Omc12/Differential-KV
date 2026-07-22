@@ -23,15 +23,15 @@ def test_dense_unique_facts():
     Scenario 1: Dense unique facts (reconstruction degradation stress).
     Loads a sequence containing multiple unique facts and asks about one.
     """
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # Set threshold low so routing is active
-    os.environ["DIFFKV_SRL_THRESHOLD"] = "5"
+    os.environ["DKV_SRL_THRESHOLD"] = "5"
     
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 16}, device=device)
     
     # Create a dense list of facts
     facts = [
@@ -77,15 +77,15 @@ def test_far_needle_retrieval():
     Scenario 2: Far-needle retrieval (0% depth, max recency window bypass).
     Needle is placed at the absolute start of the context (index 0).
     """
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # Set threshold low so routing is active
-    os.environ["DIFFKV_SRL_THRESHOLD"] = "5"
+    os.environ["DKV_SRL_THRESHOLD"] = "5"
     
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 16}, device=device)
     
     needle = "The special security word is BANANA."
     filler = make_filler(wrapper.tokenizer, 4000)
@@ -116,15 +116,15 @@ def test_multi_hop_cross_reference():
     Scenario 3: Multi-hop cross-referencing.
     Requires joining two facts separated by large filler contexts.
     """
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     
     # Set threshold low so routing is active
-    os.environ["DIFFKV_SRL_THRESHOLD"] = "5"
+    os.environ["DKV_SRL_THRESHOLD"] = "5"
     
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 16}, device=device)
     
     fact_a = "Alice is married to David."
     filler_a = make_filler(wrapper.tokenizer, 2000)

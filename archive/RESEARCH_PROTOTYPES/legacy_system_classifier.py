@@ -21,7 +21,7 @@ class LegacySystemClassifier:
                 "BENCHMARKING_GUIDE.md"
             ],
             "ACTIVE_RUNTIME": [
-                "runtime/hf_diffkv_wrapper.py", "decode_pipeline_fusion_engine.py", 
+                "runtime/hf_dkv_wrapper.py", "decode_pipeline_fusion_engine.py", 
                 "runtime/kv_runtime_manager.py", "persistent_triton_dispatcher.py",
                 "active_gpu_residency_controller.py", "triton_token_collapse_kernel.py",
                 "triton_sparse_mlp_kernel.py", "occupancy_aware_triton_fuser.py",

@@ -455,7 +455,7 @@ def decompress_kv_sequence_lowrank(
 
 def estimate_memory(seq_len: int, heads: int, dim: int,
                     rank: int, interval: int = 64) -> dict:
-    """Compare memory for FP16 / INT8-DiffKV / LowRank-DiffKV."""
+    """Compare memory for FP16 / INT8-DKV / LowRank-DKV."""
     feat   = 2 * heads * dim
     n_anc  = max(1, seq_len // interval)
     n_del  = seq_len - n_anc
@@ -518,7 +518,7 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     for every layer.  Recomputing it per layer meant a full tokenizer.decode()
     plus three regex scans for each of (num_blocks x num_layers) calls — 2,352
     times for a 13K prompt on a 48-layer model.  MLX hit the same wall and
-    solved it the same way (mlx_diffkv_wrapper.py:2424): compute once per
+    solved it the same way (mlx_dkv_wrapper.py:2424): compute once per
     block, then tile the result across layers.
 
     Cached on the manager as _block_rank_cache[sid][anchor_idx] -> int, and
@@ -543,7 +543,7 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     boost at all — it runs a flat rank 32 — so this is a CUDA-only divergence
     that costs ~1.5x pool bytes and ~1.5x compression work.
 
-    DIFFKV_RANK_BOOST:
+    DKV_RANK_BOOST:
       auto (default) — current behaviour, boost on the predicate above.
       off            — flat `rank` for every block (MLX parity).
     A/B `off` on the GPU before trusting either: it lowers pool VRAM and
@@ -552,7 +552,7 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     if manager is None:
         return rank
 
-    mode = os.environ.get("DIFFKV_RANK_BOOST", "auto").lower()
+    mode = os.environ.get("DKV_RANK_BOOST", "auto").lower()
     if mode == "off":
         return rank
 
@@ -608,7 +608,7 @@ def _tf32_matmul():
 
     torch.backends.cuda.matmul.allow_tf32 is PROCESS-GLOBAL.  Setting it at
     startup (as an earlier version of this work did, from
-    hf_diffkv_wrapper._configure_cuda_allocator) also changed the fp32 math in
+    hf_dkv_wrapper._configure_cuda_allocator) also changed the fp32 math in
     the decode reconstruction and the block router, which shifted generated
     output across every preset.  Scope it to the compression math so the
     accuracy of decode is untouched.
@@ -616,9 +616,9 @@ def _tf32_matmul():
     Measured worth on A100 (colab/profile_compress_stages.py): compress 4.635 s
     -> 4.453 s, i.e. ~4%.  Small, because 92% of compress is cuSOLVER
     (qr + svd), which does not use TF32 at all.  Kept because it is free and
-    confined; DIFFKV_TF32=0 disables it.
+    confined; DKV_TF32=0 disables it.
     """
-    if not (torch.cuda.is_available() and os.environ.get("DIFFKV_TF32", "1") != "0"):
+    if not (torch.cuda.is_available() and os.environ.get("DKV_TF32", "1") != "0"):
         yield
         return
     _prev = torch.backends.cuda.matmul.allow_tf32
@@ -663,24 +663,24 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # diagnosis; CUDA runs opt out by default, while non-CUDA paths retain the
     # defensive behavior.
     _validate_finite = _local_os.environ.get(
-        "DIFFKV_COMPRESS_VALIDATE_FINITE",
+        "DKV_COMPRESS_VALIDATE_FINITE",
         "0" if gpu_device.type == "cuda" else "1",
     ) == "1"
     if _validate_finite and not torch.isfinite(deltas).all():
         deltas = torch.nan_to_num(deltas, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # ── V-side rebalancing for the joint K|V SVD (MLX parity: DIFFKV_V_SCALE) ──
+    # ── V-side rebalancing for the joint K|V SVD (MLX parity: DKV_V_SCALE) ──
     # When a block's V-delta energy is much smaller than its K-delta energy, the
     # joint SVD spends its rank budget on K and under-represents V.  MLX scales V
     # up by sqrt(eK/eV) before the SVD so V competes for rank, then undoes it on
-    # the V factor (mlx_diffkv_wrapper.compress_deferred_prefill_blocks,
+    # the V factor (mlx_dkv_wrapper.compress_deferred_prefill_blocks,
     # v_scale_on).  Ported here: keep the ORIGINAL `deltas` for residual/error/
     # storage, feed a V-scaled copy to the SVD only, and divide the factor's V
     # columns back by the same gain after the SVD (below).  Self-consistent —
     # recon from the unscaled factor is original-space, so nothing else changes.
-    # Default ON to match MLX; DIFFKV_V_SCALE=0 restores the old CUDA behavior.
+    # Default ON to match MLX; DKV_V_SCALE=0 restores the old CUDA behavior.
     _half_d = feat_dim // 2
-    _v_scale_on = _local_os.environ.get("DIFFKV_V_SCALE", "1") != "0"
+    _v_scale_on = _local_os.environ.get("DKV_V_SCALE", "1") != "0"
     _v_gain = None
     if _v_scale_on:
         _eK = (deltas[:, :, :_half_d] ** 2).sum(dim=(1, 2))                    # [N]
@@ -722,22 +722,22 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # the Gram eigh from ~2.1 s to ~0.015 s — the single biggest compress lever,
     # far past the 1.9x the Gram swap gives at r_proj=53.
     #
-    # BUT r_proj = max_rank + oversamples: even DIFFKV_RANK_BOOST=off (rank 32)
+    # BUT r_proj = max_rank + oversamples: even DKV_RANK_BOOST=off (rank 32)
     # gives 32+5 = 37, still over the cliff.  Two knobs make r_proj<=32 reachable:
-    #   DIFFKV_RSVD_OVERSAMPLES (default 5) — randomized-SVD slack.  With the two
+    #   DKV_RSVD_OVERSAMPLES (default 5) — randomized-SVD slack.  With the two
     #     power iterations below, 0-2 is usually enough; rank 32 + 0 = 32 batches.
-    #   DIFFKV_RSVD_MAX_RPROJ (default 0=off) — hard cap on r_proj.  Blocks that
+    #   DKV_RSVD_MAX_RPROJ (default 0=off) — hard cap on r_proj.  Blocks that
     #     wanted a higher rank are capped to it (fidelity trade — A/B recall).
     # Recommended batched recipe to A/B:
-    #   DIFFKV_COMPRESS_GRAM_SVD=1 DIFFKV_RANK_BOOST=off DIFFKV_RSVD_MAX_RPROJ=32
+    #   DKV_COMPRESS_GRAM_SVD=1 DKV_RANK_BOOST=off DKV_RSVD_MAX_RPROJ=32
     try:
-        n_oversamples = int(_local_os.environ.get("DIFFKV_RSVD_OVERSAMPLES", "5"))
+        n_oversamples = int(_local_os.environ.get("DKV_RSVD_OVERSAMPLES", "5"))
     except ValueError:
         n_oversamples = 5
     n_oversamples = max(0, n_oversamples)
     r_proj = min(max_rank_for_batch + n_oversamples, T_active, feat_dim)
     try:
-        _max_rproj = int(_local_os.environ.get("DIFFKV_RSVD_MAX_RPROJ", "0"))
+        _max_rproj = int(_local_os.environ.get("DKV_RSVD_MAX_RPROJ", "0"))
     except ValueError:
         _max_rproj = 0
     if _max_rproj > 0:
@@ -765,7 +765,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # svd = 3.9s of a 4.6s compress (84.5%), ~1.67 ms/block. The rSVD
         # MATMULS around it total ~0.04s — the cost is entirely cuSOLVER.
         #
-        # DIFFKV_COMPRESS_GRAM_SVD=1 replaces the wide SVD with an eigendecomp of
+        # DKV_COMPRESS_GRAM_SVD=1 replaces the wide SVD with an eigendecomp of
         # the small [r_proj, r_proj] Gram matrix G = B Bᵀ:
         #     G = U_b diag(S²) U_bᵀ            (eigh, ascending → flip to desc)
         #     S  = sqrt(clamp(eigvals, 0))
@@ -784,12 +784,12 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # exact SVD baseline (both 33% at that harness's samples; dense ceiling 100%)
         # — it changes SPEED, not quality, because the factorisation is numerically
         # equivalent (Part 1 recon error ~6e-7 << the int8-U quant floor 9.2e-3).
-        # Set DIFFKV_COMPRESS_GRAM_SVD=0 to force the exact SVD. Any runtime failure
+        # Set DKV_COMPRESS_GRAM_SVD=0 to force the exact SVD. Any runtime failure
         # falls through to the exact SVD below. NOTE: the r_proj<=32 recipe
-        # (DIFFKV_RSVD_MAX_RPROJ=32) is a SEPARATE fidelity trade that DROPPED recall
+        # (DKV_RSVD_MAX_RPROJ=32) is a SEPARATE fidelity trade that DROPPED recall
         # to 0% in the same A/B — it stays OFF by default; do not enable it blindly.
         _gram_ok = False
-        if _local_os.environ.get("DIFFKV_COMPRESS_GRAM_SVD", "1") != "0":
+        if _local_os.environ.get("DKV_COMPRESS_GRAM_SVD", "1") != "0":
             try:
                 G = torch.matmul(B, B.transpose(1, 2))                     # [N, r, r]
                 evals, evecs = torch.linalg.eigh(G)                        # ascending
@@ -799,12 +799,12 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 Vh = torch.matmul(U_b.transpose(1, 2), B) / S.clamp(min=1e-8).unsqueeze(-1)
                 _gram_ok = True
             except Exception as _ge:
-                print(f"[DiffKV GPU-rSVD] Gram eigh path failed ({_ge}); using exact SVD.")
+                print(f"[DKV GPU-rSVD] Gram eigh path failed ({_ge}); using exact SVD.")
         if not _gram_ok:
             U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)  # tiny matrix — fast!
         U = torch.matmul(Q, U_b)                               # [N, T, r_proj]
     except Exception as e:
-        print(f"[DiffKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")
+        print(f"[DKV GPU-rSVD] Batched randomized SVD failed: {e}. Falling back to CPU SVD.")
         return False
 
     # 4. Extract dynamic rank using S — vectorized over the whole block batch.
@@ -813,7 +813,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # energy, clamp into [4, b_rank] on the truncation branch, else keep b_rank.
     S_cpu = S.cpu()
     # Cap the per-block target rank at r_proj: U/S/Vh only have r_proj columns,
-    # so a block_rank above r_proj (possible when DIFFKV_RSVD_MAX_RPROJ caps
+    # so a block_rank above r_proj (possible when DKV_RSVD_MAX_RPROJ caps
     # r_proj below the boosted rank) would otherwise record a dynamic_rank larger
     # than the number of factor columns actually stored, and block.U =
     # U_scaled[:, :, :k] would silently keep only r_proj of them — a rank/data
@@ -841,7 +841,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # Undo the V-side rebalancing on the FACTOR (not the deltas): divide the V
     # columns of Vh by the same per-block gain so U @ Vh reconstructs original-
     # space V.  Everything downstream (recon, residual, block.V storage) then
-    # operates in original space with no further changes.  See the DIFFKV_V_SCALE
+    # operates in original space with no further changes.  See the DKV_V_SCALE
     # note above.
     if _v_gain is not None:
         _vg = _v_gain.view(-1, 1, 1).to(Vh_fp16.dtype)
@@ -849,7 +849,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
 
     # Match the input guard: these scans are diagnostic protection, not part
     # of the compression algorithm.  Re-enable them when validating a new
-    # model/checkpoint with DIFFKV_COMPRESS_VALIDATE_FINITE=1.
+    # model/checkpoint with DKV_COMPRESS_VALIDATE_FINITE=1.
     if _validate_finite:
         if not torch.isfinite(U_fp16).all():
             U_fp16 = torch.nan_to_num(U_fp16, nan=0.0, posinf=0.0, neginf=0.0)
@@ -863,7 +863,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     import os as _os_b
     _cov_frac_batch = 0.0
     try:
-        _cov_frac_batch = float(_os_b.environ.get("DIFFKV_RESIDUAL_COVERAGE_FRAC", "0"))
+        _cov_frac_batch = float(_os_b.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
     except ValueError:
         pass
     from collections import namedtuple as _namedtuple
@@ -926,7 +926,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     # eager execution those launches — NOT the SVD — dominated "compress"
     # (~9s, ~51% of prefill; MLX keeps the equivalent batched finalization at
     # ~13% by doing it over the whole batch at once, see
-    # mlx_diffkv_wrapper.compress_deferred_prefill_blocks).  Here every
+    # mlx_dkv_wrapper.compress_deferred_prefill_blocks).  Here every
     # GPU-heavy step runs ONCE over the whole [N, ...] batch:
     #   • U_scaled = U·S·token_norms, columns ≥ dynamic-rank[i] zeroed per block
     #   • recon    = bmm(U_scaled, V)              (one batched matmul)
@@ -1101,7 +1101,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                     rel_error_K = rel_error_K * _bt
                     rel_error_V = rel_error_V * _bt
                     try:
-                        _margin = int(os.environ.get("DIFFKV_RESIDUAL_FLOOR_MARGIN", "4"))
+                        _margin = int(os.environ.get("DKV_RESIDUAL_FLOOR_MARGIN", "4"))
                     except ValueError:
                         _margin = 4
                     n_max_residual = max(n_max_residual,
@@ -1141,10 +1141,10 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
             _recon_exact = (_U_q * _scale_u) @ _V_w.float()       # int8-dequant recon
             recon_K_for_res = _recon_exact[:, :half_d]
             recon_V_for_res = _recon_exact[:, half_d:]
-            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            if os.environ.get("DKV_TELEMETRY", "0") == "1":
                 _dn = delta_K.norm(dim=1).clamp(min=1e-6)
                 _absorbed = ((recon_K_for_res - recon_K).norm(dim=1) / _dn).max().item()
-                print(f"[DiffKV DEBUG] int8-exact residual for skip block "
+                print(f"[DKV DEBUG] int8-exact residual for skip block "
                       f"anchor={getattr(block, 'anchor_idx', '?')}: absorbed up to "
                       f"{_absorbed*100:.1f}% per-token int8-U error", flush=True)
 

@@ -44,7 +44,7 @@ class SpeculativeDecoder:
             position_ids = torch.tensor([[prefix_len - 1 + step]], dtype=torch.long, device=self.draft_wrapper.device)
             
             # Inject session ID for draft attention routing
-            self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
+            self.draft_wrapper.model._dkv_session_ids = [draft_session_id]
             
             with torch.no_grad():
                 out = self.draft_wrapper.model(
@@ -75,7 +75,7 @@ class SpeculativeDecoder:
         ).unsqueeze(0)
         
         # Inject main session ID
-        self.main_wrapper.model._diffkv_session_ids = [session_id]
+        self.main_wrapper.model._dkv_session_ids = [session_id]
         
         # Disable lm_head slicing during the verification pass
         self.main_wrapper.model._disable_lm_head_slicing = True
@@ -105,7 +105,7 @@ class SpeculativeDecoder:
             # Greedy verification for simplicity and speed, or temperature-based if specified
             if temperature == 0.0:
                 pred_token = pred_logits.argmax().item()
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
                     print(f"[Speculative Verification] step {i}: pred={pred_token} ({self.main_wrapper.tokenizer.decode([pred_token])!r}) vs draft={target_token} ({self.main_wrapper.tokenizer.decode([target_token])!r})")
                 if pred_token == target_token:
                     accepted_tokens.append(target_token)
@@ -127,7 +127,7 @@ class SpeculativeDecoder:
                 r = torch.rand(1).item()
                 if r < min(1.0, p_main / (p_draft + 1e-9)):
                     accepted_tokens.append(target_token)
-                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    if os.environ.get("DKV_TELEMETRY", "0") == "1":
                         print(f"[Speculative Verification] step {i} accepted: draft={target_token} ({self.main_wrapper.tokenizer.decode([target_token])!r})")
                     if target_token in self.main_wrapper.stop_token_ids or target_token == self.main_wrapper.tokenizer.eos_token_id:
                         break
@@ -139,7 +139,7 @@ class SpeculativeDecoder:
                         correction_token = torch.multinomial(diff_dist, 1).item()
                     else:
                         correction_token = pred_logits.argmax().item()
-                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                    if os.environ.get("DKV_TELEMETRY", "0") == "1":
                         print(f"[Speculative Verification] step {i} rejected: draft={target_token} ({self.main_wrapper.tokenizer.decode([target_token])!r}), correction={correction_token} ({self.main_wrapper.tokenizer.decode([correction_token])!r})")
                     break
                     

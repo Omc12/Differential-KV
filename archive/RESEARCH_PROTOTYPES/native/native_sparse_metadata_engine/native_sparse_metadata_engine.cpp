@@ -5,7 +5,7 @@
 #include <sstream>
 #include <iomanip>
 
-namespace diffkv {
+namespace dkv {
 
 NativeSparseMetadataEngine::NativeSparseMetadataEngine(int max_sessions)
     : max_sessions_(max_sessions) {
@@ -67,7 +67,7 @@ bool NativeSparseMetadataEngine::is_sparse_safe(const std::string& session_id) c
     if (it == entries_.end()) {
         return true; // Default: assume sparse-safe for new sessions
     }
-    bool safe = diffkv::is_sparse_safe(it->second);
+    bool safe = dkv::is_sparse_safe(it->second);
     if (safe) sparse_safe_hits_++;
     return safe;
 }
@@ -146,4 +146,4 @@ std::string NativeSparseMetadataEngine::get_stats_json() const {
     return oss.str();
 }
 
-} // namespace diffkv
+} // namespace dkv

@@ -27,7 +27,7 @@ A live server run is required for the instrumented measurements in Task 4.
 
 ### 25K Prompt Serving
 - **Status: AT RISK — conditional import path**
-- The `q_len > 1024` branch in `diffkv_attention.py` imports `RetrievalAwareSparsePrefill` from `research.sparse_prefill_anchors`
+- The `q_len > 1024` branch in `dkv_attention.py` imports `RetrievalAwareSparsePrefill` from `research.sparse_prefill_anchors`
 - If that module is absent: `ModuleNotFoundError` crashes prefill for long sequences
 - Mitigation: wrap import in try/except or validate module existence before serving
 - SDPA path (the else-branch) would handle it correctly if the conditional is removed
@@ -46,7 +46,7 @@ A live server run is required for the instrumented measurements in Task 4.
 
 ### OpenWebUI Integration
 - **Status: WILL WORK**
-- /v1/models returns `diffkv-{model_id}` (sanitized, prefixed)
+- /v1/models returns `dkv-{model_id}` (sanitized, prefixed)
 - /v1/chat/completions returns OpenAI-compatible SSE format
 - session_id can be passed or auto-assigned
 
@@ -113,7 +113,7 @@ python launch_real_serving.py &
 # 4K prompt test
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"diffkv","messages":[{"role":"user","content":"'$(python -c "print('x '*4000)')'"}],"stream":true}'
+  -d '{"model":"dkv","messages":[{"role":"user","content":"'$(python -c "print('x '*4000)')'"}],"stream":true}'
 
 # VRAM measurement
 python phase24_6_vram_audit.py
@@ -130,6 +130,6 @@ python test_long_context.py
 ## Blockers for Full Task 4 Completion
 
 1. **Research module**: `research.sparse_prefill_anchors` — must verify exists or add try/except guard
-2. **Triton availability**: `triton_diffkv.py` has fallback but Triton must be installed for kernel dispatch
+2. **Triton availability**: `triton_dkv.py` has fallback but Triton must be installed for kernel dispatch
 3. **Model download**: Qwen/Qwen2.5-0.5B-Instruct must be cached locally
 4. **GPU required**: All serving paths assume CUDA device; CPU-only mode not implemented

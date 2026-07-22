@@ -243,7 +243,7 @@ def _filter_penalty_ids(ids, tokenizer):
     Digits carry semantics, not fluency. Loop recovery is unaffected: the
     caller skips this filter while repetition_loop_detected is set, so the
     escalated 1.3/256 penalty still breaks digit loops ("7741-7741-").
-    DIFFKV_REP_PENALTY_PROTECT_NUMERIC=0 restores the old behavior."""
+    DKV_REP_PENALTY_PROTECT_NUMERIC=0 restores the old behavior."""
     keep = []
     cache = _REP_EXEMPT_CACHE
     for tid in ids:
@@ -357,8 +357,8 @@ class ContinuousBatchEngine:
 
         if self.draft_wrapper is not None:
             from plugins.speculative import SpeculativeDecodingPlugin
-            from plugins.diffkv_as_draft import DiffKVAsDraftPlugin
-            draft_plugin = DiffKVAsDraftPlugin(self.draft_wrapper)
+            from plugins.dkv_as_draft import DKVAsDraftPlugin
+            draft_plugin = DKVAsDraftPlugin(self.draft_wrapper)
             self.speculative_decoder = SpeculativeDecodingPlugin(self.wrapper, draft_plugin)
 
         if torch.backends.mps.is_available():
@@ -368,15 +368,15 @@ class ContinuousBatchEngine:
                 watermark = cfg.mps_watermark if cfg is not None else 0.0
                 if cfg is not None:
                     approx = "1" if cfg.approximate_attn else "0"
-                    os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = approx
+                    os.environ["DKV_MPS_APPROXIMATE_ATTN"] = approx
                 else:
-                    if os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
-                        os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
+                    if os.environ.get("DKV_MPS_APPROXIMATE_ATTN") is None:
+                        os.environ["DKV_MPS_APPROXIMATE_ATTN"] = "1"
                 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
                 if watermark > 0:
                     torch.mps.set_per_process_memory_fraction(watermark)
             except Exception as e:
-                print(f"[DiffKV] WARNING: Failed to set MPS memory fraction: {e}")
+                print(f"[DKV] WARNING: Failed to set MPS memory fraction: {e}")
 
         self.tokenizer = self.wrapper.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
@@ -394,23 +394,23 @@ class ContinuousBatchEngine:
         # Track activity and idle timeouts (similar to Ollama)
         self.last_active_time = time.time()
         try:
-            self.idle_timeout_seconds = float(os.environ.get("DIFFKV_MODEL_IDLE_TIMEOUT", "300"))
+            self.idle_timeout_seconds = float(os.environ.get("DKV_MODEL_IDLE_TIMEOUT", "300"))
         except Exception:
             self.idle_timeout_seconds = 300.0
-        print(f"[DiffKV] Idle model unloading configured for {self.idle_timeout_seconds} seconds of inactivity.")
+        print(f"[DKV] Idle model unloading configured for {self.idle_timeout_seconds} seconds of inactivity.")
 
     # ── VRAM instrumentation ────────────────────────────────────────────
 
     def _log_vram(self, tag: str):
         """Log VRAM stats (allocated and reserved) under a human-readable tag.
-        Only active when DIFFKV_TELEMETRY=1 to avoid overhead in production."""
-        if os.environ.get("DIFFKV_TELEMETRY", "0") != "1":
+        Only active when DKV_TELEMETRY=1 to avoid overhead in production."""
+        if os.environ.get("DKV_TELEMETRY", "0") != "1":
             return
         if not torch.cuda.is_available():
             return
         alloc_gb = torch.cuda.memory_allocated() / 1024 ** 3
         resv_gb  = torch.cuda.memory_reserved()   / 1024 ** 3
-        print(f"[DiffKV VRAM] [{tag}] allocated={alloc_gb:.3f} GB  reserved={resv_gb:.3f} GB")
+        print(f"[DKV VRAM] [{tag}] allocated={alloc_gb:.3f} GB  reserved={resv_gb:.3f} GB")
 
     def _post_prefill_cleanup(self):
         """
@@ -434,14 +434,14 @@ class ContinuousBatchEngine:
                 if _sync is not None:
                     _sync()
         
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / 1024**3
                 reserved  = torch.cuda.memory_reserved()  / 1024**3
-                print(f"[DiffKV] Post-prefill: {allocated:.2f}GB allocated, "
+                print(f"[DKV] Post-prefill: {allocated:.2f}GB allocated, "
                       f"{reserved:.2f}GB reserved")
             else:
-                print(f"[DiffKV] Post-prefill cleanup completed (non-CUDA platform).")
+                print(f"[DKV] Post-prefill cleanup completed (non-CUDA platform).")
 
     # ── Compression barrier ─────────────────────────────────────────────
 
@@ -485,8 +485,8 @@ class ContinuousBatchEngine:
             await asyncio.sleep(check_interval)  # yield to event loop, stream chunks etc.
 
         # Timeout — warn but don’t block decode indefinitely
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            print(f"[DiffKV BatchEngine] WARNING: compression barrier timed out after {timeout_s}s "
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
+            print(f"[DKV BatchEngine] WARNING: compression barrier timed out after {timeout_s}s "
                   f"for session {session_id}. Some blocks may still be SUBMITTED.")
 
     # ── SVD thread priority helpers ──────────────────────────────────────
@@ -562,13 +562,13 @@ class ContinuousBatchEngine:
             if hasattr(self.wrapper, 'stop'):
                 self.wrapper.stop()
                 
-        # Purge class-level TritonDiffKV reconstruction buffers
+        # Purge class-level TritonDKV reconstruction buffers
         try:
-            from native_core.sparse_decode.triton_fused_decode import TritonDiffKV
-            if hasattr(TritonDiffKV, '_recon_buffers'):
-                TritonDiffKV._recon_buffers.clear()
+            from native_core.sparse_decode.triton_fused_decode import TritonDKV
+            if hasattr(TritonDKV, '_recon_buffers'):
+                TritonDKV._recon_buffers.clear()
         except Exception as e:
-            print(f"[DiffKV] Warning: failed to clear TritonDiffKV reconstruction buffers: {e}")
+            print(f"[DKV] Warning: failed to clear TritonDKV reconstruction buffers: {e}")
 
     async def submit(self, session_id: str, payload: Dict) -> asyncio.Queue:
         # Ensure model is loaded on demand when a request arrives
@@ -592,21 +592,21 @@ class ContinuousBatchEngine:
 
         # ---------------------------------------------------------------------------
         # Input token limit guard
-        # Default hard limit is 32,768 tokens. Raise it with DIFFKV_MAX_INPUT_TOKENS.
+        # Default hard limit is 32,768 tokens. Raise it with DKV_MAX_INPUT_TOKENS.
         # Inputs above the WARN threshold (75% of limit) get a yellow warning.
         # Inputs above the limit get truncated to the limit with a clear message
         # instead of crashing Python with an MPS OOM.
         # ---------------------------------------------------------------------------
-        _max_input_tokens = int(os.environ.get("DIFFKV_MAX_INPUT_TOKENS", "32768"))
+        _max_input_tokens = int(os.environ.get("DKV_MAX_INPUT_TOKENS", "32768"))
         _warn_threshold   = int(_max_input_tokens * 0.75)
         n_prompt_tokens   = len(req.prompt_ids)
 
         if n_prompt_tokens > _max_input_tokens:
             truncated_to = _max_input_tokens
             print(
-                f"\n[DiffKV] ⚠️  INPUT TOO LARGE: {n_prompt_tokens:,} tokens (limit {_max_input_tokens:,}).\n"
-                f"[DiffKV] Truncating to {truncated_to:,} tokens to prevent OOM crash.\n"
-                f"[DiffKV] Tip: raise the limit with  DIFFKV_MAX_INPUT_TOKENS=65536  "
+                f"\n[DKV] ⚠️  INPUT TOO LARGE: {n_prompt_tokens:,} tokens (limit {_max_input_tokens:,}).\n"
+                f"[DKV] Truncating to {truncated_to:,} tokens to prevent OOM crash.\n"
+                f"[DKV] Tip: raise the limit with  DKV_MAX_INPUT_TOKENS=65536  "
                 f"(ensure your Mac has enough unified memory).\n",
                 file=sys.stderr
             )
@@ -615,7 +615,7 @@ class ContinuousBatchEngine:
             req.prompt = self.tokenizer.decode(req.prompt_ids, skip_special_tokens=False)
         elif n_prompt_tokens > _warn_threshold:
             print(
-                f"[DiffKV] ⚠️  Large input: {n_prompt_tokens:,} tokens "
+                f"[DKV] ⚠️  Large input: {n_prompt_tokens:,} tokens "
                 f"({n_prompt_tokens / _max_input_tokens * 100:.0f}% of {_max_input_tokens:,} limit). "
                 f"Prefill may take {n_prompt_tokens // 50:.0f}–{n_prompt_tokens // 30:.0f}s on MPS.",
                 file=sys.stderr
@@ -630,10 +630,10 @@ class ContinuousBatchEngine:
         # (<|im_start|>assistant\n...\n<|im_end|>), so raw concat does NOT match the new prompt.
         # The registry is updated at the end of each turn via update_session_token_prefix().
         req.cached_len = 0
-        # Diagnostic/safety dial: DIFFKV_PREFIX_SHARING=0 forces a fresh
+        # Diagnostic/safety dial: DKV_PREFIX_SHARING=0 forces a fresh
         # prefill every turn (frees the stale session KV first), bypassing
         # cache reuse, rollback, and cross-session cloning below.
-        if os.environ.get("DIFFKV_PREFIX_SHARING", "1") == "0":
+        if os.environ.get("DKV_PREFIX_SHARING", "1") == "0":
             self._free_session_kv(session_id)
             if self.draft_wrapper is not None:
                 self._free_session_kv(session_id + "_draft", is_draft=True)
@@ -647,7 +647,7 @@ class ContinuousBatchEngine:
                 compare_len = min(cached_len, len(stored_ids))
                 if compare_len > 0 and req.prompt_ids[:compare_len] == stored_ids[:compare_len]:
                     req.cached_len = cached_len
-                    print(f"[DiffKV BatchEngine] Found cached history for session {session_id}: "
+                    print(f"[DKV BatchEngine] Found cached history for session {session_id}: "
                           f"length {cached_len} tokens (verified {compare_len} token prefix). Reusing KV cache!")
                 else:
                     mismatch_idx = -1
@@ -656,21 +656,21 @@ class ContinuousBatchEngine:
                             if idx >= len(req.prompt_ids) or idx >= len(stored_ids) or req.prompt_ids[idx] != stored_ids[idx]:
                                 mismatch_idx = idx
                                 break
-                    print(f"[DiffKV BatchEngine] Prefix mismatch at token index {mismatch_idx}: "
+                    print(f"[DKV BatchEngine] Prefix mismatch at token index {mismatch_idx}: "
                           f"new_prompt_token={req.prompt_ids[mismatch_idx] if mismatch_idx >= 0 else None}, "
                           f"stored_token={stored_ids[mismatch_idx] if mismatch_idx >= 0 else None}")
-                    print(f"[DiffKV BatchEngine] Prefix mismatch details for session {session_id}: "
+                    print(f"[DKV BatchEngine] Prefix mismatch details for session {session_id}: "
                           f"cached_len={cached_len}, stored={len(stored_ids)}, new_prompt={len(req.prompt_ids)}.")
                     
                     if mismatch_idx > 32:
-                        print(f"[DiffKV BatchEngine] Partially rolling back session {session_id} to token index {mismatch_idx} instead of fully clearing.")
+                        print(f"[DKV BatchEngine] Partially rolling back session {session_id} to token index {mismatch_idx} instead of fully clearing.")
                         self.wrapper.rollback_session(session_id, mismatch_idx, clear_srl=True)
                         if self.draft_wrapper is not None:
                             self.draft_wrapper.rollback_session(session_id + "_draft", mismatch_idx, clear_srl=True)
                         req.cached_len = mismatch_idx
                         self.session_token_ids[session_id] = stored_ids[:mismatch_idx]
                     else:
-                        print(f"[DiffKV BatchEngine] Clearing stale KV cache and re-prefilling from scratch.")
+                        print(f"[DKV BatchEngine] Clearing stale KV cache and re-prefilling from scratch.")
                         # The stored context diverged — clear so we get a fresh prefill
                         self._free_session_kv(session_id)
                         if self.draft_wrapper is not None:
@@ -717,7 +717,7 @@ class ContinuousBatchEngine:
                     # roll it back to match length (e.g. if the matching session was stopped mid-generation).
                     cloned_len = self.wrapper.manager.get_session_sequence_length(session_id)
                     if cloned_len > longest_match_len:
-                        print(f"[DiffKV BatchEngine] Cloned session {session_id} has length {cloned_len} tokens, "
+                        print(f"[DKV BatchEngine] Cloned session {session_id} has length {cloned_len} tokens, "
                               f"but matched prefix is {longest_match_len} tokens. Rolling back cloned cache to match length.")
                         self.wrapper.rollback_session(session_id, longest_match_len, clear_srl=True)
                         if self.draft_wrapper is not None:
@@ -726,7 +726,7 @@ class ContinuousBatchEngine:
                     # Update local token registry
                     self.session_token_ids[session_id] = self.session_token_ids[best_sid][:longest_match_len]
                     req.cached_len = longest_match_len
-                    print(f"[DiffKV BatchEngine] Auto-matched sharing prefix from session {best_sid}: matched length {longest_match_len} tokens. Cloned KV cache successfully!")
+                    print(f"[DKV BatchEngine] Auto-matched sharing prefix from session {best_sid}: matched length {longest_match_len} tokens. Cloned KV cache successfully!")
 
         await self.incoming_queue.put(req)
         return req.chunks_queue
@@ -747,10 +747,10 @@ class ContinuousBatchEngine:
                     req.cancelled = True
                     cancelled_count += 1
         except Exception as e:
-            print(f"[DiffKV] Warning: failed to scan incoming queue for cancellation: {e}")
+            print(f"[DKV] Warning: failed to scan incoming queue for cancellation: {e}")
 
         if cancelled_count > 0:
-            print(f"[DiffKV] Cancelled {cancelled_count} request(s) for session: {session_id}")
+            print(f"[DKV] Cancelled {cancelled_count} request(s) for session: {session_id}")
             if free_kv:
                 self._free_session_kv(session_id)
 
@@ -771,7 +771,7 @@ class ContinuousBatchEngine:
                     if self.wrapper.model is not None:
                         idle_time = time.time() - self.last_active_time
                         if idle_time > self.idle_timeout_seconds:
-                            print(f"\n[DiffKV] Server has been idle for {idle_time:.1f} seconds. "
+                            print(f"\n[DKV] Server has been idle for {idle_time:.1f} seconds. "
                                   f"Unloading model weights from VRAM to free resources...")
                             if hasattr(self.wrapper, "close"):
                                 self.wrapper.close()
@@ -802,7 +802,7 @@ class ContinuousBatchEngine:
                 # Provide helpful guidance for MPS out of memory errors
                 if "MPS backend out of memory" in error_msg:
                     print("\n" + "="*80)
-                    print("[DiffKV] MPS OUT OF MEMORY ERROR")
+                    print("[DKV] MPS OUT OF MEMORY ERROR")
                     print("="*80)
                     print("Your Apple Silicon GPU has exceeded its 4GB memory limit.")
                     print("\nQuick fixes:")
@@ -849,7 +849,7 @@ class ContinuousBatchEngine:
             elif hasattr(wrapper, 'manager') and hasattr(wrapper.manager, 'clear_session'):
                 wrapper.manager.clear_session(session_id)
         except Exception as e:
-            print(f"[DiffKV] WARNING: could not free KV for session {session_id}: {e}")
+            print(f"[DKV] WARNING: could not free KV for session {session_id}: {e}")
 
     def update_session_token_prefix(self, session_id: str, full_prompt: str) -> None:
         """
@@ -879,7 +879,7 @@ class ContinuousBatchEngine:
                     _sid_dict = getattr(kv_mgr, "_session_token_ids", None)
                     if _sid_dict is not None:
                         _sid_dict[session_id] = _torch.tensor(existing, dtype=_torch.long)
-                print(f"[DiffKV BatchEngine] Prefix registry confirmed for session {session_id}: "
+                print(f"[DKV BatchEngine] Prefix registry confirmed for session {session_id}: "
                       f"{len(existing)} tokens (from exact decode-time token IDs).")
                 return
 
@@ -895,10 +895,10 @@ class ContinuousBatchEngine:
                 if _sid_dict is not None:
                     _sid_dict[session_id] = _torch.tensor(token_ids, dtype=_torch.long)
 
-            print(f"[DiffKV BatchEngine] Updated prefix registry for session {session_id}: "
+            print(f"[DKV BatchEngine] Updated prefix registry for session {session_id}: "
                   f"{len(token_ids)} tokens (fallback retokenization — no exact decode IDs found).")
         except Exception as e:
-            print(f"[DiffKV BatchEngine] WARNING: failed to update prefix registry for {session_id}: {e}")
+            print(f"[DKV BatchEngine] WARNING: failed to update prefix registry for {session_id}: {e}")
 
 
     async def _step(self):
@@ -908,12 +908,12 @@ class ContinuousBatchEngine:
         prefill_reqs = [r for r in self.active_requests if not r.is_prefilled]
         decode_reqs  = [r for r in self.active_requests if r.is_prefilled]
 
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
             if prefill_reqs:
                 req0 = prefill_reqs[0]
                 offset = getattr(req0, "prefill_offset", 0)
                 cached = getattr(req0, "cached_len", 0)
-                print(f"[DiffKV Step] PREFILL session={req0.session_id[:8]}... "
+                print(f"[DKV Step] PREFILL session={req0.session_id[:8]}... "
                       f"cached_len={cached} offset={offset}/{len(req0.prompt_ids)} "
                       f"({'Turn2+' if cached > 0 else 'Turn1'})")
         # ─────────────────────────────────────────────────────────────────
@@ -946,8 +946,8 @@ class ContinuousBatchEngine:
                         oom_hint = (
                             f"MPS out of memory while allocating KV cache for "
                             f"{len(req.prompt_ids):,} tokens. "
-                            f"Try a shorter input, or set DIFFKV_MAX_INPUT_TOKENS to a lower value "
-                            f"(currently {os.environ.get('DIFFKV_MAX_INPUT_TOKENS', '32768')}). "
+                            f"Try a shorter input, or set DKV_MAX_INPUT_TOKENS to a lower value "
+                            f"(currently {os.environ.get('DKV_MAX_INPUT_TOKENS', '32768')}). "
                             f"You can also free memory with --preset low or --serving-mode lightweight."
                         )
                         req.chunks_queue.put_nowait({"error": oom_hint, "is_final": True})
@@ -958,7 +958,7 @@ class ContinuousBatchEngine:
                     raise
 
             # Inject session ID so the attention patch stores KV under the right key
-            self.wrapper.model._diffkv_session_ids = [req.session_id]
+            self.wrapper.model._dkv_session_ids = [req.session_id]
 
             # Chunk size strategy:
             # • First turn (cached_len == 0): process the ENTIRE prompt in one forward pass.
@@ -976,14 +976,14 @@ class ContinuousBatchEngine:
                 is_mps = (self.wrapper.device == "mps" or 
                           (isinstance(self.wrapper.device, torch.device) and self.wrapper.device.type == "mps"))
                 
-                # Check if DiffKV is bypassed for this session (length < engage threshold)
-                from runtime.diffkv_attention import _get_engage_threshold
+                # Check if DKV is bypassed for this session (length < engage threshold)
+                from runtime.dkv_attention import _get_engage_threshold
                 is_bypassed = len(req.prompt_ids) < _get_engage_threshold()
                 
                 if is_bypassed:
                     max_chunk = 16384
                 else:
-                    env_chunk = os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE")
+                    env_chunk = os.environ.get("DKV_PREFILL_CHUNK_SIZE")
                     if env_chunk is not None:
                         max_chunk = int(env_chunk)
                     else:
@@ -1003,10 +1003,10 @@ class ContinuousBatchEngine:
                 #
                 # For large MPS inputs, auto-reduce max_chunk so each individual
                 # forward pass completes well within 1–2s, regardless of prompt length.
-                # The user can override with DIFFKV_PREFILL_CHUNK_SIZE if they know
+                # The user can override with DKV_PREFILL_CHUNK_SIZE if they know
                 # their hardware can handle larger chunks without triggering the watchdog.
                 # ────────────────────────────────────────────────────────────────────
-                if is_mps and not os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
+                if is_mps and not os.environ.get("DKV_PREFILL_CHUNK_SIZE"):
                     # With chunk-level flushes (mx.eval() and SVD flushes) active,
                     # we keep the command buffers small and prevent timeouts naturally.
                     # We can use a standard chunk size of 512. Going smaller (e.g. 128)
@@ -1015,7 +1015,7 @@ class ContinuousBatchEngine:
                     max_chunk = min(max_chunk, 512)
                     if req.prefill_offset == 0 and len(req.prompt_ids) > 4000:
                         print(
-                            f"[DiffKV] Auto-configured prefill chunk size to 512 tokens to balance "
+                            f"[DKV] Auto-configured prefill chunk size to 512 tokens to balance "
                             f"Metal GPU dispatch rate and attention reconstruction overhead.",
                             file=sys.stderr
                         )
@@ -1099,7 +1099,7 @@ class ContinuousBatchEngine:
                         draft_session_id = req.session_id + "_draft"
                         draft_input_ids = input_ids.to(self.draft_wrapper.device)
                         draft_position_ids = position_ids.to(self.draft_wrapper.device)
-                        self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
+                        self.draft_wrapper.model._dkv_session_ids = [draft_session_id]
                         with torch.no_grad():
                             self.draft_wrapper.model(
                                 input_ids=draft_input_ids,
@@ -1119,7 +1119,7 @@ class ContinuousBatchEngine:
                     draft_session_id = req.session_id + "_draft"
                     draft_input_ids = input_ids.to(self.draft_wrapper.device)
                     draft_position_ids = position_ids.to(self.draft_wrapper.device)
-                    self.draft_wrapper.model._diffkv_session_ids = [draft_session_id]
+                    self.draft_wrapper.model._dkv_session_ids = [draft_session_id]
                     with torch.no_grad():
                         self.draft_wrapper.model(
                             input_ids=draft_input_ids,
@@ -1146,7 +1146,7 @@ class ContinuousBatchEngine:
                 # Flush Metal command buffers every chunk to prevent accumulation.
                 # IMPORTANT: We must also call mx.eval() here. PyTorch MPS and MLX
                 # share the same Metal command queue on Apple Silicon. Without an
-                # explicit mx.eval() after each chunk, MLX lazy ops from DiffKV's
+                # explicit mx.eval() after each chunk, MLX lazy ops from DKV's
                 # attention hooks (KV capture, routing, compression) keep piling up
                 # in an un-evaluated graph. When torch.mps.synchronize() finally
                 # forces a Metal flush, ALL accumulated MLX ops execute in one
@@ -1220,9 +1220,9 @@ class ContinuousBatchEngine:
                 self._post_prefill_cleanup()
                 self._log_vram(f"post-prefill session={req.session_id}")
 
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
                     dur_pref = (time.perf_counter() - t0_pref) * 1000
-                    print(f"[DiffKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms", file=sys.stderr)
+                    print(f"[DKV Telemetry] Prefill session={req.session_id} tokens={len(req.prompt_ids)} duration={dur_pref:.2f}ms", file=sys.stderr)
                     if hasattr(self.wrapper.manager, "log_block_states"):
                         self.wrapper.manager.log_block_states(req.session_id)
 
@@ -1262,26 +1262,26 @@ class ContinuousBatchEngine:
                             growth_ratio = (n_current - n_at_build) / max(1, n_at_build)
                             if growth_ratio < 0.20:
                                 # < 20% growth — fast path, skip rebuild
-                                print(f"[DiffKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
+                                print(f"[DKV BatchEngine] Turn 2+: SRL index already valid for session {_sid} "
                                       f"({n_current} blocks, built at {n_at_build}, growth={growth_ratio:.0%}). "
                                       f"Skipping compression barrier and SRL rebuild. "
                                       f"(saved ~{n_current * 28 // 1000:.1f}k SVD ops)", file=sys.stderr)
                                 return  # ← decode starts immediately, no wait
                             else:
                                 # ≥ 20% growth — rebuild needed for accurate routing
-                                print(f"[DiffKV BatchEngine] Turn 2+: SRL index stale for session {_sid} "
+                                print(f"[DKV BatchEngine] Turn 2+: SRL index stale for session {_sid} "
                                       f"({n_current} blocks vs {n_at_build} at build, growth={growth_ratio:.0%}). "
                                       f"Triggering incremental SRL rebuild.", file=sys.stderr)
 
                     # ── First turn: wait for compression then build SRL ──────────────
-                    print(f"[DiffKV BatchEngine] First-turn SRL build: waiting for compression barrier...", file=sys.stderr)
+                    print(f"[DKV BatchEngine] First-turn SRL build: waiting for compression barrier...", file=sys.stderr)
                     _t_barrier_start = time.perf_counter()
                     # 1. Wait for SVD compression to finish (async — yields to event loop)
                     await self._wait_for_compression(_sid)
                     if _draft_mgr is not None:
                         await self._wait_for_compression(_sid + "_draft")
                     _t_barrier_end = time.perf_counter()
-                    print(f"[DiffKV BatchEngine] Compression barrier done in {(_t_barrier_end - _t_barrier_start)*1000:.1f}ms", file=sys.stderr)
+                    print(f"[DKV BatchEngine] Compression barrier done in {(_t_barrier_end - _t_barrier_start)*1000:.1f}ms", file=sys.stderr)
 
                     # 2. Build SRL index in a thread so the event loop stays live
                     def _do_finalize():
@@ -1299,7 +1299,7 @@ class ContinuousBatchEngine:
                         else:
                             await _loop.run_in_executor(None, _do_finalize)
                         _t_finalize_end = time.perf_counter()
-                        print(f"[DiffKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
+                        print(f"[DKV BatchEngine] SRL index built in {(_t_finalize_end - _t_finalize_start)*1000:.1f}ms "
                               f"| total={(_t_finalize_end - _t_srl_start)*1000:.1f}ms", file=sys.stderr)
 
                         # ── Pre-warm SRL routing for the first decode step ──
@@ -1325,12 +1325,12 @@ class ContinuousBatchEngine:
                                 )
                                 srl_state.current_step_slots = selected_slots
                                 srl_state.current_step_count = 0
-                                if os.environ.get("DIFFKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                                if os.environ.get("DKV_SRL_VERBOSE", "0") == "1" or os.environ.get("DKV_TELEMETRY", "0") == "1":
                                     print(f"[SRL Pre-warm] Pre-warmed routing for session {_sid}: "
                                           f"selected {selected_slots.numel()}/{srl_state.n_active_blocks()} blocks", file=sys.stderr)
 
                     except Exception as _e:
-                        print(f"[DiffKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}", file=sys.stderr)
+                        print(f"[DKV BatchEngine] WARNING: SRL index build/pre-warm failed: {_e}", file=sys.stderr)
                         import traceback
                         traceback.print_exc()
                         pass  # SRL index failure is non-fatal; decode continues without routing
@@ -1341,7 +1341,7 @@ class ContinuousBatchEngine:
         # 2. BATCHED DECODE (B >= 1)
         # CUDA: uses CUDAGraphDecodeRunner for ~2µs graph replay overhead.
         # MPS:  runs eager — fused_decode_attention_mps fires automatically
-        #       inside the DiffKV attention patch (triton_sparse_attn.py).
+        #       inside the DKV attention patch (triton_sparse_attn.py).
         # ─────────────────────────────────────────────────────────────────
         if decode_reqs:
             # Finalize any completed async compressions before decode
@@ -1357,9 +1357,9 @@ class ContinuousBatchEngine:
                 )
                 self.session_token_ids[req.session_id] = req.prompt_ids + req.generated_ids
                 
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
                     dur_dec = (time.perf_counter() - t0_dec) * 1000
-                    print(f"[DiffKV Telemetry] Speculative Decode Step candidates={self.speculative_decoder.num_candidates} "
+                    print(f"[DKV Telemetry] Speculative Decode Step candidates={self.speculative_decoder.num_candidates} "
                           f"accepted={len(new_tokens) - 1} dur={dur_dec:.2f}ms")
                 
                 # Check for periodic memory sweeps
@@ -1406,7 +1406,7 @@ class ContinuousBatchEngine:
             position_ids = torch.tensor(position_ids_list, dtype=torch.long, device=self.wrapper.device)
 
             # Inject session IDs into the model so the attention patch routes correctly
-            self.wrapper.model._diffkv_session_ids = session_ids
+            self.wrapper.model._dkv_session_ids = session_ids
 
             is_cuda = (self.wrapper.device == "cuda" or
                        (isinstance(self.wrapper.device, torch.device) and
@@ -1459,7 +1459,7 @@ class ContinuousBatchEngine:
                 else:
                     # ── MPS / CPU path: run normally ────────────────────────
                     # fused_decode_attention_mps() fires automatically inside
-                    # diffkv_attention.py when the session has compressed blocks
+                    # dkv_attention.py when the session has compressed blocks
                     # and device == mps. Wrap in capture_to_graph to cache execution graph.
                     is_mps = (self.wrapper.device == "mps" or
                               (isinstance(self.wrapper.device, torch.device) and
@@ -1494,10 +1494,10 @@ class ContinuousBatchEngine:
                 if not req.is_finished:
                     self.session_token_ids[req.session_id] = req.prompt_ids
 
-            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
+            if os.environ.get("DKV_TELEMETRY", "0") == "1":
                 dur_dec = (time.perf_counter() - t0_dec) * 1000
                 graph_tag = " [graph]" if _ran_graph else " [eager]"
-                print(f"[DiffKV Telemetry] Decode Step batch={actual_batch_size} "
+                print(f"[DKV Telemetry] Decode Step batch={actual_batch_size} "
                       f"bucket={bucket_size} dur={dur_dec:.2f}ms{graph_tag}", file=sys.stderr)
 
 
@@ -1507,9 +1507,9 @@ class ContinuousBatchEngine:
             # spikes as the allocator scans and consolidates.  500 steps amortizes the
             # cost while still preventing unbounded fragmentation growth.
             # On MPS the memory model differs, so we keep the tighter 100-step cadence.
-            # Override with DIFFKV_GC_INTERVAL=N for tuning without a code change.
+            # Override with DKV_GC_INTERVAL=N for tuning without a code change.
             _default_gc_interval = 500 if torch.cuda.is_available() else 100
-            _gc_interval = int(os.environ.get("DIFFKV_GC_INTERVAL", str(_default_gc_interval)))
+            _gc_interval = int(os.environ.get("DKV_GC_INTERVAL", str(_default_gc_interval)))
             if self.decode_steps_since_gc >= _gc_interval:
                 self.decode_steps_since_gc = 0
                 if torch.cuda.is_available():
@@ -1559,7 +1559,7 @@ class ContinuousBatchEngine:
         # Numeric/separator exemption (see _filter_penalty_ids). Skipped during
         # loop recovery so the escalated penalty can still break digit loops.
         _protect_numeric = (not req.repetition_loop_detected and
-                            os.environ.get("DIFFKV_REP_PENALTY_PROTECT_NUMERIC", "1") == "1")
+                            os.environ.get("DKV_REP_PENALTY_PROTECT_NUMERIC", "1") == "1")
         # Table-line suspension (see _in_table_line): verbatim table rows get
         # no repetition penalty at all while the current line is table-like.
         if (_protect_numeric and req.generated_ids and
@@ -1626,7 +1626,7 @@ class ContinuousBatchEngine:
             # in comparison mode, because RC5 now locks one entity per block, and
             # it escalates to a near-hard penalty once retrieval is confident.
             #
-            # DIFFKV_RC8_LICENSE gate (default OFF) UNIFIES this with the native
+            # DKV_RC8_LICENSE gate (default OFF) UNIFIES this with the native
             # path (main.cpp), where RC8 was dead-commented while it ran here —
             # the cross-runtime divergence found in the 2026-07-12 audit. Default
             # OFF is safe here: this block only ever fired when the (default-OFF,
@@ -1635,9 +1635,9 @@ class ContinuousBatchEngine:
             # for keeping it opt-in lives in the native comment + the binding
             # report: RC8's targets are already handled by the capture-layer
             # fixes, and the remaining REV swaps are a base-model limit (identical
-            # in dense). Set DIFFKV_RC8_LICENSE=1 to A/B on comparison workloads.
+            # in dense). Set DKV_RC8_LICENSE=1 to A/B on comparison workloads.
             import os as _os
-            _rc8_on = _os.environ.get("DIFFKV_RC8_LICENSE", "0") == "1"
+            _rc8_on = _os.environ.get("DKV_RC8_LICENSE", "0") == "1"
             current_entity_dx2 = getattr(srl_state, "current_entity_id", -1)
             if (_rc8_on and current_entity_dx2 != -1
                     and getattr(srl_state, "current_step_factual_sequences", None)):
@@ -1805,7 +1805,7 @@ class ContinuousBatchEngine:
             if _detect_repetition_loop(req.generated_ids):
                 req.repetition_loop_detected = True
                 print(
-                    f"[DiffKV] WARNING: repetition loop detected for session "
+                    f"[DKV] WARNING: repetition loop detected for session "
                     f"{req.session_id} at token {len(req.generated_ids)}. "
                     "Escalating penalty window to 256 tokens and strength to 1.3x.",
                     file=sys.stderr
@@ -1821,14 +1821,14 @@ class ContinuousBatchEngine:
             elif len(req.generated_ids) - req._loop_detection_idx >= 40:
                 # Force stop: the loop has not resolved in 40 tokens.
                 print(
-                    f"[DiffKV] WARNING: repetition loop for session {req.session_id} "
+                    f"[DKV] WARNING: repetition loop for session {req.session_id} "
                     f"persisted for 40 tokens after detection — forcing EOS.",
                     file=sys.stderr
                 )
                 is_eos = True
 
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            print(f"[DiffKV Debug] Emitting token={token_id} (is_eos={is_eos}, is_max={is_max}) generated_len={len(req.generated_ids)}")
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
+            print(f"[DKV Debug] Emitting token={token_id} (is_eos={is_eos}, is_max={is_max}) generated_len={len(req.generated_ids)}")
 
         # Update SRL recent generated tokens to keep query routing in sync with output
         srl_state = self.wrapper.manager.get_srl_state(req.session_id)
@@ -1881,7 +1881,7 @@ class ContinuousBatchEngine:
                 if srl_state is not None and hasattr(srl_state, "commit_turn"):
                     srl_state.commit_turn(self.wrapper.manager, req.session_id)
             except Exception as e:
-                print(f"[DiffKV] Error in commit_turn on turn boundary: {e}")
+                print(f"[DKV] Error in commit_turn on turn boundary: {e}")
 
             # ── Reference-formatting normalisation (Fix 1) ───────────────────
             # The model sometimes generates inconsistent citation styles within

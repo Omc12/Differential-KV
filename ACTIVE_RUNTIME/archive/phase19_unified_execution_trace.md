@@ -9,7 +9,7 @@ This trace documents the single authoritative runtime path for Differential KV f
 - Differentiates between requests needing PREFILL (dense) and DECODE (sparse).
 
 ## 2. Prefill Ingestion (Dense)
-**Location:** `ACTIVE_RUNTIME/serving/hf_diffkv_wrapper.py`
+**Location:** `ACTIVE_RUNTIME/serving/hf_dkv_wrapper.py`
 - Executes standard PyTorch SDPA for token ingestion.
 - Passes uncompressed Key/Value tensors directly to the `KVRuntimeManager`.
 
@@ -25,7 +25,7 @@ This trace documents the single authoritative runtime path for Differential KV f
 **Location:** `ACTIVE_RUNTIME/native_core/graph_runtime/static_decode_graph.py`
 - On decode step, Python orchestration is bypassed.
 - `StaticSparseDecodeGraph` uses `torch.cuda.CUDAGraph.replay()` to fire the decode kernel.
-- **Location:** `ACTIVE_RUNTIME/native_core/sparse_decode/triton_diffkv.py`
+- **Location:** `ACTIVE_RUNTIME/native_core/sparse_decode/triton_dkv.py`
 - The Triton Sparse Decode kernel reads from the pre-allocated metadata pool.
 - $O(1)$ block-sparse generation computes the token.
 

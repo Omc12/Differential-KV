@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Fresh DiffKV active-vs-dense sweep on the CURRENT working tree.
+# Fresh DKV active-vs-dense sweep on the CURRENT working tree.
 # Each (engine, ctx) runs in an isolated process (8 GB-safe; clean mem attribution).
-# active = DiffKV in its default serving configuration:
+# active = DKV in its default serving configuration:
 #   compressed sparse decode + decode-cache (bit-exact fast path) + sparse prefill,
 #   max_residual=128, rank=16, router=residual, topk=16.
 # dense  = mlx_lm full KV, SAME int4 weights.
 # Writes benchmarks/results/fresh_{engine}_{ctx}.json  (+ a live log).
 set -u
 cd "$(dirname "$0")/../.."          # repo root
-source diffkv_venv/bin/activate 2>/dev/null
+source dkv_venv/bin/activate 2>/dev/null
 RES=benchmarks/results
 LOG=$RES/fresh_sweep.log
 : > "$LOG"
@@ -16,8 +16,8 @@ LOG=$RES/fresh_sweep.log
 CTXS=${CTXS:-"4096 8192 16384 32768"}
 GEN=${GEN:-128}
 
-ACTIVE_ENV="DIFFKV_COMPRESSED_DECODE=1 DIFFKV_DECODE_CACHE=1 DIFFKV_SPARSE_PREFILL=1 \
-DIFFKV_MAX_RESIDUAL=128 DIFFKV_ROUTER=residual DIFFKV_TOPK_BLOCKS=16 DIFFKV_SVD_SEED=1234"
+ACTIVE_ENV="DKV_COMPRESSED_DECODE=1 DKV_DECODE_CACHE=1 DKV_SPARSE_PREFILL=1 \
+DKV_MAX_RESIDUAL=128 DKV_ROUTER=residual DKV_TOPK_BLOCKS=16 DKV_SVD_SEED=1234"
 
 echo "== fresh sweep $(date) ==" | tee -a "$LOG"
 for ctx in $CTXS; do

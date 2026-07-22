@@ -21,9 +21,9 @@ out = self.wrapper.model(
     use_cache=True # <-- Does not pass past_key_values
 )
 ```
-**Status: CLEAN.** The batch engine never passes `past_key_values` into the model, forcing the DiffKV patch to handle 100% of KV state.
+**Status: CLEAN.** The batch engine never passes `past_key_values` into the model, forcing the DKV patch to handle 100% of KV state.
 
-### 2. `hf_diffkv_wrapper.py` (Legacy `generate()`)
+### 2. `hf_dkv_wrapper.py` (Legacy `generate()`)
 ```python
 outputs = self.model(
     input_ids=input_ids, past_key_values=past_kv, use_cache=True
@@ -31,7 +31,7 @@ outputs = self.model(
 ```
 **Status: DIRTY (but unused).** This method explicitly passes and updates `past_key_values`, silently accumulating a dense HF cache. However, this method is never invoked by the `openai_compatible_api_gateway.py` or the `ContinuousBatchEngine`. It is dead legacy code.
 
-### 3. `diffkv_attention.py` (The Patch)
+### 3. `dkv_attention.py` (The Patch)
 ```python
 outputs = (attn_output,)
 if output_attentions:

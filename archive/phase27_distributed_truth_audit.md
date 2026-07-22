@@ -101,7 +101,7 @@ Search for `torch.distributed`, `dist.init_process_group`, `dist.all_reduce`, `d
 
 Search for `device_map="auto"`, tensor parallel sharding, pipeline stages:
 
-- `hf_diffkv_wrapper.py` L42: `device_map=device` — hardcoded single device string (default: `"cuda"`)
+- `hf_dkv_wrapper.py` L42: `device_map=device` — hardcoded single device string (default: `"cuda"`)
 - No `device_map="auto"` which would trigger HF multi-GPU dispatch
 - No custom tensor parallel sharding in model layers
 - All layers run on one GPU

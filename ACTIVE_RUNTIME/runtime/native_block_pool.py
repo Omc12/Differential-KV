@@ -64,7 +64,7 @@ class NativeBlockPool:
         if max_residual_tokens is not None:
             self.max_residual_tokens = max_residual_tokens
         else:
-            _env_max_res = _os.environ.get("DIFFKV_MAX_RESIDUAL_TOKENS")
+            _env_max_res = _os.environ.get("DKV_MAX_RESIDUAL_TOKENS")
             self.max_residual_tokens = int(_env_max_res) if _env_max_res and _env_max_res.isdigit() else 8
 
         _is_mps = (str(device) == "mps" or
@@ -153,7 +153,7 @@ class NativeBlockPool:
         import os as _os_pool
         try:
             reserve_tokens = int(
-                _os_pool.environ.get("DIFFKV_DECODE_RESERVE_TOKENS", "0")
+                _os_pool.environ.get("DKV_DECODE_RESERVE_TOKENS", "0")
             )
         except ValueError:
             reserve_tokens = 0
@@ -523,7 +523,7 @@ class NativeBlockPool:
             if n_semantic:
                 raise RuntimeError(
                     "write_block received n_semantic>0 but the pool was built without "
-                    "stratified slots (DIFFKV_GPU_COMPRESS path). Set DIFFKV_GPU_COMPRESS=0."
+                    "stratified slots (DKV_GPU_COMPRESS path). Set DKV_GPU_COMPRESS=0."
                 )
         else:
             self.U_sem[pool_idx] = 0

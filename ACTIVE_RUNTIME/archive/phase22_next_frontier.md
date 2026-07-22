@@ -11,7 +11,7 @@ Phase 22 designed three tightly coupled native components:
 
 These three are not independent. The State Machine is the **synchronization backbone** that makes the Compressor and Pager safe to run concurrently. Extracting the Compressor without the State Machine creates race conditions. Extracting the Pager without event-safe State Machine transitions corrupts graph replay.
 
-**They must be implemented together in Phase 23 as a single C++ extension module: `libdiffkv_core.so`.**
+**They must be implemented together in Phase 23 as a single C++ extension module: `libdkv_core.so`.**
 
 ## Justification: Why Not vLLM Integration First?
 Full vLLM backend integration requires these three components to already be native — vLLM will not accept Python GIL-bound threads as production workers. Phase 23 builds the native building blocks. Phase 24 wires them into vLLM.
@@ -23,10 +23,10 @@ Sparse prefill is blocked by SRAM limits on consumer hardware, not by orchestrat
 Retrieval routing is an architectural expansion, explicitly banned by the Phase 22 rules. We are not in a research phase.
 
 ## Phase 23 Deliverable
-A single PyBind11-compiled C++ extension module `diffkv_core`:
+A single PyBind11-compiled C++ extension module `dkv_core`:
 ```
-diffkv_core.DiffKVCompressorThread   — lock-free compression worker
-diffkv_core.DiffKVPagingStream       — CUDA-stream-based async reload
-diffkv_core.DiffKVBlockStateTable    — atomic state machine table
+dkv_core.DKVCompressorThread   — lock-free compression worker
+dkv_core.DKVPagingStream       — CUDA-stream-based async reload
+dkv_core.DKVBlockStateTable    — atomic state machine table
 ```
 This module becomes the new physical backbone of `native_core/`, replacing all Python threading in the compression and paging paths.

@@ -14,7 +14,7 @@
 #include <functional>
 #include <optional>
 
-namespace diffkv {
+namespace dkv {
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -140,4 +140,4 @@ private:
     double   scheduler_overhead_sum_us_{0.0};
 };
 
-} // namespace diffkv
+} // namespace dkv

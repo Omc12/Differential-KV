@@ -2,7 +2,7 @@
 
 #include "native_sparse_cuda_extension.hpp"
 
-namespace diffkv {
+namespace dkv {
 
 void NativeSparseCudaExtension::pack_gpu_metadata(const std::vector<float>& confidence_scores, std::vector<uint8_t>& out_buffer) {
     out_buffer.clear();
@@ -32,4 +32,4 @@ std::vector<int> NativeSparseCudaExtension::index_sparse_blocks(const std::vecto
     return indices;
 }
 
-} // namespace diffkv
+} // namespace dkv

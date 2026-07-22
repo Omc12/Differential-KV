@@ -1,4 +1,4 @@
-[DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-[DiffKV MLX] Loaded model in 0.69s
+[DKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
+[DKV MLX] Loaded model in 0.69s
 
 __BENCH_RESULT__ {"prompt_tokens": 16490, "gen_tokens": 128, "prefill_s": 54.40514866600279, "decode_s": 3.8276902500074357, "decode_tps": 33.44053244636275, "ttft_s": null, "mx_peak_gb": 2.20084525, "output_preview": "er parts of the system without conflicts. The primary consistency models include linearizability, sequential consistency, causal consistency, and eventual consistency.\n\n#### Linearizability\n\nLinearizability is a stronger form of correctness than causality but requires more resources to implement. In", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 16384, "gen_target": 128, "worker_wall_s": 63.15328008297365}

@@ -5,9 +5,9 @@ Downstream model quality evaluation.
 
 Compares:
   - baseline FP16 KV
-  - periodic DiffKV (64, 128)
-  - EMA-balanced DiffKV
-  - rolling-threshold DiffKV
+  - periodic DKV (64, 128)
+  - EMA-balanced DKV
+  - rolling-threshold DKV
 
 Measures:
   - perplexity delta
@@ -107,7 +107,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DiffKV Quality Evaluation")
+    parser = argparse.ArgumentParser(description="DKV Quality Evaluation")
     parser.add_argument("--model",            default="gpt2",
                         choices=["gpt2", "gpt2-med", "opt-125m", "tinyllama", "phi2"])
     parser.add_argument("--context-len",      type=int, default=256)

@@ -22,7 +22,7 @@ The `AsyncCompressor` is the **single most dangerous Python component** in the e
 3. **Maximum Systemic Impact:** Extracting this single component to C++ directly unlocks the remaining two "NO" entries in the `native_readiness_matrix.md`. A C++ SVD worker running on a dedicated CPU thread with a lockfree queue makes both Async Compression and Paging Reload natively safe without touching the GPU kernels at all.
 
 ## The Native Implementation Plan
-1. Write a `C++` extension (`diffkv_compressor.cpp`) that spawns a dedicated OS thread.
+1. Write a `C++` extension (`dkv_compressor.cpp`) that spawns a dedicated OS thread.
 2. Use `std::queue` and `std::mutex` (or a lockfree SPSC queue) to receive block compression requests.
 3. Call `cuBLAS` or `cuSOLVER` directly for batched SVD without Python overhead.
 4. Write the result directly to the pre-allocated `MetadataPool` GPU tensor via a raw CUDA pointer.

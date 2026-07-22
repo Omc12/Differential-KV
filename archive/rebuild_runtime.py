@@ -242,7 +242,7 @@ faster decode than dense inference.
 
 ```bash
 cd ACTIVE_RUNTIME
-python serving/hf_diffkv_wrapper.py
+python serving/hf_dkv_wrapper.py
 ```
 
 ## Metrics That Matter
@@ -261,7 +261,7 @@ python serving/hf_diffkv_wrapper.py
 ### Prefill (q_len > 1)
 ```
 input_ids -> HF model forward
-  -> diffkv_attention forward (per layer)
+  -> dkv_attention forward (per layer)
     -> StreamingSparseIngestManager.ingest_chunk()
       -> micro-block accumulation (16 tokens)
       -> AsyncCompressor.submit() when full
@@ -272,7 +272,7 @@ input_ids -> HF model forward
 ### Decode (q_len == 1)
 ```
 input_ids -> HF model forward
-  -> diffkv_attention forward (per layer)
+  -> dkv_attention forward (per layer)
     -> StreamingSparseIngestManager.append_decode_token()
     -> native_triton_sparse_attn_decode()
       -> NativeBlockPool block_indices gather
@@ -296,10 +296,10 @@ input_ids -> HF model forward
 | `native_core/compression/async_compressor.py` | Background SVD thread pool |
 | `native_core/compression/lowrank.py` | SVD low-rank compression |
 | `native_core/sparse_decode/triton_sparse_attn.py` | Triton fused decode kernel |
-| `native_core/sparse_decode/triton_diffkv.py` | Triton reconstruction kernel |
+| `native_core/sparse_decode/triton_dkv.py` | Triton reconstruction kernel |
 | `runtime/native_block_pool.py` | Contiguous GPU pool |
-| `runtime/diffkv_attention.py` | HF model attention patch |
-| `serving/hf_diffkv_wrapper.py` | Model wrapper + generate() |
+| `runtime/dkv_attention.py` | HF model attention patch |
+| `serving/hf_dkv_wrapper.py` | Model wrapper + generate() |
 | `serving/batch_engine.py` | Continuous batching engine |
 | `serving/openai_compatible_api_gateway.py` | OpenAI-compatible API |
 """,
@@ -309,7 +309,7 @@ input_ids -> HF model forward
 
 ## Methodology
 
-All benchmarks run on single GPU. Baseline = dense HF inference (no DiffKV).
+All benchmarks run on single GPU. Baseline = dense HF inference (no DKV).
 
 ## Format
 
@@ -319,7 +319,7 @@ Model:       Qwen2-7B
 GPU:         RTX 4090 / A100 / etc.
 Context:     25K tokens
 
-| Metric          | Baseline | DiffKV | Delta |
+| Metric          | Baseline | DKV | Delta |
 |-----------------|----------|--------|-------|
 | Peak VRAM (GB)  |          |        |       |
 | Prefill (s)     |          |        |       |
@@ -357,7 +357,7 @@ pip install torch transformers triton accelerate
 ## Native C++ Extension (optional, for NativeBlockPool)
 
 ```bash
-cd ACTIVE_RUNTIME/native_core/diffkv_core
+cd ACTIVE_RUNTIME/native_core/dkv_core
 python setup.py build_ext --inplace
 ```
 
@@ -414,9 +414,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_4k():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    wrapper = DKVHFWrapper(MODEL, config={}, device="cuda")
     
     prompt = "Hello, " * 2000  # ~4K tokens
     
@@ -449,9 +449,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_25k():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2-7B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2-7B-Instruct")
+    wrapper = DKVHFWrapper(MODEL, config={}, device="cuda")
     
     prompt = "The following is a long document. " * 1000  # ~25K tokens
     
@@ -481,7 +481,7 @@ Measures:
   - Cosine similarity (compression quality)
 
 Run with:
-  DIFFKV_MODEL=Qwen/Qwen2-7B-Instruct python tests/benchmark.py
+  DKV_MODEL=Qwen/Qwen2-7B-Instruct python tests/benchmark.py
 """
 import time
 import torch
@@ -493,9 +493,9 @@ CONTEXTS = [4096, 8192, 16384, 25000]
 MAX_NEW_TOKENS = 128
 
 def run_benchmark():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2-7B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2-7B-Instruct")
+    wrapper = DKVHFWrapper(MODEL, config={}, device="cuda")
     
     print(f"Model: {MODEL}")
     print(f"{'Context':>10} | {'Prefill(s)':>10} | {'Decode(tok/s)':>13} | {'PeakVRAM(GB)':>12} | {'AvgCosSim':>10}")
@@ -537,10 +537,10 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def test_concurrency():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from serving.batch_engine import ContinuousBatchEngine
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device="cuda")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    wrapper = DKVHFWrapper(MODEL, config={}, device="cuda")
     engine = ContinuousBatchEngine(wrapper, max_batch_size=4)
     engine.start()
     
@@ -612,12 +612,12 @@ print("REBUILD COMPLETE")
 print("=" * 70)
 print()
 print("Surviving execution-grounded systems:")
-print("  [1] SDPA/FlashAttention prefill    (diffkv_attention.py)")
+print("  [1] SDPA/FlashAttention prefill    (dkv_attention.py)")
 print("  [2] StreamingSparseIngestManager   (streaming_sparse_ingest.py)")
 print("  [3] AsyncCompressor                (async_compressor.py)")
 print("  [4] NativeBlockPool                (native_block_pool.py)")
 print("  [5] Triton Sparse Decode Kernel    (triton_sparse_attn.py)")
-print("  [6] Last-Token Logits Projection   (diffkv_attention.py)")
+print("  [6] Last-Token Logits Projection   (dkv_attention.py)")
 print("  [7] Geometry-preserving SVD        (lowrank.py)")
 print("  [8] ContinuousBatchEngine          (batch_engine.py)")
 print("  [9] OpenAI-compatible API          (openai_compatible_api_gateway.py)")

@@ -1,4 +1,4 @@
-"""Single source of measured data for every DiffKV paper figure and table.
+"""Single source of measured data for every DKV paper figure and table.
 
 Loads the two reconciled datasets and exposes them as plain dicts. NOTHING here
 is hand-typed from a document: every number is read from a measured JSON, or
@@ -81,14 +81,14 @@ def cell_status(engine, ctx):
 
 
 def active_contexts():
-    """Contexts where the DiffKV active engine produced a result (incl. 64k reach)."""
+    """Contexts where the DKV active engine produced a result (incl. 64k reach)."""
     prim = load_primary()
     return [c for c in CONTEXTS if c in prim["active"]]
 
 
 # ── Analytic KV-state footprint for an arbitrary sequence length ─────────────
 def analytic_footprint(seq_len, max_residual):
-    """Whole-model DiffKV store bytes vs dense full-KV bytes at `seq_len`.
+    """Whole-model DKV store bytes vs dense full-KV bytes at `seq_len`.
 
     num_blocks = full blocks that clear the recency window; the remainder stays in
     the dense window. Mirrors compress_deferred_prefill_blocks.

@@ -19,7 +19,7 @@ This matrix classifies all recovered systems across the 7 salvage categories, de
 | Paged KV Store | `runtime/paged_kv_store.py` | `KVRuntimeManager` | **ACTIVE_EXECUTING** |
 | Adaptive Rank Selection | `compression/adaptive.py` | `KVRuntimeManager._compress_block_sync` | **ACTIVE_EXECUTING** |
 | Shared Basis Compression | `compression/shared_basis.py` | None | **DISCONNECTED** |
-| Triton Sparse Decode | `runtime/triton_sparse_attn.py` | `batch_engine.py` / `hf_diffkv_wrapper.py` | **ACTIVE_EXECUTING** |
+| Triton Sparse Decode | `runtime/triton_sparse_attn.py` | `batch_engine.py` / `hf_dkv_wrapper.py` | **ACTIVE_EXECUTING** |
 
 ### CATEGORY 2 — Sparse Transformer Execution
 | System | Source Location | Execution Path | Status |

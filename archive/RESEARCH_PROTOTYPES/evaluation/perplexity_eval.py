@@ -112,7 +112,7 @@ class Phase8PerplexityEvaluator:
                     
                 stacked_deltas = torch.cat(deltas_all, dim=0)
                 
-                if mode == "INT8-DiffKV":
+                if mode == "INT8-DKV":
                     # Quantize all deltas
                     q = quantize_int8(stacked_deltas)
                     recon_deltas = dequantize_int8(q)
@@ -250,7 +250,7 @@ def run_ppl_benchmark(model_id="Qwen/Qwen2-0.5B", n_samples=3):
     
     modes = [
         "FP16",
-        "INT8-DiffKV",
+        "INT8-DKV",
         "Layer-Shared Rank16",
         "Adaptive-Only",
         "Hybrid-S1%",

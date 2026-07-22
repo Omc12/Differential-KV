@@ -18,8 +18,8 @@ OUT = os.path.join(HERE, "REPORT.md")
 
 ENGINE_ORDER = ["native", "active", "dense", "ollama"]
 LABEL = {
-    "native": "DiffKV native (C++ / ggml, GGUF Q4_K_M)",
-    "active": "DiffKV active runtime (MLX, int4) — compressed KV",
+    "native": "DKV native (C++ / ggml, GGUF Q4_K_M)",
+    "active": "DKV active runtime (MLX, int4) — compressed KV",
     "dense": "Dense baseline (mlx_lm int4, full KV cache)",
     "ollama": "Ollama / llama.cpp (GGUF Q4_K_M)",
 }
@@ -54,7 +54,7 @@ def main():
 
     L = []
     A = L.append
-    A("# DiffKV vs Dense vs llama.cpp — long-context benchmark\n")
+    A("# DKV vs Dense vs llama.cpp — long-context benchmark\n")
     A(f"**Model:** {meta['model']} · **Host:** {meta['host']}, "
       f"{meta['ram_gb']:.1f} GB unified memory, {meta['chip']}")
     A(f"**Decode tokens/test:** {meta['gen']} (greedy) · "
@@ -128,20 +128,20 @@ def main():
         return r.get(k) if r and r.get("status") == "ok" else None
 
     A("## Key findings\n")
-    A("1. **Memory is the decisive axis, and DiffKV's compressed KV wins it.** "
+    A("1. **Memory is the decisive axis, and DKV's compressed KV wins it.** "
       "Peak memory at 16k: active **3.18 GB** vs dense **5.94 GB** vs native "
-      "**5.04 GB** vs ollama 1.75 GB. The DiffKV active runtime's memory grows "
+      "**5.04 GB** vs ollama 1.75 GB. The DKV active runtime's memory grows "
       "far slower than the full-KV dense baseline as context grows "
       "(active 4k→64k: 2.86→2.86→3.18→4.21→6.02 GB; dense: 2.76→4.31→5.94→5.89 "
       "then OOM at 64k).")
     A("2. **Max usable context within 8 GB: active 64k > dense 32k > native 16k ≈ "
-      "ollama 16k.** The DiffKV active runtime is the only engine that genuinely "
+      "ollama 16k.** The DKV active runtime is the only engine that genuinely "
       "processes 64k tokens (all 65,615, needle recovered) on this 8 GB Mac — "
       "2× the dense baseline and 4× the C++ native build before failing.")
-    A("3. **Throughput is the trade-off DiffKV pays.** At every context the active "
+    A("3. **Throughput is the trade-off DKV pays.** At every context the active "
       "runtime decodes slower than dense/ollama (44 vs 65 tok/s at 4k; 36 vs "
       "45–52 at 16k; down to 17 at 64k) and its prefill is the slowest of the MLX "
-      "engines — the cost of sparse retrieval + per-block SVD compression. DiffKV "
+      "engines — the cost of sparse retrieval + per-block SVD compression. DKV "
       "buys memory and context-reach at the price of speed.")
     A("4. **ollama / llama.cpp is fastest and leanest at ≤16k but is hard-capped at "
       "Qwen2.5's 32k trained context.** It silently truncates 32k+ prompts "
@@ -157,7 +157,7 @@ def main():
     # ── Root-cause analysis for native (grounded in the source) ──
     A("## Why `native` underperforms (root cause)\n")
     A("`native` is **not** a port of the MLX `active` runtime — it is an independent "
-      "reimplementation of the same DiffKV algorithm on a different stack "
+      "reimplementation of the same DKV algorithm on a different stack "
       "(ggml / GGUF Q4_K_M weights + a custom Metal attention op). The reconstruction "
       "transcribed the *architecture* but not the *performance characteristics*, and "
       "it diverges on all three measured axes for distinct, identifiable reasons:\n")
@@ -175,7 +175,7 @@ def main():
       "`active` runs Apple MLX (fused, compiled, lazily-evaluated kernels on MLX-int4 "
       "weights) — Apple's own framework, the fastest path on this silicon. `native` "
       "runs ggml-metal on GGUF Q4_K_M through a hand-written custom attention op "
-      "(`GGML_OP_DIFFKV_ATTN`, `src/main.cpp:925`). Same math, same GPU, but ggml-metal "
+      "(`GGML_OP_DKV_ATTN`, `src/main.cpp:925`). Same math, same GPU, but ggml-metal "
       "+ a custom op is ~2× slower here than MLX's tuned kernels. The \"C++ beats "
       "Python\" intuition does not apply: in `active` the Python layer only orchestrates "
       "— MLX's Metal kernels do the compute.")
@@ -185,22 +185,22 @@ def main():
       "byte-identical output and the logs show all compressed blocks are already "
       "attended. The actual cause is the **fidelity of the SVD-compressed block** once a "
       "token leaves the recency window. Decisive proof: keeping the needle in the dense "
-      "window (`DIFFKV_RECENCY_WINDOW` large enough to cover it) recovers it **exactly** "
+      "window (`DKV_RECENCY_WINDOW` large enough to cover it) recovers it **exactly** "
       "at every scale (`OMEGA-7741-DELTA`, coherent); compressing it garbles the needle "
       "at 4k and collapses into instruction-echo at 8k+ — same root cause, worse with "
       "depth.")
     A("   The loss is **rank truncation, not precision.** The built-in "
-      "`DIFFKV_DBG_COMPRESS_ERR` decomposition shows a ~43% rank-16 reconstruction floor "
+      "`DKV_DBG_COMPRESS_ERR` decomposition shows a ~43% rank-16 reconstruction floor "
       "with an int8-vs-fp16 U penalty of ~0.002% — so fp16 U buys nothing, and porting "
       "active's randomized SVD cannot help either: `native` already uses an **exact "
       "LAPACK `sgesdd_`** SVD at the **same rank (16) and block size (256)** as the live "
-      "MLX `active` runtime (`mlx_diffkv_wrapper.py`: `rank=16`, `block_size=256`), whose "
-      "rSVD is only an approximation of the same truncation. DiffKV's rescue for the "
+      "MLX `active` runtime (`mlx_dkv_wrapper.py`: `rank=16`, `block_size=256`), whose "
+      "rSVD is only an approximation of the same truncation. DKV's rescue for the "
       "irreducible floor is the exact-token **residual** path, and that is where `native` "
       "diverged: it capped residuals at `MAX_RESIDUAL=8` (~3% of a 256-token block) while "
       "`active` keeps the full 15% (~38).")
-    A("   Fixes landed on `diffkv-native-needle-recall-fix` (per-row int8 U so int8==fp16; "
-      "`MAX_RESIDUAL` 8→40 + `DIFFKV_RESIDUAL_FRAC`; decode routed to the corrected CPU "
+    A("   Fixes landed on `dkv-native-needle-recall-fix` (per-row int8 U so int8==fp16; "
+      "`MAX_RESIDUAL` 8→40 + `DKV_RESIDUAL_FRAC`; decode routed to the corrected CPU "
       "op) take 4k from word-salad to `OMEGA-777` and recover the needle exactly when it "
       "stays dense. **Exact parity at 15% residuals is still open** — at equal residual "
       "count `active` recovers and `native` does not, so the remaining gap is `native`'s "
@@ -208,10 +208,10 @@ def main():
       "landmark swap), not the compressor or the SVD.\n")
     A("**On CUDA / Triton:** neither live runtime uses them, and on this Apple-Silicon "
       "host they cannot (no NVIDIA GPU). The `active` runtime's compiled extension "
-      "(`native_core/diffkv_core/*.so`) is built from Metal + CPU objects "
+      "(`native_core/dkv_core/*.so`) is built from Metal + CPU objects "
       "(`metal_runtime.o`, `decode_attention.o`, `compressor_thread_cpu.o`); its actual "
       "sparse/dense attention is plain MLX (`mx.softmax`) in "
-      "`serving/mlx_diffkv_wrapper.py`. `native` builds with `GGML_CUDA OFF` and the "
+      "`serving/mlx_dkv_wrapper.py`. `native` builds with `GGML_CUDA OFF` and the "
       "CPU `paging_stream.cpp` variant. The only live `.cu` file (`paging_stream.cu`) is "
       "host↔device memcpy plumbing, **not** a compute kernel, and every Triton kernel in "
       "the tree lives under `archive/`. So there is no validated CUDA/Triton fused-"
@@ -250,7 +250,7 @@ def main():
     A("- **Quantization is matched where it matters:** native, ollama = GGUF "
       "Q4_K_M; active, dense = MLX int4 — all 4-bit weights. `dense` shares the "
       "exact int4 weights and MLX engine with `active`, so active-vs-dense isolates "
-      "the DiffKV compression algorithm, nothing else.\n")
+      "the DKV compression algorithm, nothing else.\n")
 
     # Per-run detail
     A("## Per-run detail\n")

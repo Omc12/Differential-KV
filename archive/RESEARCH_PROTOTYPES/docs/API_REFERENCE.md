@@ -1,11 +1,11 @@
 # API Reference
 
 ## CLI
-- `diffkv serve`: Launch inference gateway.
-- `diffkv benchmark`: Run OBS suite.
-- `diffkv doctor`: Run environment checks.
+- `dkv serve`: Launch inference gateway.
+- `dkv benchmark`: Run OBS suite.
+- `dkv doctor`: Run environment checks.
 
 ## Python Adapters
-- `DiffKVHFAdapter`: HuggingFace compatibility.
-- `DiffKVSparseLLM`: LangChain integration.
-- `DiffKVLlamaIndexAdapter`: LlamaIndex support.
+- `DKVHFAdapter`: HuggingFace compatibility.
+- `DKVSparseLLM`: LangChain integration.
+- `DKVLlamaIndexAdapter`: LlamaIndex support.

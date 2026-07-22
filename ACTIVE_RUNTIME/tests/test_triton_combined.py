@@ -62,7 +62,7 @@ class MockPool:
 
 
 class MockDenseBlock:
-    """Minimal dense block matching what diffkv_attention.py passes."""
+    """Minimal dense block matching what dkv_attention.py passes."""
     def __init__(self, H_kv, L, D, device, dtype=torch.float16):
         self.anchor_kv = None
         self.active_k  = torch.randn(1, H_kv, L, D, device=device, dtype=dtype) * 0.1

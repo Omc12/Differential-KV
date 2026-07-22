@@ -66,14 +66,14 @@ def patch_runtime():
     """
     Monkey-patch runtime components to insert audit hooks.
     """
-    # 1. Patch TritonDiffKV
+    # 1. Patch TritonDKV
     try:
-        from runtime.triton_diffkv import TritonDiffKV
+        from runtime.triton_dkv import TritonDKV
         
-        original_recon = TritonDiffKV.reconstruct_lowrank
+        original_recon = TritonDKV.reconstruct_lowrank
         def audited_recon(U, V, anchor, scale=1.0):
             try:
-                from runtime.triton_diffkv import triton_fused_reconstruct
+                from runtime.triton_dkv import triton_fused_reconstruct
                 # Force Triton check
                 auditor.log_event("triton", "launch", {"kernel": "lowrank_recon_kernel", "shape": list(U.shape)})
                 res = triton_fused_reconstruct(U, V, anchor, scale=scale)
@@ -84,10 +84,10 @@ def patch_runtime():
                 # Fallback implementation
                 return (torch.matmul(U.float(), V.float()) * scale + anchor.float()).to(U.dtype)
         
-        TritonDiffKV.reconstruct_lowrank = audited_recon
-        TritonDiffKV.reconstruct_lowrank_sparse = TritonDiffKV.reconstruct_lowrank_sparse # Ensure it uses the patched version if it calls it
+        TritonDKV.reconstruct_lowrank = audited_recon
+        TritonDKV.reconstruct_lowrank_sparse = TritonDKV.reconstruct_lowrank_sparse # Ensure it uses the patched version if it calls it
     except ImportError:
-        print("Warning: Could not patch TritonDiffKV")
+        print("Warning: Could not patch TritonDKV")
 
     # 2. Patch NativeSparseAttention
     try:

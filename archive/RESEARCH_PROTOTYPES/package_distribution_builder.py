@@ -40,7 +40,7 @@ gpu = ["triton>=2.0.0"]
 dev = ["pytest", "black", "isort"]
 
 [project.scripts]
-diffkv = "differential_kv_cli:main"
+dkv = "differential_kv_cli:main"
 """
         with open("pyproject.toml", "w") as f:
             f.write(content)

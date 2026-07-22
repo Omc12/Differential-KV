@@ -13,11 +13,11 @@ An answer that names ANOTHER planted value/entity is a SWAP (binding failure);
 an answer with none of the planted set is a MISS (retention/other). If swaps
 dominate misses, the fix is relational locality, not wider capture.
 
-Modes: dense (COMPRESSED_DECODE=0), diffkv (compressed, DIFFKV_LEGO_PREFILL=0),
-lego (compressed, DIFFKV_LEGO_PREFILL=1 — studs default on MLX).
+Modes: dense (COMPRESSED_DECODE=0), dkv (compressed, DKV_LEGO_PREFILL=0),
+lego (compressed, DKV_LEGO_PREFILL=1 — studs default on MLX).
 
 Usage:
-  python3 benchmarks/binding_probe.py --ctx 8192 --modes dense diffkv lego
+  python3 benchmarks/binding_probe.py --ctx 8192 --modes dense dkv lego
   python3 benchmarks/binding_probe.py --ctx 8192 --modes lego --full-matrix
 (Each cell runs in its own subprocess; the driver aggregates.)
 """
@@ -151,12 +151,12 @@ def run_cell(mode, ctx, question, max_tokens):
     import torch
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
-    os.environ["DIFFKV_LEGO_PREFILL"] = "1" if mode == "lego" else "0"
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    os.environ["DKV_COMPRESSED_DECODE"] = "0" if mode == "dense" else "1"
+    os.environ["DKV_LEGO_PREFILL"] = "1" if mode == "lego" else "0"
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
+    wrapper = DKVHFWrapper(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
     prompt = build_prompt(tok, ctx, question)
@@ -166,7 +166,7 @@ def run_cell(mode, ctx, question, max_tokens):
     wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     import numpy as np
     CH = 512
     output = None
@@ -194,7 +194,7 @@ def run_cell(mode, ctx, question, max_tokens):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctx", type=int, default=8192)
-    ap.add_argument("--modes", nargs="+", default=["dense", "diffkv", "lego"])
+    ap.add_argument("--modes", nargs="+", default=["dense", "dkv", "lego"])
     ap.add_argument("--full-matrix", action="store_true",
                     help="also run the per-question fwd/rev matrix (slow)")
     ap.add_argument("--single", nargs=3, metavar=("MODE", "KIND", "ARG"),

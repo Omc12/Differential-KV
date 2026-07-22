@@ -1,9 +1,9 @@
 """
 native_core/sparse_decode/simd_expand.py
 
-Vectorized / tiled block expansion kernels for DiffKV.
+Vectorized / tiled block expansion kernels for DKV.
 
-Feature 3 of the k-transformers × DiffKV integration.
+Feature 3 of the k-transformers × DKV integration.
 
 Provides:
   - CUDA/Triton: already handled directly in triton_fused_decode.py via autotune.
@@ -20,8 +20,8 @@ All functions share the same interface:
   -> (K_reconstructed, V_reconstructed)
 
 Env knobs:
-  DIFFKV_MLX_METAL_EXPAND   auto  # 1=force Metal, 0=force pure-MLX, auto=try Metal
-  DIFFKV_TRITON_INT8_V       0    # 1=quantize V_KV to int8 in Triton kernel
+  DKV_MLX_METAL_EXPAND   auto  # 1=force Metal, 0=force pure-MLX, auto=try Metal
+  DKV_TRITON_INT8_V       0    # 1=quantize V_KV to int8 in Triton kernel
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ def _has_metal_kernel() -> bool:
         return False
 
 
-_METAL_EXPAND_ENV = os.environ.get("DIFFKV_MLX_METAL_EXPAND", "auto").lower()
-_INT8_V_ENV = os.environ.get("DIFFKV_TRITON_INT8_V", "0") == "1"
+_METAL_EXPAND_ENV = os.environ.get("DKV_MLX_METAL_EXPAND", "auto").lower()
+_INT8_V_ENV = os.environ.get("DKV_TRITON_INT8_V", "0") == "1"
 
 
 # ── INT8 V Quantization Helpers (for Triton INT8_V path) ─────────────────────
@@ -72,7 +72,7 @@ def quantize_v_to_int8(
     Returns (V_int8, V_scale) where V_scale is [pool_size, RANK] float16.
     This is called once after pool writes, not in the hot decode path.
 
-    Usage: gated by DIFFKV_TRITON_INT8_V=1
+    Usage: gated by DKV_TRITON_INT8_V=1
     """
     orig_shape = V_fp16.shape          # [N, R, H, D]
     N, R = orig_shape[0], orig_shape[1]
@@ -201,7 +201,7 @@ def _try_build_metal_kernel():
         #include <metal_stdlib>
         using namespace metal;
 
-        kernel void diffkv_block_expand(
+        kernel void dkv_block_expand(
             device const char*    U_int8  [[buffer(0)]],
             device const half*    U_scale [[buffer(1)]],
             device const half*    V_flat  [[buffer(2)]],
@@ -236,7 +236,7 @@ def _try_build_metal_kernel():
         """
 
         _mlx_metal_expand_kernel = mx.fast.metal_kernel(
-            name="diffkv_block_expand",
+            name="dkv_block_expand",
             input_names=["U_int8", "U_scale", "V_flat", "anchor"],
             output_names=["out"],
             source=_METAL_SOURCE,
@@ -245,8 +245,8 @@ def _try_build_metal_kernel():
         return True
     except Exception as e:
         _METAL_KERNEL_AVAILABLE = False
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            print(f"[DiffKV simd_expand] Metal kernel build failed ({e}); using pure-MLX fallback")
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
+            print(f"[DKV simd_expand] Metal kernel build failed ({e}); using pure-MLX fallback")
         return False
 
 
@@ -311,8 +311,8 @@ def mlx_block_expand_fast(
         return K_out, V_out
 
     except Exception as e:
-        if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-            print(f"[DiffKV simd_expand] Metal dispatch failed ({e}); falling back to pure-MLX")
+        if os.environ.get("DKV_TELEMETRY", "0") == "1":
+            print(f"[DKV simd_expand] Metal dispatch failed ({e}); falling back to pure-MLX")
         return mlx_block_expand_fallback(U_int8, U_scale, V_K_fp16, V_V_fp16, anchor_K, anchor_V)
 
 
@@ -321,7 +321,7 @@ def mlx_block_expand_fast(
 def expand_kv_mlx(U_int8, U_scale, V_K_fp16, V_V_fp16, anchor_K, anchor_V) -> Tuple:
     """
     Dispatch to the best available MLX expansion path:
-      1. mx.fast.metal_kernel tile (if DIFFKV_MLX_METAL_EXPAND != 0 and MLX >= 0.16)
+      1. mx.fast.metal_kernel tile (if DKV_MLX_METAL_EXPAND != 0 and MLX >= 0.16)
       2. pure-MLX matmul chain (fallback)
     """
     if _METAL_EXPAND_ENV == "1" or _METAL_EXPAND_ENV == "auto":

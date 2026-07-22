@@ -3,7 +3,7 @@
 
 We list the limitations plainly; several are direct consequences of the design choices above.
 
-\paragraph{Decode throughput.} The headline cost. \diffkv{} decode is slower than a dense cache
+\paragraph{Decode throughput.} The headline cost. \dkv{} decode is slower than a dense cache
 that fits (\S\ref{sec:eval}, E4), and the E6 ablation localizes the gap to per-token
 reconstruction-and-merge overhead. The clearest remedy is a single fused decode kernel that does
 the routing, low-rank scoring, residual attention, and merge in one launch, rather than a sequence
@@ -35,7 +35,7 @@ once, is a known weaker case that the single-needle metric does not probe; an op
 bias mitigates it but is not a full solution. Broadening the evaluation is the most important next
 step for external credibility.
 
-\paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both \diffkv{} and the optimized
+\paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both \dkv{} and the optimized
 dense are pushed to the machine's limit: their prefills complete but are heavily memory-bound (so the
 $64$k prefill \emph{times} are reach indicators, not clean measurements), while the standard PyTorch
 dense has already OOM'd at $\ptOOMK$k. A machine with more memory headroom would give cleaner

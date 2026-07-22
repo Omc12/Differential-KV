@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import time
 import sys, os
 
-from runtime.triton_diffkv import TritonDiffKV
+from runtime.triton_dkv import TritonDKV
 from compression.lowrank import compress_lowrank, LowRankDelta
 from runtime.paged_kv_store import PagedKVStore
 from runtime.recon_cache import ReconstructionCache
@@ -194,7 +194,7 @@ class KVRuntimeManager:
                     v_list.append(cached_v)
                 else:
                     anchor_flat = block.anchor_kv.view(-1).to(torch.float16)
-                    recon = TritonDiffKV.reconstruct_lowrank(
+                    recon = TritonDKV.reconstruct_lowrank(
                         block.U, block.V, anchor_flat, scale=block.scale
                     )
                     hds  = block.anchor_kv.shape[2]

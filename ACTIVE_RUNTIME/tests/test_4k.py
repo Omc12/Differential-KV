@@ -12,10 +12,10 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_4k():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    from serving.hf_dkv_wrapper import DKVHFWrapper
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    wrapper = DiffKVHFWrapper(MODEL, config={}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={}, device=device)
     
     prompt = "Hello, " * 2000  # ~4K tokens
     

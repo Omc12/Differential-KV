@@ -7,8 +7,8 @@
 | Requirement | Why | Evidence |
 |---|---|---|
 | **Anchor KV per block** | Each block needs 1 dense reference point for delta computation | `KVBlock.anchor_kv` — the single token used as compression baseline |
-| **Last active block during decode** | Attention must see the freshest uncompressed token just appended | `last_block.active_k` in `diffkv_attention.py:103` |
-| **RoPE positional encoding** | Applied to raw Q/K before storage — cannot be compressed before application | `apply_rotary_pos_emb` in diffkv_attention.py:64 |
+| **Last active block during decode** | Attention must see the freshest uncompressed token just appended | `last_block.active_k` in `dkv_attention.py:103` |
+| **RoPE positional encoding** | Applied to raw Q/K before storage — cannot be compressed before application | `apply_rotary_pos_emb` in dkv_attention.py:64 |
 | **First token of any session** | No anchor exists yet — cannot compute delta from nothing | `len(blocks)==0` path in set_kv() |
 
 These 4 requirements are **genuinely mathematically dense-critical**.
@@ -32,7 +32,7 @@ These are correctness constraints under the **current replay model**, but can be
 
 | Requirement | Why | Can be relaxed? |
 |---|---|---|
-| **Full prefill dense concat** | `diffkv_attention.py:171`: `new_k = cat([past_k, curr_k])` requires full dense history | YES — can be replaced by compressed-prefill path |
+| **Full prefill dense concat** | `dkv_attention.py:171`: `new_k = cat([past_k, curr_k])` requires full dense history | YES — can be replaced by compressed-prefill path |
 | **Block full before compress** | `active_k.shape[2] >= block_size-1` gate | YES — can use partial compression with smaller micro-blocks |
 | **Async copy to CPU then back** | CPU-pinned transfer adds latency and keeps GPU tensor live | YES — can compress in-place on GPU |
 
@@ -48,7 +48,7 @@ These are pure scheduler choices baked in. None are architectural requirements.
 | **Compress only AFTER full loop** | Lines 260-266 after the allocation loop | No compression overlap with ingest |
 | **dense_recency_blocks=2 hardcoded constant** | `kv_runtime_manager.py:104` | Keeps minimum 128 tokens dense always |
 | **No micro-block streaming** | Block must fill to 63 tokens before eligible | Forces 63-token minimum dense residency per block |
-| **Prefill attends to `get_kv()` dense output** | `diffkv_attention.py:158-163` | Forces dense materialization before every prefill chunk |
+| **Prefill attends to `get_kv()` dense output** | `dkv_attention.py:158-163` | Forces dense materialization before every prefill chunk |
 
 These are **entirely artificial constraints** with no mathematical basis.
 

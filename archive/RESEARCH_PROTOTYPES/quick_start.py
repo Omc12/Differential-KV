@@ -89,7 +89,7 @@ def run_quick(seq_len: int, mode: str, heads: int, head_dim: int):
         summary = profiler.summarize()
 
         rows.append({
-            "strategy":  f"DiffKV-{label}",
+            "strategy":  f"DKV-{label}",
             "seq_len":   seq_len,
             "bytes_KB":  f"{stats.total_compressed_bytes/1024:.0f}",
             "ratio":     f"{stats.compression_ratio:.2f}x",

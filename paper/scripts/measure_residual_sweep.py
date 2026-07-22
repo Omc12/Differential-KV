@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""E2 — residual-budget accuracy/memory trade-off for the DiffKV active runtime.
+"""E2 — residual-budget accuracy/memory trade-off for the DKV active runtime.
 
-For a fixed context length and forced compressed decode, sweep DIFFKV_MAX_RESIDUAL
+For a fixed context length and forced compressed decode, sweep DKV_MAX_RESIDUAL
 (the number of exact fp16 tokens kept per 256-token block) and record, per cell:
   needle_found, decode_tps, mx_decode_peak_gb, analytic store bytes, ratio vs dense.
 
@@ -10,7 +10,7 @@ less compression; fewer -> better compression but the buried needle is lost (the
 pre-fix failure). Each cell runs in its own subprocess for clean memory isolation.
 
 Usage:
-  diffkv_venv/bin/python3 paper/scripts/measure_residual_sweep.py \
+  dkv_venv/bin/python3 paper/scripts/measure_residual_sweep.py \
       --ctx 16384 32768 --residuals 0 8 16 32 64 --gen 96 \
       --out paper/generated/residual_sweep.json
 """
@@ -53,8 +53,8 @@ def main():
         for R in args.residuals:
             print(f">>> R={R} ctx={ctx}", flush=True)
             env = os.environ.copy()
-            env["DIFFKV_COMPRESSED_DECODE"] = "1"   # force compressed
-            env["DIFFKV_MAX_RESIDUAL"] = str(R)
+            env["DKV_COMPRESSED_DECODE"] = "1"   # force compressed
+            env["DKV_MAX_RESIDUAL"] = str(R)
             cmd = [sys.executable, os.path.abspath(__file__),
                    "--single", f"{R},{ctx}", "--gen", str(args.gen)]
             p = subprocess.run(cmd, capture_output=True, text=True, env=env)

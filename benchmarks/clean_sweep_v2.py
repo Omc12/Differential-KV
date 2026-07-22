@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-clean_sweep_v2.py — Symmetric single-process benchmark for DiffKV paper.
+clean_sweep_v2.py — Symmetric single-process benchmark for DKV paper.
 
-Both DiffKV (active) and Dense use their respective generate() function —
+Both DKV (active) and Dense use their respective generate() function —
 exactly how each engine is invoked from the CLI. Timing methodology is
 identical for both:
 
@@ -21,12 +21,12 @@ identical for both:
   Between every cell: full session/cache teardown + gc.collect + mx.clear_cache
   to guarantee zero bleed-over between runs.
 
-Run order: DiffKV 4k→64k, then Dense 4k→64k.
+Run order: DKV 4k→64k, then Dense 4k→64k.
 Each context runs in an isolated subprocess for maximum memory isolation.
 
 Usage:
   python3 benchmarks/clean_sweep_v2.py [--contexts 4096 ...] [--gen 128]
-  python3 benchmarks/clean_sweep_v2.py --engines active   # DiffKV only
+  python3 benchmarks/clean_sweep_v2.py --engines active   # DKV only
   python3 benchmarks/clean_sweep_v2.py --engines dense    # Dense only
 """
 import argparse, json, os, subprocess, sys, time
@@ -34,14 +34,14 @@ import argparse, json, os, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RESULTS = os.path.join(HERE, "results")
-VENV_PY = os.path.join(REPO, "diffkv_venv", "bin", "python3")
+VENV_PY = os.path.join(REPO, "dkv_venv", "bin", "python3")
 MODEL_ID = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 CONTEXTS = [4096, 8192, 16384, 32768, 65536]
 GEN = 128
 NEEDLE = "OMEGA-7741-DELTA"
 
 
-# ── Active (DiffKV) worker ────────────────────────────────────────────────────
+# ── Active (DKV) worker ────────────────────────────────────────────────────
 ACTIVE_WORKER = r'''
 import sys, os, json, time, gc
 REPO, CTX, GEN, MODEL_ID, OUT = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
@@ -52,15 +52,15 @@ sys.path.insert(0, os.path.join(REPO, "benchmarks"))
 
 import mlx.core as mx
 
-os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-os.environ["DIFFKV_MAX_RESIDUAL"] = "128"
-os.environ["DIFFKV_SPARSE_PREFILL"] = "1"
-os.environ["DIFFKV_DECODE_CACHE"] = "1"
-os.environ["DIFFKV_SPARSE_BIAS"] = "auto"
-os.environ["DIFFKV_SEED"] = "1234"
+os.environ["DKV_COMPRESSED_DECODE"] = "1"
+os.environ["DKV_MAX_RESIDUAL"] = "128"
+os.environ["DKV_SPARSE_PREFILL"] = "1"
+os.environ["DKV_DECODE_CACHE"] = "1"
+os.environ["DKV_SPARSE_BIAS"] = "auto"
+os.environ["DKV_SEED"] = "1234"
 
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
-wrapper = MLXDiffKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
+wrapper = MLXDKVWrapper(model_id=MODEL_ID, config={"rank": 32, "block_size": 256})
 wrapper.ensure_loaded()
 
 # Load prompt from saved file (written by earlier sweep)

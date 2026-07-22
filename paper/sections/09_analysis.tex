@@ -1,18 +1,18 @@
 \section{Analysis and Discussion}
 \label{sec:analysis}
 
-\subsection{What \diffkv{} buys, and what it costs}
-The evaluation supports a precise, bounded claim. \diffkv{} converts the KV cache from an
+\subsection{What \dkv{} buys, and what it costs}
+The evaluation supports a precise, bounded claim. \dkv{} converts the KV cache from an
 \emph{unbounded, growing} liability into a \emph{bounded, fixed-pool} one, at
 $\ratioDefault\times$--$\ratioPreset\times$ per-block compression, while preserving exact recall of
 distinctive tokens and making long-context prefill sub-quadratic. It costs per-token decode
 throughput, because the sparse representation must be scored and merged every step where a dense
 cache would simply attend. Through $32$k, where the optimized dense cache still fits comfortably on
-our host, \diffkv{} is the slower decode and dense is the right choice. Memory is the other axis: a
+our host, \dkv{} is the slower decode and dense is the right choice. Memory is the other axis: a
 \emph{naive} full-KV cache OOMs at $\ptOOMK$k, and by $\reachK$k the standard PyTorch dense has been
-dead for four context-doublings, while \diffkv{} runs to $\reachK$k and prefills there
+dead for four context-doublings, while \dkv{} runs to $\reachK$k and prefills there
 $\pfSpeedupSixtyFourK\times$ faster than even the memory-optimized dense. That boundary is the whole
-point: \diffkv{}'s regime is where the cache would otherwise not fit---larger models, longer
+point: \dkv{}'s regime is where the cache would otherwise not fit---larger models, longer
 contexts, tighter memory, or more concurrent sessions---and there the alternative to a slower
 decode is no decode at all.
 
@@ -31,19 +31,19 @@ decode kernel (or a GPU-native CUDA/Triton one), not a change to the representat
 \subsection{The memory story, stated carefully}
 We are deliberately careful about memory because it is the easiest claim to overstate. The
 \emph{analytic KV state} is unambiguously smaller and bounded (E1). The \emph{measured allocator
-peak}, through $32$k, is close between \diffkv{} and the optimized dense, and \diffkv{}'s can even
+peak}, through $32$k, is close between \dkv{} and the optimized dense, and \dkv{}'s can even
 exceed dense's, because the peak there is set during prefill and by the pre-allocated pool rather
 than by steady-state decode; on a $1.5$B model at those lengths, full KV is simply not yet large
 enough for the compression to dominate the peak. The claim sharpens at the memory boundary: a naive
 full-KV cache \emph{does} become the binding constraint and OOMs at $\ptOOMK$k, and even the
-optimized dense, while it reaches $\reachK$k, holds a larger unbounded KV state that \diffkv{}'s
+optimized dense, while it reaches $\reachK$k, holds a larger unbounded KV state that \dkv{}'s
 fixed pool caps. So the honest memory story has two parts---below the boundary, compression buys a
 smaller \emph{growth rate} but not always a smaller measured peak; at and beyond the boundary, the
 bound is what keeps the context runnable, and what a naive dense cache cannot survive. The peak
 advantage is a reach advantage.
 
-\subsection{When does \diffkv{} win?}
-Synthesizing the results: \diffkv{} wins when (i) the KV cache, not the weights, is the memory
+\subsection{When does \dkv{} win?}
+Synthesizing the results: \dkv{} wins when (i) the KV cache, not the weights, is the memory
 bottleneck---bigger models, longer contexts, many concurrent sessions; (ii) prefill dominates the
 request (long prompt, short answer), where sub-quadratic block-sparse prefill is a direct
 wall-clock win; and (iii) exact recall of specific tokens matters, where the residual mechanism
@@ -52,12 +52,12 @@ throughput whenever a dense cache fits. Stating both halves is the point: the de
 memory-and-prefill instrument with a decode cost, not a free lunch.
 
 \subsection{Relationship to sparse-attention methods}
-\diffkv{}'s decode is, in effect, a training-free instance of retrieve-then-attend sparse
+\dkv{}'s decode is, in effect, a training-free instance of retrieve-then-attend sparse
 attention: the low-rank block reconstruction plays the role of a coarse compressed representation,
 the exact residuals and top-\topk{} routing play the role of fine token selection (cf.\ query-aware
 block sparsity~\cite{tang2024quest} and heavy-hitter selection~\cite{zhang2023h2o}), and the recency
 window is the local branch~\cite{xiao2024streamingllm}, combined by an exact log-sum-exp
 merge~\cite{dao2022flashattention}. The difference from methods
-that require a trained importance predictor is that \diffkv{}'s router scores exact residual keys
+that require a trained importance predictor is that \dkv{}'s router scores exact residual keys
 directly, so it needs no training and no tuning to head count or content---the residuals are
 whatever a given block's distinctive tokens happen to be.

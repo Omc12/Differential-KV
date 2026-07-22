@@ -38,7 +38,7 @@ def generate_schedules(num_layers: int):
         elif i < late_cut: strat_a.append(8)
         else: strat_a.append("fp16")
     
-    # Strategy B: early=low-rank (16), mid=standard DiffKV (rank-8), late=conservative periodic (dense)
+    # Strategy B: early=low-rank (16), mid=standard DKV (rank-8), late=conservative periodic (dense)
     strat_b = []
     for i in range(num_layers):
         if i < early_cut: strat_b.append(16)

@@ -6,7 +6,7 @@ import json
 async def fetch(session, idx, prompt):
     start = time.time()
     payload = {
-        "model": "diffkv-serving",
+        "model": "dkv-serving",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 100,
         "temperature": 0.7,

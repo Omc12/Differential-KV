@@ -12,7 +12,7 @@ outcomes.
 
 \begin{sloppypar}
 \paragraph{Software.}
-Python in \texttt{diffkv\_venv}, MLX~$0.31.2$, \texttt{mlx\_lm}, NumPy~$2.x$,
+Python in \texttt{dkv\_venv}, MLX~$0.31.2$, \texttt{mlx\_lm}, NumPy~$2.x$,
 PyTorch (used only for tensor plumbing in the wrapper, not for compute),
 \texttt{psutil}. Model: \path{mlx-community/Qwen2.5-1.5B-Instruct-4bit}
 (group size $64$, $4$-bit), $28$ layers, $12$ query heads, $2$ KV heads, head
@@ -25,19 +25,19 @@ preset \texttt{mid}, \texttt{serving\_mode=balanced}, \texttt{rank=32} (the ``mi
 default; only the ``low'' preset reduces it to $16$), \texttt{block\_size=256},
 \texttt{recency\_window=1024} (dense buffer $\dwin{+}\bs=1{,}280$), \texttt{max\_blocks=256},
 \texttt{max\_residual=128}, top-$K{=}16$ routing with the \texttt{residual} router,
-\texttt{DIFFKV\_SVD\_SEED=1234} (deterministic). The \diffkv{} engine runs in
+\texttt{DKV\_SVD\_SEED=1234} (deterministic). The \dkv{} engine runs in
 the active CLI's serving configuration with the sparse path forced on at every
-context: \texttt{DIFFKV\_COMPRESSED\_DECODE=1} (so DiffKV's compressed decode is
+context: \texttt{DKV\_COMPRESSED\_DECODE=1} (so DKV's compressed decode is
 what is measured at all lengths, not the adaptive dense-below-threshold policy),
-\texttt{DIFFKV\_DECODE\_FUSED=1} (persistent fused-buffer decode, default on;
-\texttt{DIFFKV\_DECODE\_CACHE} is \emph{off} by default since Jul 2026 and was not
+\texttt{DKV\_DECODE\_FUSED=1} (persistent fused-buffer decode, default on;
+\texttt{DKV\_DECODE\_CACHE} is \emph{off} by default since Jul 2026 and was not
 used in the reported measurements),
-\texttt{DIFFKV\_SPARSE\_PREFILL=1} (block-sparse prefill),
-\texttt{DIFFKV\_SPARSE\_BIAS=auto} (adaptive merge bias, as the CLI ships).
+\texttt{DKV\_SPARSE\_PREFILL=1} (block-sparse prefill),
+\texttt{DKV\_SPARSE\_BIAS=auto} (adaptive merge bias, as the CLI ships).
 The dense baseline is \texttt{mlx\_lm} with a full KV cache on the same int4
-weights. The residual sweep (E5) forces \texttt{DIFFKV\_COMPRESSED\_DECODE=1}
-and varies \texttt{DIFFKV\_MAX\_RESIDUAL}; the decode-mode ablation (E6) toggles
-\texttt{DIFFKV\_COMPRESSED\_DECODE} between $1$ (compressed) and $0$ (exact
+weights. The residual sweep (E5) forces \texttt{DKV\_COMPRESSED\_DECODE=1}
+and varies \texttt{DKV\_MAX\_RESIDUAL}; the decode-mode ablation (E6) toggles
+\texttt{DKV\_COMPRESSED\_DECODE} between $1$ (compressed) and $0$ (exact
 upper bound) over the same store.
 \end{sloppypar}
 
@@ -50,7 +50,7 @@ with \texttt{perf\_counter} around the chunked forward after \texttt{mx.eval}; d
 fixed-length greedy ($128$ tokens, EOS ignored) so throughput is directly comparable. Memory is
 read from MLX's allocator (\texttt{get\_peak\_memory}). Each \texttt{(engine, context)} cell runs
 in its own subprocess so memory is attributable and an out-of-memory event kills only that cell.
-The full primary sweep is a single back-to-back batch, so \diffkv{} and dense are measured under
+The full primary sweep is a single back-to-back batch, so \dkv{} and dense are measured under
 the same machine conditions; the volatile long-context dense cells were re-measured in isolation to
 confirm their regime.
 
@@ -61,18 +61,18 @@ CTXS="4096 8192 16384 32768" bash paper/scripts/measure\_sweep.sh\\[3pt]
 \# 64k reach point + long-context dense re-check\\
 bash paper/scripts/measure\_tail.sh\\[3pt]
 \# decode-mode ablation (compressed vs exact, same store)\\
-DIFFKV\_DECODE\_CACHE=1 diffkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
+DKV\_DECODE\_CACHE=1 dkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
 \ \ --ctx 4096 8192 16384 32768 --modes compressed exact --gen 128 \textbackslash\\
 \ \ --out paper/generated/active\_modes\_fresh.json\\[3pt]
 \# residual-budget sweep at 16k\\
-diffkv\_venv/bin/python3 paper/scripts/measure\_residual\_sweep.py \textbackslash\\
+dkv\_venv/bin/python3 paper/scripts/measure\_residual\_sweep.py \textbackslash\\
 \ \ --ctx 16384 --residuals 0 8 16 32 64 128 \textbackslash\\
 \ \ --out paper/generated/residual\_sweep\_fresh.json\\[3pt]
 \# facts, figures, and tables from the measured JSON (no hand-typed numbers)\\
-diffkv\_venv/bin/python3 paper/scripts/make\_facts.py\\
-diffkv\_venv/bin/python3 paper/scripts/make\_diagrams.py\\
-diffkv\_venv/bin/python3 paper/scripts/make\_graphs.py\\
-diffkv\_venv/bin/python3 paper/scripts/make\_tables.py
+dkv\_venv/bin/python3 paper/scripts/make\_facts.py\\
+dkv\_venv/bin/python3 paper/scripts/make\_diagrams.py\\
+dkv\_venv/bin/python3 paper/scripts/make\_graphs.py\\
+dkv\_venv/bin/python3 paper/scripts/make\_tables.py
 \end{quote}
 
 \begin{sloppypar}

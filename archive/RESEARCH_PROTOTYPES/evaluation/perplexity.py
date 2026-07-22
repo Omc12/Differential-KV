@@ -1,11 +1,11 @@
 """
 evaluation/perplexity.py — Phase 2.5 Objective 1
 
-Measures whether DiffKV-reconstructed KV caches preserve actual model behavior.
+Measures whether DKV-reconstructed KV caches preserve actual model behavior.
 
 Strategy:
   1. Run model prefill on a prompt → capture real past_key_values
-  2. Compress + reconstruct each layer's KV with DiffKV policy
+  2. Compress + reconstruct each layer's KV with DKV policy
   3. Feed reconstructed KV as past_key_values for continuation
   4. Compare log-likelihoods (perplexity) vs baseline
   5. Also compare token-level softmax distributions (KL divergence)
@@ -61,7 +61,7 @@ class PerplexityResult:
 
 class PerplexityEvaluator:
     """
-    Evaluates DiffKV reconstruction quality via perplexity and token agreement.
+    Evaluates DKV reconstruction quality via perplexity and token agreement.
 
     Parameters
     ----------
@@ -109,7 +109,7 @@ class PerplexityEvaluator:
 
     def _compress_kv(self, past_kv, strategy_label: str, selector=None):
         """
-        Compress each layer's KV cache using DiffKV.
+        Compress each layer's KV cache using DKV.
         Returns reconstructed past_key_values tuple.
         """
         from anchor_logic.anchor_manager import AnchorManager
@@ -273,7 +273,7 @@ class PerplexityEvaluator:
             except Exception:
                 pass
 
-            # DiffKV variants
+            # DKV variants
             eval_strategies = [(s, None) for s in strategies]
             if selector is not None:
                 eval_strategies = [(selector_label, selector)]
@@ -285,21 +285,21 @@ class PerplexityEvaluator:
                     recon_kv, orig_b, comp_b = self._compress_kv(
                         baseline_kv_fresh, strat_label, selector=sel
                     )
-                    ppl, ll, logits_diffkv = self._eval_continuation(
+                    ppl, ll, logits_dkv = self._eval_continuation(
                         prefix_ids, suffix_ids, recon_kv
                     )
                     eval_ms = (time.perf_counter() - t0) * 1000
 
                     # Token agreement
                     agreed = sum(
-                        1 for lb, ld in zip(logits_base, logits_diffkv)
+                        1 for lb, ld in zip(logits_base, logits_dkv)
                         if lb.argmax(-1).item() == ld.argmax(-1).item()
                     )
                     tok_agreement = agreed / len(logits_base) if logits_base else 0.0
 
                     # KL divergence
                     kl_divs = []
-                    for lb, ld in zip(logits_base, logits_diffkv):
+                    for lb, ld in zip(logits_base, logits_dkv):
                         p = F.softmax(lb, dim=-1)
                         q = F.softmax(ld, dim=-1)
                         kl = (p * (p.log() - q.log())).sum().item()

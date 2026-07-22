@@ -18,15 +18,15 @@ spec:
   replicas: 10
   selector:
     matchLabels:
-      app: diff-kv-runtime
+      app: dkv-runtime
   template:
     metadata:
       labels:
-        app: diff-kv-runtime
+        app: dkv-runtime
     spec:
       containers:
-      - name: diff-kv
-        image: diff_kv/cloud_runtime:v1
+      - name: dkv
+        image: dkv/cloud_runtime:v1
         resources:
           limits:
             nvidia.com/gpu: 1

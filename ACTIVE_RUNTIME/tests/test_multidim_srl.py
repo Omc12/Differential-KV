@@ -506,9 +506,9 @@ def test_reranker_and_recency_decay():
 
 def test_dynamic_scaling_and_seeds():
     from unittest.mock import patch, MagicMock
-    from serving.hf_diffkv_wrapper import PyTorchDiffKVHFWrapper as DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import PyTorchDKVHFWrapper as DKVHFWrapper
 
-    # 1. Test model-size dependent configuration defaults in DiffKVHFWrapper
+    # 1. Test model-size dependent configuration defaults in DKVHFWrapper
     class DummyConfig:
         num_hidden_layers = 12
         num_attention_heads = 8
@@ -543,37 +543,37 @@ def test_dynamic_scaling_and_seeds():
     dummy_tokenizer = DummyTokenizer()
 
     # Clear process pollution from other tests that set this globally
-    old_threshold = os.environ.pop("DIFFKV_SRL_THRESHOLD", None)
+    old_threshold = os.environ.pop("DKV_SRL_THRESHOLD", None)
     try:
         # A. Test smaller model (e.g. 500M params)
         model_500m = DummyModel(500 * 10**6)
-        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_500m), \
-             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
-            wrapper = DiffKVHFWrapper("mock/qwen-500m", config={"rank": 16})
+        with patch("serving.hf_dkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_500m), \
+             patch("serving.hf_dkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DKVHFWrapper("mock/qwen-500m", config={"rank": 16})
             assert wrapper.config["srl_k_min"] == 10
             assert wrapper.config["srl_k_max"] == 50
             assert wrapper.config["srl_threshold"] == 25
 
         # B. Test medium model (e.g. 1.5B params)
         model_1_5b = DummyModel(1500 * 10**6)
-        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_1_5b), \
-             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
-            wrapper = DiffKVHFWrapper("mock/qwen-1.5b", config={"rank": 16})
+        with patch("serving.hf_dkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_1_5b), \
+             patch("serving.hf_dkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DKVHFWrapper("mock/qwen-1.5b", config={"rank": 16})
             assert wrapper.config["srl_k_min"] == 15
             assert wrapper.config["srl_k_max"] == 100
             assert wrapper.config["srl_threshold"] == 40
 
         # C. Test larger model (e.g. 7B params)
         model_7b = DummyModel(7000 * 10**6)
-        with patch("serving.hf_diffkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_7b), \
-             patch("serving.hf_diffkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
-            wrapper = DiffKVHFWrapper("mock/qwen-7b", config={"rank": 16})
+        with patch("serving.hf_dkv_wrapper.AutoModelForCausalLM.from_pretrained", return_value=model_7b), \
+             patch("serving.hf_dkv_wrapper.AutoTokenizer.from_pretrained", return_value=dummy_tokenizer):
+            wrapper = DKVHFWrapper("mock/qwen-7b", config={"rank": 16})
             assert wrapper.config["srl_k_min"] == 20
             assert wrapper.config["srl_k_max"] == 200
             assert wrapper.config["srl_threshold"] == 50
     finally:
         if old_threshold is not None:
-            os.environ["DIFFKV_SRL_THRESHOLD"] = old_threshold
+            os.environ["DKV_SRL_THRESHOLD"] = old_threshold
 
 
 def test_dynamic_handshake_hunting_and_concentric_roles():

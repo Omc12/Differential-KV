@@ -2,18 +2,18 @@
 """Table-row binding probe v2 — NATIVE (C++) runner.
 
 Reuses table_probe2's prompt builders and scorers; drives the native binary
-(diffkv_native <model.gguf> <prompt>) exactly like native_margin_probe.sh:
-temperature 0, DIFFKV_NATIVE_ATTN=0, one isolated process per cell.
+(dkv_native <model.gguf> <prompt>) exactly like native_margin_probe.sh:
+temperature 0, DKV_NATIVE_ATTN=0, one isolated process per cell.
 
 Modes:
-  dense  — DIFFKV_DENSE_CMP=1 (cpu dense reference path)
-  diffkv — default compressed path
-Table capture A/B via --extra-env DIFFKV_RESIDUAL_TABLE_CAPTURE=1.
+  dense  — DKV_DENSE_CMP=1 (cpu dense reference path)
+  dkv — default compressed path
+Table capture A/B via --extra-env DKV_RESIDUAL_TABLE_CAPTURE=1.
 
 Usage:
-  python3 benchmarks/table_probe_native.py --ctx 16384 --modes dense diffkv
-  python3 benchmarks/table_probe_native.py --ctx 16384 --modes diffkv \
-      --extra-env DIFFKV_RESIDUAL_TABLE_CAPTURE=1
+  python3 benchmarks/table_probe_native.py --ctx 16384 --modes dense dkv
+  python3 benchmarks/table_probe_native.py --ctx 16384 --modes dkv \
+      --extra-env DKV_RESIDUAL_TABLE_CAPTURE=1
 """
 import os, sys, json, argparse, subprocess, time
 
@@ -22,20 +22,20 @@ REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import table_probe2 as tp
 
-BINARY = os.path.join(REPO, "diffkv_native", "build", "diffkv_native")
-MODEL = os.path.join(REPO, "diffkv_native", "qwen2.5-1.5b-instruct-q8_0.gguf")
+BINARY = os.path.join(REPO, "dkv_native", "build", "dkv_native")
+MODEL = os.path.join(REPO, "dkv_native", "qwen2.5-1.5b-instruct-q8_0.gguf")
 
 BASE_ENV = {
-    "DIFFKV_ENGAGE_THRESHOLD": "1024",
-    "DIFFKV_NATIVE_ATTN": "0",
-    "DIFFKV_FORCE_CPU_ATTN": "0",
-    "DIFFKV_MPS_APPROXIMATE_ATTN": "1",
-    "DIFFKV_DENSE_DIRECT": "1",
-    "DIFFKV_POOL_ABS_ROT": "1",
-    "DIFFKV_TEMPERATURE": "0",
-    "DIFFKV_DISABLE_VSL": "1",
-    "DIFFKV_ENABLE_FACTUAL": "0",
-    "DIFFKV_REPETITION_PENALTY": "1.0",
+    "DKV_ENGAGE_THRESHOLD": "1024",
+    "DKV_NATIVE_ATTN": "0",
+    "DKV_FORCE_CPU_ATTN": "0",
+    "DKV_MPS_APPROXIMATE_ATTN": "1",
+    "DKV_DENSE_DIRECT": "1",
+    "DKV_POOL_ABS_ROT": "1",
+    "DKV_TEMPERATURE": "0",
+    "DKV_DISABLE_VSL": "1",
+    "DKV_ENABLE_FACTUAL": "0",
+    "DKV_REPETITION_PENALTY": "1.0",
     "HF_HUB_OFFLINE": "1",
 }
 
@@ -50,9 +50,9 @@ def run_cell(tok, mode, ctx, question, max_tokens, extra_env, timeout=1800):
     env = dict(os.environ)
     env.update(BASE_ENV)
     env.update(extra_env)   # extra-env overrides BASE_ENV (e.g. penalty A/Bs)
-    env["DIFFKV_MAX_TOKENS"] = str(max_tokens)
+    env["DKV_MAX_TOKENS"] = str(max_tokens)
     if mode == "dense":
-        env["DIFFKV_DENSE_CMP"] = "1"
+        env["DKV_DENSE_CMP"] = "1"
     proc = subprocess.Popen([BINARY, MODEL, prompt], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
     try:
@@ -73,7 +73,7 @@ def run_cell(tok, mode, ctx, question, max_tokens, extra_env, timeout=1800):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctx", type=int, default=16384)
-    ap.add_argument("--modes", nargs="+", default=["dense", "diffkv"])
+    ap.add_argument("--modes", nargs="+", default=["dense", "dkv"])
     ap.add_argument("--extra-env", nargs="*", default=[])
     args = ap.parse_args()
     extra_env = dict(kv.split("=", 1) for kv in args.extra_env)

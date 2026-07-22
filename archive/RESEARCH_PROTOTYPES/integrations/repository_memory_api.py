@@ -1,14 +1,14 @@
 import os
 from typing import List, Dict
-from integrations.langchain_adapter import DiffKVLangChainAdapter
+from integrations.langchain_adapter import DKVLangChainAdapter
 
 class RepositoryMemoryAPI:
     """
-    High-level API for using DiffKV as a persistent memory for repository-scale coding.
+    High-level API for using DKV as a persistent memory for repository-scale coding.
     """
     def __init__(self, repo_path: str):
         self.repo_path = repo_path
-        self.adapter = DiffKVLangChainAdapter()
+        self.adapter = DKVLangChainAdapter()
         self.session_id = None
 
     def initialize_session(self):
@@ -22,7 +22,7 @@ class RepositoryMemoryAPI:
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Ingesting a file into DiffKV's sparse memory
+        # Ingesting a file into DKV's sparse memory
         # We do this by sending the content as a "system" context or similar
         prompt = f"INGEST FILE: {file_path}\nCONTENT:\n{content}\n"
         return self.adapter.predict(prompt, max_tokens=10)

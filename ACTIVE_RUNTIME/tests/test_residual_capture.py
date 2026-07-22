@@ -99,16 +99,16 @@ class TestComputeBoostMultipliers:
         assert table_min > plain_digit, (table_min, plain_digit)
 
     def test_disabled_by_env(self, monkeypatch):
-        monkeypatch.setenv("DIFFKV_RESIDUAL_TOKEN_BOOST", "0")
+        monkeypatch.setenv("DKV_RESIDUAL_TOKEN_BOOST", "0")
         boost, n = compute_boost_multipliers(PROSE, _ids(PROSE), {}, 8192)
         assert boost is None and n == 0
 
     def test_table_capture_off_leaves_core_boost(self, monkeypatch):
-        monkeypatch.setenv("DIFFKV_RESIDUAL_TABLE_CAPTURE", "0")
+        monkeypatch.setenv("DKV_RESIDUAL_TABLE_CAPTURE", "0")
         toks = TABLE_ROW * 3
         boost, n = compute_boost_multipliers(toks, _ids(toks), {}, 8192)
         # digit cells are still is_core (layer-1 boost), but no priority
-        monkeypatch.setenv("DIFFKV_RESIDUAL_TABLE_CAPTURE", "1")
+        monkeypatch.setenv("DKV_RESIDUAL_TABLE_CAPTURE", "1")
         boost_on, n_on = compute_boost_multipliers(toks, _ids(toks), {}, 8192)
         assert n_on >= n
         assert max(boost_on) > max(boost)
@@ -121,7 +121,7 @@ class TestComputeBoostMultipliers:
 
 
 @pytest.mark.skipif(
-    os.environ.get("DIFFKV_RUN_TORCH_TESTS", "1") != "1",
+    os.environ.get("DKV_RUN_TORCH_TESTS", "1") != "1",
     reason="torch not requested")
 class TestTorchPathIntegration:
     """compress_layer_blocks_gpu on CPU tensors: boosted table rows must win

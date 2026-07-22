@@ -20,9 +20,9 @@ class LGSResolver:
         """Initialize the HF model wrapper. Idempotent."""
         if self.wrapper is not None:
             return
-        from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+        from runtime.hf_dkv_wrapper import DKVHFWrapper
         model_id = self.config.get("model_id", "Qwen/Qwen2.5-0.5B-Instruct")
-        self.wrapper = DiffKVHFWrapper(
+        self.wrapper = DKVHFWrapper(
             model_id,
             {"mode": "fp16", "block_size": 64, "rank": 16,
              "prefill_chunk_size": self.config.get("prefill_chunk_size", 512)},

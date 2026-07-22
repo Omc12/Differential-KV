@@ -27,7 +27,7 @@ class RuntimeActivationController:
         self.registry.register_dormancy()
         
         # 3. Final system state
-        os.environ["DIFFKV_CRMP_ACTIVE"] = "1"
+        os.environ["DKV_CRMP_ACTIVE"] = "1"
         
         print(f"\\n[CRMP] System stabilized with {len(active_opts)} active optimizations.")
         print("=========================================================\\n")

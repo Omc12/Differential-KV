@@ -1,4 +1,4 @@
-"""Decode-cache FUSED-path parity test (DIFFKV_DECODE_FUSED).
+"""Decode-cache FUSED-path parity test (DKV_DECODE_FUSED).
 
 Validates that the fused persistent-buffer decode path (fp16 storage, exact-length
 slicing, -3e4 mask floor, one-row in-place appends) matches the legacy
@@ -25,7 +25,7 @@ import pytest
 # whole module instead of erroring pytest collection — a bare `import mlx.core`
 # aborted the entire `pytest ACTIVE_RUNTIME/tests/` run.
 mx = pytest.importorskip("mlx.core")
-from serving.mlx_diffkv_wrapper import MLXKVBlockManager
+from serving.mlx_dkv_wrapper import MLXKVBlockManager
 
 
 def cosine_sim(a: mx.array, b: mx.array) -> float:
@@ -128,7 +128,7 @@ def run_case(mgr, nb, dense_len, steps=20, seed=0):
 
 
 def main():
-    os.environ.setdefault("DIFFKV_TOPK_BLOCKS", "16")
+    os.environ.setdefault("DKV_TOPK_BLOCKS", "16")
     mgr = MLXKVBlockManager(num_layers=1, heads=12, kv_heads=2, head_dim=64,
                             rank=16, block_size=64, recency_window=128)
     mgr.max_residual = 16

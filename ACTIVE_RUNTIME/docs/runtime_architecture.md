@@ -5,7 +5,7 @@
 ### Prefill (q_len > 1)
 ```
 input_ids -> HF model forward
-  -> diffkv_attention forward (per layer)
+  -> dkv_attention forward (per layer)
     -> StreamingSparseIngestManager.ingest_chunk()
       -> micro-block accumulation (16 tokens)
       -> AsyncCompressor.submit() when full
@@ -16,7 +16,7 @@ input_ids -> HF model forward
 ### Decode (q_len == 1)
 ```
 input_ids -> HF model forward
-  -> diffkv_attention forward (per layer)
+  -> dkv_attention forward (per layer)
     -> StreamingSparseIngestManager.append_decode_token()
     -> native_triton_sparse_attn_decode()
       -> NativeBlockPool block_indices gather
@@ -44,7 +44,7 @@ input_ids -> HF model forward
 | `native_core/srl/query_router.py` | Hierarchical graph-based semantic query routing |
 | `native_core/sparse_decode/triton_fused_decode.py` | Triton fused decode kernel / PyTorch fallback attention |
 | `runtime/native_block_pool.py` | Contiguous GPU pool |
-| `runtime/diffkv_attention.py` | HF model attention monkey-patch |
-| `serving/hf_diffkv_wrapper.py` | Model wrapper + generate() |
+| `runtime/dkv_attention.py` | HF model attention monkey-patch |
+| `serving/hf_dkv_wrapper.py` | Model wrapper + generate() |
 | `serving/batch_engine.py` | Continuous batching engine |
 | `serving/openai_compatible_api_gateway.py` | OpenAI-compatible API |

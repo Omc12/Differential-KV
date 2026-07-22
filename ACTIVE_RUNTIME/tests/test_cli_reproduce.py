@@ -22,7 +22,7 @@ env["HF_HUB_OFFLINE"] = "1"
 env["PYTHONPATH"] = "ACTIVE_RUNTIME"
 
 p = subprocess.Popen(
-    ["./diffkv_venv/bin/python3", "ACTIVE_RUNTIME/serving/cli.py",
+    ["./dkv_venv/bin/python3", "ACTIVE_RUNTIME/serving/cli.py",
      "--model", "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
      "--preset", "mid",
      "--serving-mode", "performance"],

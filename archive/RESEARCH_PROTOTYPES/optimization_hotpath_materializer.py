@@ -32,30 +32,30 @@ class OptimizationHotpathMaterializer:
         return self.active_optimizations
 
     def _activate_cuda_graphs(self):
-        os.environ["DIFFKV_USE_CUDA_GRAPHS"] = "1"
-        os.environ["DIFFKV_GRAPH_PERSISTENCE"] = "1"
+        os.environ["DKV_USE_CUDA_GRAPHS"] = "1"
+        os.environ["DKV_GRAPH_PERSISTENCE"] = "1"
         self.active_optimizations.append("cuda_graph_replay")
         print("  -> CUDA Graph Replay: ENABLED")
 
     def _activate_kernel_fusion(self):
-        os.environ["DIFFKV_FUSE_KERNELS"] = "1"
-        os.environ["DIFFKV_TRITON_AUTO_TUNE"] = "1"
+        os.environ["DKV_FUSE_KERNELS"] = "1"
+        os.environ["DKV_TRITON_AUTO_TUNE"] = "1"
         self.active_optimizations.append("runtime_kernel_fusion")
         print("  -> Runtime Kernel Fusion: ENABLED")
 
     def _optimize_memory_traffic(self):
-        os.environ["DIFFKV_HBM_OPTIMIZATION"] = "1"
-        os.environ["DIFFKV_OCCUPANCY_STABILIZATION"] = "1"
+        os.environ["DKV_HBM_OPTIMIZATION"] = "1"
+        os.environ["DKV_OCCUPANCY_STABILIZATION"] = "1"
         self.active_optimizations.append("hbm_traffic_optimization")
         print("  -> HBM Traffic Optimization: ENABLED")
 
     def _ensure_deterministic_replay(self):
-        os.environ["DIFFKV_DETERMINISTIC_MICROBATCH"] = "1"
+        os.environ["DKV_DETERMINISTIC_MICROBATCH"] = "1"
         torch.use_deterministic_algorithms(False) # We use custom determinism
         self.active_optimizations.append("deterministic_microbatching")
         print("  -> Deterministic Microbatching: ENABLED")
 
     def _activate_sparse_scheduling(self):
-        os.environ["DIFFKV_SPARSE_SCHEDULING"] = "1"
+        os.environ["DKV_SPARSE_SCHEDULING"] = "1"
         self.active_optimizations.append("sparse_scheduling")
         print("  -> Sparse Scheduling: ENABLED")

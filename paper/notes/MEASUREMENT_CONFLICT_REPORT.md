@@ -5,13 +5,13 @@
 
 ## What I found
 
-The `benchmarks/REPORT.md` headline "active" numbers are **not** produced by DiffKV's
+The `benchmarks/REPORT.md` headline "active" numbers are **not** produced by DKV's
 novel compressed sparse-decode kernel. They are produced by an **exact full-KV decode**
 path. The actual compressed decode (the paper's core contribution) behaves very
-differently. The selector is the env var `DIFFKV_COMPRESSED_DECODE`
-(default `"1"` in code), read in `attention_forward` (`mlx_diffkv_wrapper.py:860`).
+differently. The selector is the env var `DKV_COMPRESSED_DECODE`
+(default `"1"` in code), read in `attention_forward` (`mlx_dkv_wrapper.py:860`).
 
-The working tree (`git diff HEAD`) shows `mlx_diffkv_wrapper.py` is the *newer*
+The working tree (`git diff HEAD`) shows `mlx_dkv_wrapper.py` is the *newer*
 compressed-decode implementation; committed HEAD was the older exact-decode one.
 
 ## Hard numbers I just measured (Apple M3, 8.6 GB, Qwen2.5-1.5B int4, same NIAH prompts)
@@ -35,7 +35,7 @@ Probe B (`=0`) reproduces REPORT.md active-4k (45.1 tok/s, needle Y, identical t
 ## Two distinct integrity problems
 
 **P1 — Decode path attribution.** The headline throughput + needle-correctness come from
-exact full-KV decode, where DiffKV's low-rank compressed reconstruction is *not exercised
+exact full-KV decode, where DKV's low-rank compressed reconstruction is *not exercised
 at decode time*. The genuine compressed decode is ~5× slower and currently **misses the
 needle** (rank-16 SVD fidelity floor — corroborated by prior native needle-recall notes).
 We cannot present the `=0` throughput/correctness as evidence for the compressed algorithm.

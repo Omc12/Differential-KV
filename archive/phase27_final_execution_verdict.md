@@ -125,7 +125,7 @@ Differential KV is **missing** all of these.
 
 ### To reach "Working Sparse Transformer Runtime" (3):
 
-1. **Build `diffkv_core.so`** — the C++ extension is written, needs `cmake && make`
+1. **Build `dkv_core.so`** — the C++ extension is written, needs `cmake && make`
 2. **Wire Triton fused decode kernel** — plug `native_triton_sparse_attn_decode()` into decode path
 3. **Fix long-context import guard** — 10-line change prevents 25K+ crash
 4. **Run and pass the existing test suite** — `test_long_context.py`, `phase24_6_vram_audit.py`, `test_batching.py`

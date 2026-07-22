@@ -10,10 +10,10 @@ Methodology:
 
 Components timed:
   1. Full decode step (baseline for percentages)
-  2. Dense recency-window attention only  (dense_only mode via DIFFKV_COMPRESSED_DECODE=0)
+  2. Dense recency-window attention only  (dense_only mode via DKV_COMPRESSED_DECODE=0)
   3. Low-rank SVD scoring               (difference: full - skip_scoring variant)
   4. Residual exact attend              (measured from wrapper timing hooks)
-  5. fused-buffer materialisation       (controlled by DIFFKV_DECODE_CACHE)
+  5. fused-buffer materialisation       (controlled by DKV_DECODE_CACHE)
 
 Outputs:
   benchmarks/results/test6_latency_breakdown.json
@@ -93,23 +93,23 @@ def run_latency_profile(
 
     # ── Shared env base (paper config: rank-32, max_residual=128)
     base_env = {
-        "DIFFKV_MAX_RESIDUAL": "128",
-        "DIFFKV_SPARSE_PREFILL": "1",
-        "DIFFKV_SPARSE_BIAS": "auto",
-        "DIFFKV_SEED": "1234",
+        "DKV_MAX_RESIDUAL": "128",
+        "DKV_SPARSE_PREFILL": "1",
+        "DKV_SPARSE_BIAS": "auto",
+        "DKV_SEED": "1234",
     }
     for k, v in base_env.items():
         os.environ[k] = v
 
     results = {}
 
-    # ── Mode 1: Full DiffKV sparse decode (paper default)
+    # ── Mode 1: Full DKV sparse decode (paper default)
     # This is the reference: every component active.
-    print("[Mode 1/4] Full DiffKV sparse decode (COMPRESSED_DECODE=1, DECODE_CACHE=1)...", flush=True)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_DECODE_CACHE"] = "1"
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
-    wrapper_full = MLXDiffKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
+    print("[Mode 1/4] Full DKV sparse decode (COMPRESSED_DECODE=1, DECODE_CACHE=1)...", flush=True)
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_DECODE_CACHE"] = "1"
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper
+    wrapper_full = MLXDKVWrapper(model_id=model_id, config={"rank": 32, "block_size": 256})
     prompt = build_prompt(wrapper_full.tokenizer, ctx_len)
     tps_full, ms_full = _measure_decode_tps(wrapper_full, prompt, N_MEASURE, "full")
     print(f"  -> {tps_full:.1f} tok/s  ({ms_full:.1f} ms/step)\n", flush=True)
@@ -119,14 +119,14 @@ def run_latency_profile(
     # Delta vs Mode 1 = fused-buffer materialisation cost.
     print("[Mode 2/4] Sparse decode WITHOUT fused buffer (COMPRESSED_DECODE=1, DECODE_CACHE=0)...", flush=True)
     # Need fresh import with new env
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_DECODE_CACHE"] = "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_DECODE_CACHE"] = "0"
     # Reload wrapper to pick up env change
     import importlib
-    import serving.mlx_diffkv_wrapper as _mod
+    import serving.mlx_dkv_wrapper as _mod
     importlib.reload(_mod)
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper as MLXDiffKVWrapper2
-    wrapper_no_cache = MLXDiffKVWrapper2(model_id=model_id, config={"rank": 32, "block_size": 256})
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper as MLXDKVWrapper2
+    wrapper_no_cache = MLXDKVWrapper2(model_id=model_id, config={"rank": 32, "block_size": 256})
     tps_no_cache, ms_no_cache = _measure_decode_tps(wrapper_no_cache, prompt, N_MEASURE, "nocache")
     print(f"  -> {tps_no_cache:.1f} tok/s  ({ms_no_cache:.1f} ms/step)\n", flush=True)
     results["sparse_no_cache"] = {"tps": round(tps_no_cache, 1), "ms_per_step": round(ms_no_cache, 1)}
@@ -134,11 +134,11 @@ def run_latency_profile(
     # ── Mode 3: Dense exact decode (COMPRESSED_DECODE=0)
     # Measures the irreducible per-token cost of dense self-attention.
     print("[Mode 3/4] Dense exact decode (COMPRESSED_DECODE=0) — pure attention baseline...", flush=True)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "0"
-    os.environ["DIFFKV_DECODE_CACHE"] = "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "0"
+    os.environ["DKV_DECODE_CACHE"] = "0"
     importlib.reload(_mod)
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper as MLXDiffKVWrapper3
-    wrapper_dense = MLXDiffKVWrapper3(model_id=model_id, config={"rank": 32, "block_size": 256})
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper as MLXDKVWrapper3
+    wrapper_dense = MLXDKVWrapper3(model_id=model_id, config={"rank": 32, "block_size": 256})
     tps_dense, ms_dense = _measure_decode_tps(wrapper_dense, prompt, N_MEASURE, "dense")
     print(f"  -> {tps_dense:.1f} tok/s  ({ms_dense:.1f} ms/step)\n", flush=True)
     results["dense_exact"] = {"tps": round(tps_dense, 1), "ms_per_step": round(ms_dense, 1)}
@@ -146,16 +146,16 @@ def run_latency_profile(
     # ── Mode 4: Sparse with top-K=1 (minimal routing cost, near-zero residual attend)
     # This isolates routing overhead at minimum.
     print("[Mode 4/4] Sparse decode with TOPK=1 (minimal routing, no useful residuals)...", flush=True)
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_DECODE_CACHE"] = "1"
-    os.environ["DIFFKV_TOP_K"] = "1"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_DECODE_CACHE"] = "1"
+    os.environ["DKV_TOP_K"] = "1"
     importlib.reload(_mod)
-    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper as MLXDiffKVWrapper4
-    wrapper_topk1 = MLXDiffKVWrapper4(model_id=model_id, config={"rank": 32, "block_size": 256})
+    from serving.mlx_dkv_wrapper import MLXDKVWrapper as MLXDKVWrapper4
+    wrapper_topk1 = MLXDKVWrapper4(model_id=model_id, config={"rank": 32, "block_size": 256})
     tps_topk1, ms_topk1 = _measure_decode_tps(wrapper_topk1, prompt, N_MEASURE, "topk1")
     print(f"  -> {tps_topk1:.1f} tok/s  ({ms_topk1:.1f} ms/step)\n", flush=True)
     results["sparse_topk1"] = {"tps": round(tps_topk1, 1), "ms_per_step": round(ms_topk1, 1)}
-    del os.environ["DIFFKV_TOP_K"]
+    del os.environ["DKV_TOP_K"]
 
     # ── Component breakdown (differences, measured not assumed) ───────────────
     # Total step time = ms_full (reference, 100%)
@@ -164,14 +164,14 @@ def run_latency_profile(
     #   Actually: cache ON should be faster. If ms_no_cache > ms_full, delta = overhead.
     #   If ms_no_cache < ms_full, buffer materialisation costs more than it saves => not happening.
     # Dense attention baseline (recency window) = ms_dense
-    # Sparse reconstruction overhead = ms_full - ms_dense (total DiffKV add-on)
+    # Sparse reconstruction overhead = ms_full - ms_dense (total DKV add-on)
     # Top-K routing overhead         ≈ ms_topk1 - ms_dense (routing at K=1)
     # Low-rank scoring + residual    = (ms_full - ms_dense) - (ms_topk1 - ms_dense)
     #                                = ms_full - ms_topk1
 
     total_ms      = ms_full
     dense_base_ms = ms_dense
-    sparse_overhead_ms   = ms_full - ms_dense           # total DiffKV add-on
+    sparse_overhead_ms   = ms_full - ms_dense           # total DKV add-on
     routing_ms           = max(0.0, ms_topk1 - ms_dense)  # routing at K=1
     lowrank_residual_ms  = max(0.0, ms_full - ms_topk1)   # low-rank score + residual attend
     buffer_ms            = max(0.0, ms_no_cache - ms_full) # buffer materialisation

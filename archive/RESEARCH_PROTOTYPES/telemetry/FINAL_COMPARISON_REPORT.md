@@ -1,6 +1,6 @@
 # FINAL COMPARISON REPORT: Transformers vs Differential KV
 
-| Context | Metric | Transformers | DiffKV | Improvement |
+| Context | Metric | Transformers | DKV | Improvement |
 |---------|--------|--------------|---------|-------------|
 | 4096 | TPS | 21.54 | 22.64 | **+5.1%** |
 | 4096 | VRAM (GB) | 5.32 | 5.32 | **-0.0%** |

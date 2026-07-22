@@ -10,9 +10,9 @@ from typing import Dict, Any, List
 from integrations.runtime_hook_manager import RuntimeHookManager
 
 class VLLMAdapter:
-    def __init__(self, model_id: str, diffkv_config: Dict[str, Any]):
+    def __init__(self, model_id: str, dkv_config: Dict[str, Any]):
         self.model_id = model_id
-        self.hook_manager = RuntimeHookManager(diffkv_config)
+        self.hook_manager = RuntimeHookManager(dkv_config)
         # vLLM engine would be initialized here
         # self.engine = LLMEngine.from_engine_args(EngineArgs(model=model_id))
         

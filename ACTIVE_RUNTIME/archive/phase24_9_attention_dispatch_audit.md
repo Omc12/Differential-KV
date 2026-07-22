@@ -2,7 +2,7 @@
 
 ## Audit of Attention Kernel Dispatches
 
-We instrumented the monkey-patched attention forward loops in `diffkv_attention.py` to record exactly which attention kernels run under live production loads.
+We instrumented the monkey-patched attention forward loops in `dkv_attention.py` to record exactly which attention kernels run under live production loads.
 
 ### Live Production Dispatch Distribution
 

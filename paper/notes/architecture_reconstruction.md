@@ -1,26 +1,26 @@
-# Architecture Reconstruction — DiffKV Active Runtime (MLX)
+# Architecture Reconstruction — DKV Active Runtime (MLX)
 
 > Reconstructed directly from the implementation that produces the measured benchmark
-> numbers. Source of truth: `ACTIVE_RUNTIME/serving/mlx_diffkv_wrapper.py` and the
+> numbers. Source of truth: `ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py` and the
 > measured outputs in `benchmarks/results/`. Where docs disagree with code, code wins.
 
 ## 0. What "Active Runtime" actually is (provenance)
 
 - The benchmark worker `benchmarks/bench_worker.py::run_active` instantiates
-  `DiffKVHFWrapper` from `ACTIVE_RUNTIME/serving/hf_diffkv_wrapper.py`.
-- On macOS with MLX present, `hf_diffkv_wrapper.py:1220` rebinds
-  `DiffKVHFWrapper = MLXDiffKVWrapper` (`serving/mlx_diffkv_wrapper.py`).
-  Confirmed log line in every active run: `"[DiffKV] macOS + MLX detected: using
-  native MLX DiffKV wrapper."`
+  `DKVHFWrapper` from `ACTIVE_RUNTIME/serving/hf_dkv_wrapper.py`.
+- On macOS with MLX present, `hf_dkv_wrapper.py:1220` rebinds
+  `DKVHFWrapper = MLXDKVWrapper` (`serving/mlx_dkv_wrapper.py`).
+  Confirmed log line in every active run: `"[DKV] macOS + MLX detected: using
+  native MLX DKV wrapper."`
 - **Therefore the measured ACTIVE runtime = the MLX wrapper.** The PyTorch/HF +
-  Triton path (`runtime/diffkv_attention.py`, `native_core/streaming_sparse_ingest.py`,
+  Triton path (`runtime/dkv_attention.py`, `native_core/streaming_sparse_ingest.py`,
   `native_core/sparse_decode/triton_fused_decode.py`, `runtime/native_block_pool.py`)
   is the *portable backend / original design*, described in `docs/runtime_architecture.md`,
   but it is NOT the engine behind the numbers. The paper centers on the MLX path and
   references the PyTorch backend as an alternative implementation.
 - **SRL / factual-store relational-binding subsystem is GATED OFF in these benchmarks.**
   `MLXKVBlockManager.get_srl_state()` returns `None` and `_session_srl` is never
-  populated (`mlx_diffkv_wrapper.py:352,354`). Every factual-store / VSL / logit-bias
+  populated (`mlx_dkv_wrapper.py:352,354`). Every factual-store / VSL / logit-bias
   block in the decode and generate loops is guarded by `srl_state is not None`, so it is
   inert during the NIAH long-context runs. Needle recovery is purely from the core
   compressed+dense attention. The SRL module is described as an optional, separately
@@ -43,9 +43,9 @@ group_size=64, bits=4). Dimensions (from model config):
 | — | rope_theta | 1e6 |
 | — | trained context | 32768 |
 
-## 2. DiffKV hyper-parameters (as instantiated)
+## 2. DKV hyper-parameters (as instantiated)
 
-From `MLXDiffKVWrapper.__init__` / `MLXKVBlockManager.__init__`, with the bench config
+From `MLXDKVWrapper.__init__` / `MLXKVBlockManager.__init__`, with the bench config
 `{"quantization":"int4","rank":16,"block_size":256,"micro_block_size":256,"preset":"mid"}`:
 
 | symbol | meaning | value | source |
@@ -54,7 +54,7 @@ From `MLXDiffKVWrapper.__init__` / `MLXKVBlockManager.__init__`, with the bench 
 | r | SVD target rank | 16 | config |
 | W | dense recency window | 512 | `recency_window` default |
 | D_max | dense buffer capacity | W + B = 768 | `max_dense_len` |
-| M | max compressed blocks | 256 | `DIFFKV_MAX_BLOCKS` |
+| M | max compressed blocks | 256 | `DKV_MAX_BLOCKS` |
 | — | max compressed tokens | M·B = 65536 | derived |
 | — | KV store dtype | float16 | `_create_empty_session` |
 | — | prefill chunk | 512 | `generate()` / worker |
@@ -127,7 +127,7 @@ Asymptotic state per token: O(r·d) basis amortized over B + O(r) coefficient
    attends over all prior tokens → exact causal hidden states (no approximation in
    prefill). This is `mx.fast.scaled_dot_product_attention` over the growing cache.
 2. After SDPA, the chunk's rotated K and raw V are captured token-by-token into the
-   DiffKV dense buffer (`capture_prefill_kv`); when the dense buffer overflows D_max,
+   DKV dense buffer (`capture_prefill_kv`); when the dense buffer overflows D_max,
    the oldest B tokens are compressed out (`_flush_oldest_block`) — streaming compression.
 3. `compress_deferred_prefill_blocks` is a no-op hook in the MLX path (compression is
    inline during capture).
@@ -138,7 +138,7 @@ At the first decode step the runtime:
 - `mx.eval()` to flush lazy ops, then `mx.clear_cache()` + `gc.collect()` to return the
   peak GQA-expanded prefill activations to the OS;
 - drops the native prefill KVCache entirely (`_prefill_caches.pop`) when compressed
-  decode is enabled, so decode-time memory reflects only the DiffKV store (compressed
+  decode is enabled, so decode-time memory reflects only the DKV store (compressed
   pool + dense window), not a retained full-context cache. This is the mechanism behind
   the active runtime's low, flat decode-time footprint.
 
@@ -176,7 +176,7 @@ blocks) from poisoning the merge — documented as a real bug fix in the source.
 `@mx.compile` fuses the whole decode attention into one Metal graph; the Python layer
 only orchestrates dispatch.
 
-## 9. Generation / sampling (`MLXDiffKVWrapper.generate`)
+## 9. Generation / sampling (`MLXDKVWrapper.generate`)
 
 Greedy (benchmark) or temperature/top-p sampling, repetition penalty with a
 loop-detection escalation (n-gram repeat ratio ≥ 0.35 → widen window, raise penalty;
@@ -194,8 +194,8 @@ rollback — a full KV-cache lifecycle for multi-turn serving.
 
 ## 11. Knobs (env) that matter for the paper
 
-- `DIFFKV_MAX_BLOCKS` (256) → caps compressed tokens / VRAM.
-- `DIFFKV_ENGAGE_THRESHOLD` → overrides recency window W.
-- `DIFFKV_COMPRESSED_DECODE` (default 1) → real sparse decode; 0 = exact full-KV (debug).
+- `DKV_MAX_BLOCKS` (256) → caps compressed tokens / VRAM.
+- `DKV_ENGAGE_THRESHOLD` → overrides recency window W.
+- `DKV_COMPRESSED_DECODE` (default 1) → real sparse decode; 0 = exact full-KV (debug).
 - Presets low/mid/high (`native_core/config.py`) tune chunk size, kv_quant, dense budget.
 </content>

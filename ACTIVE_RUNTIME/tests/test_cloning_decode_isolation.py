@@ -6,14 +6,14 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def test_cloning_decode_isolation():
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from serving.batch_engine import ContinuousBatchEngine
 
-    MODEL = os.environ.get("DIFFKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+    MODEL = os.environ.get("DKV_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
     print(f"Initializing model {MODEL} for isolation test...")
     
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    wrapper = DiffKVHFWrapper(MODEL, config={"rank": 16}, device=device)
+    wrapper = DKVHFWrapper(MODEL, config={"rank": 16}, device=device)
     engine = ContinuousBatchEngine(wrapper, max_batch_size=2)
     engine.start()
 

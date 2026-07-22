@@ -15,7 +15,7 @@ This report validates the mechanical stability of the runtime after native extra
 
 ## New Stability Properties Gained
 
-1. **Deterministic destruction:** `DiffKVCompressorThread::stop()` joins the OS thread before Python garbage collection. No dangling worker threads.
+1. **Deterministic destruction:** `DKVCompressorThread::stop()` joins the OS thread before Python garbage collection. No dangling worker threads.
 2. **Deadlock impossibility:** No mutexes in the compression hot path. The SPSC ring buffer uses only atomic reads/writes.
 3. **Allocator corruption impossibility:** All slab writes are gated by valid `Compressing → CompressedResident` CAS transitions. A failed CAS means the slab slot is never exposed to the Triton kernel.
 

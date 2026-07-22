@@ -106,13 +106,13 @@ def plot_error_attribution(data: dict, output_dir: Path):
         ax.text(i, d + (0.0001 if d >= 0 else -0.0003), density_txt,
                 ha="center", fontsize=6, color="#C9D1D9")
 
-    # ── Plot 4: Full DiffKV vs FP16 chain comparison ─────────────────────────
+    # ── Plot 4: Full DKV vs FP16 chain comparison ─────────────────────────
     ax = axes[1, 1]
-    ax.set_title("Full DiffKV vs Components (mixed mode)")
+    ax.set_title("Full DKV vs Components (mixed mode)")
     mode = "mixed" if "mixed" in data else modes[0]
     d    = data[mode]
-    labels  = ["FP16\nChain Only", "INT8\nNo Chain", "Full\nDiffKV"]
-    vals    = [d["fp16_chain"], d["int8_no_chain"], d["full_diffkv"]]
+    labels  = ["FP16\nChain Only", "INT8\nNo Chain", "Full\nDKV"]
+    vals    = [d["fp16_chain"], d["int8_no_chain"], d["full_dkv"]]
     colors2 = ["#8E44AD", "#3498DB", "#E74C3C"]
     bars = ax.bar(labels, vals, color=colors2, alpha=0.85,
                   edgecolor="#0D1117", linewidth=0.5)

@@ -19,9 +19,9 @@ Build cost (once per prefill):
 from __future__ import annotations
 import sys
 import os
-# Add the build directory containing diffkv_core.so to sys.path
+# Add the build directory containing dkv_core.so to sys.path
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_core_dir = os.path.abspath(os.path.join(_script_dir, "../diffkv_core"))
+_core_dir = os.path.abspath(os.path.join(_script_dir, "../dkv_core"))
 if _core_dir not in sys.path:
     sys.path.insert(0, _core_dir)
 
@@ -99,7 +99,7 @@ class SemanticIndex:
 
         k = min(k, N)
         try:
-            import diffkv_core as _dkv_core
+            import dkv_core as _dkv_core
             if getattr(_dkv_core, "HAS_SRL_ROUTER", False):
                 top_k_indices = _dkv_core.semantic_search_topk(q_desc, self.desc_matrix, k)
                 return self.slot_ids.to(top_k_indices.device)[top_k_indices]

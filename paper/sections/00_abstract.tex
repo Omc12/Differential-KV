@@ -2,7 +2,7 @@
 \noindent
 The key--value (KV) cache is the memory wall of long-context transformer inference: its
 size grows linearly with sequence length, and on commodity hardware it, not the model
-weights, is what first exhausts memory. We present \diffkv{}, a KV-cache compression runtime
+weights, is what first exhausts memory. We present \dkv{}, a KV-cache compression runtime
 that keeps recent tokens exact and compresses older ones. Each block of \bs${=}256$ tokens is
 reduced to an \emph{anchor} token (kept exact), a rank-\rank{} joint $K\!\mid\!V$ truncated-SVD
 \emph{delta} that captures the block's shared structure, and a budget of \maxres{} \emph{exact
@@ -15,15 +15,15 @@ and merges the two halves with a flash-style log-sum-exp reduction; the selected
 materialised once per routing interval into a persistent buffer and appended to per token.
 Prefill uses a training-free block-sparse attention so its cost grows sub-quadratically.
 
-We implement \diffkv{} entirely in MLX and evaluate it on Qwen2.5-1.5B (int4) against two dense
+We implement \dkv{} entirely in MLX and evaluate it on Qwen2.5-1.5B (int4) against two dense
 full-KV baselines on the \emph{same} weights---a memory-optimized \texttt{mlx\_lm} engine and a
 standard PyTorch engine---on an Apple~M3 with 8.6\,GB of unified memory.
-\diffkv{} holds a bounded KV state that is $\ratioDefault\times$--$\ratioPreset\times$ smaller
+\dkv{} holds a bounded KV state that is $\ratioDefault\times$--$\ratioPreset\times$ smaller
 per block than a dense cache (the residual budget \maxres{} is the knob), recovers a buried
 passcode \emph{exactly} at every context from $4$k to $\reachK$k, and reaches $\reachK$k---where a
 standard PyTorch full-KV cache runs out of memory at $\ptOOMK$k on the same host, and which even a
 memory-optimized dense cache reaches only by prefilling $\pfSpeedupSixtyFourK\times$ slower than
-\diffkv{}. The cost is decode throughput: reconstructing and merging the sparse
+\dkv{}. The cost is decode throughput: reconstructing and merging the sparse
 representation makes per-token decode slower than a dense cache while the dense cache still fits. We
 report this trade-off in full, isolate each component with ablations, and characterize the
 residual budget as an explicit accuracy--memory--speed dial. All numbers in this report are

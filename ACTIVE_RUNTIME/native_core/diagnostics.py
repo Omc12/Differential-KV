@@ -1,7 +1,7 @@
 """
 native_core/diagnostics.py
 
-Validation and profiling utilities for the DiffKV optimization pipeline.
+Validation and profiling utilities for the DKV optimization pipeline.
 All functions are safe to call in production (no side effects unless explicitly noted).
 
 Usage:
@@ -174,10 +174,10 @@ def enable_cuda_sync_debug():
     """
     if torch.cuda.is_available():
         torch.cuda.set_sync_debug_mode(1)
-        print("[DiffKV Diagnostics] CUDA sync debug mode ENABLED. "
+        print("[DKV Diagnostics] CUDA sync debug mode ENABLED. "
               "Unexpected sync points will print warnings.")
     else:
-        print("[DiffKV Diagnostics] CUDA sync debug mode: N/A (no CUDA).")
+        print("[DKV Diagnostics] CUDA sync debug mode: N/A (no CUDA).")
 
 
 def disable_cuda_sync_debug():

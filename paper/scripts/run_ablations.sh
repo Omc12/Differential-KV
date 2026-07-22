@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # CLEAN ablations + 64k reach, one process at a time, nothing else running.
-# Same DiffKV config as the primary sweep (mid/balanced/rank32/int4, decode-cache,
+# Same DKV config as the primary sweep (mid/balanced/rank32/int4, decode-cache,
 # sparse-prefill, adaptive bias). Each internal cell is its own subprocess.
 set -u
 cd "$(dirname "$0")/../.."
-source diffkv_venv/bin/activate 2>/dev/null
+source dkv_venv/bin/activate 2>/dev/null
 RES=benchmarks/results
 LOG=$RES/clean_ablations.log
 : > "$LOG"
 
-# Shared DiffKV env (COMPRESSED_DECODE + MAX_RESIDUAL are set per-cell by the drivers).
-export DIFFKV_DECODE_CACHE=1 DIFFKV_SPARSE_PREFILL=1 DIFFKV_SPARSE_BIAS=auto \
-       DIFFKV_ROUTER=residual DIFFKV_TOPK_BLOCKS=16 DIFFKV_SVD_SEED=1234 DIFFKV_PRESET=mid
+# Shared DKV env (COMPRESSED_DECODE + MAX_RESIDUAL are set per-cell by the drivers).
+export DKV_DECODE_CACHE=1 DKV_SPARSE_PREFILL=1 DKV_SPARSE_BIAS=auto \
+       DKV_ROUTER=residual DKV_TOPK_BLOCKS=16 DKV_SVD_SEED=1234 DKV_PRESET=mid
 
 echo "== ablations start $(date) ==" | tee -a "$LOG"
 
 echo "--- E6: decode-mode ablation (compressed vs exact), 4k-32k ---" | tee -a "$LOG"
-DIFFKV_MAX_RESIDUAL=128 python paper/scripts/measure_active.py \
+DKV_MAX_RESIDUAL=128 python paper/scripts/measure_active.py \
     --ctx 4096 8192 16384 32768 --modes compressed exact --gen 128 \
     --out paper/generated/active_modes_fresh.json >> "$LOG" 2>&1
 echo "  modes done" | tee -a "$LOG"

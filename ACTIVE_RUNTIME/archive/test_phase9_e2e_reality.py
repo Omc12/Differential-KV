@@ -13,7 +13,7 @@ sys.path.insert(0, ".")
 from transformers import AutoConfig
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 from runtime.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -37,13 +37,13 @@ mgr = KVRuntimeManager(
     async_compression=False, # Make it sync so timing is deterministic and fair
 )
 
-apply_diffkv_attention_patch(model, mgr)
+apply_dkv_attention_patch(model, mgr)
 
 sid = "reality_test_session"
 mgr.init_session(sid)
 
-# We mock kwargs expected by the diffkv forward pass
-# specifically it extracts 'diffkv_session_id' from past_key_value
+# We mock kwargs expected by the dkv forward pass
+# specifically it extracts 'dkv_session_id' from past_key_value
 from transformers.cache_utils import DynamicCache
 
 def test_decode_path(history_blocks_n, steps=100, warmup=10):
@@ -52,7 +52,7 @@ def test_decode_path(history_blocks_n, steps=100, warmup=10):
     
     # Use real HF DynamicCache and attach our session ID
     hf_cache = DynamicCache()
-    hf_cache.diffkv_session_id = sid
+    hf_cache.dkv_session_id = sid
     
     # 1. Prefill
     prefill_len = history_blocks_n * 64

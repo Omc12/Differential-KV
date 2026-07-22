@@ -15,8 +15,8 @@ Confirm that actual OpenWebUI requests route through the `StreamingSparseIngestM
 ### 2. Prefill Phase
 - `ContinuousBatchEngine._step()` pulls the request.
 - It calls `self.wrapper.model(input_ids=..., position_ids=..., use_cache=True)` with **NO `past_key_values`**.
-- This correctly routes through the `apply_diffkv_attention_patch` because Hugging Face native cache is not provided.
-- Inside `diffkv_attention.py`, the code hits the Phase 24.5 prefill branch:
+- This correctly routes through the `apply_dkv_attention_patch` because Hugging Face native cache is not provided.
+- Inside `dkv_attention.py`, the code hits the Phase 24.5 prefill branch:
   ```python
   kv_manager.ingest_streaming(sid, layer, curr_k, curr_v)
   ```
@@ -25,7 +25,7 @@ Confirm that actual OpenWebUI requests route through the `StreamingSparseIngestM
 ### 3. Decode Phase
 - `ContinuousBatchEngine._step()` executes the decode step.
 - It again calls `self.wrapper.model` with **NO `past_key_values`**.
-- Inside `diffkv_attention.py`, the code hits the decode branch (`q_len == 1`):
+- Inside `dkv_attention.py`, the code hits the decode branch (`q_len == 1`):
   ```python
   kv_manager.ingest_streaming(sid, layer, curr_k, curr_v)
   blocks = kv_manager.get_streaming_blocks(sid, layer)
@@ -37,14 +37,14 @@ Confirm that actual OpenWebUI requests route through the `StreamingSparseIngestM
 
 ## The `generate()` Bypass (Legacy Code)
 
-There is a method `DiffKVHFWrapper.generate()` in `hf_diffkv_wrapper.py`.
+There is a method `DKVHFWrapper.generate()` in `hf_dkv_wrapper.py`.
 ```python
 outputs = self.model(
     input_ids=input_ids, past_key_values=past_kv, use_cache=True
 )
 ```
 - This method passes `past_key_values` explicitly.
-- When `past_key_values` is provided, the Hugging Face native attention uses it, bypassing the DiffKV monkey-patch.
+- When `past_key_values` is provided, the Hugging Face native attention uses it, bypassing the DKV monkey-patch.
 - **However**, this `generate()` method is **never called** by the `ContinuousBatchEngine`. It is a legacy method from earlier prototyping.
 
 ## Verification Result

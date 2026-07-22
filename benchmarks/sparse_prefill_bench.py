@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prefill-time + recall harness for DIFFKV_SPARSE_PREFILL (HANDOFF §DSA).
+"""Prefill-time + recall harness for DKV_SPARSE_PREFILL (HANDOFF §DSA).
 
 niah_recall.py measures DECODE tps; sparse prefill's win is PREFILL wall-clock, which this
 harness times directly. It reuses the SAME hard on-topic NIAH prompt (bench_common) and the
@@ -7,9 +7,9 @@ same chunked-prefill + greedy-decode loop as niah_recall, then reports prefill s
 tps, and needle recall per ctx. Toggle the engine with the env flag and run it twice:
 
     # dense prefill (baseline)
-    DIFFKV_COMPRESSED_DECODE=1 python benchmarks/sparse_prefill_bench.py --ctx 8192 16384 32768
+    DKV_COMPRESSED_DECODE=1 python benchmarks/sparse_prefill_bench.py --ctx 8192 16384 32768
     # sparse prefill
-    DIFFKV_COMPRESSED_DECODE=1 DIFFKV_SPARSE_PREFILL=1 python benchmarks/sparse_prefill_bench.py --ctx 8192 16384 32768
+    DKV_COMPRESSED_DECODE=1 DKV_SPARSE_PREFILL=1 python benchmarks/sparse_prefill_bench.py --ctx 8192 16384 32768
 
 Prefill time is the authoritative number here; decode tps is approximate (kernel recompiles).
 """
@@ -33,16 +33,16 @@ def run(model_id, contexts, gen, rank=16):
     from bench_common import build_niah_prompt   # the harder, on-topic NIAH prompt
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
 
     quant_val = None if (model_id.startswith(".") or model_id.startswith("/")) else "int4"
     cfg = {"quantization": quant_val, "rank": rank, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id=model_id, config=cfg)
+    wrapper = DKVHFWrapper(model_id=model_id, config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
 
-    dec = os.environ.get("DIFFKV_COMPRESSED_DECODE", "auto")
+    dec = os.environ.get("DKV_COMPRESSED_DECODE", "auto")
     # Report the ACTUAL knob values the manager resolved (env override OR ON-defaults), not the
     # env string — otherwise an unset env misleadingly prints the harness's own default.
     print(f"SPARSE_PREFILL={getattr(mgr,'_sparse_prefill',False)}  COMPRESSED_DECODE={dec}  gen={gen}  "
@@ -62,7 +62,7 @@ def run(model_id, contexts, gen, rank=16):
         wrapper._session_token_ids[sid] = []
         mgr.init_session(sid, prefill_len=len(ids))
         mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-        model._diffkv_session_ids = [sid]
+        model._dkv_session_ids = [sid]
 
         CH = 512
         output = None

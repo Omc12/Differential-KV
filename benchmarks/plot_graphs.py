@@ -29,7 +29,7 @@ COLORS = {
     "normal_dense": "#d35400",
 }
 LABELS = {
-    "active": "DiffKV Active (MLX int4, compressed KV)",
+    "active": "DKV Active (MLX int4, compressed KV)",
     "dense": "Optimized Dense (mlx_lm int4, full KV)",
     "normal_dense": "Standard PyTorch Dense (AutoModelForCausalLM)",
 }
@@ -90,7 +90,7 @@ def plot_memory(ax, by, contexts):
     # dashed-peak label sits indented under its engine's solid KV label; the
     # short parenthetical keeps each string unique for the legend lookup
     PEAK_LABELS = {
-        "active":       "  └ peak process RAM (DiffKV)",
+        "active":       "  └ peak process RAM (DKV)",
         "dense":        "  └ peak process RAM (Dense)",
         "normal_dense": "  └ peak process RAM (PyTorch)",
     }
@@ -280,7 +280,7 @@ def main():
     fig.legend(handles, labels, loc="lower center", ncol=3,
                bbox_to_anchor=(0.5, -0.07), fontsize=9.5, framealpha=0.9)
     fig.suptitle(
-        "DiffKV vs Optimized Dense vs Standard PyTorch — long-context benchmark\n"
+        "DKV vs Optimized Dense vs Standard PyTorch — long-context benchmark\n"
         f"{host_line}",
         fontsize=11, y=1.02,
     )

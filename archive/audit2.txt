@@ -1,6 +1,6 @@
 ﻿--- kv_runtime_manager.py ---
   L217:         Return the raw KVBlock list. Used by fused_sparse_attention_decode.
---- diffkv_attention.py ---
+--- dkv_attention.py ---
   L24:     fused_sparse_attention_decode().
 --- triton_sparse_attn.py ---
   L245:                 from runtime.sparse_attention import repeat_kv

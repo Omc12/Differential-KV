@@ -1,14 +1,14 @@
 import os
 from typing import Dict, Any
 
-class DiffKVConfig:
+class DKVConfig:
     def __init__(self, config_dict: Dict[str, Any] = None):
         config_dict = config_dict or {}
 
         # 1. Detect preset
-        # Preset can be specified in config_dict['preset'] or environment variable DIFFKV_PRESET.
+        # Preset can be specified in config_dict['preset'] or environment variable DKV_PRESET.
         # Default is "mid".
-        preset = config_dict.get("preset", os.environ.get("DIFFKV_PRESET", "mid")).lower()
+        preset = config_dict.get("preset", os.environ.get("DKV_PRESET", "mid")).lower()
         if preset not in ("low", "mid", "high"):
             preset = "mid"
         self.preset = preset
@@ -90,19 +90,19 @@ class DiffKVConfig:
             # ladder it: `mid` = 64 (covers the prose cap plus boost headroom),
             # `high` = 128 (full table/factual fidelity, accepts the VRAM), and
             # `low` = 40 (memory-priority).  Override with
-            # DIFFKV_MAX_RESIDUAL_TOKENS; raise toward 128+ for table-heavy or
+            # DKV_MAX_RESIDUAL_TOKENS; raise toward 128+ for table-heavy or
             # exact-recall (needle) workloads.
             self.max_residual_tokens = 64
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
-            "decode_cache_enabled", "DIFFKV_DECODE_CACHE_ENABLED", self.decode_cache_enabled, config_dict
+            "decode_cache_enabled", "DKV_DECODE_CACHE_ENABLED", self.decode_cache_enabled, config_dict
         )
         self.decode_cache_max_tokens = self._get_int(
-            "decode_cache_max_tokens", "DIFFKV_DECODE_CACHE_MAX_TOKENS", self.decode_cache_max_tokens, config_dict
+            "decode_cache_max_tokens", "DKV_DECODE_CACHE_MAX_TOKENS", self.decode_cache_max_tokens, config_dict
         )
         self.prefill_chunk_size = self._get_int(
-            "prefill_chunk_size", "DIFFKV_PREFILL_CHUNK_SIZE", self.prefill_chunk_size, config_dict
+            "prefill_chunk_size", "DKV_PREFILL_CHUNK_SIZE", self.prefill_chunk_size, config_dict
         )
         # Safety guard: prefill_chunk_size must accommodate at least 2 full streaming
         # blocks (each block = 1 anchor + micro_block_size active tokens = 257 tokens
@@ -117,19 +117,19 @@ class DiffKVConfig:
             if self.prefill_chunk_size < _min_chunk:
                 self.prefill_chunk_size = _min_chunk
         self.srl_threshold = self._get_int(
-            "srl_threshold", "DIFFKV_SRL_THRESHOLD", self.srl_threshold, config_dict
+            "srl_threshold", "DKV_SRL_THRESHOLD", self.srl_threshold, config_dict
         )
         self.async_svd = self._get_bool(
-            "async_svd", "DIFFKV_ASYNC_SVD", self.async_svd, config_dict
+            "async_svd", "DKV_ASYNC_SVD", self.async_svd, config_dict
         )
         self.mps_watermark = self._get_float(
             "mps_watermark", "PYTORCH_MPS_HIGH_WATERMARK_RATIO", self.mps_watermark, config_dict
         )
         self.torch_compile = self._get_bool(
-            "torch_compile", "DIFFKV_USE_TORCH_COMPILE", self.torch_compile, config_dict
+            "torch_compile", "DKV_USE_TORCH_COMPILE", self.torch_compile, config_dict
         )
         self.approximate_attn = self._get_bool(
-            "approximate_attn", "DIFFKV_MPS_APPROXIMATE_ATTN", self.approximate_attn, config_dict
+            "approximate_attn", "DKV_MPS_APPROXIMATE_ATTN", self.approximate_attn, config_dict
         )
         # srl_age_penalty: subtracts age*penalty from each block's relevance in
         # two_level_gate, biasing selection toward RECENT blocks.  Default moved
@@ -137,54 +137,54 @@ class DiffKVConfig:
         # q·k relevance with no recency term — a recency bias actively drops
         # early-document content on whole-document synthesis (the likely cause
         # of the routed-decode degradation observed at 13.4K).  Re-enable with
-        # DIFFKV_SRL_AGE_PENALTY>0 for multi-turn chat, where damping stale
+        # DKV_SRL_AGE_PENALTY>0 for multi-turn chat, where damping stale
         # concepts from earlier turns can help.
         self.srl_age_penalty = self._get_float(
-            "srl_age_penalty", "DIFFKV_SRL_AGE_PENALTY", self.srl_age_penalty, config_dict
+            "srl_age_penalty", "DKV_SRL_AGE_PENALTY", self.srl_age_penalty, config_dict
         )
         self.kv_quant = self._get_str(
-            "kv_quant", "DIFFKV_KV_QUANT", self.kv_quant, config_dict
+            "kv_quant", "DKV_KV_QUANT", self.kv_quant, config_dict
         )
         self.max_active_dense_tokens = self._get_int(
-            "max_active_dense_tokens", "DIFFKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
+            "max_active_dense_tokens", "DKV_MAX_ACTIVE_DENSE_TOKENS", self.max_active_dense_tokens, config_dict
         )
         # Issue 10: max_residual_tokens — configurable upper bound on correction slots per block.
-        # NativeBlockPool reads DIFFKV_MAX_RESIDUAL_TOKENS directly for backward-compat;
-        # DiffKVConfig surfaces it here for callers that pass config objects.
+        # NativeBlockPool reads DKV_MAX_RESIDUAL_TOKENS directly for backward-compat;
+        # DKVConfig surfaces it here for callers that pass config objects.
         self.max_residual_tokens = self._get_int(
-            "max_residual_tokens", "DIFFKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
+            "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
         )
 
         # ── CUDA-specific performance flags ──────────────────────────────────
         # These have no effect on MPS/CPU; they are documented here so that
-        # DIFFKV_TELEMETRY=1 output gives a complete picture of active defaults.
+        # DKV_TELEMETRY=1 output gives a complete picture of active defaults.
 
         # factual_store: retain full prefill K/V on CPU and build FactualExactStore.
         # Default OFF to match MLX path and documentation.  Enable with
-        # DIFFKV_FACTUAL_STORE=1 when factual-recall accuracy matters more than
+        # DKV_FACTUAL_STORE=1 when factual-recall accuracy matters more than
         # the additional RAM/D2H cost.
         self.factual_store = self._get_bool(
-            "factual_store", "DIFFKV_FACTUAL_STORE", False, config_dict
+            "factual_store", "DKV_FACTUAL_STORE", False, config_dict
         )
 
         # gpu_compress: run randomized SVD on the GPU instead of CPU workers.
         # Default ON for CUDA (GPU-rSVD is ~30× faster than CPU rSVD for typical
-        # rank/block sizes).  Force CPU with DIFFKV_GPU_COMPRESS=0.
+        # rank/block sizes).  Force CPU with DKV_GPU_COMPRESS=0.
         _cuda_default_gpu_compress = not is_macos
         self.gpu_compress = self._get_bool(
-            "gpu_compress", "DIFFKV_GPU_COMPRESS", _cuda_default_gpu_compress, config_dict
+            "gpu_compress", "DKV_GPU_COMPRESS", _cuda_default_gpu_compress, config_dict
         )
 
         # cuda_graph: capture a static CUDA decode graph.
         # Default OFF until the graph ABI is redesigned around device-resident
         # routing/session state.  The current implementation captures mutable
         # Python state and produces stale outputs after any routing change.
-        # DIFFKV_DISABLE_CUDA_GRAPH=0 is retained as a compatibility request,
+        # DKV_DISABLE_CUDA_GRAPH=0 is retained as a compatibility request,
         # but the current mutable model does not have the static-state ABI
         # required for a valid full-forward graph.  Keep the effective flag
         # false so config telemetry cannot claim graphs are active merely
         # because an environment variable was set.
-        _disable_graph = os.environ.get("DIFFKV_DISABLE_CUDA_GRAPH", "1")
+        _disable_graph = os.environ.get("DKV_DISABLE_CUDA_GRAPH", "1")
         self.cuda_graph_requested = (not is_macos and _disable_graph != "1")
         self.cuda_graph = False
 
@@ -193,7 +193,7 @@ class DiffKVConfig:
         # 100 on MPS matches the original value (MPS memory model differs).
         _default_gc = 100 if is_macos else 500
         self.gc_interval = self._get_int(
-            "gc_interval", "DIFFKV_GC_INTERVAL", _default_gc, config_dict
+            "gc_interval", "DKV_GC_INTERVAL", _default_gc, config_dict
         )
 
         # srl_route_every: run route_query_fixed_k every N decode tokens; reuse
@@ -202,32 +202,32 @@ class DiffKVConfig:
         # Default 1 = every token (preserves original behaviour).
         # Set to 2-4 on CUDA for 2-4× less D2H during SRL-routed decode.
         self.srl_route_every = self._get_int(
-            "srl_route_every", "DIFFKV_SRL_ROUTE_EVERY", 1, config_dict
+            "srl_route_every", "DKV_SRL_ROUTE_EVERY", 1, config_dict
         )
 
         # 3. Per-layer rank options
         # early_layer_rank_boost: when True, layers in the first 15% of the network
         # use up to 2× base_rank to improve syntactic representation quality.
         # Default: False for backward compatibility.
-        # Enable via: config_dict={'early_layer_rank_boost': True} or DIFFKV_EARLY_LAYER_RANK_BOOST=1
+        # Enable via: config_dict={'early_layer_rank_boost': True} or DKV_EARLY_LAYER_RANK_BOOST=1
         self.early_layer_rank_boost = self._get_bool(
-            "early_layer_rank_boost", "DIFFKV_EARLY_LAYER_RANK_BOOST", False, config_dict
+            "early_layer_rank_boost", "DKV_EARLY_LAYER_RANK_BOOST", False, config_dict
         )
         # max_rank_early: cap for early-layer rank. 0 = auto (2× base_rank).
         # Only used when early_layer_rank_boost=True.
-        # Enable via: config_dict={'max_rank_early': 32} or DIFFKV_MAX_RANK_EARLY=32
+        # Enable via: config_dict={'max_rank_early': 32} or DKV_MAX_RANK_EARLY=32
         self.max_rank_early = self._get_int(
-            "max_rank_early", "DIFFKV_MAX_RANK_EARLY", 0, config_dict
+            "max_rank_early", "DKV_MAX_RANK_EARLY", 0, config_dict
         )
         # layer_adaptive_rank: when True, early/late layers use lower ranks (e.g. 8 or 12)
         # and middle layers use higher ranks (e.g. 24), rather than a uniform rank.
-        # Default: True. Disable via DIFFKV_LAYER_ADAPTIVE_RANK=0 or config dict.
+        # Default: True. Disable via DKV_LAYER_ADAPTIVE_RANK=0 or config dict.
         # This is a major win for decode throughput (TPS) and VRAM reduction on both CUDA and MLX.
         self.layer_adaptive_rank = self._get_bool(
-            "layer_adaptive_rank", "DIFFKV_LAYER_ADAPTIVE_RANK", True, config_dict
+            "layer_adaptive_rank", "DKV_LAYER_ADAPTIVE_RANK", True, config_dict
         )
         # ── Streaming Compression Default Tradeoffs ───────────────────────────
-        # DIFFKV_STREAMING_COMPRESS defaults:
+        # DKV_STREAMING_COMPRESS defaults:
         # - CUDA: OFF (0). SVD compression is a highly parallelizable operation.
         #   Doing it layer-by-layer during the forward pass forces sequential
         #   GPU dispatches (e.g. 624 dispatches for 13k context), incurring massive
@@ -237,9 +237,9 @@ class DiffKVConfig:
         #   compression critical for bounding peak VRAM without performance penalty.
         # ──────────────────────────────────────────────────────────────────────
 
-        verbose = os.environ.get("DIFFKV_TELEMETRY", "0") == "1"
+        verbose = os.environ.get("DKV_TELEMETRY", "0") == "1"
         if verbose:
-            print(f"[DiffKV Config] Loaded preset: {self.preset.upper()}")
+            print(f"[DKV Config] Loaded preset: {self.preset.upper()}")
             print(f"  decode_cache_enabled      = {self.decode_cache_enabled}")
             print(f"  decode_cache_max_tokens   = {self.decode_cache_max_tokens}")
             print(f"  prefill_chunk_size        = {self.prefill_chunk_size}")

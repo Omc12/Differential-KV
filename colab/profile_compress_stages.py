@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attribute DiffKV's CUDA prefill-compression time, stage by stage.
+"""Attribute DKV's CUDA prefill-compression time, stage by stage.
 
 Why this exists
 ---------------
@@ -24,7 +24,7 @@ the wide SVD and checks that the factorisation it produces is equivalent.
 Usage
 -----
     python colab/profile_compress_stages.py                 # defaults to the eval's shapes
-    python colab/profile_compress_stages.py --rank 32       # DIFFKV_RANK_BOOST=off equivalent
+    python colab/profile_compress_stages.py --rank 32       # DKV_RANK_BOOST=off equivalent
     python colab/profile_compress_stages.py --layers 4      # quicker smoke run
 """
 
@@ -75,7 +75,7 @@ def profile_current(N, T, feat, rank, layers, dev, oversample=5):
         deltas = s.run("1. deltas (fp32 materialise)",
                        lambda: torch.randn(N, T, feat, device=dev, dtype=torch.float32))
 
-        # V-side rebalancing (DIFFKV_V_SCALE, default on).
+        # V-side rebalancing (DKV_V_SCALE, default on).
         half = feat // 2
         def _vscale():
             eK = (deltas[:, :, :half] ** 2).sum(dim=(1, 2))
@@ -246,7 +246,7 @@ def main():
     ap.add_argument("--kv-heads", type=int, default=8)
     ap.add_argument("--head-dim", type=int, default=128)
     ap.add_argument("--rank", type=int, default=48,
-                    help="48 = boost fires (default today); 32 = DIFFKV_RANK_BOOST=off")
+                    help="48 = boost fires (default today); 32 = DKV_RANK_BOOST=off")
     ap.add_argument("--layers", type=int, default=48)
     ap.add_argument("--tf32", action="store_true", help="enable TF32 for fp32 matmul")
     args = ap.parse_args()
@@ -296,7 +296,7 @@ def main():
     # If eigh drops sharply at r<=32, capping r_proj there beats the Gram swap.
     probe_batched_cliff(N, feat, args.layers, dev)
 
-    print("\nNext: re-run with --rank 32 (DIFFKV_RANK_BOOST=off) and --tf32 to")
+    print("\nNext: re-run with --rank 32 (DKV_RANK_BOOST=off) and --tf32 to")
     print("separate the rank-boost cost from the cuSOLVER cost.")
 
 

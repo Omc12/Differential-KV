@@ -84,7 +84,7 @@ q = torch.randn(1, HEADS, 1, HEAD_DIM, device=DEVICE, dtype=DTYPE)
 # ──────────────────────────────────────────────────────────────────────────
 def dense_baseline_decode(q, blocks, full_k_list, full_v_list):
     from runtime.sparse_attention import repeat_kv
-    from runtime.triton_diffkv import TritonDiffKV
+    from runtime.triton_dkv import TritonDKV
 
     k_list = []
     v_list = []
@@ -93,7 +93,7 @@ def dense_baseline_decode(q, blocks, full_k_list, full_v_list):
         v_list.append(blk.anchor_kv[:, 1].unsqueeze(2))
         if blk.U is not None:
             anchor_flat = blk.anchor_kv.view(-1).to(torch.float16)
-            recon = TritonDiffKV.reconstruct_lowrank(blk.U, blk.V, anchor_flat, scale=blk.scale)
+            recon = TritonDKV.reconstruct_lowrank(blk.U, blk.V, anchor_flat, scale=blk.scale)
             kv_heads = blk.anchor_kv.shape[2]
             head_dim  = blk.anchor_kv.shape[3]
             recon = recon.view(1, -1, 2, kv_heads, head_dim)

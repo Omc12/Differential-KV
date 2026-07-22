@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-collect_results.py — Collects all DiffKV eval JSON outputs and prints a
+collect_results.py — Collects all DKV eval JSON outputs and prints a
 paper-ready summary table + identifies any missing / failed evals.
 
 Usage:
@@ -87,14 +87,14 @@ def main():
             print(f"  File: {ruler_files[0]}")
             res_dict = d_ruler.get("results", {})
             contexts = d_ruler.get("contexts", [])
-            header = f"  {'Task':<22}" + "".join(f"  {c//1024}k DiffKV  {c//1024}k Dense" for c in contexts)
+            header = f"  {'Task':<22}" + "".join(f"  {c//1024}k DKV  {c//1024}k Dense" for c in contexts)
             print(header)
             hr()
             for task_name, task_data in res_dict.items():
                 row = f"  {task_name:<22}"
                 for c in contexts:
                     cd = task_data.get(str(c)) or task_data.get(c) or {}
-                    dk = cd.get("diffkv", {}).get("accuracy", float("nan"))
+                    dk = cd.get("dkv", {}).get("accuracy", float("nan"))
                     dn = cd.get("dense", {}).get("accuracy", float("nan"))
                     row += f"  {dk:>8.1f}  {dn:>8.1f}"
                 print(row)
@@ -141,7 +141,7 @@ def main():
         summary["B2"] = [{"ctx": r["context_tokens"], "pass": r["success"]} for r in d]
 
     # ── B3: Perplexity ───────────────────────────────────────────────────────
-    section("B3 — Perplexity (dense vs DiffKV @ 4k/8k/16k)")
+    section("B3 — Perplexity (dense vs DKV @ 4k/8k/16k)")
     d = load("test3_perplexity.json")
     if d is None:
         print("  [MISSING] Run: benchmarks/run_ppl_mlx.py")
@@ -150,12 +150,12 @@ def main():
         print(f"  [ERROR] {d['_error']}")
         summary["B3"] = f"ERROR: {d['_error']}"
     else:
-        print(f"  {'Context':>8}  {'Dense PPL':>10}  {'DiffKV PPL':>12}  {'Delta%':>8}")
+        print(f"  {'Context':>8}  {'Dense PPL':>10}  {'DKV PPL':>12}  {'Delta%':>8}")
         hr()
         for r in d:
             ctx = r.get("context_tokens", "?")
             pd  = r.get("ppl_dense", float("nan"))
-            pk  = r.get("ppl_diffkv", float("nan"))
+            pk  = r.get("ppl_dkv", float("nan"))
             dlt = r.get("ppl_delta_pct", float("nan"))
             print(f"  {ctx:>8}  {pd:>10.4f}  {pk:>12.4f}  {dlt:>+8.2f}%")
         summary["B3"] = [{"ctx": r["context_tokens"], "ppl_delta_pct": r["ppl_delta_pct"]} for r in d]
@@ -268,13 +268,13 @@ def main():
             with open(lb_path) as f:
                 lb = json.load(f)
             print(f"  File: {lb_files[0]}")
-            print(f"  {'Dataset':<16}  {'Metric':>7}  {'Dense':>8}  {'DiffKV':>8}  {'Delta':>8}")
+            print(f"  {'Dataset':<16}  {'Metric':>7}  {'Dense':>8}  {'DKV':>8}  {'Delta':>8}")
             hr()
             for dataset, ddata in lb.items():
-                if isinstance(ddata, dict) and "dense" in ddata and "diffkv" in ddata:
+                if isinstance(ddata, dict) and "dense" in ddata and "dkv" in ddata:
                     metric = ddata.get("metric", "?")
                     dv = ddata["dense"].get(metric, float("nan"))
-                    kv = ddata["diffkv"].get(metric, float("nan"))
+                    kv = ddata["dkv"].get(metric, float("nan"))
                     delta = kv - dv if isinstance(dv, float) else float("nan")
                     print(f"  {dataset:<16}  {metric:>7}  {dv:>8.3f}  {kv:>8.3f}  {delta:>+8.3f}")
             summary["C1"] = lb

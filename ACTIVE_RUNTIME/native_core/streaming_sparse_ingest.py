@@ -812,52 +812,52 @@ class StreamingSparseIngestManager:
 
             # Rule 1: Long digit codes (IDs, years+, zip codes, DOIs) — always exempt
             if _RE_LONG_DIGITS.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 1 skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 1 skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 1b: Alphanumeric identifier codes (SIGMA-1409-ZETA, SKU9910,
             # GPT-4) — always exempt. Catches short/hyphenated codes the \d{5,}
             # rule missed (the CUDA-vs-MLX random-code retrieval gap).
             elif _RE_ALNUM_CODE.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 1b skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 1b skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 2: Scientific notation — always exempt (1.23e+4, 2.998e8)
             elif _RE_SCI_NOTATION.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 2 skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 2 skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 3: Unicode math symbols — always exempt (π, ∑, ∞, ≤, ±, etc.)
             elif _RE_UNICODE_MATH.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3 skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 3 skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 3b: LaTeX math formula block — always exempt
             elif _RE_LATEX_MATH.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3b skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 3b skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 3c: ASCII equation statement — always exempt
             elif _RE_ASCII_EQUATION.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3c skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 3c skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 3d: Verbatim definitions — always exempt
             elif _RE_DEFINITIONS.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3d skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 3d skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             # Rule 3e: Formal claims / theorems — always exempt
             elif _RE_CLAIMS.search(block_text):
-                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                    print(f"[DiffKV DEBUG] Rule 3e skip block anchor={anchor_idx}: '{block_text}'")
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV DEBUG] Rule 3e skip block anchor={anchor_idx}: '{block_text}'")
                 _result = True
             else:
                 # Rule 3f: Acronym density — always exempt
                 acronyms = set(_RE_ACRONYMS.findall(block_text))
                 if len(acronyms) >= 3:
-                    if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                        print(f"[DiffKV DEBUG] Rule 3f skip block anchor={anchor_idx}: '{block_text}', acronyms={acronyms}")
+                    if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                        print(f"[DKV DEBUG] Rule 3f skip block anchor={anchor_idx}: '{block_text}', acronyms={acronyms}")
                     _result = True
                 else:
                     # Rule 4: Short digits (≥2 digits) with query-word overlap
@@ -886,8 +886,8 @@ class StreamingSparseIngestManager:
                                 if w not in _STOP_WORDS_COMPRESS
                             }
                             if block_words & query_words:
-                                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                                    print(f"[DiffKV DEBUG] Rule 4 skip block anchor={anchor_idx}: overlap={block_words & query_words}")
+                                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                                    print(f"[DKV DEBUG] Rule 4 skip block anchor={anchor_idx}: overlap={block_words & query_words}")
                                 _result = True
 
                     if not _result:
@@ -909,14 +909,14 @@ class StreamingSparseIngestManager:
                         }
                         for w in block_words:
                             if doc_words.get(w, 0) <= 2:
-                                if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                                    print(f"[DiffKV DEBUG] Rule 5 skip block anchor={anchor_idx}: word '{w}' occurs {doc_words.get(w, 0)} times")
+                                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                                    print(f"[DKV DEBUG] Rule 5 skip block anchor={anchor_idx}: word '{w}' occurs {doc_words.get(w, 0)} times")
                                 _result = True
                                 break
 
         except Exception as e:
-            if os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                print(f"[DiffKV DEBUG] skip check error: {e}")
+            if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                print(f"[DKV DEBUG] skip check error: {e}")
 
         self._skip_compress_cache[_cache_key] = _result
         return _result
@@ -992,8 +992,8 @@ class StreamingSparseIngestManager:
                 # Check for compression exemption
                 if self._should_skip_compression(session_id, anchor_idx, 1):
                     new_block.skip_compression = True
-                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                        print(f"[DiffKV Ingest] Decode block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD (contains digit/number)")
+                    if layer_idx == 0 and os.environ.get("DKV_TELEMETRY", "0") == "1":
+                        print(f"[DKV Ingest] Decode block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD (contains digit/number)")
                 
                 blocks.append(new_block)
                 self.update_metadata_block(session_id, layer_idx, len(blocks) - 1, new_block)
@@ -1034,8 +1034,8 @@ class StreamingSparseIngestManager:
                 new_tok_pos = current_block.anchor_idx + len(current_block.token_indices)
                 if self._should_skip_compression(session_id, new_tok_pos, 1):
                     current_block.skip_compression = True
-                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                        print(f"[DiffKV Ingest] Decode block anchor_idx={current_block.anchor_idx} layer={layer_idx}: Exempted from SVD (appended digit/number)")
+                    if layer_idx == 0 and os.environ.get("DKV_TELEMETRY", "0") == "1":
+                        print(f"[DKV Ingest] Decode block anchor_idx={current_block.anchor_idx} layer={layer_idx}: Exempted from SVD (appended digit/number)")
 
             current_block.dirty = True
             current_block.token_indices.append(
@@ -1184,8 +1184,8 @@ class StreamingSparseIngestManager:
                     # Check for compression exemption
                     if self._should_skip_compression(session_id, anchor_idx, block_capacity):
                         new_block.skip_compression = True
-                        if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                            print(f"[DiffKV Ingest] Block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
+                        if layer_idx == 0 and os.environ.get("DKV_TELEMETRY", "0") == "1":
+                            print(f"[DKV Ingest] Block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
                     # Prefill must remain exact until the final chunk has run.
                     # The next chunk reads these blocks as history, so publishing
@@ -1195,7 +1195,7 @@ class StreamingSparseIngestManager:
                     # compress_deferred_prefill_blocks() after prefill.  The
                     # immediate mode is retained only as an explicit benchmark
                     # knob for approximate prefill experiments.
-                    _immediate_prefill = os.environ.get("DIFFKV_IMMEDIATE_PREFILL_COMPRESS", "0") == "1"
+                    _immediate_prefill = os.environ.get("DKV_IMMEDIATE_PREFILL_COMPRESS", "0") == "1"
                     if (_immediate_prefill
                             and (anchor_idx > 0 or not self.protect_block_zero)
                             and not new_block.skip_compression):
@@ -1250,8 +1250,8 @@ class StreamingSparseIngestManager:
                 # Check for compression exemption
                 if self._should_skip_compression(session_id, anchor_idx, len(token_indices)):
                     new_block.skip_compression = True
-                    if layer_idx == 0 and os.environ.get("DIFFKV_TELEMETRY", "0") == "1":
-                        print(f"[DiffKV Ingest] Partial block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
+                    if layer_idx == 0 and os.environ.get("DKV_TELEMETRY", "0") == "1":
+                        print(f"[DKV Ingest] Partial block anchor_idx={anchor_idx} layer={layer_idx}: Exempted from SVD compression (contains digit/number)")
 
                 # SVD compression is deferred during prefill to ensure exact attention.
                 new_block.state = "ACCUMULATING"
@@ -1307,7 +1307,7 @@ class StreamingSparseIngestManager:
                 self.stats["total_dense_tokens_peak"] = dense_tokens
 
         # Compress during the forward pass:
-        if os.environ.get("DIFFKV_STREAMING_COMPRESS", "0") == "1":
+        if os.environ.get("DKV_STREAMING_COMPRESS", "0") == "1":
             self.compress_deferred_blocks_for_layer(session_id, layer_idx)
 
     def _submit_blocks_batched(self, session_id: str, layer_idx: int, blocks_list: List[StreamingKVBlock]):
@@ -1322,12 +1322,12 @@ class StreamingSparseIngestManager:
 
         # GPU-accelerated randomized SVD path (Component 2).
         # Default to GPU compression on CUDA for maximum throughput; CPU path
-        # is the fallback (set DIFFKV_GPU_COMPRESS=0 to force CPU SVD).
+        # is the fallback (set DKV_GPU_COMPRESS=0 to force CPU SVD).
         _config_gpu_compress = getattr(
             getattr(self.manager, "config", None), "gpu_compress", device.type == "cuda"
         )
         _gpu_compress_default = "1" if _config_gpu_compress else "0"
-        if os.environ.get("DIFFKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
+        if os.environ.get("DKV_GPU_COMPRESS", _gpu_compress_default) == "1" and device.type == "cuda":
             from native_core.compression.lowrank import compress_layer_blocks_gpu
             from native_core.kv_runtime_manager import get_layer_rank
             _cfg = getattr(self.manager, "config", None)
@@ -1364,7 +1364,7 @@ class StreamingSparseIngestManager:
             # 13k (peak 15.07 -> 17.16 GB, and 16k began OOMing) because the
             # natural per-layer batch there is only ~49 blocks — the "cap" was
             # acting as a floor and inflating every transient ~5x.
-            _B_MAX = int(os.environ.get("DIFFKV_COMPRESS_BLOCK_BATCH", "64"))
+            _B_MAX = int(os.environ.get("DKV_COMPRESS_BLOCK_BATCH", "64"))
             for _T_active, _group in _by_T.items():
                 for _cs in range(0, len(_group), _B_MAX):
                     _sub = _group[_cs:_cs + _B_MAX]
@@ -1383,8 +1383,8 @@ class StreamingSparseIngestManager:
                                     _b.state = "ACCUMULATING"
                     except Exception as _gpu_err:
                         import traceback
-                        print(f"[DiffKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
-                        if os.environ.get("DIFFKV_DIAG", "0") == "1":
+                        print(f"[DKV] compress_layer_blocks_gpu FAILED for T={_T_active} (falling back to CPU): {_gpu_err}", flush=True)
+                        if os.environ.get("DKV_DIAG", "0") == "1":
                             traceback.print_exc()
                         _gpu_all_success = False
                         # Rollback SUBMITTED → ACCUMULATING for this group so CPU path retries
@@ -1668,7 +1668,7 @@ class StreamingSparseIngestManager:
                 last_block = first_layer_blocks[-1]
                 total_seq_len = last_block.anchor_idx + last_block.token_count()
 
-        _diag = os.environ.get("DIFFKV_DIAG", "0") == "1"
+        _diag = os.environ.get("DKV_DIAG", "0") == "1"
         if _diag:
             n_blocks_l0 = len(layers.get(0, []))
             print(f"[DIAG compress_deferred] session={session_id} total_seq_len={total_seq_len} "

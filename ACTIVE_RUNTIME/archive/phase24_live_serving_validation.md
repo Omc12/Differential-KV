@@ -6,12 +6,12 @@ This report validates the Differential KV backend under real, interactive servin
 
 ### 1. Sustained Multi-User Concurrency
 - **Setup:** 8 simulated concurrent users sending continuous Chat ML prompts.
-- **Observation:** vLLM batches the requests effectively. The C++ `DiffKVCompressorThread` maintains a steady throughput of SVD compressions in the background.
+- **Observation:** vLLM batches the requests effectively. The C++ `DKVCompressorThread` maintains a steady throughput of SVD compressions in the background.
 - **Result:** Sustained TPS remains high. No decode stalls observed due to compression queue backpressure.
 
 ### 2. Paging Reload Pressure
 - **Setup:** VRAM budget artificially constrained. Large context loaded, forcing aggressive paging to CPU.
-- **Observation:** As the user scrolls back to ask questions about early context, the `DiffKVPagingStream` triggers async H2D reloads.
+- **Observation:** As the user scrolls back to ask questions about early context, the `DKVPagingStream` triggers async H2D reloads.
 - **Result:** The `sync_to_compute_stream` overlap mechanism works perfectly. Reload jitter is completely hidden behind compute. The user perceives no latency spike.
 
 ### 3. Graph Replay Reuse

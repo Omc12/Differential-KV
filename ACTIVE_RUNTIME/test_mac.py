@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-test_mac.py — DiffKV Mac/Apple Silicon Integration Test
+test_mac.py — DKV Mac/Apple Silicon Integration Test
 
-Validates that the entire DiffKV pipeline (compression, attention patch,
+Validates that the entire DKV pipeline (compression, attention patch,
 decode, streaming ingest) works correctly on Apple Silicon (MPS) and CPU,
 using the tiny Qwen/Qwen2.5-0.5B-Instruct model.
 
@@ -11,8 +11,8 @@ Usage:
     python test_mac.py
 
 Environment variables:
-    DIFFKV_USE_TORCH_COMPILE=0   skip torch.compile (faster startup)
-    DIFFKV_TELEMETRY=1           verbose block-state logging
+    DKV_USE_TORCH_COMPILE=0   skip torch.compile (faster startup)
+    DKV_TELEMETRY=1           verbose block-state logging
 """
 
 import os
@@ -27,13 +27,13 @@ if _script_dir not in sys.path:
 # Disable tokenizer parallelism warnings
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 # Skip torch.compile for faster test startup
-os.environ.setdefault("DIFFKV_USE_TORCH_COMPILE", "0")
+os.environ.setdefault("DKV_USE_TORCH_COMPILE", "0")
 
 import torch
 
 # ── 1. Platform diagnostics ───────────────────────────────────────────────────
 print("=" * 60)
-print("  DiffKV Mac Integration Test")
+print("  DKV Mac Integration Test")
 print("=" * 60)
 print(f"  PyTorch : {torch.__version__}")
 print(f"  Python  : {sys.version.split()[0]}")
@@ -166,7 +166,7 @@ def test_full_pipeline():
 
     MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
 
     config = {
         "rank": 32,
@@ -175,7 +175,7 @@ def test_full_pipeline():
     }
 
     t0 = time.perf_counter()
-    wrapper = DiffKVHFWrapper(
+    wrapper = DKVHFWrapper(
         model_id=MODEL_ID,
         config=config,
         device=DEVICE,

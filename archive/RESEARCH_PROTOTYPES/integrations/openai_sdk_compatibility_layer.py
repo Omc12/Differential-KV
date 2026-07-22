@@ -36,7 +36,7 @@ class OpenAISDKCompatibilityLayer:
             "id": raw_response.get("id", "chatcmpl-unknown"),
             "object": "chat.completion",
             "created": raw_response.get("created", 0),
-            "model": raw_response.get("model", "diff-kv"),
+            "model": raw_response.get("model", "dkv"),
             "choices": raw_response.get("choices", []),
             "usage": raw_response.get("usage", {
                 "prompt_tokens": 0,

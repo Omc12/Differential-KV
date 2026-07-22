@@ -1,4 +1,4 @@
-"""V-side rebalancing (DIFFKV_V_SCALE) in compress_layer_blocks_gpu — MLX parity.
+"""V-side rebalancing (DKV_V_SCALE) in compress_layer_blocks_gpu — MLX parity.
 
 MLX scales V up by sqrt(eK/eV) before the joint K|V SVD so V competes for rank
 when its delta energy is small, then unscales the V factor.  This test builds a
@@ -11,7 +11,7 @@ import os
 import types
 import torch
 
-os.environ.setdefault("DIFFKV_MAX_RESIDUAL_TOKENS", "8")   # small so V rank, not residuals, carries V
+os.environ.setdefault("DKV_MAX_RESIDUAL_TOKENS", "8")   # small so V rank, not residuals, carries V
 import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTIVE = os.path.abspath(os.path.join(HERE, ".."))
@@ -31,7 +31,7 @@ def _low_rank(T, kv, hd, rank, scale, g):
 
 
 def _run(v_scale, T=255, kv=2, hd=64, rank=16, seed=5):
-    os.environ["DIFFKV_V_SCALE"] = "1" if v_scale else "0"
+    os.environ["DKV_V_SCALE"] = "1" if v_scale else "0"
     g = torch.Generator().manual_seed(seed)
     maxseq = 256
     pool = NativeBlockPool(max_blocks=8, num_kv_heads=kv, head_dim=hd, rank=rank,

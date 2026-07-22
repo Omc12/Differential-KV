@@ -2,7 +2,7 @@
 agents/persistent_tool_memory.py
 
 Manages agent tool-use history and persistent state across multi-session workflows.
-Uses DiffKV anchors to preserve tool interaction manifolds.
+Uses DKV anchors to preserve tool interaction manifolds.
 """
 
 import torch

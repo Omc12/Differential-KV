@@ -10,7 +10,7 @@ ACTIVE = os.path.join(REPO, "ACTIVE_RUNTIME")
 sys.path.insert(0, ACTIVE)
 
 import mlx.core as mx
-from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
+from serving.mlx_dkv_wrapper import MLXDKVWrapper
 
 FILLER = (
     "The history of artificial intelligence is long and complex. "
@@ -20,11 +20,11 @@ FILLER = (
 )
 
 def measure_prefill_mem(model_id="mlx-community/Qwen2.5-1.5B-Instruct-4bit", ctx_len=32000, lego=0):
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1"
-    os.environ["DIFFKV_LEGO_PREFILL"] = str(lego)
+    os.environ["DKV_COMPRESSED_DECODE"] = "1"
+    os.environ["DKV_LEGO_PREFILL"] = str(lego)
 
     try:
-        wrapper = MLXDiffKVWrapper(
+        wrapper = MLXDKVWrapper(
             model_id=model_id,
             config={"rank": 32, "block_size": 256},
         )

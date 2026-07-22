@@ -11,16 +11,16 @@ Differential KV has reached **Operational Maturity**. The "packaging" phase is c
 
 ## 1. How to Run the Server
 
-We have consolidated all stages into a single entry point: `run_diffkv_webui_server.py`. This script boots the unified runtime, initializes hardware acceleration, and starts the API gateway.
+We have consolidated all stages into a single entry point: `run_dkv_webui_server.py`. This script boots the unified runtime, initializes hardware acceleration, and starts the API gateway.
 
 ### Start Command
 ```bash
-python run_diffkv_webui_server.py
+python run_dkv_webui_server.py
 ```
 
 ### Server Details
 - **Endpoint**: `http://localhost:8000/v1`
-- **Model ID**: `diffkv-qwen2.5-7b`
+- **Model ID**: `dkv-qwen2.5-7b`
 - **Format**: OpenAI Chat Completions compatible.
 
 ---
@@ -32,8 +32,8 @@ Most WebUIs (like [Open WebUI](https://openwebui.com/)) support OpenAI-compatibl
 ### Open WebUI Configuration
 1. Go to **Settings > Connections > OpenAI API**.
 2. **OpenAI API Base URL**: `http://localhost:8000/v1`
-3. **OpenAI API Key**: `sk-diffkv` (or any string, as authentication is local).
-4. Save and select the `diffkv-qwen2.5-7b` model from the dropdown.
+3. **OpenAI API Key**: `sk-dkv` (or any string, as authentication is local).
+4. Save and select the `dkv-qwen2.5-7b` model from the dropdown.
 
 ---
 
@@ -48,7 +48,7 @@ Most WebUIs (like [Open WebUI](https://openwebui.com/)) support OpenAI-compatibl
 ## 4. Troubleshooting
 - **No GPU Found**: The runtime will fallback to CPU (slow), but will still function for verification.
 - **Connection Refused**: Ensure no other service is using port `8000`.
-- **Model Loading**: First run may take a moment to initialize the `DiffKVHFWrapper` and Triton kernels.
+- **Model Loading**: First run may take a moment to initialize the `DKVHFWrapper` and Triton kernels.
 
 ---
 

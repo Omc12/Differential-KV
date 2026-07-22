@@ -74,7 +74,7 @@ class OpenAICompatibleAPIGateway:
                         except asyncio.CancelledError:
                             break
                         except Exception as e:
-                            print(f"[DiffKV Cleanup] Error during idle cleanup: {e}")
+                            print(f"[DKV Cleanup] Error during idle cleanup: {e}")
                 cleanup_task = asyncio.create_task(_cleanup_loop())
 
             # ── torch.compile warmup pass ────────────────────────────────────
@@ -87,7 +87,7 @@ class OpenAICompatibleAPIGateway:
                 import asyncio, os, torch
                 async def _warmup():
                     try:
-                        use_compile = os.environ.get("DIFFKV_USE_TORCH_COMPILE", "auto")
+                        use_compile = os.environ.get("DKV_USE_TORCH_COMPILE", "auto")
                         if use_compile == "0":
                             return
                         model = wrapper.model
@@ -100,21 +100,21 @@ class OpenAICompatibleAPIGateway:
                                 break
                         if not hasattr(model, '_orig_mod') and not hasattr(model, '_dynamo_ctx') and not is_compiled:
                             return
-                        print("[DiffKV] Running torch.compile warmup (chunk_size=512)...")
+                        print("[DKV] Running torch.compile warmup (chunk_size=512)...")
                         device = wrapper.device
                         chunk_size = 512
                         dummy_ids = torch.zeros((1, chunk_size), dtype=torch.long, device=device)
                         dummy_pos = torch.arange(0, chunk_size, dtype=torch.long, device=device).unsqueeze(0)
                         # Inject a dummy session so the attention patch doesn't error
-                        wrapper.model._diffkv_session_ids = ["__warmup__"]
+                        wrapper.model._dkv_session_ids = ["__warmup__"]
                         with torch.no_grad():
                             wrapper.model(input_ids=dummy_ids, position_ids=dummy_pos, use_cache=True)
                         # Clean up warmup session artifacts
                         if hasattr(wrapper, 'manager') and hasattr(wrapper.manager, 'clear_session'):
                             wrapper.manager.clear_session("__warmup__")
-                        print("[DiffKV] torch.compile warmup complete.")
+                        print("[DKV] torch.compile warmup complete.")
                     except Exception as e:
-                        print(f"[DiffKV] WARNING: torch.compile warmup failed ({e}). Continuing in eager mode.")
+                        print(f"[DKV] WARNING: torch.compile warmup failed ({e}). Continuing in eager mode.")
                 asyncio.create_task(_warmup())
 
             yield
@@ -214,13 +214,13 @@ class OpenAICompatibleAPIGateway:
                 history = content[idx + len(marker):]
                 if len(history) > 2000:
                     history = history[:1000] + "\n... [TRUNCATED FOR SPEED] ...\n" + history[-1000:]
-                print(f"[DiffKV Gateway] Optimized long title/summary prompt by truncating embedded chat history "
+                print(f"[DKV Gateway] Optimized long title/summary prompt by truncating embedded chat history "
                       f"(shrank {len(content)} -> {len(prefix) + len(history)} characters).")
                 return prefix + history
 
         # Fallback: simple truncation of the middle
         truncated = content[:1500] + "\n... [TRUNCATED FOR SPEED] ...\n" + content[-1500:]
-        print(f"[DiffKV Gateway] Optimized long title/summary prompt by middle-truncation "
+        print(f"[DKV Gateway] Optimized long title/summary prompt by middle-truncation "
               f"(shrank {len(content)} -> {len(truncated)} characters).")
         return truncated
 
@@ -242,7 +242,7 @@ class OpenAICompatibleAPIGateway:
             if is_ephemeral:
                 orig_session_id = session_id or str(uuid.uuid4())
                 ephemeral_session_id = f"__ephemeral__{orig_session_id}"
-                print(f"[DiffKV Gateway] Detected ephemeral title/summary request. "
+                print(f"[DKV Gateway] Detected ephemeral title/summary request. "
                       f"Routing to isolated session {ephemeral_session_id} to protect main KV cache.")
                 session_id = ephemeral_session_id
                 # Optimize/truncate the long user prompt (containing chat history) for the ephemeral request
@@ -269,7 +269,7 @@ class OpenAICompatibleAPIGateway:
                                     break
                             if match:
                                 session_id = sid
-                                print(f"[DiffKV Gateway] Dynamically matched message history prefix to active session: {session_id}")
+                                print(f"[DKV Gateway] Dynamically matched message history prefix to active session: {session_id}")
                                 break
                     
                     # Fallback match comparing the last assistant message content in the history
@@ -295,7 +295,7 @@ class OpenAICompatibleAPIGateway:
                                     p_last = last_incoming_assistant.get("content", "").strip()
                                     if len(p_last) > 150 and h_last == p_last:
                                         session_id = sid
-                                        print(f"[DiffKV Gateway] Dynamically matched session {session_id} using fallback last assistant message content match.")
+                                        print(f"[DKV Gateway] Dynamically matched session {session_id} using fallback last assistant message content match.")
                                         break
 
             if not is_ephemeral and session_id is None and self.session_manager is not None:
@@ -404,7 +404,7 @@ class OpenAICompatibleAPIGateway:
                             if hasattr(self.resolver, "update_session_token_prefix"):
                                 self.resolver.update_session_token_prefix(session_id, full_next_prompt)
                         except Exception as _prefix_e:
-                            print(f"[DiffKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
+                            print(f"[DKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
                     else:
                         # Clean up ephemeral session KV immediately to free VRAM
                         try:
@@ -465,7 +465,7 @@ class OpenAICompatibleAPIGateway:
         @self.app.get("/v1/models")
         @self.app.get("/models")
         async def list_models():
-            model_id = "diffkv-serving"
+            model_id = "dkv-serving"
             if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
                 model_id = getattr(self.resolver.wrapper, "model_id", model_id)
             elif hasattr(self.resolver, "resolver") and self.resolver.resolver:
@@ -476,9 +476,9 @@ class OpenAICompatibleAPIGateway:
             # Sanitize model ID for Open WebUI (remove slashes which can confuse its registry parser)
             model_id = model_id.replace("/", "-")
             
-            # Ensure model ID starts with diffkv-
-            if not model_id.startswith("diffkv-"):
-                model_id = f"diffkv-{model_id}"
+            # Ensure model ID starts with dkv-
+            if not model_id.startswith("dkv-"):
+                model_id = f"dkv-{model_id}"
                 
             return {
                 "object": "list",
@@ -515,7 +515,7 @@ class OpenAICompatibleAPIGateway:
             device = "cpu"
             kv_manager = None
             serving_mode = "balanced"
-            model_id = "diffkv-serving"
+            model_id = "dkv-serving"
             
             if hasattr(self.resolver, "wrapper") and self.resolver.wrapper:
                 w = self.resolver.wrapper
@@ -718,7 +718,7 @@ class OpenAICompatibleAPIGateway:
                             if hasattr(self.resolver, "update_session_token_prefix"):
                                 self.resolver.update_session_token_prefix(session_id, full_next_prompt)
                         except Exception as _prefix_e:
-                            print(f"[DiffKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
+                            print(f"[DKV Gateway] WARNING: failed to update prefix registry: {_prefix_e}")
                     else:
                         # Clean up ephemeral session KV immediately to free VRAM
                         try:
@@ -829,14 +829,14 @@ def check_and_preload_allocator():
             break
             
     if found_path and preload_env_var:
-        print(f"[DiffKV Allocator] Found mimalloc at {found_path}. Automatically preloading for memory compaction...")
+        print(f"[DKV Allocator] Found mimalloc at {found_path}. Automatically preloading for memory compaction...")
         env = os.environ.copy()
         env[preload_env_var] = found_path
         env["MIMALLOC_PRELOADED"] = "1"
         try:
             os.execve(sys.executable, [sys.executable] + sys.argv, env)
         except Exception as e:
-            print(f"[DiffKV Allocator] WARNING: Failed to re-execute with mimalloc: {e}")
+            print(f"[DKV Allocator] WARNING: Failed to re-execute with mimalloc: {e}")
 
 def main():
     import argparse
@@ -851,7 +851,7 @@ def main():
     if _runtime_dir not in sys.path:
         sys.path.insert(0, _runtime_dir)
         
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     from serving.batch_engine import ContinuousBatchEngine
     from serving.production_session_manager import ProductionSessionManager
 
@@ -903,51 +903,51 @@ def main():
         _best_device = _gbd()
     except ImportError:
         _best_device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f'[DiffKV] Auto-selected device: {_best_device}')
+    print(f'[DKV] Auto-selected device: {_best_device}')
 
     # Apply global platform defaults early in environment
     if _best_device == "mps":
-        if os.environ.get("DIFFKV_MPS_APPROXIMATE_ATTN") is None:
-            os.environ["DIFFKV_MPS_APPROXIMATE_ATTN"] = "1"
-        if os.environ.get("DIFFKV_USE_TORCH_COMPILE") is None:
-            os.environ["DIFFKV_USE_TORCH_COMPILE"] = "0"
-        print("[DiffKV] Apple Silicon/MPS detected. Automatically wired platform settings:")
-        print(f"  - DIFFKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DIFFKV_MPS_APPROXIMATE_ATTN')}")
-        print(f"  - DIFFKV_USE_TORCH_COMPILE     = {os.environ.get('DIFFKV_USE_TORCH_COMPILE')}")
+        if os.environ.get("DKV_MPS_APPROXIMATE_ATTN") is None:
+            os.environ["DKV_MPS_APPROXIMATE_ATTN"] = "1"
+        if os.environ.get("DKV_USE_TORCH_COMPILE") is None:
+            os.environ["DKV_USE_TORCH_COMPILE"] = "0"
+        print("[DKV] Apple Silicon/MPS detected. Automatically wired platform settings:")
+        print(f"  - DKV_MPS_APPROXIMATE_ATTN = {os.environ.get('DKV_MPS_APPROXIMATE_ATTN')}")
+        print(f"  - DKV_USE_TORCH_COMPILE     = {os.environ.get('DKV_USE_TORCH_COMPILE')}")
 
-    # ── BEST DiffKV decode config (shared with the interactive CLI) ──
+    # ── BEST DKV decode config (shared with the interactive CLI) ──
     # Performance-optimal serving policy: EXACT DENSE for short prompts (fastest + exact), switch
-    # to DiffKV sparse once the context is long enough that its memory/reach win matters
+    # to DKV sparse once the context is long enough that its memory/reach win matters
     # (COMPRESSED_DECODE=auto, engages >= COMPRESSED_MIN_CTX=8192). When sparse IS on: the
     # decompress-and-cache fast decode (~2x tps, bit-exact) + adaptive sparse bias (synthesis-safe
     # + NIAH-safe). Single source of truth in serving/decode_config.py; each is a setdefault so an
-    # explicit env still wins. Force DiffKV always-on with DIFFKV_COMPRESSED_DECODE=1.
+    # explicit env still wins. Force DKV always-on with DKV_COMPRESSED_DECODE=1.
     # Guardrails for the sparse path: parity 4/4, NIAH forced-sparse exact, relational 5/5.
     from serving.decode_config import apply_best_decode_defaults
-    apply_best_decode_defaults(log=lambda m: print("[DiffKV] Serving " + m))
+    apply_best_decode_defaults(log=lambda m: print("[DKV] Serving " + m))
 
     # ── Platform-specific auto-optimization for 'low' preset ──
     if args.preset == "low":
-        print(f'[DiffKV Debug] Low preset condition matched! Applying platform auto-optimizations...')
+        print(f'[DKV Debug] Low preset condition matched! Applying platform auto-optimizations...')
         
         # 1. Quantization auto-enable (INT8 on MPS via torchao, INT4 on CUDA via bitsandbytes)
         if not args.load_in_4bit and not args.load_in_8bit:
             if _best_device == "cuda":
                 args.load_in_4bit = True
-                print("[DiffKV] Low preset + CUDA: auto-enabling 4-bit weight quantization (bitsandbytes) to save VRAM")
+                print("[DKV] Low preset + CUDA: auto-enabling 4-bit weight quantization (bitsandbytes) to save VRAM")
             elif _best_device == "mps":
-                print("[DiffKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
+                print("[DKV] Low preset + MPS: running in FP16 to avoid torchao NaN/stability issues on MPS")
                 
         # 2. Serving mode auto-adjustment
         if args.serving_mode not in ["lightweight"]:
             original_mode = args.serving_mode
             args.serving_mode = "lightweight"
-            print(f"[DiffKV] Low preset: auto-adjusting serving_mode from '{original_mode}' to 'lightweight' to prevent OOM")
+            print(f"[DKV] Low preset: auto-adjusting serving_mode from '{original_mode}' to 'lightweight' to prevent OOM")
             
         # 3. Rank auto-adjustment
         if args.rank == 32:  # Only auto-adjust if using default rank
             args.rank = 16
-            print(f"[DiffKV] Low preset: auto-adjusting rank from 32 to 16 to prevent attention OOM on long prompts")
+            print(f"[DKV] Low preset: auto-adjusting rank from 32 to 16 to prevent attention OOM on long prompts")
 
     # ── Build quantization config (CUDA/bitsandbytes only) ──────────────────────────
     quantization_config = None
@@ -961,40 +961,40 @@ def main():
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_quant_type="nf4",
                 )
-                print("[DiffKV] Weight quantization: 4-bit NF4 (bitsandbytes) — weight VRAM reduced ~70%")
+                print("[DKV] Weight quantization: 4-bit NF4 (bitsandbytes) — weight VRAM reduced ~70%")
             elif args.load_in_8bit:
                 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-                print("[DiffKV] Weight quantization: 8-bit LLM.int8 (bitsandbytes) — weight VRAM reduced ~50%")
+                print("[DKV] Weight quantization: 8-bit LLM.int8 (bitsandbytes) — weight VRAM reduced ~50%")
         except ImportError:
-            print("[DiffKV] WARNING: bitsandbytes not installed. Falling back to full precision on CUDA.")
-            print("[DiffKV]   Install with: pip install bitsandbytes")
+            print("[DKV] WARNING: bitsandbytes not installed. Falling back to full precision on CUDA.")
+            print("[DKV]   Install with: pip install bitsandbytes")
             quantization_config = None
 
-    print(f'Loading DiffKV runtime with model: {args.model}...')
-    print(f'[DiffKV Debug] settings: device={_best_device}, preset={args.preset}, serving_mode={args.serving_mode}, rank={args.rank}')
+    print(f'Loading DKV runtime with model: {args.model}...')
+    print(f'[DKV Debug] settings: device={_best_device}, preset={args.preset}, serving_mode={args.serving_mode}, rank={args.rank}')
     print(f'  rank={args.rank}  micro_block_size={args.micro_block_size}  serving_mode={args.serving_mode}')
     print(f'  max_resident_sessions={args.max_resident_sessions}  quantization={"4bit" if args.load_in_4bit else ("8bit" if args.load_in_8bit else "none")}')
-    print(f'  [Tip] Set DIFFKV_TELEMETRY=1 to enable VRAM + block state logging')
+    print(f'  [Tip] Set DKV_TELEMETRY=1 to enable VRAM + block state logging')
     
     # ── Configure MPS high watermark ratio early before allocator is initialized ──
     if _best_device == "mps":
         try:
-            from native_core.config import DiffKVConfig
-            cfg = DiffKVConfig({"preset": args.preset})
+            from native_core.config import DKVConfig
+            cfg = DKVConfig({"preset": args.preset})
             watermark = cfg.mps_watermark
             if watermark > 0.0:
                 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(watermark)
                 os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = str(round(watermark * 0.8, 2))
-                print(f"[DiffKV] Configured PYTORCH_MPS_HIGH_WATERMARK_RATIO={watermark}, LOW_WATERMARK_RATIO={round(watermark * 0.8, 2)}")
+                print(f"[DKV] Configured PYTORCH_MPS_HIGH_WATERMARK_RATIO={watermark}, LOW_WATERMARK_RATIO={round(watermark * 0.8, 2)}")
                 torch.mps.set_per_process_memory_fraction(watermark)
             else:
                 os.environ.pop("PYTORCH_MPS_HIGH_WATERMARK_RATIO", None)
                 os.environ.pop("PYTORCH_MPS_LOW_WATERMARK_RATIO", None)
-                print("[DiffKV] MPS watermark set to default (no override)")
+                print("[DKV] MPS watermark set to default (no override)")
         except Exception as e:
-            print(f"[DiffKV] WARNING: Failed to configure MPS memory defaults: {e}")
+            print(f"[DKV] WARNING: Failed to configure MPS memory defaults: {e}")
 
-    wrapper = DiffKVHFWrapper(
+    wrapper = DKVHFWrapper(
         args.model,
         config={
             'rank':             args.rank,
@@ -1012,7 +1012,7 @@ def main():
     draft_wrapper = None
     if args.draft_model:
         print(f"Loading speculative draft model: {args.draft_model}...")
-        draft_wrapper = DiffKVHFWrapper(
+        draft_wrapper = DKVHFWrapper(
             args.draft_model,
             config={
                 'rank':             args.rank,

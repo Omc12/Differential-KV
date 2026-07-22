@@ -2,10 +2,10 @@
 DEAD IMPORT AUDIT
 =================================================================
   [ok] kv_runtime_manager.py                            CLEAN
-  [ok] diffkv_attention.py                              CLEAN
+  [ok] dkv_attention.py                              CLEAN
   [ok] triton_sparse_attn.py                            CLEAN
-  [ok] triton_diffkv.py                                 CLEAN
-  [ok] hf_diffkv_wrapper.py                             CLEAN
+  [ok] triton_dkv.py                                 CLEAN
+  [ok] hf_dkv_wrapper.py                             CLEAN
   [ok] batch_engine.py                                  CLEAN
   [ok] openai_compatible_api_gateway.py                 CLEAN
   [ok] async_compressor.py                              CLEAN
@@ -20,10 +20,10 @@ DEAD IMPORT AUDIT
 SYNTAX CHECK
 =================================================================
   [ok] kv_runtime_manager.py
-  [ok] diffkv_attention.py
+  [ok] dkv_attention.py
   [ok] triton_sparse_attn.py
-  [ok] triton_diffkv.py
-  [ok] hf_diffkv_wrapper.py
+  [ok] triton_dkv.py
+  [ok] hf_dkv_wrapper.py
   [ok] batch_engine.py
   [ok] openai_compatible_api_gateway.py
   [ok] async_compressor.py

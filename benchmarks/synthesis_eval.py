@@ -89,13 +89,13 @@ def run_mlx(model_id, prompt_text, mode, max_tokens=250):
     import torch
     sys.path.insert(0, ACTIVE)
     os.chdir(ACTIVE)
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    from serving.hf_dkv_wrapper import DKVHFWrapper
     
-    os.environ["DIFFKV_COMPRESSED_DECODE"] = "1" if mode == "compressed" else "0"
+    os.environ["DKV_COMPRESSED_DECODE"] = "1" if mode == "compressed" else "0"
     
     cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
            "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id=model_id, config=cfg)
+    wrapper = DKVHFWrapper(model_id=model_id, config=cfg)
     wrapper.ensure_loaded()
     tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
     
@@ -105,7 +105,7 @@ def run_mlx(model_id, prompt_text, mode, max_tokens=250):
     wrapper._session_token_ids[sid] = []
     mgr.init_session(sid, prefill_len=len(ids))
     mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
+    model._dkv_session_ids = [sid]
     
     CH = 512
     output = None
@@ -137,15 +137,15 @@ def run_mlx(model_id, prompt_text, mode, max_tokens=250):
     return summary, tps
 
 def run_native(model_path, prompt_text, mode, max_tokens=250):
-    binary_path = os.path.join(REPO, "diffkv_native/build/diffkv_native")
+    binary_path = os.path.join(REPO, "dkv_native/build/dkv_native")
     
     env = os.environ.copy()
-    env["DIFFKV_MAX_TOKENS"] = str(max_tokens)
-    env["DIFFKV_TEMPERATURE"] = "0"
+    env["DKV_MAX_TOKENS"] = str(max_tokens)
+    env["DKV_TEMPERATURE"] = "0"
     if mode == "compressed":
-        env["DIFFKV_ENGAGE_THRESHOLD"] = "1024"
+        env["DKV_ENGAGE_THRESHOLD"] = "1024"
     else:
-        env["DIFFKV_ENGAGE_THRESHOLD"] = "999999"
+        env["DKV_ENGAGE_THRESHOLD"] = "999999"
         
     cmd = [binary_path, model_path, prompt_text]
     t0 = time.perf_counter()
@@ -169,7 +169,7 @@ def main():
     parser = argparse.ArgumentParser(description="Synthesis Evaluation Harness")
     parser.add_argument("--ctx", nargs="+", type=int, default=[8192, 16384])
     parser.add_argument("--model-mlx", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
-    parser.add_argument("--model-native", default=os.path.join(REPO, "diffkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"))
+    parser.add_argument("--model-native", default=os.path.join(REPO, "dkv_native/qwen2.5-1.5b-instruct-q8_0.gguf"))
     parser.add_argument("--engine", choices=["mlx", "native", "both"], default="both")
     parser.add_argument("--mode", choices=["dense", "compressed", "both"], default="both")
     parser.add_argument("--gen", type=int, default=250)

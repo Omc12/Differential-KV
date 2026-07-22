@@ -4,7 +4,7 @@ import torch
 import time
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from native_core.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 
 print("=== PHASE 4: LONG-CONTEXT STABILITY TEST (NEEDLE IN A HAYSTACK) ===")
 
@@ -22,7 +22,7 @@ mgr = KVRuntimeManager(
 )
 mgr.block_size = 64
 mgr.rank = 16
-apply_diffkv_attention_patch(model, mgr)
+apply_dkv_attention_patch(model, mgr)
 
 session_id = "long_context_test"
 
@@ -35,7 +35,7 @@ prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_star
 
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
 
-model._diffkv_session_ids = [session_id]
+model._dkv_session_ids = [session_id]
 position_ids = torch.arange(0, input_ids.shape[1], device="cuda").unsqueeze(0)
 
 print(f"\n[1] Running Prefill ({input_ids.shape[1]} tokens)...")

@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 class RealThroughputComparator:
     """
     Stage 4B.1.5 RTA: Real Throughput Comparator.
-    Compares DiffKV's actual generation speed honestly with Ollama.
+    Compares DKV's actual generation speed honestly with Ollama.
     """
     def __init__(self, ollama_endpoint: str = "http://localhost:11434"):
         self.ollama_endpoint = ollama_endpoint

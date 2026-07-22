@@ -23,24 +23,24 @@ def estimate_bandwidth(
     # 2. INT8 KV
     int8_bytes_per_token = feat_dim * 1 + 4/block_size # 1 byte per element + scale
     
-    # 3. DiffKV Low-Rank
+    # 3. DKV Low-Rank
     # Per block: 1 Anchor [feat_dim * 2] + (block_size-1) * (U [rank * 2] + V [rank * feat_dim * 4 / block_size])
     # Effective per token:
     anchor_share = (feat_dim * dtype_bytes) / block_size
     u_share = rank * 2 # U is [1, rank] per token
     v_share = (rank * feat_dim * 4) / block_size # V is shared across block
-    diffkv_lr_bytes = anchor_share + u_share + v_share
+    dkv_lr_bytes = anchor_share + u_share + v_share
     
-    # 4. DiffKV Low-Rank + Sparse
+    # 4. DKV Low-Rank + Sparse
     sparse_elements = feat_dim * sparse_ratio
     sparse_share = sparse_elements * (4 + 2) # index (int32) + value (fp16)
-    diffkv_lrs_bytes = diffkv_lr_bytes + sparse_share
+    dkv_lrs_bytes = dkv_lr_bytes + sparse_share
     
     return {
         "fp16": fp16_bytes_per_token,
         "int8": int8_bytes_per_token,
-        "diffkv_lowrank": diffkv_lr_bytes,
-        "diffkv_lowrank_sparse": diffkv_lrs_bytes
+        "dkv_lowrank": dkv_lr_bytes,
+        "dkv_lowrank_sparse": dkv_lrs_bytes
     }
 
 if __name__ == "__main__":

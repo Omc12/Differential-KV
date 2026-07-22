@@ -71,7 +71,7 @@ ACCUMULATING  ──fills──▶  SUBMITTED  ──SVD done──▶  COMPRESS
 
 ---
 
-## What Changed in `diffkv_attention.py`
+## What Changed in `dkv_attention.py`
 
 The prefill branch **no longer does:**
 ```python

@@ -4,7 +4,7 @@ import torch
 import time
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from runtime.kv_runtime_manager import KVRuntimeManager
-from runtime.diffkv_attention import apply_diffkv_attention_patch
+from runtime.dkv_attention import apply_dkv_attention_patch
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -17,13 +17,13 @@ mgr = KVRuntimeManager(
     head_dim=model.config.hidden_size // model.config.num_attention_heads,
     device="cuda"
 )
-apply_diffkv_attention_patch(model, mgr)
+apply_dkv_attention_patch(model, mgr)
 
 session_id = "profiler_session"
 prompt = "Explain the history of the Roman Empire in great detail. " * 5
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
 
-model._diffkv_session_ids = [session_id]
+model._dkv_session_ids = [session_id]
 position_ids = torch.arange(0, input_ids.shape[1], device="cuda").unsqueeze(0)
 
 # PREFILL

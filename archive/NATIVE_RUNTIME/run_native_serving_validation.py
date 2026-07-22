@@ -47,7 +47,7 @@ class MockTokenizer:
 
 class MockModel:
     def __init__(self):
-        self._diffkv_session_ids = []
+        self._dkv_session_ids = []
     def __call__(self, **kwargs):
         class Output:
             logits = torch.randn(1, 10, 1000, device=DEVICE)
@@ -111,7 +111,7 @@ decode_steps = 100
 t0 = time.perf_counter()
 
 # Simulate concurrent continuous decode
-# In a real setup, `hf_diffkv_wrapper` calls `TritonDiffKV` for active sessions
+# In a real setup, `hf_dkv_wrapper` calls `TritonDKV` for active sessions
 import asyncio
 for step in range(decode_steps):
     asyncio.run(engine._step())

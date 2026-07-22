@@ -6,14 +6,14 @@ The Differential KV system is now formally reclassified from an **"Experimental 
 ## Core Criteria Achieved
 
 1. **Successful Native Compilation (Bypassed CUDA Toolkit constraints)**:
-   - Successfully compiled the C++ / CUDA extension `diffkv_core` on Windows using PyTorch's `cpp_extension` infrastructure.
+   - Successfully compiled the C++ / CUDA extension `dkv_core` on Windows using PyTorch's `cpp_extension` infrastructure.
    - Bypassed strict MSVC compiler version warnings via `-allow-unsupported-compiler` and resolved symbol dependencies by explicitly linking `cusolver` and `cublas`.
 2. **Native Paged Block Table Activation (`NativeBlockPool`)**:
    - Integrated the pre-allocated GPU block storage table into `KVRuntimeManager`.
    - Replaced all intermediate Python-side list-of-tensors configurations with a static pool using fast slice-write routines, reducing GPU memory allocations to $O(1)$.
 3. **End-to-End Triton Fused Decode Execution**:
    - Swapped out the Phase 8 batched Python accumulation loops.
-   - Intercepted the decode hotpath in `diffkv_attention.py` to route query, block, and scale inputs directly to the Triton `native_triton_sparse_attn_decode` kernel.
+   - Intercepted the decode hotpath in `dkv_attention.py` to route query, block, and scale inputs directly to the Triton `native_triton_sparse_attn_decode` kernel.
    - Demonstrated direct execution with live console validation logs.
 4. **CUDA Graph Capture Support**:
    - Proved that the Triton decode execution graph is fully compatible with static CUDA Graph capture routines.

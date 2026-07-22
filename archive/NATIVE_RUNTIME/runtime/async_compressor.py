@@ -78,7 +78,7 @@ class AsyncCompressor:
         for i in range(self._num_workers):
             t = threading.Thread(
                 target=self._worker_loop,
-                name=f"DiffKV-Compressor-{i}",
+                name=f"DKV-Compressor-{i}",
                 daemon=True,
             )
             t.start()

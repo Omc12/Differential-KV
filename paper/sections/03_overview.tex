@@ -4,9 +4,9 @@
 \begin{\figenv}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/f1_architecture.pdf}
-  \caption[\diffkv{} active-runtime architecture: serving stack, monkey-patched attention,
-  and bounded block store.]{\diffkv{} active-runtime architecture. A serving stack (gateway,
-  batching engine, session manager) drives \texttt{MLXDiffKVWrapper}, which runs chunked
+  \caption[\dkv{} active-runtime architecture: serving stack, monkey-patched attention,
+  and bounded block store.]{\dkv{} active-runtime architecture. A serving stack (gateway,
+  batching engine, session manager) drives \texttt{MLXDKVWrapper}, which runs chunked
   prefill and a greedy or sampled decode loop over \texttt{MLXQwenModel}. The model's
   attention layer is monkey-patched: on prefill ($L{>}1$) it runs (block-sparse) causal
   attention over the native cache and captures $K$/$V$ into the store; on decode ($L{=}1$)
@@ -16,7 +16,7 @@
   \label{fig:arch}
 \end{\figenv}
 
-\diffkv{} is structured as a thin serving stack over an MLX inference core whose attention has
+\dkv{} is structured as a thin serving stack over an MLX inference core whose attention has
 been replaced (Figure~\ref{fig:arch}). We walk the components in the order data flows through
 them.
 
@@ -25,7 +25,7 @@ requests; a session manager owns per-conversation lifecycle and residency. These
 standard and are not the subject of this paper; they exist so that the compression runtime is
 exercised under a realistic request path.
 
-\paragraph{Wrapper and model.} \texttt{MLXDiffKVWrapper} loads an \texttt{mlx\_lm} model, patches
+\paragraph{Wrapper and model.} \texttt{MLXDKVWrapper} loads an \texttt{mlx\_lm} model, patches
 its attention, and exposes \texttt{generate()}, which tokenizes the prompt, runs prefill in
 fixed-size chunks, and then decodes one token at a time. \texttt{MLXQwenModel} wraps the patched
 model, holds a native MLX KV cache used only during prefill, and---critically---\emph{releases}

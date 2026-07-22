@@ -10,20 +10,20 @@ from typing import Optional, List, Union, Dict, Any
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig, AutoTokenizer
 from runtime.kv_runtime_manager import KVRuntimeManager
 
-class DiffKVHFConfig(PretrainedConfig):
-    model_type = "diff_kv"
+class DKVHFConfig(PretrainedConfig):
+    model_type = "dkv"
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.sparse_mode = kwargs.get("sparse_mode", "lowrank_sparse")
         self.block_size = kwargs.get("block_size", 64)
 
-class DiffKVHFAdapter(PreTrainedModel):
+class DKVHFAdapter(PreTrainedModel):
     """
     Adapter that makes Differential KV look like a HuggingFace model.
     """
-    config_class = DiffKVHFConfig
+    config_class = DKVHFConfig
     
-    def __init__(self, config: DiffKVHFConfig, base_model: Optional[Any] = None):
+    def __init__(self, config: DKVHFConfig, base_model: Optional[Any] = None):
         super().__init__(config)
         self._base_model = base_model
         self.manager = KVRuntimeManager(config.to_dict())
@@ -43,7 +43,7 @@ class DiffKVHFAdapter(PreTrainedModel):
             **kwargs
         )
         
-        adapter_config = DiffKVHFConfig(**hf_config.to_dict())
+        adapter_config = DKVHFConfig(**hf_config.to_dict())
         return cls(adapter_config, base_model=base_model)
 
     def forward(
@@ -76,11 +76,11 @@ class DiffKVHFAdapter(PreTrainedModel):
         # Use base model's generate but ensure our hooks are active
         return self._base_model.generate(*args, **kwargs)
 
-def wrap_hf_model(model: PreTrainedModel) -> DiffKVHFAdapter:
+def wrap_hf_model(model: PreTrainedModel) -> DKVHFAdapter:
     """Utility to wrap an existing HF model instance."""
-    config = DiffKVHFConfig(**model.config.to_dict())
-    return DiffKVHFAdapter(config, base_model=model)
+    config = DKVHFConfig(**model.config.to_dict())
+    return DKVHFAdapter(config, base_model=model)
 
 if __name__ == "__main__":
     # Mock testing
-    print("DiffKVHFAdapter module loaded.")
+    print("DKVHFAdapter module loaded.")

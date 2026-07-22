@@ -10,7 +10,7 @@ from typing import Dict, List, Any
 from fastapi import FastAPI
 
 from runtime.cdbe_resolver import CDBEResolver
-from runtime.hf_diffkv_wrapper import DiffKVHFWrapper
+from runtime.hf_dkv_wrapper import DKVHFWrapper
 from decode_pipeline_fusion_engine import DecodePipelineFusionEngine
 from serving.openai_compatible_api_gateway import OpenAICompatibleAPIGateway
 
@@ -30,7 +30,7 @@ async def startup_event():
     print(f"[*] CDBE STAGE 2: Loading REAL 7B Model -> {model_id}")
     
     # Initialize Wrapper
-    wrapper = DiffKVHFWrapper(model_id, {
+    wrapper = DKVHFWrapper(model_id, {
         "mode": "lowrank_sparse", 
         "block_size": 64, 
         "rank": 16
