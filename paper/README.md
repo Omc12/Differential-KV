@@ -1,6 +1,6 @@
 # DKV Paper Workspace
 
-**Author:** Om Chimurkar — <https://github.com/Omc12/Differential-KV>
+**Author:** Om Chimurkar (Newton School of Technology, Rishihood University) — <omchimurkar45@gmail.com> — <https://github.com/Omc12/Differential-KV>
 
 Implementation-driven technical report + conference paper for the **DKV active (MLX)
 runtime**. Everything regenerates from measured data; no number is hand-typed into the paper

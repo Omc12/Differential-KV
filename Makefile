@@ -7,8 +7,8 @@
 # The default MODEL is a HuggingFace id; on macOS the wrapper auto-selects the
 # matching mlx-community 4-bit build. Override with:  make chat MODEL=<id>
 
-PY    := diffkv_venv/bin/python
-PIP   := diffkv_venv/bin/pip
+PY    := dkv_venv/bin/python
+PIP   := dkv_venv/bin/pip
 MODEL ?= Qwen/Qwen2.5-1.5B-Instruct
 
 .DEFAULT_GOAL := help
@@ -16,7 +16,7 @@ MODEL ?= Qwen/Qwen2.5-1.5B-Instruct
 help:
 	@echo "Differential-KV — common commands:"
 	@echo "  make setup    create venv + install Python deps (run this first)"
-	@echo "  make chat     interactive DiffKV chat CLI       (MODEL=$(MODEL))"
+	@echo "  make chat     interactive DKV chat CLI       (MODEL=$(MODEL))"
 	@echo "  make serve    OpenAI-compatible API on :8000    (MODEL=$(MODEL))"
 	@echo "  make test     NIAH recall guardrail (8k + 16k)"
 	@echo "  make native   build the C++ native engine (submodule + cmake)"
@@ -24,7 +24,7 @@ help:
 	@echo "  Override the model:  make chat MODEL=Qwen/Qwen2.5-0.5B-Instruct"
 
 setup:
-	python3 -m venv diffkv_venv
+	python3 -m venv dkv_venv
 	$(PIP) install --upgrade pip
 	$(PIP) install -r ACTIVE_RUNTIME/requirements.txt
 	@echo ""
@@ -41,6 +41,6 @@ test:
 
 native:
 	git submodule update --init --recursive
-	cd diffkv_native && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+	cd dkv_native && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 
 .PHONY: help setup chat serve test native

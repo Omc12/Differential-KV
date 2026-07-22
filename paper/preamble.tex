@@ -84,6 +84,27 @@
 \newcommand{\lse}{\operatorname{lse}}
 \newcommand{\dkv}{\textsc{DKV}}
 
+% ── Abstract styling (prominent title, standard \small body) ──────────────────
+\ifext
+  \renewenvironment{abstract}{%
+    \vspace{0.4em}%
+    \centerline{\Large\bfseries\color{ink} Abstract}%
+    \vspace{0.8em}%
+    \begin{quote}\small\color{ink}\setlength{\parskip}{0.35em}%
+  }{%
+    \end{quote}\vspace{1.0em}%
+  }
+\else
+  \renewenvironment{abstract}{%
+    \vspace{0.2em}%
+    \centerline{\large\bfseries\color{ink} Abstract}%
+    \vspace{0.5em}%
+    \begin{quote}\small\color{ink}\setlength{\parskip}{0.35em}%
+  }{%
+    \end{quote}\vspace{0.6em}%
+  }
+\fi
+
 % callout box for a "measured fact"
 \newtcolorbox{measbox}{colback=panel, colframe=ink, boxrule=0.5pt, arc=2pt,
   left=6pt,right=6pt,top=4pt,bottom=4pt, fonttitle=\bfseries}
