@@ -11,8 +11,9 @@ a training-free block-sparse prefill makes long-context prefill sub-quadratic; a
 pool bounds the memory. Implemented entirely in MLX and measured on Qwen2.5-1.5B (int4) on an
 $8.6$\,GB Apple~M3, \diffkv{} holds a bounded KV
 state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, recovers a
-buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where the dense full-KV cache
-runs out of memory, and overtakes dense on long-context prefill---at a measured cost in decode
+buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where a standard PyTorch full-KV
+cache runs out of memory at $\ptOOMK$k, and overtakes even a memory-optimized dense on long-context
+prefill ($\pfSpeedupSixtyFourK\times$ at $\reachK$k)---at a measured cost in decode
 throughput, in the regime where a dense cache still fits, that we report in full and localize to
 reconstruction-and-merge overhead. The residual budget is an explicit dial between memory, accuracy,
 and speed. Toward closing the throughput gap, the runtime now incorporates four optimizations

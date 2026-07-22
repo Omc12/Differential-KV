@@ -22,24 +22,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(HERE, "results", "results_latest.json")
 OUT_DIR = os.path.join(HERE, "results")
 
-ENGINES = ["native", "active", "dense", "ollama"]
+ENGINES = ["active", "dense", "normal_dense"]
 COLORS = {
-    "native": "#c0392b",
     "active": "#1565C0",
     "dense": "#2e7d32",
-    "ollama": "#e65100",
+    "normal_dense": "#d35400",
 }
 LABELS = {
-    "native": "DiffKV native (C++/ggml, Q4_K_M)",
-    "active": "DiffKV active (MLX int4, compressed KV)",
-    "dense": "Dense baseline (mlx_lm int4, full KV)",
-    "ollama": "Ollama / llama.cpp (Q4_K_M)",
+    "active": "DiffKV Active (MLX int4, compressed KV)",
+    "dense": "Optimized Dense (mlx_lm int4, full KV)",
+    "normal_dense": "Standard PyTorch Dense (AutoModelForCausalLM)",
 }
 MARKERS = {
-    "native": "s",
     "active": "o",
     "dense": "^",
-    "ollama": "D",
+    "normal_dense": "v",
 }
 
 RAM_CAP_GB = 7.2
@@ -84,66 +81,74 @@ def _style():
 
 
 def plot_memory(ax, by, contexts):
+    """Two lines per engine, same colour:
+         solid  = KV-cache footprint (kv_mem_gb) — what the method bounds
+         dashed = peak process RAM (peak_mem_gb) — what decides whether it fits
+    so the figure separates the resident KV state (compressed) from the transient
+    peak that drives PyTorch dense into the host's memory ceiling."""
     xs, xlabs = _xticks(contexts)
+    # dashed-peak label sits indented under its engine's solid KV label; the
+    # short parenthetical keeps each string unique for the legend lookup
+    PEAK_LABELS = {
+        "active":       "  └ peak process RAM (DiffKV)",
+        "dense":        "  └ peak process RAM (Dense)",
+        "normal_dense": "  └ peak process RAM (PyTorch)",
+    }
+
     for e in ENGINES:
-        ys = []
-        for i, c in enumerate(contexts):
-            r = by.get((e, c))
-            if r is None:
-                ys.append(None)
-            elif r["status"] in ("ok",) or r["status"] == "oom":
-                # for oom we still have peak_mem_gb (the peak at kill time)
-                ys.append(r.get("mem_headline_gb"))
-            else:
-                ys.append(None)
+        # ── solid: measured KV-cache footprint (only where the run completed) ──
+        kx = [i for i, c in enumerate(contexts)
+              if by.get((e, c)) and by[(e, c)]["status"] == "ok"
+              and by[(e, c)].get("kv_mem_gb") is not None]
+        ky = [by[(e, contexts[i])]["kv_mem_gb"] for i in kx]
+        if kx:
+            ax.plot(kx, ky, color=COLORS[e], marker=MARKERS[e], label=LABELS[e])
 
-        # split at None gaps — draw solid where values exist
-        segs_x, segs_y = [], []
-        seg_x, seg_y = [], []
-        for i, y in enumerate(ys):
-            if y is not None:
-                seg_x.append(i)
-                seg_y.append(y)
-            else:
-                if seg_x:
-                    segs_x.append(seg_x)
-                    segs_y.append(seg_y)
-                seg_x, seg_y = [], []
-        if seg_x:
-            segs_x.append(seg_x)
-            segs_y.append(seg_y)
+        # ── dashed: measured peak RAM (through OK and OOM cells alike; the peak
+        #    at kill time is a real measurement) ──
+        px = [i for i, c in enumerate(contexts)
+              if by.get((e, c)) and by[(e, c)]["status"] in ("ok", "oom")
+              and by[(e, c)].get("peak_mem_gb") is not None]
+        py = [by[(e, contexts[i])]["peak_mem_gb"] for i in px]
+        if px:
+            ax.plot(px, py, color=COLORS[e], marker=MARKERS[e], linestyle="--",
+                    linewidth=1.8, markerfacecolor="white", markersize=6,
+                    alpha=0.95, label=PEAK_LABELS[e])
 
-        for sx, sy in zip(segs_x, segs_y):
-            ax.plot(sx, sy, color=COLORS[e], marker=MARKERS[e],
-                    label=LABELS[e] if sx == segs_x[0] else "_nolegend_")
+        # ── OOM cells: red X on the peak line + a single "OOM" annotation ──
+        oom_pts = [(i, by[(e, contexts[i])]["peak_mem_gb"])
+                   for i, c in enumerate(contexts)
+                   if by.get((e, c)) and by[(e, c)]["status"] == "oom"
+                   and by[(e, c)].get("peak_mem_gb") is not None]
+        for j, (i, y) in enumerate(oom_pts):
+            ax.plot(i, y, "x", color=COLORS[e], markersize=11,
+                    markeredgewidth=2.5, zorder=6)
+            if j == 0:
+                ax.annotate("OOM", xy=(i, y), xytext=(7, -13),
+                            textcoords="offset points", ha="left", va="top",
+                            fontsize=8.5, fontweight="bold", color=COLORS[e])
 
-        # mark OOM cells with a red X
-        for i, c in enumerate(contexts):
-            r = by.get((e, c))
-            if r and r["status"] == "oom" and r.get("mem_headline_gb"):
-                ax.plot(i, r["mem_headline_gb"], "x", color=COLORS[e],
-                        markersize=11, markeredgewidth=2.5, zorder=5)
-
-        # mark skip cells with a faint triangle
-        for i, c in enumerate(contexts):
-            r = by.get((e, c))
-            if r and r["status"] == "skipped":
-                ax.plot(i, -0.2, "v", color=COLORS[e], alpha=0.5,
-                        markersize=7, clip_on=False)
-
-    # Reference lines
-    ax.axhline(RAM_CAP_GB, color="#888", linestyle=":", linewidth=1.4,
-               label=f"Kill cap ({RAM_CAP_GB} GB)")
+    # System-RAM ceiling: the line the PyTorch peak RAM slams into at OOM
     ax.axhline(RAM_TOTAL_GB, color="#555", linestyle="-.", linewidth=1.2,
                label=f"System RAM ({RAM_TOTAL_GB} GB)")
 
     ax.set_xticks(xs)
     ax.set_xticklabels(xlabs)
     ax.set_xlabel("Context length (tokens)")
-    ax.set_ylabel("Peak memory (GB)")
-    ax.set_title("Peak memory vs context length\n(× = killed at that peak; ▽ = skipped)")
-    ax.set_ylim(bottom=0)
-    ax.legend(loc="upper left", ncol=1)
+    ax.set_ylabel("Memory (GB)")
+    ax.set_title("Memory vs context length\n"
+                 "(solid = KV cache · dashed = peak process RAM)")
+    ax.set_ylim(0, RAM_TOTAL_GB * 1.06)
+    # group each engine's dashed peak line directly under its solid KV line
+    handles, labels = ax.get_legend_handles_labels()
+    lut = {l: h for l, h in zip(labels, handles)}
+    order = []
+    for e in ENGINES:
+        order += [LABELS[e], PEAK_LABELS[e]]
+    order.append(f"System RAM ({RAM_TOTAL_GB} GB)")
+    oh = [lut[k] for k in order if k in lut]
+    ol = [k for k in order if k in lut]
+    ax.legend(oh, ol, loc="upper left", ncol=1, fontsize=8.5)
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f GB"))
 
 
@@ -198,7 +203,8 @@ def plot_decode_tps(ax, by, contexts):
     ax.set_xticklabels(xlabs)
     ax.set_xlabel("Context length (tokens)")
     ax.set_ylabel("Decode throughput (tok/s)")
-    ax.set_title("Decode throughput vs context length\n(ollama 32k+ truncated — excluded)")
+    ax.set_title("Decode throughput vs context length\n"
+                 "(Standard PyTorch dense OOMs at 16k+)")
     ax.set_ylim(bottom=0)
     ax.legend(loc="upper right")
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.0f tok/s"))
@@ -222,7 +228,8 @@ def plot_prefill(ax, by, contexts):
     ax.set_xticklabels(xlabs)
     ax.set_xlabel("Context length (tokens)")
     ax.set_ylabel("Prefill time (s)")
-    ax.set_title("Prefill time vs context length\n(valid runs only; ollama 32k+ excluded)")
+    ax.set_title("Prefill time vs context length\n"
+                 "(Standard PyTorch dense OOMs at 16k+)")
     ax.set_ylim(bottom=0)
     ax.legend(loc="upper left")
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.0f s"))
@@ -240,7 +247,7 @@ def main():
     by, contexts, meta = load()
 
     host_line = (f"{meta['model']} · {meta['chip']}, "
-                 f"{meta['ram_gb']:.0f} GB unified memory · greedy, 128 gen tok")
+                 f"{meta['ram_gb']:.1f} GB unified memory · greedy, 128 gen tok")
 
     # ── Individual figures ──────────────────────────────────────────────────
     for plot_fn, fname, figsize in [
@@ -273,7 +280,8 @@ def main():
     fig.legend(handles, labels, loc="lower center", ncol=3,
                bbox_to_anchor=(0.5, -0.07), fontsize=9.5, framealpha=0.9)
     fig.suptitle(
-        f"DiffKV vs Dense vs llama.cpp — long-context benchmark\n{host_line}",
+        "DiffKV vs Optimized Dense vs Standard PyTorch — long-context benchmark\n"
+        f"{host_line}",
         fontsize=11, y=1.02,
     )
     fig.tight_layout(rect=[0, 0.04, 1, 1])

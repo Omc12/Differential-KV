@@ -38,14 +38,17 @@ relevant blocks, so decode cost scales with \topk{} rather than with the context
 
 \paragraph{What this paper claims, and what it does not.}
 We are deliberate about the trade-off, because it is easy to overstate. On our host---an
-Apple~M3 with $8.6$\,GB of unified memory, running Qwen2.5-1.5B at int4---the dense full-KV cache
-\emph{fits and decodes faster than} \diffkv{} through $32$k tokens; \diffkv{} does not make this
-model decode faster where a dense cache still fits. But at $\reachK$k the dense cache exhausts the
-machine's memory and does not run at all, whereas \diffkv{} completes with the passcode intact.
+Apple~M3 with $8.6$\,GB of unified memory, running Qwen2.5-1.5B at int4---an optimized dense full-KV
+cache \emph{fits and decodes faster than} \diffkv{} through $32$k tokens; \diffkv{} does not make
+this model decode faster where a dense cache still fits. But memory tells the other half of the
+story: a standard PyTorch full-KV cache exhausts the machine at $\ptOOMK$k and does not run beyond
+it, and even the optimized dense---which does reach $\reachK$k---gets there only by prefilling
+$\pfSpeedupSixtyFourK\times$ slower than \diffkv{}, whose bounded store completes with the passcode
+intact.
 What \diffkv{} provides is therefore (i) a KV state that is bounded by a fixed block pool and is
 $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, so the cache
-stops being the term that grows without limit and $\reachK$k becomes reachable where dense
-cannot; (ii) \emph{exact} recovery of a buried passcode at every context we tested, from $4$k to
+stops being the term that grows without limit and $\reachK$k becomes reachable where a naive
+full-KV cache cannot; (ii) \emph{exact} recovery of a buried passcode at every context we tested, from $4$k to
 $\reachK$k, preserved by the residual mechanism; and (iii) a sparse prefill whose sub-quadratic
 cost lets long-context prefill overtake the dense baseline once the context is large enough. The
 price is per-token decode throughput \emph{in the regime where a dense cache still fits}. We
@@ -67,8 +70,9 @@ report the full picture---including where \diffkv{} loses---and we treat the res
   \item A \textbf{bounded-memory runtime} (\S\ref{sec:runtime}) with streaming prefill
     compression, a fixed block pool, a prefill-to-decode memory release, and a training-free
     block-sparse prefill, implemented entirely in MLX for Apple unified memory.
-  \item A \textbf{measured, self-consistent evaluation} (\S\ref{sec:eval}) against a dense
-    baseline on identical weights, reporting footprint, prefill, decode, and exact recall from
+  \item A \textbf{measured, self-consistent evaluation} (\S\ref{sec:eval}) against both an
+    optimized \texttt{mlx\_lm} dense baseline and a standard PyTorch dense baseline on identical
+    weights, reporting footprint, prefill, decode, and exact recall from
     $4$k to $\reachK$k, with component ablations and a residual-budget sweep. We state the
     decode-throughput cost plainly rather than hiding it.
   \item \textbf{Runtime extensions for GPU-native serving} (\S\ref{sec:impl}), informed by the

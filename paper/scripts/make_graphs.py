@@ -5,11 +5,12 @@ All numbers come from paper/scripts/data.py (clean measured JSON) or are derived
 from the runtime dimensions in the code. Charts carry no in-figure titles (the
 LaTeX captions do); text is black; palette = blues + emerald.
 
-  g_perf      two panels: (a) prefill time, (b) decode throughput — incl. 64K reach
-              where the dense baseline OOMs (marker, no fabricated value)
+  g_perf      two panels: (a) prefill time, (b) decode throughput — three engines
+              (DiffKV, optimized mlx_lm dense, standard PyTorch dense); the naive
+              PyTorch baseline OOMs at 16K+ (✗ markers, no fabricated value)
   g1_kv_footprint   analytic KV-state growth vs the bounded pool
   g6_residual_tradeoff  residual budget: compression ratio bars + decode tok/s line
-  g7_decode_ablation    compressed vs exact decode over the same store
+  g7_decode_ablation    DiffKV compressed vs dense full-KV decode (primary sweep)
   g8_latency_breakdown  E11 per-step decode latency split (extruded 3-D pie)
 """
 import os
@@ -30,8 +31,11 @@ GB = 1e9
 _prim = D.load_primary()
 CTX_BOTH = [c for c in D.CONTEXTS if c in _prim["active"] and c in _prim["dense"]]
 CTX_ACT = [c for c in D.CONTEXTS if c in _prim["active"]]
-DENSE_OOM_CTX = [c for c in D.CONTEXTS
-                 if c not in _prim["dense"] and D.cell_status("dense", c) == "oom"]
+CTX_PT = [c for c in D.CONTEXTS if c in _prim["normal_dense"]]   # Standard PyTorch, OK cells
+PT_OOM_CTX = [c for c in D.CONTEXTS
+              if c not in _prim["normal_dense"]
+              and D.cell_status("normal_dense", c) in ("oom", "error")]
+C_PT = "#6B5CA5"   # muted purple — Standard PyTorch (naive full KV) baseline
 
 
 def _xk(c):
@@ -42,46 +46,50 @@ def _xk(c):
 def g_perf():
     a_pf = [_prim["active"][c]["prefill_s"] for c in CTX_ACT]
     d_pf = [_prim["dense"][c]["prefill_s"] for c in CTX_BOTH]
+    p_pf = [_prim["normal_dense"][c]["prefill_s"] for c in CTX_PT]
     a_tp = [_prim["active"][c]["decode_tps"] for c in CTX_ACT]
     d_tp = [_prim["dense"][c]["decode_tps"] for c in CTX_BOTH]
+    p_tp = [_prim["normal_dense"][c]["decode_tps"] for c in CTX_PT]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.6, 2.85))
 
-    # (a) prefill
-    ax1.plot(CTX_BOTH, d_pf, "-o", color=S.C_DENSE_LN, label="Dense (full KV)",
-             markerfacecolor="white")
+    # (a) prefill — three engines; Standard PyTorch OOMs at 16K+
+    ax1.plot(CTX_BOTH, d_pf, "-o", color=S.C_DENSE_LN,
+             label="Optimized dense (mlx_lm)", markerfacecolor="white")
+    ax1.plot(CTX_PT, p_pf, "-^", color=C_PT, label="Standard PyTorch dense",
+             markerfacecolor="white", markeredgecolor=C_PT)
     ax1.plot(CTX_ACT, a_pf, "-o", color=S.BLUE, label="DiffKV")
     ax1.set_yscale("log")
     ax1.set_ylabel("Prefill time (s)")
     S.context_ticks(ax1, CTX_ACT, "Context length")
-    # dense OOM at 64K: ✗ marker in the empty region under the DiffKV endpoint
-    # (no implied value, no fabricated guide line)
-    for c in DENSE_OOM_CTX:
-        y = d_pf[-1] * 2.0
+    # PyTorch OOM at 16K+: ✗ markers just above its last (fast, unchunked) prefill
+    for i, c in enumerate(PT_OOM_CTX):
+        y = p_pf[-1] * 1.7
         ax1.plot([c], [y], marker="x", ms=7.5, mew=1.9,
                  color=S.OOM_RED, ls="none", zorder=5)
-        ax1.annotate("Dense: OOM", (c, y), textcoords="offset points",
-                     xytext=(-7, 0), ha="right", va="center", fontsize=7.8,
-                     color=S.BLACK, fontweight="bold")
+        if i == 0:
+            ax1.annotate("PyTorch: OOM", (c, y), textcoords="offset points",
+                         xytext=(6, 2), ha="left", va="bottom", fontsize=7.6,
+                         color=S.BLACK, fontweight="bold")
     S.legend(ax1, loc="upper left")
     S.box_axes(ax1)
 
-    # (b) decode
-    ax2.plot(CTX_BOTH, d_tp, "-o", color=S.C_DENSE_LN, label="Dense (full KV)",
-             markerfacecolor="white")
+    # (b) decode — three engines
+    ax2.plot(CTX_BOTH, d_tp, "-o", color=S.C_DENSE_LN,
+             label="Optimized dense (mlx_lm)", markerfacecolor="white")
+    ax2.plot(CTX_PT, p_tp, "-^", color=C_PT, label="Standard PyTorch dense",
+             markerfacecolor="white", markeredgecolor=C_PT)
     ax2.plot(CTX_ACT, a_tp, "-o", color=S.BLUE, label="DiffKV")
     ax2.set_ylabel("Decode throughput (tokens/s)")
     ax2.set_ylim(0, max(d_tp) * 1.18)
-    # reserved series slot for the CUDA fused decode path (future work; no data)
-    ax2.plot([], [], "s", color="white", markeredgecolor=S.GRAY_D,
-             label="CUDA fused decode (future work)")
-    for c in DENSE_OOM_CTX:
-        y = d_tp[-1] * 0.88
+    for i, c in enumerate(PT_OOM_CTX):
+        y = p_tp[-1]
         ax2.plot([c], [y], marker="x", ms=7.5, mew=1.9,
                  color=S.OOM_RED, ls="none", zorder=5)
-        ax2.annotate("Dense: OOM", (c, y),
-                     textcoords="offset points", xytext=(-7, 0), ha="right",
-                     va="center", fontsize=7.8, color=S.BLACK, fontweight="bold")
+        if i == 0:
+            ax2.annotate("PyTorch: OOM", (c, y), textcoords="offset points",
+                         xytext=(6, 6), ha="left", va="bottom", fontsize=7.6,
+                         color=S.BLACK, fontweight="bold")
     S.context_ticks(ax2, CTX_ACT, "Context length")
     S.legend(ax2, loc="upper right")
     S.box_axes(ax2)
@@ -163,26 +171,51 @@ def g6_residual_tradeoff():
     S.finalize(fig, os.path.join(FIG, "g6_residual_tradeoff.png"))
 
 
-# ── g7 · compressed vs exact decode over the same store ──────────────────────
+# ── g7 · decode throughput of the three engines (primary sweep) ──────────────
 def g7_decode_ablation():
-    comp = D.modes_by("compressed")
-    exact = D.modes_by("exact")
-    ctx = [c for c in D.CONTEXTS if c in comp and c in exact]
-    c_tps = [comp[c]["decode_tps"] for c in ctx]
-    e_tps = [exact[c]["decode_tps"] for c in ctx]
+    # Three-engine decode-throughput comparison (shipping config, 4k..64k):
+    # optimized mlx_lm dense, DiffKV compressed sparse, and the raw PyTorch dense
+    # (which OOMs at 16k+). Complements the same-store compressed-vs-exact
+    # mechanism ablation in Table 4 (t6_decode_ablation).
+    prim = D.load_primary()
+    ctx = [c for c in D.CONTEXTS if c in prim["active"] and c in prim["dense"]]
+    e_tps = [prim["dense"][c]["decode_tps"] for c in ctx]     # optimized dense
+    c_tps = [prim["active"][c]["decode_tps"] for c in ctx]    # DiffKV compressed
+    p_tps = [prim["normal_dense"][c]["decode_tps"] if c in prim["normal_dense"]
+             else None for c in ctx]                          # raw PyTorch dense
     x = np.arange(len(ctx)); w = 0.26
 
     fig, ax = plt.subplots(figsize=(4.9, 2.95))
-    b1 = ax.bar(x - w / 2, e_tps, w, color=S.BLUE_L, edgecolor=S.BLACK,
-                linewidth=0.7, label="Exact decode (upper bound)")
-    b2 = ax.bar(x + w / 2, c_tps, w, color=S.BLUE, edgecolor=S.BLACK,
-                linewidth=0.7, hatch="//", label="Compressed sparse decode")
-    S.bar_value_labels(ax, b1); S.bar_value_labels(ax, b2)
+    b1 = ax.bar(x - w, e_tps, w, color=S.BLUE_L, edgecolor=S.BLACK,
+                linewidth=0.7, label="Optimized dense (full KV)")
+    b2 = ax.bar(x, c_tps, w, color=S.BLUE, edgecolor=S.BLACK,
+                linewidth=0.7, hatch="//", label="DiffKV compressed sparse")
+    p_x = [x[i] + w for i, v in enumerate(p_tps) if v is not None]
+    p_y = [v for v in p_tps if v is not None]
+    b3 = ax.bar(p_x, p_y, w, color=C_PT, edgecolor=S.BLACK, linewidth=0.7,
+                label="Standard PyTorch dense (raw full KV)")
+
+    # value labels above each bar — small font + the 3-bar spacing (centres w
+    # apart) keeps adjacent labels (e.g. 20.2 vs 21.4 at 64k) from colliding
+    def _labels(bars, fs=6.0):
+        for r in bars:
+            h = r.get_height()
+            ax.annotate(f"{h:.1f}", (r.get_x() + r.get_width() / 2, h),
+                        textcoords="offset points", xytext=(0, 1.6), ha="center",
+                        va="bottom", fontsize=fs, color=S.BLACK)
+    _labels(b1); _labels(b2); _labels(b3)
+
+    # OOM tick where the raw PyTorch dense did not run (16k+)
+    for i, v in enumerate(p_tps):
+        if v is None:
+            ax.text(x[i] + w, 1.8, "OOM", rotation=90, ha="center", va="bottom",
+                    fontsize=5.6, color=S.OOM_RED, fontweight="bold")
+
     ax.set_xticks(x); ax.set_xticklabels([_xk(c) for c in ctx])
     ax.set_xlabel("Context length")
     ax.set_ylabel("Decode throughput (tokens/s)")
-    ax.set_ylim(0, max(e_tps) * 1.22)
-    S.legend(ax, loc="upper right", fontsize=7.6)
+    ax.set_ylim(0, max(e_tps) * 1.24)
+    S.legend(ax, loc="upper right", fontsize=7.0)
     S.box_axes(ax)
     S.finalize(fig, os.path.join(FIG, "g7_decode_ablation.png"))
 

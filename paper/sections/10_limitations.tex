@@ -18,8 +18,8 @@ The CUDA kernel is additionally equipped with \path{@triton.autotune}~\cite{till
 over tiling configurations (see \S\ref{par:ktransformers}), and the runtime's tiered CPU--GPU
 block offloading (\S\ref{par:ktransformers}) is active on CUDA with asynchronous H2D via dedicated
 \path{cudaStream}s. Both are CPU-verified and ready for hardware validation.
-The figures and tables reserve space (a series slot in Figure~\ref{fig:perf}, a column convention
-in the results tables) so CUDA data can be inserted without restructuring the paper.
+The results tables keep a column convention so CUDA data can be inserted without restructuring the
+paper.
 
 \paragraph{Single model, single host.} Every number here is Qwen2.5-1.5B (int4) on one Apple~M3.
 The residual budget and router settings are tuned for this model; larger models, different
@@ -35,12 +35,14 @@ once, is a known weaker case that the single-needle metric does not probe; an op
 bias mitigates it but is not a full solution. Broadening the evaluation is the most important next
 step for external credibility.
 
-\paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both engines are pushed to the
-machine's limit: \diffkv{}'s prefill completes but is heavily memory-bound (so its $64$k prefill
-\emph{time} is a reach indicator, not a clean measurement), and the dense baseline OOMs outright.
-A machine with more memory headroom would give cleaner absolute long-context timings and would move
-the dense OOM boundary further out; the robust claims are the sub-quadratic prefill scaling and the
-bounded KV state, not the specific $64$k prefill seconds.
+\paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both \diffkv{} and the optimized
+dense are pushed to the machine's limit: their prefills complete but are heavily memory-bound (so the
+$64$k prefill \emph{times} are reach indicators, not clean measurements), while the standard PyTorch
+dense has already OOM'd at $\ptOOMK$k. A machine with more memory headroom would give cleaner
+absolute long-context timings and would move both the naive-dense OOM boundary and the
+optimized-dense limit further out; the robust claims are the sub-quadratic prefill scaling, the
+$\pfSpeedupSixtyFourK\times$ prefill lead at $\reachK$k, and the bounded KV state, not the specific
+$64$k prefill seconds.
 
 \paragraph{Bounded pool.} The fixed $256$-block pool caps compressed capacity at $65{,}536$ tokens.
 Beyond that, the oldest blocks must be dropped or the pool enlarged (trading memory). A capacity

@@ -29,32 +29,69 @@ def main():
     # per-context active values (include 64k reach); dense only where it did not OOM
     for c in D.CONTEXTS:
         w = words[c]
-        if c in prim["active"]:
+        if c in prim["active"] and prim["active"][c].get("status") == "ok":
             a = prim["active"][c]
             mac(f"actPf{w}", num(a["prefill_s"], "%.0f" if c >= 65536 else "%.1f"))
             mac(f"actTps{w}", num(a["decode_tps"]))
-            mac(f"actMx{w}", num(a["mx_peak_gb"], "%.2f"))
-        if c in prim["dense"]:
+            mac(f"actMx{w}", num(a.get("peak_mem_gb", a.get("mx_peak_gb", 0)), "%.2f"))
+        else:
+            mac(f"actPf{w}", "--")
+            mac(f"actTps{w}", "--")
+            mac(f"actMx{w}", "--")
+
+        if c in prim["dense"] and prim["dense"][c].get("status") == "ok":
             d = prim["dense"][c]
             mac(f"dnPf{w}", num(d["prefill_s"], "%.0f" if c >= 65536 else "%.1f"))
             mac(f"dnTps{w}", num(d["decode_tps"]))
-            mac(f"dnMx{w}", num(d["mx_peak_gb"], "%.2f"))
+            mac(f"dnMx{w}", num(d.get("peak_mem_gb", d.get("mx_peak_gb", 0)), "%.2f"))
+        else:
+            mac(f"dnPf{w}", "--")
+            mac(f"dnTps{w}", "--")
+            mac(f"dnMx{w}", "--")
 
-    both = [c for c in D.CONTEXTS if c in prim["active"] and c in prim["dense"]]
+    both = [c for c in D.CONTEXTS if c in prim["active"] and c in prim["dense"] and prim["active"][c].get("status") == "ok" and prim["dense"][c].get("status") == "ok"]
     if 32768 in both:
         a, d = prim["active"][32768], prim["dense"][32768]
         mac("pfSpeedupThirtyTwoK", num(d["prefill_s"] / a["prefill_s"], "%.2f"))
         mac("decRatioThirtyTwoK", num(d["decode_tps"] / a["decode_tps"], "%.1f"))
+    else:
+        mac("pfSpeedupThirtyTwoK", "--")
+        mac("decRatioThirtyTwoK", "--")
+
     if 4096 in both:
         a, d = prim["active"][4096], prim["dense"][4096]
         mac("decRatioFourK", num(d["decode_tps"] / a["decode_tps"], "%.1f"))
-    # dense OOM at 64k?
-    mac("denseSixtyFourK", "OOM" if D.cell_status("dense", 65536) == "oom" else "--")
+    else:
+        mac("decRatioFourK", "--")
+
+    # DiffKV prefill speedup over the optimized dense baseline at 64k
+    if 65536 in both:
+        a, d = prim["active"][65536], prim["dense"][65536]
+        mac("pfSpeedupSixtyFourK", num(d["prefill_s"] / a["prefill_s"], "%.2f"))
+    else:
+        mac("pfSpeedupSixtyFourK", "--")
+
+    # dense OOM at 64k? (optimized mlx_lm dense — now completes, so '--')
+    mac("denseSixtyFourK", "OOM" if D.cell_status("dense", 65536) in ("oom", "error") else "--")
+
+    # Standard PyTorch dense (AutoModelForCausalLM, naive full KV): reach boundary.
+    # This naive baseline is the one that OOMs early on the 8.6 GB host.
+    nd = prim["normal_dense"]
+    nd_ok = [c for c in D.CONTEXTS if c in nd and nd[c].get("status") == "ok"]
+    pt_oom = [c for c in D.CONTEXTS if D.cell_status("normal_dense", c) in ("oom", "error")]
+    mac("ptMaxK", f"{max(nd_ok)//1024}" if nd_ok else "--")   # largest completed
+    mac("ptOOMK", f"{min(pt_oom)//1024}" if pt_oom else "--")  # first OOM
+    if nd_ok:
+        lo = min(nd_ok)
+        mac("ptTps", num(nd[lo]["decode_tps"]))                # ~3.6 tok/s even where it fits
+        mac("ptMx", num(nd[lo].get("peak_mem_gb", nd[lo].get("mx_peak_gb", 0)), "%.2f"))
+    else:
+        mac("ptTps", "--"); mac("ptMx", "--")
     # reach = largest context with active needle recovered
     act = prim["active"]
     reach = max((c for c in act if act[c].get("needle_found")), default=max(act or [0]))
     mac("reachK", f"{reach//1024}")
-    mac("maxCtxK", f"{max(both)//1024}" if both else "32")
+    mac("maxCtxK", f"{max(both)//1024}" if both else "8")
     mac("nContexts", f"{len(D.active_contexts())}")
 
     # block budget

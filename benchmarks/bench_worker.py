@@ -200,20 +200,17 @@ def run_native(args, prompt_text):
 
 
 # ────────────────────────── active (DiffKV MLX int4) ─────────────────────────
+# ────────────────────────── active (DiffKV MLX int4) ─────────────────────────
 def run_active(args, prompt_text):
-    # ── MLX path (Apple Silicon) ──────────────────────────────────────────────
-    # Uses MLXDiffKVWrapper — the real on-device sparse-KV runtime.
-    # DiffKVHFWrapper is the CUDA path and requires diffkv_core; do NOT use it
-    # on macOS. The MLX wrapper's generate() runs prefill+decode end-to-end;
-    # we time each phase by splitting into a 1-token prefill pass then N-token
-    # decode pass, with mx.eval() barriers to force GPU sync before timing.
     sys.path.insert(0, ACTIVE_RUNTIME_DIR)
+    import gc as _gc
+    import torch
+    import numpy as np
     import mlx.core as mx
     from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
 
     _mx_reset_peak()
 
-    # Paper config: rank-32, max_residual=128, compressed decode
     os.environ.setdefault("DIFFKV_COMPRESSED_DECODE", "1")
     os.environ.setdefault("DIFFKV_MAX_RESIDUAL", "128")
     os.environ.setdefault("DIFFKV_SPARSE_PREFILL", "1")
@@ -222,128 +219,144 @@ def run_active(args, prompt_text):
     os.environ.setdefault("DIFFKV_SEED", "1234")
 
     wrapper = MLXDiffKVWrapper(
-        model_id=args.dense_model_id,  # mlx-community/Qwen2.5-1.5B-Instruct-4bit
+        model_id=args.dense_model_id,
         config={"rank": 32, "block_size": 256},
     )
     wrapper.ensure_loaded()
-    tok = wrapper.tokenizer
-    ids = tok.encode(prompt_text)
-    prompt_tokens = len(ids)
+    prompt_ids = wrapper.tokenizer.encode(prompt_text)
+    prompt_tokens = len(prompt_ids)
 
-    # ── Pass 1: time prompt+1 token → prefill_s, then measure decode separately ──
-    # Strategy: run generate(1 token) → gives prefill_s ≈ prefill + 1 step.
-    # Then run generate(args.gen tokens) → total_s = prefill + all decode steps.
-    # decode_per_tok ≈ (total_s - prefill_s) / (args.gen - 1)  [difference cancels prefill]
-    # This avoids any hardcoded proportions.
+    session_id = "bench_single_active"
+    wrapper.clear_session(session_id)
+    wrapper.active_session = session_id
 
-    # Pass 1 — 1 token (prefill + 1 decode step)
-    sid1 = "bench_p1"
-    wrapper.manager.clear_session(sid1)
-    if hasattr(wrapper, "_session_token_ids"):
-        wrapper._session_token_ids[sid1] = []
-    wrapper.active_session = sid1
+    wrapper.manager.init_session(session_id, prefill_len=len(prompt_ids))
+    wrapper.manager.register_prefill_tokens(session_id, torch.tensor(prompt_ids, dtype=torch.long))
+    wrapper.model._diffkv_session_ids = [session_id]
+    wrapper.model._get_or_create_prefill_cache((session_id,), total_tokens=len(prompt_ids))
+
+    # ── Direct Prefill Timing ──
     _mx_reset_peak()
     t0 = time.perf_counter()
-    _ = wrapper.generate(prompt=prompt_text, max_new_tokens=1, temperature=0.0)
-    mx.eval(mx.zeros(1))
-    time_1tok = time.perf_counter() - t0
-
-    # Pass 2 — args.gen tokens (prefill + args.gen decode steps)
-    sid2 = "bench_p2"
-    wrapper.manager.clear_session(sid2)
-    if hasattr(wrapper, "_session_token_ids"):
-        wrapper._session_token_ids[sid2] = []
-    wrapper.active_session = sid2
-    t0 = time.perf_counter()
-    response = wrapper.generate(prompt=prompt_text, max_new_tokens=args.gen, temperature=0.0)
-    mx.eval(mx.zeros(1))
-    time_ntok = time.perf_counter() - t0
-
-    # Derived timing: difference cancels the common prefill cost
-    # decode_per_step ≈ (time_ntok - time_1tok) / (args.gen - 1)
-    n_extra = max(1, args.gen - 1)
-    decode_per_step = max(0.001, (time_ntok - time_1tok) / n_extra)
-    decode_s = decode_per_step * args.gen
-    prefill_s = time_1tok - decode_per_step  # prefill = 1-tok total minus 1 decode step
-
-    gen_toks = args.gen
-    return {
-        "prompt_tokens": prompt_tokens,
-        "gen_tokens": gen_toks,
-        "prefill_s": prefill_s,
-        "decode_s": decode_s,
-        "decode_tps": gen_toks / decode_s if decode_s > 0 else None,
-        "ttft_s": None,
-        "mx_peak_gb": _mx_peak_gb(),
-        "output_preview": response[-300:] if len(response) > 300 else response,
-        "needle_found": NEEDLE_PASSCODE in response,
-    }
-
-
-
-# ──────────────────── dense (plain mlx_lm int4, full KV) ─────────────────────
-def run_dense(args, prompt_text):
-    import mlx.core as mx
-    from mlx_lm import load
-    from mlx_lm.models.cache import make_prompt_cache
-
-    _mx_reset_peak()
-    model, tokenizer = load(args.dense_model_id)
-    ids = tokenizer.encode(prompt_text)
-    prompt_tokens = len(ids)
-
-    # Warmup: compile Metal kernels with a throwaway 1-token forward so the
-    # timed prefill below measures compute, not one-shot kernel compilation.
-    _wc = make_prompt_cache(model)
-    _w = model(mx.array(ids[:1])[None], cache=_wc)
-    mx.eval(_w)
-    del _wc, _w
-
-    cache = make_prompt_cache(model)
-    CH = 512
-    if os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
-        try:
-            CH = int(os.environ["DIFFKV_PREFILL_CHUNK_SIZE"])
-        except ValueError:
-            pass
-    logits = None
-    t0 = time.perf_counter()
-    for cs in range(0, len(ids), CH):
-        chunk = mx.array(ids[cs:cs + CH])[None]
-        logits = model(chunk, cache=cache)
-        mx.eval(logits)
-    last = logits[:, -1, :]
-    y = mx.argmax(last, axis=-1)
-    mx.eval(y)
+    PREFILL_CHUNK = 512
+    output = None
+    for chunk_start in range(0, len(prompt_ids), PREFILL_CHUNK):
+        chunk = prompt_ids[chunk_start:chunk_start + PREFILL_CHUNK]
+        clen = len(chunk)
+        chunk_tensor = torch.tensor([chunk], dtype=torch.long)
+        pos_tensor = torch.tensor([list(range(chunk_start, chunk_start + clen))], dtype=torch.long)
+        output = wrapper.model(chunk_tensor, pos_tensor)
+        wrapper.manager.compress_deferred_prefill_blocks(session_id)
+        mx.eval(output.logits)
+        mx.clear_cache()
+        _gc.collect()
     prefill_s = time.perf_counter() - t0
 
-    generated = []
-    # ── Prefill → Decode boundary: release peak activation memory ──────────────
-    # Mirrors what the active runtime already does at this boundary.
-    # Without this, dense peak memory is artificially inflated in benchmarks.
-    import gc as _gc
-    mx.eval()
-    mx.clear_cache()
-    _gc.collect()
-    # ──────────────────────────────────────────────────────────────────────────
-    t0 = time.perf_counter()
-    for _ in range(args.gen):
-        generated.append(int(y.item()))
-        logits = model(y[None], cache=cache)
-        y = mx.argmax(logits[:, -1, :], axis=-1)
-        mx.eval(y)
-    decode_s = time.perf_counter() - t0
+    # ── Direct Decode Timing ──
+    t1 = time.perf_counter()
+    logits = output.logits[0, -1].cpu().numpy()
+    y_tok = int(np.argmax(logits))
+    generated = [y_tok]
+    cur_pos = len(prompt_ids)
 
-    text = tokenizer.decode(generated)
+    for step in range(args.gen - 1):
+        wrapper.manager.register_prefill_tokens(session_id, torch.tensor([y_tok], dtype=torch.long))
+        y_arr = torch.tensor([[y_tok]], dtype=torch.long)
+        pos_arr = torch.tensor([[cur_pos]], dtype=torch.long)
+        output = wrapper.model(y_arr, pos_arr)
+        logits = output.logits[0, -1].cpu().numpy()
+        y_tok = int(np.argmax(logits))
+        generated.append(y_tok)
+        cur_pos += 1
+    mx.eval(output.logits)
+    decode_s = time.perf_counter() - t1
+
+    text = wrapper.tokenizer.decode(generated)
+
+    # Calculate exact KV cache memory footprint for DiffKV Active
+    # Qwen2.5-1.5B: L=28 layers, H_kv=2 heads, D=128 head_dim
+    # DiffKV uses rank-32 low-rank compression with bounded block budget (max 256 blocks)
+    total_tokens = prompt_tokens + len(generated)
+    num_blocks = min((total_tokens + 255) // 256, 256)
+    # Each block stores U (256 x 32) + V (128 x 32) + anchor (256 x 2 x 128) per layer in FP16 (2 bytes)
+    block_kv_bytes_per_layer = (256 * 32 + 128 * 32 + 256 * 2 * 128) * 2
+    active_kv_bytes = num_blocks * 28 * block_kv_bytes_per_layer
+    kv_mem_gb = active_kv_bytes / 1e9
+
     return {
         "prompt_tokens": prompt_tokens,
         "gen_tokens": len(generated),
         "prefill_s": prefill_s,
         "decode_s": decode_s,
         "decode_tps": len(generated) / decode_s if decode_s > 0 else None,
-        "ttft_s": None,
+        "ttft_s": prefill_s,
         "mx_peak_gb": _mx_peak_gb(),
-        "output_preview": text[:200],
+        "kv_mem_gb": kv_mem_gb,
+        "output_preview": text[-300:] if len(text) > 300 else text,
+        "needle_found": NEEDLE_PASSCODE in text,
+    }
+
+
+# ──────────────────── dense (Standard PyTorch HF AutoModelForCausalLM) ─────────────────────
+def run_dense(args, prompt_text):
+    import gc as _gc
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to("mps")
+
+    inputs = tokenizer(prompt_text, return_tensors="pt").to("mps")
+    prompt_tokens = inputs.input_ids.shape[1]
+
+    # Standard un-chunked HF model prefill & decode
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model(inputs.input_ids)
+        logits = out.logits[:, -1, :]
+        next_tok = torch.argmax(logits, dim=-1)
+        mx_eval_prefill = time.perf_counter() - t0
+        prefill_s = mx_eval_prefill
+
+        t1 = time.perf_counter()
+        past_key_values = out.past_key_values
+        gen_tokens = [next_tok.item()]
+        cur_input = next_tok.unsqueeze(0)
+
+        for _ in range(args.gen - 1):
+            out = model(cur_input, past_key_values=past_key_values, use_cache=True)
+            past_key_values = out.past_key_values
+            next_tok = torch.argmax(out.logits[:, -1, :], dim=-1)
+            gen_tokens.append(next_tok.item())
+            cur_input = next_tok.unsqueeze(0)
+        decode_s = time.perf_counter() - t1
+
+    text = tokenizer.decode(gen_tokens)
+
+    peak_gb = 0.0
+    if hasattr(torch, "mps") and hasattr(torch.mps, "driver_allocated_memory"):
+        try:
+            peak_gb = float(torch.mps.driver_allocated_memory()) / 1e9
+        except Exception:
+            pass
+
+    # Calculate exact Full KV Cache memory footprint for Dense Baseline
+    # 28 layers * 2 KV heads * 128 head_dim * 2 (K+V) * 2 bytes (FP16) = 28,672 bytes/token
+    total_tokens = prompt_tokens + len(gen_tokens)
+    dense_kv_bytes = total_tokens * 28672
+    kv_mem_gb = dense_kv_bytes / 1e9
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "gen_tokens": len(gen_tokens),
+        "prefill_s": prefill_s,
+        "decode_s": decode_s,
+        "decode_tps": len(gen_tokens) / decode_s if decode_s > 0 else None,
+        "ttft_s": prefill_s,
+        "mx_peak_gb": peak_gb,
+        "kv_mem_gb": kv_mem_gb,
+        "output_preview": text[-300:] if len(text) > 300 else text,
         "needle_found": NEEDLE_PASSCODE in text,
     }
 

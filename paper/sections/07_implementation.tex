@@ -53,8 +53,10 @@ structure that the error signal alone cannot reliably surface.
 paths ship disabled until validated. The defaults used throughout this report are: compressed
 sparse decode on; fused decode buffer on (\texttt{DIFFKV\_DECODE\_FUSED}); block-sparse prefill
 on; base rank $\rank{=}32$ with layer-adaptive variation; $\maxres{=}128$; top-\topk{} $=16$;
-residual-key router; SVD seed $1234$. The dense baseline is \texttt{mlx\_lm} with a full KV
-cache on the same int4 weights.
+residual-key router; SVD seed $1234$. The optimized dense baseline is \texttt{mlx\_lm} with a full
+KV cache (chunked prefill, prefill-to-decode allocator release) on the same int4 weights; the
+standard PyTorch baseline is \texttt{AutoModelForCausalLM} on the PyTorch MPS backend with an
+uncompressed full KV cache and none of those memory-management paths.
 
 \paragraph{Gated subsystems.} A factual-store / semantic-retrieval module, a lego streaming
 prefill (memory-bounded prefill that drops raw KV after block compression), and a speculative-decode

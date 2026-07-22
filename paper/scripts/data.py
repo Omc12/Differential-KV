@@ -44,16 +44,10 @@ def _load(path):
 
 # ── Dataset B: primary active-vs-dense system sweep ──────────────────────────
 def load_primary():
-    """Return {'active': {ctx: rec}, 'dense': {ctx: rec}} from benchmarks/results.
-
-    Prefers the freshly re-measured `fresh_{engine}_{ctx}.json` (current working
-    tree, shipping config: decode-cache ON, sparse prefill ON, R=128); falls back
-    to the older `.result_{engine}_{ctx}.json` only where a fresh cell is absent.
-    """
-    out = {"active": {}, "dense": {}}
-    for engine in ("active", "dense"):
+    """Return {'active': {ctx: rec}, 'dense': {ctx: rec}, 'normal_dense': {ctx: rec}} from benchmarks/results."""
+    out = {"active": {}, "dense": {}, "normal_dense": {}}
+    for engine in ("active", "dense", "normal_dense"):
         for ctx in CONTEXTS:
-            # Prefer the CLEAN rank-32 mid/balanced sweep; fall back in order.
             candidates = [
                 os.path.join(RESULTS, f"clean_{engine}_{ctx}.json"),
                 os.path.join(RESULTS, f"fresh_{engine}_{ctx}.json"),
@@ -61,8 +55,6 @@ def load_primary():
             ]
             for p in candidates:
                 if os.path.exists(p):
-                    # First existing file (by priority) is authoritative — a clean
-                    # cell that OOM'd must NOT fall back to an older successful run.
                     rec = _load(p)
                     if rec.get("status") == "ok":
                         rec["_source"] = os.path.basename(p)
