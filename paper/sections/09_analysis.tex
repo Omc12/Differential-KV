@@ -26,7 +26,13 @@ subspace, contracting with $U$ and $V_V$, attending the residual pool, and mergi
 log-sum-exp halves---is simply more per-token arithmetic than a single fused attention over a
 cache that still fits. The E6 ablation confirms the gap is reconstruction-and-merge overhead,
 not a correctness compromise. This is why the highest-leverage optimization is a single fused
-decode kernel (or a GPU-native CUDA/Triton one), not a change to the representation.
+decode kernel (or a GPU-native \cuda{}/Triton one), not a change to the representation. On
+\cuda{}, the Triton kernel (\S\ref{sec:decode-backends}) already fuses anchor score, delta
+projection, in-place residual correction, and online-softmax reduction into one launch with
+autotuned register tiling---the remaining architectural gap relative to a dedicated
+FlashDecoding-style kernel is the inter-chunk reduction step and the buffer re-write every
+$N$ tokens, both of which are separable from the block representation and addressable
+without algorithmic changes.
 
 \subsection{The memory story, stated carefully}
 We are deliberately careful about memory because it is the easiest claim to overstate. The

@@ -65,7 +65,50 @@ a tensor produced on the GPU is visible to NumPy without a transfer, so the rand
 during compression can run in NumPy on the CPU while the attention kernels run on the GPU, with
 no marshalling cost. Second, ``freeing'' memory means returning it to a single shared pool that
 the rest of the system is contending for, so bounding \emph{peak} allocation matters as much as
-bounding steady state. \dkv{} is built on MLX: it monkey-patches the attention of an
-\texttt{mlx\_lm} model, keeps its compressed store in MLX fp16 arrays, uses a persistent fused
+bounding steady state. \dkv{} is built on \mlxe{}: it monkey-patches the attention of an
+\texttt{mlx\_lm} model, keeps its compressed store in \mlxe{} fp16 arrays, uses a persistent fused
 decode buffer, and explicitly releases the prefill cache at the prefill$\to$decode boundary
 (\S\ref{sec:runtime}).
+
+\subsection{Discrete GPU memory model}
+\label{sec:background-cuda}
+
+\begin{\figenv}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f11_memory_topology.pdf}
+  \caption[Unified memory versus a discrete-GPU HBM pool, and what each implies for
+  \dkv{}.]{Memory topology, and what each one implies for \dkv{}. \emph{Left:} on Apple
+  silicon the CPU, GPU and NPU address one physical DRAM pool, so a tensor crosses no
+  boundary---the randomized SVD can run in NumPy on the CPU while attention runs on the
+  GPU, and the binding constraint is \emph{peak} allocation against a pool the whole
+  system shares. \emph{Right:} on a discrete GPU, HBM is a separate physical pool behind
+  PCIe, so every block restore is an explicit H2D transfer ($\approx137$\,KB,
+  $\approx15\,\mu$s). That single difference is what motivates the step-ahead async
+  prefetch and the GPU-native Gram-Eigh SVD (\S\ref{sec:cuda-impl}).}
+  \label{fig:memtopology}
+\end{\figenv}
+
+On discrete-GPU hardware (NVIDIA \cuda{}) the memory model differs from unified memory in two ways
+that directly shape implementation choices (Figure~\ref{fig:memtopology}).
+
+\paragraph{Separate HBM pool.}
+The GPU's High-Bandwidth Memory (HBM) is a distinct physical pool from host DRAM. Any
+tensor crossing the boundary incurs an explicit PCIe host--device (H2D) or device--host (D2H)
+transfer. For \dkv{}'s block-level CPU--GPU offloading, a default block
+(${U}$: $63{\times}32$ int8; ${V_K,V_V}$: $2{\times}32{\times}\Hkv{\times}\dhead$ fp16;
+anchors/residuals: fp16) totals $\approx137$\,KB, costing $\approx15\,\mu$s on PCIe~4.0.
+At decode cadences of $20$--$80$\,ms per token this is below $1\%$ overhead even for a cold
+hit---and the step-ahead async prefetch (\S\ref{par:ktransformers}) hides it entirely by
+issuing H2D restores a step ahead via a dedicated \texttt{cudaStream}.
+
+\paragraph{Compression on a discrete GPU.}
+On \mlxe{} the randomized SVD runs in NumPy on the CPU at near-zero marshalling cost
+(unified memory). On a discrete GPU, the same CPU SVD is still available but incurs a D2H copy
+of the raw $K/V$ block at compression time---acceptable as a one-time prefill cost per block.
+A GPU-native path uses the \emph{Gram-Eigh reformulation}: computing the $r{\times}r$
+symmetric Gram matrix $B B^\top$ and calling \texttt{cuSOLVER} \texttt{syevjBatched}, which
+batches correctly for $r{\le}32$ (unlike \texttt{gesvdjBatched}, which falls back to a
+sequential loop for matrices larger than $32{\times}32$).
+Controlled CPU measurements show this reduces compression time from $\approx6.1$\,s to
+$\approx2.6$\,s per representative prefill; GPU recall validation is pending
+\pendingGPU{} (\S\ref{sec:impl}).

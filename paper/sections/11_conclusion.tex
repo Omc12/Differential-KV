@@ -8,7 +8,7 @@ and relational edge-capture. A fused decode buffer routes queries in the low-ran
 ever decompressing the cache, attends the residuals and a recency window exactly, and merges the
 two in log-space, materialising the selected blocks once per interval into a persistent buffer;
 a training-free block-sparse prefill makes long-context prefill sub-quadratic; and a fixed block
-pool bounds the memory. Implemented entirely in MLX and measured on Qwen2.5-1.5B (int4) on an
+pool bounds the memory. Implemented entirely in \mlxe{} and measured on Qwen2.5-1.5B (int4) on an
 $8.6$\,GB Apple~M3, \dkv{} holds a bounded KV
 state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, recovers a
 buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where a standard PyTorch full-KV
@@ -16,12 +16,14 @@ cache runs out of memory at $\ptOOMK$k, and overtakes even a memory-optimized de
 prefill ($\pfSpeedupSixtyFourK\times$ at $\reachK$k)---at a measured cost in decode
 throughput, in the regime where a dense cache still fits, that we report in full and localize to
 reconstruction-and-merge overhead. The residual budget is an explicit dial between memory, accuracy,
-and speed. Toward closing the throughput gap, the runtime now incorporates four optimizations
+and speed. Toward closing the throughput gap, the runtime incorporates four optimizations
 informed by the kTransformers framework~\cite{yang2025ktransformers}: tiered CPU--GPU block
 offloading with heat-scored eviction, step-ahead asynchronous H2D prefetching, autotuned Triton
 decode kernels~\cite{tillet2019triton}, and an optional MLA-style latent pre-projection inspired by
 DeepSeek-V2~\cite{deepseekv2}. These are implemented and CPU-verified but await GPU hardware
-validation; the remaining next steps are a fused single-launch CUDA decode kernel and a broader
-evaluation across models, hardware, and standard long-context suites. We have been careful
-to claim only what the measurements support: \dkv{} is a memory-and-prefill instrument for
+validation; the \cuda{}/Triton fused kernel (\S\ref{sec:decode-backends}) is already a single-launch
+design---anchor score, delta projection, in-place residual correction, and online-softmax reduction
+in one autotuned kernel---so the remaining next steps are GPU validation of the implemented kernels
+and a broader evaluation across models, hardware, and standard long-context suites. We have been
+careful to claim only what the measurements support: \dkv{} is a memory-and-prefill instrument for
 long context on commodity unified-memory hardware, not a universally faster one.

@@ -79,9 +79,17 @@ report the full picture---including where \dkv{} loses---and we treat the residu
     kTransformers framework~\cite{yang2025ktransformers}: tiered CPU--GPU block offloading with
     heat-scored eviction, step-ahead asynchronous H2D prefetch, autotuned Triton decode
     kernels~\cite{tillet2019triton}, and an optional MLA-style latent
-    projection~\cite{deepseekv2}. All four are implemented and CPU-verified; CUDA hardware
-    validation is reserved for a follow-up.
+    projection~\cite{deepseekv2}. The \cuda{}/Triton engine exposes two decode paths:
+    a Triton fused kernel (\path{_fused_sparse_decode_kernel}, with \path{@triton.autotune}
+    over \path{(S_MAX, BLOCKS_PER_CHUNK, num_warps)}) for PyTorch/\cuda{} environments, and
+    a native C++/GGML kernel (\path{dkv_full_decode_kernel} in \path{dkv_decode.cu},
+    built with \texttt{-DGGML\_CUDA=ON}) for embedded serving. Both implement the same
+    anchor-plus-delta-plus-residual decode algorithm described in \S\ref{sec:decode}. All four
+
+    runtime optimizations are implemented and CPU-verified; \cuda{} hardware
+    validation is reserved for a follow-up \pendingGPU{}.
 \end{itemize}
+
 
 The rest of the paper follows the system's own execution order: background and the memory
 arithmetic that motivates the design (\S\ref{sec:background}), a component overview

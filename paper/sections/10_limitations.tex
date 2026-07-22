@@ -9,17 +9,31 @@ reconstruction-and-merge overhead. The clearest remedy is a single fused decode 
 the routing, low-rank scoring, residual attention, and merge in one launch, rather than a sequence
 of MLX ops.
 
-\paragraph{CUDA / Triton path (reserved, not evaluated).} A CUDA/Triton decode kernel exists in
-the repository, but the evaluation host has no NVIDIA GPU, so we report \emph{no} CUDA numbers and
-make \emph{no} CUDA claims. The decode design ports cleanly---reconstruct routed blocks into a
-buffer (a matmul), attend with a flash kernel, cache across a re-route interval---so we expect the
-gap in E4 to narrow on a GPU-native path, but that is a hypothesis to be measured, not a result.
-The CUDA kernel is additionally equipped with \path{@triton.autotune}~\cite{tillet2019triton}
-over tiling configurations (see \S\ref{par:ktransformers}), and the runtime's tiered CPU--GPU
-block offloading (\S\ref{par:ktransformers}) is active on CUDA with asynchronous H2D via dedicated
-\path{cudaStream}s. Both are CPU-verified and ready for hardware validation.
-The results tables keep a column convention so CUDA data can be inserted without restructuring the
-paper.
+\paragraph{\cuda{} / Triton path (implemented, not evaluated).}
+A \cuda{}/Triton decode kernel and a native C++/GGML kernel exist in the repository and are
+described architecturally in \S\ref{sec:decode-backends}--\S\ref{sec:cuda-impl}; the evaluation
+host has no NVIDIA GPU, so we report \emph{no} \cuda{} numbers and make \emph{no} \cuda{} claims.
+The decode design ports cleanly---reconstruct routed blocks into a buffer (a matmul), attend with
+a flash kernel, cache across a re-route interval---and the Triton kernel already implements this
+as a single autotuned launch; we expect the gap in E4 to narrow on a GPU-native path, but that is
+a hypothesis to be measured, not a result.
+Two correctness issues have been root-caused and fixed on CPU, pending GPU hardware certification.
+First, a \emph{metadata desync bug}: blocks force-compressed through the deferred path left their
+metadata state code stale, causing the decode router to exclude the needle block entirely; fixed
+by calling \path{update_metadata_state} immediately after every \path{block.state="COMPRESSED"}
+assignment on the sync and deferred paths (documented in
+\path{CUDA_DECODE_NEEDLE_FIDELITY_HANDOFF.md}).
+Second, a \emph{Triton residual alignment bug}: the kernel appended residuals as extra standalone
+softmax tokens instead of correcting scores in-place at the residual positions, inflating the
+softmax denominator; fixed by the in-place scatter described in \S\ref{sec:decode-backends}
+(documented as finding F1 in \path{CUDA_TRITON_AUDIT.md}).
+Both fixes are CPU-verified and committed; GPU compilation and end-to-end recall certification
+are the outstanding steps \pendingGPU{}.
+The kernel is additionally equipped with \path{@triton.autotune}~\cite{tillet2019triton}
+over tiling configurations (\S\ref{par:ktransformers}), and the runtime's tiered CPU--GPU
+block offloading (\S\ref{par:ktransformers}) is active on \cuda{} with asynchronous H2D via
+dedicated \path{cudaStream}s (\S\ref{sec:cuda-impl}).
+The results tables keep a column convention so \cuda{} data can be inserted without restructuring.
 
 \paragraph{Single model, single host.} Every number here is Qwen2.5-1.5B (int4) on one Apple~M3.
 The residual budget and router settings are tuned for this model; larger models, different

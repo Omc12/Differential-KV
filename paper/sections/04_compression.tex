@@ -111,6 +111,28 @@ residual pool dominates the block at the default setting---a fact the memory lay
 matrix ($\approx2$\,ms), amortized over $256$ tokens; \S\ref{sec:eval} shows compression is a
 single-digit percentage of prefill time.
 
+\paragraph{\cuda{} compression backends.}
+On \mlxe{} the randomized SVD runs in NumPy on the CPU with near-zero marshalling cost (unified
+memory), as noted in \S\ref{sec:background-cuda}. The \cuda{} engine exposes two compression
+paths, selectable at runtime. The \emph{CPU-offloaded} path reuses the identical NumPy SVD,
+acceptable because compression is a one-time prefill cost per block and the D2H transfer is
+amortized over $\bs{=}256$ tokens. The \emph{GPU-native} path
+(\texttt{DKV\_COMPRESS\_GRAM\_SVD=1}) replaces the direct SVD with the \emph{Gram-Eigh
+reformulation}: it computes the $r{\times}r$ symmetric Gram matrix
+$B B^\top \in\R^{r\times r}$ and calls \texttt{cuSOLVER} \texttt{syevjBatched}, which batches
+correctly at $r{\le}32$ (unlike \texttt{gesvdjBatched}, which regresses to a sequential per-matrix
+loop for our $\approx255{\times}512$ deltas). Mathematically the right singular vectors of $B$ are
+the eigenvectors of $B B^\top$, so the factorization is equivalent; controlled CPU timing
+shows $\approx6.1\,\text{s}\to2.6\,\text{s}$ for a representative prefill.
+GPU recall validation of this path is pending \pendingGPU{}.
+
+An additional fidelity guard applies in both backends: blocks containing high-information-density
+content (e.g.\ digit runs matching the pattern \texttt{\textbackslash d\{5,\}}, detected at compression time)
+are force-stored with \emph{all} token positions as exact residuals rather than SVD-compressed,
+bypassing the reconstruction-error selection filter. This preserves verbatim recall of such
+tokens even when they happen not to top the reconstruction-error ranking.
+
+
 \begin{\tabenv}[t]
   \centering
   \caption{Per-$256$-token-block storage, computed from the model dimensions and the store's fp16

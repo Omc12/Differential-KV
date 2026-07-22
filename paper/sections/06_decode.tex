@@ -122,3 +122,90 @@ the measured decode numbers in \S\ref{sec:eval}.
 \State \Return flash-merge$(O_{\text{sp}},\lse_{\text{sp}},O_{\text{dn}},\lse_{\text{dn}})$ \Comment{Eq.~\eqref{eq:merge}}
 \end{algorithmic}
 \end{\algenv}
+
+\subsection{Backend dispatch and kernel implementations}
+\label{sec:decode-backends}
+
+\begin{\figenv}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f9_backend_dispatch.pdf}
+  \caption[Three kernel backends over one compressed block store.]{Backend dispatch.
+  One compression pipeline (\S\ref{sec:compression}) writes the block store; three
+  independent kernels read it and return the same attention output through the same
+  interface. They are three implementations of Algorithm~\ref{alg:decode}, not three
+  algorithms: no path decompresses, re-encodes, or otherwise reinterprets the stored
+  format. Figure~\ref{fig:arch} details the \mlxe{} column, which is the path evaluated
+  in \S\ref{sec:eval}; the two \cuda{} columns are implemented but GPU validation is
+  pending \pendingGPU{}.}
+  \label{fig:backends}
+\end{\figenv}
+
+The decode algorithm (Algorithm~\ref{alg:decode}) is implemented by three independent kernel
+paths that share the identical compressed block format (Figure~\ref{fig:backends}).
+
+\paragraph{\mlxe{}/Metal path (evaluated).}
+The \mlxe{} implementation uses \path{mx.matmul} for the query projection and $U$-expand,
+\path{mx.fast.metal_kernel} for tiled $UV$ expansion across Metal threadgroups on Apple Silicon
+(with a fallback to \path{mx.matmul} if the MLX version does not expose the custom-kernel API),
+and \path{scaled_dot_product_attention} for the dense-window and residual half.
+This is the path benchmarked throughout \S\ref{sec:eval}.
+
+\begin{\figenv}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f10_residual_inplace.pdf}
+  \caption[Appending a residual as an extra softmax token inflates the denominator;
+  scattering it in place does not.]{Why the residual correction is applied \emph{in place}.
+  \emph{(a)} Appending the exact row as an extra softmax token leaves the token's low-rank
+  approximation in the sum as well, so $i^{*}$ contributes twice and the denominator carries
+  a $B{+}1$-th term that belongs to no token; every weight in the block is scaled down by it.
+  \emph{(b)} Scattering $q\cdot R_K$ into the score already held at position $i^{*}$ replaces
+  the approximate value before the denominator is finalized, leaving $B$ terms. K and V use
+  separate position arrays (\path{res_K_positions}, \path{res_V_positions}) because the
+  highest-error rows differ between the two projections.}
+  \label{fig:inplace}
+\end{\figenv}
+
+\begin{\figenv}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f7_triton_dispatch.pdf}
+  \caption[Triton decode dispatch: autotuned fused kernel, PyTorch fallback, and strict
+  mode.]{\cuda{}/Triton decode dispatch. When Triton is available the six kernel steps run
+  in a single autotuned launch, with the exact residual rows scattered in place at steps
+  4--5 (Figure~\ref{fig:inplace}). When it is not, a PyTorch vectorized fallback returns
+  through the same interface---which is why \path{DKV_TRITON_STRICT=1} exists: it converts
+  the fallback into a hard error so a GPU regression run cannot silently measure the wrong
+  path. \pendingGPU{}}
+  \label{fig:triton}
+\end{\figenv}
+
+\paragraph{\cuda{}/Triton path \pendingGPU{}.}
+\path{native_triton_sparse_attn_decode()} dispatches to \path{_fused_sparse_decode_kernel}, a
+Triton kernel that fuses the anchor score, delta projection ($q\,V_K^\top \to \tilde{q}$, then
+$\tilde{q}\cdot U_i$ for all $i$), and exact residual correction in one kernel launch
+(Figure~\ref{fig:triton}).
+Residual corrections are applied \emph{in place}: the kernel scatters $q\cdot R_K$
+directly into the accumulated score at position \path{res_pos}, and scatters $p\cdot R_V$
+into the output numerator at \path{res_pos_v}, \emph{before} the block's softmax
+denominator is finalized. This is architecturally distinct from \emph{appending} residuals as
+extra softmax tokens: appending inflates the denominator with a ghost entry; in-place correction
+does not (Figure~\ref{fig:inplace}), and the reference decoder confirms the difference is
+numerically significant. K and V
+use \emph{separate} position arrays (\path{res_K_positions} and \path{res_V_positions}),
+because the highest-error rows differ between the two projections. The kernel is autotuned via
+\path{@triton.autotune} over \path{(S_MAX, BLOCKS_PER_CHUNK, num_warps)}: on the first five
+real-shape calls the configurations are benchmarked and the fastest is locked in, giving full
+inner-loop unrolling matched to the specific $(\rank, \dhead)$ shape. A PyTorch vectorized
+fallback (\path{_pytorch_vectorized_sparse_attn_decode}) is available for testing or if
+Triton compilation fails; \path{DKV_TRITON_STRICT=1} converts the fallback to a hard error,
+which is recommended for GPU regression testing so a wrong-but-non-throwing kernel is not
+silently measured.
+
+\paragraph{Native C++/GGML path \pendingGPU{}.}
+\path{execute_cuda_attention()} calls \path{dkv_full_decode_kernel} in \path{dkv_decode.cu},
+compiled with \texttt{-DGGML\_CUDA=ON}. It implements the same anchor score, per-token delta
+projection, and K/V separate-position in-place residual correction as the Triton path, in pure
+CUDA C++. The split-K scratch tensors are sized dynamically from
+\texttt{n\_q\_heads $\times$ S\_split $\times$ D} at runtime and reallocated on model change.
+A \texttt{DKV\_CUDA\_CHECK} macro wraps every \texttt{cudaMalloc}, \texttt{cudaMemcpy}, and
+kernel launch, with \path{cudaGetLastError()} after each launch; \texttt{DKV\_CUDA\_ANCHOR\_ONLY=1}
+reverts to the anchor-only stub for A/B regression testing.

@@ -91,10 +91,14 @@ hit, and Feature (ii) below hides it entirely.
 After the router delivers the top-$\topk$ slot indices for step $t$, a background daemon thread
 submits non-blocking H2D restores for any cold slots in that set, so they are warm before step
 $t{+}1$ begins. The submit path is a lock-free \path{queue.put_nowait} call
-(${\approx}50\,\text{ns}$) and does not touch the critical path. On CUDA the restore issues via
-a dedicated \texttt{cudaStream} with recorded events; on MPS the transfer is synchronous but
-still below the decode step budget. In practice, because routing is stable across steps, the
-prefetch almost always completes before it is needed, making the effective H2D overhead zero.
+(${\approx}50\,\text{ns}$) and does not touch the critical path.
+On \cuda{}, the restore issues on a dedicated \texttt{stream\_h2d} stream; after issuing the
+\path{cudaMemcpyAsync} the dispatcher records a \path{cudaEvent} on \texttt{stream\_h2d} and
+calls \path{cudaStreamWaitEvent} on the main compute stream, so the kernel launch on step $t{+}1$
+automatically stalls only as long as the H2D transfer is outstanding---no global device
+synchronization. On \mlxe{}/MPS the transfer is synchronous but still below the decode step
+budget. In practice, because routing is stable across steps, the prefetch almost always completes
+before it is needed, making the effective H2D overhead zero.
 
 \emph{(iii) Kernel-level tiling for the expansion step.}
 On CUDA, the main fused decode kernel (\S\ref{sec:decode}) is wrapped with
@@ -126,3 +130,66 @@ compounds with the SVD approximation, this feature is disabled by default
 implementation on seeded sessions; the needle and relational-binding harnesses guard recall. The
 measurement scripts, prompts, and the exact commands are in the reproducibility appendix\ifext{}
 (Appendix~\ref{app:repro})\fi.
+
+\subsection{\cuda{}-specific implementation notes}
+\label{sec:cuda-impl}
+
+% Figure f8 (native CUDA call chain) planned; to be added when diagram is finalised.
+\IfFileExists{figures/f8_native_cuda.pdf}{%
+\begin{\figenv}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/f8_native_cuda.pdf}
+  \caption[Native C++/GGML decode path: prefetch stream, fused kernel, and error
+  checking.]{Native C++/GGML decode path. \path{execute_cuda_attention()} waits on the
+  event recorded by the background \path{stream_h2d} prefetch, so the H2D block restore
+  (\S\ref{sec:background-cuda}, Figure~\ref{fig:memtopology}) is already in flight a step
+  ahead. The kernel body performs the same anchor score, delta projection and separate
+  K/V in-place residual scatter as the Triton path (Figure~\ref{fig:triton}) and returns
+  through the same interface---the two are one algorithm in two languages, differing only
+  in the split-K scratch allocation and the \path{DKV_CUDA_CHECK} wrapper. \pendingGPU{}}
+  \label{fig:nativecuda}
+\end{\figenv}
+}{}
+
+
+The kTransformers-informed optimizations above (\S\ref{par:ktransformers}) span both backends.
+This subsection records three \cuda{}-only design decisions that arise from the discrete-GPU
+memory model and have no \mlxe{} equivalent.
+
+\paragraph{Triton compilation pipeline and strict-mode telemetry.}
+\label{par:triton-telemetry}
+At import time, \path{triton_fused_decode.py} checks \path{HAS_TRITON}; if true, the kernel
+is compiled with \path{@triton.jit} on the first call. A one-time log line---\textbf{``Triton
+path ACTIVE''}---confirms the live kernel is executing rather than the PyTorch fallback.
+This distinction is critical for GPU regression testing: a numerically wrong kernel that does
+not throw an exception is otherwise invisible, and a performance measurement taken on the
+PyTorch path would silently undercount \cuda{} throughput. \path{DKV_TRITON_STRICT=1}
+converts the \path{except Exception} fallback into a hard re-raise, making such failures
+explicit. The default (\path{STRICT=0}) preserves safe degradation in production environments
+where Triton is absent.
+
+\paragraph{GPU-native SVD via the Gram-Eigh reformulation.}
+\label{par:gram-eigh}
+As described in \S\ref{sec:background-cuda} and \S\ref{sec:compression}, \cuda{} compression
+can run the same CPU-offloaded NumPy SVD as \mlxe{}, or a GPU-native path activated by
+\path{DKV_COMPRESS_GRAM_SVD=1}. The reformulation computes the $r{\times}r$ Gram matrix
+$B B^\top$ and calls \texttt{cuSOLVER} \texttt{syevjBatched}. Two additional flags tune the
+trade-off: \path{DKV_RSVD_MAX_RPROJ=32} caps the Gram-matrix dimension at $32$ for
+\texttt{syevjBatched} compatibility (larger ranks fall back to CPU), and
+\path{DKV_CONTIGUOUS_PREFILL=1} / \path{DKV_CONTIG_UNROTATE=1} activate the $1{\times}$
+prefill variant described in \S\ref{sec:runtime} that eliminates the 2$\times$ HBM spike.
+GPU recall validation of the Gram-Eigh path is pending \pendingGPU{}.
+
+\paragraph{\cuda{} Graphs: roadmap and current blockers.}
+\label{par:cuda-graphs}
+\cuda{} Graphs would allow the per-token decode sequence to be captured as a single replayed
+graph, eliminating per-kernel launch overhead. The current implementation cannot use them
+because host Python synchronization points---\path{tensor.item()} and \path{routing.tolist()}
+calls in the routing hot path---occur mid-graph and require host--device round trips that
+prevent graph capture. The planned migration is a three-phase sequence: (1)~replace all
+\path{.item()} / \path{.tolist()} calls in the critical decode path with async-safe GPU
+predicates so the routing decision stays on device; (2)~isolate the graph boundary to the
+pure-kernel sequence (query projection, Triton fused kernel, inter-chunk reduction kernel);
+(3)~validate graph replay bit-exactness against eager mode on seeded sessions before enabling
+for production. No step in this roadmap requires changes to the block representation or
+compression algorithm.

@@ -52,9 +52,16 @@ low-rank space, attend residuals and window). The compression pipeline (\S\ref{s
 defines the store's contents; the runtime (\S\ref{sec:runtime}) defines its lifecycle; the decode
 kernel (\S\ref{sec:decode}) defines how it is read. We take these in turn.
 
-\paragraph{Scope.} This report documents the \emph{active runtime}---the MLX implementation.
-An independent native (C++/GGML) engine and a CUDA/Triton decode kernel exist in the repository
-and are out of scope here; we neither evaluate them nor compare against them, and where the
-design ports cleanly we say so and reserve space for future measurement (\S\ref{sec:limits}).
+\paragraph{Scope.} This report documents the \emph{active runtime}---the \mlxe{} implementation,
+which is what Figure~\ref{fig:arch} depicts. Two independent backends also exist in the
+repository and are out of scope for evaluation:
+a \cuda{}/Triton engine (\path{native_triton_sparse_attn_decode()}, dispatching to
+\path{_fused_sparse_decode_kernel} or a PyTorch vectorized fallback) and a native C++/GGML engine
+(\path{execute_cuda_attention()} to \path{dkv_full_decode_kernel} in \path{dkv_decode.cu},
+built with \texttt{-DGGML\_CUDA=ON}). Both share the identical block store format and compression
+pipeline described in \S\ref{sec:compression}; Figure~\ref{fig:backends} places all three
+side by side, and porting the evaluation is a hardware availability
+problem, not an algorithmic redesign. Where the decode design ports cleanly we say so and reserve
+space for future measurement (\S\ref{sec:decode}, \S\ref{sec:impl}, \S\ref{sec:limits}).
 A separate factual-store / semantic-retrieval subsystem is present but disabled by default and
 is not part of the evaluated system.

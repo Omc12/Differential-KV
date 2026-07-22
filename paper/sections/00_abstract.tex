@@ -15,9 +15,15 @@ and merges the two halves with a flash-style log-sum-exp reduction; the selected
 materialised once per routing interval into a persistent buffer and appended to per token.
 Prefill uses a training-free block-sparse attention so its cost grows sub-quadratically.
 
-We implement \dkv{} entirely in MLX and evaluate it on Qwen2.5-1.5B (int4) against two dense
+We implement \dkv{} entirely in \mlxe{} and evaluate it on Qwen2.5-1.5B (int4) against two dense
 full-KV baselines on the \emph{same} weights---a memory-optimized \texttt{mlx\_lm} engine and a
 standard PyTorch engine---on an Apple~M3 with 8.6\,GB of unified memory.
+A parallel \cuda{}/Triton engine---comprising a custom Triton fused decode kernel with
+\path{@triton.autotune} tiling, asynchronous H2D block prefetch via dedicated \texttt{cudaStream}s,
+tiered CPU--HBM block offloading, and a native C++/GGML decode kernel built with
+\texttt{-DGGML\_CUDA=ON}---is implemented and CPU-verified; no GPU benchmark numbers are collected in
+this report, and no GPU performance claims are made.
+
 \dkv{} holds a bounded KV state that is $\ratioDefault\times$--$\ratioPreset\times$ smaller
 per block than a dense cache (the residual budget \maxres{} is the knob), recovers a buried
 passcode \emph{exactly} at every context from $4$k to $\reachK$k, and reaches $\reachK$k---where a

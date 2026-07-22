@@ -49,6 +49,18 @@ $O(L^2)$ toward $O(L\cdot K)$ and is the mechanism behind the prefill crossover 
 \S\ref{sec:eval} (E3). It changes compute, not the stored state: every token's exact $K$/$V$ is
 still captured for later compression, so retrieval accuracy is unaffected.
 
+\paragraph{Prefill memory on discrete GPU (\cuda{}).}
+On \mlxe{} the native prefill KV cache and the \dkv{} block store coexist in unified memory
+at minimal extra cost. On a discrete GPU the same dual-copy creates a $2\times$ HBM spike:
+\texttt{past\_key\_values} (the native cache) plus the DKV store both reside in HBM
+simultaneously until the prefill$\to$decode boundary. The \cuda{} runtime offers a
+\emph{1$\times$ contiguous prefill} variant (\texttt{DKV\_CONTIGUOUS\_PREFILL=1}): rather than
+maintaining a separate native cache alongside the store, it keeps a single RoPE-rotated
+contiguous buffer and inverse-RoPE at block boundaries when slicing. This eliminates the parallel
+native-cache copy, halving the peak HBM requirement during prefill. The inverse-RoPE step adds
+one small matrix multiplication per block boundary and is designed to be a negligible cost at
+the prefill cadence.
+
 \subsection{The prefill$\to$decode boundary}
 The transition from prefill to decode is where memory is reclaimed (Figure~\ref{fig:life}). At the
 first decode step the runtime resolves the decode policy once, flushes pending work with

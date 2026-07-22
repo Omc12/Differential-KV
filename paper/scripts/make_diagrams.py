@@ -22,9 +22,9 @@ import math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import style
 from style import (BLACK, BLUE, BLUE_D, BLUE_L, BLUE_XL, EMERALD, EMER_L,
-                   GRAY, GRAY_XL, GRAY_D, LEGEND_EC, WHITE)
+                   GRAY, GRAY_XL, GRAY_D, LEGEND_EC, WHITE, OOM_RED)
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle, Polygon
 
 style.apply_rc()
 plt.rcParams.update({"axes.grid": False})
@@ -76,6 +76,28 @@ def arrow(ax, p0, p1, color=BLACK, lw=1.0, rad=0.0, ls="-", style_="-|>", z=2, *
 def note(ax, x, y, text, fs=7.0, ha="center", va="center", style_="italic"):
     ax.text(x, y, text, ha=ha, va=va, fontsize=fs, color=BLACK,
             fontstyle=style_, zorder=5)
+
+
+def diamond(ax, cx, cy, hw, hh, text, fc=WHITE, ec=BLACK, tc=BLACK, fs=7.2, lw=0.9):
+    """Decision node — same stroke/fill language as box(), rotated square."""
+    p = Polygon([(cx - hw, cy), (cx, cy + hh), (cx + hw, cy), (cx, cy - hh)],
+                closed=True, fc=fc, ec=ec, lw=lw, zorder=3)
+    ax.add_patch(p)
+    ax.text(cx, cy, text, ha="center", va="center", fontsize=fs, color=tc,
+            zorder=4, linespacing=1.25)
+    return (cx, cy, hw, hh)
+
+
+def elbow(ax, pts, color=BLACK, lw=1.0, ls="-", tip=True, z=2):
+    """Orthogonal polyline routed around content; optional arrowhead on the last leg."""
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    ax.plot(xs[:-1] if tip else xs, ys[:-1] if tip else ys,
+            color=color, lw=lw, ls=ls, zorder=z, solid_capstyle="butt")
+    if tip:
+        ax.plot(xs[-3:-1], ys[-3:-1], color=color, lw=lw, ls=ls, zorder=z,
+                solid_capstyle="butt")
+        arrow(ax, pts[-2], pts[-1], color=color, lw=lw, ls=ls,
+              shrinkA=0, shrinkB=0, z=z)
 
 
 def clean(ax, xmax=10, ymax=10):
@@ -656,11 +678,353 @@ def f6_memory_3d():
 
 
 
+# ── F7 · Triton dispatch flow ────────────────────────────────────────────────
+def f7_triton_dispatch():
+    fig, ax = plt.subplots(figsize=(8.6, 5.45)); clean(ax, 10, 9.35)
+
+    CX = 2.98                       # main-flow centre line
+    LX, LW = 0.45, 5.05             # main-flow column
+
+    # entry
+    box(ax, LX, 8.62, LW, 0.58,
+        "native_triton_sparse_attn_decode($q$, blocks, routing)",
+        fc=BLUE, tc=WHITE, fs=7.4, bold=True)
+    arrow(ax, (CX, 8.62), (CX, 8.30), lw=1.1)
+    diamond(ax, CX, 7.90, 1.22, 0.38, "HAS_TRITON ?", fs=7.6)
+    note(ax, CX + 0.16, 7.31, "yes", fs=7.0, ha="left", style_="normal")
+    arrow(ax, (CX, 7.52), (CX, 7.18), lw=1.1)
+    arrow(ax, (CX + 1.22, 7.90), (5.95, 7.90), lw=1.1)
+    note(ax, 4.58, 8.04, "no", fs=7.0, style_="normal")
+
+    # ── fallback path (right) ──
+    band(ax, 5.72, 5.30, 3.93, 3.00, fc="#F7F8FA", dashed=True)
+    note(ax, 5.72, 8.42, "Fallback path", fs=7.4, ha="left", style_="normal")
+    FCX = 7.68
+    box(ax, 5.95, 7.62, 3.46, 0.56,
+        "_pytorch_vectorized_sparse_attn_decode()", fc=GRAY_XL, fs=7.2)
+    arrow(ax, (FCX, 7.62), (FCX, 7.28), lw=1.0)
+    diamond(ax, FCX, 6.88, 1.42, 0.38, "DKV_TRITON_STRICT = 1 ?", fs=6.9)
+    arrow(ax, (7.34, 6.56), (6.86, 6.24), rad=-0.10, lw=1.0)
+    arrow(ax, (8.02, 6.56), (8.50, 6.24), rad=0.10, lw=1.0)
+    note(ax, 6.84, 6.50, "yes", fs=6.9, style_="normal")
+    note(ax, 8.54, 6.50, "no", fs=6.9, style_="normal")
+    box(ax, 5.95, 5.48, 1.62, 0.74, "hard error\n(re-raise)",
+        fc=WHITE, ec=OOM_RED, fs=7.2)
+    box(ax, 7.79, 5.48, 1.62, 0.74, "PyTorch output\n+ telemetry log",
+        fc=WHITE, fs=7.2)
+    note(ax, 7.68, 5.14,
+         "strict mode is recommended for GPU regression testing:\n"
+         "a wrong-but-non-throwing kernel is otherwise invisible",
+         fs=6.6, va="top")
+
+    # ── Triton path (left) ──
+    box(ax, LX, 6.42, LW, 0.72,
+        "@triton.autotune  over  (S_MAX, BLOCKS_PER_CHUNK, num_warps)\n"
+        "first five real-shape calls benchmarked → fastest config locked in",
+        fc=WHITE, fs=6.8)
+    arrow(ax, (CX, 6.42), (CX, 6.12), lw=1.1)
+    box(ax, LX, 5.44, LW, 0.60,
+        "_fused_sparse_decode_kernel  —  one launch",
+        fc=BLUE, tc=WHITE, fs=8.0, bold=True)
+
+    band(ax, LX, 1.52, LW, 3.86, fc="#F6F9FE", ec=BLUE_L)
+    rows = [
+        ("①  anchor score   $s_{anc} = (q\\cdot a_k)\\cdot$scale", WHITE, BLACK, False),
+        ("②  delta projection   $\\tilde q = q\\,V_K^{\\top} \\in \\mathbb{R}^{32}$", WHITE, BLACK, False),
+        ("③  token scores   $\\delta s_i = \\tilde q \\cdot U_i$   (all $i$ in the block)", WHITE, BLACK, False),
+        ("④  scatter $q\\cdot R_K$ into the score at res_K_positions", EMER_L, BLACK, False),
+        ("⑤  scatter $p\\cdot R_V$ into the numerator at res_V_positions", EMER_L, BLACK, False),
+        ("⑥  online softmax  →  accumulate $O$, lse", WHITE, BLACK, False),
+    ]
+    ys = [4.74, 4.20, 3.66, 3.12, 2.58, 2.04]
+    for (t, fc, tc, bd), y0 in zip(rows, ys):
+        box(ax, LX + 0.20, y0, LW - 0.40, 0.46, t, fc=fc,
+            ec=EMERALD if fc is EMER_L else BLACK, tc=tc, fs=6.7, bold=bd)
+    for y0 in ys[:-1]:
+        arrow(ax, (CX, y0), (CX, y0 - 0.08), lw=0.85, shrinkA=0, shrinkB=0)
+    note(ax, LX + 0.20, 1.78, "$O(K\\,r\\,B)$ — the block is never expanded to $\\hat K$",
+         fs=6.9, ha="left")
+
+    # in-place annotation, bracketed off steps ④–⑤
+    ax.plot([5.56, 5.70, 5.70, 5.56], [3.58, 3.58, 2.58, 2.58],
+            color=EMERALD, lw=0.9, zorder=2)
+    ax.plot([5.70, 5.80], [3.08, 3.08], color=EMERALD, lw=0.9, zorder=2)
+    note(ax, 5.88, 3.08,
+         "applied in place — before the block's\n"
+         "softmax denominator is finalized, so\n"
+         "no ghost entry is added.  K and V use\n"
+         "separate position arrays: the highest-\n"
+         "error rows differ between K and V.",
+         fs=6.6, ha="left")
+
+    arrow(ax, (CX, 1.52), (CX, 1.22), lw=1.1)
+    box(ax, 1.10, 0.52, 3.75, 0.62, "flash-merge (log-sum-exp)   →   $o$",
+        fc=BLUE_D, tc=WHITE, fs=7.8, bold=True)
+    # the fallback returns through the same interface
+    elbow(ax, [(9.41, 5.77), (9.66, 5.77), (9.66, 0.83), (5.05, 0.83), (4.87, 0.83)],
+          color=GRAY_D, lw=0.9, ls=(0, (3, 2.5)))
+    note(ax, 7.30, 0.98, "same output interface", fs=6.8)
+
+    style.finalize(fig, os.path.join(FIG, "f7_triton_dispatch.png"))
+
+
+# ── F8 · native C++/GGML CUDA path ───────────────────────────────────────────
+def f8_native_cuda():
+    fig, ax = plt.subplots(figsize=(8.6, 5.15)); clean(ax, 10, 8.60)
+
+    box(ax, 2.60, 7.80, 4.80, 0.58, "execute_cuda_attention()",
+        fc=BLUE, tc=WHITE, fs=8.4, bold=True)
+    arrow(ax, (5.0, 7.80), (5.0, 7.45), lw=1.1)
+    diamond(ax, 5.0, 7.05, 1.52, 0.38, "DKV_CUDA_ANCHOR_ONLY = 1 ?", fs=6.9)
+    arrow(ax, (6.52, 7.05), (7.62, 7.05), lw=1.0)
+    note(ax, 7.06, 7.19, "yes", fs=6.9, style_="normal")
+    box(ax, 7.62, 6.73, 1.98, 0.64, "anchor-only stub\n(A/B regression)",
+        fc=GRAY_XL, fs=7.0)
+    note(ax, 4.84, 6.44, "no", fs=6.9, ha="right", style_="normal")
+    arrow(ax, (5.0, 6.67), (5.0, 5.90), lw=1.1)
+
+    # background prefetch stream
+    band(ax, 0.35, 4.90, 2.92, 1.72, fc="#F7F8FA", dashed=True)
+    note(ax, 0.55, 6.42, "stream_h2d  (background)", fs=7.0, ha="left", style_="normal")
+    box(ax, 0.55, 5.66, 2.52, 0.62, "issue the H2D restore for\nthe blocks of step $t{+}1$",
+        fc=WHITE, fs=7.0)
+    arrow(ax, (1.81, 5.66), (1.81, 5.42), lw=0.9)
+    box(ax, 0.55, 5.02, 2.52, 0.40, "cudaEventRecord(event_h2d)", fc=WHITE, fs=6.9)
+
+    box(ax, 3.55, 5.06, 3.90, 0.80,
+        "fetch the routed blocks from HBM\ncudaStreamWaitEvent(main, event_h2d)",
+        fc=BLUE_XL, fs=7.4)
+    arrow(ax, (3.27, 5.22), (3.55, 5.22), lw=1.0)
+    note(ax, 7.58, 5.46,
+         "≈137 KB per block, ≈15 µs\non PCIe 4.0 — hidden behind\nthe previous decode step",
+         fs=6.4, ha="left")
+    arrow(ax, (5.50, 5.06), (5.50, 4.78), lw=1.1)
+
+    band(ax, 1.55, 1.34, 6.90, 3.42, fc="#F6F9FE", ec=BLUE_L)
+    box(ax, 1.55, 4.06, 6.90, 0.60,
+        "dkv_full_decode_kernel   ·   dkv_decode.cu   ·   -DGGML_CUDA=ON",
+        fc=BLUE, tc=WHITE, fs=8.0, bold=True)
+    krows = [
+        ("anchor score  +  per-token delta projection   (identical math to the Triton path)",
+         WHITE, False),
+        ("K-side in-place residual scatter   ←   res_K_positions", EMER_L, True),
+        ("V-side in-place residual scatter   ←   res_V_positions", EMER_L, True),
+        ("split-K accumulation   ·   scratch sized $H_q \\times S_{split} \\times d$, reallocated on model change",
+         WHITE, False),
+    ]
+    for (t, fc, bd), y0 in zip(krows, [3.42, 2.90, 2.38, 1.86]):
+        box(ax, 1.75, y0, 6.50, 0.44, t, fc=fc,
+            ec=EMERALD if fc is EMER_L else BLACK, fs=7.0, bold=bd)
+    note(ax, 5.0, 1.76,
+         "DKV_CUDA_CHECK wraps every cudaMalloc, cudaMemcpy and kernel launch;\n"
+         "cudaGetLastError() is polled after each launch",
+         fs=6.8, va="top")
+
+    arrow(ax, (5.0, 1.34), (5.0, 1.06), lw=1.1)
+    box(ax, 2.60, 0.46, 4.80, 0.58,
+        "output tensor  —  same interface as the Triton path",
+        fc=BLUE_D, tc=WHITE, fs=7.2, bold=True)
+    elbow(ax, [(9.60, 6.73), (9.76, 6.73), (9.76, 0.75), (7.56, 0.75), (7.41, 0.75)],
+          color=GRAY_D, lw=0.9, ls=(0, (3, 2.5)))
+
+    style.finalize(fig, os.path.join(FIG, "f8_native_cuda.png"))
+
+
+# ── F9 · three-backend dispatch overview ─────────────────────────────────────
+def f9_backend_dispatch():
+    fig, ax = plt.subplots(figsize=(8.6, 5.35)); clean(ax, 10, 9.05)
+
+    note(ax, 5.0, 8.92,
+         "one compression pipeline (§4) writes it  ·  all three kernels read it — "
+         "no decompression, no re-encode", fs=7.0)
+    box(ax, 1.35, 8.12, 7.30, 0.62,
+        "shared compressed block store   "
+        "$\\{\\,U,\\ V_K,\\ V_V,\\ a_k,\\ a_v,\\ R_K,\\ R_V,\\ k_{\\min},k_{\\max}\\,\\}$",
+        fc=BLUE, tc=WHITE, fs=8.2, bold=True)
+    arrow(ax, (5.0, 8.12), (5.0, 7.82), lw=1.2)
+    box(ax, 2.55, 7.20, 4.90, 0.60,
+        "routed decode attention   —   backend-agnostic",
+        fc=BLUE_XL, fs=8.0, bold=True)
+    arrow(ax, (4.30, 7.20), (1.95, 6.60), rad=-0.13, lw=1.1)
+    arrow(ax, (5.00, 7.20), (5.00, 6.60), lw=1.1)
+    arrow(ax, (5.70, 7.20), (8.05, 6.60), rad=0.13, lw=1.1)
+
+    cols = [
+        # (band x, header fill/text colour, header, sub, entry, rows, tag, dashed)
+        (0.55, BLUE, WHITE, "MLX / Metal", "Apple silicon · unified memory",
+         "MLXDKVWrapper →\npatched Qwen2 attention",
+         [("mx.matmul\n$q\\,V_K^{\\top}$ and $U$-expand", WHITE, BLACK),
+          ("mx.fast.metal_kernel\ntiled $UV$ expansion", BLUE_XL, BLACK),
+          ("scaled_dot_product_attention\nresiduals + recency window", EMER_L, EMERALD)],
+         "evaluated throughout §8", False),
+        (3.60, BLUE_XL, BLACK, "CUDA / Triton", "NVIDIA discrete GPU",
+         "native_triton_sparse_\nattn_decode()",
+         [("@triton.autotune over\nS_MAX × BLOCKS/CHUNK × warps", WHITE, BLACK),
+          ("_fused_sparse_decode_kernel\none fused launch", BLUE_XL, BLACK),
+          ("PyTorch vectorized fallback\nDKV_TRITON_STRICT=1 → error", GRAY_XL, BLACK)],
+         "GPU validation pending", True),
+        (6.65, BLUE_XL, BLACK, "native C++ / GGML", "NVIDIA discrete GPU",
+         "execute_cuda_attention()",
+         [("dkv_full_decode_kernel\ndkv_decode.cu · -DGGML_CUDA=ON", BLUE_XL, BLACK),
+          ("split-K accumulation\nscratch $H_q \\times S_{split} \\times d$", WHITE, BLACK),
+          ("DKV_CUDA_CHECK on every\nmalloc / memcpy / launch", GRAY_XL, BLACK)],
+         "GPU validation pending", True),
+    ]
+    BW = 2.80
+    for bx, hfc, htc, head, sub, entry, rows, tag, dashed in cols:
+        cx = bx + BW / 2
+        band(ax, bx, 1.86, BW, 4.72, fc="#F7F8FA", dashed=dashed)
+        box(ax, bx + 0.15, 5.86, BW - 0.30, 0.52, head, fc=hfc, tc=htc,
+            fs=8.4, bold=True)
+        note(ax, cx, 5.64, sub, fs=6.8)
+        box(ax, bx + 0.15, 4.82, BW - 0.30, 0.62, entry, fc=WHITE, fs=6.6)
+        for (t, fc, ec), y0 in zip(rows, [3.96, 3.16, 2.36]):
+            box(ax, bx + 0.15, y0, BW - 0.30, 0.62, t, fc=fc, ec=ec, fs=6.5)
+        for y0 in (4.82, 3.96, 3.16):
+            arrow(ax, (cx, y0), (cx, y0 - 0.18), lw=0.85, shrinkA=0, shrinkB=0)
+        note(ax, cx, 2.10, tag, fs=7.0, style_="normal" if not dashed else "italic")
+
+    box(ax, 1.90, 0.52, 6.20, 0.62,
+        "attention output $o$   —   one interface, one numerical contract",
+        fc=BLUE_D, tc=WHITE, fs=8.0, bold=True)
+    arrow(ax, (1.95, 1.86), (3.55, 1.20), rad=0.13, lw=1.1)
+    arrow(ax, (5.00, 1.86), (5.00, 1.20), lw=1.1)
+    arrow(ax, (8.05, 1.86), (6.45, 1.20), rad=-0.13, lw=1.1)
+
+    style.finalize(fig, os.path.join(FIG, "f9_backend_dispatch.png"))
+
+
+# ── F10 · in-place vs. appended residual correction ──────────────────────────
+def f10_residual_inplace():
+    fig, ax = plt.subplots(figsize=(8.6, 3.72)); clean(ax, 10, 6.20)
+
+    NC, CW = 6, 0.42
+    ISTAR = 3
+
+    def panel(px, title, appended):
+        band(ax, px, 0.50, 4.45, 5.20, fc="#F7F8FA")
+        note(ax, px + 0.22, 5.42, title, fs=7.6, ha="left", style_="normal")
+
+        x0 = px + 0.40
+        star_cx = x0 + ISTAR * CW + CW / 2
+        src_cx = (x0 + NC * CW + 0.18 + CW / 2) if appended else star_cx
+        box(ax, src_cx - 0.95, 4.32, 1.90, 0.56,
+            "exact residual row\n$q\\cdot R_{K,i^{*}}$", fc=EMER_L, ec=EMERALD, fs=7.0)
+        arrow(ax, (src_cx, 4.32), (src_cx, 3.86), color=EMERALD, lw=1.1)
+
+        note(ax, px + 0.22, 3.96, "per-block scores, pre-softmax", fs=6.8, ha="left")
+        for i in range(NC):
+            star = (i == ISTAR)
+            fc = (BLUE_L if appended else EMER_L) if star else BLUE_XL
+            ec = EMERALD if (star and not appended) else BLACK
+            ax.add_patch(Rectangle((x0 + i * CW, 3.24), CW, 0.62, fc=fc, ec=ec,
+                                   lw=1.0 if star else 0.8, zorder=3))
+            lbl = ("$s^{\\star}_{i^{*}}$" if (star and not appended) else
+                   "$\\hat s_{i^{*}}$" if star else "$\\hat s_i$")
+            note(ax, x0 + i * CW + CW / 2, 3.55, lbl, fs=6.6, style_="normal")
+        if appended:
+            gx = x0 + NC * CW + 0.18
+            ax.add_patch(Rectangle((gx, 3.24), CW, 0.62, fc=EMER_L, ec=EMERALD,
+                                   lw=1.0, ls=(0, (2, 2)), zorder=3))
+            note(ax, gx + CW / 2, 3.55, "$s^{\\star}_{i^{*}}$", fs=6.6, style_="normal")
+            note(ax, gx + CW / 2, 3.06, "extra\nrow", fs=6.9, va="top")
+            note(ax, star_cx, 3.06, "low-rank $i^{*}$\nstill in the sum", fs=6.9, va="top")
+        else:
+            note(ax, star_cx, 3.06, "overwritten\nin place", fs=6.9, va="top")
+        return px + 0.40
+
+    # ── (a) appended ──
+    panel(0.30, "(a)  residual appended as an extra softmax token", True)
+    box(ax, 0.70, 1.72, 3.65, 0.78,
+        "$Z_a = \\sum e^{\\hat s_i}\\; +\\; e^{s^{\\star}_{i^{*}}}$\n"
+        "$B{+}1$ terms — token $i^{*}$ is counted twice", fc=WHITE, fs=7.2)
+    box(ax, 0.70, 0.70, 3.65, 0.82,
+        "$Z_a > Z_b$  →  every weight in the block is pulled\n"
+        "down by a ghost entry that no token owns",
+        fc=WHITE, ec=OOM_RED, fs=7.0)
+
+    # ── (b) in place ──
+    panel(5.25, "(b)  residual scattered in place at res_K_positions", False)
+    box(ax, 5.65, 1.72, 3.65, 0.78,
+        "$Z_b = \\sum e^{s_i}$,   with   "
+        "$s_{i^{*}} \\!\\leftarrow\\! s^{\\star}_{i^{*}}$\n"
+        "$B$ terms — token $i^{*}$ counted once, exactly", fc=WHITE, fs=7.2)
+    box(ax, 5.65, 0.70, 3.65, 0.82,
+        "denominator unchanged  →  the exact row\n"
+        "corrects the score without adding weight",
+        fc=EMER_L, ec=EMERALD, fs=7.0, bold=True)
+
+    style.finalize(fig, os.path.join(FIG, "f10_residual_inplace.png"))
+
+
+# ── F11 · unified vs. discrete-GPU memory topology ───────────────────────────
+def f11_memory_topology():
+    fig, ax = plt.subplots(figsize=(8.6, 3.86)); clean(ax, 10, 6.40)
+
+    # ── left: unified memory ──
+    band(ax, 0.30, 0.45, 4.45, 5.55, fc="#F7F8FA")
+    note(ax, 0.52, 5.72, "Apple silicon  —  unified memory", fs=7.8, ha="left",
+         style_="normal")
+    for i, t in enumerate(("CPU", "GPU", "NPU")):
+        bx = 0.62 + i * 1.40
+        box(ax, bx, 4.28, 1.25, 0.56, t, fc=WHITE, fs=8.0, bold=True)
+        ax.plot([bx + 0.625] * 2, [3.88, 4.28], color=BLACK, lw=1.0, zorder=2)
+    box(ax, 0.62, 3.06, 4.05, 0.82,
+        "unified memory pool\none physical DRAM, one address space",
+        fc=BLUE_XL, fs=7.6)
+    note(ax, 2.645, 2.86,
+         "no host↔device copy — a GPU tensor is visible to NumPy", fs=6.7,
+         va="top")
+    box(ax, 0.62, 0.80, 4.05, 1.72,
+        "⇒  the randomized SVD runs in NumPy on the CPU\n"
+        "while attention runs on the GPU — no marshalling\n\n"
+        "⇒  \"freeing\" returns memory to a shared pool, so\n"
+        "bounding $peak$ allocation is what matters",
+        fc=WHITE, ec=BLUE, fs=6.8)
+
+    # ── right: discrete GPU ──
+    band(ax, 5.25, 0.45, 4.45, 5.55, fc="#F7F8FA")
+    note(ax, 5.47, 5.72, "NVIDIA discrete GPU  —  separate HBM pool", fs=7.8,
+         ha="left", style_="normal")
+    box(ax, 5.57, 4.28, 1.30, 0.56, "CPU", fc=WHITE, fs=8.0, bold=True)
+    box(ax, 8.08, 4.28, 1.30, 0.56, "GPU SMs", fc=WHITE, fs=8.0, bold=True)
+    ax.plot([6.22] * 2, [3.88, 4.28], color=BLACK, lw=1.0, zorder=2)
+    ax.plot([8.73] * 2, [3.88, 4.28], color=BLACK, lw=1.0, zorder=2)
+    box(ax, 5.57, 3.06, 1.30, 0.82, "host DRAM", fc=GRAY_XL, fs=7.4)
+    box(ax, 8.08, 3.06, 1.30, 0.82, "HBM", fc=BLUE_XL, fs=7.4)
+    box(ax, 7.05, 3.20, 0.88, 0.54, "PCIe\n4.0", fc=WHITE, ec=GRAY_D, fs=6.6)
+    ax.plot([6.87, 7.05], [3.47, 3.47], color=BLACK, lw=1.0, zorder=2)
+    ax.plot([7.93, 8.08], [3.47, 3.47], color=BLACK, lw=1.0, zorder=2)
+    note(ax, 7.475, 2.86,
+         "explicit H2D / D2H — a block restore is ≈137 KB, ≈15 µs", fs=6.7, va="top")
+    box(ax, 5.57, 0.80, 4.05, 1.72,
+        "⇒  a step-ahead prefetch on a dedicated cudaStream\n"
+        "hides the restore behind the previous decode step\n\n"
+        "⇒  the GPU-native Gram-Eigh SVD keeps compression\n"
+        "on device, avoiding the D2H copy of the $K/V$ block",
+        fc=WHITE, ec=BLUE, fs=6.8)
+
+    style.finalize(fig, os.path.join(FIG, "f11_memory_topology.png"))
+
+
+ALL = {
+    "f1": f1_architecture,
+    "f2": f2_compression,
+    "f4": f4_lifecycle,
+    "f5a": f5a_decode_semantics,
+    "f5b": f5b_fused_buffer,
+    "f6": f6_memory_3d,
+    "f7": f7_triton_dispatch,
+    "f8": f8_native_cuda,
+    "f9": f9_backend_dispatch,
+    "f10": f10_residual_inplace,
+    "f11": f11_memory_topology,
+}
+
 if __name__ == "__main__":
-    f1_architecture()
-    f2_compression()
-    f4_lifecycle()
-    f5a_decode_semantics()
-    f5b_fused_buffer()
-    f6_memory_3d()
+    want = sys.argv[1:] or list(ALL)
+    for k in want:
+        if k not in ALL:
+            raise SystemExit(f"unknown figure {k!r}; known: {', '.join(ALL)}")
+        ALL[k]()
     print("diagrams done")

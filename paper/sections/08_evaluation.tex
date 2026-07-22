@@ -20,11 +20,18 @@ buried at $\sim$$50\%$ depth in a technical-prose haystack, and the request asks
 the passcode and then write a long explanation. The same deterministic prompt is used for every context length and both
 engines. We report prefill time, decode throughput (greedy, a fixed $128$ tokens with EOS ignored
 so throughput is comparable), peak process memory, and whether the exact passcode appears in the
-output. Contexts span $4$k to $\reachK$k. For the MLX engines, memory is the MLX allocator peak
+output. Contexts span $4$k to $\reachK$k. For the \mlxe{} engines, memory is the MLX allocator peak
 (\texttt{mx.get\_peak\_memory}), the allocator-true metric; for the PyTorch engine it is the peak
 resident process memory. The analytic KV-state footprint is computed from the store layout
 (Table~\ref{tab:budget}). Table~\ref{tab:main} is the headline\ifext{};
 the per-run detail is in Appendix~\ref{app:tables}\fi.
+
+\textbf{Evaluation scope.} All numbers in this section are measured on \mlxe{} on the Apple M3
+host described above. The \cuda{}/Triton and native C++/GGML backends exist and are described in
+\S\ref{sec:decode-backends} and \S\ref{sec:cuda-impl}, but no GPU benchmark has been collected;
+no \cuda{} throughput, memory, or recall numbers appear in this section. The result tables follow
+a column convention that accommodates a future \cuda{}/GPU baseline without restructuring.
+
 
 \begin{\tabenv}[t]
   \centering
@@ -115,8 +122,13 @@ Through $32$k---the regime where a dense cache is the natural choice---dense rem
 decoder; the standard PyTorch dense, by contrast, decodes at only ${\approx}\ptTps$\,tok/s even
 where it fits, so its full-KV cache is neither fast nor far-reaching. \dkv{}'s value proposition
 is bounded memory, exact recall, and prefill scaling---not decode speed---and a faster decode path
-(a fused kernel; a CUDA/Triton port, \S\ref{sec:limits}) is the clearest avenue to narrow the
-short-context decode gap further.
+(a fused kernel; a \cuda{}/Triton port, \S\ref{sec:limits}) is the clearest avenue to narrow the
+short-context decode gap further. On a \cuda{} platform the Triton fused kernel already collapses
+the anchor score, delta projection, in-place residual correction, and online-softmax accumulation
+into a single launch with autotuned tiling (\S\ref{sec:decode-backends}); whether and by how much
+this narrows the gap relative to a dense flash-attention kernel on the same hardware is a
+hypothesis to be measured, not a result of this report.
+
 
 
 \subsection{E5 --- Residual budget: the accuracy/memory/speed dial}
