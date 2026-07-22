@@ -1,7 +1,4 @@
-[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
-[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 108473.38it/s]
-[DiffKV MLX] Loaded model in 1.24s
+[DiffKV MLX] Loaded model in 0.59s
 
-__BENCH_RESULT__ {"prompt_tokens": 65615, "gen_tokens": 128, "prefill_s": 101.14855229100021, "decode_s": 5.02182112499986, "decode_tps": 25.488761310669656, "ttft_s": null, "mx_peak_gb": 2.713830474, "output_preview": "The secret passcode hidden in the document is **\"OMEGA-7741-DELTA**\".\n\n### Explanation:\n\nIn the context of distributed systems, consistency models are essential for ensuring that the data stored in a ", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 65536, "gen_target": 128, "worker_wall_s": 110.21055462499999}
+__BENCH_RESULT__ {"prompt_tokens": 65615, "gen_tokens": 128, "prefill_s": 224.93815908301622, "decode_s": 5.5855365410097875, "decode_tps": 22.916330250497186, "ttft_s": null, "mx_peak_gb": 5.042611822, "output_preview": "ency models, focusing on linearizability, sequential consistency, causal consistency, and eventual consistency.\n\n### Linearizability\nLinearizability is a property where operations appear sequentially in time when they were executed concurrently. This ensures that no process perceives an operation as", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 65536, "gen_target": 128, "worker_wall_s": 235.60942029202124}

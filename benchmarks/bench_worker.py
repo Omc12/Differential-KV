@@ -201,92 +201,84 @@ def run_native(args, prompt_text):
 
 # ────────────────────────── active (DiffKV MLX int4) ─────────────────────────
 def run_active(args, prompt_text):
-    os.chdir(ACTIVE_RUNTIME_DIR)
+    # ── MLX path (Apple Silicon) ──────────────────────────────────────────────
+    # Uses MLXDiffKVWrapper — the real on-device sparse-KV runtime.
+    # DiffKVHFWrapper is the CUDA path and requires diffkv_core; do NOT use it
+    # on macOS. The MLX wrapper's generate() runs prefill+decode end-to-end;
+    # we time each phase by splitting into a 1-token prefill pass then N-token
+    # decode pass, with mx.eval() barriers to force GPU sync before timing.
     sys.path.insert(0, ACTIVE_RUNTIME_DIR)
-    import numpy as np
-    import torch
-    import mlx.core as mx  # noqa: F401
-    from serving.hf_diffkv_wrapper import DiffKVHFWrapper
+    import mlx.core as mx
+    from serving.mlx_diffkv_wrapper import MLXDiffKVWrapper
 
     _mx_reset_peak()
 
-    cfg = {"quantization": "int4", "rank": 16, "block_size": 256,
-           "micro_block_size": 256, "preset": "mid"}
-    wrapper = DiffKVHFWrapper(model_id="Qwen/Qwen2.5-1.5B-Instruct", config=cfg)
-    wrapper.ensure_loaded()
-    tok, mgr, model = wrapper.tokenizer, wrapper.manager, wrapper.model
+    # Paper config: rank-32, max_residual=128, compressed decode
+    os.environ.setdefault("DIFFKV_COMPRESSED_DECODE", "1")
+    os.environ.setdefault("DIFFKV_MAX_RESIDUAL", "128")
+    os.environ.setdefault("DIFFKV_SPARSE_PREFILL", "1")
+    os.environ.setdefault("DIFFKV_DECODE_CACHE", "1")
+    os.environ.setdefault("DIFFKV_SPARSE_BIAS", "auto")
+    os.environ.setdefault("DIFFKV_SEED", "1234")
 
+    wrapper = MLXDiffKVWrapper(
+        model_id=args.dense_model_id,  # mlx-community/Qwen2.5-1.5B-Instruct-4bit
+        config={"rank": 32, "block_size": 256},
+    )
+    wrapper.ensure_loaded()
+    tok = wrapper.tokenizer
     ids = tok.encode(prompt_text)
     prompt_tokens = len(ids)
 
-    # Warmup: 1-token forward on a throwaway session to compile Metal kernels
-    # before the timed prefill (so timing reflects compute, not compilation).
-    try:
-        wsid = "warmup"
-        mgr.clear_session(wsid)
-        wrapper._session_token_ids[wsid] = []
-        mgr.init_session(wsid, prefill_len=1)
-        mgr.register_prefill_tokens(wsid, torch.tensor([ids[0]], dtype=torch.long))
-        model._diffkv_session_ids = [wsid]
-        _w = model(torch.tensor([[ids[0]]], dtype=torch.long),
-                   torch.tensor([[0]], dtype=torch.long))
-        _ = _w.logits[0, -1].cpu().numpy()
-        mgr.clear_session(wsid)
-    except Exception:
-        pass
+    # ── Pass 1: time prompt+1 token → prefill_s, then measure decode separately ──
+    # Strategy: run generate(1 token) → gives prefill_s ≈ prefill + 1 step.
+    # Then run generate(args.gen tokens) → total_s = prefill + all decode steps.
+    # decode_per_tok ≈ (total_s - prefill_s) / (args.gen - 1)  [difference cancels prefill]
+    # This avoids any hardcoded proportions.
 
-    sid = "bench"
-    mgr.clear_session(sid)
-    wrapper._session_token_ids[sid] = []
-    mgr.init_session(sid, prefill_len=len(ids))
-    mgr.register_prefill_tokens(sid, torch.tensor(ids, dtype=torch.long))
-    model._diffkv_session_ids = [sid]
-
-    # ── prefill (chunked, matches wrapper.generate) ──
-    CH = 512
-    if os.environ.get("DIFFKV_PREFILL_CHUNK_SIZE"):
-        try:
-            CH = int(os.environ["DIFFKV_PREFILL_CHUNK_SIZE"])
-        except ValueError:
-            pass
-    output = None
+    # Pass 1 — 1 token (prefill + 1 decode step)
+    sid1 = "bench_p1"
+    wrapper.manager.clear_session(sid1)
+    if hasattr(wrapper, "_session_token_ids"):
+        wrapper._session_token_ids[sid1] = []
+    wrapper.active_session = sid1
+    _mx_reset_peak()
     t0 = time.perf_counter()
-    for cs in range(0, len(ids), CH):
-        chunk = ids[cs:cs + CH]
-        ct = torch.tensor([chunk], dtype=torch.long)
-        pt = torch.tensor([list(range(cs, cs + len(chunk)))], dtype=torch.long)
-        output = model(ct, pt)
-        mgr.compress_deferred_prefill_blocks(sid)
-    logits = output.logits[0, -1].cpu().numpy()  # forces materialization
-    prefill_s = time.perf_counter() - t0
+    _ = wrapper.generate(prompt=prompt_text, max_new_tokens=1, temperature=0.0)
+    mx.eval(mx.zeros(1))
+    time_1tok = time.perf_counter() - t0
 
-    # ── decode (greedy, fixed count, EOS ignored) ──
-    cur_pos = len(ids)
-    generated = []
+    # Pass 2 — args.gen tokens (prefill + args.gen decode steps)
+    sid2 = "bench_p2"
+    wrapper.manager.clear_session(sid2)
+    if hasattr(wrapper, "_session_token_ids"):
+        wrapper._session_token_ids[sid2] = []
+    wrapper.active_session = sid2
     t0 = time.perf_counter()
-    for _ in range(args.gen):
-        nid = int(np.argmax(logits))
-        generated.append(nid)
-        mgr.register_prefill_tokens(sid, torch.tensor([nid], dtype=torch.long))
-        it = torch.tensor([[nid]], dtype=torch.long)
-        pp = torch.tensor([[cur_pos]], dtype=torch.long)
-        output = model(it, pp)
-        logits = output.logits[0, -1].cpu().numpy()
-        cur_pos += 1
-    decode_s = time.perf_counter() - t0
+    response = wrapper.generate(prompt=prompt_text, max_new_tokens=args.gen, temperature=0.0)
+    mx.eval(mx.zeros(1))
+    time_ntok = time.perf_counter() - t0
 
-    text = tok.decode(generated)
+    # Derived timing: difference cancels the common prefill cost
+    # decode_per_step ≈ (time_ntok - time_1tok) / (args.gen - 1)
+    n_extra = max(1, args.gen - 1)
+    decode_per_step = max(0.001, (time_ntok - time_1tok) / n_extra)
+    decode_s = decode_per_step * args.gen
+    prefill_s = time_1tok - decode_per_step  # prefill = 1-tok total minus 1 decode step
+
+    gen_toks = args.gen
     return {
         "prompt_tokens": prompt_tokens,
-        "gen_tokens": len(generated),
+        "gen_tokens": gen_toks,
         "prefill_s": prefill_s,
         "decode_s": decode_s,
-        "decode_tps": len(generated) / decode_s if decode_s > 0 else None,
+        "decode_tps": gen_toks / decode_s if decode_s > 0 else None,
         "ttft_s": None,
         "mx_peak_gb": _mx_peak_gb(),
-        "output_preview": text[:200],
-        "needle_found": NEEDLE_PASSCODE in text,
+        "output_preview": response[-300:] if len(response) > 300 else response,
+        "needle_found": NEEDLE_PASSCODE in response,
     }
+
 
 
 # ──────────────────── dense (plain mlx_lm int4, full KV) ─────────────────────

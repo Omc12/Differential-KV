@@ -2,13 +2,13 @@
 \toprule
 Component & Bytes & Note \\
 \midrule
-$U$ coefficients $[255,32]$ & 16320 & low-rank (base rank) \\
-$V_K,V_V\ [2,32,128]$ & 32768 & low-rank (base rank) \\
+$U$ coefficients $[255,16]$ & 16320 & low-rank \\
+$V_K,V_V\ [2,16,128]$ & 32768 & low-rank \\
 anchors $a_k,a_v\ [2,128]$ & 1024 & exact \\
 key min/max $[2,128]$ & 1024 & router \\
 scale, seq\_len & 8 & scalar \\
 \midrule
-\textbf{Low-rank core} & \textbf{51144} & (49.9 KiB; pool alloc uses $1.5r{=}48$) \\
+\textbf{Low-rank core} & \textbf{51144} & (49.9 KiB) \\
 exact residuals $R{=}128$ & 131072 & (128.0 KiB) \\
 exact residuals $R{=}64$ & 65536 & (64.0 KiB) \\
 \midrule

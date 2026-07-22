@@ -165,8 +165,28 @@ if HAS_TRITON:
                  m + tl.log(tl.where(l > 0.0, l, 1e-9)))
 
     # Working Triton kernel matching the actual NativeBlockPool layout
+    # Feature 3: @triton.autotune over RANK and S_MAX shapes.
+    # Triton pre-compiles one kernel per (R, S_MAX, D) combination seen at runtime
+    # and benchmarks them to pick the fastest config.  The inner rank loop unrolls
+    # completely for each specialisation → full register reuse, no loop overhead.
+    @triton.autotune(
+        configs=[
+            # Each config specialises (S_MAX tile, BLOCKS_PER_CHUNK).
+            # R (rank) and D (head_dim) are already constexpr — they specialise
+            # automatically per unique launch.  These configs tune the blocking.
+            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 16}, num_warps=4),
+            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 8},  num_warps=4),
+            triton.Config({"S_MAX": 64,  "BLOCKS_PER_CHUNK": 16}, num_warps=8),
+            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 8},  num_warps=4),
+            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 16}, num_warps=4),
+            triton.Config({"S_MAX": 128, "BLOCKS_PER_CHUNK": 16}, num_warps=8),
+        ],
+        key=["R", "D"],         # specialise per (rank, head_dim) pair
+        reset_to_zero=["out_ptr", "m_ptr", "l_ptr"],
+    )
     @triton.jit
     def _fused_sparse_decode_kernel(
+
         q_ptr, block_indices_ptr, pool_ak_ptr, pool_av_ptr, pool_vk_ptr, pool_vv_ptr,
         pool_u_ptr, pool_u_scale_ptr, pool_scales_ptr, pool_seq_lens_ptr,
         # Residual correction pointers (C1). res_pos = K positions, res_pos_v = V positions
@@ -1518,6 +1538,25 @@ def _pytorch_vectorized_sparse_attn_decode(
     block_capacity = 0
     diagnostics = (os.environ.get("DIFFKV_DIAGNOSTICS", "0") == "1")
 
+    # ── Features 1 & 2: Heat update + step-ahead prefetch (MPS/CPU path) ──
+    if N > 0 and session_id is not None:
+        _mgr = getattr(pool, "_manager", None) if pool is not None else None
+        if _mgr is not None:
+            _tiered = getattr(_mgr, "_kt_tiered_store", None)
+            if _tiered is not None:
+                _slot_list = block_indices.cpu().tolist()
+                for _sid in _slot_list:
+                    _tiered.update_heat(_sid, routing_score=1.0)
+                _occupied = [i for i in range(getattr(pool, "current_blocks", N))
+                             if getattr(pool, "seq_lens", None) is not None
+                             and pool.seq_lens[i].item() > 0]
+                _tiered.maybe_evict(_occupied)
+            _prefetch = getattr(_mgr, "_kt_prefetch_engine", None)
+            if _prefetch is not None and "_slot_list" in dir():
+                _prefetch.submit(session_id, _slot_list)
+    # ───────────────────────────────────────────────────────────────────────
+
+
     U = torch.empty((0,), device=q.device, dtype=q.dtype)
     V_K = torch.empty((0,), device=q.device, dtype=q.dtype)
     V_V = torch.empty((0,), device=q.device, dtype=q.dtype)
@@ -1918,8 +1957,33 @@ def native_triton_sparse_attn_decode(
         
     inv_scale = 1.0 / math.sqrt(D)
     N = block_indices.shape[0] if block_indices is not None else 0
-    
+
+    # ── Features 1 & 2: Heat update + step-ahead prefetch ─────────────────
+    # After routing delivers block_indices, tell the TieredBlockStore that these
+    # slots are "hot" and submit an async prefetch job for the next decode step.
+    # Both calls are O(K) and non-blocking; no GPU synchronisation is introduced.
+    if N > 0 and session_id is not None:
+        _mgr = getattr(pool, "_manager", None) if pool is not None else None
+        if _mgr is not None:
+            # Feature 1: mark routed slots hot so eviction keeps them warm.
+            _tiered = getattr(_mgr, "_kt_tiered_store", None)
+            if _tiered is not None:
+                _slot_list = block_indices.cpu().tolist()
+                for _sid in _slot_list:
+                    _tiered.update_heat(_sid, routing_score=1.0)
+                # Proactively evict cold slots when pool fill is high (async no-op if below thresh).
+                _occupied = [i for i in range(getattr(pool, "current_blocks", N)) if getattr(pool, "seq_lens", None) is not None and pool.seq_lens[i].item() > 0]
+                _tiered.maybe_evict(_occupied)
+
+            # Feature 2: submit routed slots to the prefetch engine so they are
+            # H2D-warm before the next decode step begins.
+            _prefetch = getattr(_mgr, "_kt_prefetch_engine", None)
+            if _prefetch is not None:
+                _prefetch.submit(session_id, _slot_list if "_slot_list" in dir() else block_indices.cpu().tolist())
+    # ──────────────────────────────────────────────────────────────────────────
+
     if N > 0:
+
         try:
             q_sq = q[0, :, 0, :]
             D_pad = triton.next_power_of_2(D)

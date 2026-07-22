@@ -29,7 +29,15 @@ exploits redundancy across tokens or channels, replacing the cache with a small
 basis~\cite{deepseekv2,dong2024less}; it compresses the shared structure well but, by construction,
 discards the low-energy directions in which distinctive tokens live. Orthogonally, KV \emph{memory
 management} such as paged attention~\cite{kwon2023vllm} reduces fragmentation without shrinking the
-logical cache.
+logical cache, and heterogeneous CPU--GPU inference frameworks such as
+kTransformers~\cite{yang2025ktransformers} keep hot operators on the GPU while offloading cold
+operators and KV state to CPU memory, extending effective capacity at the cost of host--device
+transfer latency. DeepSeek-V2's Multi-head Latent Attention (MLA)~\cite{deepseekv2} takes
+a different angle: it re-trains the model to project keys and values into a shared low-rank latent
+space at the architecture level, reducing KV cache footprint without post-hoc compression. \diffkv{}
+draws on both ideas: it adapts kTransformers' tiered CPU--GPU offloading to the compressed-block
+level (\S\ref{par:ktransformers}), and incorporates an optional MLA-style latent projection as a
+pre-SVD step (\S\ref{sec:impl}), without requiring model re-training.
 
 The tension common to all three is that the tokens most expensive to keep---rare, high-entropy
 tokens such as identifiers, digits, and names---are exactly the tokens that verbatim recall

@@ -71,6 +71,12 @@ report the full picture---including where \diffkv{} loses---and we treat the res
     baseline on identical weights, reporting footprint, prefill, decode, and exact recall from
     $4$k to $\reachK$k, with component ablations and a residual-budget sweep. We state the
     decode-throughput cost plainly rather than hiding it.
+  \item \textbf{Runtime extensions for GPU-native serving} (\S\ref{sec:impl}), informed by the
+    kTransformers framework~\cite{yang2025ktransformers}: tiered CPU--GPU block offloading with
+    heat-scored eviction, step-ahead asynchronous H2D prefetch, autotuned Triton decode
+    kernels~\cite{tillet2019triton}, and an optional MLA-style latent
+    projection~\cite{deepseekv2}. All four are implemented and CPU-verified; CUDA hardware
+    validation is reserved for a follow-up.
 \end{itemize}
 
 The rest of the paper follows the system's own execution order: background and the memory

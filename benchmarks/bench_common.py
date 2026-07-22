@@ -50,8 +50,14 @@ FILLER_PARAGRAPH = (
 
 
 def _load_ref_tokenizer():
-    from transformers import AutoTokenizer
-    return AutoTokenizer.from_pretrained(REF_TOKENIZER_ID)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    try:
+        from mlx_lm.utils import load_tokenizer
+        return load_tokenizer("mlx-community/Qwen2.5-1.5B-Instruct-4bit")
+    except Exception:
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained(REF_TOKENIZER_ID, local_files_only=True)
 
 
 def build_niah_prompt(target_tokens, tokenizer=None, tolerance=24):
@@ -66,14 +72,18 @@ def build_niah_prompt(target_tokens, tokenizer=None, tolerance=24):
         tokenizer = _load_ref_tokenizer()
 
     def n_tokens(text):
+        if hasattr(tokenizer, "encode"):
+            return len(tokenizer.encode(text, add_special_tokens=False))
         return len(tokenizer(text, add_special_tokens=False)["input_ids"])
 
     def templ(content):
-        return tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        if hasattr(tokenizer, "apply_chat_template"):
+            return tokenizer.apply_chat_template(
+                [{"role": "user", "content": content}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
     # Fixed overhead: chat template wrapper + needle + question.
     overhead = n_tokens(templ(NEEDLE_SENTENCE + QUESTION))

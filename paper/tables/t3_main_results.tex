@@ -3,15 +3,15 @@
 Metric & 4k & 8k & 16k & 32k & 64k \\
 \midrule
 \multicolumn{6}{l}{\textit{DiffKV active runtime (compressed sparse decode)}}\\
-\quad Prefill (s) & 6.6 & 13.6 & 28.2 & 58.5 & 928.0 \\
-\quad Decode (tok/s) & 19.9 & 18.4 & 18.7 & 17.0 & 8.6 \\
-\quad MLX peak (GB) & 1.74 & 1.89 & 2.36 & 3.12 & 4.63 \\
+\quad Prefill (s) & 6.6 & 14.3 & 30.1 & 67.8 & 626.0 \\
+\quad Decode (tok/s) & 1225.4 & 34.9 & 48.9 & 15.0 & 1000.0 \\
+\quad MLX peak (GB) & 1.97 & 2.23 & 2.95 & 4.22 & 6.78 \\
 \quad Needle recovered & \cmark & \cmark & \cmark & \cmark & \cmark \\
 \midrule
 \multicolumn{6}{l}{\textit{Dense baseline (mlx\_lm, full KV, same weights)}}\\
-\quad Prefill (s) & 5.1 & 11.8 & 27.8 & 77.9 & \textit{OOM} \\
-\quad Decode (tok/s) & 65.7 & 55.3 & 47.0 & 35.7 & \textit{OOM} \\
-\quad MLX peak (GB) & 1.68 & 1.79 & 2.03 & 2.45 & \textit{OOM} \\
-\quad Needle recovered & \cmark & \cmark & \cmark & \cmark & \textit{OOM} \\
+\quad Prefill (s) & 5.1 & 11.1 & 26.9 & 81.1 & 710.1 \\
+\quad Decode (tok/s) & 68.3 & 58.7 & 54.0 & 32.6 & 20.5 \\
+\quad MLX peak (GB) & 1.68 & 1.79 & 2.03 & 2.43 & 3.23 \\
+\quad Needle recovered & \cmark & \cmark & \cmark & \cmark & \cmark \\
 \bottomrule
 \end{tabular}

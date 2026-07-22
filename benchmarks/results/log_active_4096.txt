@@ -1,7 +1,4 @@
-[DiffKV] macOS + MLX detected: using native MLX DiffKV wrapper.
-[DiffKV MLX] Loading quantized model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
 [DiffKV MLX] Loading model via mlx_lm: mlx-community/Qwen2.5-1.5B-Instruct-4bit...
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 142448.06it/s]
-[DiffKV MLX] Loaded model in 1.25s
+[DiffKV MLX] Loaded model in 0.67s
 
-__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 128, "prefill_s": 4.890136917000291, "decode_s": 3.9146242499996333, "decode_tps": 32.69790197616336, "ttft_s": null, "mx_peak_gb": 1.60439238, "output_preview": "The secret passcode hidden in the document is **\"OMEGA-7741-DELTA**\".\n\n### Consistency Models in Distributed Systems\n\nIn distributed systems, consistency is a fundamental aspect of data consistency in", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 4096, "gen_target": 128, "worker_wall_s": 13.041879291999976}
+__BENCH_RESULT__ {"prompt_tokens": 4096, "gen_tokens": 128, "prefill_s": 6.152350999996997, "decode_s": 3.832731250033248, "decode_tps": 33.39654978388835, "ttft_s": null, "mx_peak_gb": 1.552875652, "output_preview": " consistency, eventual consistency, and read-your-writes.\n\n#### Linearizable Consistency\nLinearizability is one of the strongest consistency guarantees available in distributed systems. It ensures that every operation takes effect atomically at some instant between its invocation and response to all", "needle_found": true, "status": "ok", "engine": "active", "ctx_target": 4096, "gen_target": 128, "worker_wall_s": 14.52512658300111}

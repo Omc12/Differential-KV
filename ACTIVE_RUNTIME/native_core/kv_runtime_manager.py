@@ -711,6 +711,9 @@ class KVRuntimeManager:
             max_residual_tokens=self.config.max_residual_tokens,
         )
         self.native_pool.config = self.config
+        # Back-reference so decode-path hooks can reach k-transformers subsystems
+        # through the pool object (which is always passed to Triton/PyTorch kernels).
+        self.native_pool._manager = self
 
         # ── Routing top-K default (block_size-derived, MLX-parity) ────────
         # A block router keeps K blocks; the routed TOKEN budget is K * block_size.
@@ -822,6 +825,71 @@ class KVRuntimeManager:
         # when this is zero (the normal decode steady-state after prefill completes).
         self._pending_cpu_blocks: int = 0
         self._pending_lock = threading.Lock()
+
+        # ── k-transformers Features 1, 2, 4 ──────────────────────────────────
+        # All gated by env vars; existing behaviour is unchanged when disabled.
+        self._kt_tiered_store  = None   # Feature 1: TieredBlockStore
+        self._kt_prefetch_engine = None  # Feature 2: BlockPrefetchEngine
+        self._kt_mla_projectors: dict = {}  # Feature 4: {layer_idx: MLAProjector}
+
+        # Feature 1: Tiered CPU-GPU KV Offloading
+        _tier_env = os.environ.get("DIFFKV_TIER_ENABLED", "auto").lower()
+        _is_gpu = str(self.device).startswith("cuda") or "mps" in str(self.device)
+        _tier_on = (_tier_env == "1") or (_tier_env == "auto" and _is_gpu)
+        if _tier_on:
+            try:
+                from native_core.paging.tiered_block_store import TieredBlockStore
+                _evict_thresh = float(os.environ.get("DIFFKV_TIER_EVICT_THRESH", "0.80"))
+                _evict_batch  = int(os.environ.get("DIFFKV_TIER_EVICT_BATCH", "32"))
+                self._kt_tiered_store = TieredBlockStore(
+                    pool=self.native_pool,
+                    pager=self.pager,
+                    device=str(self.device),
+                    evict_threshold=_evict_thresh,
+                    evict_batch=_evict_batch,
+                )
+                print(f"[DiffKV kT] Feature 1 — TieredBlockStore enabled "
+                      f"(evict_thresh={_evict_thresh:.0%}, batch={_evict_batch})")
+            except Exception as _e:
+                print(f"[DiffKV kT] Feature 1 — TieredBlockStore init failed: {_e}")
+
+        # Feature 2: Async Block Prefetching
+        _prefetch_on = os.environ.get("DIFFKV_BLOCK_PREFETCH", "1") == "1"
+        if _prefetch_on:
+            try:
+                from native_core.compression.block_prefetch_engine import BlockPrefetchEngine
+                _lookahead = int(os.environ.get("DIFFKV_PREFETCH_LOOKAHEAD", "1"))
+                self._kt_prefetch_engine = BlockPrefetchEngine(
+                    tiered_store=self._kt_tiered_store,
+                    device=str(self.device),
+                    lookahead=_lookahead,
+                )
+                self._kt_prefetch_engine.start()
+                print(f"[DiffKV kT] Feature 2 — BlockPrefetchEngine enabled "
+                      f"(lookahead={_lookahead}, active={self._kt_prefetch_engine.is_enabled()})")
+            except Exception as _e:
+                print(f"[DiffKV kT] Feature 2 — BlockPrefetchEngine init failed: {_e}")
+
+        # Feature 4: MLA Latent Projection (experimental)
+        _mla_on = os.environ.get("DIFFKV_MLA_LATENT", "0") == "1"
+        if _mla_on:
+            try:
+                from native_core.compression.mla_projector import MLAProjector
+                _mla_latent_dim = int(os.environ.get("DIFFKV_MLA_LATENT_DIM", "0"))
+                _mla_calib     = int(os.environ.get("DIFFKV_MLA_CALIB_BLOCKS", "16"))
+                for _li in range(self.num_layers):
+                    self._kt_mla_projectors[_li] = MLAProjector(
+                        head_dim=self.head_dim,
+                        kv_heads=self.kv_heads,
+                        latent_dim=_mla_latent_dim,
+                        device=str(self.device),
+                        n_calib_blocks=_mla_calib,
+                    )
+                _ld = self._kt_mla_projectors[0].latent_dim
+                print(f"[DiffKV kT] Feature 4 — MLAProjector enabled "
+                      f"(latent_dim={_ld}, calib_blocks={_mla_calib})")
+            except Exception as _e:
+                print(f"[DiffKV kT] Feature 4 — MLAProjector init failed: {_e}")
 
     # ── Session management ────────────────────────────────────────────────────
 
@@ -3143,6 +3211,23 @@ class KVRuntimeManager:
             
         normalized_deltas, token_norms, deltas, rank, block_token_ids, k_orig, v_orig, anchor_kv_local = res
 
+        # ── Feature 4: MLA Latent Projection ──────────────────────────────
+        # If a per-layer MLAProjector is registered, project normalized_deltas to
+        # a lower-dimensional latent space before the SVD.  The projector accumulates
+        # the first n_calib_blocks to build W via PCA; before calibration is done it
+        # acts as identity.  After projection, the SVD runs on a smaller matrix
+        # [n_tokens, latent_dim] instead of [n_tokens, 2*kv_heads*head_dim].
+        _mla_proj = None
+        if self._kt_mla_projectors:
+            _layer_idx = getattr(block, "_layer_idx_hint", None)
+            if _layer_idx is not None:
+                _mla_proj = self._kt_mla_projectors.get(_layer_idx)
+        if _mla_proj is not None:
+            # Update calibration — returns True once W is initialised
+            _mla_proj.update_calibration(normalized_deltas)
+            # Project to latent space (identity if not yet calibrated)
+            normalized_deltas = _mla_proj.project(normalized_deltas)
+
         # FIX (needle digits): force exact residuals for skip_compression (digit/
         # formula/exact) blocks that the deferred path force-compresses — otherwise
         # a low-but-nonzero SVD error corrupts the digits at decode ('847291'->'84').
@@ -3150,10 +3235,29 @@ class KVRuntimeManager:
             normalized_deltas, rank,
             force_exact=bool(getattr(block, "skip_compression", False)),
         )
-        
+
+        # ── Feature 4: Unproject V back to full feature space ─────────────
+        # V must be in the original feat_dim for the Triton/MPS attention kernel.
+        if _mla_proj is not None and _mla_proj.is_calibrated:
+            lr_delta_V_orig = _mla_proj.unproject(lr_delta.V)
+            lr_delta = type(lr_delta)(
+                U=lr_delta.U, V=lr_delta_V_orig,
+                shape=lr_delta.shape, rank=lr_delta.rank, scale=lr_delta.scale,
+                energy_retained=getattr(lr_delta, "energy_retained", 0.0),
+                cosine_sim=getattr(lr_delta, "cosine_sim", 1.0),
+                norm_drift=getattr(lr_delta, "norm_drift", 0.0),
+                dynamic_rank=getattr(lr_delta, "dynamic_rank", -1),
+                residual_K_positions=getattr(lr_delta, "residual_K_positions", None),
+                residual_K_values=getattr(lr_delta, "residual_K_values", None),
+                residual_V_positions=getattr(lr_delta, "residual_V_positions", None),
+                residual_V_values=getattr(lr_delta, "residual_V_values", None),
+            )
+        # ──────────────────────────────────────────────────────────────────
+
         # Populate SVD residuals on block
         block.residual_K_positions = lr_delta.residual_K_positions
         block.residual_K_values = lr_delta.residual_K_values
+
         block.residual_V_positions = lr_delta.residual_V_positions
         block.residual_V_values = lr_delta.residual_V_values
         

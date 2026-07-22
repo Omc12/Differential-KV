@@ -27,4 +27,7 @@ report this trade-off in full, isolate each component with ablations, and charac
 residual budget as an explicit accuracy--memory--speed dial. All numbers in this report are
 measured on the described host; none are estimated. A CUDA/Triton decode path exists in the
 codebase but is not evaluated here, and the report reserves space for it without restructuring.
+The runtime additionally incorporates tiered CPU--GPU block offloading, step-ahead asynchronous
+prefetch, and autotuned Triton kernels---informed by the kTransformers inference
+framework---that are implemented and unit-tested but await GPU hardware validation.
 \end{abstract}

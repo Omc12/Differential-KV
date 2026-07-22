@@ -53,6 +53,27 @@ import mlx.nn as nn
 from mlx_lm.utils import load as mlx_load
 import torch
 
+# ── Feature 3: simd_expand — vectorized U@V Metal kernel (k-transformers) ───
+# Used for single-block reconstruction in non-cached decode paths.
+# The batched path (compute_decode_attention_static) uses mx.einsum which MLX
+# auto-fuses via @mx.compile — no change needed there.
+try:
+    from native_core.sparse_decode.simd_expand import (
+        expand_kv_mlx as _mlx_expand_kv,
+        mlx_block_expand_fallback as _mlx_expand_fallback,
+        _try_build_metal_kernel as _simd_try_build_metal,
+    )
+    _METAL_EXPAND_AVAILABLE = True
+    # Pre-warm kernel build (non-blocking; fails silently if MLX < 0.16)
+    try:
+        _simd_try_build_metal()
+    except Exception:
+        pass
+except ImportError:
+    _METAL_EXPAND_AVAILABLE = False
+    _mlx_expand_kv = None
+    _mlx_expand_fallback = None
+
 def _normalize_references(text: str) -> str:
     """Normalise citation-list formatting inconsistencies produced by the model."""
     lines = text.split('\n')

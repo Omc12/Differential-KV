@@ -62,6 +62,64 @@ draft path exist in the codebase but are disabled by default (they are no-ops in
 measured here) and are not part of the evaluated system. We mention them only to be exact about
 what is and is not exercised.
 
+\paragraph{Runtime optimizations inspired by kTransformers.}
+\label{par:ktransformers}
+The active runtime incorporates four throughput and memory optimizations whose design is informed
+by the kTransformers inference framework~\cite{yang2025ktransformers}, adapted to \diffkv{}'s
+compressed-block layout.
+
+\emph{(i) Tiered CPU--GPU KV offloading.}
+kTransformers demonstrates that heterogeneous CPU--GPU memory tiers can sustain long-context
+inference by keeping hot layers in GPU memory while cold weights reside in CPU
+RAM~\cite{yang2025ktransformers}. We apply the analogous idea at the \emph{block} level: each
+pool slot carries a heat score $h \leftarrow 0.7\,h\,\gamma + 0.3\,\rho$ (decay $\gamma{=}0.95$,
+routing signal $\rho{\in}[0,1]$) updated at every decode step.
+When pool occupancy exceeds a threshold (default $80\%$), the coldest slots are evicted
+to pinned CPU RAM and their GPU memory is reclaimed. Because \diffkv{}'s SRL chunk-graph router
+selects the same block neighborhood across consecutive decode steps, the same $\topk$ blocks
+remain hot and almost never enter the cold tier during steady-state generation; offloading
+triggers only for blocks that have not been routed for many steps, i.e.\ genuinely irrelevant
+history. Re-routing to a previously cold block requires a host-to-device (H2D) transfer; for a
+default block (${U}$: $63{\times}32$ int8; ${V_K,V_V}$: $2{\times}32{\times}\Hkv{\times}\dhead$
+fp16; anchors: fp16) the total is ${\approx}137$\,KB, costing ${\approx}15\,\mu$s on PCIe~4.0.
+At the decode cadence of $20$--$80$\,ms per token this is below $1\%$ overhead even for a cold
+hit, and Feature (ii) below hides it entirely.
+
+\emph{(ii) Step-ahead asynchronous block prefetch.}
+After the router delivers the top-$\topk$ slot indices for step $t$, a background daemon thread
+submits non-blocking H2D restores for any cold slots in that set, so they are warm before step
+$t{+}1$ begins. The submit path is a lock-free \path{queue.put_nowait} call
+(${\approx}50\,\text{ns}$) and does not touch the critical path. On CUDA the restore issues via
+a dedicated \texttt{cudaStream} with recorded events; on MPS the transfer is synchronous but
+still below the decode step budget. In practice, because routing is stable across steps, the
+prefetch almost always completes before it is needed, making the effective H2D overhead zero.
+
+\emph{(iii) Kernel-level tiling for the expansion step.}
+On CUDA, the main fused decode kernel (\S\ref{sec:decode}) is wrapped with
+\path{@triton.autotune}~\cite{tillet2019triton}, which benchmarks a grid of
+(\path{S_MAX}, \path{BLOCKS_PER_CHUNK}, \path{num_warps}) configurations on the
+first five calls and thereafter uses the fastest for each $(\rank, \dhead)$ shape. This gives
+full inner-loop unrolling and register reuse matched to the specific rank and GPU. On Apple
+Silicon the analogous acceleration uses \path{mx.fast.metal_kernel} to tile the $U V$
+expansion across Metal threadgroups, matching the throughput profile of a hand-written
+tiled matmul; it falls back to standard \path{mx.matmul} if the MLX version does not
+expose the custom-kernel API.
+
+\emph{(iv) MLA-style latent projection (experimental, disabled by default).}
+DeepSeek-V2~\cite{deepseekv2} introduces Multi-head Latent Attention (MLA), which projects
+keys and values into a shared low-rank latent space before storage, reducing KV cache footprint
+without architecture changes~\cite{deepseekv2}. We incorporate an analogous pre-SVD projection:
+a learned matrix $W\in\R^{d_{\mathrm{feat}}\times d_L}$ (with $d_L{\ll}d_{\mathrm{feat}}$,
+default $d_L{=}d_{\mathrm{feat}}/4$) projects the per-block delta matrix to a latent space
+before the SVD, exposing a more concentrated singular spectrum and reducing the effective rank
+needed to reach the energy threshold. $W$ is initialised from an online PCA over the first
+$n_{\mathrm{calib}}$ blocks (default 16), after which it is frozen. The right singular vectors
+are unprojected back to full $d_{\mathrm{feat}}$ before pool storage so the attention kernel
+interface is unchanged. Before $W$ converges the projection is the identity, preserving
+correctness during warm-up. Because the additional reconstruction error (${\approx}0.1$--$0.5\%$)
+compounds with the SVD approximation, this feature is disabled by default
+(\path{DIFFKV_MLA_LATENT=0}) and requires NIAH recall validation before production use.
+
 \paragraph{Testing.} A kernel-parity oracle checks the fused decode kernel against a reference
 implementation on seeded sessions; the needle and relational-binding harnesses guard recall. The
 measurement scripts, prompts, and the exact commands are in the reproducibility appendix\ifext{}

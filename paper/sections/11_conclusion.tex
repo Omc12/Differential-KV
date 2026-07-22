@@ -14,8 +14,13 @@ state $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense
 buried passcode exactly from $4$k to $\reachK$k, reaches $\reachK$k where the dense full-KV cache
 runs out of memory, and overtakes dense on long-context prefill---at a measured cost in decode
 throughput, in the regime where a dense cache still fits, that we report in full and localize to
-reconstruction-and-merge overhead. The residual budget is an explicit dial between memory, accuracy, and speed. The most
-promising next steps are a fused (and GPU-native) decode kernel to narrow the throughput gap, and a
-broader evaluation across models, hardware, and standard long-context suites. We have been careful
+reconstruction-and-merge overhead. The residual budget is an explicit dial between memory, accuracy,
+and speed. Toward closing the throughput gap, the runtime now incorporates four optimizations
+informed by the kTransformers framework~\cite{yang2025ktransformers}: tiered CPU--GPU block
+offloading with heat-scored eviction, step-ahead asynchronous H2D prefetching, autotuned Triton
+decode kernels~\cite{tillet2019triton}, and an optional MLA-style latent pre-projection inspired by
+DeepSeek-V2~\cite{deepseekv2}. These are implemented and CPU-verified but await GPU hardware
+validation; the remaining next steps are a fused single-launch CUDA decode kernel and a broader
+evaluation across models, hardware, and standard long-context suites. We have been careful
 to claim only what the measurements support: \diffkv{} is a memory-and-prefill instrument for
 long context on commodity unified-memory hardware, not a universally faster one.

@@ -14,6 +14,10 @@ the repository, but the evaluation host has no NVIDIA GPU, so we report \emph{no
 make \emph{no} CUDA claims. The decode design ports cleanly---reconstruct routed blocks into a
 buffer (a matmul), attend with a flash kernel, cache across a re-route interval---so we expect the
 gap in E4 to narrow on a GPU-native path, but that is a hypothesis to be measured, not a result.
+The CUDA kernel is additionally equipped with \path{@triton.autotune}~\cite{tillet2019triton}
+over tiling configurations (see \S\ref{par:ktransformers}), and the runtime's tiered CPU--GPU
+block offloading (\S\ref{par:ktransformers}) is active on CUDA with asynchronous H2D via dedicated
+\path{cudaStream}s. Both are CPU-verified and ready for hardware validation.
 The figures and tables reserve space (a series slot in Figure~\ref{fig:perf}, a column convention
 in the results tables) so CUDA data can be inserted without restructuring the paper.
 
