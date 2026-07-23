@@ -75,6 +75,7 @@ except ImportError:
     _mlx_expand_fallback = None
 
 from serving.query_span import extract_query_token_ids as _extract_query_token_ids
+from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
 
 
 def _normalize_references(text: str) -> str:
@@ -1262,42 +1263,43 @@ def _cache_fetch(cache, keys, values):
 
 
 def _sparse_prefill_attend(
-    q_rot: mx.array,       # [1, H_q, L, D]   rotated queries for the current chunk
-    all_k: mx.array,       # [1, H_kv, T, D]  rotated keys, ALL tokens so far (T = cur_start + L)
-    all_v: mx.array,       # [1, H_kv, T, D]
-    cur_start: int,        # absolute position of the first query in this chunk
+    q_rot: mx.array,          # [1, H_q, L, D]   rotated queries for the current chunk
+    all_k: mx.array,          # [1, H_kv, T, D]  rotated keys, ALL tokens so far
+    all_v: mx.array,          # [1, H_kv, T, D]
+    cur_start: int,           # absolute position of the first query in this chunk
     scale: float,
-    gpk: int,              # GQA group size = H_q // H_kv
+    gpk: int,                 # GQA group size = H_q // H_kv
     block_size: int,
-    window: int,           # exact recency window (tokens), always attended
-    sink_blocks: int,      # leading blocks kept as always-attended attention sinks
+    window: int,              # exact recency window (tokens), always attended
+    sink_blocks: int,         # leading blocks kept as always-attended attention sinks
     kmin: int,
     frac: float,
     dbg: bool = False,
+    pinned_blk_abs: tuple = (),  # absolute block indices to always attend (instruction sinks)
 ):
     """DSA/NSA-style block-sparse PREFILL attention for one chunk (HANDOFF §DSA).
 
-    Instead of dense attention over all T keys, build a SPARSE key/value set —
-        [ leading sink blocks | top-K routed history blocks | recency window | current chunk ]
-    — and run ONE masked SDPA over it. History keys (absolute pos < cur_start) are fully
-    visible; the current chunk is causal. Blocks are not yet compressed during prefill, so
-    routing is a Quest-style min/max bound (`_block_relevance_minmax`) computed on-the-fly
-    from the RAW block keys. Compute drops O(L*T) -> O(L*Ksel). Returns [1, H_q, L, D].
+    Builds a SPARSE key/value set:
+        [ sink blocks | pinned instruction blocks | top-K routed blocks | recency window | current chunk ]
+    Pinned blocks (from pinned_blk_abs) are always attended for chunks after the question,
+    ensuring post-question tokens attend the question regardless of routing scores.
+    Blocks are not yet compressed during prefill; routing uses Quest-style min/max bounds.
+    Compute drops O(L*T) -> O(L*Ksel). Returns [1, H_q, L, D].
     """
     _, H_q, L, D = q_rot.shape
     H_kv = all_k.shape[1]
     T = all_k.shape[2]
     neg_inf = mx.array(-float("inf"), dtype=q_rot.dtype)
     zero = mx.array(0.0, dtype=q_rot.dtype)
+    i32 = mx.int32
 
     # Aligned routable region: whole blocks fully inside [sink_end, cur_start - window).
     sink_end = sink_blocks * block_size
-    first_blk = (sink_end + block_size - 1) // block_size    # first block fully >= sink_end
-    last_blk = (cur_start - window) // block_size            # blocks fully below cur_start-window
+    first_blk = (sink_end + block_size - 1) // block_size
+    last_blk = (cur_start - window) // block_size
     nb = last_blk - first_blk
 
     if nb <= 0:
-        # Not enough prunable history — dense causal over everything.
         ii = mx.arange(L).reshape(L, 1) + cur_start
         jj = mx.arange(T).reshape(1, T)
         mask = mx.where(jj <= ii, zero, neg_inf)
@@ -1306,46 +1308,72 @@ def _sparse_prefill_attend(
     aligned_lo = first_blk * block_size
     aligned_hi = last_blk * block_size
 
-    # Per-block key min/max over the raw keys → [nb, H_kv, D].
+    # Per-block key min/max for relevance scoring.
     mid_k = all_k[:, :, aligned_lo:aligned_hi, :].reshape(H_kv, nb, block_size, D)
-    comp_min_k = mx.min(mid_k, axis=2).transpose(1, 0, 2)
-    comp_max_k = mx.max(mid_k, axis=2).transpose(1, 0, 2)
+    comp_min_k = mx.min(mid_k, axis=2).transpose(1, 0, 2)   # [nb, H_kv, D]
+    comp_max_k = mx.max(mid_k, axis=2).transpose(1, 0, 2)   # [nb, H_kv, D]
 
-    # Coarse block selection: check if we should skip query pooling to prevent signal dilution
+    # ── Instruction-pinned blocks ────────────────────────────────────────────
+    # Blocks in pinned_blk_abs that fall within the routable region are always
+    # attended and removed from the routing pool (no top-K budget cost).
+    pinned_in_region = set()
+    pinned_tok_parts = []
+    for blk_abs in pinned_blk_abs:
+        blk_start = blk_abs * block_size
+        blk_end   = blk_start + block_size
+        if blk_start >= aligned_lo and blk_end <= aligned_hi:
+            pinned_in_region.add(blk_abs - first_blk)   # store as relative index
+            pinned_tok_parts.append(mx.arange(blk_start, blk_end, dtype=i32))
+
+    # Routable = all blocks MINUS pinned
+    routable = [bi for bi in range(nb) if bi not in pinned_in_region]
+    nb_r = len(routable)
+
+    # ── Relevance scoring over routable blocks only ──────────────────────────
     no_pool = os.environ.get("DKV_SP_NO_POOL", "1") == "1"
-    if no_pool:
-        # Pass the full query chunk of shape [H_q, L, D]
-        rel = _block_relevance_minmax(q_rot[0], comp_min_k, comp_max_k, scale, gpk)
+    if nb_r > 0:
+        if nb_r < nb:
+            # Gather only routable block slices
+            r_min = mx.stack([comp_min_k[bi] for bi in routable], axis=0)   # [nb_r, H_kv, D]
+            r_max = mx.stack([comp_max_k[bi] for bi in routable], axis=0)
+        else:
+            r_min, r_max = comp_min_k, comp_max_k
+        if no_pool:
+            rel = _block_relevance_minmax(q_rot[0], r_min, r_max, scale, gpk)
+        else:
+            q_rep = mx.mean(q_rot[0], axis=1)
+            rel   = _block_relevance_minmax(q_rep, r_min, r_max, scale, gpk)
+        K = min(nb_r, max(kmin, int(math.ceil(frac * nb_r))))
     else:
-        # Coarse block selection uses a single pooled query per head (mean over the chunk).
-        q_rep = mx.mean(q_rot[0], axis=1)                        # [H_q, D]
-        rel = _block_relevance_minmax(q_rep, comp_min_k, comp_max_k, scale, gpk)  # [nb]
+        rel, K = None, 0
 
-    K = min(nb, max(kmin, int(math.ceil(frac * nb))))
-    # Build the gather index list ENTIRELY in MLX (no host sync). The mask makes ALL history
-    # keys fully visible regardless of order, so the selected blocks need NOT be sorted — which
-    # lets us skip the per-layer `mx.eval(sel)` + `.tolist()` GPU→CPU sync that otherwise
-    # serialized ~L/CH×n_layers times per prefill.
-    i32 = mx.int32
-    if K >= nb:
-        sel_tok = mx.arange(aligned_lo, aligned_hi, dtype=i32)          # all routable tokens
-    elif K <= 0:
-        sel_tok = mx.arange(0, 0, dtype=i32)                            # pure StreamingLLM: no routed blocks
+    # ── Build top-K token index list ─────────────────────────────────────────
+    if K >= nb_r and nb_r > 0:
+        sel_tok = mx.arange(aligned_lo, aligned_hi, dtype=i32) if not pinned_in_region else mx.concatenate(
+            [mx.arange(aligned_lo + bi * block_size, aligned_lo + (bi + 1) * block_size, dtype=i32)
+             for bi in routable]
+        ) if routable else mx.arange(0, 0, dtype=i32)
+    elif K > 0 and rel is not None:
+        sel_r   = mx.argpartition(-rel, K)[:K].astype(i32)   # indices into routable[]
+        # Convert back to absolute block starts
+        sel_abs = mx.array(
+            [(first_blk + routable[int(sel_r[j].item())]) * block_size for j in range(K)],
+            dtype=i32,
+        )
+        offs    = mx.arange(block_size, dtype=i32)
+        sel_tok = (mx.expand_dims(sel_abs, 1) + mx.expand_dims(offs, 0)).reshape(-1)
     else:
-        sel_blk = mx.argpartition(-rel, K)[:K].astype(i32)             # [K] routable block idxs
-        sel_abs = (first_blk + sel_blk) * block_size                   # [K] absolute block starts
-        offs = mx.arange(block_size, dtype=i32)                        # [block_size]
-        sel_tok = (mx.expand_dims(sel_abs, 1) + mx.expand_dims(offs, 0)).reshape(-1)  # [K*bs]
+        sel_tok = mx.arange(0, 0, dtype=i32)
 
-    # Global key index list:
-    #   [0, aligned_lo)          leading sink blocks + pre-alignment slack (fully attended)
-    #   selected blocks          K*block_size rows (unordered — mask treats them uniformly)
-    #   [aligned_hi, cur_start)  post-alignment slack + recency window (fully attended)
-    #   [cur_start, T)           current chunk (causal)
+    # ── Assemble final index list ─────────────────────────────────────────────
+    # Layout: [sinks | pinned-instruction | top-K routed | recency | current]
     idx_parts = []
     if aligned_lo > 0:
         idx_parts.append(mx.arange(0, aligned_lo, dtype=i32))
-    idx_parts.append(sel_tok)
+    for ptoks in pinned_tok_parts:            # pinned instruction blocks
+        idx_parts.append(ptoks)
+    if sel_tok.size > 0:
+        idx_parts.append(sel_tok)             # top-K routed
     if cur_start > aligned_hi:
         idx_parts.append(mx.arange(aligned_hi, cur_start, dtype=i32))
     idx_parts.append(mx.arange(cur_start, T, dtype=i32))
@@ -1786,6 +1814,17 @@ class MLXKVBlockManager:
         self._sp_kmin = int(os.environ.get("DKV_SPARSE_PREFILL_KMIN", "8"))
         self._sp_frac = float(os.environ.get("DKV_SPARSE_PREFILL_FRAC", "0.05"))
         self._sp_dbg = os.environ.get("DKV_SPARSE_PREFILL_DBG", "0") == "1"
+        # ── Instruction-pinning (DKV_INSTR_PIN) ─────────────────────────────
+        # When sparse prefill is on, pin answer-candidate blocks (those whose
+        # content is distinctively tied to the user question) as always-attended
+        # sinks. Gated off by default until benchmarked; set DKV_INSTR_PIN=1
+        # to enable. The pinned block list is computed per-session before prefill
+        # starts and stored in self._sp_pinned_blocks[session_id].
+        self._sp_instr_pin = (self._sparse_prefill and
+                              os.environ.get("DKV_INSTR_PIN", "0") != "0")
+        self._sp_pin_idf   = float(os.environ.get("DKV_INSTR_PIN_IDF", "3.0"))
+        self._sp_pin_max   = int(os.environ.get("DKV_INSTR_PIN_MAX", "4"))
+        self._sp_pinned_blocks: dict = {}   # session_id -> tuple of absolute block indices
 
         # ── DKV_LEGO_PREFILL=1 — streaming "lego-block" prefill (memory follow-up to
         # sparse prefill; see the note above about dropping compressed blocks' raw KV). ──
@@ -4902,11 +4941,14 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                     # Also profile the VALIDATED sparse prefill against the same
                     # dense reference — the acceptance bar for lego's error.
                     _cur0 = int(position_ids[0, 0])
+                    _pinned_par = manager._sp_pinned_blocks.get(
+                        session_ids[0] if session_ids else "", ())
                     _sp = _sparse_prefill_attend(
                         queries_rot, all_k, all_v, _cur0,
                         self.scale, self.n_heads // self.n_kv_heads,
                         manager.block_size, manager._sp_window, manager._sp_sink_blocks,
-                        manager._sp_kmin, manager._sp_frac, False)
+                        manager._sp_kmin, manager._sp_frac, False,
+                        pinned_blk_abs=_pinned_par)
                     _c = _sp.astype(mx.float32).reshape(-1)
                     _cos_sp = mx.sum(_c * _b) / (mx.sqrt(mx.sum(_c * _c)) * mx.sqrt(mx.sum(_b * _b)) + 1e-9)
                     _md_sp = mx.max(mx.abs(_c - _b))
@@ -4921,11 +4963,14 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
             _T = all_k.shape[2]
             _cur_start = _T - L
             if (manager._sparse_prefill and _cur_start >= manager._sp_min_ctx):
+                _sid_pin = session_ids[0] if session_ids else ""
+                _pinned_blks = manager._sp_pinned_blocks.get(_sid_pin, ())
                 out_b = _sparse_prefill_attend(
                     queries_rot, all_k, all_v, _cur_start,
                     self.scale, self.n_heads // self.n_kv_heads,
                     manager.block_size, manager._sp_window, manager._sp_sink_blocks,
                     manager._sp_kmin, manager._sp_frac, manager._sp_dbg,
+                    pinned_blk_abs=_pinned_blks,
                 )
             else:
                 out_b = mx.fast.scaled_dot_product_attention(
@@ -5355,6 +5400,27 @@ class MLXDKVWrapper:
                     self.manager._pending_query[session_id] = _q_ids
             except Exception:
                 pass
+
+        # ── Instruction-pinning: compute answer-candidate blocks pre-prefill ──
+        # Uses the same query span to find document blocks whose distinctive
+        # tokens overlap with the question. Stored on the manager so attention_forward
+        # can inject them as always-attended instruction sinks during sparse prefill.
+        if self.manager._sp_instr_pin and 'session_id' in dir():
+            try:
+                _q_ids_pin = self.manager._pending_query.get(session_id) or list(prompt_ids)
+                _pinned = _pinned_blocks_from_prompt(
+                    prompt_ids,
+                    _q_ids_pin,
+                    block_size=self.manager.block_size,
+                    stop_ids=getattr(self.manager, "_stop_token_ids", None),
+                    idf_threshold=self.manager._sp_pin_idf,
+                    max_pinned_blocks=self.manager._sp_pin_max,
+                )
+                self.manager._sp_pinned_blocks[session_id] = tuple(_pinned)
+            except Exception:
+                self.manager._sp_pinned_blocks[session_id] = ()
+        elif session_id in getattr(self.manager, '_sp_pinned_blocks', {}):
+            del self.manager._sp_pinned_blocks[session_id]
         
         # Check cache reuse
         cached_len = 0

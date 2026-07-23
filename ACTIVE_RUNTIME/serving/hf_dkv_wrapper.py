@@ -27,6 +27,7 @@ from native_core.kv_runtime_manager import KVRuntimeManager
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from runtime.dkv_attention import apply_dkv_attention_patch
 from serving.query_span import extract_query_token_ids as _extract_query_token_ids
+from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
 
 
 try:
@@ -912,6 +913,25 @@ class PyTorchDKVHFWrapper:
                     )
                 if _q_ids:
                     self.manager._pending_query[session_id] = _q_ids
+            except Exception:
+                pass
+
+        # ── Instruction-pinning: compute answer-candidate blocks pre-prefill ──
+        # On HF/CUDA the sparse prefill is not yet ported (that path is MLX-only),
+        # but the pinned block list is stored on the manager so the decode-time
+        # residual router can use it as a hint for block prioritisation.
+        if getattr(self.manager, '_sp_instr_pin', False):
+            try:
+                _q_ids_pin = getattr(self.manager, '_pending_query', {}).get(session_id) or list(prompt_ids)
+                _pinned = _pinned_blocks_from_prompt(
+                    prompt_ids,
+                    _q_ids_pin,
+                    block_size=getattr(self.manager, 'block_size', 256),
+                    stop_ids=getattr(self.manager, '_stop_token_ids', None),
+                    idf_threshold=getattr(self.manager, '_sp_pin_idf', 3.0),
+                    max_pinned_blocks=getattr(self.manager, '_sp_pin_max', 4),
+                )
+                self.manager._sp_pinned_blocks[session_id] = tuple(_pinned)
             except Exception:
                 pass
 

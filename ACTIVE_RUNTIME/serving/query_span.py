@@ -165,3 +165,108 @@ def _right_anchored_search(
         if tuple(haystack[start : start + n]) == needle_t:
             return list(haystack[start : start + n])
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instruction-pinning: lightweight pre-SRL index → pinned block indices
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pinned_blocks_from_prompt(
+    prompt_ids: List[int],
+    query_ids: List[int],
+    block_size: int,
+    stop_ids: Optional[set] = None,
+    idf_threshold: float = 3.0,
+    max_pinned_blocks: int = 4,
+) -> List[int]:
+    """Return sorted block indices to pin as instruction sinks during sparse prefill.
+
+    Background
+    ----------
+    During block-sparse prefill, each chunk routes back to history blocks using
+    its OWN query vectors.  When the user question is embedded in the middle of
+    a long document, post-question chunks are routing using document-content
+    queries — they have no intrinsic reason to score the question block highly.
+    The result is that tokens at positions AFTER the question may never attend
+    it during prefill, leaving their KV representations question-unaware.
+
+    This function identifies document blocks whose content is distinctively tied
+    to the user question, so they can be added to the always-attended set for
+    all sparse-prefill chunks that come after the question position.
+
+    Algorithm
+    ---------
+    1.  Build a lightweight inverted map: query_token -> set of block indices
+        containing that token.  Pure-Python CPU, ~0.05 s at 25 k tokens.
+    2.  IDF = log(N_blocks / n_blocks_containing_token) + 1.
+        Tokens with IDF >= idf_threshold are considered distinctive.
+    3.  Score each candidate block by sum of IDF scores of its matching
+        query tokens.
+    4.  Return top-max_pinned_blocks block indices, sorted ascending.
+
+    Why this finds ANSWER blocks, not just the QUESTION block
+    ---------------------------------------------------------
+    The distinctive tokens of the question (proper nouns, identifiers, numbers)
+    appear in the document at the location of the ANSWER.  Pinning by IDF-weighted
+    hit count therefore pulls in the answer-bearing blocks, which is exactly what
+    the model needs to build accurate representations for tokens processed after
+    the question.
+
+    Parameters
+    ----------
+    prompt_ids        : full tokenized prompt (flat list[int])
+    query_ids         : token ids of the user question span
+    block_size        : tokens per block — must match manager.block_size
+    stop_ids          : set of stop-word token ids to ignore (None → empty set)
+    idf_threshold     : minimum IDF to treat a query token as distinctive (3.0)
+    max_pinned_blocks : hard cap on pinned blocks — default 4 = 1024 tokens at bs=256
+
+    Returns
+    -------
+    Sorted list[int] of block indices (0-based).  Empty list if no distinctive
+    query tokens found → caller uses normal sparse routing with no pinning.
+    """
+    if not prompt_ids or not query_ids or block_size <= 0:
+        return []
+
+    _stop = stop_ids or set()
+    query_set = {q for q in query_ids if q not in _stop}
+    if not query_set:
+        return []
+
+    import math
+    from collections import defaultdict
+
+    n_tokens = len(prompt_ids)
+    n_blocks = max(1, (n_tokens + block_size - 1) // block_size)
+
+    # Step 1: token → block index map (only track query tokens)
+    blk_hits: dict = defaultdict(set)   # token_id → set[block_idx]
+    for pos, tid in enumerate(prompt_ids):
+        if tid in query_set:
+            blk_hits[tid].add(pos // block_size)
+
+    if not blk_hits:
+        return []
+
+    # Step 2: IDF per query token
+    idf: dict = {
+        tid: math.log(n_blocks / max(1, len(blks))) + 1.0
+        for tid, blks in blk_hits.items()
+    }
+
+    # Step 3: score each block by IDF-weighted hits
+    block_score: dict = defaultdict(float)
+    for tid, blks in blk_hits.items():
+        score = idf[tid]
+        if score < idf_threshold:
+            continue
+        for blk in blks:
+            block_score[blk] += score
+
+    if not block_score:
+        return []
+
+    # Step 4: top-K, sorted ascending (so idx_parts concatenation is ordered)
+    ranked = sorted(block_score, key=lambda b: -block_score[b])
+    return sorted(ranked[:max_pinned_blocks])
