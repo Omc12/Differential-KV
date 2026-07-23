@@ -59,10 +59,15 @@ standard PyTorch baseline is \texttt{AutoModelForCausalLM} on the PyTorch MPS ba
 uncompressed full KV cache and none of those memory-management paths.
 
 \paragraph{Gated subsystems.} A factual-store / semantic-retrieval module, a lego streaming
-prefill (memory-bounded prefill that drops raw KV after block compression), and a speculative-decode
-draft path exist in the codebase but are disabled by default (they are no-ops in the configuration
-measured here) and are not part of the evaluated system. We mention them only to be exact about
-what is and is not exercised.
+prefill (memory-bounded prefill that drops raw KV after block compression), a speculative-decode
+draft path, and a query-aware instruction-pinning mechanism (\texttt{DKV\_INSTR\_PIN}) exist in the
+codebase but are disabled by default (they are no-ops in the configuration measured here) and are
+not part of the evaluated system. Query-aware instruction pinning identifies high-IDF query tokens
+pre-prefill to statically pin answer-candidate blocks as always-attended attention sinks during
+block-sparse prefill, avoiding question-block pruning when instructions appear mid-document; we
+implement this as an architectural extension for future long-context instruction-following ablations.
+We mention these subsystems only to be exact about what is and is not exercised.
+
 
 \paragraph{Runtime optimizations inspired by kTransformers.}
 \label{par:ktransformers}
