@@ -1,10 +1,10 @@
-# DeltaKV: Anchor + Low-Rank Differential KV-Cache Compression
+# Differential-KV (DKV): Anchor + Low-Rank KV-Cache Compression
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](BUILD.md)
 [![Backend](https://img.shields.io/badge/Backend-MLX%20%7C%20PyTorch%20%7C%20CUDA%20%7C%20C%2B%2B17-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
 
-**DeltaKV (Differential-KV)** is a sparse KV-cache inference runtime designed for long-context Large Language Model (LLM) inference on memory-constrained hardware (e.g., Apple M3 Mac with 8.6 GB unified memory or edge CUDA GPUs).
+**Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for long-context Large Language Model (LLM) inference on memory-constrained hardware (e.g., Apple M3 Mac with 8.6 GB unified memory or edge CUDA GPUs).
 
 Author: **Om Chimurkar** (Newton School of Technology, Rishihood University)  
 Technical Report: [paper/main.pdf](paper/main.pdf)
@@ -15,7 +15,7 @@ Technical Report: [paper/main.pdf](paper/main.pdf)
 
 The Key-Value (KV) cache is the primary memory bottleneck in long-context LLM inference: its memory footprint scales linearly $O(L)$ with sequence length $L$, causing commodity hardware to run out of memory (OOM) during prefill or generation long before model weights exhaust VRAM.
 
-DeltaKV addresses this by partitioning the KV cache into fixed micro-blocks of size $B_s = 256$ tokens and decomposing each block into four complementary components:
+Differential-KV addresses this by partitioning the KV cache into fixed micro-blocks of size $B_s = 256$ tokens and decomposing each block into four complementary components:
 
 1. **Anchor Token ($a_k, a_v$):** The first token in the block, preserved in exact precision to serve as an anchor reference.
 2. **Joint $K \mid V$ Low-Rank SVD Delta:** A truncated Singular Value Decomposition (SVD) of rank $r = 32$ (with layer-adaptive variation: early layers $0.75r$, mid layers $1.5r$, late layers $0.5r$) capturing shared structural variation across key and value projections ($U \in \mathbb{R}^{(B_s-1) \times r}$, $V_K, V_V \in \mathbb{R}^{r \times d_{\text{head}}}$).
@@ -25,7 +25,7 @@ DeltaKV addresses this by partitioning the KV cache into fixed micro-blocks of s
 ### Decode & Prefill Innovations
 * **Low-Rank Space Query Scoring:** Scores queries directly in the low-rank subspace ($O(r \cdot d_{\text{head}})$ dot products per block) without ever decompressing or materializing the full Key matrix $K$.
 * **Flash-Style LSE Combine:** Merges sparse low-rank/residual attention scores with the dense recency window using numerically stable fp32 log-sum-exp (LSE) accumulation and fp16 operands.
-* **Sub-Quadratic Prefill:** Uses block-sparse attention during prefill, reducing prompt processing complexity from $O(L^2)$ down to $O(L \cdot K)$, enabling prefill crossover where DeltaKV prefilling outperforms dense baselines at long contexts ($\ge 32\text{k}$).
+* **Sub-Quadratic Prefill:** Uses block-sparse attention during prefill, reducing prompt processing complexity from $O(L^2)$ down to $O(L \cdot K)$, enabling prefill crossover where Differential-KV prefilling outperforms dense baselines at long contexts ($\ge 32\text{k}$).
 
 ---
 
@@ -69,7 +69,7 @@ make setup
 
 ## 🖥️ CLI Commands & Operating Modes
 
-The DeltaKV terminal interface (`ACTIVE_RUNTIME/serving/cli.py`) supports two primary operational modes: **Direct Execution Mode** and **Client-Server Mode**.
+The Differential-KV terminal interface (`ACTIVE_RUNTIME/serving/cli.py`) supports two primary operational modes: **Direct Execution Mode** and **Client-Server Mode**.
 
 ### 1. Operational Modes
 
@@ -113,7 +113,7 @@ python ACTIVE_RUNTIME/serving/cli.py --api-url http://localhost:8000/v1
 
 ## ⚙️ Key Environment Knobs
 
-DeltaKV runtime behaviors can be fine-tuned using environment variables:
+Differential-KV runtime behaviors can be fine-tuned using environment variables:
 
 | Variable | Default | Scope | Description |
 |---|---|---|---|
@@ -149,24 +149,24 @@ DeltaKV runtime behaviors can be fine-tuned using environment variables:
 
 All benchmark results are empirically measured on a single host: **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router.
 
-### 1. Context Length Sweep (DeltaKV vs. Dense Baselines)
+### 1. Context Length Sweep (DKV vs. Dense Baselines)
 
 | Context Length | Runtime / Engine | Prefill Time (s) | Decode Speed (tok/s) | Peak Allocator Memory (GB) | Needle Recalled |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **4k** | **DeltaKV (Compressed)** | 6.6s | 19.9 | 1.74 GB | **Yes** |
+| **4k** | **DKV (Compressed)** | 6.6s | 19.9 | 1.74 GB | **Yes** |
 | | Dense Baseline | 5.1s | 65.7 | 1.68 GB | **Yes** |
-| **8k** | **DeltaKV (Compressed)** | 13.6s | 18.4 | 1.89 GB | **Yes** |
+| **8k** | **DKV (Compressed)** | 13.6s | 18.4 | 1.89 GB | **Yes** |
 | | Dense Baseline | 11.8s | 55.3 | 1.79 GB | **Yes** |
-| **16k** | **DeltaKV (Compressed)** | 28.2s | 18.7 | 2.36 GB | **Yes** |
+| **16k** | **DKV (Compressed)** | 28.2s | 18.7 | 2.36 GB | **Yes** |
 | | Dense Baseline | 27.8s | 47.0 | 2.03 GB | **Yes** |
-| **32k** | **DeltaKV (Compressed)** | 58.5s | 17.0 | 3.12 GB | **Yes** |
+| **32k** | **DKV (Compressed)** | 58.5s | 17.0 | 3.12 GB | **Yes** |
 | | Dense Baseline | 77.9s | 35.7 | 2.45 GB | **Yes** |
-| **64k** | **DeltaKV (Compressed)** | 928s | 8.6 | 4.63 GB | **Yes** |
+| **64k** | **DKV (Compressed)** | 928s | 8.6 | 4.63 GB | **Yes** |
 | | Dense Baseline | *OOM* | *OOM* | *OOM* | *OOM* |
 
 > 💡 **Key Benchmark Takeaways:**
-> - **Prefill Crossover ($\ge 32\text{k}$):** Thanks to block-sparse prefill scaling $O(L \cdot K)$, DeltaKV prefilling beats the dense baseline at 32k context ($1.33\times$ faster prefill: 58.5s vs 77.9s).
-> - **64k Reach Advantage:** The dense full-KV baseline suffers an Out-Of-Memory (OOM) failure at 64k context on the 8.6 GB memory host. DeltaKV completes 64k inference with 100% exact needle recovery within bounded memory.
+> - **Prefill Crossover ($\ge 32\text{k}$):** Thanks to block-sparse prefill scaling $O(L \cdot K)$, Differential-KV prefilling beats the dense baseline at 32k context ($1.33\times$ faster prefill: 58.5s vs 77.9s).
+> - **64k Reach Advantage:** The dense full-KV baseline suffers an Out-Of-Memory (OOM) failure at 64k context on the 8.6 GB memory host. Differential-KV completes 64k inference with 100% exact needle recovery within bounded memory.
 
 ### 2. Residual Budget ($R$) Trade-Off Sweep (16k Context)
 
@@ -192,8 +192,8 @@ The residual budget $R$ acts as an explicit memory-speed-accuracy dial:
 | **Low-Rank Core Total** | | **51,144 B** | **49.9 KiB (Fixed)** |
 | Exact residuals ($R=128$) | $[128, 2, 128]$ | 131,072 B | 128.0 KiB |
 | Exact residuals ($R=64$) | $[64, 2, 128]$ | 65,536 B | 64.0 KiB |
-| **DeltaKV Block ($R=128$)** | | **182,216 B** | **177.9 KiB ($1.44\times$ compression)** |
-| **DeltaKV Block ($R=64$)** | | **116,680 B** | **113.9 KiB ($2.25\times$ compression)** |
+| **DKV Block ($R=128$)** | | **182,216 B** | **177.9 KiB ($1.44\times$ compression)** |
+| **DKV Block ($R=64$)** | | **116,680 B** | **113.9 KiB ($2.25\times$ compression)** |
 | **Dense Block** | $[256, 2, 128] \times 2$ | **262,144 B** | **256.0 KiB ($1.00\times$)** |
 
 ---
@@ -239,11 +239,11 @@ cd dkv_native/tests && ./test_niah_native.sh
 
 ## 📖 Citation & References
 
-If you use DeltaKV in your research or project, please cite the technical report:
+If you use Differential-KV in your research or project, please cite the technical report:
 
 ```bibtex
-@article{chimurkar2026deltakv,
-  title={DeltaKV: Anchor + Low-Rank Differential KV-Cache Compression for Scalable Long-Context Inference},
+@article{chimurkar2026differentialkv,
+  title={Differential-KV: Anchor + Low-Rank Differential KV-Cache Compression for Scalable Long-Context Inference},
   author={Chimurkar, Om},
   journal={Technical Report, Newton School of Technology, Rishihood University},
   year={2026},
