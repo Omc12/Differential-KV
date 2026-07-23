@@ -65,12 +65,28 @@ FILLER = " ".join(FILLER_LINES) + " "
 
 
 def make_qim_prompt(tokenizer, target_tokens, needle_depth, question_depth=0.3):
-    """Build prompt with QUESTION embedded at question_depth, NEEDLE at needle_depth."""
-    filler_ids  = tokenizer.encode(FILLER, add_special_tokens=False)
-    needle_ids  = tokenizer.encode(NEEDLE + "\n", add_special_tokens=False)
-    budget      = max(200, target_tokens - len(needle_ids) - 100)
-    repeats     = budget // len(filler_ids) + 1
-    all_filler  = (filler_ids * repeats)[:budget]
+    """
+    Build a QIM prompt:
+      user: [filler_a] [QUESTION-IN-MIDDLE] [filler_b] [NEEDLE] [filler_c] [QUESTION-AT-END]
+      assistant: (empty — let model generate freely)
+
+    The question appears TWICE:
+      1. In the MIDDLE of the document (depth question_depth) — this is what instruction pinning
+         is designed to handle: ensuring post-question prefill chunks attend the question block.
+      2. At the END of the user turn — same as standard NIAH, so the model knows what to answer.
+
+    This mirrors real-world RAG: the system prompt / task description may embed the question
+    early, while the retrieved document is long, and the question is also stated as the final
+    instruction. Instruction pinning helps the model build question-aware KV representations
+    for the document section that follows the embedded question (including the needle block).
+    """
+    filler_ids   = tokenizer.encode(FILLER, add_special_tokens=False)
+    needle_ids   = tokenizer.encode(NEEDLE + "\n", add_special_tokens=False)
+    question_ids = tokenizer.encode(QUESTION, add_special_tokens=False)
+    overhead     = len(needle_ids) + 2 * len(question_ids) + 80  # two question copies + template
+    budget       = max(200, target_tokens - overhead)
+    repeats      = budget // len(filler_ids) + 1
+    all_filler   = (filler_ids * repeats)[:budget]
 
     needle_at  = int(len(all_filler) * needle_depth)
     pre_needle = all_filler[:needle_at]
@@ -81,19 +97,18 @@ def make_qim_prompt(tokenizer, target_tokens, needle_depth, question_depth=0.3):
     seg_b = tokenizer.decode(pre_needle[q_at:])
     seg_c = tokenizer.decode(post)
 
+    # Format mirrors test_mlx_niah.py exactly, with the question at end.
     prompt = (
-        "<|im_start|>system\n"
-        "You are a helpful assistant. Read the document carefully and answer the question.\n"
-        "<|im_end|>\n"
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         "<|im_start|>user\n"
-        + seg_a + "\n\n"
-        + "QUESTION: " + QUESTION + "\n\n"
+        + seg_a
+        + "\n\n[Note: " + QUESTION + "]\n\n"   # question embedded in middle
         + seg_b + "\n"
         + NEEDLE + "\n"
-        + seg_c + "\n"
-        "<|im_end|>\n"
+        + seg_c + "\n\n"
+        + QUESTION                               # question at end — same as standard NIAH
+        + "<|im_end|>\n"
         "<|im_start|>assistant\n"
-        "The secret passcode is "       # prime the model with the answer prefix
     )
     return prompt
 
