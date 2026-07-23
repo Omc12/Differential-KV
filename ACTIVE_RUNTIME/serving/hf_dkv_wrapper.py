@@ -26,6 +26,8 @@ from native_core.kv_runtime_manager import KVRuntimeManager
 
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from runtime.dkv_attention import apply_dkv_attention_patch
+from serving.query_span import extract_query_token_ids as _extract_query_token_ids
+
 
 try:
     from native_core.graph_runtime.static_decode_graph import CUDAGraphDecodeRunner
@@ -877,12 +879,42 @@ class PyTorchDKVHFWrapper:
         query_text: Optional[str] = None,
     ):
         session_id = self.active_session or "default"
-        
+
         # O(1) Smart Prefix Check: check if the session already has resident KV cache.
         # If so, mark the cached length so prefill is incremental (avoiding O(N) re-prefill of history).
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
         prompt_ids = inputs.input_ids[0].tolist()
-        
+
+        # Entity-binding hint: the actual question span inside the prompt.
+        # Used by the factual store to bind decode to the queried entity (no-op
+        # unless the factual store is enabled).
+        #
+        # Identical logic to mlx_dkv_wrapper.generate(): position-agnostic —
+        # works whether the question is at the start, middle, or end of the
+        # context. _pending_query is consumed by manager.finalize_srl_index().
+        #
+        # Priority:
+        #   1. Explicit query_text from caller (highest precision).
+        #   2. Auto-extracted from _last_messages (set by API gateway).
+        #   3. Full prompt fallback (safe — IDF filters downstream).
+        if getattr(self.manager, "_factual_enabled", False):
+            try:
+                if query_text:
+                    _q_ids = self.tokenizer.encode(
+                        query_text, add_special_tokens=False
+                    )
+                    if hasattr(_q_ids, "tolist"):
+                        _q_ids = _q_ids.tolist()
+                else:
+                    _messages = getattr(self, "_last_messages", None)
+                    _q_ids = _extract_query_token_ids(
+                        self.tokenizer, prompt_ids, _messages
+                    )
+                if _q_ids:
+                    self.manager._pending_query[session_id] = _q_ids
+            except Exception:
+                pass
+
         cached_len = 0
         if hasattr(self.manager, "get_session_sequence_length"):
             seq_len = self.manager.get_session_sequence_length(session_id)

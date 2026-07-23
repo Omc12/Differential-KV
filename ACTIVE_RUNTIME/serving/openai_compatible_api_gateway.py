@@ -369,7 +369,14 @@ class OpenAICompatibleAPIGateway:
                 prompt = self.resolver.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 payload_copy = dict(payload)
                 payload_copy["prompt"] = prompt
-                
+
+                # Attach structured messages so _extract_query_token_ids()
+                # can locate the user-question span regardless of its position
+                # in the prompt (start / middle / end).
+                _w = getattr(self.resolver, "wrapper", None)
+                if _w is not None:
+                    _w._last_messages = messages
+
                 is_finished = False
                 try:
                     queue = await self.resolver.submit(session_id, payload_copy)
@@ -666,7 +673,14 @@ class OpenAICompatibleAPIGateway:
         # Override payload prompt for the engine
         payload_copy = dict(payload)
         payload_copy["prompt"] = prompt
-        
+
+        # Attach structured messages so _extract_query_token_ids()
+        # can locate the user-question span regardless of its position
+        # in the prompt (start / middle / end).
+        _w = getattr(self.resolver, "wrapper", None)
+        if _w is not None:
+            _w._last_messages = messages
+
         is_finished = False
         try:
             # Submit to background continuous batching engine

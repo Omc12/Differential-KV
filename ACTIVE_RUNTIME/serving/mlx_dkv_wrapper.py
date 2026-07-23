@@ -74,6 +74,9 @@ except ImportError:
     _mlx_expand_kv = None
     _mlx_expand_fallback = None
 
+from serving.query_span import extract_query_token_ids as _extract_query_token_ids
+
+
 def _normalize_references(text: str) -> str:
     """Normalise citation-list formatting inconsistencies produced by the model."""
     lines = text.split('\n')
@@ -5323,12 +5326,33 @@ class MLXDKVWrapper:
         # Squeeze prompt tokenization
         prompt_ids = self.tokenizer.encode(prompt)
 
-        # Entity-binding hint: the part of the prompt that is the actual question.
+        # Entity-binding hint: the actual question span inside the prompt.
         # Used by the factual store to bind decode to the queried entity (no-op
-        # unless the factual store is enabled). Falls back to the uncached tail.
-        if query_text and getattr(self.manager, "_factual_enabled", False):
+        # unless the factual store is enabled).
+        #
+        # The query can appear ANYWHERE in the prompt (start, middle, end).
+        # _extract_query_token_ids() finds the last user-role turn via the
+        # tokenizer's own chat-template encoding and locates it inside
+        # prompt_ids by right-anchored subsequence search — no tail assumption.
+        #
+        # Priority:
+        #   1. Explicit query_text from caller (highest precision).
+        #   2. Auto-extracted from messages (position-agnostic, reliable).
+        #   3. Full prompt fallback (safe — IDF filters downstream).
+        if getattr(self.manager, "_factual_enabled", False):
             try:
-                self.manager._pending_query[session_id] = self.tokenizer.encode(query_text)
+                if query_text:
+                    _q_ids = self.tokenizer.encode(query_text, add_special_tokens=False)
+                else:
+                    # Auto-extract: find the last user turn in prompt_ids using
+                    # chat-template encoding.  `messages` may be attached to the
+                    # prompt kwargs by the caller; fall back to prompt_ids alone.
+                    _messages = getattr(self, "_last_messages", None)
+                    _q_ids = _extract_query_token_ids(
+                        self.tokenizer, prompt_ids, _messages
+                    )
+                if _q_ids:
+                    self.manager._pending_query[session_id] = _q_ids
             except Exception:
                 pass
         
