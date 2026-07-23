@@ -1,7 +1,7 @@
 # Differential-KV — one-command setup & run.
 #
 # macOS / Apple Silicon (MLX) works out of the box:  make setup && make chat
-# Linux / CUDA: `make setup` installs the base deps; see BUILD.md for the CUDA
+# Linux / CUDA: `make setup` installs the base deps; see docs/BUILD.md for the CUDA
 # extras (triton, cuSOLVER/cuBLAS) and the native `-DGGML_CUDA=ON` build.
 #
 # The default MODEL is a HuggingFace id; on macOS the wrapper auto-selects the
