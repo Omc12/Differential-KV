@@ -5405,9 +5405,20 @@ class MLXDKVWrapper:
         # Uses the same query span to find document blocks whose distinctive
         # tokens overlap with the question. Stored on the manager so attention_forward
         # can inject them as always-attended instruction sinks during sparse prefill.
-        if self.manager._sp_instr_pin and 'session_id' in dir():
+        #
+        # IMPORTANT: _pending_query may be empty when DKV_FACTUAL_STORE=0.
+        # Always extract the query span directly via _extract_query_token_ids so
+        # pinning works independently of the SRL/factual-store feature flag.
+        if self.manager._sp_instr_pin:
             try:
-                _q_ids_pin = self.manager._pending_query.get(session_id) or list(prompt_ids)
+                # Prefer the SRL-populated span (most precise); fall back to
+                # chat-template extraction which works for any prompt layout.
+                _q_ids_pin = self.manager._pending_query.get(session_id)
+                if not _q_ids_pin:
+                    _messages = getattr(self, "_last_messages", None)
+                    _q_ids_pin = _extract_query_token_ids(
+                        self.tokenizer, prompt_ids, _messages
+                    )
                 _pinned = _pinned_blocks_from_prompt(
                     prompt_ids,
                     _q_ids_pin,
@@ -5417,10 +5428,14 @@ class MLXDKVWrapper:
                     max_pinned_blocks=self.manager._sp_pin_max,
                 )
                 self.manager._sp_pinned_blocks[session_id] = tuple(_pinned)
+                if _pinned:
+                    print(f"[DKV] Instruction-pinning: {len(_pinned)} block(s) pinned "
+                          f"→ {_pinned}", flush=True)
             except Exception:
                 self.manager._sp_pinned_blocks[session_id] = ()
         elif session_id in getattr(self.manager, '_sp_pinned_blocks', {}):
             del self.manager._sp_pinned_blocks[session_id]
+
         
         # Check cache reuse
         cached_len = 0

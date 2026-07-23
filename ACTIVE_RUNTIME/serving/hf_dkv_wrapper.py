@@ -917,12 +917,21 @@ class PyTorchDKVHFWrapper:
                 pass
 
         # ── Instruction-pinning: compute answer-candidate blocks pre-prefill ──
-        # On HF/CUDA the sparse prefill is not yet ported (that path is MLX-only),
-        # but the pinned block list is stored on the manager so the decode-time
-        # residual router can use it as a hint for block prioritisation.
+        # On HF/CUDA the sparse prefill is not yet ported (MLX-only),
+        # but the pinned block list is stored so the decode-time residual
+        # router can use it as a block-priority hint.
+        #
+        # Same fix as MLX wrapper: always extract query span via chat-template
+        # rather than falling back to full prompt_ids (which has IDF ~1.0 for
+        # everything and would pin nothing useful).
         if getattr(self.manager, '_sp_instr_pin', False):
             try:
-                _q_ids_pin = getattr(self.manager, '_pending_query', {}).get(session_id) or list(prompt_ids)
+                _q_ids_pin = getattr(self.manager, '_pending_query', {}).get(session_id)
+                if not _q_ids_pin:
+                    _messages = getattr(self, "_last_messages", None)
+                    _q_ids_pin = _extract_query_token_ids(
+                        self.tokenizer, prompt_ids, _messages
+                    )
                 _pinned = _pinned_blocks_from_prompt(
                     prompt_ids,
                     _q_ids_pin,
@@ -932,8 +941,12 @@ class PyTorchDKVHFWrapper:
                     max_pinned_blocks=getattr(self.manager, '_sp_pin_max', 4),
                 )
                 self.manager._sp_pinned_blocks[session_id] = tuple(_pinned)
+                if _pinned:
+                    print(f"[DKV] Instruction-pinning: {len(_pinned)} block(s) pinned "
+                          f"→ {_pinned}", flush=True)
             except Exception:
                 pass
+
 
         cached_len = 0
         if hasattr(self.manager, "get_session_sequence_length"):
