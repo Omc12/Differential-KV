@@ -31,9 +31,13 @@
 # Ignore the massive synthetic systems archive completely
 archive/ARCHIVED_SYNTHETIC_SYSTEMS/
 
-# Build directories
+# Build directories & package artifacts
 **/build/
 build/
+dist/
+*.egg-info/
+.DS_Store
+**/.DS_Store
 
 # Compiled native extensions & object files — build per-platform, never commit.
 # The one-time untrack of pre-rule artifacts (diffkv_core.cpython-*-darwin.so,
