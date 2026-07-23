@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dkv"
+version = "0.1.0a1"
+description = "Differential KV-Cache Management & High-Efficiency Attention Engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary / Private Research"}
+authors = [
+    {name = "Differential KV Team"}
+]
+dependencies = [
+    "torch>=2.0.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx"]
+cuda = ["triton"]
+dev = ["pytest", "build", "wheel"]
+
+[tool.setuptools]
+packages = [
+    "dkv",
+    "native_core",
+    "native_core.compression",
+    "native_core.graph_runtime",
+    "native_core.paging",
+    "native_core.sparse_decode",
+    "native_core.srl",
+    "runtime",
+    "serving",
+]
+
+[tool.setuptools.package-dir]
+"dkv" = "dkv"
+"native_core" = "ACTIVE_RUNTIME/native_core"
+"runtime" = "ACTIVE_RUNTIME/runtime"
+"serving" = "ACTIVE_RUNTIME/serving"
