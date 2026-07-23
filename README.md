@@ -4,7 +4,7 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](BUILD.md)
 [![Backend](https://img.shields.io/badge/Backend-MLX%20%7C%20PyTorch%20%7C%20CUDA%20%7C%20C%2B%2B17-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
 
-**Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for long-context Large Language Model (LLM) inference on memory-constrained hardware (e.g., Apple M3 Mac with 8.6 GB unified memory or edge CUDA GPUs).
+**Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for high-efficiency, memory-bounded long-context Large Language Model (LLM) inference across Apple Silicon (MLX) and CUDA GPUs.
 
 Author: **Om Chimurkar** (Newton School of Technology, Rishihood University)  
 Technical Report: [paper/main.pdf](paper/main.pdf)
