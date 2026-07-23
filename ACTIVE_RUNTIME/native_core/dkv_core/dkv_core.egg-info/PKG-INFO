@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: diffkv_core
-Version: 1.1.0
-Summary: DiffKV native runtime core — C++/CUDA/Metal extension
-Dynamic: summary
