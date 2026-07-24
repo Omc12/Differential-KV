@@ -2,8 +2,6 @@
 
 Welcome to the **Differential-KV (`dkv`)** documentation repository. Below is the organized directory of technical documentation, architectural specifications, and hardware audit reports.
 
-- [BUILD.md](file:///Users/omchimurkar1/Desktop/Differential-KV/docs/BUILD.md) — Comprehensive compilation and build instructions for macOS & Linux/CUDA.
-
 ---
 
 ## 🏛️ Architecture & Handoff Specifications (`docs/architecture/`)
