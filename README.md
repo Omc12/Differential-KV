@@ -252,3 +252,19 @@ If you use Differential-KV in your research or project, please cite the technica
 ```
 
 For build instructions and native compilation details, see **[BUILD.md](BUILD.md)**.
+
+---
+
+## ⚖️ License
+
+Differential-KV is released under the **MIT License** — see [LICENSE](LICENSE).
+
+Vendored third-party code keeps its own license and is **not** covered by the root LICENSE:
+
+| Component | Path | License |
+|---|---|---|
+| `llama.cpp` / `ggml` | `dkv_native/third_party/llama.cpp/` | MIT — [LICENSE](dkv_native/third_party/llama.cpp/LICENSE) (© 2023–2026 The ggml authors) |
+| `nlohmann/json` | `dkv_native/third_party/llama.cpp/licenses/` | MIT — [LICENSE-jsonhpp](dkv_native/third_party/llama.cpp/licenses/LICENSE-jsonhpp) |
+
+Both are MIT and therefore compatible with this project's license; their copyright
+notices are retained in place, as MIT requires.
