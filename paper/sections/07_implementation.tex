@@ -56,7 +56,10 @@ on; base rank $\rank{=}32$ with layer-adaptive variation; $\maxres{=}128$; top-\
 residual-key router; SVD seed $1234$. The optimized dense baseline is \texttt{mlx\_lm} with a full
 KV cache (chunked prefill, prefill-to-decode allocator release) on the same int4 weights; the
 standard PyTorch baseline is \texttt{AutoModelForCausalLM} on the PyTorch MPS backend with an
-uncompressed full KV cache and none of those memory-management paths.
+uncompressed full KV cache and none of those memory-management paths, loading the unquantized fp16
+checkpoint (\path{Qwen/Qwen2.5-1.5B-Instruct}) because \texttt{transformers} cannot read the MLX
+int4 format---so it is a practitioner-default reference point, not a weight-matched control
+(\S\ref{sec:eval}, \S\ref{sec:limits}).
 
 \paragraph{Gated subsystems.} A factual-store / semantic-retrieval module, a lego streaming
 prefill (memory-bounded prefill that drops raw KV after block compression), a speculative-decode
@@ -82,8 +85,8 @@ RAM~\cite{yang2025ktransformers}. We apply the analogous idea at the \emph{block
 pool slot carries a heat score $h \leftarrow 0.7\,h\,\gamma + 0.3\,\rho$ (decay $\gamma{=}0.95$,
 routing signal $\rho{\in}[0,1]$) updated at every decode step.
 When pool occupancy exceeds a threshold (default $80\%$), the coldest slots are evicted
-to pinned CPU RAM and their GPU memory is reclaimed. Because \dkv{}'s SRL chunk-graph router
-selects the same block neighborhood across consecutive decode steps, the same $\topk$ blocks
+to pinned CPU RAM and their GPU memory is reclaimed. Because \dkv{}'s residual-key router
+(Eq.~\eqref{eq:router}) selects the same block neighborhood across consecutive decode steps, the same $\topk$ blocks
 remain hot and almost never enter the cold tier during steady-state generation; offloading
 triggers only for blocks that have not been routed for many steps, i.e.\ genuinely irrelevant
 history. Re-routing to a previously cold block requires a host-to-device (H2D) transfer; for a

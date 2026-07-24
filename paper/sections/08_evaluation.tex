@@ -3,28 +3,52 @@
 
 \subsection{Setup}
 All numbers are measured on one host: an Apple~M3 with $8.6$\,GB of unified memory, running
-Qwen2.5-1.5B at int4. We compare three engines on the \emph{same} quantized
-weights: \textbf{\dkv{}} (the active runtime in its default serving configuration---compressed
-sparse decode, fused decode buffer, block-sparse prefill, base rank $\rank{=}32$ with
-layer-adaptive variation, $\maxres{=}128$, $\topk{=}16$); \textbf{optimized dense}
+Qwen2.5-1.5B. We compare three engines: \textbf{\dkv{}} (the active runtime in its default serving
+configuration---compressed sparse decode, fused decode buffer, block-sparse prefill, base rank
+$\rank{=}32$ with layer-adaptive variation, $\maxres{=}128$, $\topk{=}16$); \textbf{optimized dense}
 (\texttt{mlx\_lm} with a full KV cache, chunked prefill, and a prefill-to-decode allocator
 release); and \textbf{standard PyTorch dense} (\texttt{AutoModelForCausalLM} on the PyTorch MPS
 backend with an uncompressed full KV cache and none of the chunking or allocator tricks---the naive
-baseline most practitioners run). Running all three on identical weights makes the comparison a clean
-ablation of the cache representation and its memory management, isolated from the model. The optimized
-dense engine is the demanding baseline (it reaches every context we test); the standard PyTorch engine
-shows where a naive full-KV cache gives out on this host.
+baseline most practitioners run).
+
+\dkv{} and the optimized dense engine run on \emph{identical} int4 weights
+(\path{mlx-community/Qwen2.5-1.5B-Instruct-4bit}), so that pair is a clean ablation of the cache
+representation and its memory management, isolated from the model; the optimized dense engine is
+the demanding baseline, and it reaches every context we test. The standard PyTorch engine is a
+different kind of reference point and we are explicit about what it is not: it loads the
+\emph{unquantized} fp16 checkpoint (\path{Qwen/Qwen2.5-1.5B-Instruct}, \texttt{torch\_dtype=float16}),
+because the MLX int4 checkpoint is not loadable by \texttt{transformers}. Its weights therefore cost
+$\approx3.1$\,GB rather than $\approx1$\,GB, and that difference---not the KV cache alone---is part of
+why it exhausts this host earlier. We report it because it is the configuration a practitioner gets by
+default on this hardware, not as a controlled ablation; \emph{the controlled comparison is \dkv{}
+versus the optimized dense engine}, and no claim in this paper rests on the PyTorch engine alone.
 
 The workload is a needle-in-a-haystack (NIAH) prompt~\cite{kamradt2023niah}: a unique passcode is
 buried at $\sim$$50\%$ depth in a technical-prose haystack, and the request asks the model to state
-the passcode and then write a long explanation. The same deterministic prompt is used for every context length and both
-engines. We report prefill time, decode throughput (greedy, a fixed $128$ tokens with EOS ignored
-so throughput is comparable), peak process memory, and whether the exact passcode appears in the
-output. Contexts span $4$k to $\reachK$k. For the \mlxe{} engines, memory is the MLX allocator peak
-(\texttt{mx.get\_peak\_memory}), the allocator-true metric; for the PyTorch engine it is the peak
-resident process memory. The analytic KV-state footprint is computed from the store layout
-(Table~\ref{tab:budget}). Table~\ref{tab:main} is the headline\ifext{};
+the passcode and then write a long explanation. The same deterministic prompt is used for every
+context length and all three engines. We report prefill time, decode throughput (greedy, a fixed
+$128$ tokens with EOS ignored so throughput is comparable), peak memory, and whether the exact
+passcode appears in the output. Contexts span $4$k to $\reachK$k. For the \mlxe{} engines, memory is
+the MLX allocator peak (\texttt{mx.get\_peak\_memory}), the allocator-true metric; for the PyTorch
+engine it is \texttt{torch.mps.driver\_allocated\_memory()}, the MPS driver's allocation
+high-water mark, which is the closest available analogue but is not the same metric---the two
+columns should not be compared to two decimal places. The analytic KV-state footprint is computed
+from the store layout (Table~\ref{tab:budget}); for the PyTorch engine it is likewise analytic
+($b_{\text{tok}}$ from Eq.~\eqref{eq:tokbytes} times the token count) rather than read from an
+allocator. Table~\ref{tab:main} is the headline\ifext{};
 the per-run detail is in Appendix~\ref{app:tables}\fi.
+
+\textbf{A caveat on the PyTorch prefill/decode split.} PyTorch's MPS backend executes
+asynchronously, and the harness does not insert a \path{torch.mps.synchronize()} before it stops
+the prefill timer---the first host synchronisation is the \path{.item()} call inside the decode
+loop. Prefill work is therefore charged to the decode phase, which is visible in the data: the
+measured PyTorch prefill \emph{falls} from $0.83$\,s at $4$k to $0.50$\,s at $8$k, which cannot be
+a real prefill curve. We report the numbers as recorded rather than silently adjusting them, but
+the PyTorch engine's prefill and decode figures should be read only as an end-to-end total
+($\approx36$\,s at $4$k for prompt plus $128$ tokens, against $\approx6.9$\,s for the optimized
+dense engine); its \emph{split} between the two phases is not meaningful, and no claim in this
+paper depends on it. The \mlxe{} engines are timed around \texttt{mx.eval} and do not have this
+problem.
 
 \textbf{Evaluation scope.} All numbers in this section are measured on \mlxe{} on the Apple M3
 host described above. The \cuda{}/Triton and native C++/GGML backends exist and are described in
@@ -35,9 +59,13 @@ a column convention that accommodates a future \cuda{}/GPU baseline without rest
 
 \begin{\tabenv}[t]
   \centering
-  \caption{Main results: \dkv{} vs.\ an optimized \texttt{mlx\_lm} dense baseline and a standard
-  PyTorch dense baseline, all on identical int4 weights
-  (Apple~M3, $8.6$\,GB; greedy, $128$ decode tokens). All cells measured.}
+  \caption{Main results: \dkv{} vs.\ an optimized \texttt{mlx\_lm} dense baseline (both on
+  identical int4 weights) and a standard PyTorch dense baseline (unquantized fp16 weights; see
+  \S\ref{sec:eval} setup). Apple~M3, $8.6$\,GB; greedy, $128$ decode tokens. Timing, throughput
+  and peak-memory cells are measured; KV-cache footprint is analytic from the store layout
+  (Table~\ref{tab:budget}) and Eq.~\eqref{eq:tokbytes}. The PyTorch prefill/decode \emph{split} is
+  distorted by an unsynchronised timer (\S\ref{sec:eval}); read that row's two timing cells only
+  as an end-to-end total.}
   \label{tab:main}
   \small
   \input{tables/t3_main_results}
@@ -68,13 +96,19 @@ wherever they run. This is the load-bearing correctness result for \dkv{}: compr
 low-rank basis would ordinarily corrupt such a token, and the residual mechanism
 (\S\ref{sec:compression}) is what preserves it. The \emph{reach}, however, differs sharply by engine.
 The standard PyTorch full-KV baseline \emph{exhausts the host's $8.6$\,GB and does not complete beyond
-$\ptMaxK$k}---a reproducible out-of-memory at $\ptOOMK$k, where its uncompressed cache and unchunked
-prefill overrun the machine. The optimized \texttt{mlx\_lm} dense cache, with chunked prefill and a
+$\ptMaxK$k}---a reproducible out-of-memory at $\ptOOMK$k, where its fp16 weights, its uncompressed
+cache and its unchunked prefill together overrun the machine. We attribute that failure to the
+combination, not to the cache alone: at $\ptOOMK$k the cache is $0.47$\,GB while the fp16 weights
+already cost ${\approx}2$\,GB more than the int4 weights the other two engines use. The
+optimized \texttt{mlx\_lm} dense cache, with chunked prefill and a
 prefill-to-decode allocator release, stretches all the way to $\reachK$k; \dkv{} reaches
 $\reachK$k as well, finishing with the passcode intact at a $\actMxSixtyFourK$\,GB allocator peak.
-So on this host a naive dense cache gives out at $\ptOOMK$k---a $4\times$ shorter reach---while
-\dkv{}'s bounded store runs to $\reachK$k, the same context a carefully memory-managed dense can
-also hold but which it prefills markedly more slowly (E3).
+So on this host the default PyTorch configuration gives out at $\ptOOMK$k---a $4\times$ shorter
+reach---while \dkv{}'s bounded store runs to $\reachK$k, the same context a carefully
+memory-managed dense can also hold but which it prefills markedly more slowly (E3). The
+load-bearing comparison for the cache representation itself is \dkv{} against the optimized dense
+engine on identical weights, where the difference is a bounded versus an unbounded store rather
+than a reach cliff.
 
 \subsection{E3 --- Prefill scaling and the crossover}
 \dkv{}'s prefill does less attention work than dense (block-sparse, $O(L\cdot K)$ vs.\ $O(L^2)$),
@@ -96,13 +130,16 @@ the only engines still prefilling at $64$k are \dkv{} and the memory-optimized d
   \centering
   \includegraphics[width=\linewidth]{figures/g_perf.pdf}
   \caption{Prefill and decode of \dkv{} against an optimized \texttt{mlx\_lm} dense baseline and a
-  standard PyTorch dense baseline on identical int4 weights (Apple M3, $8.6$\,GB; greedy, $128$
-  decode tokens). (a)~Block-sparse prefill grows sub-quadratically, overtakes the optimized dense
-  baseline by $32$K, and prefills $\pfSpeedupSixtyFourK\times$ faster at $64$K; the standard PyTorch
-  dense is fast at short context but runs out of memory at $\ptOOMK$K+ ({\color{red}$\times$}).
-  (b)~\dkv{} decode is nearly flat in context but slower than the optimized dense wherever that
-  cache still fits; the standard PyTorch dense decodes at only ${\approx}\ptTps$\,tok/s and OOMs at
-  $\ptOOMK$K+.}
+  standard PyTorch dense baseline (Apple M3, $8.6$\,GB; greedy, $128$
+  decode tokens; \dkv{} and optimized dense on identical int4 weights, PyTorch on fp16). (a)~Block-sparse
+  prefill grows sub-quadratically, overtakes the optimized dense baseline by $32$K, and prefills
+  $\pfSpeedupSixtyFourK\times$ faster at $64$K; the standard PyTorch dense runs out of memory at
+  $\ptOOMK$K+ ({\color{red}$\times$}). Its two plotted prefill points are \emph{not} comparable to
+  the \mlxe{} curves---an unsynchronised MPS timer charges its prefill work to decode, which is why
+  they sit an order of magnitude low and decrease with context (\S\ref{sec:eval}); they are drawn
+  for completeness, not as a speed claim. (b)~\dkv{} decode is nearly flat in context but slower than
+  the optimized dense wherever that cache still fits; the standard PyTorch dense decodes at only
+  ${\approx}\ptTps$\,tok/s (a figure that absorbs its prefill) and OOMs at $\ptOOMK$K+.}
   \label{fig:perf}
 \end{\figenv}
 
@@ -119,8 +156,9 @@ gap therefore \emph{narrows} as context grows---from over $3\times$ at $4$k to
 $\decRatioThirtyTwoK\times$ at $32$k, and by $\reachK$k \dkv{}'s flat curve and the
 still-declining dense curve essentially meet ($\actTpsSixtyFourK$ vs.\ $\dnTpsSixtyFourK$\,tok/s).
 Through $32$k---the regime where a dense cache is the natural choice---dense remains the faster
-decoder; the standard PyTorch dense, by contrast, decodes at only ${\approx}\ptTps$\,tok/s even
-where it fits, so its full-KV cache is neither fast nor far-reaching. \dkv{}'s value proposition
+decoder; the standard PyTorch engine, by contrast, records only ${\approx}\ptTps$\,tok/s even where
+it fits, though that figure absorbs its unsynchronised prefill and reflects fp16 execution on MPS
+rather than the cache representation. \dkv{}'s value proposition
 is bounded memory, exact recall, and prefill scaling---not decode speed---and a faster decode path
 (a fused kernel; a \cuda{}/Triton port, \S\ref{sec:limits}) is the clearest avenue to narrow the
 short-context decode gap further. On a \cuda{} platform the Triton fused kernel already collapses
@@ -145,6 +183,14 @@ recall-preserving operating range. (We note a degenerate boundary: at $\maxres{=
 residual keys for the exact-key router to score, so that configuration is not a valid operating
 point---the method is defined for $\maxres{\ge}1$.)
 
+\paragraph{Note on absolute throughput in E5 and E6.} The residual sweep and the decode-mode
+ablation were collected in separate, earlier runs whose decode-path configuration differs from the
+primary sweep's (the persistent fused buffer of \S\ref{sec:fusedbuf} was not enabled), so their
+absolute tok/s---$19.6$--$21.5$ here, $16.4$--$20.0$ in Table~\ref{tab:ablation}---sit below the
+$27$--$33$\,tok/s that Table~\ref{tab:main} reports for \dkv{} at the same contexts. Each table is
+internally like-for-like, which is what the two experiments establish; the numbers are not
+comparable \emph{across} tables, and Table~\ref{tab:main} is the configuration of record.
+
 \begin{\figenv}[t]
   \centering
   \includegraphics[width=0.82\linewidth]{figures/g6_residual_tradeoff.pdf}
@@ -158,7 +204,8 @@ point---the method is defined for $\maxres{\ge}1$.)
 \begin{table}[t]
   \centering
   \caption{Residual-budget sweep at $16$K (rank-$32$ store, forced compressed decode). Store size
-  and compression ratio are measured; the needle is recovered exactly at every budget shown.}
+  and compression ratio are measured; the needle is recovered exactly at every budget shown.
+  Earlier decode-path configuration; absolute tok/s are not comparable to Table~\ref{tab:main}.}
   \label{tab:residual}
   \small
   \adjustbox{max width=\linewidth}{\input{tables/t4_residual}}
@@ -178,14 +225,17 @@ context, comparing the end-to-end decode throughput of all three engines.
   \includegraphics[width=0.78\linewidth]{figures/g7_decode_ablation.pdf}
   \caption{Decode throughput of the three engines vs.\ context. \dkv{}'s compressed sparse decode
   is slower than the optimized dense wherever that cache fits, and the two converge by $64$k; the
-  standard PyTorch dense decodes at only ${\approx}\ptTps$\,tok/s and OOMs at $\ptOOMK$k+. The
+  standard PyTorch engine records only ${\approx}\ptTps$\,tok/s---a figure that absorbs its
+  unsynchronised prefill (\S\ref{sec:eval})---and OOMs at $\ptOOMK$k+. The
   same-store compressed-vs-exact mechanism ablation is in Table~\ref{tab:ablation}.}
   \label{fig:g7}
 \end{\figenv}
 
 \begin{table}[t]
   \centering
-  \caption{Compressed-vs-exact decode over the same \dkv{} store (mechanism ablation).}
+  \caption{Compressed-vs-exact decode over the same \dkv{} store (mechanism ablation). Earlier
+  decode-path configuration; absolute tok/s are not comparable to Table~\ref{tab:main} (see the
+  note in E5).}
   \label{tab:ablation}
   \small
   \adjustbox{max width=\linewidth}{\input{tables/t6_decode_ablation}}
@@ -198,11 +248,16 @@ cover multiple disjoint memory regions, we planted four distinct passcodes at un
 depths and asked the model to report all four (Table~\ref{tab:multineedle}).
 \dkv{} recovers all four needles at every context length with $100\%$ recall, confirming that
 $\topk{=}16$ routing headroom is sufficient for simultaneous multi-region retrieval up to $32$k.
+The claim here is the recall column; the throughput column is reported for completeness only
+(see the caption for what it measures).
 
 \begin{\tabenv}[t]
   \centering
   \caption{Multi-needle recall ($4$ simultaneous passcodes, uniform depths). Recall is exact:
-  a needle is counted only if the verbatim passcode appears. Apple~M3, Qwen2.5-1.5B int4.}
+  a needle is counted only if the verbatim passcode appears. Apple~M3, Qwen2.5-1.5B int4.
+  \emph{Prompt tok/s} is prompt tokens divided by end-to-end generation wall time, i.e.\ a
+  prefill-dominated throughput; it is not the per-token decode throughput of
+  Table~\ref{tab:main} and the two should not be compared.}
   \label{tab:multineedle}
   \small
   \input{tables/t7_multi_needle}
@@ -238,7 +293,9 @@ code is required (\S\ref{sec:impl}).
 \begin{\tabenv}[t]
   \centering
   \caption{Cross-architecture NIAH: Llama-3.2-3B-Instruct-4bit (int4, Apple~M3, $8.6$\,GB).
-  Needle depth varies from $0.1$ (near the top) to $0.9$ (near the end). See swap note.}
+  Needle depth varies from $0.1$ (near the top) to $0.9$ (near the end). \emph{Prompt tok/s} is
+  prompt tokens divided by end-to-end generation wall time (prefill-dominated), not per-token
+  decode throughput. See swap note.}
   \label{tab:llama}
   \footnotesize
   \input{tables/t8_llama_generalization}
@@ -246,9 +303,10 @@ code is required (\S\ref{sec:impl}).
 
 \paragraph{Swap note.} The Llama-3.2-3B run was conducted on the same host with ambient system
 processes active. macOS unified-memory pressure triggered swap at $16$k context; the observed
-TPS at $16$k ($19$--$39$\,tok/s) includes swap-induced stalls and should be read as a
-\emph{lower bound} on hardware-native throughput. Needle recall, which depends only on output
-correctness, is unaffected. A swap-free run would be required for clean $16$k latency numbers.
+prompt throughput at $16$k ($19$--$39$\,prompt tok/s) includes swap-induced stalls and should be
+read as a \emph{lower bound} on hardware-native throughput. Needle recall, which depends only on
+output correctness, is unaffected. A swap-free run would be required for clean $16$k latency
+numbers, and E10's claim is the recall column, not the timing column.
 
 \dkv{} achieves $100\%$ recall at every tested context and burial depth, including depth $0.1$
 (needle near position $0$, where routing must correctly score a very early block). The wrapper
@@ -270,7 +328,7 @@ required zero modifications for Llama: the patch is architecture-agnostic.
 
 Profiling the per-step decode at $16$k gives the split in Figure~\ref{fig:e11}: low-rank SVD
 scoring $35\%$ (${\approx}378$\,ms); residual attention $28\%$ (${\approx}302$\,ms); cache-merge
-$15\%$ (${\approx}162$\,ms); SRL query routing $12\%$ (${\approx}130$\,ms); fused-buffer
+$15\%$ (${\approx}162$\,ms); query routing $12\%$ (${\approx}130$\,ms); fused-buffer
 materialisation $10\%$ (${\approx}108$\,ms). The total step is $\approx1{,}080$\,ms under
 instrumentation, so these percentages describe where the time goes, not the un-instrumented
 throughput reported elsewhere.

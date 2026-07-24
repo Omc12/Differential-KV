@@ -77,7 +77,7 @@ IDF-weighted boost signals inflate certain tokens' priority before the top-\maxr
 to 12 tokens and boosts the nearest capitalized word into the residual set alongside its
 value---preserving entity \emph{names} that are low-energy prose yet essential for
 attribute-binding queries. \textbf{Edge-capture} (default on): relational connectives
-("grows to'', ``needs~$X$ because~$Y$'') are low-energy prose whose low-rank reconstruction
+(``grows to'', ``needs~$X$ because~$Y$'') are low-energy prose whose low-rank reconstruction
 collides with a neighbouring token's key; a direct cosine-collision test detects this and
 boosts such tokens before the residual cut, so the model cannot substitute a neighbour's
 relation. \textbf{Coverage bonus} (default on): a uniform bonus across block positions prevents

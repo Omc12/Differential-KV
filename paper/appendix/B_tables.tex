@@ -2,19 +2,20 @@
 \label{app:tables}
 
 \begin{sloppypar}
-Table~\ref{tab:detail} lists every cell of the fresh primary sweep
-(\path{paper/scripts/measure_sweep.sh} and \path{measure_tail.sh}) for both engines,
-exactly as recorded by the isolated workers. \emph{MLX peak} is the allocator peak
-(\texttt{get\_peak\_memory}) inside the worker process; \emph{Prompt tok} is the
-tokenizer count for the built NIAH prompt at that context. Empty cells are measurements
-that do not apply; failed cells would be stated as failures in the text, never given an
-invented value.
+Table~\ref{tab:detail} lists every cell of the primary sweep
+(\path{paper/scripts/run_clean.sh} and \path{measure_tail.sh}) for the two \mlxe{} engines,
+exactly as recorded by the isolated workers; the PyTorch engine is measured by a separate worker
+and appears only in Table~\ref{tab:main}. \emph{MLX peak} is the allocator peak
+(\texttt{get\_peak\_memory}) inside the worker process. The \emph{Prompt tok} column is
+uniformly empty: the isolated workers did not persist the tokenizer count for the primary sweep,
+and we leave the column blank rather than back-fill it from a later re-tokenisation. Failed cells
+would be stated as failures in the text, never given an invented value.
 \end{sloppypar}
 
 \begin{table}[h]
 \centering
-\caption{Per-run detail for the primary sweep: \dkv{} (active) and the dense baseline on
-identical int4 weights. All values measured.}
+\caption{Per-run detail for the primary sweep: \dkv{} (active) and the optimized \texttt{mlx\_lm}
+dense baseline on identical int4 weights. All values measured.}
 \label{tab:detail}
 \small
 \adjustbox{max width=\linewidth}{\input{tables/t5_detail}}

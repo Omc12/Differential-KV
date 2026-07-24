@@ -35,19 +35,34 @@ block offloading (\S\ref{par:ktransformers}) is active on \cuda{} with asynchron
 dedicated \path{cudaStream}s (\S\ref{sec:cuda-impl}).
 The results tables keep a column convention so \cuda{} data can be inserted without restructuring.
 
-\paragraph{Single model, single host.} Every number here is Qwen2.5-1.5B (int4) on one Apple~M3.
-The residual budget and router settings are tuned for this model; larger models, different
-architectures, and non-Apple hardware are unvalidated. Two normalizations (the $V$-to-$K$ RMS
-rescale, the seeded rank) are model-sensitive and should be re-checked per model.
+\paragraph{Baseline construction.} Only two of our three engines are a controlled pair. \dkv{}
+and the optimized \texttt{mlx\_lm} dense baseline share identical int4 weights, so their
+comparison isolates the cache representation. The standard PyTorch engine does not: it runs the
+unquantized fp16 checkpoint, because the MLX int4 checkpoint is not loadable by
+\texttt{transformers}, so roughly $2$\,GB of its footprint is weights rather than cache and its
+earlier out-of-memory is over-determined. Its prefill/decode split is additionally distorted by a
+missing MPS synchronisation (\S\ref{sec:eval}). We report it as the default configuration a
+practitioner encounters, and we have kept every load-bearing claim off it; a like-for-like
+quantized PyTorch baseline would still be the better experiment and is future work.
 
-\paragraph{Evaluation breadth.} Correctness here is exact single-needle recall plus fluent
-long-form generation. This is a strong, unambiguous signal for the fidelity claim, but it is not a
-substitute for standard long-context suites (RULER, LongBench), multi-needle and multi-hop recall,
-or comparisons against other cache-compression baselines (quantization, eviction, other low-rank
-methods). Diffuse multi-fact synthesis, where the top-\topk{} router must cover several regions at
-once, is a known weaker case that the single-needle metric does not probe; an optional log-sum-exp
-bias mitigates it but is not a full solution. Broadening the evaluation is the most important next
-step for external credibility.
+\paragraph{Narrow model and hardware coverage.} Every performance number here is Qwen2.5-1.5B
+(int4) on one Apple~M3; the only cross-architecture evidence is the Llama-3.2-3B recall sweep of
+E10 (\S\ref{sec:e10}), which validates that the wrapper is architecture-agnostic but was run on
+the same host, under memory pressure, and reports recall rather than clean timings. The residual
+budget and router settings are tuned for Qwen2.5-1.5B; larger models, other architectures, and
+non-Apple hardware remain unvalidated for \emph{throughput and memory}. Two normalizations (the
+$V$-to-$K$ RMS rescale, the seeded rank) are model-sensitive and should be re-checked per model.
+
+\paragraph{Evaluation breadth.} Correctness here is exact needle recall---single-needle
+(E2), four simultaneous needles (E7), and a two-hop relational chain (E8)---plus zero perplexity
+drift (E9) and fluent long-form generation. That is a strong, unambiguous signal for the fidelity
+claim, but it is not a substitute for standard long-context suites (RULER, LongBench), nor for
+comparisons against other cache-compression baselines (quantization, eviction, other low-rank
+methods), which we do not run at all. Our needles are planted passcodes in synthetic haystacks;
+diffuse multi-fact synthesis over natural documents, where the top-\topk{} router must cover
+several regions at once, remains a known weaker case that none of these probes reaches---an
+optional log-sum-exp bias mitigates it but is not a full solution. Broadening the evaluation to
+external suites and competing baselines is the most important next step for credibility.
 
 \paragraph{Memory-bound long context on an 8\,GB host.} At $64$k, both \dkv{} and the optimized
 dense are pushed to the machine's limit: their prefills complete but are heavily memory-bound (so the

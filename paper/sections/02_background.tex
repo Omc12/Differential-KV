@@ -13,7 +13,8 @@ one token's keys \emph{and} values across all layers, in fp16, costs
 For our evaluation model (Qwen2.5-1.5B: $L{=}28$, $\Hkv{=}2$, $\dhead{=}128$) this is
 $28{,}672$ bytes per token---about $28$\,KB. The cache for a sequence of length $N$ is therefore
 $N\cdot b_{\text{tok}}$ and grows without bound in $N$: $16$k tokens cost $0.47$\,GB, $32$k cost
-$0.94$\,GB, and $64$k cost $1.8$\,GB. Against $8.6$\,GB of unified memory shared with the weights
+$0.94$\,GB, and $64$k cost $1.8$\,GB (Eq.~\eqref{eq:tokbytes} is also how we report the dense
+engines' KV footprint in \S\ref{sec:eval}). Against $8.6$\,GB of unified memory shared with the weights
 ($\approx 1$\,GB at int4), the OS, and transient prefill activations, the cache is the term that
 decides whether a long context fits.
 

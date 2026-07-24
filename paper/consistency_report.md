@@ -1,5 +1,23 @@
 # Consistency Report — DKV Active-Runtime Paper (clean rebuild 2026-07-07)
 
+> ## ⚠️ PARTIALLY SUPERSEDED — read this first (2026-07-25)
+>
+> This document certifies the **2026-07-07** state of the paper. Sections 1–5 (design claims ↔
+> code, generator wiring, honesty checks) still hold. **Section 6 does not:** its headline table
+> predates the current measured dataset and states `dense 64k = OOM`, which the paper explicitly
+> retracts. The engine story of record is now three engines —
+>
+> - DKV reaches 64k (prefill 477 s, 21.4 tok/s, needle ✓);
+> - the **optimized `mlx_lm` dense** baseline (identical int4 weights) also reaches 64k, but
+>   prefills 1.72× slower (821 s);
+> - the **standard PyTorch dense** engine OOMs at 16k — and it runs *unquantized fp16* weights,
+>   so its earlier failure is over-determined and no load-bearing claim rests on it.
+>
+> The numbers of record are `paper/generated/facts.tex` (emitted by `make_facts.py` from
+> `benchmarks/results/clean_*.json`), not the table in §6 below. Also verified 2026-07-25: table
+> shapes now print `[255,32] / [2,32,128]`, and the recency window is `1024 (+256 = 1280)`, matching
+> the runtime's auto-sizing formula.
+
 Verifies every figure, table, equation, and claim against the implementation and the **clean**
 measured outputs. Supersedes the 2026-06-30 report (which certified rank-16, decode-cache-off,
 partly memory-contended data). "Code" = `ACTIVE_RUNTIME/serving/mlx_dkv_wrapper.py` unless noted.
@@ -73,14 +91,36 @@ ablation (measured). All emitted by `make_tables.py`; no hand-typed numbers.
 - [ ] (Pre-camera-ready) verify arXiv ids in `references.bib`; broaden eval (RULER/LongBench,
   multi-model, baselines) per §10 limitations.
 
-## 6. Headline measured numbers (clean, of record)
-Apple M3 / 8.6 GB, Qwen2.5-1.5B int4, mid/balanced/rank-32, COMPRESSED_DECODE=1, greedy gen=128:
+## 6. Headline measured numbers — ⚠️ SUPERSEDED (2026-07-07 dataset)
+
+**Do not cite this table.** It is retained only to show what changed. It was collected before the
+fused decode buffer became the default and before the PyTorch engine was added, so its DKV tok/s
+run low and its `dense 64k = OOM` cell is wrong (the optimized dense engine does reach 64k).
+
+<details><summary>Superseded 2026-07-07 numbers</summary>
+
 | ctx | DKV prefill s | DKV tok/s | dense prefill s | dense tok/s | needle |
 |----|----|----|----|----|----|
 | 4k | 6.6 | 19.9 | 5.1 | 65.7 | ✓/✓ |
 | 8k | 13.6 | 18.4 | 11.8 | 55.3 | ✓/✓ |
 | 16k | 28.2 | 18.7 | 27.8 | 47.0 | ✓/✓ |
 | 32k | 58.5 | 17.0 | 77.9 | 35.7 | ✓/✓ |
-| 64k | 928 | 8.6 | **OOM** | — | ✓ / n-a |
-Per-block compression (rank 32): R=128 → 1.44×, R=64 → 2.25×. Residual sweep @16k: needle ✓ for
-R=8..128, ratio 3.80×→1.40×. Decode ablation @16k: compressed 18.8 vs exact 30.3 tok/s (both ✓).
+| 64k | 928 | 8.6 | ~~OOM~~ (wrong) | — | ✓ / n-a |
+
+</details>
+
+**Current numbers of record** (Apple M3 / 8.6 GB, greedy gen=128; `clean_*.json` →
+`generated/facts.tex` → Table 3):
+
+| ctx | DKV prefill s | DKV tok/s | opt. dense prefill s | opt. dense tok/s | PyTorch dense |
+|----|----|----|----|----|----|
+| 4k | 6.2 | 33.3 | 5.0 | 68.9 | ok (fp16) |
+| 8k | 13.4 | 31.4 | 11.1 | 54.5 | ok (fp16) |
+| 16k | 29.8 | 29.7 | 27.0 | 48.2 | **OOM** |
+| 32k | 72.3 | 27.2 | 75.0 | 37.5 | **OOM** |
+| 64k | 477 | 21.4 | 821 | 20.2 | **OOM** |
+
+Needle ✓ for DKV at every context. Per-block compression (rank 32): R=128 → 1.44×, R=64 → 2.25×.
+Residual sweep @16k: needle ✓ for R=8..128, ratio 3.80×→1.40×. Decode ablation @16k: compressed
+18.8 vs exact 30.3 tok/s (both ✓) — note E5/E6 use the earlier decode-path configuration, so their
+absolute tok/s are not comparable to Table 3 (the paper now says this explicitly).

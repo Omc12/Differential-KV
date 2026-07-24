@@ -41,10 +41,11 @@ We are deliberate about the trade-off, because it is easy to overstate. On our h
 Apple~M3 with $8.6$\,GB of unified memory, running Qwen2.5-1.5B at int4---an optimized dense full-KV
 cache \emph{fits and decodes faster than} \dkv{} through $32$k tokens; \dkv{} does not make
 this model decode faster where a dense cache still fits. But memory tells the other half of the
-story: a standard PyTorch full-KV cache exhausts the machine at $\ptOOMK$k and does not run beyond
-it, and even the optimized dense---which does reach $\reachK$k---gets there only by prefilling
-$\pfSpeedupSixtyFourK\times$ slower than \dkv{}, whose bounded store completes with the passcode
-intact.
+story: the default PyTorch full-KV configuration exhausts the machine at $\ptOOMK$k and does not run
+beyond it (on fp16 weights---see \S\ref{sec:eval} for why that engine is a practitioner reference
+rather than a weight-matched control), and even the optimized dense---which shares \dkv{}'s int4
+weights and does reach $\reachK$k---gets there only by prefilling $\pfSpeedupSixtyFourK\times$ slower
+than \dkv{}, whose bounded store completes with the passcode intact.
 What \dkv{} provides is therefore (i) a KV state that is bounded by a fixed block pool and is
 $\ratioDefault\times$--$\ratioPreset\times$ smaller per block than a dense cache, so the cache
 stops being the term that grows without limit and $\reachK$k becomes reachable where a naive
@@ -70,11 +71,12 @@ report the full picture---including where \dkv{} loses---and we treat the residu
   \item A \textbf{bounded-memory runtime} (\S\ref{sec:runtime}) with streaming prefill
     compression, a fixed block pool, a prefill-to-decode memory release, and a training-free
     block-sparse prefill, implemented entirely in MLX for Apple unified memory.
-  \item A \textbf{measured, self-consistent evaluation} (\S\ref{sec:eval}) against both an
-    optimized \texttt{mlx\_lm} dense baseline and a standard PyTorch dense baseline on identical
-    weights, reporting footprint, prefill, decode, and exact recall from
-    $4$k to $\reachK$k, with component ablations and a residual-budget sweep. We state the
-    decode-throughput cost plainly rather than hiding it.
+  \item A \textbf{measured, self-consistent evaluation} (\S\ref{sec:eval}) against an optimized
+    \texttt{mlx\_lm} dense baseline on \emph{identical} int4 weights---plus a standard PyTorch
+    dense engine as a practitioner-default reference---reporting footprint, prefill, decode, and
+    exact recall from $4$k to $\reachK$k, with component ablations and a residual-budget sweep. We
+    state the decode-throughput cost, and the limits of each baseline, plainly rather than hiding
+    them.
   \item \textbf{Runtime extensions for GPU-native serving} (\S\ref{sec:impl}), informed by the
     kTransformers framework~\cite{yang2025ktransformers}: tiered CPU--GPU block offloading with
     heat-scored eviction, step-ahead asynchronous H2D prefetch, autotuned Triton decode
@@ -85,7 +87,6 @@ report the full picture---including where \dkv{} loses---and we treat the residu
     a native C++/GGML kernel (\path{dkv_full_decode_kernel} in \path{dkv_decode.cu},
     built with \texttt{-DGGML\_CUDA=ON}) for embedded serving. Both implement the same
     anchor-plus-delta-plus-residual decode algorithm described in \S\ref{sec:decode}. All four
-
     runtime optimizations are implemented and CPU-verified; \cuda{} hardware
     validation is reserved for a follow-up \pendingGPU{}.
 \end{itemize}

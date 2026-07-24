@@ -15,11 +15,29 @@
       (added G6 residual trade-off) + tables T2/T3/T4/T5 from the clean JSON.
 
 ## Needs author attention before submission
-- [ ] **Compile** (no system LaTeX on the build machine): on Overleaf/arXiv run
-      `pdflatex main && bibtex main && pdflatex main && pdflatex main` (same for conference).
-- [ ] **Verify bibliography identifiers** (arXiv ids / venues) in `bibliography/references.bib`.
-- [ ] Add author names/affiliations (currently blank / "Anonymous").
-- [ ] Optional: dense 64k cell (analytic only here — dense OOMs before 64k on this device).
+- [x] **Compile** — both documents build clean with `tectonic -X compile {main,conference}.tex`
+      (0 undefined refs/cites, 0 overfull boxes in the conference build).
+- [x] **Verify bibliography identifiers** — arXiv ids checked against arxiv.org 2026-07-25;
+      KIVI upgraded to its ICML'24 journal-ref. Venues not stated by arXiv were left as preprints.
+- [x] Add author names/affiliations.
+- [x] Dense 64k cell — measured, not analytic: the optimized dense engine *does* reach 64k
+      (821 s prefill). The "dense OOMs before 64k" note is retracted.
+
+## Open before any camera-ready
+- [ ] **Weight-matched PyTorch baseline.** The current one runs unquantized fp16
+      (`Qwen/Qwen2.5-1.5B-Instruct`) because `transformers` cannot load the MLX int4 checkpoint;
+      the paper now says so explicitly, but a quantized PyTorch baseline would be the better
+      experiment.
+- [ ] **Fix the PyTorch prefill timer.** `benchmarks/bench_worker.py::run_dense` stops the prefill
+      timer with no `torch.mps.synchronize()`, so prefill work is charged to decode (prefill
+      *falls* 0.83 s @4k → 0.50 s @8k). Documented as a caveat in §8; should be re-measured.
+- [ ] **Commit the E7–E12 result JSONs.** `run_multi_needle_mlx.py`, `run_llama3b_mlx.py`,
+      `run_signal_ablation_mlx.py`, `run_lego_mem_mlx.py` emit files that are not in the repo, so
+      T7–T10 are hand-transcribed and not machine-verifiable. Their throughput columns are prompt
+      tokens ÷ end-to-end time (now labelled "Prompt tok/s"), not decode tok/s.
+- [ ] **Re-run E5/E6 under the current decode configuration** so their absolute tok/s line up with
+      Table 3 instead of needing a "not comparable across tables" note.
+- [ ] Broaden eval (RULER/LongBench, cache-compression baselines) per §10 limitations.
 
 ## Future experiments (paper calls these out, not blocking)
 - [ ] Hand-written fused decode kernel (Metal / CUDA-Triton) — slot into G3/G5 + T3 (placeholders ready).

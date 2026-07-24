@@ -15,27 +15,27 @@ and merges the two halves with a flash-style log-sum-exp reduction; the selected
 materialised once per routing interval into a persistent buffer and appended to per token.
 Prefill uses a training-free block-sparse attention so its cost grows sub-quadratically.
 
-We implement \dkv{} entirely in \mlxe{} and evaluate it on Qwen2.5-1.5B (int4) against two dense
-full-KV baselines on the \emph{same} weights---a memory-optimized \texttt{mlx\_lm} engine and a
-standard PyTorch engine---on an Apple~M3 with 8.6\,GB of unified memory.
-A parallel \cuda{}/Triton engine---comprising a custom Triton fused decode kernel with
-\path{@triton.autotune} tiling, asynchronous H2D block prefetch via dedicated \texttt{cudaStream}s,
-tiered CPU--HBM block offloading, and a native C++/GGML decode kernel built with
-\texttt{-DGGML\_CUDA=ON}---is implemented and CPU-verified; no GPU benchmark numbers are collected in
-this report, and no GPU performance claims are made.
+We implement \dkv{} entirely in \mlxe{} and evaluate it on an Apple~M3 with $8.6$\,GB of unified
+memory against two dense full-KV baselines: a memory-optimized \texttt{mlx\_lm} engine sharing
+\dkv{}'s exact Qwen2.5-1.5B int4 weights---the controlled comparison---and a standard PyTorch
+engine on the unquantized fp16 checkpoint, included as the configuration a practitioner gets by
+default rather than as a weight-matched control.
 
 \dkv{} holds a bounded KV state that is $\ratioDefault\times$--$\ratioPreset\times$ smaller
 per block than a dense cache (the residual budget \maxres{} is the knob), recovers a buried
-passcode \emph{exactly} at every context from $4$k to $\reachK$k, and reaches $\reachK$k---where a
-standard PyTorch full-KV cache runs out of memory at $\ptOOMK$k on the same host, and which even a
-memory-optimized dense cache reaches only by prefilling $\pfSpeedupSixtyFourK\times$ slower than
-\dkv{}. The cost is decode throughput: reconstructing and merging the sparse
+passcode \emph{exactly} at every context from $4$k to $\reachK$k, and reaches $\reachK$k---where the
+default PyTorch full-KV configuration runs out of memory at $\ptOOMK$k on the same host, and which
+even the memory-optimized dense cache reaches only by prefilling $\pfSpeedupSixtyFourK\times$ slower
+than \dkv{}. The cost is decode throughput: reconstructing and merging the sparse
 representation makes per-token decode slower than a dense cache while the dense cache still fits. We
 report this trade-off in full, isolate each component with ablations, and characterize the
 residual budget as an explicit accuracy--memory--speed dial. All numbers in this report are
-measured on the described host; none are estimated. A CUDA/Triton decode path exists in the
-codebase but is not evaluated here, and the report reserves space for it without restructuring.
-The runtime additionally incorporates tiered CPU--GPU block offloading, step-ahead asynchronous
-prefetch, and autotuned Triton kernels---informed by the kTransformers inference
-framework---that are implemented and unit-tested but await GPU hardware validation.
+measured on the described host; none are estimated.
+
+A parallel \cuda{}/Triton engine---a custom Triton fused decode kernel with
+\path{@triton.autotune} tiling, asynchronous H2D block prefetch via dedicated \texttt{cudaStream}s,
+tiered CPU--HBM block offloading informed by the kTransformers inference framework, and a native
+C++/GGML decode kernel built with \texttt{-DGGML\_CUDA=ON}---is implemented and CPU-verified. No GPU
+benchmark numbers are collected in this report and no GPU performance claims are made; the tables
+reserve space for them without restructuring.
 \end{abstract}

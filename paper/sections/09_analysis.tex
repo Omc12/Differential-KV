@@ -8,10 +8,11 @@ $\ratioDefault\times$--$\ratioPreset\times$ per-block compression, while preserv
 distinctive tokens and making long-context prefill sub-quadratic. It costs per-token decode
 throughput, because the sparse representation must be scored and merged every step where a dense
 cache would simply attend. Through $32$k, where the optimized dense cache still fits comfortably on
-our host, \dkv{} is the slower decode and dense is the right choice. Memory is the other axis: a
-\emph{naive} full-KV cache OOMs at $\ptOOMK$k, and by $\reachK$k the standard PyTorch dense has been
-dead for four context-doublings, while \dkv{} runs to $\reachK$k and prefills there
-$\pfSpeedupSixtyFourK\times$ faster than even the memory-optimized dense. That boundary is the whole
+our host, \dkv{} is the slower decode and dense is the right choice. Memory is the other axis: the
+\emph{default} PyTorch full-KV configuration OOMs at $\ptOOMK$k---over-determined by its fp16 weights
+as much as its cache (\S\ref{sec:limits})---and by $\reachK$k it has been dead for four
+context-doublings, while \dkv{} runs to $\reachK$k and prefills there
+$\pfSpeedupSixtyFourK\times$ faster than even the weight-matched memory-optimized dense. That boundary is the whole
 point: \dkv{}'s regime is where the cache would otherwise not fit---larger models, longer
 contexts, tighter memory, or more concurrent sessions---and there the alternative to a slower
 decode is no decode at all.
@@ -40,13 +41,14 @@ We are deliberately careful about memory because it is the easiest claim to over
 peak}, through $32$k, is close between \dkv{} and the optimized dense, and \dkv{}'s can even
 exceed dense's, because the peak there is set during prefill and by the pre-allocated pool rather
 than by steady-state decode; on a $1.5$B model at those lengths, full KV is simply not yet large
-enough for the compression to dominate the peak. The claim sharpens at the memory boundary: a naive
-full-KV cache \emph{does} become the binding constraint and OOMs at $\ptOOMK$k, and even the
-optimized dense, while it reaches $\reachK$k, holds a larger unbounded KV state that \dkv{}'s
-fixed pool caps. So the honest memory story has two parts---below the boundary, compression buys a
-smaller \emph{growth rate} but not always a smaller measured peak; at and beyond the boundary, the
-bound is what keeps the context runnable, and what a naive dense cache cannot survive. The peak
-advantage is a reach advantage.
+enough for the compression to dominate the peak. The claim sharpens at the memory boundary: an
+unmanaged full-KV configuration \emph{does} become the binding constraint and OOMs at $\ptOOMK$k, and
+even the optimized dense, while it reaches $\reachK$k, holds a larger unbounded KV state that
+\dkv{}'s fixed pool caps. So the honest memory story has two parts---below the boundary,
+compression buys a smaller \emph{growth rate} but not always a smaller measured peak; at and beyond
+the boundary, the bound is what keeps the context runnable. We are careful not to over-read the
+PyTorch OOM here: that engine's fp16 weights contribute to its earlier failure, so it bounds the
+\emph{practitioner-default} reach, not the reach of full-KV caching as such.
 
 \subsection{When does \dkv{} win?}
 Synthesizing the results: \dkv{} wins when (i) the KV cache, not the weights, is the memory

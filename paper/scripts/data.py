@@ -30,7 +30,10 @@ DIMS = dict(
     kv_heads=2,          # GQA
     head_dim=128,
     block_size=256,      # S
-    recency_window=512,  # dense window = recency + block = 768
+    # Auto-sized by the runtime as round_up_512(n_layers * head_dim * 0.25):
+    # 28 * 128 * 0.25 = 896 -> 1024. Dense window = recency + block = 1280.
+    # (mlx_dkv_wrapper.py, DKV_DENSE_WINDOW_FACTOR)
+    recency_window=1024,
     rank=32,             # r — CLI 'mid' preset default (only 'low' drops to 16)
     max_blocks=256,      # bounded pool
     fp16_bytes=2,

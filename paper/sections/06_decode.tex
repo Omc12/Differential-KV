@@ -61,7 +61,7 @@ the true value.
 
 \subsection{Flash-style merge}
 The two halves are combined by the standard online-softmax identity used by
-FlashAttention~\cite{dao2022flashattention}, in a numerically guarded form:
+FlashAttention~\cite{dao2022flashattention,dao2023flashattention2}, in a numerically guarded form:
 \begin{equation}
   m = \max(\lse_{\text{sp}}, \lse_{\text{dn}}),\quad
   o = \frac{e^{\lse_{\text{sp}}-m}\,O_{\text{sp}} + e^{\lse_{\text{dn}}-m}\,O_{\text{dn}}}

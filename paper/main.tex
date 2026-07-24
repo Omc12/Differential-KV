@@ -6,6 +6,9 @@
 \usepackage[letterpaper,margin=1in]{geometry}
 \newif\ifext \exttrue           % extended (technical-report) mode ON
 \input{preamble}
+% Fixed release date: pinned (not \today) so a rebuild reproduces the deposited
+% record byte-for-byte. Bump only when the report is actually revised.
+\newcommand{\pubdate}{July 25, 2026}
 \setlength{\parskip}{0.35em}
 \setlength{\parindent}{0pt}
 
@@ -13,7 +16,7 @@
 for Scalable Long-Context Inference}}
 
 \author{Om Chimurkar}
-\date{Technical Report --- generated \today}
+\date{Technical Report --- \pubdate}
 
 \begin{document}
 
@@ -31,7 +34,7 @@ for Scalable Long-Context Inference\par}
 {\color{accent}\rule{\textwidth}{1.0pt}}\\[0.8cm]
 {\large Technical Report\par}
 \vspace{0.2cm}
-{\large Generated \today\par}
+{\large \pubdate\par}
 \vspace{0.4cm}
 {\large\bfseries Om Chimurkar\par}
 \vspace{0.15cm}
@@ -44,9 +47,9 @@ A sparse KV-cache inference runtime that compresses each transformer KV block to
 \emph{anchor token}, a rank-$32$ joint SVD \emph{delta}, and a set of \emph{exact residual
 tokens}, paired with a bounded dense recency window and a fused, routed decode kernel that scores
 queries in low-rank space without ever decompressing the cache and attends the residuals exactly.
-The bounded store reaches $64$k context on an $8.6$\,GB Apple~M3, where a standard full-KV cache
-exhausts memory at $16$k, and the residuals recover a buried passcode exactly at every context.
-Evaluated on Qwen2.5-1.5B (int4).
+The bounded store reaches $64$k context on an $8.6$\,GB Apple~M3, where a standard PyTorch full-KV
+cache (fp16 weights) exhausts memory at $16$k, and the residuals recover a buried passcode exactly at
+every context. Evaluated on Qwen2.5-1.5B (int4), with a cross-architecture check on Llama-3.2-3B.
 All numbers in this report are measured; no value is fabricated.
 \end{minipage}
 \vspace{1.2cm}

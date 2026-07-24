@@ -43,8 +43,10 @@ def t1_config():
         ("Query / KV heads (GQA)", f"{d['n_heads']} / {d['kv_heads']}"),
         ("Head dimension $d$", f"{d['head_dim']}"),
         ("Block size $B$", f"{d['block_size']} tokens"),
-        ("SVD rank $r$", f"{d['rank']} (adaptive $\\le r$, 99.9\\% energy)"),
-        ("Recency window $W$ (+block)", f"{d['recency_window']} (+{d['block_size']} = 768 exact)"),
+        ("SVD rank $r$", f"{d['rank']} base (layer-adaptive $[0.75r, 1.5r]$, 99.9\\% energy)"),
+        ("Recency window $W$ (+block)",
+         f"{d['recency_window']} (+{d['block_size']} = "
+         f"{d['recency_window'] + d['block_size']} exact)"),
         ("Residual budget $R$", "128 (default) / 64 (memory preset)"),
         ("Block pool $M$", f"{d['max_blocks']} blocks ($\\le$ 65\\,536 tokens)"),
         ("Top-$K$ routed blocks", "16 (residual-key router)"),
@@ -64,12 +66,18 @@ def t2_block_budget():
     b64 = D.block_budget(64)
     def kib(x):
         return "%.1f" % (x / 1024)
+    # Shapes are derived from DIMS, not hardcoded: a rank change must move the
+    # printed shapes and the byte counts together.
+    S1 = D.DIMS["block_size"] - 1
+    r = D.DIMS["rank"]
+    Hk = D.DIMS["kv_heads"]
+    d = D.DIMS["head_dim"]
     L = [r"\begin{tabular}{lrr}", r"\toprule",
          r"Component & Bytes & Note \\", r"\midrule",
-         r"$U$ coefficients $[255,16]$ & %d & low-rank \\" % b128["U"],
-         r"$V_K,V_V\ [2,16,128]$ & %d & low-rank \\" % b128["VKV"],
-         r"anchors $a_k,a_v\ [2,128]$ & %d & exact \\" % b128["anchors"],
-         r"key min/max $[2,128]$ & %d & router \\" % b128["minmax"],
+         r"$U$ coefficients $[%d,%d]$ & %d & low-rank \\" % (S1, r, b128["U"]),
+         r"$V_K,V_V\ [%d,%d,%d]$ & %d & low-rank \\" % (Hk, r, d, b128["VKV"]),
+         r"anchors $a_k,a_v\ [%d,%d]$ & %d & exact \\" % (Hk, d, b128["anchors"]),
+         r"key min/max $[%d,%d]$ & %d & router \\" % (Hk, d, b128["minmax"]),
          r"scale, seq\_len & %d & scalar \\" % b128["scalars"],
          r"\midrule",
          r"\textbf{Low-rank core} & \textbf{%d} & (%s KiB) \\" % (b128["lowrank"], kib(b128["lowrank"])),

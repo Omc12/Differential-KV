@@ -34,8 +34,13 @@ what is measured at all lengths, not the adaptive dense-below-threshold policy),
 used in the reported measurements),
 \texttt{DKV\_SPARSE\_PREFILL=1} (block-sparse prefill),
 \texttt{DKV\_SPARSE\_BIAS=auto} (adaptive merge bias, as the CLI ships).
-The dense baseline is \texttt{mlx\_lm} with a full KV cache on the same int4
-weights. The residual sweep (E5) forces \texttt{DKV\_COMPRESSED\_DECODE=1}
+The optimized dense baseline is \texttt{mlx\_lm} with a full KV cache on the same
+int4 weights. The standard PyTorch baseline is \texttt{AutoModelForCausalLM} on
+\path{Qwen/Qwen2.5-1.5B-Instruct} with \texttt{torch\_dtype=float16} on the MPS
+backend---unquantized weights, since \texttt{transformers} cannot load the MLX
+int4 checkpoint---and is therefore a practitioner-default reference rather than a
+weight-matched control (\S\ref{sec:eval}).
+The residual sweep (E5) forces \texttt{DKV\_COMPRESSED\_DECODE=1}
 and varies \texttt{DKV\_MAX\_RESIDUAL}; the decode-mode ablation (E6) toggles
 \texttt{DKV\_COMPRESSED\_DECODE} between $1$ (compressed) and $0$ (exact
 upper bound) over the same store.
@@ -48,18 +53,26 @@ passcode (\texttt{OMEGA-7741-DELTA}); ``needle recovered'' means the generation 
 Engines are warmed once (a $1$-token forward to compile kernels) before timing. Prefill is timed
 with \texttt{perf\_counter} around the chunked forward after \texttt{mx.eval}; decode is
 fixed-length greedy ($128$ tokens, EOS ignored) so throughput is directly comparable. Memory is
-read from MLX's allocator (\texttt{get\_peak\_memory}). Each \texttt{(engine, context)} cell runs
+read from MLX's allocator (\texttt{get\_peak\_memory}) for the two \mlxe{} engines and from
+\texttt{torch.mps.driver\_allocated\_memory()} for the PyTorch engine---different metrics, not
+interchangeable. Each \texttt{(engine, context)} cell runs
 in its own subprocess so memory is attributable and an out-of-memory event kills only that cell.
-The full primary sweep is a single back-to-back batch, so \dkv{} and dense are measured under
-the same machine conditions; the volatile long-context dense cells were re-measured in isolation to
-confirm their regime.
+The full primary sweep is a single back-to-back batch, so \dkv{} and the optimized dense engine are
+measured under the same machine conditions; the volatile long-context dense cells were re-measured
+in isolation to confirm their regime. The PyTorch cells come from a separate worker
+(\path{benchmarks/bench_worker.py}), which does not synchronise the MPS queue before stopping its
+prefill timer---see the caveat in \S\ref{sec:eval}.
 
 \paragraph{Commands.}
 \begin{quote}\small\ttfamily
-\# fresh primary sweep (active vs dense, 4k--32k), isolated per cell\\
-CTXS="4096 8192 16384 32768" bash paper/scripts/measure\_sweep.sh\\[3pt]
+\# primary sweep (active vs optimized dense, 4k--32k), isolated per cell\\
+CTXS="4096 8192 16384 32768" bash paper/scripts/run\_clean.sh\\[3pt]
 \# 64k reach point + long-context dense re-check\\
 bash paper/scripts/measure\_tail.sh\\[3pt]
+\# standard PyTorch dense cells (fp16 weights; separate worker)\\
+python benchmarks/bench\_worker.py --engine dense --ctx 4096 --gen 128 \textbackslash\\
+\ \ --prompt-file benchmarks/results/prompt\_4096.txt \textbackslash\\
+\ \ --result-file benchmarks/results/clean\_normal\_dense\_4096.json\\[3pt]
 \# decode-mode ablation (compressed vs exact, same store)\\
 DKV\_DECODE\_CACHE=1 dkv\_venv/bin/python3 paper/scripts/measure\_active.py \textbackslash\\
 \ \ --ctx 4096 8192 16384 32768 --modes compressed exact --gen 128 \textbackslash\\
@@ -77,12 +90,23 @@ dkv\_venv/bin/python3 paper/scripts/make\_tables.py
 
 \begin{sloppypar}
 \paragraph{Artifacts and provenance.}
-Primary measured JSON: \path{benchmarks/results/fresh_{active,dense}_{ctx}.json}.
+Primary measured JSON: \path{benchmarks/results/clean_{active,dense,normal_dense}_{ctx}.json}.
 Ablations: \path{paper/generated/active_modes_fresh.json} (decode modes) and
-\path{paper/generated/residual_sweep_fresh.json} (residual budget). Every figure
-and table is regenerated from these by the scripts above; the body text's numbers
-are LaTeX macros emitted by \texttt{make\_facts.py}, so the prose cannot drift
-from the data. The dataset selection, the decode-path attribution that motivated
-this measurement design, and the corrected compression-ratio accounting are
-documented in \path{paper/notes/AUDIT_2026-07-07.md} and the consistency report.
+\path{paper/generated/residual_sweep_fresh.json} (residual budget); as noted in
+\S\ref{sec:eval}, these two were collected in earlier runs under a different
+decode-path configuration, so their absolute throughput is not comparable to the
+primary sweep. Tables~\ref{tab:config}--\ref{tab:ablation} and every data figure
+are regenerated from these files by the scripts above, and the body text's numbers
+are LaTeX macros emitted by \texttt{make\_facts.py}, so that prose cannot drift
+from that data.
+
+\emph{Provenance gap.} The E7--E12 tables (multi-needle, Llama-3.2-3B, the residual-signal
+ablation, and lego prefill) are transcribed by hand rather than generated: their harnesses are
+\path{benchmarks/run_multi_needle_mlx.py}, \path{run_llama3b_mlx.py},
+\path{run_signal_ablation_mlx.py} and \path{run_lego_mem_mlx.py}, but the result JSONs those
+scripts emit are not checked into this repository, so those four tables are not machine-verifiable
+from the artifact the way Tables~\ref{tab:config}--\ref{tab:ablation} are. Re-running the listed
+harnesses regenerates them. The dataset selection, the decode-path attribution that motivated this
+measurement design, and the corrected compression-ratio accounting are documented in
+\path{paper/notes/AUDIT_2026-07-07.md}.
 \end{sloppypar}
