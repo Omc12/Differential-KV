@@ -1,5 +1,6 @@
 # Differential-KV (DKV): Anchor + Low-Rank KV-Cache Compression
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21539110.svg)](https://doi.org/10.5281/zenodo.21539110)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](BUILD.md)
 [![Backend](https://img.shields.io/badge/Backend-MLX%20%7C%20PyTorch%20%7C%20CUDA%20%7C%20C%2B%2B17-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
