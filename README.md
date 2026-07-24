@@ -256,6 +256,8 @@ If you use Differential-KV in your research or project, please cite the technica
 }
 ```
 
+Persistent DOI: https://doi.org/10.5281/zenodo.21539110
+
 For build instructions and native compilation details, see **[BUILD.md](BUILD.md)**.
 
 ---
