@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+title: "DKV: Anchor + Low-Rank Differential KV-Cache Compression for Scalable Long-Context Inference"
+
+message: "If you use this software, please cite it using the metadata below."
+
+authors:
+  - family-names: Chimurkar
+    given-names: Om
+    affiliation: Newton School of Technology, Rishihood University
+
+version: 1.0.0
+
+date-released: 2026-07-21
+
+license: MIT
+
+doi: 10.5281/zenodo.21539110
+
+repository-code: https://github.com/Omc12/Differential-KV
+
+url: https://doi.org/10.5281/zenodo.21539110
