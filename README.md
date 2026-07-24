@@ -8,7 +8,7 @@
 **Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for high-efficiency, memory-bounded long-context Large Language Model (LLM) inference across Apple Silicon (MLX) and CUDA GPUs.
 
 Author: **Om Chimurkar** (Newton School of Technology, Rishihood University)  
-Technical Report: [paper/main.pdf](paper/main.pdf)
+Paper: https://doi.org/10.5281/zenodo.21539110
 
 ---
 
@@ -243,12 +243,16 @@ cd dkv_native/tests && ./test_niah_native.sh
 If you use Differential-KV in your research or project, please cite the technical report:
 
 ```bibtex
-@article{chimurkar2026differentialkv,
-  title={Differential-KV: Anchor + Low-Rank Differential KV-Cache Compression for Scalable Long-Context Inference},
-  author={Chimurkar, Om},
-  journal={Technical Report, Newton School of Technology, Rishihood University},
-  year={2026},
-  url={https://github.com/Omc12/Differential-KV}
+@misc{chimurkar_2026_21539110,
+  author       = {Chimurkar, Om},
+  title        = {DKV: Anchor + Low-Rank Differential KV-Cache
+                   Compression for Scalable Long-Context Inference},
+  month        = jul,
+  year         = 2026,
+  publisher    = {Zenodo},
+  version      = {v1},
+  doi          = {10.5281/zenodo.21539110},
+  url          = {https://doi.org/10.5281/zenodo.21539110},
 }
 ```
 
