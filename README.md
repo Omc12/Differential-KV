@@ -1,5 +1,6 @@
 # Differential-KV (DKV): Anchor + Low-Rank KV-Cache Compression
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21539110.svg)](https://doi.org/10.5281/zenodo.21539110)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](BUILD.md)
 [![Backend](https://img.shields.io/badge/Backend-MLX%20%7C%20PyTorch%20%7C%20CUDA%20%7C%20C%2B%2B17-blueviolet.svg)](ACTIVE_RUNTIME/README.md)
@@ -7,7 +8,7 @@
 **Differential-KV (DKV)** is a sparse KV-cache inference runtime designed for high-efficiency, memory-bounded long-context Large Language Model (LLM) inference across Apple Silicon (MLX) and CUDA GPUs.
 
 Author: **Om Chimurkar** (Newton School of Technology, Rishihood University)  
-Technical Report: [paper/main.pdf](paper/main.pdf)
+Paper: https://doi.org/10.5281/zenodo.21539110
 
 ---
 
@@ -245,8 +246,7 @@ If you use Differential-KV in your research or project, please cite:
 @misc{chimurkar_2026_21539110,
   author       = {Chimurkar, Om},
   title        = {DKV: Anchor + Low-Rank Differential KV-Cache
-                   Compression for Scalable Long-Context Inference
-                  },
+                   Compression for Scalable Long-Context Inference},
   month        = jul,
   year         = 2026,
   publisher    = {Zenodo},
@@ -255,6 +255,8 @@ If you use Differential-KV in your research or project, please cite:
   url          = {https://doi.org/10.5281/zenodo.21539110},
 }
 ```
+
+Persistent DOI: https://doi.org/10.5281/zenodo.21539110
 
 For build instructions and native compilation details, see **[BUILD.md](BUILD.md)**.
 
