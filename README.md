@@ -10,8 +10,6 @@
 Author: **Om Chimurkar** (Newton School of Technology, Rishihood University)  
 Paper: https://doi.org/10.5281/zenodo.21539110
 
-**You can try a demo here:** https://huggingface.co/spaces/Om1232/Differential-KV
-**ORCID:** https://orcid.org/0009-0004-0518-4598
 ---
 
 ## 📌 Core Architecture & Paper Overview
