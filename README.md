@@ -142,32 +142,40 @@ Differential-KV runtime behaviors can be fine-tuned using environment variables:
 | **Backends** | MLX (Apple Silicon) / PyTorch + Triton (CUDA) | forked `llama.cpp` / `ggml` (Metal & CUDA) |
 | **Model Format** | HuggingFace Transformers / `mlx-community` | GGUF |
 | **Primary Target** | Research, rapid iteration, serving gateway | Production edge deployment, minimal host overhead |
-| **Status** | Reference accuracy (4k–64k NIAH 100% exact recall) | Verified NIAH sweep (6/6 Q8_0 & Q4_K_M) |
+| **Status** | Reference accuracy (4k–64k NIAH 100% exact recall) | Experimental / Work-In-Progress |
 
 ---
 
 ## 📊 Measured Paper Benchmarks
 
-All benchmark results are empirically measured on a single host: **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router.
+All benchmark results are empirically measured on a single host: **Apple M3 with 8.6 GB unified memory**, evaluating **Qwen2.5-1.5B-Instruct (int4)** using rank $r=32$, residual budget $R=128$, micro-block size $B_s=256$, top-$K=16$, and residual-key router (raw logs preserved in `benchmarks/results/results_latest.json`).
 
 ### 1. Context Length Sweep (DKV vs. Dense Baselines)
 
 | Context Length | Runtime / Engine | Prefill Time (s) | Decode Speed (tok/s) | Peak Allocator Memory (GB) | Needle Recalled |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **4k** | **DKV (Compressed)** | 6.6s | 19.9 | 1.74 GB | **Yes** |
-| | Dense Baseline | 5.1s | 65.7 | 1.68 GB | **Yes** |
-| **8k** | **DKV (Compressed)** | 13.6s | 18.4 | 1.89 GB | **Yes** |
-| | Dense Baseline | 11.8s | 55.3 | 1.79 GB | **Yes** |
-| **16k** | **DKV (Compressed)** | 28.2s | 18.7 | 2.36 GB | **Yes** |
-| | Dense Baseline | 27.8s | 47.0 | 2.03 GB | **Yes** |
-| **32k** | **DKV (Compressed)** | 58.5s | 17.0 | 3.12 GB | **Yes** |
-| | Dense Baseline | 77.9s | 35.7 | 2.45 GB | **Yes** |
-| **64k** | **DKV (Compressed)** | 928s | 8.6 | 4.63 GB | **Yes** |
-| | Dense Baseline | *OOM* | *OOM* | *OOM* | *OOM* |
+| **4k** | **DKV Active (Compressed)** | 6.16s | 33.3 | 1.55 GB | **Yes** |
+| | MLX Dense Baseline | 5.00s | 68.9 | 1.68 GB | **Yes** |
+| | PyTorch Dense Baseline | 0.83s | 3.6 | 8.05 GB | **Yes** |
+| **8k** | **DKV Active (Compressed)** | 13.37s | 31.4 | 1.67 GB | **Yes** |
+| | MLX Dense Baseline | 11.08s | 54.5 | 1.79 GB | **Yes** |
+| | PyTorch Dense Baseline | 0.48s | 3.5 | 8.05 GB | **Yes** |
+| **16k** | **DKV Active (Compressed)** | 29.77s | 29.7 | 2.20 GB | **Yes** |
+| | MLX Dense Baseline | 27.04s | 48.2 | 2.03 GB | **Yes** |
+| | PyTorch Dense Baseline | *OOM* | *OOM* | *OOM* (8.58 GB) | *OOM* |
+| **32k** | **DKV Active (Compressed)** | 72.33s | 27.2 | 3.12 GB | **Yes** |
+| | MLX Dense Baseline | 75.00s | 37.5 | 2.45 GB | **Yes** |
+| | PyTorch Dense Baseline | *OOM* | *OOM* | *OOM* (8.58 GB) | *OOM* |
+| **64k** | **DKV Active (Compressed)** | **477.12s** | **21.4** | 5.04 GB | **Yes** |
+| | MLX Dense Baseline | **820.98s** | **20.2** | 3.23 GB | **Yes** |
+| | PyTorch Dense Baseline | *OOM* | *OOM* | *OOM* (8.58 GB) | *OOM* |
 
 > 💡 **Key Benchmark Takeaways:**
-> - **Prefill Crossover ($\ge 32\text{k}$):** Thanks to block-sparse prefill scaling $O(L \cdot K)$, Differential-KV prefilling beats the dense baseline at 32k context ($1.33\times$ faster prefill: 58.5s vs 77.9s).
-> - **64k Reach Advantage:** The dense full-KV baseline suffers an Out-Of-Memory (OOM) failure at 64k context on the 8.6 GB memory host. Differential-KV completes 64k inference with 100% exact needle recovery within bounded memory.
+> - **Prefill Crossover at 64k:** At extreme context ($64\text{k}$), DKV prefilling beats MLX Dense prefilling by **$1.72\times$** (477.1s vs 821.0s), demonstrating sub-quadratic scaling ($O(L \cdot K)$).
+> - **Baseline Differentiation:** Standard PyTorch Dense (`AutoModelForCausalLM`) suffers an Out-Of-Memory (OOM) failure at $\ge 16\text{k}$ context on an 8.6 GB memory host, whereas MLX unified memory optimization enables MLX Dense to complete 64k.
+> - **Needle Recall & Heuristic-Protection Transparency:**
+>   - **Pattern-Protected NIAH Needle Recall (Digits/Codes):** 100% exact recall (protected by `streaming_sparse_ingest.py` content-aware regex safeguards).
+>   - **Unassisted Prose Entity Recall (`benchmarks/prose_fact_recall.py`):** ~60% recall under default unassisted SVD compression. Toggle regex rules via `DKV_DISABLE_REGEX_HEURISTICS=1`.
 
 ### 2. Residual Budget ($R$) Trade-Off Sweep (16k Context)
 

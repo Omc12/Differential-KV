@@ -5962,3 +5962,15 @@ class MLXDKVWrapper:
         if hasattr(self, "manager") and self.manager is not None:
             self.manager.clear_session(session_id)
         self._session_token_ids.pop(session_id, None)
+        if hasattr(self, "sessions") and session_id in self.sessions:
+            session = self.sessions.pop(session_id, None)
+            if isinstance(session, dict):
+                if "_res_cache" in session and isinstance(session["_res_cache"], dict):
+                    session["_res_cache"].clear()
+                if "_cache_kv" in session and isinstance(session["_cache_kv"], dict):
+                    session["_cache_kv"].clear()
+        if hasattr(self, "engine") and hasattr(self.engine, "clear_session"):
+            try:
+                self.engine.clear_session(session_id)
+            except Exception:
+                pass

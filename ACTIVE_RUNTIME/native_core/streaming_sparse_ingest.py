@@ -788,6 +788,10 @@ class StreamingSparseIngestManager:
         if _cache_key in self._skip_compress_cache:
             return self._skip_compress_cache[_cache_key]
 
+        if os.environ.get("DKV_DISABLE_REGEX_HEURISTICS", "0").lower() in ("1", "true", "yes"):
+            self._skip_compress_cache[_cache_key] = False
+            return False
+
         if self.manager is None or getattr(self.manager, "tokenizer", None) is None:
             self._skip_compress_cache[_cache_key] = False
             return False
