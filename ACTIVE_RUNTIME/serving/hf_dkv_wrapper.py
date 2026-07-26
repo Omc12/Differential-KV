@@ -26,6 +26,7 @@ from native_core.kv_runtime_manager import KVRuntimeManager
 
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
 from runtime.dkv_attention import apply_dkv_attention_patch
+from runtime.dkv_backend import register_dkv_backend, bind_kv_manager
 from serving.query_span import extract_query_token_ids as _extract_query_token_ids
 from serving.query_span import pinned_blocks_from_prompt as _pinned_blocks_from_prompt
 
@@ -552,7 +553,23 @@ class PyTorchDKVHFWrapper:
         if _has_cuda():
             _configure_cuda_allocator()
 
-        if device == "mps":
+        # Clean Code Integration: AttentionInterface path (Mode A default)
+        attn_impl_kwarg = {}
+        if os.environ.get("DKV_USE_ATTENTION_INTERFACE", "1") == "1" or config.get("use_attention_interface", False):
+            register_dkv_backend()
+            attn_impl_kwarg["attn_implementation"] = "dkv"
+
+        if device == "mps" and quantization_config is None:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+                use_safetensors=True,
+                low_cpu_mem_usage=True,
+                local_files_only=self.local_files_only,
+                **attn_impl_kwarg,
+            ).to(device)
+        elif device == "mps":
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
@@ -562,14 +579,9 @@ class PyTorchDKVHFWrapper:
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
                 local_files_only=self.local_files_only,
+                **attn_impl_kwarg,
             )
         elif quantization_config is None and str(device).startswith("cuda"):
-            # Non-quantized CUDA: load WITHOUT device_map then .to(device).
-            # device_map= triggers transformers' caching_allocator_warmup (4.46+),
-            # which coexists a full-size warmup buffer AND the weights (~2x the
-            # model → ~39GiB for a 7B on a 40GB card → OOM at load). Skipping
-            # device_map skips the warmup; peak is ~1x (fp16 weights). Quantized
-            # (4-bit) still needs device_map, handled by the else branch.
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
@@ -577,6 +589,7 @@ class PyTorchDKVHFWrapper:
                 use_safetensors=True,
                 low_cpu_mem_usage=True,
                 local_files_only=self.local_files_only,
+                **attn_impl_kwarg,
             ).to(device)
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -587,6 +600,7 @@ class PyTorchDKVHFWrapper:
                 quantization_config=quantization_config,
                 use_safetensors=True,
                 local_files_only=self.local_files_only,
+                **attn_impl_kwarg,
             )
 
         self.model.eval()

@@ -4482,6 +4482,31 @@ def _resolve_compressed_decode(seq_len: int) -> bool:
     threshold = int(os.environ.get("DKV_COMPRESSED_MIN_CTX", "16384"))
     return seq_len >= threshold
 
+
+def _resolve_attn_dims(attn):
+    """Read (n_heads, n_kv_heads, head_dim) off an attention module across
+    naming conventions (`n_heads`/`num_attention_heads`/`num_heads`, etc.) and
+    across gated-attention variants (Qwen3-Next/Qwen3.5-style) whose q_proj
+    packs [query | gate] per head and so is 2x the plain n_heads*head_dim
+    width — those architectures expose `head_dim` directly, so prefer that
+    over deriving it from q_proj's output width.
+    """
+    n_heads = (
+        getattr(attn, "n_heads", None)
+        or getattr(attn, "num_attention_heads", None)
+        or getattr(attn, "num_heads", None)
+    )
+    n_kv_heads = (
+        getattr(attn, "n_kv_heads", None)
+        or getattr(attn, "num_key_value_heads", None)
+        or n_heads
+    )
+    head_dim = getattr(attn, "head_dim", None)
+    if head_dim is None:
+        head_dim = attn.q_proj.weight.shape[0] // n_heads
+    return n_heads, n_kv_heads, head_dim
+
+
 def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Optional[Any] = None) -> mx.array:
     """Patched Qwen2 attention that:
     - During PREFILL: uses the native MLX KV cache (via `cache`) so that
@@ -4500,13 +4525,37 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
     session_ids = manager.active_session_ids
     position_ids = manager.position_ids
 
-    queries = self.q_proj(x)
+    n_heads, n_kv_heads, head_dim = self.n_heads, self.n_kv_heads, self.head_dim
+
+    q_out   = self.q_proj(x)
     keys    = self.k_proj(x)
     values  = self.v_proj(x)
 
-    queries = queries.reshape(B, L, self.n_heads,    -1).transpose(0, 2, 1, 3)
-    keys    = keys.reshape(   B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
-    values  = values.reshape( B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+    # Gated-attention variants (Qwen3-Next/Qwen3.5-style) pack [query | gate]
+    # per head into q_proj's output (2x width); split and apply sigmoid(gate)
+    # to the attention output below, mirroring the model's own attention class.
+    attn_gate = None
+    if q_out.shape[-1] == n_heads * head_dim * 2:
+        queries, attn_gate = mx.split(
+            q_out.reshape(B, L, n_heads, 2 * head_dim), 2, axis=-1
+        )
+        attn_gate = attn_gate.reshape(B, L, -1)
+    else:
+        queries = q_out.reshape(B, L, n_heads, head_dim)
+    keys = keys.reshape(B, L, n_kv_heads, head_dim)
+
+    # QK-norm (RMSNorm on queries/keys before rotation) — used by Qwen3-family
+    # attention but not Qwen2/Llama/Mistral; apply only when the module has it.
+    q_norm = getattr(self, "q_norm", None)
+    k_norm = getattr(self, "k_norm", None)
+    if q_norm is not None:
+        queries = q_norm(queries)
+    if k_norm is not None:
+        keys = k_norm(keys)
+
+    queries = queries.transpose(0, 2, 1, 3)
+    keys    = keys.transpose(0, 2, 1, 3)
+    values  = values.reshape(B, L, n_kv_heads, head_dim).transpose(0, 2, 1, 3)
 
     if B == 1:
         # Fast path: plain int offset (no per-layer mx.array creation) and no
@@ -4885,6 +4934,8 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 queries_rot, all_k, all_v, scale=self.scale, mask=mask)
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        if attn_gate is not None:
+            output = output * mx.sigmoid(attn_gate)
         return self.o_proj(output)
 
     else:
@@ -5005,6 +5056,8 @@ def attention_forward(self, x: mx.array, mask: Optional[Any] = None, cache: Opti
                 manager.compress_deferred_prefill_blocks_for_layer(sid, layer_idx)
 
         output = out_b.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        if attn_gate is not None:
+            output = output * mx.sigmoid(attn_gate)
         return self.o_proj(output)
 
 class MLXQwenModel:
@@ -5144,12 +5197,26 @@ class MLXQwenModel:
                 mx.clear_cache()   # return peak activation memory to OS
                 import gc; gc.collect()
                 if use_compressed and not getattr(self, "keep_prefill_cache", False):
-                    # Compressed decode runs entirely on the DKV store
-                    # (compressed blocks + dense recency window), so the full
-                    # native prefill KV cache is no longer needed. Drop it so
-                    # decode-time memory reflects the DKV footprint, not a
-                    # retained full-context cache.
-                    self._prefill_caches.pop(cache_key, None)
+                    # Compressed decode runs the DKV-patched (self_attn) layers
+                    # entirely on the DKV store (compressed blocks + dense
+                    # recency window), so THEIR native KVCache entries are dead
+                    # weight and get dropped here for the memory win. But hybrid
+                    # architectures (Qwen3-Next/Qwen3.5-style) interleave
+                    # non-attention layers (linear/gated-delta-net) that DKV
+                    # does not touch — those still rely on MLX's native cache
+                    # to carry their recurrent state across decode steps, so
+                    # dropping the whole list would silently reset them to a
+                    # blank state on every single token. Null out only the
+                    # self_attn slots; leave everything else alone.
+                    _cache_list = self._prefill_caches.get(cache_key)
+                    if _cache_list is not None:
+                        _all_attn = all(hasattr(l, "self_attn") for l in self.mlx_model.layers)
+                        if _all_attn:
+                            self._prefill_caches.pop(cache_key, None)
+                        else:
+                            for _i, _layer in enumerate(self.mlx_model.layers):
+                                if hasattr(_layer, "self_attn"):
+                                    _cache_list[_i] = None
                     # Lego prefill state (raw sinks + recency-ring buffers, up to
                     # ~250 MB at ring 4096 on a 28-layer model) is prefill-only —
                     # decode attends the compressed store. Free it, and clear the
@@ -5302,11 +5369,24 @@ class MLXDKVWrapper:
             if tok_id is not None and tok_id != self.tokenizer.unk_token_id:
                 self.stop_token_ids.add(tok_id)
 
+        # Use the first layer that actually exposes `self_attn` to derive shapes —
+        # hybrid architectures (Qwen3-Next/Qwen3.5-style) interleave attention-free
+        # linear/gated-delta-net layers that have no KV cache and no `self_attn`.
+        _attn_layers = [l for l in model.layers if hasattr(l, "self_attn")]
+        if not _attn_layers:
+            raise RuntimeError(
+                "DKV could not find any `self_attn` module on this model's decoder "
+                "layers — it may use a fully non-standard attention/state layout "
+                "that DKV's KV-compression patching doesn't support yet."
+            )
+        _ref_attn = _attn_layers[0].self_attn
+        _ref_heads, _ref_kv_heads, _ref_head_dim = _resolve_attn_dims(_ref_attn)
+
         self.manager = MLXKVBlockManager(
             num_layers=len(model.layers),
-            heads=model.model.layers[0].self_attn.n_heads,
-            kv_heads=model.model.layers[0].self_attn.n_kv_heads,
-            head_dim=model.model.layers[0].self_attn.q_proj.weight.shape[0] // model.model.layers[0].self_attn.n_heads,
+            heads=_ref_heads,
+            kv_heads=_ref_kv_heads,
+            head_dim=_ref_head_dim,
             rank=self.base_rank,
             block_size=self.block_size
         )
@@ -5331,16 +5411,37 @@ class MLXDKVWrapper:
         self.manager.patched_model = self.model
 
     def _patch_attention_layers(self, model):
-        # Dynamically find and patch the attention class of the loaded model
-        if len(model.model.layers) > 0:
-            attn_class = model.model.layers[0].self_attn.__class__
-            if not hasattr(attn_class, "original_call"):
-                attn_class.original_call = attn_class.__call__
-            attn_class.__call__ = attention_forward
-        
-        for layer_idx, layer in enumerate(model.model.layers):
-            layer.self_attn.layer_idx = layer_idx
-            layer.self_attn.kv_manager = self.manager
+        # Dynamically find and patch the attention class(es) of the loaded model.
+        # Hybrid architectures (e.g. gated-delta-net / linear-attention layers
+        # interleaved with full attention, as in Qwen3-Next/Qwen3.5) mean not
+        # every decoder layer has a `self_attn` submodule — only the layers
+        # that expose one have a KV cache DKV can compress, so only patch those.
+        patched_classes = set()
+        for layer in model.layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is None:
+                continue
+            attn_class = attn.__class__
+            if attn_class not in patched_classes:
+                if not hasattr(attn_class, "original_call"):
+                    attn_class.original_call = attn_class.__call__
+                attn_class.__call__ = attention_forward
+                patched_classes.add(attn_class)
+
+        for layer_idx, layer in enumerate(model.layers):
+            attn = getattr(layer, "self_attn", None)
+            if attn is None:
+                continue
+            attn.layer_idx = layer_idx
+            attn.kv_manager = self.manager
+            attn.n_heads, attn.n_kv_heads, attn.head_dim = _resolve_attn_dims(attn)
+
+        if not patched_classes:
+            raise RuntimeError(
+                "DKV could not find any `self_attn` module on this model's decoder "
+                "layers — it may use a fully non-standard attention/state layout "
+                "that DKV's KV-compression patching doesn't support yet."
+            )
 
     def close(self):
         if self.manager is not None:

@@ -2879,9 +2879,20 @@ class KVRuntimeManager:
             
             rope_theta = 10000.0
             if hasattr(self, "model") and self.model is not None:
-                rope_theta = getattr(self.model.config, "rope_theta", 10000.0)
-            if "qwen" in str(getattr(self, "model_id", "")).lower():
-                rope_theta = 1000000.0
+                model_cfg = self.model.config
+                cfg_theta = getattr(model_cfg, "rope_theta", None)
+                if cfg_theta is not None:
+                    rope_theta = cfg_theta
+                else:
+                    # Newer HF configs (e.g. Qwen3.5, Llama 3.1) nest theta under
+                    # a rope_parameters/rope_scaling dict instead of a flat field.
+                    rope_cfg = (
+                        getattr(model_cfg, "rope_parameters", None)
+                        or getattr(model_cfg, "rope_scaling", None)
+                        or getattr(getattr(model_cfg, "text_config", None), "rope_parameters", None)
+                    )
+                    if isinstance(rope_cfg, dict) and rope_cfg.get("rope_theta") is not None:
+                        rope_theta = rope_cfg["rope_theta"]
             
             inv_freq = 1.0 / (rope_theta ** (torch.arange(0, D, 2, device=device, dtype=torch.float32) / D))
             t_coords = torch.arange(S_total, device=device, dtype=torch.float32)

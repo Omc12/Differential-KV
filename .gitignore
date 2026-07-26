@@ -94,4 +94,13 @@ paper/xr.sty
 # Temporary evaluation outputs in repository root
 dkv_*_verified.json
 
+# Post-paper engineering report
+things_after_paper.md
 
+# Ignore models directory and benchmark execution artifacts
+models/
+benchmarks/results/
+benchmarks/results_*/
+benchmarks/*.sh
+benchmarks/bench_rope_tradeoff.py
+docs/turboquant_dkv_hybrid_roadmap.md
