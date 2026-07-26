@@ -5477,7 +5477,7 @@ class MLXDKVWrapper:
         # the MLX allocator cache, making peak RAM proportional to the full prompt
         # length instead of one chunk — the root cause of the 7–8 GB spike at 12k.
         import gc as _gc
-        PREFILL_CHUNK = 512
+        PREFILL_CHUNK = int(os.environ.get("DKV_PREFILL_CHUNK", "512"))
         output = None
         total_chunks = (len(new_prompt_ids) + PREFILL_CHUNK - 1) // PREFILL_CHUNK
         for i, chunk_start in enumerate(range(0, len(new_prompt_ids), PREFILL_CHUNK)):

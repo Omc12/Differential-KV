@@ -56,3 +56,42 @@ dist/
 # (archive/**/scratch is intentionally retained as a historical record.)
 /scratch/
 /ACTIVE_RUNTIME/scratch/
+
+# External benchmark clones & datasets
+LongBench/
+RULER/
+
+# Local virtual environment & IDE settings
+dkv_venv/
+.claude/
+.vscode/
+
+# LaTeX auxiliary build files & compiled manuscript packages
+*.aux
+*.bbl
+*.blg
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+paper/*.pdf
+paper/**/*.pdf
+paper/*.docx
+paper/**/*.docx
+paper/*.zip
+paper/**/*.zip
+paper/submission_package/
+paper/submission_documents/
+paper/sections_ieee/
+paper/*_ieee*
+paper/*_IEEE*
+paper/ieee_*
+paper/IEEEtran*
+paper/supplementary*
+paper/xr.sty
+
+# Temporary evaluation outputs in repository root
+dkv_*_verified.json
+
+
