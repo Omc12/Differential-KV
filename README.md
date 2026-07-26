@@ -207,6 +207,44 @@ The residual budget $R$ acts as an explicit memory-speed-accuracy dial:
 | **DKV Block ($R=64$)** | | **116,680 B** | **113.9 KiB ($2.25\times$ compression)** |
 | **Dense Block** | $[256, 2, 128] \times 2$ | **262,144 B** | **256.0 KiB ($1.00\times$)** |
 
+### 4. THUDM LongBench & NVIDIA RULER Benchmark Suites (32k Context)
+
+Evaluated on **Qwen2.5-1.5B-Instruct (int4)** under up to $32,768$ context length using DKV active runtime ($r=32$, $R=128$, $B_s=256$):
+
+#### NVIDIA RULER Benchmark Suite
+| Task Category | Task | Evaluated Metric | DKV Score |
+| :--- | :--- | :--- | :---: |
+| **Multi-Document QA** | `qa_2` | Exact Match / Substring | **100.0%** |
+| **Single-Needle Recall** | `niah_single` | Needle Retrieval | **100.0%** |
+| **Multi-Key Recall** | `niah_multikey` | Key-Value Retrieval | **100.0%** |
+| **Multi-Value Recall** | `niah_multivalue` | Value Association | **100.0%** |
+| **Variable Tracking** | `variable_tracking` | Chain-of-Thought Variable | **100.0%** |
+| **Common Words Extraction** | `cwe` | Frequency Extraction | **100.0%** |
+
+#### THUDM LongBench Comprehensive Suite
+| Category | Task | Metric | DKV Score |
+| :--- | :--- | :--- | :---: |
+| **Single-Doc QA** | `qasper` | F1 Score | **87.90%** |
+| | `multifieldqa-en` | F1 Score | **62.61%** |
+| | `narrativeqa` | F1 Score | **24.56%** |
+| **Multi-Doc QA** | `2wikimultihopqa` | F1 Score | **9.68%** |
+| | `hotpotqa` | F1 Score | **5.11%** |
+| | `musique` | F1 Score | **4.97%** |
+| **Summarization** | `multi_news` | ROUGE-L | **26.48** |
+| | `gov_report` | ROUGE-L | **20.38** |
+| | `qmsum` | ROUGE-L | **7.79** |
+| **Code Completion** | `repobench-p` | Code Sim | **30.00%** |
+| | `lcc` | Code Sim | **24.33%** |
+| **Synthetic & Few-Shot** | `passage_count` | Accuracy | **65.05%** |
+| | `samsum` | ROUGE-L | **58.99** |
+| | `passage_retrieval-en` | Rank Accuracy | **1.58%** |
+| | `trec` | Accuracy | **2.56%** |
+| | `triviaqa` | F1 Score | **0.13%** |
+
+> 💡 **Routing & Pruning Insight (`DKV_TOPK_BLOCKS=16`):**
+> - **High-Efficiency Pruning Trade-off:** The default benchmark setting (`DKV_TOPK_BLOCKS=16`) routes only 16 micro-blocks ($16 \times 256 = 4,096$ tokens) per decode step out of the full 32,768 ($32\text{k}$) context window, pruning **87.5%** of sequence blocks to achieve $>30$ tok/s decode speed on unified memory.
+> - **Multi-Hop Retrieval Scaling:** For complex multi-document reasoning tasks (such as `2wikimultihopqa`, `hotpotqa`, and `musique`) where evidence is scattered across multiple distant passages, increasing the candidate budget to `DKV_TOPK_BLOCKS=32` or `64` ($8\text{k}$–$16\text{k}$ attended tokens) expands evidence gathering and further boosts multi-hop recall.
+
 ---
 
 ## ⚡ Advanced Systems Features & Safeguards
