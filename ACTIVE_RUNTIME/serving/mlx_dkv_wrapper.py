@@ -5465,8 +5465,11 @@ class MLXDKVWrapper:
         top_p: float = 0.9,
         repetition_penalty: float = 1.15,
         query_text: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         self.ensure_loaded()
+        if session_id is not None:
+            self.active_session = session_id
         session_id = self.active_session or "default"
 
         # Squeeze prompt tokenization

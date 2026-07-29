@@ -35,10 +35,36 @@ except ImportError:
 # severity so recurring failures are visible without flooding the log.
 _triton_fallback_count = 0
 
+# DKV_DEBUG_NUMERICS — off by default.
+#
+# The NaN/Inf and large-LSE guards below are pure diagnostics, but each one
+# converts a GPU tensor to a Python bool (`if t.any():`) or calls `.item()`,
+# and BOTH force a device->host sync. They sat on the unconditional path at the
+# top and bottom of fused_decode_mps, which runs per layer per token, so every
+# decode step paid several full pipeline stalls to print nothing. That is the
+# per-token sync recorded as F8 in CUDA_TRITON_AUDIT.md. Read once at import.
+_DKV_DEBUG_NUMERICS = os.environ.get("DKV_DEBUG_NUMERICS", "0") == "1"
+
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
+
+def _partial_rope_apply(x, cos, sin):
+    """Apply RoPE to x using cos/sin, honoring partial rotary (Qwen3.5/GLM-style
+    partial_rotary_factor<1.0): cos/sin's last dim (rotary_dim) may be smaller
+    than x's -- rotate only that leading slice and pass the remainder through
+    unrotated, mirroring apply_rope_to_keys in decode_attention.cpp. Reduces to
+    the original full-width `x*cos + rotate_half(x)*sin` when rotary_dim==D.
+    """
+    rotary_dim = cos.shape[-1]
+    D = x.shape[-1]
+    if rotary_dim >= D:
+        return x * cos + rotate_half(x) * sin
+    x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
+    rotated = x_rot * cos + rotate_half(x_rot) * sin
+    return torch.cat([rotated, x_pass], dim=-1)
 
 # ── 1. Fused Triton Kernels ───────────────────────────────────────────────────
 
@@ -209,7 +235,7 @@ if HAS_TRITON:
         stride_fact_av_n, stride_fact_av_f, stride_fact_av_h, stride_fact_av_d,
         stride_out_h, stride_out_d,
         N: tl.constexpr, H_q: tl.constexpr, H_kv: tl.constexpr, KV_GRP: tl.constexpr, D: tl.constexpr,
-        R: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr, BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
+        R: tl.constexpr, R_REAL: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr, BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
     ):
@@ -243,13 +269,22 @@ if HAS_TRITON:
             ak = tl.load(ak_ptrs).to(tl.float32)
             av = tl.load(av_ptrs).to(tl.float32)
             
+            # r_mask is REQUIRED, not defensive. R here is R_pad =
+            # next_power_of_2(layer_rank), while the pool's rank dimension is
+            # pool_rank (the max rank across layers). For a 1.5x-boosted layer
+            # rank 48 -> R_pad 64 against a 48-wide pool, so r = 48..63 walked
+            # past the rank dimension into the NEXT SLOT's basis and summed it
+            # into this block's scores and values. For rank 24 -> R_pad 32 it
+            # read 8 columns this layer never wrote. Both vk/vv loads were
+            # unmasked; only `u` was masked, and only on S.
+            r_mask = offs_r < R_REAL
             vk_ptrs = pool_vk_ptr + pool_idx * stride_vk_n + h_kv * stride_vk_h + offs_r[:, None] * stride_vk_r + offs_d[None, :] * stride_vk_d
             vv_ptrs = pool_vv_ptr + pool_idx * stride_vv_n + h_kv * stride_vv_h + offs_r[:, None] * stride_vv_r + offs_d[None, :] * stride_vv_d
-            vk = tl.load(vk_ptrs).to(tl.float32)
-            vv = tl.load(vv_ptrs).to(tl.float32)
+            vk = tl.load(vk_ptrs, mask=r_mask[:, None], other=0.0).to(tl.float32)
+            vv = tl.load(vv_ptrs, mask=r_mask[:, None], other=0.0).to(tl.float32)
             
             u_ptrs = pool_u_ptr + pool_idx * stride_u_n + offs_s[:, None] * stride_u_s + offs_r[None, :] * stride_u_r
-            s_mask = offs_s[:, None] < actual_s
+            s_mask = (offs_s[:, None] < actual_s) & r_mask[None, :]
             u = tl.load(u_ptrs, mask=s_mask, other=0.0).to(tl.float32)
             
             u_scale_ptr = pool_u_scale_ptr + pool_idx
@@ -324,7 +359,10 @@ if HAS_TRITON:
                         
                         # Compute low-rank reconstructed V at fact_pos
                         u_val_ptrs = pool_u_ptr + pool_idx * stride_u_n + fact_pos * stride_u_s + offs_r * stride_u_r
-                        u_val = tl.load(u_val_ptrs).to(tl.float32) * u_scale
+                        # vv is already r-masked to zero above so the sum would be
+                        # right regardless, but the LOAD itself must not address
+                        # past the rank dimension (the last slot has nothing after it).
+                        u_val = tl.load(u_val_ptrs, mask=r_mask, other=0.0).to(tl.float32) * u_scale
                         v_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale + av
                         
                         # Accumulate correction: p_fact * (fact_v - v_recon)
@@ -631,8 +669,8 @@ def _attend_and_reconstruct_v_compiled(
 
     if S_dense > 0:
         O_dense_total = torch.matmul(
-            P_dense.view(H_q, 1, S_dense),
-            v_dense_rep[0].view(H_q, S_dense, D)
+            P_dense.float().view(H_q, 1, S_dense),
+            v_dense_rep[0].float().view(H_q, S_dense, D)
         ).squeeze(1)
         O_final = O_final + O_dense_total.to(P_anchor.dtype)
 
@@ -1122,8 +1160,8 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
         sin_anc = sin_flat[anchor_indices_clamped].to(device=V_K.device, dtype=V_K.dtype).unsqueeze(1).unsqueeze(2)
         cos_anc_2d = cos_anc.squeeze(2)                 # [N, 1, D] for [N, H_kv, D] tensors
         sin_anc_2d = sin_anc.squeeze(2)
-        V_K       = V_K * cos_anc + rotate_half(V_K) * sin_anc
-        anchors_K = anchors_K * cos_anc_2d + rotate_half(anchors_K) * sin_anc_2d
+        V_K       = _partial_rope_apply(V_K, cos_anc, sin_anc)
+        anchors_K = _partial_rope_apply(anchors_K, cos_anc_2d, sin_anc_2d)
     g["anchors_K"] = anchors_K
     g["V_K"]       = V_K
 
@@ -1161,11 +1199,11 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
                                                 dtype=res_k_g.dtype).unsqueeze(2)   # [N, MAX_RES, 1, D]
                 _sin_rk = sin_flat[_abs_pos].to(device=res_k_g.device,
                                                 dtype=res_k_g.dtype).unsqueeze(2)
-                res_k_g = res_k_g * _cos_rk + rotate_half(res_k_g) * _sin_rk
+                res_k_g = _partial_rope_apply(res_k_g, _cos_rk, _sin_rk)
             else:
                 # Pre-rotate residual K by the block anchor's RoPE, exactly like V_K
                 # (reference rotates res_val_K identically). res_v is never rotated.
-                res_k_g = res_k_g * cos_anc + rotate_half(res_k_g) * sin_anc
+                res_k_g = _partial_rope_apply(res_k_g, cos_anc, sin_anc)
         g["res_k"]     = res_k_g
         g["res_v"]     = res_v[indices]
         g["res_pos"]   = res_pos_g
@@ -1266,7 +1304,7 @@ def fused_decode_mps(
     H_q, D   = Q.shape
     gpk      = num_key_value_groups
     scale    = D ** -0.5
-    if torch.isnan(Q).any():
+    if _DKV_DEBUG_NUMERICS and torch.isnan(Q).any():
         print(f"[fused_decode_mps DEBUG] Q has NaN at start! shape={Q.shape}", flush=True)
     q        = Q.float()
 
@@ -1283,11 +1321,6 @@ def fused_decode_mps(
     VK_a   = pool.V_K[idx].float()
     VV_a   = pool.V_V[idx].float()
 
-    def rotate_half(x):
-        x1 = x[..., :x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2:]
-        return torch.cat((-x2, x1), dim=-1)
-
     if anchor_indices is not None and cos is not None and sin is not None:
         cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
         sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
@@ -1302,13 +1335,13 @@ def fused_decode_mps(
         VK_e   = VK_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
         VV_e   = VV_a.repeat_interleave(gpk, dim=2).permute(0, 2, 1, 3).contiguous()
         
-        AncK_e_rot = AncK_e * cos_anc + rotate_half(AncK_e) * sin_anc
+        AncK_e_rot = _partial_rope_apply(AncK_e, cos_anc, sin_anc)
         s_anc = torch.einsum('hd,nhd->hn', q, AncK_e_rot) * scale
 
         # Forwards rotation for VK_e using cos_anc and sin_anc (since keys are pre-rotated at ingest)
         cos_anc_exp = cos_anc.unsqueeze(2) # [N, 1, 1, D]
         sin_anc_exp = sin_anc.unsqueeze(2)
-        VK_e_rot = VK_e * cos_anc_exp + rotate_half(VK_e) * sin_anc_exp
+        VK_e_rot = _partial_rope_apply(VK_e, cos_anc_exp, sin_anc_exp)
         
         q_proj_n = torch.einsum('hd,nhrd->nhr', q, VK_e_rot) * scale
         delta_s = torch.einsum('nhr,nsr->hns', q_proj_n, U_a)
@@ -1344,7 +1377,7 @@ def fused_decode_mps(
                 sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
                 cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
                 sin_anc_exp = sin_anc.unsqueeze(1)
-                res_val_K_rot = res_val_K_e * cos_anc_exp + rotate_half(res_val_K_e) * sin_anc_exp
+                res_val_K_rot = _partial_rope_apply(res_val_K_e, cos_anc_exp, sin_anc_exp)
                 corr_K = torch.sum(q.unsqueeze(0).unsqueeze(1) * res_val_K_rot, dim=-1) * scale
             else:
                 corr_K = torch.sum(q.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * scale
@@ -1374,7 +1407,7 @@ def fused_decode_mps(
                 sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q.dtype).unsqueeze(1)
                 cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
                 sin_anc_exp = sin_anc.unsqueeze(1)
-                K_exact = K_exact * cos_anc_exp + rotate_half(K_exact) * sin_anc_exp
+                K_exact = _partial_rope_apply(K_exact, cos_anc_exp, sin_anc_exp)
             score_exact = torch.sum(q.view(1, 1, H_q, D) * K_exact, dim=-1) * scale
             score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
             fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
@@ -1459,7 +1492,7 @@ def fused_decode_mps(
             O = O + torch.sum(update_term, dim=(0, 1))
 
 
-    if torch.isnan(O).any() or torch.isinf(O).any() or torch.isnan(lse).any():
+    if _DKV_DEBUG_NUMERICS and (torch.isnan(O).any() or torch.isinf(O).any() or torch.isnan(lse).any()):
         print("[fused_decode_mps DEBUG] NaN/Inf detected!")
         print(f"q finite: {torch.isfinite(q).all().item()} min: {q.min().item()} max: {q.max().item()}")
         print(f"AncK_e finite: {torch.isfinite(AncK_e).all().item()} min: {AncK_e.min().item()} max: {AncK_e.min().item()} max: {AncK_e.max().item()}")
@@ -1474,7 +1507,7 @@ def fused_decode_mps(
         print(f"lse finite: {torch.isfinite(lse).all().item()}")
         print(f"w finite: {torch.isfinite(w).all().item()}")
 
-    if lse.max().item() > 100.0:
+    if _DKV_DEBUG_NUMERICS and lse.max().item() > 100.0:
         print(f"[fused_decode_mps DIAG] lse has large value! max={lse.max().item():.2f}")
         print(f"  q min/max: {q.min().item():.4f}/{q.max().item():.4f}")
         print(f"  AncK_e min/max: {AncK_e.min().item():.4f}/{AncK_e.max().item():.4f}")
@@ -1528,11 +1561,6 @@ def _pytorch_vectorized_sparse_attn_decode(
         t = t.expand(*expand_shape)
         new_shape = shape[:dim] + [val * n_rep] + shape[dim + 1:]
         return t.reshape(*new_shape)
-
-    def rotate_half(x):
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
 
     N = block_indices.shape[0] if block_indices is not None else 0
     block_capacity = 0
@@ -1646,8 +1674,8 @@ def _pytorch_vectorized_sparse_attn_decode(
                 cos_anc_2d = cos_flat[anchor_indices_clamped].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
                 sin_anc_2d = sin_flat[anchor_indices_clamped].to(device=anchors_K_raw.device, dtype=anchors_K_raw.dtype).unsqueeze(1)
                 
-                V_K_raw = V_K_raw * cos_anc + rotate_half(V_K_raw) * sin_anc
-                anchors_K_raw = anchors_K_raw * cos_anc_2d + rotate_half(anchors_K_raw) * sin_anc_2d
+                V_K_raw = _partial_rope_apply(V_K_raw, cos_anc, sin_anc)
+                anchors_K_raw = _partial_rope_apply(anchors_K_raw, cos_anc_2d, sin_anc_2d)
                 
             V_K = repeat_kv_at_dim(V_K_raw, num_key_value_groups, dim=2)
             V_V = repeat_kv_at_dim(pool.V_V[indices], num_key_value_groups, dim=2)
@@ -1696,11 +1724,28 @@ def _pytorch_vectorized_sparse_attn_decode(
                     cos_flat = cos.squeeze(0) if cos.dim() == 3 else cos
                     sin_flat = sin.squeeze(0) if sin.dim() == 3 else sin
                     anchor_indices_clamped = anchor_indices.clamp(min=0, max=cos_flat.shape[0] - 1).clone()
-                    cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
-                    sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
-                    cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
-                    sin_anc_exp = sin_anc.unsqueeze(1)
-                    res_val_K_rot = res_val_K_e * cos_anc_exp + rotate_half(res_val_K_e) * sin_anc_exp
+                    if os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1") == "1":
+                        # Rotate each exact residual key at its TRUE absolute token
+                        # position (anchor + within-block offset), not the block
+                        # anchor's -- residual_K holds the exact-minus-recon
+                        # correction for ONE specific token, and anchor-position
+                        # rotation applies the wrong phase to exactly the
+                        # position-sensitive digit/code content these residuals
+                        # exist to preserve. Matches _gather_routed_blocks_for_kernel
+                        # (the real Triton path, A100-validated 75%->88% random-code
+                        # recall) and the Metal kernel's has_exact_res_rope.
+                        _abs_pos = (anchor_indices_clamped.unsqueeze(1)
+                                    + res_pos_K_idx.clamp(min=0).long())      # [N, MAX_RES]
+                        _abs_pos = _abs_pos.clamp(min=0, max=cos_flat.shape[0] - 1)
+                        cos_rk = cos_flat[_abs_pos].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
+                        sin_rk = sin_flat[_abs_pos].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(2)
+                        res_val_K_rot = _partial_rope_apply(res_val_K_e, cos_rk, sin_rk)
+                    else:
+                        cos_anc = cos_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                        sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
+                        cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
+                        sin_anc_exp = sin_anc.unsqueeze(1)
+                        res_val_K_rot = _partial_rope_apply(res_val_K_e, cos_anc_exp, sin_anc_exp)
                     corr_K = torch.sum(q_sq_fp32.unsqueeze(0).unsqueeze(1) * res_val_K_rot, dim=-1) * inv_scale
                 else:
                     corr_K = torch.sum(q_sq_fp32.unsqueeze(0).unsqueeze(1) * res_val_K_e, dim=-1) * inv_scale
@@ -1730,7 +1775,7 @@ def _pytorch_vectorized_sparse_attn_decode(
                     sin_anc = sin_flat[anchor_indices_clamped].to(device=q.device, dtype=q_sq_fp32.dtype).unsqueeze(1)
                     cos_anc_exp = cos_anc.unsqueeze(1) # [N, 1, 1, D]
                     sin_anc_exp = sin_anc.unsqueeze(1)
-                    K_exact = K_exact * cos_anc_exp + rotate_half(K_exact) * sin_anc_exp
+                    K_exact = _partial_rope_apply(K_exact, cos_anc_exp, sin_anc_exp)
                 score_exact = torch.sum(q_sq_fp32.view(1, 1, H_q, D) * K_exact, dim=-1) * inv_scale  # [N, 3, H_q]
                 score_exact = score_exact.permute(2, 0, 1)  # [H_q, N, 3]
                 fact_pos_idx_clamped = fact_pos_idx.clamp(min=0).long()
@@ -1810,9 +1855,9 @@ def _pytorch_vectorized_sparse_attn_decode(
         dense_positions = _dp_ws  # [S_dense] — always fixed shape
 
         if cos is not None and sin is not None:
-            cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1)  # [1,1,S_dense,D]
+            cos_dense = cos[0, dense_positions].unsqueeze(0).unsqueeze(1)  # [1,1,S_dense,rotary_dim]
             sin_dense = sin[0, dense_positions].unsqueeze(0).unsqueeze(1)
-            full_k_rot = (full_k * cos_dense) + (rotate_half(full_k) * sin_dense)
+            full_k_rot = _partial_rope_apply(full_k, cos_dense, sin_dense)
         else:
             full_k_rot = full_k
 
@@ -2056,7 +2101,7 @@ def native_triton_sparse_attn_decode(
                 g["fact_av"].stride(0), g["fact_av"].stride(1), g["fact_av"].stride(2), g["fact_av"].stride(3),
                 out_workspace.stride(0), out_workspace.stride(1),
                 N, H_q, g["anchors_K"].shape[1], num_key_value_groups, D_pad,
-                R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
+                R_pad, R, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
                 MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
                 HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"]
             )
@@ -2291,7 +2336,7 @@ if HAS_TRITON:
         stride_out_h, stride_out_d,
         # ── Constexpr shape/config ──
         N: tl.constexpr, H_q: tl.constexpr, H_kv: tl.constexpr, KV_GRP: tl.constexpr, D: tl.constexpr,
-        R: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr,
+        R: tl.constexpr, R_REAL: tl.constexpr, S_MAX: tl.constexpr, INV_SCALE: tl.constexpr,
         BLOCKS_PER_CHUNK: tl.constexpr, NUM_CHUNKS: tl.constexpr,
         MAX_RESIDUAL: tl.constexpr, MAX_FACT: tl.constexpr,
         HAS_RESIDUAL: tl.constexpr, HAS_FACT: tl.constexpr,
@@ -2329,13 +2374,22 @@ if HAS_TRITON:
             ak = tl.load(ak_ptrs).to(tl.float32)
             av = tl.load(av_ptrs).to(tl.float32)
 
+            # r_mask is REQUIRED, not defensive. R here is R_pad =
+            # next_power_of_2(layer_rank), while the pool's rank dimension is
+            # pool_rank (the max rank across layers). For a 1.5x-boosted layer
+            # rank 48 -> R_pad 64 against a 48-wide pool, so r = 48..63 walked
+            # past the rank dimension into the NEXT SLOT's basis and summed it
+            # into this block's scores and values. For rank 24 -> R_pad 32 it
+            # read 8 columns this layer never wrote. Both vk/vv loads were
+            # unmasked; only `u` was masked, and only on S.
+            r_mask = offs_r < R_REAL
             vk_ptrs = pool_vk_ptr + pool_idx * stride_vk_n + h_kv * stride_vk_h + offs_r[:, None] * stride_vk_r + offs_d[None, :] * stride_vk_d
             vv_ptrs = pool_vv_ptr + pool_idx * stride_vv_n + h_kv * stride_vv_h + offs_r[:, None] * stride_vv_r + offs_d[None, :] * stride_vv_d
-            vk = tl.load(vk_ptrs).to(tl.float32)
-            vv = tl.load(vv_ptrs).to(tl.float32)
+            vk = tl.load(vk_ptrs, mask=r_mask[:, None], other=0.0).to(tl.float32)
+            vv = tl.load(vv_ptrs, mask=r_mask[:, None], other=0.0).to(tl.float32)
 
             u_ptrs = pool_u_ptr + pool_idx * stride_u_n + offs_s[:, None] * stride_u_s + offs_r[None, :] * stride_u_r
-            s_mask = offs_s[:, None] < actual_s
+            s_mask = (offs_s[:, None] < actual_s) & r_mask[None, :]
             u = tl.load(u_ptrs, mask=s_mask, other=0.0).to(tl.float32)
             u_scale = tl.load(pool_u_scale_ptr + pool_idx)
             u = u * u_scale
@@ -2391,7 +2445,10 @@ if HAS_TRITON:
                         fact_v_ptrs = pool_fact_av_ptr + pool_idx * stride_fact_av_n + fi * stride_fact_av_f + h_kv * stride_fact_av_h + offs_d * stride_fact_av_d
                         fact_v = tl.load(fact_v_ptrs).to(tl.float32)
                         u_val_ptrs = pool_u_ptr + pool_idx * stride_u_n + fact_pos * stride_u_s + offs_r * stride_u_r
-                        u_val = tl.load(u_val_ptrs).to(tl.float32) * u_scale
+                        # vv is already r-masked to zero above so the sum would be
+                        # right regardless, but the LOAD itself must not address
+                        # past the rank dimension (the last slot has nothing after it).
+                        u_val = tl.load(u_val_ptrs, mask=r_mask, other=0.0).to(tl.float32) * u_scale
                         v_recon = tl.sum(u_val[:, None] * vv, axis=0) * scale + av
                         O_fact_corr += p_fact * (fact_v - v_recon)
 
@@ -2636,7 +2693,7 @@ def native_triton_sparse_attn_decode_combined(
             g["fact_av"].stride(0), g["fact_av"].stride(1), g["fact_av"].stride(2), g["fact_av"].stride(3),
             out_workspace.stride(0), out_workspace.stride(1),
             N, H_q, g["anchors_K"].shape[1], num_key_value_groups, D_pad,
-            R_pad, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
+            R_pad, R, S_pad, inv_scale, BLOCKS_PER_CHUNK, num_chunks,
             MAX_RESIDUAL=g["max_res_pad"], MAX_FACT=g["max_fact"],
             HAS_RESIDUAL=g["has_res"], HAS_FACT=g["has_fact"],
             DENSE_PER_CHUNK=DENSE_PER_CHUNK,

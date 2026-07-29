@@ -39,11 +39,17 @@ class DKVConfig:
             self.kv_quant = "q4_0"
             self.max_active_dense_tokens = 1024
             # Residual budget per block — see the "mid" branch for the full
-            # rationale.  The presets ladder it as a memory/quality dial: `low`
-            # is memory-priority, and 40 already covers the adaptive prose cap
-            # (int(0.15*256)=38), so it loses essentially nothing on prose while
-            # roughly halving the pool vs 128.  A/B at 13.4K confirmed res40
-            # matched res128 output quality at ~1.5 GB vs ~2.8 GB pool.
+            # rationale.  `low` is memory-priority.
+            #
+            # CAUTION: the old justification here ("40 already covers the
+            # adaptive prose cap int(0.15*256)=38, so it loses essentially
+            # nothing"), and the 13.4K A/B that "confirmed res40 matched res128
+            # quality", are both INVALID.  They were measured while the budget
+            # was bugged to start from int(0.15*n)=38 (handoff §10j), which
+            # capped 40 and 128 to the same 38 exact tokens — of course they
+            # matched.  With that cap removed this ladder is real for the first
+            # time, and 40 now genuinely stores ~3x fewer exact tokens per block
+            # than `high`.  Re-measure before treating `low` as quality-neutral.
             self.max_residual_tokens = 40
         elif self.preset == "high":
             self.decode_cache_enabled = True
@@ -75,24 +81,46 @@ class DKVConfig:
             self.kv_quant = "q8_0"
             self.max_active_dense_tokens = 2048
             # Residual budget per block: how many exact (uncompressed) tokens
-            # correct the lossy SVD.  This is the main quality dial, but it is
-            # NOT a flat cost=benefit knob.  The compressor caps actual usage at
-            # n_max_residual = int(0.15*T_active) (=38 for T=256), clamped down
-            # to 8/16 for low-error blocks and raised only for digit/table
-            # blocks (up to T_active).  So prose blocks never use more than ~38
-            # regardless of this value; only factual/table-dense blocks benefit
-            # from a higher ceiling.
+            # correct the lossy SVD.  This is the main quality dial.
+            #
+            # It used to be described here as NOT a flat knob, on the grounds
+            # that "the compressor caps actual usage at int(0.15*T_active) (=38
+            # for T=256) ... so prose blocks never use more than ~38 regardless
+            # of this value".  That cap was a BUG, not a design (handoff §10j):
+            # the budget started from int(0.15*n) instead of max_residual, so a
+            # block could never exceed 38 exact tokens and raising this setting
+            # to 128 did literally nothing.  Both compress paths now start from
+            # the pool value, and the separate 0.08 error floor that was
+            # discarding the budget entirely on ordinary prose is gone (§10k,
+            # MLX picks residuals by pure top-k).  The value below is now the
+            # real per-block ceiling.
             #
             # The pool allocates this many slots UNIFORMLY per block, so the
             # physical VRAM cost is paid on every block even though most sit
             # mostly empty.  A/B at 13.4K: res128 pool = 2.8 GB, res40 = 1.5 GB,
-            # identical output quality on prose synthesis.  So the presets
+            # identical output quality on prose synthesis -- which is why `mid`
+            # used to be 64.
+            #
             # ladder it: `mid` = 64 (covers the prose cap plus boost headroom),
             # `high` = 128 (full table/factual fidelity, accepts the VRAM), and
             # `low` = 40 (memory-priority).  Override with
-            # DKV_MAX_RESIDUAL_TOKENS; raise toward 128+ for table-heavy or
-            # exact-recall (needle) workloads.
-            self.max_residual_tokens = 64
+            # DKV_MAX_RESIDUAL_TOKENS.
+            #
+            # RAISED TO 128 (2026-07-28) to match MLX, which uses 128 FLAT at
+            # every preset (mlx_dkv_wrapper.py: DKV_MAX_RESIDUAL default "128");
+            # the 40/64/128 ladder is a CUDA-only invention.
+            #
+            # Doing so initially produced GARBAGE output, which turned out to be
+            # two CUDA-side limits this value reaches and 64 did not:
+            #   * the decode kernel's residual scratch was 64 wide while its READ
+            #     loops ran to max_residual -- out-of-bounds reads above 64
+            #     (fixed: DKV_MAX_RESIDUAL_SHARED in dkv_decode.metal);
+            #   * pool sizing divided the budget by a per-slot cost that EXCLUDED
+            #     the residual arrays, so the over-allocation grew from 2.2x to
+            #     3.3x (fixed in KVRuntimeManager).
+            # Neither was a reason to keep 64 -- both were bugs 64 happened to
+            # hide. See handoff §9u.
+            self.max_residual_tokens = 128
 
         # 2. Individual options overrides (dict or env variables)
         self.decode_cache_enabled = self._get_bool(
@@ -152,7 +180,8 @@ class DKVConfig:
         # NativeBlockPool reads DKV_MAX_RESIDUAL_TOKENS directly for backward-compat;
         # DKVConfig surfaces it here for callers that pass config objects.
         self.max_residual_tokens = self._get_int(
-            "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict
+            "max_residual_tokens", "DKV_MAX_RESIDUAL_TOKENS", self.max_residual_tokens, config_dict,
+            alias_env="DKV_MAX_RESIDUAL",   # MLX's name for the same knob
         )
 
         # ── CUDA-specific performance flags ──────────────────────────────────
@@ -277,18 +306,29 @@ class DKVConfig:
             return env_val.lower() in ("true", "1", "yes", "on")
         return default
 
-    def _get_int(self, key: str, env_name: str, default: int, config_dict: dict) -> int:
+    def _get_int(self, key: str, env_name: str, default: int, config_dict: dict,
+                 alias_env: str = None) -> int:
+        """`alias_env` is a second accepted name for the SAME knob.
+
+        The two runtimes grew different names for identical settings (MLX calls
+        the residual budget DKV_MAX_RESIDUAL, this side DKV_MAX_RESIDUAL_TOKENS),
+        so a config written against MLX silently configured nothing here. The
+        primary name still wins when both are set.
+        """
         if key in config_dict:
             try:
                 return int(config_dict[key])
             except (ValueError, TypeError):
                 pass
-        env_val = os.environ.get(env_name)
-        if env_val is not None:
-            try:
-                return int(env_val)
-            except (ValueError, TypeError):
-                pass
+        for name in (env_name, alias_env):
+            if not name:
+                continue
+            env_val = os.environ.get(name)
+            if env_val is not None:
+                try:
+                    return int(env_val)
+                except (ValueError, TypeError):
+                    pass
         return default
 
     def _get_float(self, key: str, env_name: str, default: float, config_dict: dict) -> float:

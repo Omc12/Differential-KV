@@ -21,6 +21,7 @@ from native_core.sparse_decode.triton_fused_decode import (
     native_triton_sparse_attn_decode_combined,
     _prefill_fused_history_attend,
     fused_decode_mps,
+    _DKV_DEBUG_NUMERICS,
     HAS_TRITON,
 )
 from native_core.compression.lowrank import reconstruct_batch_U
@@ -40,6 +41,37 @@ from native_core.compression.lowrank import reconstruct_batch_U
 # or built without the Phase 1 ops. No behavioral change on fallback.
 try:
     import dkv_core as _dkv_core
+
+    # ── Stale-binary guard ────────────────────────────────────────────────────
+    # A bare `import dkv_core` resolves to whatever is first on sys.path, and
+    # there are usually SEVERAL candidates: a copy at the repo root, the real
+    # build in native_core/dkv_core/, and two editable-install .pth finders
+    # (__editable__.dkv_core-*.pth). Rebuilding in native_core/dkv_core/ does NOT
+    # update the root copy, so the runtime can keep running a months-old kernel
+    # while the isolated tests -- which insert the build directory FIRST -- happily
+    # exercise the new one. Every end-to-end measurement then describes code that
+    # is not the code under test, with nothing in the logs to say so.
+    #
+    # Compare the loaded binary against the Metal source it is built from and say
+    # so loudly. Cheap: two stat() calls at import.
+    try:
+        import os as _os
+        _so_path = getattr(_dkv_core, "__file__", None)
+        _metal_src = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), "native_core", "dkv_core", "metal", "dkv_decode.metal")
+        if _so_path and _os.path.exists(_metal_src):
+            _so_mt, _src_mt = _os.path.getmtime(_so_path), _os.path.getmtime(_metal_src)
+            if _src_mt > _so_mt:
+                print(f"[DKV] WARNING: loaded dkv_core is OLDER than the Metal source it is "
+                      f"built from -- you are running a stale kernel.\n"
+                      f"       loaded : {_so_path}\n"
+                      f"       source : {_metal_src} (newer by {(_src_mt - _so_mt) / 60:.0f} min)\n"
+                      f"       Rebuild:  cd ACTIVE_RUNTIME/native_core/dkv_core && "
+                      f"rm -rf build dkv_core*.so && python setup.py build_ext --inplace\n"
+                      f"       then copy the built .so over the one listed above.", flush=True)
+    except Exception:
+        pass  # never let the guard break the import
+
     _DKV_CORE_AVAILABLE    = True
     _DKV_HAS_DECODE_ATTN   = getattr(_dkv_core, "HAS_DECODE_ATTN", False)
     _DKV_HAS_SRL_ROUTER    = getattr(_dkv_core, "HAS_SRL_ROUTER", False)
@@ -77,6 +109,15 @@ _SRL_VALIDATE_EVERY = int(os.environ.get("DKV_VALIDATE_EVERY", "50"))
 # recomputes it once per flush instead of every token, eliminating the launch
 # explosion the profiler showed. Output is bit-identical (kernel still runs each
 # token with the fresh query). Default OFF until A100-validated (NIAH parity).
+#
+# NAME COLLISION WARNING: this is NOT the same knob as MLX's `DKV_DECODE_CACHE`
+# (mlx_dkv_wrapper.py). MLX's flag changes ROUTING FRESHNESS — it re-routes and
+# re-materializes (dequantize + reconstruct) the selected blocks once every
+# DKV_DECODE_CACHE_INTERVAL tokens (default 16), trading staleness for speed.
+# This CUDA flag never re-routes or re-materializes anything; it only caches
+# the gather/index-select step for an UNCHANGED block set between flushes, so
+# the routed content is always current — a much narrower optimization. Porting
+# one flag's expectations (e.g. an "interval") to the other would be wrong.
 _DECODE_CACHE_CUDA = os.environ.get("DKV_DECODE_CACHE_CUDA", "0") == "1"
 
 # ── Sparse LSE Bias Configuration ─────────────────────────────────────────────
@@ -124,6 +165,107 @@ def _apply_sparse_bias(lse_sparse, lse_dense):
 # Override with DKV_ENGAGE_THRESHOLD=<n> to tune for your hardware.
 def _get_engage_threshold():
     return int(os.environ.get("DKV_ENGAGE_THRESHOLD", "4096"))
+
+
+def _sparse_prefill_filter_blocks(history_blocks, chunk_q, sink_blocks: int = 1,
+                                  chunk_start: int = None):
+    """DSA/NSA-style block-sparse PREFILL (MLX parity: DKV_SPARSE_PREFILL).
+
+    The "CHUNKED SPARSE PREFILL" path below cross-attends EVERY history block
+    for every new chunk -- O(N^2) work that grows with total prompt length,
+    despite the section's name. MLX's _sparse_prefill_attend avoids this by
+    keeping a few leading "sink" blocks plus only the top-K most
+    query-relevant blocks (cheap Quest-style key-bound scoring), dropping
+    everything else from that chunk's cross-attention. This mirrors that
+    algorithm, adapted for this file's block-OBJECT model (vs MLX's flat
+    pool-tensor indexing): score each candidate block by its anchor key's
+    dot product with this chunk's (mean-pooled) query -- the same anchor-based
+    relevance signal the decode-time router already uses -- and keep only
+    sinks + top-K. Vectorized (one stack + one topk), not a per-block .item()
+    loop, matching this codebase's stated sync-avoidance discipline elsewhere.
+
+    Gates:
+      DKV_SPARSE_PREFILL       default "1" -- set "0" to disable (attend all
+                                history blocks, the original behavior).
+      DKV_SPARSE_PREFILL_MIN   default 2048 -- MLX parity. Stay fully dense until
+                                the chunk starts this far in. Small prompts have
+                                nothing worth pruning and the routing overhead
+                                does not amortize. This side had NO such gate and
+                                sparsified from the very first chunk.
+      DKV_SPARSE_PREFILL_WINDOW default 1024 -- MLX parity. Blocks covering the
+                                most recent WINDOW tokens are ALWAYS attended, on
+                                top of sinks and top-K. This side had no recency
+                                guarantee at all, so routing could drop a chunk's
+                                immediate left context -- which every token
+                                depends on, at every layer.
+      DKV_SPARSE_PREFILL_KMIN  default 8   -- minimum routed blocks kept.
+      DKV_SPARSE_PREFILL_FRAC  default 0.25 -- routed blocks as a fraction of
+                                the routable (non-sink) candidate count. MLX uses
+                                0.05; keeping 0.25 here means this side attends
+                                strictly MORE than MLX, which is the safe
+                                direction, so it is left alone.
+    """
+    if os.environ.get("DKV_SPARSE_PREFILL", "1") == "0":
+        return history_blocks
+    if len(history_blocks) <= sink_blocks:
+        return history_blocks
+
+    # MLX: `if manager._sparse_prefill and _cur_start >= manager._sp_min_ctx`.
+    try:
+        min_ctx = int(os.environ.get("DKV_SPARSE_PREFILL_MIN", "2048"))
+    except ValueError:
+        min_ctx = 2048
+    if chunk_start is not None and chunk_start < min_ctx:
+        return history_blocks
+
+    try:
+        window = int(os.environ.get("DKV_SPARSE_PREFILL_WINDOW", "1024"))
+    except ValueError:
+        window = 1024
+
+    sinks = history_blocks[:sink_blocks]
+    routable = history_blocks[sink_blocks:]
+
+    # Split off the exact recency window: those blocks bypass routing entirely.
+    recent = []
+    if chunk_start is not None and window > 0 and routable:
+        win_start = max(0, int(chunk_start) - window)
+        keep_recent = [b for b in routable if getattr(b, "anchor_idx", -1) >= win_start]
+        if keep_recent:
+            recent_ids = {id(b) for b in keep_recent}
+            routable = [b for b in routable if id(b) not in recent_ids]
+            recent = keep_recent
+    if not routable:
+        return sinks + recent
+
+    try:
+        kmin = int(os.environ.get("DKV_SPARSE_PREFILL_KMIN", "8"))
+    except ValueError:
+        kmin = 8
+    try:
+        frac = float(os.environ.get("DKV_SPARSE_PREFILL_FRAC", "0.25"))
+    except ValueError:
+        frac = 0.25
+
+    k_eff = min(len(routable), max(kmin, int(math.ceil(frac * len(routable)))))
+    if k_eff >= len(routable):
+        return history_blocks
+
+    valid = [(i, b) for i, b in enumerate(routable) if getattr(b, "anchor_kv", None) is not None]
+    if len(valid) <= k_eff:
+        return history_blocks
+
+    device = chunk_q.device
+    anchor_ks = torch.stack([b.anchor_kv[0, 0] for _, b in valid], dim=0).float().to(device)  # [nb, H_kv, D]
+    q_repr = chunk_q[0].mean(dim=(0, 1)).float()  # [D] -- mean over heads and chunk tokens
+    scores = torch.einsum("nhd,d->nh", anchor_ks, q_repr).mean(dim=1)  # [nb], stays on-device
+    top_idx = torch.topk(scores, k=k_eff).indices.tolist()  # single sync, not per-block
+    keep_positions = sorted(valid[i][0] for i in top_idx)
+    kept = sinks + [routable[i] for i in keep_positions] + recent
+    # Preserve absolute order: downstream builds positions from anchor_idx and
+    # assumes the block list is monotonically ordered.
+    kept.sort(key=lambda b: getattr(b, "anchor_idx", 0))
+    return kept
 
 
 def _get_prefill_chunk_size(kv_manager, session_id: str, device) -> int:
@@ -183,9 +325,31 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         cos = cos.unsqueeze(1)   # → [B, 1, seq, D]
         sin = sin.unsqueeze(1)
     # dim==4: [B, 1, seq, D] — nothing to do
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+
+    # Partial RoPE (Qwen3.5/GLM-style: partial_rotary_factor < 1.0) — cos/sin's
+    # last dim is only the rotary sub-range; rotate that slice and pass the
+    # remainder through untouched, then concatenate back. When the model uses
+    # full rotary (the common case), rotary_dim == q.shape[-1], q_pass is
+    # empty, and this reduces to the original unconditional rotation exactly.
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
     return q_embed, k_embed
+
+
+def _apply_rope_single(x, cos, sin):
+    """Single-tensor counterpart of apply_rotary_pos_emb's partial-RoPE slicing,
+    for the dense-history K reconstruction sites that only rotate K (Q is
+    already rotated earlier via apply_rotary_pos_emb).
+    """
+    rotary_dim = cos.shape[-1]
+    x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
+    x_embed = (x_rot * cos) + (rotate_half(x_rot) * sin)
+    return torch.cat([x_embed, x_pass], dim=-1)
 
 
 def _resolve_rotary_emb(model):
@@ -407,11 +571,24 @@ def apply_dkv_attention_patch(model, kv_manager):
                     if total_prompt_len < _get_engage_threshold():
                         is_bypassed = True
                 else:
-                    # Decode step: bypass if we don't have any captured blocks in the manager
+                    # Decode step: bypass if we don't have any captured blocks in the manager.
+                    # BUG (found 2026-07-27): this used to hardcode layer_idx=0, which
+                    # silently assumes layer 0 is a normal attention layer with a KV
+                    # cache. For hybrid architectures (Qwen3.5/Qwen3-Next-style, where
+                    # most layers are linear_attention and only every Nth is
+                    # full_attention) layer 0 is very often NOT one of the attended
+                    # layers DKV ever compresses, so this check always saw zero blocks
+                    # and forced every decode step onto the dense-only bypass path below
+                    # -- silently ignoring the entire compressed KV pool, including any
+                    # exact/force_exact-stored content. captured_layer_idx is THIS
+                    # layer's own index, which is guaranteed to be an attended layer
+                    # (only those get dkv_forward patched in), so it's always a correct
+                    # probe -- unlike 0, which is only correct by coincidence on
+                    # non-hybrid models where every layer is attended.
                     has_blocks = False
                     if sid and sid != "dummy_session":
                         if hasattr(kv_manager, "get_streaming_blocks"):
-                            has_blocks = len(kv_manager.get_streaming_blocks(sid, 0)) > 0
+                            has_blocks = len(kv_manager.get_streaming_blocks(sid, captured_layer_idx)) > 0
                     if not has_blocks:
                         is_bypassed = True
 
@@ -569,8 +746,20 @@ def apply_dkv_attention_patch(model, kv_manager):
                         # Clamp positions to actual sequence length of cos_ref to prevent indexing out of bounds
                         seq_len_limit = cos_ref.shape[1] if cos_ref.dim() >= 3 else cos_ref.shape[0]
                         positions_flat = positions_flat.clamp(min=0, max=seq_len_limit - 1).clone()
-                        cos_sliced = cos_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                        sin_sliced = sin_ref[0, positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                        cos_gathered = cos_ref[0, positions_flat]
+                        sin_gathered = sin_ref[0, positions_flat]
+                        rotary_dim = cos_gathered.shape[-1]
+                        if rotary_dim < head_dim:
+                            # Partial RoPE (Qwen3.5-style) -- same pad-to-head_dim rationale
+                            # as the decode-side anchor cos/sin construction above; see that
+                            # comment for the full explanation and its known approximation.
+                            _pad_shape = cos_gathered.shape[:-1] + (head_dim - rotary_dim,)
+                            cos_gathered = torch.cat(
+                                [cos_gathered, torch.ones(_pad_shape, device=cos_gathered.device, dtype=cos_gathered.dtype)], dim=-1)
+                            sin_gathered = torch.cat(
+                                [sin_gathered, torch.zeros(_pad_shape, device=sin_gathered.device, dtype=sin_gathered.dtype)], dim=-1)
+                        cos_sliced = cos_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                        sin_sliced = sin_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
                         prefill_cos_cache[anchors_tuple] = cos_sliced
                         prefill_sin_cache[anchors_tuple] = sin_sliced
 
@@ -655,7 +844,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                     key_states   = self.k_proj(hidden_states)
                     value_states = self.v_proj(hidden_states)
 
-                query_states = query_states.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
+                # Gated-attention variants (Qwen3-Next/Qwen3.5-style) pack [query | gate]
+                # per head into q_proj's output (2x width): reshape to (..., n_heads,
+                # 2*head_dim) and chunk the LAST axis so each head's own gate stays
+                # paired with that head's query (a flat chunk(2) on the un-reshaped
+                # tensor would wrongly split heads 0-3 from heads 4-7 instead).
+                # sigmoid(attn_gate) is applied to the attention output right before
+                # o_proj at each of the three return sites below, mirroring the
+                # model's own attention class and MLX's attention_forward.
+                attn_gate = None
+                if query_states.shape[-1] == num_heads * head_dim * 2:
+                    query_states = query_states.view(bsz, q_len, num_heads, head_dim * 2)
+                    query_states, attn_gate = query_states.chunk(2, dim=-1)
+                    attn_gate = attn_gate.reshape(bsz, q_len, -1)
+                    query_states = query_states.transpose(1, 2)
+                else:
+                    query_states = query_states.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
                 key_states   = key_states.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
                 value_states = value_states.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
 
@@ -737,9 +941,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                     if _total_ctx >= _engage_threshold:
                         _has_history = True  # don't bypass — context is long enough
                     else:
+                        # Same hardcoded-layer-0 hazard as the decode-side check below
+                        # (see its comment) -- captured_layer_idx is this closure's own
+                        # attended layer, always a valid probe on hybrid models.
                         for _sid in session_ids:
                             if _sid != "dummy_session":
-                                if kv_manager.get_streaming_blocks(_sid, 0):
+                                if kv_manager.get_streaming_blocks(_sid, captured_layer_idx):
                                     _has_history = True
                                     break
                     # Store bypass decision on the kv_manager for reuse by layers 1-27
@@ -754,6 +961,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                         query_states, k_rep, v_rep, is_causal=(q_len > 1)
                     )
                     attn_out = attn_out.transpose(1, 2).contiguous().reshape(bsz, q_len, hidden_size)
+                    if attn_gate is not None:
+                        attn_out = attn_out * torch.sigmoid(attn_gate)
                     attn_out = self.o_proj(attn_out)
 
                     # Capture KV states so they are stored in the KV manager/pool for decode
@@ -879,7 +1088,16 @@ def apply_dkv_attention_patch(model, kv_manager):
                         ):
                             try:
                                 from native_core.srl.query_router import route_query_fixed_k
-                                if captured_layer_idx == 0:
+                                # DKV_ROUTE_PER_LAYER=1: opt out of cross-layer route sharing
+                                # (MLX parity -- MLX's default is to route every layer
+                                # independently; DKV_ROUTE_ONCE=1 is MLX's opt-IN to sharing,
+                                # for the opposite tradeoff). CUDA's default here is the
+                                # reverse -- share the layer-0 decision across all layers
+                                # unconditionally -- kept as the default for backward
+                                # compatibility (existing perf characteristics), with this
+                                # as an accuracy-over-speed escape hatch.
+                                _route_per_layer = os.environ.get("DKV_ROUTE_PER_LAYER", "0") == "1"
+                                if captured_layer_idx == 0 or _route_per_layer:
                                     # SRL routing cadence: route every N tokens to amortise
                                     # the D2H cost of entropy/.item(), centroid/.tolist(),
                                     # and semantic score vector .cpu() in route_query_fixed_k.
@@ -965,7 +1183,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         selected_anchors = getattr(srl_state, "current_step_anchors", None)
 
                                 else:
-                                    # Layers 1-27: reuse cached slot selection
+                                    # Other layers: reuse the layer-0 slot selection (default;
+                                    # set DKV_ROUTE_PER_LAYER=1 above to route every layer
+                                    # independently instead).
                                     selected_slots = getattr(srl_state, "current_step_slots", None)
                                     selected_anchors = getattr(srl_state, "current_step_anchors", None)
 
@@ -1140,11 +1360,31 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 
                                 cos_flat = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
                                 sin_flat = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
-                                
+
                                 seq_len_limit = cos_flat.shape[0]
                                 positions_flat = positions_flat.clamp(min=0, max=seq_len_limit - 1).clone()
-                                cos_sliced_cached = cos_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
-                                sin_sliced_cached = sin_flat[positions_flat].view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                                cos_gathered = cos_flat[positions_flat]
+                                sin_gathered = sin_flat[positions_flat]
+                                rotary_dim = cos_gathered.shape[-1]
+                                if rotary_dim < head_dim:
+                                    # Partial RoPE (Qwen3.5-style partial_rotary_factor<1.0): the
+                                    # C++/ATen and Metal anchor-rotation kernels below always
+                                    # rotate the full head_dim (no rotary_dim concept, fixed
+                                    # head_dim//2 pairing) and read this buffer as [K, head_dim]
+                                    # -- passing the true [K, rotary_dim] tensor would read past
+                                    # its real width. Pad the tail with cos=1/sin=0 so those
+                                    # dims come out unrotated (raw*1 + partner*0 == raw) instead
+                                    # of reading out of bounds. The rotary sub-range itself still
+                                    # uses the kernels' head_dim//2 pairing rather than the
+                                    # mathematically-correct rotary_dim//2 one -- a known,
+                                    # narrower approximation pending a native-kernel fix.
+                                    _pad_shape = cos_gathered.shape[:-1] + (head_dim - rotary_dim,)
+                                    cos_gathered = torch.cat(
+                                        [cos_gathered, torch.ones(_pad_shape, device=cos_gathered.device, dtype=cos_gathered.dtype)], dim=-1)
+                                    sin_gathered = torch.cat(
+                                        [sin_gathered, torch.zeros(_pad_shape, device=sin_gathered.device, dtype=sin_gathered.dtype)], dim=-1)
+                                cos_sliced_cached = cos_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
+                                sin_sliced_cached = sin_gathered.view(N_blocks, 1 + max_seq_len, 1, head_dim)
                                 
                                 cos_sliced_cache[captured_layer_idx] = (current_version, cos_sliced_cached)
                                 sin_sliced_cache[captured_layer_idx] = (current_version, sin_sliced_cached)
@@ -1153,13 +1393,24 @@ def apply_dkv_attention_patch(model, kv_manager):
                             sin_sliced_arg = sin_sliced_cached
 
                         # Compute per-slot anchor cos/sin for C++/Metal on-the-fly RoPE rotation.
-                        # cos_sliced_arg shape: [K, 1+max_seq_len, 1, D] — index 0 on dim1 is the anchor.
-                        # We need [K, D] float32 for the C++ kernel.
+                        # cos_sliced_arg shape: [K, 1+max_seq_len, 1, D] — index 0 on dim1 is the anchor,
+                        # already padded to full D width (see its construction above) so the
+                        # fixed-buffer Metal kernel never reads out of bounds. We need [K, D]
+                        # float32 for the C++/Metal kernel, PLUS the true (pre-padding) rotary
+                        # width for the shader's rotary_dim param (it can't infer width from a
+                        # buffer size the way a shaped tensor can).
                         _cos_anc_2d = None
                         _sin_anc_2d = None
+                        _anchor_rotary_dim = cos_all.shape[-1]
                         if cos_sliced_arg is not None and cos_sliced_arg.numel() > 0:
                             _cos_anc_2d = cos_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
                             _sin_anc_2d = sin_sliced_arg[:, 0, 0, :].to(torch.float32).contiguous()  # [K, D]
+                        # ATen kernels (decode_attention_aten*) derive rotary_dim from the cos/sin
+                        # tensor's own last-dim size rather than a separate param, so they need
+                        # the TRUE unpadded width, not the Metal-oriented padded buffer above --
+                        # recover it by slicing the padding back off.
+                        _cos_anc_2d_true = _cos_anc_2d[:, :_anchor_rotary_dim] if _cos_anc_2d is not None else None
+                        _sin_anc_2d_true = _sin_anc_2d[:, :_anchor_rotary_dim] if _sin_anc_2d is not None else None
 
                         # ── Query Factual Store (Solution 4) ──
                         # Descriptors are built from layer-0 K vectors (factual_store.py:200,
@@ -1611,18 +1862,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 lse_facts = lse_facts + boost
 
                             # 4. Three-way LSE combination (unclamped to preserve true log-sum-exp combination math)
+                            # NaN guards (not just Inf, MLX parity): torch.maximum propagates NaN from
+                            # either operand, so a single NaN in any of the three lse_* tensors would
+                            # otherwise poison lse_max_masked -> every w_* -> the whole merge for that
+                            # row. Treat NaN the same as Inf (contribute zero weight) at each guard.
                             lse_sparse = _apply_sparse_bias(lse_sparse, lse_dense)
                             lse_max = torch.maximum(torch.maximum(lse_dense, lse_sparse), lse_facts)
                             lse_max_masked = lse_max.clone()
-                            lse_max_masked[torch.isinf(lse_max)] = 0.0
+                            lse_max_masked[~torch.isfinite(lse_max)] = 0.0
 
                             w_dense = torch.exp(lse_dense - lse_max_masked)
                             w_sparse = torch.exp(lse_sparse - lse_max_masked)
                             w_facts = torch.exp(lse_facts - lse_max_masked)
 
-                            w_dense[torch.isinf(lse_dense)] = 0.0
-                            w_sparse[torch.isinf(lse_sparse)] = 0.0
-                            w_facts[torch.isinf(lse_facts)] = 0.0
+                            w_dense[~torch.isfinite(lse_dense)] = 0.0
+                            w_sparse[~torch.isfinite(lse_sparse)] = 0.0
+                            w_facts[~torch.isfinite(lse_facts)] = 0.0
 
                             denom = w_dense + w_sparse + w_facts
                             denom_safe = torch.clamp(denom, min=1e-9)
@@ -1630,6 +1885,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                             out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
                                          out_sparse_fp32 * w_sparse.unsqueeze(-1) +
                                          out_facts_hd * w_facts.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
+                            # Final safety net (MLX parity): zero any NaN that still made it through
+                            # (e.g. from a NaN in an attention output itself, not just the lse weights).
+                            out_final = torch.nan_to_num(out_final, nan=0.0)
                             attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)
                             attn_outputs.append(attn_out_b)
                             continue
@@ -1662,11 +1920,35 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         for blk in dense_blocks:
                                             dense_positions_list.extend(blk.token_indices)
                                         dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
-                                    _cos = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
-                                    _sin = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1)
+                                    # .to(torch.float32) is REQUIRED, not a nicety.
+                                    #
+                                    # dkv_decode.metal declares cos_dense/sin_dense as
+                                    # `device const float*`. cos_all/sin_all carry the model's
+                                    # dtype (fp16 here), so passing the slice through unconverted
+                                    # made the shader reinterpret each PAIR of halves as one
+                                    # float32 -- and read twice the buffer's byte length, running
+                                    # off the end into whatever the allocator had there. Result:
+                                    # garbage rotation angles, a handful of astronomically large
+                                    # dense scores, and a softmax whose max was junk (global_d
+                                    # collapsed to exactly 1 -- one outlier swamping ~2700 real
+                                    # tokens). Because the overrun landed in recycled memory it
+                                    # differed run to run, which is what made decode output
+                                    # nondeterministic at temperature 0 on byte-identical inputs.
+                                    # The anchor tables a few hundred lines up always did this
+                                    # conversion (_cos_anc_2d), which is why only the dense half
+                                    # of PASS 1 was corrupted.
+                                    _cos = cos_all[0, dense_positions.clamp(min=0, max=cos_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1).to(torch.float32)
+                                    _sin = sin_all[0, dense_positions.clamp(min=0, max=sin_all.shape[1] - 1).clone()].squeeze().unsqueeze(0).unsqueeze(1).to(torch.float32)
+                                    # Same Metal-buffer-width rationale as the anchor cos/sin
+                                    # padding above: the shader indexes this as [.., head_dim],
+                                    # not [.., rotary_dim].
+                                    if _cos.shape[-1] < head_dim:
+                                        _dense_pad_shape = _cos.shape[:-1] + (head_dim - _cos.shape[-1],)
+                                        _cos = torch.cat([_cos, torch.ones(_dense_pad_shape, device=_cos.device, dtype=_cos.dtype)], dim=-1)
+                                        _sin = torch.cat([_sin, torch.zeros(_dense_pad_shape, device=_sin.device, dtype=_sin.dtype)], dim=-1)
                                 else:
-                                    _cos = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
-                                    _sin = torch.empty(0, device=query_states.device, dtype=query_states.dtype)
+                                    _cos = torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                    _sin = torch.empty(0, device=query_states.device, dtype=torch.float32)
 
                                 _slots = block_indices if block_indices is not None else torch.empty(0, device=query_states.device, dtype=torch.int32)
                                 _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
@@ -1679,6 +1961,48 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 _fact_pos = pool.fact_anchor_positions if pool.fact_anchor_positions is not None else torch.empty(0, device=query_states.device, dtype=torch.int16)
                                 _fact_val_K = pool.fact_anchors_K if pool.fact_anchors_K is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
                                 _fact_val_V = pool.fact_anchors_V if pool.fact_anchors_V is not None else torch.empty(0, device=query_states.device, dtype=query_states.dtype)
+
+                                # DKV_LAYER_ADAPTIVE_RANK (default on) compresses this
+                                # layer's blocks at get_layer_rank(...), not the flat
+                                # kv_manager.rank -- passing the flat value here caps the
+                                # kernel's delta reconstruction to fewer components than
+                                # a boosted-rank layer (e.g. 32 of 48) actually stored,
+                                # even after the pool_rank stride fix makes it read the
+                                # RIGHT slot's data. Match what compression really used.
+                                from native_core.kv_runtime_manager import get_layer_rank as _get_layer_rank
+                                _cfg = getattr(kv_manager, "config", None)
+                                _layer_active_rank = _get_layer_rank(
+                                    captured_layer_idx, kv_manager.num_layers, kv_manager.rank,
+                                    early_boost=getattr(_cfg, "early_layer_rank_boost", False),
+                                    max_rank_early=getattr(_cfg, "max_rank_early", 0),
+                                )
+
+                                # Exact-position RoPE for residual/fact overrides
+                                # (DKV_RESIDUAL_EXACT_ROPE, default on — matches the
+                                # CUDA/Triton path and MLX). residual_K/fact_K hold the
+                                # EXACT key of one specific token at absolute position
+                                # anchor+offset; rotating them at the block anchor's angle
+                                # instead scrambles precisely the position-sensitive
+                                # digit/code tokens these overrides exist to preserve.
+                                # Pass the model's raw full-sequence tables (row stride =
+                                # rotary_dim, NOT padded to head_dim — the kernel is told
+                                # the stride explicitly) plus each routed slot's absolute
+                                # anchor position. cos_all/sin_all are already cached in
+                                # the session workspace, so this is a pointer pass, not a
+                                # gather. Empty tensors => kernel falls back to the old
+                                # anchor-position approximation.
+                                _exact_res_rope = os.environ.get("DKV_RESIDUAL_EXACT_ROPE", "1") == "1"
+                                _empty_f32 = torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                if _exact_res_rope and anchor_indices is not None and anchor_indices.numel() > 0:
+                                    _cf = cos_all.squeeze(0) if cos_all.dim() == 3 else cos_all
+                                    _sf = sin_all.squeeze(0) if sin_all.dim() == 3 else sin_all
+                                    _cos_full = _cf.to(torch.float32).contiguous()
+                                    _sin_full = _sf.to(torch.float32).contiguous()
+                                    _anchor_pos_i32 = anchor_indices.to(torch.int32).contiguous()
+                                else:
+                                    _cos_full = _empty_f32
+                                    _sin_full = _empty_f32
+                                    _anchor_pos_i32 = torch.empty(0, device=query_states.device, dtype=torch.int32)
 
                                 _time_attn = os.environ.get("DKV_TIME_ATTN") == "1"
                                 if _time_attn:
@@ -1706,7 +2030,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _scale,
                                     num_heads,
                                     num_key_value_heads,
-                                    kv_manager.rank,
+                                    _layer_active_rank,
                                     _res_pos_K.contiguous(),
                                     _res_val_K.contiguous(),
                                     _res_pos_V.contiguous(),
@@ -1714,12 +2038,17 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _fact_pos.contiguous(),
                                     _fact_val_K.contiguous(),
                                     _fact_val_V.contiguous(),
+                                    _anchor_rotary_dim,
+                                    _cos_full,
+                                    _sin_full,
+                                    _anchor_pos_i32,
                                 )
                                 if _time_attn:
                                     if query_states.device.type == "mps":
                                         torch.mps.synchronize()
                                     _t_kernel_ms = (_t_mod.perf_counter() - _t_kernel_start) * 1000
                                     print(f"[DKV_TIME_ATTN] fused_kernel={_t_kernel_ms:.2f}ms", flush=True)
+
                                 attn_out_b = out_val.unsqueeze(0).unsqueeze(2)
                             else:
                                 # ── Separate Dense SDPA and Compressed fused_decode_mps combined via LSE ──
@@ -1769,18 +2098,26 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                                        device=query_states.device, dtype=query_states.dtype)
                                         dense_k_half_cache[captured_layer_idx] = workspace_k_half
                                     
-                                    dense_k_half = workspace_k_half[:, :, :L_dense]
-                                    half_d = head_dim // 2
-                                    dense_k_half[..., :half_d] = -dense_k_assembled[..., half_d:]
+                                    # Partial RoPE (Qwen3.5-style partial_rotary_factor<1.0):
+                                    # cos_dense/sin_dense are only rotary_dim wide, not the
+                                    # full head_dim -- rotate just that sub-range in the
+                                    # pre-allocated workspace and copy the remainder through
+                                    # unrotated. Reduces to the original full-width behavior
+                                    # exactly when rotary_dim == head_dim.
+                                    rotary_dim = cos_dense.shape[-1]
+                                    half_d = rotary_dim // 2
+                                    dense_k_half = workspace_k_half[:, :, :L_dense, :rotary_dim]
+                                    dense_k_half[..., :half_d] = -dense_k_assembled[..., half_d:rotary_dim]
                                     dense_k_half[..., half_d:] = dense_k_assembled[..., :half_d]
 
                                     dense_k_rot = workspace_k_rot[:, :, :L_dense]
                                     # Compute RoPE in-place in the pre-allocated slice
-                                    torch.mul(dense_k_assembled, cos_dense, out=dense_k_rot)
-                                    dense_k_rot.addcmul_(dense_k_half, sin_dense)
+                                    torch.mul(dense_k_assembled[..., :rotary_dim], cos_dense, out=dense_k_rot[..., :rotary_dim])
+                                    dense_k_rot[..., :rotary_dim].addcmul_(dense_k_half, sin_dense)
+                                    if rotary_dim < head_dim:
+                                        dense_k_rot[..., rotary_dim:].copy_(dense_k_assembled[..., rotary_dim:])
                                 else:
                                     dense_k_rot = None
-
                                 if not has_dense and not has_comp:
                                     attn_out_b = torch.zeros((1, H_q, 1, D), dtype=query_states.dtype, device=query_states.device)
                                 elif has_dense and not has_comp:
@@ -1799,7 +2136,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _Q_sq = query_states[b_idx, :, 0, :]  # [H_q, D]
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
-                                    
+                                    # ATen kernel derives rotary_dim from tensor shape (not a
+                                    # separate param) -- must get the true unpadded width, not
+                                    # the Metal-oriented padded buffer above.
+                                    _ca_true = _cos_anc_2d_true if _cos_anc_2d_true is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                    _sa_true = _sin_anc_2d_true if _sin_anc_2d_true is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+
                                     has_residual = False
                                     if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
                                         # B1: read the cached flag (set at write_block time) instead of
@@ -1845,6 +2187,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _fact_val_K.contiguous(),
                                             _fact_val_V.contiguous(),
                                             _ed, _ed, _ed, _ed,
+                                            _anchor_rotary_dim,
                                         )
                                     elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
@@ -1858,8 +2201,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
                                             pool.scales.contiguous(),
-                                            _ca,
-                                            _sa,
+                                            _ca_true,
+                                            _sa_true,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -1904,7 +2247,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     _Q_sq = query_states[b_idx, :, 0, :]
                                     _ca = _cos_anc_2d if _cos_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
                                     _sa = _sin_anc_2d if _sin_anc_2d is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
-                                    
+                                    # ATen kernel derives rotary_dim from tensor shape (not a
+                                    # separate param) -- must get the true unpadded width, not
+                                    # the Metal-oriented padded buffer above.
+                                    _ca_true = _cos_anc_2d_true if _cos_anc_2d_true is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+                                    _sa_true = _sin_anc_2d_true if _sin_anc_2d_true is not None else torch.empty(0, device=query_states.device, dtype=torch.float32)
+
                                     has_residual = False
                                     if pool is not None and getattr(pool, "residual_K_positions", None) is not None:
                                         # B1: same cached flag used in both branches.
@@ -1948,6 +2296,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             _fact_val_K.contiguous(),
                                             _fact_val_V.contiguous(),
                                             _ed, _ed, _ed, _ed,
+                                            _anchor_rotary_dim,
                                         )
                                     elif _DKV_HAS_DECODE_ATTN and pool is not None and not has_residual:
                                         _scale = 1.0 / math.sqrt(head_dim)
@@ -1961,8 +2310,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             pool.anchors_V.contiguous(),
                                             pool.seq_lens.contiguous(),
                                             pool.scales.contiguous(),
-                                            _ca,
-                                            _sa,
+                                            _ca_true,
+                                            _sa_true,
                                             block_indices.contiguous(),
                                             _scale,
                                             num_heads,
@@ -1984,16 +2333,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         )  # [H_q, D], [H_q]
 
                                     # 4. Combine outputs via LSE safely (unclamped to preserve true log-sum-exp combination math)
+                                    # NaN guards (not just Inf, MLX parity) — see the 3-way combine above
+                                    # for why torch.maximum makes this necessary, not optional.
                                     lse_sparse = _apply_sparse_bias(lse_sparse, lse_dense)
                                     lse_max = torch.maximum(lse_dense, lse_sparse)
                                     lse_max_masked = lse_max.clone()
-                                    lse_max_masked[torch.isinf(lse_max)] = 0.0
+                                    lse_max_masked[~torch.isfinite(lse_max)] = 0.0
 
                                     w_dense = torch.exp(lse_dense - lse_max_masked)
                                     w_sparse = torch.exp(lse_sparse - lse_max_masked)
 
-                                    w_dense[torch.isinf(lse_dense)] = 0.0
-                                    w_sparse[torch.isinf(lse_sparse)] = 0.0
+                                    w_dense[~torch.isfinite(lse_dense)] = 0.0
+                                    w_sparse[~torch.isfinite(lse_sparse)] = 0.0
 
                                     denom = w_dense + w_sparse
                                     denom_safe = torch.clamp(denom, min=1e-9)
@@ -2001,6 +2352,9 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     out_sparse_fp32 = out_sparse.float()
                                     out_final = (out_dense_hd * w_dense.unsqueeze(-1) +
                                                  out_sparse_fp32 * w_sparse.unsqueeze(-1)) / denom_safe.unsqueeze(-1)
+                                    # Final safety net (MLX parity): zero any NaN that still made it
+                                    # through (e.g. from a NaN in an attention output itself).
+                                    out_final = torch.nan_to_num(out_final, nan=0.0)
                                     attn_out_b = out_final.to(query_states.dtype).unsqueeze(0).unsqueeze(2)  # [1, H_q, 1, D]
                         else:
                             # ── CUDA: use fused combined kernel (single dispatch for
@@ -2201,6 +2555,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # P1-6: Deferred batch dispatch — queue this session's call
                                 # so we can dispatch all sessions in tight Python-free sequence.
                                 if _triton_batch_enabled:
+                                    from native_core.kv_runtime_manager import get_layer_rank as _get_layer_rank
+                                    _cfg = getattr(kv_manager, "config", None)
+                                    _layer_active_rank = _get_layer_rank(
+                                        captured_layer_idx, kv_manager.num_layers, kv_manager.rank,
+                                        early_boost=getattr(_cfg, "early_layer_rank_boost", False),
+                                        max_rank_early=getattr(_cfg, "max_rank_early", 0),
+                                    )
                                     _triton_batch_queue.append((
                                         b_idx,
                                         dict(
@@ -2210,7 +2571,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             dense_k=_dk_combined,
                                             dense_v=_dv_combined,
                                             num_key_value_groups=num_key_value_groups,
-                                            R=kv_manager.rank,
+                                            R=_layer_active_rank,
                                             S_MAX=session_mbs,
                                             anchor_indices=anchor_indices,
                                             cos=cos_all,
@@ -2235,6 +2596,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         _gc = kv_manager.decode_workspace.setdefault(sid, {}).setdefault(
                                             "_gather_cache_cuda", {})
                                         _gk = (captured_layer_idx, _mdver)
+                                    from native_core.kv_runtime_manager import get_layer_rank as _get_layer_rank
+                                    _cfg = getattr(kv_manager, "config", None)
+                                    _layer_active_rank = _get_layer_rank(
+                                        captured_layer_idx, kv_manager.num_layers, kv_manager.rank,
+                                        early_boost=getattr(_cfg, "early_layer_rank_boost", False),
+                                        max_rank_early=getattr(_cfg, "max_rank_early", 0),
+                                    )
                                     attn_out_b = native_triton_sparse_attn_decode_combined(
                                         q=query_states[b_idx:b_idx+1],
                                         block_indices=block_indices,
@@ -2242,7 +2610,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         dense_k=_dk_combined,
                                         dense_v=_dv_combined,
                                         num_key_value_groups=num_key_value_groups,
-                                        R=kv_manager.rank,
+                                        R=_layer_active_rank,
                                         S_MAX=session_mbs,
                                         anchor_indices=anchor_indices,
                                         cos=cos_all,
@@ -2252,6 +2620,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         gather_key=_gk,
                                     )
                             else:
+                                from native_core.kv_runtime_manager import get_layer_rank as _get_layer_rank
+                                _cfg = getattr(kv_manager, "config", None)
+                                _layer_active_rank = _get_layer_rank(
+                                    captured_layer_idx, kv_manager.num_layers, kv_manager.rank,
+                                    early_boost=getattr(_cfg, "early_layer_rank_boost", False),
+                                    max_rank_early=getattr(_cfg, "max_rank_early", 0),
+                                )
                                 attn_out_b = native_triton_sparse_attn_decode(
                                     q=query_states[b_idx:b_idx+1],
                                     block_indices=block_indices,
@@ -2260,7 +2635,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     active_k=dense_k_assembled,
                                     active_v=dense_v_assembled,
                                     num_key_value_groups=num_key_value_groups,
-                                    R=kv_manager.rank,
+                                    R=_layer_active_rank,
                                     S_MAX=session_mbs,
                                     anchor_indices=anchor_indices,
                                     cos=cos_all,
@@ -2296,7 +2671,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             seq_limit = cos_flat.shape[0]
                                             cos_dense = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
-                                            dense_k_rot = (dense_k_valid * cos_dense) + (rotate_half(dense_k_valid)) * sin_dense
+                                            dense_k_rot = _apply_rope_single(dense_k_valid, cos_dense, sin_dense)
 
                                         _q_val = query_states[b_idx, :, 0, :]
                                         _full_bsizes = pool.seq_lens[_full_bi]
@@ -2359,6 +2734,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                               out_sparse_full_fp32 * w_sparse_full.unsqueeze(-1)) / denom_full_safe.unsqueeze(-1)
                                             attn_out_full_approx = out_final_full.to(query_states.dtype).unsqueeze(0).unsqueeze(2)
                                     else:
+                                        from native_core.kv_runtime_manager import get_layer_rank as _get_layer_rank
+                                        _cfg = getattr(kv_manager, "config", None)
+                                        _layer_active_rank = _get_layer_rank(
+                                            captured_layer_idx, kv_manager.num_layers, kv_manager.rank,
+                                            early_boost=getattr(_cfg, "early_layer_rank_boost", False),
+                                            max_rank_early=getattr(_cfg, "max_rank_early", 0),
+                                        )
                                         attn_out_full_approx = native_triton_sparse_attn_decode(
                                             q=query_states[b_idx:b_idx+1],
                                             block_indices=_full_bi,
@@ -2367,7 +2749,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             active_k=dense_k_assembled,
                                             active_v=dense_v_assembled,
                                             num_key_value_groups=num_key_value_groups,
-                                            R=kv_manager.rank,
+                                            R=_layer_active_rank,
                                             S_MAX=session_mbs,
                                             anchor_indices=_full_ai,
                                             cos=cos_all,
@@ -2408,6 +2790,8 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                     attn_output = attn_output.transpose(1, 2).contiguous()
                     attn_output = attn_output.reshape(bsz, q_len, hidden_size)
+                    if attn_gate is not None:
+                        attn_output = attn_output * torch.sigmoid(attn_gate)
                     attn_output = self.o_proj(attn_output)
 
                     # transformers 4.44-4.47: fixed 3-tuple return; hand back the
@@ -2494,6 +2878,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 if K_b > 0:
                                     blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                     history_blocks = [b for b in blocks if b.anchor_idx < K_b]
+                                    history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
 
                                     comp_blocks = []
                                     dense_k = []
@@ -2544,7 +2929,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                         dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                         cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                         sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
-                                        k_dense_rot = (k_dense * cos_dense) + (rotate_half(k_dense)) * sin_dense
+                                        k_dense_rot = _apply_rope_single(k_dense, cos_dense, sin_dense)
 
                                         k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups).to(chunk_q.dtype)
                                         v_dense_rep = repeat_kv(v_dense, num_key_value_groups).to(chunk_q.dtype)
@@ -2753,6 +3138,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     if K_b > 0:
                                         blocks = kv_manager.get_streaming_blocks(sid, captured_layer_idx)
                                         history_blocks = [b for b in blocks if b.anchor_idx < K_b]
+                                        history_blocks = _sparse_prefill_filter_blocks(history_blocks, chunk_q, chunk_start=K_b)
 
                                         comp_blocks = []
                                         dense_k = []
@@ -2803,7 +3189,7 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             dense_positions_tensor = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
                                             cos_dense = cos_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_all[0, dense_positions_tensor].unsqueeze(0).unsqueeze(1)
-                                            k_dense_rot = (k_dense * cos_dense) + (rotate_half(k_dense)) * sin_dense
+                                            k_dense_rot = _apply_rope_single(k_dense, cos_dense, sin_dense)
 
                                             k_dense_rep = repeat_kv(k_dense_rot, num_key_value_groups)
                                             v_dense_rep = repeat_kv(v_dense, num_key_value_groups)
@@ -2849,9 +3235,14 @@ def apply_dkv_attention_patch(model, kv_manager):
 
                 attn_output = attn_output.transpose(1, 2).contiguous()
                 attn_output = attn_output.reshape(bsz, q_len, hidden_size)
+                if attn_gate is not None:
+                    attn_output = attn_output * torch.sigmoid(attn_gate)
                 attn_output = self.o_proj(attn_output)
 
-                if torch.isnan(attn_output).any():
+                # Gated: `if t.any():` on a GPU tensor forces a device sync, and
+                # this sits on the per-layer, per-token decode path. See
+                # DKV_DEBUG_NUMERICS in triton_fused_decode.py.
+                if _DKV_DEBUG_NUMERICS and torch.isnan(attn_output).any():
                     print(f"[DKV DEBUG] NaN detected in attn_output! layer={captured_layer_idx}, q_len={q_len}, is_decode={is_decode}")
                     print(f"  query_states has nan: {torch.isnan(query_states).any().item()}")
                     print(f"  key_states has nan: {torch.isnan(key_states).any().item()}")

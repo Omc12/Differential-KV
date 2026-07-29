@@ -140,7 +140,17 @@ torch::Tensor fused_decode_attention_combined(
     const torch::Tensor& res_val_V,
     const torch::Tensor& fact_pos,
     const torch::Tensor& fact_val_K,
-    const torch::Tensor& fact_val_V
+    const torch::Tensor& fact_val_V,
+    // Partial RoPE (Qwen3.5/GLM-style partial_rotary_factor<1.0). -1 (default)
+    // means full rotary (rotary_dim == D). See decode_attention.cpp for why
+    // this only affects the MPS branch.
+    int rotary_dim = -1,
+    // Full-sequence RoPE tables + per-slot anchor positions, forwarded to
+    // decode_attention_metal for exact-position residual/fact rotation.
+    // Empty (default) keeps the prior anchor-position behavior.
+    const c10::optional<torch::Tensor>& cos_full = c10::nullopt,
+    const c10::optional<torch::Tensor>& sin_full = c10::nullopt,
+    const c10::optional<torch::Tensor>& anchor_pos = c10::nullopt
 );
 
 } // namespace dkv

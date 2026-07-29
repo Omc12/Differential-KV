@@ -24,10 +24,29 @@ Profiler-visible impact:
   - Tracked via `.stats` dict (evictions, reloads, bytes paged).
 """
 
+import os
 import threading
 import time
 import torch
 from collections import OrderedDict
+
+
+def dkv_deterministic() -> bool:
+    """DKV_DETERMINISTIC=1 — no background thread may mutate runtime state.
+
+    Every background mutator here fires on a WALL-CLOCK timer, so which blocks
+    are resident (and therefore which the router can pick) when decode starts
+    depends on thread scheduling. Two runs of the same build on the same prompt
+    then take different routing decisions and emit different tokens, at
+    temperature 0. That makes both the generated text and per-layer
+    cosine-vs-dense useless as A/B metrics.
+
+    MLX -- the reference implementation, which IS reproducible -- runs a single
+    background thread and no timed eviction/prefetch at all. This flag brings the
+    CUDA/Metal path to that same configuration for measurement. Leave it OFF in
+    production, where the overlap is the point.
+    """
+    return os.environ.get("DKV_DETERMINISTIC", "0") == "1"
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -77,15 +96,45 @@ class PagedKVStore:
         # Async eviction thread
         self._evict_queue: List[Tuple] = []
         self._running = True
-        self._bg_thread = threading.Thread(target=self._bg_eviction_loop, daemon=True)
-        self._bg_thread.start()
+        self._deterministic = dkv_deterministic()
+        # Timed eviction is OPT-IN (DKV_PAGER_BG_EVICT=1), default OFF.
+        #
+        # It is REDUNDANT: `maybe_evict()` is already called synchronously after
+        # every ingest (kv_runtime_manager, "Trigger pager to check budget"), and
+        # this loop calls that same method -- so it adds no capability, only a
+        # 2.0 s wall-clock trigger. That timer decided WHICH blocks were resident
+        # when decode started, which made the runtime non-reproducible at
+        # temperature 0 once the allocation grew large enough for eviction to
+        # engage at all. Measured: two identical runs diverged, one into a
+        # degenerate repetition loop; disabling this pinned them.
+        #
+        # MLX has no timed eviction of any kind, so synchronous-only is also the
+        # parity behaviour.
+        #
+        # Trade-off: a session that stops ingesting no longer has memory
+        # reclaimed while idle. Reclaim resumes on the next ingest, and the
+        # budget check that matters happens at allocation time. Set
+        # DKV_PAGER_BG_EVICT=1 to restore the timer.
+        self._bg_thread = None
+        if not self._deterministic and os.environ.get("DKV_PAGER_BG_EVICT", "0") == "1":
+            self._bg_thread = threading.Thread(target=self._bg_eviction_loop, daemon=True)
+            self._bg_thread.start()
 
         # Async prefetch thread
         self._prefetch_queue: List[Tuple] = []
         self._prefetch_lock = threading.Lock()
         self._prefetch_cv = threading.Condition(self._prefetch_lock)
-        self._bg_prefetch_thread = threading.Thread(target=self._bg_prefetch_loop, daemon=True)
-        self._bg_prefetch_thread.start()
+        # Background prefetch is OPT-IN (DKV_PAGER_BG_PREFETCH=1), default OFF —
+        # same reasoning as the eviction timer above. `_bg_prefetch_loop` calls
+        # `_reload_block`, i.e. it changes a block's RESIDENCY on its own thread,
+        # so which blocks are on the GPU when decode starts depends on thread
+        # timing. A miss is not a correctness failure: `_reload_block` is also
+        # reachable synchronously on access, so prefetch only ever hides latency.
+        # MLX has no tier-prefetch thread at all.
+        self._bg_prefetch_thread = None
+        if not self._deterministic and os.environ.get("DKV_PAGER_BG_PREFETCH", "0") == "1":
+            self._bg_prefetch_thread = threading.Thread(target=self._bg_prefetch_loop, daemon=True)
+            self._bg_prefetch_thread.start()
 
         # Live stats
         self.stats = {

@@ -20,7 +20,7 @@ import sys, os
 import threading
 
 from native_core.sparse_decode.triton_fused_decode import TritonDKV
-from native_core.compression.lowrank import compress_lowrank, LowRankDelta
+from native_core.compression.lowrank import compress_lowrank, LowRankDelta, _exact_keys_enabled
 from native_core.paging.paged_kv_store import PagedKVStore
 from native_core.compression.async_compressor import AsyncCompressor
 
@@ -40,6 +40,17 @@ except ImportError:
     def _has_cuda(): return torch.cuda.is_available()
 
 
+def _residual_bytes_per_block(max_residual: int, kv_heads: int, head_dim: int) -> int:
+    """Bytes the pool spends on ONE block's residual arrays.
+
+    Mirrors NativeBlockPool's allocation exactly: two int16 position arrays and
+    two fp16 value arrays of [max_residual, kv_heads, head_dim]. Factored out
+    because the pool-sizing division and the per-slot cost report have to agree —
+    they did not, and the pool over-allocated by 2-3x as a result.
+    """
+    return int(max_residual) * (2 + 2 + int(kv_heads) * int(head_dim) * 2 * 2)
+
+
 def get_layer_rank(
     layer_idx: int,
     num_layers: int,
@@ -48,18 +59,27 @@ def get_layer_rank(
     max_rank_early: int = 0,
 ) -> int:
     """
-    Per-layer adaptive rank schedule tuned for Qwen 2.5 1.5B (28 layers).
-    Early layers have broader activation distributions and benefit from higher rank;
-    final layers are more concentrated and can use lower rank.
+    Per-layer adaptive rank schedule. MIRRORS MLX EXACTLY
+    (mlx_dkv_wrapper.get_layer_rank) -- verified equal at every full_attention
+    layer of Qwen3.5-2B (24/48/48/48/16/16 for layers 3/7/11/15/19/23 at
+    base_rank=32). Do not "fix" one without the other.
 
-    Schedule is PROPORTIONAL to base_rank so the user's configured rank acts
-    as the standard ceiling (no silent VRAM inflation beyond --rank for normal use).
+    Normal schedule (early_boost=False, default):
+      ratio < 0.25:   max(8, round(0.75 * base_rank))   (24 at base 32)
+      ratio < 0.75:   round(1.50 * base_rank)           (48 at base 32)
+      ratio >= 0.75:  max(8, round(0.50 * base_rank))   (16 at base 32)
 
-    Normal schedule (early_boost=False, default, base_rank=16):
-      Layers 0-15%:   base_rank          (e.g. 16)
-      Layers 15-50%:  base_rank          (e.g. 16)
-      Layers 50-79%:  max(6, round(0.75 * base_rank))   (e.g. 12)
-      Layers 79%+:    max(8, round(0.50 * base_rank))   (e.g. 8)
+    NOTE: the middle band returns 1.5x base_rank, i.e. ABOVE the configured
+    rank. That is deliberate and matches MLX, whose pool is allocated at
+    `base_rank * 1.5` precisely so the middle band fits; the earlier text here
+    claiming base_rank is "the standard ceiling (no silent VRAM inflation beyond
+    --rank)" described a schedule this function has not implemented for a long
+    time. The pool's `pool_rank` (48) is the real ceiling.
+
+    MLX stores U/V ZERO-PADDED to pool_rank and always reads pool_rank
+    components; this side passes the layer's own rank to the kernel and reads
+    only that many. Equivalent, since compression only ever produced
+    `layer_rank` components.
 
     Minimum floor raised from 4 -> 6 for mid layers and 4 -> 8 for final layers:
     at rank 4 the SVD approximation for formula/number blocks degrades enough
@@ -545,13 +565,14 @@ class KVRuntimeManager:
         )
         import math
         # The 1.5x is headroom for the CONTENT rank-boost (_block_boost_rank
-        # promotes a block to ceil(rank*1.5)).  When DKV_RANK_BOOST=off that
+        # promotes a block to ceil(rank*1.5)).  DKV_RANK_BOOST defaults to "off"
+        # (MLX parity -- MLX has no rank-boost concept), in which case that
         # boost never fires, so no block's stored rank exceeds max_possible_rank,
         # and the 1.5x would over-allocate every V_KV/U slot by 50% for capacity
-        # that cannot fill — the pool_rank=48 seen with rank 32 even when boost is
-        # off.  Drop the multiplier to 1.0 in that case.  (max_possible_rank
-        # already covers the per-layer schedule, incl. early_layer_rank_boost.)
-        _content_boost_on = os.environ.get("DKV_RANK_BOOST", "auto").lower() != "off"
+        # that cannot fill.  Drop the multiplier to 1.0 in that case.
+        # (max_possible_rank already covers the per-layer schedule, incl.
+        # early_layer_rank_boost.)
+        _content_boost_on = os.environ.get("DKV_RANK_BOOST", "off").lower() != "off"
         pool_rank = int(math.ceil(max_possible_rank * (1.5 if _content_boost_on else 1.0)))
         # A hard r_proj cap (DKV_RSVD_MAX_RPROJ) caps every block's stored rank
         # in the compress path, so the pool never needs to be wider than the cap.
@@ -666,12 +687,35 @@ class KVRuntimeManager:
             )
         
         min_blocks = 2048 if self.serving_mode == "lightweight" else (4096 if self.serving_mode == "balanced" else 8000)
-        
+
         # MPS + low preset: override min_blocks to prevent OOM
         if is_mps and is_low_preset:
             min_blocks = 512  # Even smaller minimum for memory-constrained devices
-        
-        dynamic_max_blocks = max(min_blocks, min(65536, pool_budget_bytes // bytes_per_block))
+
+        # Size the pool by the TRUE per-slot cost, residual arrays INCLUDED.
+        #
+        # This used to divide the budget by `bytes_per_block`, which deliberately
+        # EXCLUDES the residual arrays (see the reporting block below, which adds
+        # them back to print the real figure). The pool therefore allocated more
+        # slots than the budget actually covers, and the overshoot scales with
+        # max_residual_tokens:
+        #
+        #   kv_heads=2, head_dim=256  ->  res_bytes = max_res * 2052
+        #     max_res 64  : true 238 KB/slot vs 110 KB assumed  -> 2.2x over
+        #     max_res 128 : true 366 KB/slot vs 110 KB assumed  -> 3.3x over
+        #
+        # So raising max_residual to MLX's 128 did not just cost 2x residual
+        # memory, it ALSO widened this sizing error from 2.2x to 3.3x -- which is
+        # why that change pushed an 8 GB box into eviction and corrupted output
+        # while MLX runs the same logical config comfortably. MLX sizes its pool
+        # as a flat block count (DKV_MAX_BLOCKS, default 256) and never derives it
+        # from a byte budget, so it has no equivalent error.
+        _res_bytes_per_block = _residual_bytes_per_block(
+            getattr(self.config, "max_residual_tokens", 8) if self.config is not None else 8,
+            self.kv_heads, self.head_dim,
+        )
+        _true_bytes_per_block = bytes_per_block + _res_bytes_per_block
+        dynamic_max_blocks = max(min_blocks, min(65536, pool_budget_bytes // _true_bytes_per_block))
         self.max_blocks = dynamic_max_blocks
 
         # Surface the context ceiling this pool implies.  max_blocks is shared
@@ -682,8 +726,7 @@ class KVRuntimeManager:
         # residual arrays; the pool's own accounting includes them, so report
         # the real per-slot cost here too.
         _max_res = getattr(self.config, "max_residual_tokens", 8) if self.config is not None else 8
-        _res_bytes = _max_res * (2 + 2 + self.kv_heads * self.head_dim * 2 * 2)
-        _true_bpb = bytes_per_block + _res_bytes
+        _true_bpb = _true_bytes_per_block
         _blocks_per_layer = max(1, dynamic_max_blocks // max(self.num_layers, 1))
         print(
             f"[DKV Memory] Pool: max_blocks={dynamic_max_blocks} "
@@ -731,8 +774,18 @@ class KVRuntimeManager:
         # Fixed at construction time — never updated.
         # All block descriptors and query descriptors use the same W_proj,
         # making them directly comparable across the lifetime of the pool.
+        # SEEDED: an unseeded draw here gave every process a different descriptor
+        # basis, so block/query descriptors -- and therefore SRL routing decisions
+        # -- were not reproducible across runs. Same reasoning as the rSVD sketch
+        # (compression/lowrank._rsvd_omega); shares DKV_RSVD_SEED. Uses a local
+        # generator so it does not disturb global RNG state.
         _desc_dim = 64
-        _W = torch.randn(_desc_dim, self.head_dim, dtype=torch.float32)
+        _gW = torch.Generator(device="cpu")
+        try:
+            _gW.manual_seed(int(os.environ.get("DKV_RSVD_SEED", "0")))
+        except ValueError:
+            _gW.manual_seed(0)
+        _W = torch.randn(_desc_dim, self.head_dim, generator=_gW, dtype=torch.float32)
         _W = _W / (_W.norm(dim=1, keepdim=True) + 1e-8)   # normalize rows
         self.native_pool.W_proj = _W.to(self.device)
 
@@ -759,6 +812,21 @@ class KVRuntimeManager:
         else:
             self._async = self.config.async_svd
 
+        # DKV_SYNC_COMPRESS=1 forces compression to run inline on the calling
+        # thread. Background SVD makes a run NON-REPRODUCIBLE: which blocks have
+        # finished compressing by the time decode starts depends on thread
+        # timing, so the same prompt takes different routing decisions and emits
+        # different tokens run to run. That makes both the generated text and
+        # per-layer cosine-vs-dense useless as A/B metrics -- two runs of the
+        # SAME build disagree by more than most changes being evaluated. Set
+        # this for any fidelity measurement; leave it off in production, where
+        # the overlap is the point.
+        # DKV_DETERMINISTIC=1 implies it (that flag disables every background
+        # mutator at once -- see paging/paged_kv_store.dkv_deterministic).
+        if os.environ.get("DKV_SYNC_COMPRESS", "0") == "1" or \
+                os.environ.get("DKV_DETERMINISTIC", "0") == "1":
+            self._async = False
+
         self._compressor = AsyncCompressor(compress_fn=self._compress_block_sync)
         if self._async:
             self._compressor.start()
@@ -772,29 +840,32 @@ class KVRuntimeManager:
                 micro_block_size=self.micro_block_size,
                 dense_anchor_only=True,
                 native_pool=self.native_pool,
-                # 512-token recency window: keeps the most recent 512 tokens dense for
-                # exact attention, compressing everything older. This is sufficient for
-                # typical response lengths and yields clear VRAM savings at 4K+ contexts.
-                # Increase to 1024 via recency_window=1024 if generation quality drifts.
-                recency_window=int(os.environ.get("DKV_RECENCY_WINDOW", "512")),
+                recency_window=self._resolve_recency_window(),
             )
             self._streaming_mgr.manager = self
         else:
             self._streaming_mgr = None
 
-        _recency_window = int(os.environ.get("DKV_RECENCY_WINDOW", "512"))
-        # Compute a generous upper bound for the dense window workspace.
-        # During chunked prefill, active_k can temporarily hold up to 2*block_size − 1 tokens
-        # per block (e.g. 127 for block_size=64).  Formula:
-        #   n_max_blocks  = ceil(recency_window / block_size) + 3   (safety margin)
-        #   max_per_block = 2 * block_size + 1                      (anchor + 2× active)
-        #   max_dense_len = n_max_blocks × max_per_block
-        # This is independent of model architecture — it only depends on block_size and
-        # recency_window, both of which are system parameters (not per-model constants).
-        _n_max_blocks = (_recency_window + self.block_size - 1) // self.block_size + 3
-        _max_per_block = 2 * self.block_size + 1
+        _recency_window = self._resolve_recency_window()
+        # Dense window workspace bound. MLX uses simply
+        #     max_dense_len = recency_window + block_size
+        # (mlx_dkv_wrapper: self.max_dense_len = self.recency_window + self.block_size).
+        #
+        # This side multiplied a per-block worst case (anchor + 2x block_size, for
+        # the chunked-prefill overshoot) by a padded block COUNT, which double
+        # counts: the window holds ~recency_window tokens in TOTAL, so budgeting
+        # 2x block_size for every block at once cannot happen. At recency 4096 /
+        # block 256 that produced 9747 rows against MLX's 4352 -- 2.24x, i.e. an
+        # extra ~265 MB of K+V workspace across 24 layers on top of the real
+        # need. On a memory-tight box that is enough to push the pool into
+        # eviction and corrupt output.
+        #
+        # Use MLX's bound plus ONE extra block of slack for the overshoot.
+        # Under-allocating is safe: assemble_dense_window_kv already trims the
+        # oldest blocks (with a one-time warning) when the content does not fit.
         self.max_dense_len = int(
-            os.environ.get("DKV_MAX_DENSE_LEN", str(_n_max_blocks * _max_per_block))
+            os.environ.get("DKV_MAX_DENSE_LEN",
+                           str(_recency_window + 2 * self.block_size))
         )
 
         self.max_residual = self.native_pool.max_residual_tokens
@@ -1053,8 +1124,13 @@ class KVRuntimeManager:
         if pool is None or pool.W_proj is None:
             return  # SRL not available (W_proj not initialized)
 
-        # Gather all COMPRESSED pool slot IDs and anchor indexes for this session (from layer 0)
-        blocks_layer0 = self.get_streaming_blocks(session_id, 0)
+        # Gather all COMPRESSED pool slot IDs and anchor indexes for this session.
+        # Anchor/pool-slot metadata is identical across every attended layer for
+        # a given block, so any one attended layer works as the source -- but it
+        # must actually BE an attended layer (see _any_attended_layer_with_blocks;
+        # hardcoding 0 silently found nothing on hybrid architectures where layer
+        # 0 is unattended).
+        blocks_layer0 = self.get_streaming_blocks(session_id, self._any_attended_layer_with_blocks(session_id))
         slot_ids = []
         anchor_idxs = []
         for b in blocks_layer0:
@@ -1753,7 +1829,11 @@ class KVRuntimeManager:
           - COMPRESSED:   anchor + U.shape[0] rows
           - PAGED:        anchor + active_k_cpu tokens
         """
-        blocks = self.get_streaming_blocks(session_id, 0)
+        # NOTE: hardcoding layer_idx=0 here silently returned 0 for hybrid
+        # architectures where layer 0 is unattended (see
+        # _any_attended_layer_with_blocks) despite the "model-agnostic" claim
+        # above -- this is exactly the class of bug that claim is meant to rule out.
+        blocks = self.get_streaming_blocks(session_id, self._any_attended_layer_with_blocks(session_id))
         if not blocks:
             return 0
         last_block = blocks[-1]
@@ -2094,6 +2174,22 @@ class KVRuntimeManager:
             return self._streaming_mgr.get_blocks(session_id, layer_idx)
         return self.get_raw_blocks(session_id, layer_idx)
 
+    def _any_attended_layer_with_blocks(self, session_id: str) -> int:
+        """
+        Return a layer_idx this session actually has blocks for, or 0 if none
+        exist yet. Block-existence checks used to hardcode layer_idx=0 as a
+        proxy for "does this session have any compressed history at all" --
+        correct only when every layer is attended (layer 0 included), which
+        hybrid architectures (Qwen3.5/Qwen3-Next-style, mostly linear_attention
+        with attention every Nth layer) break: layer 0 is very often a
+        linear_attention layer DKV never compresses, so the layer-0 probe
+        always read empty even with real history present elsewhere.
+        """
+        for _lidx in range(self.num_layers):
+            if self.get_streaming_blocks(session_id, _lidx):
+                return _lidx
+        return 0
+
     def get_streaming_summary(self, session_id: str = None) -> dict:
         """Return streaming ingest telemetry for Phase 24.5 reporting."""
         if self._streaming_mgr is None:
@@ -2306,11 +2402,29 @@ class KVRuntimeManager:
         last_start_pos = dense_start_pos_dict.get(layer_idx)
         start_pos = dense_blocks[0].anchor_idx
 
+        # Identity of the CURRENT dense set. Repacking must be driven by the whole
+        # set, not just its first block: the trim loop above deliberately protects
+        # block 0 and drops the SECOND-oldest instead, and blocks also leave the
+        # set when they get compressed. In both cases dense_blocks[0].anchor_idx
+        # is unchanged, so a start_pos-only check saw "no change", kept the cached
+        # per-block write offsets, and left a GAP where the removed block used to
+        # sit -- with live data stranded PAST the recomputed L_dense.
+        #
+        # That silently broke this function's own documented contract ("positions
+        # >= L_dense contain stale/zero data") and the matching prefix-length
+        # assumption every consumer makes -- including MLX, which builds its dense
+        # buffer fresh each step and so gets `arange(max_dense_len) < dense_len`
+        # for free. Comparing the full set restores the packed-from-0 invariant.
+        dense_block_sig = tuple(b.anchor_idx for b in dense_blocks)
+        dense_sig_dict = session_dict.setdefault("dense_block_sig", {})
+        last_block_sig = dense_sig_dict.get(layer_idx)
+
         new_alloc = (workspace_k is None
             or workspace_k.shape[1] != self.kv_heads
             or workspace_k.dtype != dtype
             or last_start_pos is None
-            or last_start_pos != start_pos)
+            or last_start_pos != start_pos
+            or last_block_sig != dense_block_sig)
 
         if new_alloc:
             if workspace_k is None or workspace_k.shape[1] != self.kv_heads or workspace_k.dtype != dtype:
@@ -2330,6 +2444,30 @@ class KVRuntimeManager:
         # all blocks into a freshly-laid-out workspace.  This prevents the
         #   RuntimeError: tensor a (26) must match tensor b (27)
         # crash that killed responses mid-generation in long chat sessions.
+        # Fix 1b (MLX parity): the cached offsets must still describe a layout
+        # packed from row 0, because L_dense is computed from the BLOCK LIST
+        # (step 1) while the data is written through these offsets -- two
+        # independent sources. If they disagree, live tokens sit past L_dense
+        # (the kernel never reads them) or stale rows sit inside it (the kernel
+        # attends them as real tokens). Either way the function's documented
+        # contract is broken and the caller's -inf mask lands in the wrong place.
+        #
+        # MLX cannot get into this state: it keeps ONE contiguous dense buffer,
+        # compacts it when a block leaves (`dense_keys[..., :remaining] =
+        # dense_keys[..., block_size:dense_len]`), zeroes the tail, and masks with
+        # `arange(max_dense_len) < dense_len` -- the invariant is structural.
+        # Here it is cached, so verify it and self-heal with a full repack.
+        if not new_alloc:
+            _expect = 0
+            for blk in dense_blocks:
+                _e = dense_offsets.get((layer_idx, blk.anchor_idx))
+                _off = _e[0] if isinstance(_e, tuple) else _e
+                if _off != _expect:
+                    new_alloc = True
+                    dense_start_pos_dict[layer_idx] = start_pos
+                    break
+                _expect += _blk_len(blk)
+
         if not new_alloc:
             for blk in dense_blocks:
                 key = (layer_idx, blk.anchor_idx)
@@ -2345,6 +2483,18 @@ class KVRuntimeManager:
                         # Workspace is always max_dense_len; no reallocation needed.
                         dense_start_pos_dict[layer_idx] = start_pos
                         break
+
+        # Record the set we are about to lay out. Done AFTER the growth check
+        # above (which can also force new_alloc) so the stored signature always
+        # describes the layout actually written below. When new_alloc is False
+        # the layout is unchanged, so the previous signature still describes it.
+        if new_alloc:
+            dense_sig_dict[layer_idx] = dense_block_sig
+            # A full repack invalidates every cached per-block offset; stale
+            # entries for blocks that just left the set would otherwise be
+            # resurrected if that anchor ever reappears at a different position.
+            for _k in [k for k in dense_offsets if k[0] == layer_idx]:
+                dense_offsets.pop(_k, None)
 
         # 3. Copy only dirty blocks directly into the pre-allocated workspace slices.
         # Safety net: if a single block's active_k still exceeds the remaining workspace
@@ -2417,13 +2567,37 @@ class KVRuntimeManager:
                     curr_idx = min(offset + 1, self.max_dense_len)
 
 
-        # 4. Return the FULL fixed-size workspace + L_dense as a scalar + trimmed block list.
-        # Shape is always [1, kv_heads, max_dense_len, head_dim] — static across every
-        # decode step.  Positions >= L_dense contain stale/zero data; the caller masks
-        # those positions with -inf before softmax so they get exactly 0 attention weight.
-        # dense_blocks may have been trimmed (oldest dropped); return the surviving list so
-        # the caller's position-tensor loop uses the same trimmed set.
-        return workspace_k, workspace_v, L_dense, dense_blocks
+        # 3b. Zero every row past what we actually wrote (MLX parity —
+        # `session["dense_keys"][layer_idx][0, :, dense_len:] = 0.0`, which MLX
+        # does at every point the window shrinks). The workspace is reused across
+        # steps and layouts, so without this the tail holds REAL keys from an
+        # earlier layout. The decode kernel bounds the dense loop by the padded
+        # row stride unless DKV_DENSE_VALID_LEN is set, so those stale keys are
+        # attended as if they were live tokens -- they win real attention mass and
+        # they change run to run, which is exactly the failure signature here.
+        #
+        # Zeroing is defence in depth, NOT the fix on its own: a zero key still
+        # scores 0 and takes exp(0) weight in the softmax denominator. Correctness
+        # comes from the -inf mask (dense_strict_valid); this just bounds the
+        # damage when it is off, and makes the tail deterministic either way.
+        if curr_idx < self.max_dense_len:
+            workspace_k[:, :, curr_idx:].zero_()
+            workspace_v[:, :, curr_idx:].zero_()
+
+        # 4. Return the FULL fixed-size workspace + the ACTUAL written extent +
+        # the trimmed block list. Shape is always [1, kv_heads, max_dense_len,
+        # head_dim] — static across every decode step, so CUDA graph capture still
+        # works.
+        #
+        # Returns curr_idx, not the step-1 block-list sum: curr_idx is what was
+        # really laid out, so "positions >= this are stale/zero" is a fact rather
+        # than an assumption. With the packed-from-0 check above they agree, and
+        # the assert catches any path that still breaks it.
+        if curr_idx != L_dense and not getattr(self, "_dense_extent_warned", False):
+            print(f"[DKV] WARNING: dense extent {curr_idx} != computed L_dense {L_dense} "
+                  f"(layer {layer_idx}); using the written extent.", flush=True)
+            self._dense_extent_warned = True
+        return workspace_k, workspace_v, curr_idx, dense_blocks
 
     # ── High-throughput decode KV assembly ────────────────────────────────────
 
@@ -2838,6 +3012,68 @@ class KVRuntimeManager:
         else:
             self._compress_block_sync(block, k, v)
 
+    def _resolve_recency_window(self) -> int:
+        """How many of the most recent tokens stay DENSE (uncompressed).
+
+        Precedence: explicit DKV_RECENCY_WINDOW -> (opt-in) DKV_ENGAGE_THRESHOLD
+        -> flat 512.
+
+        MLX treats DKV_ENGAGE_THRESHOLD as a HARD OVERRIDE of the recency window
+        (mlx_dkv_wrapper.MLXKVBlockManager.__init__), not merely as an engage
+        gate. This side historically used it only as a gate. That mismatch is
+        real and worth knowing: every cross-runtime comparison run with
+        DKV_ENGAGE_THRESHOLD=4096 gave MLX a 4096-token dense window and this
+        side 512 -- MLX held ~4100 tokens of an 8.2k prompt exactly, CUDA ~990.
+        They were never running the same experiment.
+
+        Adopting MLX's semantics here (with max_residual also at MLX's 128)
+        measurably improves the per-layer metric -- residual-stream cos vs MLX,
+        mean over full_attention layers:
+
+            flat 512, res 64            0.697    (L3 0.778, L11 0.486)
+            engage-as-window, res 128   0.836    (L3 0.972, L11 0.893)
+
+        ...and yet made END-TO-END OUTPUT WORSE AND UNSTABLE on an 8 GB machine:
+        a stable "ZEBRA" became "ZEB" / "ZHEBENMONG", varying run to run,
+        including a degenerate repetition loop. The larger dense window plus a 2x
+        residual pool pushes the allocation into eviction, and the evicted state
+        is what the model then reads. Halving the workspace over-allocation (see
+        max_dense_len) did not rescue it.
+
+        The metric improved while the behaviour regressed; the behaviour wins.
+        MLX's configuration works IN MLX, whose memory layout differs;
+        transplanting it needs the memory story solved first. Opt in with
+        DKV_MLX_RECENCY_SEMANTICS=1 on a box with headroom.
+        """
+        env_rw = os.environ.get("DKV_RECENCY_WINDOW")
+        if env_rw:
+            try:
+                return int(env_rw)
+            except ValueError:
+                pass
+        # MLX semantics: OPT-IN. See the note above -- adopting them improves the
+        # per-layer metric but regressed end-to-end output on an 8 GB box.
+        # MLX parity, DEFAULT ON: MLX treats DKV_ENGAGE_THRESHOLD as a hard
+        # override of the recency window. DKV_MLX_RECENCY_SEMANTICS=0 opts out.
+        if os.environ.get("DKV_MLX_RECENCY_SEMANTICS", "1") == "1":
+            env_engage = os.environ.get("DKV_ENGAGE_THRESHOLD")
+            if env_engage:
+                try:
+                    return int(env_engage)
+                except ValueError:
+                    pass
+        # MLX's fallback, ported: max(512, round_up_512(num_layers * head_dim *
+        # DKV_DENSE_WINDOW_FACTOR)). This side used a flat 512 that ignored model
+        # shape entirely -- for Qwen3.5-2B (24 layers, head_dim 256) MLX derives
+        # 1536, so with neither env var set the two runtimes ran dense windows
+        # 3x apart. Lower the factor (e.g. 0.125) to trade recency for memory.
+        try:
+            factor = float(os.environ.get("DKV_DENSE_WINDOW_FACTOR", "0.25"))
+        except ValueError:
+            factor = 0.25
+        raw = int(self.num_layers * self.head_dim * factor)
+        return max(512, (raw + 511) // 512 * 512)
+
     def _preprocess_block_for_compression(self, block: KVBlock, k: torch.Tensor, v: torch.Tensor):
         # NOTE: skip_compression blocks are NOT early-returned here anymore. Ingest-
         # time compression is already gated by is_compression_eligible() (which
@@ -2862,7 +3098,7 @@ class KVRuntimeManager:
         if anchor_kv_local is None:
             print(f"[DKV DEBUG] _compress_block_sync: anchor_kv_local is None! block={getattr(block, 'anchor_idx', 'unknown')}, skip={getattr(block, 'skip_compression', 'unknown')}, anchor_kv={getattr(block, 'anchor_kv', 'unknown')}, anchor_kv_cpu={getattr(block, 'anchor_kv_cpu', 'unknown')}")
 
-        # ── Learned Landmark Scoring ──
+        # ── Learned Landmark Scoring (opt-in, default off -- see DKV_LANDMARK_RESCORE below) ──
         # Form full block including the old anchor
         full_k = torch.cat([anchor_kv_local[:, 0].unsqueeze(2), k], dim=2)
         full_v = torch.cat([anchor_kv_local[:, 1].unsqueeze(2), v], dim=2)
@@ -2918,29 +3154,38 @@ class KVRuntimeManager:
                 if 0 <= pos < len(all_tids):
                     block_token_ids.append(int(all_tids[pos].item()))
 
-        scores = torch.zeros(S_total, device=full_k.device)
-        
-        # 1. Key norm / activation magnitude (saliency)
-        k_norms = full_k[0].norm(dim=-1).mean(dim=0)  # [S_total]
-        scores = scores + k_norms
-        
-        # 2. Semantic Centrality (graph centrality equivalent within block)
-        K_f = full_k[0].permute(1, 0, 2).reshape(S_total, -1).float()  # [S_total, heads * head_dim]
-        K_f = K_f / (K_f.norm(dim=-1, keepdim=True) + 1e-8)
-        sim_matrix = K_f @ K_f.T  # [S_total, S_total]
-        centrality = sim_matrix.sum(dim=-1)
-        scores = scores + centrality.to(scores.device) * 0.5
-        
-        # 3. Numeric / Entity / Stopword priority
-        stop_words = getattr(self, "_stop_token_ids", set())
-        for idx in range(min(S_total, len(block_token_ids))):
-            tid = block_token_ids[idx]
-            if tid not in stop_words:
-                scores[idx] += 2.0  # content word boost
-            if 48 <= tid <= 57:  # basic ASCII digit check
-                scores[idx] += 3.0
+        # DKV_LANDMARK_RESCORE defaults to "0" (MLX parity -- MLX always anchors
+        # a block at its first token and never re-scores/swaps in a different
+        # one). Set to "1" to re-enable the re-scoring below; this was
+        # previously unconditional CUDA-only behavior with no comment
+        # justifying it as a fix for anything (unlike every other CUDA-specific
+        # addition in this file), so it's opt-in rather than removed outright.
+        if os.environ.get("DKV_LANDMARK_RESCORE", "0") == "1":
+            scores = torch.zeros(S_total, device=full_k.device)
 
-        landmark_idx = int(scores.argmax().item())
+            # 1. Key norm / activation magnitude (saliency)
+            k_norms = full_k[0].norm(dim=-1).mean(dim=0)  # [S_total]
+            scores = scores + k_norms
+
+            # 2. Semantic Centrality (graph centrality equivalent within block)
+            K_f = full_k[0].permute(1, 0, 2).reshape(S_total, -1).float()  # [S_total, heads * head_dim]
+            K_f = K_f / (K_f.norm(dim=-1, keepdim=True) + 1e-8)
+            sim_matrix = K_f @ K_f.T  # [S_total, S_total]
+            centrality = sim_matrix.sum(dim=-1)
+            scores = scores + centrality.to(scores.device) * 0.5
+
+            # 3. Numeric / Entity / Stopword priority
+            stop_words = getattr(self, "_stop_token_ids", set())
+            for idx in range(min(S_total, len(block_token_ids))):
+                tid = block_token_ids[idx]
+                if tid not in stop_words:
+                    scores[idx] += 2.0  # content word boost
+                if 48 <= tid <= 57:  # basic ASCII digit check
+                    scores[idx] += 3.0
+
+            landmark_idx = int(scores.argmax().item())
+        else:
+            landmark_idx = 0
         
         if landmark_idx > 0:
             # Swap token at index 0 (old anchor) and landmark_idx in full_k and full_v
@@ -3008,9 +3253,13 @@ class KVRuntimeManager:
             early_boost=_early_boost, max_rank_early=_max_rank_early,
         )
 
-        # Check if block qualifies for rank boosting (1.5x)
+        # Check if block qualifies for rank boosting (1.5x).
+        # DKV_RANK_BOOST defaults to "off" (MLX parity -- MLX has no rank-boost
+        # concept at all, flat rank for every block). Same "off"/"auto"
+        # semantics as lowrank.py's _block_boost_rank (GPU-batched path).
         boost_rank = False
-        if block_token_ids and getattr(self, "tokenizer", None) is not None:
+        if os.environ.get("DKV_RANK_BOOST", "off").lower() != "off" and \
+                block_token_ids and getattr(self, "tokenizer", None) is not None:
             try:
                 block_text = self.tokenizer.decode(block_token_ids)
                 # 1. Any digit
@@ -3245,6 +3494,29 @@ class KVRuntimeManager:
         lr_delta = compress_lowrank(
             normalized_deltas, rank,
             force_exact=bool(getattr(block, "skip_compression", False)),
+            # The POOL's real per-block residual budget, as MLX passes
+            # self.max_residual. Without it compress_lowrank falls back to
+            # int(0.15 * n) = 38, capping hard blocks far below the configured
+            # 128 -- see the note at the budget site.
+            max_residual=getattr(self, "max_residual", None),
+            # token_norms MUST be passed: compress_lowrank works in NORMALIZED
+            # delta space, and only un-normalizes the residuals when it is given
+            # these norms (`if token_norms is not None: res_vals *= token_norms`).
+            # Omitting it left residuals in normalized space while this function
+            # goes on to un-normalize the factor (`U_scaled = lr_delta.U *
+            # token_norms`) -- so the reconstruction was in ORIGINAL space while
+            # its correction was in NORMALIZED space, i.e. the residual was too
+            # small by a per-token factor of ||delta|| and corrected essentially
+            # nothing.
+            #
+            # Measured before the fix (layer 3, verified alignment via an exact
+            # anchor round-trip): adding residuals moved reconstruction cosine by
+            # +0.001 (0.5604 -> 0.5614), and positions that HAVE a stored
+            # residual sat at cos 0.586 instead of the ~1.0 they are constructed
+            # to achieve. Force-exact blocks (digits / alphanumeric codes) rely
+            # ENTIRELY on residuals, so this silently defeated the whole
+            # exact-recall mechanism.
+            token_norms=token_norms,
         )
 
         # ── Feature 4: Unproject V back to full feature space ─────────────
@@ -3271,11 +3543,67 @@ class KVRuntimeManager:
 
         block.residual_V_positions = lr_delta.residual_V_positions
         block.residual_V_values = lr_delta.residual_V_values
-        
+
         U_scaled = lr_delta.U.float() * token_norms.unsqueeze(1)
         U_scaled = U_scaled.to(torch.float16)
         if not torch.isfinite(U_scaled).all():
             U_scaled = torch.nan_to_num(U_scaled, nan=0.0, posinf=65504.0, neginf=-65504.0)
+
+        # ── Recompute force-exact residuals against the INT8-DEQUANT recon ────
+        # Port of the batched path's fix (compression/lowrank.py, "Recompute
+        # recon against the SAME int8-dequant U decode reads"), which this
+        # sync path never received.
+        #
+        # compress_lowrank derives its residuals from the fp16 reconstruction,
+        # but the pool stores U as int8 (per-block scale) and the kernel
+        # reconstructs from THAT. So the residual corrected a reconstruction the
+        # decoder never produces, and the leftover quantization error survived
+        # exactly where residuals are supposed to guarantee exactness --
+        # force-exact blocks, i.e. digits and alphanumeric codes.
+        #
+        # Recomputing here in ORIGINAL space (U_scaled already carries
+        # token_norms, and `deltas` is un-normalized) makes anchor + recon +
+        # residual reproduce the exact key for every stored position.
+        #
+        # Skipped entirely under DKV_RESIDUAL_EXACT_KEYS: there the residual IS
+        # the anchor-relative exact value and the kernel substitutes it, so it
+        # has no reconstruction to be "against" — recomputing would turn it back
+        # into a correction and silently reintroduce the mixed-semantics state.
+        _pool_ref = getattr(self, "native_pool", None)
+        if (bool(getattr(block, "skip_compression", False))
+                and not _exact_keys_enabled()
+                and _pool_ref is not None
+                and lr_delta.residual_K_positions is not None
+                and U_scaled.numel() > 0):
+            try:
+                _wr = min(int(U_scaled.shape[1]), int(_pool_ref.U.shape[2]))
+                _U_w = U_scaled[:, :_wr].float()
+                _V_w = lr_delta.V[:_wr].float()
+                _max_abs = _U_w.abs().amax()
+                # fp16-rounded scale, matching the pool store + decode dequant exactly.
+                _scale_u = torch.clamp(_max_abs / 127.0, min=1e-5).to(torch.float16).float()
+                _U_q = torch.clamp(torch.round(_U_w / _scale_u), -127, 127)
+                # NOTE the `* lr_delta.scale`: the batched path omits it because
+                # it forces block.scale = 1.0, but this path keeps compress_lowrank's
+                # real scale (its own recon is `(U @ V) * scale`) and the decode
+                # kernel multiplies by the stored block_scale. Dropping it here
+                # made residuals correct a differently-scaled reconstruction and
+                # measured WORSE than no fix at all (cos 0.626 -> 0.487).
+                _recon_q = ((_U_q * _scale_u) @ _V_w) * float(lr_delta.scale)
+                _half = deltas.shape[1] // 2
+                _dev = lr_delta.residual_K_values.device if lr_delta.residual_K_values is not None else deltas.device
+                _rk_pos = lr_delta.residual_K_positions.long().cpu()
+                _res_k = (deltas[:, :_half] - _recon_q[:, :_half])[_rk_pos]
+                block.residual_K_values = _res_k.to(torch.float16).to(_dev)
+                if lr_delta.residual_V_positions is not None:
+                    _rv_pos = lr_delta.residual_V_positions.long().cpu()
+                    _res_v = (deltas[:, _half:] - _recon_q[:, _half:])[_rv_pos]
+                    block.residual_V_values = _res_v.to(torch.float16).to(_dev)
+            except Exception as _e:
+                # Never let a residual refinement break compression: fall back to
+                # compress_lowrank's fp16-recon residuals (previous behavior).
+                if os.environ.get("DKV_TELEMETRY", "0") == "1":
+                    print(f"[DKV] int8-dequant residual recompute skipped: {_e}", flush=True)
 
         recon_deltas = (lr_delta.U.float() @ lr_delta.V.float()) * lr_delta.scale
         recon_errors = (deltas - recon_deltas.to(deltas.device)).norm(dim=1)
@@ -3325,8 +3653,12 @@ class KVRuntimeManager:
         
         deltas_batch = torch.stack(deltas_list, dim=0)
         
-        from native_core.compression.lowrank import compress_lowrank_batch
+        from native_core.compression.lowrank import compress_lowrank_batch, _topk_with_coverage
         U_batch, S_batch, Vh_batch, scale_batch = compress_lowrank_batch(deltas_batch, max_rank)
+        try:
+            _cov_frac = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
+        except ValueError:
+            _cov_frac = 0.0
         
         for i, (block, normalized_deltas, token_norms, deltas_raw, block_rank, block_token_ids, k_orig, v_orig, anchor_kv_local) in enumerate(preprocessed):
             try:
@@ -3472,8 +3804,13 @@ class KVRuntimeManager:
                         residual_K_pos = torch.arange(_npos, device=rel_error_K.device)
                         residual_V_pos = torch.arange(_npos, device=rel_error_V.device)
                     else:
-                        top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
-                        top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+                        # Residual coverage quota (MLX parity: DKV_RESIDUAL_COVERAGE_FRAC),
+                        # ported from the GPU-batched compress path so the day-to-day
+                        # decode-triggered async path also reserves evenly-spaced
+                        # coverage slots instead of pure error-ranked selection.
+                        # Default 0 (off) preserves prior behavior.
+                        top_k_K = _topk_with_coverage(rel_error_K, min(n_max_residual, n), _cov_frac)
+                        top_k_V = _topk_with_coverage(rel_error_V, min(n_max_residual, n), _cov_frac)
 
                         mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
                         residual_K_pos = top_k_K.indices[mask_K]
@@ -3483,7 +3820,19 @@ class KVRuntimeManager:
 
                     device = deltas_raw.device
                     if residual_K_pos.numel() > 0:
-                        res_K_vals = (delta_K - recon_K)[residual_K_pos]
+                        # DKV_RESIDUAL_EXACT_KEYS — must match compress_lowrank's
+                        # form exactly (see the long comment there). The decode
+                        # kernel picks add-vs-REPLACE off the same env var, so a
+                        # path left on the correction form while others store the
+                        # anchor-relative delta gets its scores REPLACED by a
+                        # wrong value. Mixed semantics across the three residual
+                        # producers is what regressed the first rollout.
+                        if _exact_keys_enabled():
+                            res_K_vals = delta_K[residual_K_pos]
+                            # One index set for both halves (MLX parity).
+                            residual_V_pos = residual_K_pos
+                        else:
+                            res_K_vals = (delta_K - recon_K)[residual_K_pos]
                         if token_norms is not None:
                             res_K_vals = res_K_vals * token_norms.cpu()[residual_K_pos.cpu()].unsqueeze(1)
                         residual_K_vals = res_K_vals.to(torch.float16).to(device)
@@ -3491,9 +3840,14 @@ class KVRuntimeManager:
                     else:
                         residual_K_pos = None
                         residual_K_vals = None
-                        
+                        if _exact_keys_enabled():
+                            residual_V_pos = residual_V_pos[:0]
+
                     if residual_V_pos.numel() > 0:
-                        res_V_vals = (delta_V - recon_V)[residual_V_pos]
+                        if _exact_keys_enabled():
+                            res_V_vals = delta_V[residual_V_pos]
+                        else:
+                            res_V_vals = (delta_V - recon_V)[residual_V_pos]
                         if token_norms is not None:
                             res_V_vals = res_V_vals * token_norms.cpu()[residual_V_pos.cpu()].unsqueeze(1)
                         residual_V_vals = res_V_vals.to(torch.float16).to(device)

@@ -1019,6 +1019,53 @@ class PyTorchDKVHFWrapper:
         outputs = None
         import time as _time
 
+        # ── Explicit prefill cache, threaded through every chunk ────────────
+        # Without this, each chunk call below passed no `past_key_values` at
+        # all, so HF auto-creates a FRESH empty cache per chunk -- DKV-patched
+        # (self_attn) layers don't care (they manage their own state
+        # externally), but hybrid architectures (Qwen3-Next/Qwen3.5-style)
+        # also have non-attention layers (linear/gated-delta-net) DKV never
+        # touches, which DO rely on this cache to carry their recurrent state
+        # across chunks -- losing it silently corrupts any prompt longer than
+        # one PREFILL_CHUNK. MLX's equivalent (_get_or_create_prefill_cache)
+        # already builds one cache up front and threads it through every
+        # chunk; this mirrors that.
+        #
+        # DKV_PREFILL_CACHE_BITS (MLX parity: same env var name/values):
+        #   16 (default) -> plain DynamicCache
+        #   8 or 4       -> QuantizedCache (needs the `hqq` or `quanto` package;
+        #                   DKV_PREFILL_CACHE_BACKEND selects which, default
+        #                   "hqq"). Falls back to DynamicCache with a one-time
+        #                   warning if the backend package isn't installed.
+        from transformers.cache_utils import DynamicCache
+        try:
+            _prefill_cache_bits = int(os.environ.get("DKV_PREFILL_CACHE_BITS", "16"))
+        except ValueError:
+            _prefill_cache_bits = 16
+        prefill_cache = None
+        if _prefill_cache_bits in (4, 8):
+            try:
+                from transformers.cache_utils import QuantizedCache
+                _backend = os.environ.get("DKV_PREFILL_CACHE_BACKEND", "hqq")
+                prefill_cache = QuantizedCache(
+                    backend=_backend,
+                    config=self.model.config,
+                    nbits=_prefill_cache_bits,
+                )
+            except Exception as _qe:
+                print(f"[DKV] WARNING: quantized prefill cache unavailable ({_qe}) "
+                      f"-- install the '{os.environ.get('DKV_PREFILL_CACHE_BACKEND', 'hqq')}' "
+                      "package, or set DKV_PREFILL_CACHE_BITS=16. Falling back to fp16 cache.")
+        if prefill_cache is None:
+            # config= is required for hybrid architectures (Qwen3-Next/Qwen3.5-
+            # style): DynamicCache uses it to pre-size self.layers with the
+            # right per-layer cache type (linear-attention conv/recurrent state
+            # vs standard KV) up front. Without it, a bare DynamicCache() only
+            # grows generically as if every layer were plain attention, and
+            # crashes ("list index out of range") the moment a linear-attention
+            # layer tries to update its conv state.
+            prefill_cache = DynamicCache(config=self.model.config)
+
         # Pre-allocate reusable buffers for the entire prefill loop.
         # Using torch.tensor([chunk]) inside the loop creates a new Python list
         # object + a new Tensor object + new Storage on every chunk.
@@ -1050,6 +1097,7 @@ class PyTorchDKVHFWrapper:
                 outputs = self.model(
                     input_ids=chunk_tensor,
                     position_ids=pos_tensor,
+                    past_key_values=prefill_cache,
                     use_cache=True,
                 )
 

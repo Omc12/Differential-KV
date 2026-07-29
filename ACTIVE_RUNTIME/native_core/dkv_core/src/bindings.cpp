@@ -330,6 +330,10 @@ Returns:
         py::arg("fact_pos"),
         py::arg("fact_val_K"),
         py::arg("fact_val_V"),
+        py::arg("rotary_dim") = -1,
+        py::arg("cos_full") = py::none(),
+        py::arg("sin_full") = py::none(),
+        py::arg("anchor_pos") = py::none(),
         R"doc(
 Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, and LSE combination into a single C++ call.
 )doc"
@@ -349,6 +353,11 @@ Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, a
     m.attr("HAS_CPU_COMPRESSOR") = true;
     m.attr("HAS_METAL_ATTN")     = true;
 
+    m.def("last_debug_buffer", &dkv::last_debug_buffer,
+          "DKV_DEBUG_GPUREAD scratch from the most recent decode_attention_metal "
+          "call. Read from Python AFTER the stream settles -- reading it inside "
+          "the C++ function requires committing the command buffer and then "
+          "blitting off it, which SIGSEGVs.");
     m.def("decode_attention_metal",
         &dkv::decode_attention_metal,
         py::arg("Q"),
@@ -378,6 +387,10 @@ Fuses RoPE slicing, dense attention, dense LSE, sparse Metal shader attention, a
         py::arg("dense_V"),
         py::arg("cos_dense"),
         py::arg("sin_dense"),
+        py::arg("rotary_dim") = -1,
+        py::arg("cos_full") = py::none(),
+        py::arg("sin_full") = py::none(),
+        py::arg("anchor_pos") = py::none(),
         R"doc(
 Launch custom Metal Compute Shader for fused Project-Then-Attend decode attention.
 )doc"

@@ -454,7 +454,29 @@ _original_is_compression_eligible = StreamingKVBlock.is_compression_eligible
 
 def _is_block_compression_eligible(block: StreamingKVBlock, is_last_block: bool = False,
                                    ignore_skip_compression: bool = False) -> bool:
-    if (block.anchor_idx == 0 and StreamingKVBlock.protect_block_zero) or block.is_outlier:
+    # protect_block_zero exists to keep a "sink" region out of LOSSY SVD
+    # compression. It must NOT apply when this is the deferred force-exact
+    # path for a skip_compression block (ignore_skip_compression=True):
+    # force_exact compression is lossless (every position kept as an exact
+    # residual), so there is no corruption risk to protect against -- and
+    # the alternative is actively worse. A skip_compression block stuck
+    # ACCUMULATING forever still counts as "dense" for the recency window
+    # (get_cached_decode_blocks), and assemble_dense_window_kv trims the
+    # OLDEST dense blocks first once the window is full. Anchor 0 is by
+    # definition the oldest block in the session, so once enough tokens
+    # follow it, it's evicted from the dense window every single step --
+    # never compressed (this check) and no longer dense (evicted) is total
+    # silent data loss: the block, and anything in it (e.g. a needle placed
+    # at the very start of a long prompt), becomes permanently invisible to
+    # decode. Confirmed empirically: anchor=0 stuck at state=ACCUMULATING
+    # indefinitely on an 8k-token Qwen3.5-2B prompt with the needle at the
+    # very start -- dense recalled it in full, DKV never did.
+    _block_zero_protected = (
+        block.anchor_idx == 0
+        and StreamingKVBlock.protect_block_zero
+        and not (ignore_skip_compression and block.skip_compression)
+    )
+    if _block_zero_protected or block.is_outlier:
         return False
     # skip_compression can be bypassed for the deferred prefill path — see compress_deferred_blocks
     if not ignore_skip_compression and block.skip_compression:
@@ -1663,21 +1685,29 @@ class StreamingSparseIngestManager:
         if session_id not in self.session_blocks:
             return
 
-        # 1. Determine the total sequence length of the session
+        # 1. Determine the total sequence length of the session.
+        # BUG (found 2026-07-27): this used to read layers.get(0, []) only --
+        # correct for non-hybrid models where every layer is attended, but on
+        # hybrid architectures (Qwen3.5/Qwen3-Next-style) layer 0 is very
+        # often linear_attention and NEVER has blocks, so total_seq_len stayed
+        # 0 forever and this function early-returned on EVERY call, for the
+        # entire session -- no block was ever deferred-compressed at all.
+        # Take the max anchor+token_count across every layer that actually
+        # has blocks instead of assuming layer 0 is representative.
         total_seq_len = 0
         layers = self.session_blocks[session_id]
         if layers:
-            first_layer_blocks = layers.get(0, [])
-            if first_layer_blocks:
-                last_block = first_layer_blocks[-1]
-                total_seq_len = last_block.anchor_idx + last_block.token_count()
+            for _layer_blocks in layers.values():
+                if _layer_blocks:
+                    _last = _layer_blocks[-1]
+                    total_seq_len = max(total_seq_len, _last.anchor_idx + _last.token_count())
 
         _diag = os.environ.get("DKV_DIAG", "0") == "1"
         if _diag:
-            n_blocks_l0 = len(layers.get(0, []))
+            n_blocks_any = sum(len(v) for v in layers.values()) if layers else 0
             print(f"[DIAG compress_deferred] session={session_id} total_seq_len={total_seq_len} "
                   f"recency_window={self.recency_window} short_ctx_threshold={self.short_context_threshold} "
-                  f"layer-0 blocks={n_blocks_l0}", flush=True)
+                  f"total blocks (all layers)={n_blocks_any}", flush=True)
 
         if total_seq_len < self.short_context_threshold:
             if _diag:

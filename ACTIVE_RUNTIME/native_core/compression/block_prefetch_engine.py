@@ -28,6 +28,16 @@ class BlockPrefetchEngine:
     def is_enabled(self) -> bool:
         if self.tiered_store is None:
             return False
+        # OPT-IN (DKV_BLOCK_PREFETCH=1), default OFF. This engine moves blocks
+        # between tiers on its own thread, so block residency at decode time
+        # depends on scheduling -- the same nondeterminism as the pager's
+        # eviction/prefetch loops (see paged_kv_store). It only hides latency;
+        # a miss still resolves synchronously on access. MLX has no equivalent.
+        import os
+        if os.environ.get("DKV_DETERMINISTIC", "0") == "1":
+            return False
+        if os.environ.get("DKV_BLOCK_PREFETCH", "0") != "1":
+            return False
         return self.device.startswith("cuda") or self.device.startswith("mps")
         
     def start(self):

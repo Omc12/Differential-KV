@@ -60,6 +60,15 @@ _ROUTING_THRESHOLD = int(os.environ.get("DKV_SRL_THRESHOLD",  "50"))
 # already bounded-K (adaptive_k 20..200), so this toggle controls the graph
 # channels, not an attend-all switch. NOTE: this path is GPU-only and could not be
 # validated on the Mac dev machine — see CUDA_TRITON_AUDIT.md GPU cert checklist.
+#
+# NAME COLLISION WARNING: MLX's OWN `DKV_HIGH_QUALITY_ROUTING` flag (in
+# mlx_dkv_wrapper.py) does something different — it forces attend-ALL (bypasses
+# top-K block pruning entirely) as a ground-truth comparison mode. The two
+# flags share a name but not semantics; do not assume setting this one on CUDA
+# gets you MLX's attend-all behavior. CUDA's actual attend-all equivalent is
+# `DKV_TOPK_BLOCKS=0` (see `if topk <= 0` below in route_blocks_relevance,
+# which returns every block unfiltered) — that is the flag to reach for when
+# you want CUDA's ground-truth / exhaustive-attention comparison mode.
 _HIGH_QUALITY_ROUTING = os.environ.get(
     "DKV_HIGH_QUALITY_ROUTING", "0").strip().lower() not in ("0", "", "false", "off", "auto")
 # Topic-switch: if the best semantic match falls below this cosine similarity,
@@ -907,6 +916,9 @@ def route_blocks_relevance(
     except ValueError:
         topk_frac = 0.0
     if topk <= 0:
+        # This is CUDA's attend-all / ground-truth comparison mode (MLX's
+        # equivalent is its own, differently-named DKV_HIGH_QUALITY_ROUTING —
+        # see the name-collision warning near this file's top).
         return block_indices  # routing disabled — attend every block
     
     k_eff = max(topk, int(topk_frac * N))
@@ -975,7 +987,20 @@ def route_blocks_relevance(
         except ValueError:
             r_route = 0
         R_all = res_k.shape[1]
-        R = min(R_all, r_route) if r_route > 0 else min(R_all, 64)
+        # Default: score against EVERY stored residual, as MLX does
+        # (_block_relevance_residual takes the max over all R with an
+        # `res_valid` -inf mask, which this function mirrors below).
+        #
+        # This used to cap at a hardcoded 64. That was invisible while the pool
+        # also held 64, but `max_residual_tokens` is now 128 (MLX's value), so
+        # the cap silently hid HALF of every block's exact keys from routing --
+        # and residual keys are precisely the verbatim content (digits, codes)
+        # that routing most needs to see. Same class of bug as the kernel's
+        # 64-wide residual scratch (handoff §9u): a constant sized for the old
+        # default that nothing revalidated when the default moved.
+        #
+        # DKV_ROUTE_RESIDUALS>0 still caps it explicitly, for cost control.
+        R = min(R_all, r_route) if r_route > 0 else R_all
         rk = res_k[slots_long, :R].clone()                      # [N, R, H_kv, D]
         rvalid = (res_pos[slots_long, :R] >= 0)         # [N, R]
 
@@ -1013,10 +1038,14 @@ def route_blocks_relevance(
     # Max-reduce over L (dim=1) and H (dim=0 after reshape)
     relevance = relevance.reshape(H_kv * gpk, L, N).max(dim=1).values.max(dim=0).values   # [N]
 
-    # Force-include the sink block, then top-(k_eff-1) over the rest.
-    sink_pos = anchor_indices.argmin()
-    relevance = relevance.clone()
-    relevance[sink_pos] = float("inf")
+    # Plain top-K, matching MLX's _block_relevance_residual exactly (this
+    # function's own docstring). An earlier version force-included a "sink"
+    # block (lowest anchor_indices) regardless of relevance, unconditionally
+    # spending one of the k_eff slots on it -- undocumented, MLX has no such
+    # forcing, and a sibling flag using this same function (DKV_DECODE_PRUNE_K)
+    # is confirmed on A100 to drop answer-critical blocks at matched K, which a
+    # forced non-relevance slot is a plausible contributor to. Removed to match
+    # the documented "direct port" contract.
     sel = torch.topk(relevance, k=k_eff).indices
     return block_indices[sel].to(torch.int32)
 

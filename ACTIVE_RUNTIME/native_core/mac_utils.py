@@ -18,6 +18,7 @@ MLX note:
   `mlx` is not installed, everything falls back to PyTorch on MPS.
 """
 
+import os
 import sys
 import torch
 from typing import Optional
@@ -160,8 +161,31 @@ def mlx_svd_lowrank(
         x_np = delta_cpu.numpy().astype(np.float32)
         x = mx.array(x_np)
 
-        # Randomized projection
-        Omega = mx.random.normal(shape=(d, r_proj))
+        # Randomized projection -- SEEDED.
+        #
+        # This was `mx.random.normal(shape=(d, r_proj))`, drawing from MLX's
+        # global RNG, so every process sketched the matrix differently. The rSVD
+        # then returned a different U/V, and because the factorization is
+        # TRUNCATED to `rank`, a near-degenerate spectrum means which directions
+        # survive truncation depends on the sketch -- so the reconstruction
+        # genuinely changed run to run. That made the whole runtime
+        # nondeterministic at temperature 0.
+        #
+        # Measured: across two identical runs the pool's anchors/scales/U_scale/
+        # seq_lens/slot-mapping were IDENTICAL while U, V_K, V_V and the residuals
+        # derived from them differed -- exactly the tensors downstream of Omega.
+        # Layer 3's attention output then differed at cos~0.25 on the FIRST decode
+        # step, and the same prompt produced different answers.
+        #
+        # Uses an explicit key rather than mx.random.seed() so it neither perturbs
+        # nor depends on MLX's global RNG state. Override with DKV_RSVD_SEED.
+        try:
+            # MLX calls this DKV_SVD_SEED; accept both.
+            _seed = int(os.environ.get("DKV_RSVD_SEED",
+                                       os.environ.get("DKV_SVD_SEED", "0")))
+        except ValueError:
+            _seed = 0
+        Omega = mx.random.normal(shape=(d, r_proj), key=mx.random.key(_seed))
         Y = x @ Omega
         for _ in range(n_iter):
             Y = x @ (x.T @ Y)

@@ -17,6 +17,135 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import torch
 
+
+def _rsvd_omega(*shape, device=None, dtype=torch.float32) -> torch.Tensor:
+    """Deterministic random projection for the randomized SVD.
+
+    The rSVD sketches B = A @ Omega with a RANDOM Omega. Every call site used a
+    bare `torch.randn`, which draws from the global RNG -- so two runs of the same
+    build on the same prompt got different projections, hence a different
+    truncated U/V, hence a different reconstruction and different output tokens.
+
+    That was THE source of this runtime's nondeterminism at temperature 0.
+    Measured signature: across two identical runs the pool's `anchors_K`,
+    `anchors_V`, `scales`, `U_scale`, `seq_lens`, slot mapping and dense/compressed
+    split were all IDENTICAL, while `U`, `V_K`, `V_V` and the residuals derived
+    from them differed -- i.e. exactly the tensors that depend on Omega. Layer 3's
+    attention output then differed at cos~0.25 on the FIRST decode step.
+
+    (Sign flips alone would be harmless -- they cancel between U and Vh. The
+    damage comes from rank TRUNCATION: with a near-degenerate spectrum, which
+    directions land inside the kept rank-r subspace depends on the sketch, so the
+    truncated reconstruction genuinely changes.)
+
+    Uses a dedicated generator rather than torch.manual_seed so it never perturbs
+    or depends on global RNG state (sampling, dropout, anything else). Generated
+    on CPU so the draw is identical regardless of device backend, then moved.
+    Set DKV_RSVD_SEED to change it; there is no reason to make it random again.
+    """
+    try:
+        # MLX calls this DKV_SVD_SEED; accept both.
+        seed = int(os.environ.get("DKV_RSVD_SEED",
+                                  os.environ.get("DKV_SVD_SEED", "0")))
+    except ValueError:
+        seed = 0
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+    out = torch.randn(*shape, generator=g, dtype=dtype, device="cpu")
+    return out.to(device) if device is not None and str(device) != "cpu" else out
+
+
+def _residual_error_threshold() -> float:
+    """Relative-error floor a token must clear to be given an exact residual.
+
+    MLX applies NO such floor: it takes the top-n_res by capture score outright
+    (`top_k_indices = mx.argsort(capture_scores)[-n_res:]`) -- the string "0.08"
+    does not appear anywhere in mlx_dkv_wrapper.py.
+
+    This side filtered the top-k afterwards with `values > 0.08`, so a token the
+    SVD got only MODERATELY wrong never received a residual -- even when that
+    error is enough to flip a digit, which is exactly the failure residuals exist
+    to prevent. It also meant a raised max_residual could not actually be spent:
+    the budget grew, then the filter threw the extra slots away.
+
+    Default 0.0 = MLX behaviour (spend the whole budget on the worst rows).
+    Set DKV_RESIDUAL_ERR_THRESHOLD to restore a floor.
+    """
+    try:
+        return float(os.environ.get("DKV_RESIDUAL_ERR_THRESHOLD", "0.0"))
+    except ValueError:
+        return 0.0
+
+
+def _exact_keys_enabled(device=None) -> bool:
+    """DKV_RESIDUAL_EXACT_KEYS — MLX-parity residual semantics.
+
+    OFF (default): residual_{K,V}_values hold a CORRECTION to the low-rank
+    reconstruction and the decode kernel ADDS them.
+
+    ON: they hold the anchor-relative EXACT value, so `anchor + residual` is the
+    true K/V, and the kernel SUBSTITUTES it — replacing the token's score and
+    removing its lossy twin from the block's value accumulation. This is what
+    MLX does (it masks the twin to -inf and re-attends the exact row).
+
+    Read via a function, not a module constant, because the tests and the
+    per-block compress paths toggle it per-process after import.
+
+    DEFAULT IS DEVICE-DEPENDENT, because this is a STORAGE FORMAT and it has to
+    match whichever decode kernel reads it back:
+
+        MPS/Metal  -> ON.  dkv_decode.metal implements substitution.
+                      This is also MLX's default (it gates the same behaviour on
+                      DKV_RESIDUAL_EXCLUDE_SVD, default "1",
+                      mlx_dkv_wrapper.py:1763).
+        CUDA       -> OFF. triton_fused_decode.py applies residuals as a pure
+                      correction (`s += q.residual_K`, `O += p*residual_V`) and
+                      never removes the lossy twin, so exact-form residuals
+                      would add nearly the whole key a second time.
+
+    Pass the target `device`; an explicit DKV_RESIDUAL_EXACT_KEYS (or MLX's
+    DKV_RESIDUAL_EXCLUDE_SVD) overrides the default either way.
+
+    Measured on Qwen3.5-2B / MPS, per-layer attention cos vs dense (8217-token
+    needle prompt, reproducible runtime). EVERY full_attention layer improves:
+
+        layer   3      7      11      15     19     23
+        off   0.093  0.074  -0.049  0.707  0.878  0.872
+        on    0.116  0.782   0.048  0.892  0.910  0.926
+
+    Set DKV_RESIDUAL_EXACT_KEYS=0 to revert to the correction form.
+    """
+    # MLX gates the same behaviour on DKV_RESIDUAL_EXCLUDE_SVD (default "1").
+    # Accept either name so a config written against MLX works here.
+    v = os.environ.get("DKV_RESIDUAL_EXACT_KEYS")
+    if v is None:
+        v = os.environ.get("DKV_RESIDUAL_EXCLUDE_SVD")
+    if v is not None:
+        return str(v).strip().lower() not in ("0", "off", "false", "no", "")
+
+    # No explicit setting: the storage format MUST match whatever decode kernel
+    # will read it back, and that is chosen by device.
+    #
+    #   Metal (MPS)   -- implements substitution (replaces the token's score AND
+    #                    backs the low-rank twin out of the value sum), so it
+    #                    wants the anchor-relative EXACT form. Default ON.
+    #   Triton (CUDA) -- applies residuals as a pure CORRECTION:
+    #                      s += q . residual_K          (triton_fused_decode.py)
+    #                      O += p * residual_V
+    #                    with no removal of the lossy twin. Handing it
+    #                    exact-form residuals adds almost the whole key a second
+    #                    time on top of the SVD estimate. Default OFF until the
+    #                    Triton kernel grows the substitution path.
+    #
+    # This used to return True unconditionally, which silently mismatched the
+    # CUDA decoder. Set DKV_RESIDUAL_EXACT_KEYS explicitly to override either way.
+    dev_type = getattr(device, "type", None)
+    if dev_type is None and device is not None:
+        dev_type = str(device).split(":")[0]
+    if dev_type == "cuda":
+        return False
+    return True
+
 try:
     from native_core.mac_utils import mlx_svd_lowrank as _mlx_svd, mlx_available as _mlx_available, has_cuda as _has_cuda
 except ImportError:
@@ -135,18 +264,60 @@ class LowRankDelta:
         return self.nbytes()
 
 
+from collections import namedtuple as _namedtuple
+
+_TopKCov = _namedtuple("_TopKCov", ["indices", "values"])
+
+
+def _topk_with_coverage(rel_err_vec: torch.Tensor, n_budget: int, cov_frac: float):
+    """topk with optional stride-stratified coverage bonus (MLX parity:
+    DKV_RESIDUAL_COVERAGE_FRAC). Reserves round(cov_frac * n_budget) slots for
+    evenly-spaced positions regardless of their individual error, so residual
+    capture is never fully zero-sum on error alone — MLX's own docstring for
+    this documents the concrete failure mode it fixes (boosting one high-error
+    row evicting an adjacent low-error-but-load-bearing row). Single-block
+    granularity — shared by compress_lowrank and the GPU-batched compress path.
+    """
+    if cov_frac <= 0.0 or n_budget <= 0:
+        return torch.topk(rel_err_vec, k=min(n_budget, rel_err_vec.shape[0]))
+    import numpy as _np
+    n_cov = min(n_budget, max(1, int(round(cov_frac * n_budget))))
+    n_rank = max(0, n_budget - n_cov)
+    T = rel_err_vec.shape[0]
+    # Stride-sampled coverage indices (CPU arithmetic only, no GPU sync)
+    cov_idx_np = _np.unique(_np.round(_np.linspace(0, T - 1, n_cov)).astype(int))
+    cov_idx = torch.from_numpy(cov_idx_np).long().to(rel_err_vec.device)
+    # Exclude coverage positions from the error-ranked selection
+    errs_for_rank = rel_err_vec.clone()
+    errs_for_rank[cov_idx] = -1.0
+    if n_rank > 0:
+        ranked = torch.topk(errs_for_rank, k=min(n_rank, T))
+        valid_rank = ranked.indices[ranked.values > 0.0]
+        combined = torch.cat([cov_idx, valid_rank])
+    else:
+        combined = cov_idx
+    combined = torch.unique(combined)
+    vals = rel_err_vec[combined]
+    order = torch.argsort(vals, descending=True)
+    combined = combined[order]
+    return _TopKCov(indices=combined, values=vals[order])
+
+
 def compress_lowrank(
     deltas: torch.Tensor,
     rank: int,
-    error_threshold: float = 0.08,
+    error_threshold: float = None,   # None -> _residual_error_threshold() (MLX: no floor)
     max_residual_frac: float = 0.15,
     token_norms: Optional[torch.Tensor] = None,
     force_exact: bool = False,
+    max_residual: Optional[int] = None,
 ) -> LowRankDelta:
     """
     Compress [n, feat_dim] float32 delta matrix to rank-r approximation.
     Uses Phase 36 Randomized SVD (rSVD) and Energy-Preserving Dynamic Rank.
     """
+    if error_threshold is None:
+        error_threshold = _residual_error_threshold()
     assert deltas.dim() == 2
     n, d = deltas.shape
     rank = min(rank, n, d)
@@ -162,8 +333,30 @@ def compress_lowrank(
 
     # Perform all operations on CPU to guarantee zero GPU-CPU telemetry synchronizations (.item())
     deltas_cpu = deltas.cpu() if device.type != "cpu" else deltas
-    
-    scale = deltas_cpu.abs().max().item()
+
+    # ── V-side rebalancing for the joint K|V SVD (MLX parity: DKV_V_SCALE) ──
+    # Ported from _compress_layer_blocks_gpu_inner (the only one of CUDA's three
+    # compress paths that had this) so the single-block sync path also gets it.
+    # When a block's V-delta energy is much smaller than its K-delta energy, the
+    # joint SVD under-represents V; scale V up before the SVD only, then divide
+    # the gain back out of the V factor afterward (below) so decode reconstructs
+    # original-space V with no other changes. Default ON to match MLX/the GPU
+    # path; DKV_V_SCALE=0 restores the old unscaled behavior.
+    half_d = d // 2
+    v_scale_on = os.environ.get("DKV_V_SCALE", "1") != "0"
+    v_gain = None
+    if v_scale_on:
+        eK = (deltas_cpu[:, :half_d].float() ** 2).sum()
+        eV = (deltas_cpu[:, half_d:].float() ** 2).sum()
+        v_gain = torch.sqrt(eK / eV.clamp(min=1e-12)).clamp(1.0, 10000.0)
+        deltas_for_svd = torch.cat([
+            deltas_cpu[:, :half_d],
+            deltas_cpu[:, half_d:] * v_gain,
+        ], dim=1)
+    else:
+        deltas_for_svd = deltas_cpu
+
+    scale = deltas_for_svd.abs().max().item()
     if scale < 1e-9:
         return LowRankDelta(
             U=torch.zeros(n, rank, dtype=torch.float16, device=device),
@@ -171,7 +364,7 @@ def compress_lowrank(
             shape=(n, d), rank=rank, scale=1.0, energy_retained=0.0, dynamic_rank=rank
         )
 
-    x = deltas_cpu / scale
+    x = deltas_for_svd / scale
     
     # Sanitize inputs to prevent NaNs/Infs from causing SVD failures
     if not torch.isfinite(x).all():
@@ -196,7 +389,7 @@ def compress_lowrank(
             r_proj = min(rank + n_oversamples, n, d)
             
             # 1. Generate random Gaussian projection matrix
-            Omega = torch.randn(d, r_proj, dtype=torch.float32)
+            Omega = _rsvd_omega(d, r_proj, dtype=torch.float32)
             
             # 2. Form sample matrix Y with power iterations for stable subspace capture
             Y = x @ Omega
@@ -208,9 +401,28 @@ def compress_lowrank(
             
             # 4. Project original matrix onto low-rank subspace Q
             B = Q.T @ x
-            
-            # 5. Perform standard SVD on the much smaller matrix B
-            U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)
+
+            # 5. Decompose the much smaller matrix B (MLX/GPU-batched-path parity:
+            # DKV_COMPRESS_GRAM_SVD). Default ON: eigendecompose the small
+            # [r_proj, r_proj] Gram matrix instead of a wide SVD on B -- same
+            # reconstruction (sign flips in U_b cancel against Vh), numerically
+            # equivalent to the exact SVD (see _compress_layer_blocks_gpu_inner's
+            # A/B-validated version of this same trick), just cheaper. Any
+            # failure falls through to the exact SVD.
+            _gram_ok = False
+            if os.environ.get("DKV_COMPRESS_GRAM_SVD", "1") != "0":
+                try:
+                    G = B @ B.T                                  # [r_proj, r_proj]
+                    evals, evecs = torch.linalg.eigh(G)          # ascending
+                    evals = evals.flip(-1).clamp(min=0.0)        # descending S^2
+                    U_b = evecs.flip(-1)                         # [r_proj, r_proj]
+                    S = evals.sqrt()                             # [r_proj] desc
+                    Vh = (U_b.T @ B) / S.clamp(min=1e-8).unsqueeze(-1)
+                    _gram_ok = True
+                except Exception as _ge:
+                    print(f"[DKV rSVD] Gram eigh path failed ({_ge}); using exact SVD.")
+            if not _gram_ok:
+                U_b, S, Vh = torch.linalg.svd(B, full_matrices=False)
             U = Q @ U_b
             svd_success = True
         except Exception:
@@ -255,6 +467,14 @@ def compress_lowrank(
     if not torch.isfinite(Vh_k_fp16).all():
         Vh_k_fp16 = torch.nan_to_num(Vh_k_fp16, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # Undo the V-side rebalancing on the FACTOR (not the deltas): divide the V
+    # columns of Vh by the same gain so U @ Vh reconstructs original-space V.
+    # Everything downstream (recon, residual, returned V) then operates in
+    # original space with no further changes — same as the GPU-batched path.
+    if v_gain is not None:
+        vg = v_gain.to(Vh_k_fp16.dtype)
+        Vh_k_fp16 = torch.cat([Vh_k_fp16[:, :half_d], Vh_k_fp16[:, half_d:] / vg], dim=1)
+
     # ── Singular Value Stratified Quantization (Solution 2) ──
     s_vals = S[:k]
     max_s = s_vals.max().item() if s_vals.numel() > 0 else 0.0
@@ -287,7 +507,6 @@ def compress_lowrank(
     V_out = Vh_k_fp16.to(device)  # [k, d]
 
     # ── Post-SVD Sparse Residual Storage (Solution 1) ──
-    half_d = d // 2
     delta_K = deltas_cpu[:, :half_d]
     delta_V = deltas_cpu[:, half_d:]
     recon_K = recon[:, :half_d]
@@ -302,14 +521,30 @@ def compress_lowrank(
     rel_error_K = error_K / norm_K
     rel_error_V = error_V / norm_V
 
-    n_max_residual = int(n * max_residual_frac)
-    
-    # Track F2: Adaptive Residual Budget
-    # Check median relative reconstruction error to classify block complexity
+    # Starting budget. MLX uses the POOL's max_residual directly
+    # (`b_res = self.max_residual`, then clamps down for easy blocks); this side
+    # started from `int(n * 0.15)` = 38 at n=256, so a HARD block -- numbers,
+    # codes, exactly the content residuals exist for -- could never receive more
+    # than 38 exact tokens no matter how large max_residual was set.
+    #
+    # That silently defeated raising max_residual to MLX's 128: only force-exact
+    # blocks bypassed this cap, so ordinary factual blocks kept the old ceiling.
+    # A CUDA-only invention with no MLX counterpart.
+    #
+    # When the caller passes the real budget, use it (MLX behaviour). The
+    # fraction remains as the fallback for callers that do not, so nothing that
+    # relied on the old signature changes silently.
+    if max_residual is not None and max_residual > 0:
+        n_max_residual = min(int(max_residual), n)
+    else:
+        n_max_residual = int(n * max_residual_frac)
+
+    # Track F2: Adaptive Residual Budget -- matches MLX's ladder exactly
+    # (val < 0.05 -> min(8, b); val < 0.15 -> min(16, b); else full budget).
     median_err_K = torch.median(rel_error_K).item() if rel_error_K.numel() > 0 else 0.0
     median_err_V = torch.median(rel_error_V).item() if rel_error_V.numel() > 0 else 0.0
     max_median_err = max(median_err_K, median_err_V)
-    
+
     if max_median_err < 0.05:
         # Easy block (prose filler/redundant text): limit to at most 8 residuals
         n_max_residual = min(8, n_max_residual)
@@ -337,8 +572,16 @@ def compress_lowrank(
             fact_positions_K = torch.arange(n, device=rel_error_K.device)
             fact_positions_V = torch.arange(n, device=rel_error_V.device)
         else:
-            top_k_K = torch.topk(rel_error_K, k=min(n_max_residual, n))
-            top_k_V = torch.topk(rel_error_V, k=min(n_max_residual, n))
+            # Residual coverage quota (MLX parity: DKV_RESIDUAL_COVERAGE_FRAC) —
+            # ported from the GPU-batched compress path so the single-block sync
+            # path also reserves evenly-spaced coverage slots instead of pure
+            # error-ranked selection. Default 0 (off) preserves prior behavior.
+            try:
+                cov_frac = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
+            except ValueError:
+                cov_frac = 0.0
+            top_k_K = _topk_with_coverage(rel_error_K, min(n_max_residual, n), cov_frac)
+            top_k_V = _topk_with_coverage(rel_error_V, min(n_max_residual, n), cov_frac)
 
             mask_K = (top_k_K.values > error_threshold) & (error_K[top_k_K.indices] > 1e-4)
             fact_positions_K = top_k_K.indices[mask_K]
@@ -347,17 +590,74 @@ def compress_lowrank(
             fact_positions_V = top_k_V.indices[mask_V]
         
         if fact_positions_K.numel() > 0:
-            res_K_vals = (delta_K - recon_K)[fact_positions_K]
+            # DKV_RESIDUAL_EXACT_KEYS (MLX parity) — store the residual K as the
+            # FULL anchor-relative delta (exact_K - anchor_K) instead of the
+            # correction-to-the-reconstruction (delta_K - recon_K).
+            #
+            # Why: the decode kernels rotate a compressed block's base score at
+            # the block's ANCHOR position (that anchor-rotation is exactly what
+            # makes Project-Then-Attend cheap -- rank ops per token instead of
+            # rebuilding D-dim keys). A residual stored as a correction can only
+            # be ADDED on top of that anchor-rotated base, so the token's score
+            # keeps an irreducible RoPE phase error that grows with its distance
+            # from the anchor -- which corrupts precisely the position-sensitive
+            # digit/code tokens residuals exist to preserve verbatim.
+            #
+            # MLX (the reference implementation, which recalls these codes
+            # correctly) never forms that hybrid: it masks the lossy SVD twin of
+            # a residual position out of the compressed pool entirely and
+            # attends the EXACT row as a real token at its true position. DKV
+            # already does the same thing for `fact` anchors (they store
+            # k_orig[pos] and the kernel REPLACES the score) -- but facts are
+            # capped at 3 slots/block while residuals cover up to max_residual.
+            #
+            # Storing (exact - anchor) lets the kernel reconstruct the exact key
+            # as anchor + residual and REPLACE the score, rotating both terms at
+            # the token's true position. Exact, and cheap: two D-dim dots, no
+            # D*rank reconstruction, and identical tensor shapes/memory.
+            #
+            # Default OFF: this changes the stored residual SEMANTICS, so every
+            # decode path that consumes residual_K_values must agree.
+            #
+            # MUST be the same gate as the V half below. This line used to read
+            # the environment directly with a default of "0" while the V half
+            # called _exact_keys_enabled() (default ON), so K was written in
+            # CORRECTION form and V in EXACT form in the same block -- while the
+            # Metal kernel, which reads its own flag, substituted both. That is
+            # precisely the mixed-semantics state the batch path's comment warns
+            # is "strictly worse than not enabling the mode at all".
+            _exact_keys = _exact_keys_enabled(device)
+            if _exact_keys:
+                res_K_vals = delta_K[fact_positions_K]
+            else:
+                res_K_vals = (delta_K - recon_K)[fact_positions_K]
             if token_norms is not None:
                 res_K_vals = res_K_vals * token_norms.cpu()[fact_positions_K.cpu()].unsqueeze(1)
             residual_K_vals = res_K_vals.to(torch.float16).to(device)
+            if _exact_keys:
+                # MLX uses ONE index set for both halves (`res_k_active` and
+                # `res_v_active` are both `take(..., top_k_indices + 1)`), and
+                # exact-keys mode REQUIRES that: the kernel removes a residual
+                # token's lossy twin from the block's V accumulation keyed on the
+                # V positions, and replaces its score keyed on the K positions.
+                # If the two sets disagree, a token can lose its approximate V
+                # without gaining an exact one (or keep both and double-count).
+                fact_positions_V = fact_positions_K
             fact_positions_K = fact_positions_K.to(torch.int16).to(device)
         else:
             fact_positions_K = None
             residual_K_vals = None
-            
+            if _exact_keys_enabled(device):
+                fact_positions_V = fact_positions_V[:0]
+
         if fact_positions_V.numel() > 0:
-            res_V_vals = (delta_V - recon_V)[fact_positions_V]
+            # Exact-keys mode stores the anchor-relative EXACT value (anchor + res
+            # == the true V), mirroring the K half, so the kernel can substitute
+            # it for the token's low-rank estimate rather than nudge it.
+            if _exact_keys_enabled(device):
+                res_V_vals = delta_V[fact_positions_V]
+            else:
+                res_V_vals = (delta_V - recon_V)[fact_positions_V]
             if token_norms is not None:
                 res_V_vals = res_V_vals * token_norms.cpu()[fact_positions_V.cpu()].unsqueeze(1)
             residual_V_vals = res_V_vals.to(torch.float16).to(device)
@@ -544,15 +844,16 @@ def _block_boost_rank(block, rank: int, manager) -> int:
     that costs ~1.5x pool bytes and ~1.5x compression work.
 
     DKV_RANK_BOOST:
-      auto (default) — current behaviour, boost on the predicate above.
-      off            — flat `rank` for every block (MLX parity).
-    A/B `off` on the GPU before trusting either: it lowers pool VRAM and
-    compress time, and its accuracy cost has never been measured.
+      off (default, MLX parity) — flat `rank` for every block, matching MLX's
+        behavior exactly (MLX has no rank-boost concept at all).
+      auto           — the predicate-based 1.5x boost described above. Was the
+        default; flip this back on to A/B it against the MLX-parity default —
+        its accuracy cost was never conclusively measured either way.
     """
     if manager is None:
         return rank
 
-    mode = os.environ.get("DKV_RANK_BOOST", "auto").lower()
+    mode = os.environ.get("DKV_RANK_BOOST", "off").lower()
     if mode == "off":
         return rank
 
@@ -746,7 +1047,7 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         return False
 
     try:
-        Omega = torch.randn(N_blocks, feat_dim, r_proj, device=gpu_device, dtype=torch.float32)
+        Omega = _rsvd_omega(N_blocks, feat_dim, r_proj, device=gpu_device, dtype=torch.float32)
         Y = torch.matmul(deltas_normalized, Omega)                         # [N, T, r_proj]
         # Issue 3 fix: two power iterations instead of one — matches MLX rSVD (n_iter=2)
         # and the single-block CPU path.  Tighter subspace capture improves energy_retained
@@ -859,41 +1160,13 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
     pool = getattr(manager, "native_pool", None) if manager is not None else None
 
     # OPT-B: Hoist coverage-bonus statics out of the per-block loop — reading
-    # the env var and defining the helper once is enough for the whole batch.
-    import os as _os_b
+    # the env var once is enough for the whole batch. _topk_with_coverage is
+    # now module-level (shared with compress_lowrank's sync path).
     _cov_frac_batch = 0.0
     try:
-        _cov_frac_batch = float(_os_b.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
+        _cov_frac_batch = float(os.environ.get("DKV_RESIDUAL_COVERAGE_FRAC", "0"))
     except ValueError:
         pass
-    from collections import namedtuple as _namedtuple
-    _TopKCov = _namedtuple("_TopKCov", ["indices", "values"])
-
-    def _topk_with_coverage(rel_err_vec, n_budget, cov_frac):
-        """topk with optional stride-stratified coverage bonus (GPU tensors)."""
-        if cov_frac <= 0.0 or n_budget <= 0:
-            return torch.topk(rel_err_vec, k=min(n_budget, rel_err_vec.shape[0]))
-        import numpy as _np
-        n_cov = min(n_budget, max(1, int(round(cov_frac * n_budget))))
-        n_rank = max(0, n_budget - n_cov)
-        T = rel_err_vec.shape[0]
-        # Stride-sampled coverage indices (CPU arithmetic only, no GPU sync)
-        cov_idx_np = _np.unique(_np.round(_np.linspace(0, T - 1, n_cov)).astype(int))
-        cov_idx = torch.from_numpy(cov_idx_np).long().to(rel_err_vec.device)
-        # Exclude coverage positions from the error-ranked selection
-        errs_for_rank = rel_err_vec.clone()
-        errs_for_rank[cov_idx] = -1.0
-        if n_rank > 0:
-            ranked = torch.topk(errs_for_rank, k=min(n_rank, T))
-            valid_rank = ranked.indices[ranked.values > 0.0]
-            combined = torch.cat([cov_idx, valid_rank])
-        else:
-            combined = cov_idx
-        combined = torch.unique(combined)
-        vals = rel_err_vec[combined]
-        order = torch.argsort(vals, descending=True)
-        combined = combined[order]
-        return _TopKCov(indices=combined, values=vals[order])
 
     # ── Host-sync batching ────────────────────────────────────────────────
     # The per-block finalization used to force FOUR device→host reads per
@@ -1022,7 +1295,15 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
         # Mirrors compress_lowrank() CPU path (lines 304-315). Easy prose blocks waste far fewer
         # residual slots; hard factual/code blocks keep the full budget.
         # (Medians read the UNBOOSTED rel errors, matching the MLX wrapper.)
-        n_max_residual = int(T_active * 0.15)
+        # Same MLX alignment as the per-block path: start from the POOL's real
+        # budget, not int(0.15 * T_active). The comment above says "hard blocks
+        # keep the full budget" -- they did not, because the starting value was
+        # already capped at 38 for T_active=256 regardless of max_residual.
+        _pool_max_res = getattr(pool, "max_residual_tokens", None) if pool is not None else None
+        if _pool_max_res:
+            n_max_residual = min(int(_pool_max_res), T_active)
+        else:
+            n_max_residual = int(T_active * 0.15)
         median_err_K = float(_meds_cpu[i, 0])
         median_err_V = float(_meds_cpu[i, 1])
         max_median_err = max(median_err_K, median_err_V)
@@ -1162,21 +1443,41 @@ def _compress_layer_blocks_gpu_inner(blocks_list, rank: int, manager = None) -> 
                 top_k_K = _topk_with_coverage(rel_error_K, n_max_residual, _cov_frac_batch)
                 top_k_V = _topk_with_coverage(rel_error_V, n_max_residual, _cov_frac_batch)
 
-                mask_K = (top_k_K.values > 0.08) & (error_K[top_k_K.indices] > 1e-4)
+                _err_thr = _residual_error_threshold()   # MLX: 0.0, see resolver
+                mask_K = (top_k_K.values > _err_thr) & (error_K[top_k_K.indices] > 1e-4)
                 fact_positions_K = top_k_K.indices[mask_K]
 
-                mask_V = (top_k_V.values > 0.08) & (error_V[top_k_V.indices] > 1e-4)
+                mask_V = (top_k_V.values > _err_thr) & (error_V[top_k_V.indices] > 1e-4)
                 fact_positions_V = top_k_V.indices[mask_V]
 
             if fact_positions_K.numel() > 0:
-                residual_K_vals = (delta_K - recon_K_for_res)[fact_positions_K].to(torch.float16).to(gpu_device)
+                # DKV_RESIDUAL_EXACT_KEYS — must match compress_lowrank's form
+                # EXACTLY (see the long comment there). The decode kernel decides
+                # add-vs-REPLACE from the same env var, so if this path kept the
+                # correction form while that one stored the anchor-relative
+                # delta, blocks compressed here would have their scores REPLACED
+                # by a wrong value -- strictly worse than not enabling the mode
+                # at all. That mixed-semantics state is exactly what regressed
+                # when only compress_lowrank was converted.
+                if _exact_keys_enabled(gpu_device):
+                    residual_K_vals = delta_K[fact_positions_K].to(torch.float16).to(gpu_device)
+                    # Single index set for both halves, as MLX does — see the
+                    # matching note in compress_lowrank.
+                    fact_positions_V = fact_positions_K
+                else:
+                    residual_K_vals = (delta_K - recon_K_for_res)[fact_positions_K].to(torch.float16).to(gpu_device)
                 fact_positions_K = fact_positions_K.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_K = None
                 residual_K_vals = None
+                if _exact_keys_enabled(gpu_device):
+                    fact_positions_V = fact_positions_V[:0]
 
             if fact_positions_V.numel() > 0:
-                residual_V_vals = (delta_V - recon_V_for_res)[fact_positions_V].to(torch.float16).to(gpu_device)
+                if _exact_keys_enabled(gpu_device):
+                    residual_V_vals = delta_V[fact_positions_V].to(torch.float16).to(gpu_device)
+                else:
+                    residual_V_vals = (delta_V - recon_V_for_res)[fact_positions_V].to(torch.float16).to(gpu_device)
                 fact_positions_V = fact_positions_V.to(torch.int16).to(gpu_device)
             else:
                 fact_positions_V = None
@@ -1312,12 +1613,32 @@ def compress_lowrank_batch(
     
     # Perform operations on CPU if not CUDA to avoid syncs
     deltas_cpu = deltas.cpu() if device.type != "cpu" else deltas
-    
+
+    # ── V-side rebalancing for the joint K|V SVD (MLX parity: DKV_V_SCALE) ──
+    # Same reasoning/formula as compress_lowrank and _compress_layer_blocks_gpu_inner:
+    # scale V up before the SVD only (per batch item), divide the gain back out
+    # of the V half of Vh afterward so the returned factors reconstruct
+    # original-space V — this function's contract (raw SVD factors, no residual
+    # logic) is unchanged for callers. Default ON; DKV_V_SCALE=0 to disable.
+    half_d = d // 2
+    v_scale_on = os.environ.get("DKV_V_SCALE", "1") != "0"
+    v_gain = None
+    if v_scale_on:
+        eK = (deltas_cpu[:, :, :half_d].float() ** 2).sum(dim=(1, 2))  # [B]
+        eV = (deltas_cpu[:, :, half_d:].float() ** 2).sum(dim=(1, 2))  # [B]
+        v_gain = torch.sqrt(eK / eV.clamp(min=1e-12)).clamp(1.0, 10000.0)  # [B]
+        deltas_for_svd = torch.cat([
+            deltas_cpu[:, :, :half_d],
+            deltas_cpu[:, :, half_d:] * v_gain.view(B, 1, 1),
+        ], dim=2)
+    else:
+        deltas_for_svd = deltas_cpu
+
     # Compute scale per batch item
-    scale = deltas_cpu.abs().view(B, -1).max(dim=-1).values  # [B]
+    scale = deltas_for_svd.abs().view(B, -1).max(dim=-1).values  # [B]
     scale = torch.clamp(scale, min=1e-9)
-    
-    x = deltas_cpu / scale.view(B, 1, 1)
+
+    x = deltas_for_svd / scale.view(B, 1, 1)
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     
     # Batched Randomized SVD
@@ -1330,7 +1651,7 @@ def compress_lowrank_batch(
         r_proj = min(rank + n_oversamples, n, d)
         
         # 1. Generate random Gaussian projection matrix
-        Omega = torch.randn(d, r_proj, dtype=torch.float32, device=x.device)
+        Omega = _rsvd_omega(d, r_proj, dtype=torch.float32, device=x.device)
         
         # 2. Form sample matrix Y with power iterations
         # x @ Omega: [B, n, d] @ [d, r_proj] -> [B, n, r_proj]
@@ -1343,9 +1664,25 @@ def compress_lowrank_batch(
         
         # 4. Project original matrix onto low-rank subspace Q
         B_mat = torch.matmul(Q.transpose(1, 2), x)
-        
-        # 5. Standard SVD on the much smaller matrix B_mat
-        U_b, S, Vh = torch.linalg.svd(B_mat, full_matrices=False)
+
+        # 5. Decompose the much smaller matrix B_mat (MLX/GPU-batched-path
+        # parity: DKV_COMPRESS_GRAM_SVD). Default ON, same batched Gram-eigh
+        # trick as _compress_layer_blocks_gpu_inner (A/B-validated there,
+        # numerically equivalent to the exact SVD). Falls through on failure.
+        _gram_ok = False
+        if os.environ.get("DKV_COMPRESS_GRAM_SVD", "1") != "0":
+            try:
+                G = torch.matmul(B_mat, B_mat.transpose(1, 2))      # [B, r, r]
+                evals, evecs = torch.linalg.eigh(G)                 # ascending
+                evals = evals.flip(-1).clamp(min=0.0)               # descending S^2
+                U_b = evecs.flip(-1)                                # [B, r, r]
+                S = evals.sqrt()                                    # [B, r] desc
+                Vh = torch.matmul(U_b.transpose(1, 2), B_mat) / S.clamp(min=1e-8).unsqueeze(-1)
+                _gram_ok = True
+            except Exception as _ge:
+                print(f"[DKV rSVD] Gram eigh path failed ({_ge}); using exact SVD.")
+        if not _gram_ok:
+            U_b, S, Vh = torch.linalg.svd(B_mat, full_matrices=False)
         U = torch.matmul(Q, U_b)
         svd_success = True
     except Exception:
@@ -1360,5 +1697,12 @@ def compress_lowrank_batch(
             U = torch.zeros((B, n, rank), dtype=torch.float32, device=device)
             S = torch.zeros((B, rank), dtype=torch.float32, device=device)
             Vh = torch.zeros((B, rank, d), dtype=torch.float32, device=device)
-            
+
+    # Undo the V-side rebalancing on the FACTOR: divide Vh's V columns by the
+    # same per-batch-item gain so downstream reconstruction (U @ Vh) is in
+    # original space, matching what a caller that never knew about v_gain expects.
+    if v_gain is not None:
+        vg = v_gain.view(B, 1, 1).to(Vh.dtype)
+        Vh = torch.cat([Vh[:, :, :half_d], Vh[:, :, half_d:] / vg], dim=2)
+
     return U, S, Vh, scale
