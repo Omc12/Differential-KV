@@ -58,6 +58,9 @@ def main():
     ap.add_argument("--steps", type=int, default=64, help="decode tokens to time")
     ap.add_argument("--warmup", type=int, default=8)
     ap.add_argument("--dense", action="store_true", help="disable DKV for a baseline")
+    ap.add_argument("--chunk", type=int, default=0,
+                    help="dense baseline only: prefill in chunks of this many "
+                         "tokens (DKV uses 1024 on CUDA). 0 = HF single-shot.")
     args = ap.parse_args()
 
     os.environ.setdefault("DKV_PRESET", args.preset)
@@ -77,10 +80,42 @@ def main():
             tokenizer = tok
             def generate(self, prompt, max_new_tokens, **kw):
                 ids = tok(prompt, return_tensors="pt").to("cuda")
+                if not args.chunk:
+                    with torch.inference_mode():
+                        out = model.generate(**ids, max_new_tokens=max_new_tokens,
+                                             do_sample=False)
+                    return tok.decode(out[0])
+
+                # CHUNKED dense prefill, matching what DKV does.
+                #
+                # Without this the comparison is unfair in DKV's favour: HF
+                # prefills all N tokens in ONE forward, so at 63k it OOMed inside
+                # torch_chunk_gated_delta_rule (linear-attention ACTIVATIONS,
+                # not the KV cache) while DKV -- which chunks at 1024 -- survived.
+                # That reads as a DKV reach win but is really a prefill-strategy
+                # difference. This makes both sides chunk so any remaining gap is
+                # attributable to the KV cache itself.
+                from transformers import DynamicCache
+                seq = ids["input_ids"][0].tolist()
+                cache = DynamicCache()
                 with torch.inference_mode():
-                    out = model.generate(**ids, max_new_tokens=max_new_tokens,
-                                         do_sample=False)
-                return tok.decode(out[0])
+                    for i in range(0, len(seq), args.chunk):
+                        ch = seq[i:i + args.chunk]
+                        out = model(
+                            input_ids=torch.tensor([ch], device="cuda"),
+                            position_ids=torch.tensor(
+                                [list(range(i, i + len(ch)))], device="cuda"),
+                            past_key_values=cache, use_cache=True)
+                    nxt = int(out.logits[0, -1].argmax())
+                    pos = len(seq)
+                    for _ in range(max_new_tokens):
+                        out = model(
+                            input_ids=torch.tensor([[nxt]], device="cuda"),
+                            position_ids=torch.tensor([[pos]], device="cuda"),
+                            past_key_values=cache, use_cache=True)
+                        nxt = int(out.logits[0, -1].argmax())
+                        pos += 1
+                return ""
         w = _W()
     else:
         from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
@@ -93,22 +128,42 @@ def main():
         tokenize=False, add_generation_prompt=True)
     ntok = len(w.tokenizer(prompt).input_ids)
 
-    # Warmup also forces prefill + any first-call JIT out of the timed region.
+    # Warmup: JIT/compile/allocator out of the way.
     w.generate(prompt=prompt, max_new_tokens=args.warmup, temperature=0.0,
                top_p=1.0, repetition_penalty=1.0)
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    w.generate(prompt=prompt, max_new_tokens=args.steps, temperature=0.0,
-               top_p=1.0, repetition_penalty=1.0)
-    torch.cuda.synchronize()
-    dt = time.perf_counter() - t0
+    # TWO-POINT TIMING -- required, not a refinement.
+    #
+    # generate() RE-PREFILLS the whole prompt on every call, so timing a single
+    # generate(N) and dividing by N reports (prefill + N*decode)/N, not decode
+    # throughput. At 63k the prefill swamps 64 decode tokens entirely; the
+    # earlier "2.8 tps" was mostly amortised prefill wearing a decode label.
+    #
+    #   t(N)  = prefill + N*d
+    #   t(2N) = prefill + 2N*d
+    #   => d       = (t(2N) - t(N)) / N
+    #   => prefill =  t(N) - N*d
+    #
+    # Backend-agnostic, so DKV and the dense baseline are measured identically.
+    def timed(n):
+        torch.cuda.synchronize()
+        t = time.perf_counter()
+        w.generate(prompt=prompt, max_new_tokens=n, temperature=0.0,
+                   top_p=1.0, repetition_penalty=1.0)
+        torch.cuda.synchronize()
+        return time.perf_counter() - t
 
-    mode = "DENSE (DKV off)" if args.dense else f"DKV preset={args.preset}"
+    N = args.steps
+    t1, t2 = timed(N), timed(2 * N)
+    d_s = max((t2 - t1) / N, 1e-9)          # seconds per decoded token
+    prefill_s = max(t1 - N * d_s, 0.0)
+
+    mode = f"DENSE (DKV off{', chunked prefill ' + str(args.chunk) if args.chunk else ', single-shot prefill'})" if args.dense else f"DKV preset={args.preset}"
     print("\n" + "=" * 66)
     print(f"  {mode}   model={args.model}")
-    print(f"  prompt {ntok} tok   decode {args.steps} tok")
-    print(f"  {dt:.3f}s  ->  {args.steps/dt:.1f} tps  ({1000*dt/args.steps:.1f} ms/token)")
+    print(f"  prompt {ntok} tok   ({t1:.2f}s for {N} tok, {t2:.2f}s for {2*N} tok)")
+    print(f"  PREFILL {prefill_s:7.2f} s   ({1000*prefill_s/max(ntok,1):.3f} ms/prompt-token)")
+    print(f"  DECODE  {1/d_s:7.1f} tps ({1000*d_s:.1f} ms/token)   <-- prefill excluded")
     print(f"  peak VRAM {torch.cuda.max_memory_allocated()/2**30:.2f} GB")
 
     # Evidence of which decode path actually ran -- without this the number is
