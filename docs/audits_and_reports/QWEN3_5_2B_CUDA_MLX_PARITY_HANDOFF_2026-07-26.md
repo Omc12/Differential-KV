@@ -4393,3 +4393,65 @@ these cost CUDA too.
 * `TieredBlockStore` (default ON) does `block_indices.cpu().tolist()` plus a
   Python `update_heat` loop per decode call — a real per-call D2H sync. Left
   alone because it feeds eviction and the tradeoff needs a GPU to measure.
+
+## §10s — First real CUDA throughput numbers, and they are not good (2026-07-29)
+
+Measured through generate() (colab/bench_dkv_tps.py), RTX PRO 4000, Qwen3.5-2B
+fp16, 12,870-token prompt, 64 decode tokens, preset mid, fused kernel CONFIRMED
+running (`triton fallback count: 0`, "COMBINED path ACTIVE, N_sparse=43,
+L_dense=2050"):
+
+| | DKV | dense | 
+|---|---|---|
+| decode | **11.3 tps** (88.7 ms/tok) | **38.7 tps** (25.8 ms/tok) |
+| peak VRAM | 4.45 GB | 4.94 GB |
+
+**DKV is 3.4x SLOWER than dense and saves 10% VRAM.** That is a bad trade as
+measured. Two things must be said about it before anyone acts on it:
+
+### 1. This model/context is the wrong showcase, structurally
+
+Qwen3.5-2B is a HYBRID: only 6 of 24 layers are full_attention, with 2 KV heads
+and head_dim 256. Its KV cache is therefore tiny:
+
+    12,870 tok -> 0.147 GB   (3.2% of the 4.55 GB weights)
+    128,000 tok -> 1.46 GB
+
+DKV's own pool was **491 MB — larger than the 147 MB of KV it replaces.** There
+is essentially nothing to compress here at any context this model supports. A
+DKV win needs a model whose KV actually dominates (all-full-attention, more KV
+heads): Qwen2.5-14B or Llama-3.1-8B.
+
+### 2. The 4.3 tps figure from profile_decode_step.py was an artifact
+
+That harness drives `model(input_ids=...)` directly, bypassing the wrapper's
+session setup and routing, so the fused decode never engages (its "dkv" bucket
+reads 0.0 ms and the "COMBINED path ACTIVE" banner is absent). It reported 4.3
+tps on BOTH Path A and Path B, which is what falsified the "Path B has no fused
+kernel" explanation for the slow number -- that was true of Path B but was not
+the cause. Benchmark through generate(); bench_dkv_tps.py prints the triton
+fallback count next to every number so this cannot recur.
+
+### The MLX gap is real
+
+MLX DKV runs 38-42 tps at 8k flat to 64k (memory: fused_decode_mlx_2x). CUDA DKV
+is 11.3 tps at 13k -- and CUDA DENSE is 38.7, i.e. roughly MLX-DKV speed. So
+CUDA's DKV decode is ~3.5x off MLX's, on the same algorithm. That gap is the
+thing to chase, and it is NOT the fused kernel failing to run.
+
+### Honest disclosure on the workspace fix
+
+§10r raised max_dense_len from 1152 to 2050 rows (the block-size bug). That was
+required for correctness -- it was silently trimming live dense blocks -- but it
+also means decode now attends ~78% more dense tokens per step than the runs
+before it. Some of the 88.7 ms/token is that. The fix is still right; the cost
+should be attributed honestly when comparing against older numbers.
+
+### Next
+
+* Long-context sweep (8k/16k/32k/64k) DKV vs dense, both from bench_dkv_tps.py.
+* Re-run on a KV-heavy model (Qwen2.5-14B, Llama-3.1-8B) -- the paper's regime.
+* Profile the FUSED path (the existing profiler cannot: it never engages it), to
+  attribute the ~63 ms/token DKV adds over dense.
+* `decode kernel warmup failed (AssertionError)` x4 -- Dynamo on torch 2.11 +
+  Blackwell, so decode runs eager. TORCHDYNAMO_VERBOSE=1 for the real stack.
