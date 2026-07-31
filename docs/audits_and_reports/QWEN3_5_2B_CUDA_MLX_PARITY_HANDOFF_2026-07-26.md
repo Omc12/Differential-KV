@@ -4573,3 +4573,46 @@ taken. MLX DKV does 38-42 tps; CUDA DKV does 7.9.
    the compiled decode path has never run.
 3. Profile the FUSED path through generate() (the existing profiler cannot) to
    attribute the ~117 ms/token DKV adds over dense.
+
+## §10v — Routing top-K fix VALIDATED; the gap is host dispatch, not compute (2026-08-01)
+
+### Recall held
+
+`validate_cuda_dkv.py` with the new needle DEPTH sweep, all six cases exact 3/3
+and deterministic:
+
+    2k @ depth 0.0 / 0.5 / 0.9   PASS
+    8k @ depth 0.0 / 0.5 / 0.9   PASS      ALL CHECKS PASSED
+
+Depth is the discriminating test. The old harness pinned the needle at position
+0, which lands in a block that sink/recency rules retain regardless of routing
+quality -- it would have passed even with the router dropping every mid-context
+block. So K=16 is validated, not merely assumed.
+
+### The speed result is more informative than the speedup
+
+`N_sparse` 57 -> 16 as intended. Decode 125.7 -> 102.1 ms/token.
+
+**A 4x cut in compressed-side work bought 19%.** DKV now attends 5,650 tokens
+against dense's 15,849 -- one third the work -- and remains 11x slower
+(102.1 vs 9.3 ms/token). That settles it: the cost is NOT the compressed blocks
+and NOT compute. It is ~90 ms/token of host-side dispatch, ~3.3 ms per layer per
+decoded token across 28 layers.
+
+### Consequence
+
+Further algorithmic sparsity has almost nothing left to give on this axis.
+Written up as `docs/audits_and_reports/CUDA_GRAPH_DECODE_PLAN.md`.
+
+The routing fix also removed the structural blocker for graphs without anyone
+intending it: K is now FIXED at 16 regardless of context, and the dense window
+is already a fixed-size workspace masked by `L_dense_valid`. Both shapes that
+must be constant for capture now are. The disable-comment in
+`static_decode_graph.py` says mutable routing prevents replay -- that is
+stronger than reality. Graphs need fixed ADDRESSES and SHAPES, not immutable
+contents; vLLM/TensorRT-LLM/SGLang all graph paged-attention block tables that
+change every step, by writing them in place into fixed buffers.
+
+Stage 0 of that plan is a measurement with an explicit ABORT criterion, because
+the 89%-host figure predates both the routing fix and the sync throttle and must
+be re-measured on the generate() path before anything is built on it.
