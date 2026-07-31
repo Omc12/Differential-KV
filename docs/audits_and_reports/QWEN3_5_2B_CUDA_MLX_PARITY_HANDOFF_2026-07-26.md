@@ -4505,3 +4505,71 @@ The next measurement must be a KV-heavy model (Qwen2.5-14B, Llama-3.1-8B).
 * Chunked dense baseline, so the reach comparison is apples-to-apples.
 * Same sweep on a KV-heavy model.
 * Profile the fused path to attribute the ~63-80 ms/token DKV adds over dense.
+
+## §10u — FIRST VALID benchmark. DKV loses on every axis. (2026-07-29)
+
+**All throughput numbers in §10s and §10t are RETRACTED.** Three compounding
+measurement bugs, all in the harness, not the runtime:
+
+1. `profile_decode_step.py` bypasses `generate()`, so the fused decode never
+   engages -> the "4.3 tps / dkv bucket 0.0 ms" figures measured DKV bookkeeping
+   with the kernel off.
+2. `generate()` re-prefills every call, so timing one call and dividing by N
+   reported (prefill + N*decode)/N as if it were decode.
+3. The prompt ended "Summarise ... in one sentence", so the model hit EOS after
+   ~20 tokens and the divisor was the REQUESTED count, not the produced one.
+   This is why t(128) came out FASTER than t(64).
+
+Fixed: two-point timing over ACTUAL generated tokens, prompt that does not
+terminate early, chunked dense baseline, and an explicit EOS-LIMITED warning
+when the two points do not separate.
+
+### The valid measurement
+
+Qwen2.5-1.5B-Instruct (28/28 full attention -- a model DKV can actually help),
+15,849-token prompt, RTX PRO 4000, preset mid, fused kernel running
+(`triton fallback count: 0`), BOTH sides chunking prefill at 1024:
+
+| | DKV | dense | DKV is |
+|---|---|---|---|
+| prefill | 2.97 s | 1.45 s | **2.0x slower** |
+| decode | 126.4 ms/tok (7.9 tps) | 9.3 ms/tok (107.8 tps) | **13.6x slower** |
+| peak VRAM | 4.11 GB | 3.88 GB | **0.23 GB MORE** |
+
+Two points generated 57/127 tokens (DKV) and 64/128 (dense), so both fits are
+real, not noise.
+
+**DKV is slower at prefill, 13.6x slower at decode, and uses MORE peak memory.
+There is no axis on which it currently wins.**
+
+### What DID improve by switching models
+
+DKV pool 384 MB vs dense KV 433 MB = **0.89x**. On this all-full-attention model
+the compression finally stores less than it replaces, versus 3.2x LARGER on the
+hybrid Qwen3.5-2B. So the algorithm compresses; the system around it does not
+convert that into a peak-memory win.
+
+### Why peak VRAM is higher despite a smaller pool
+
+`DKV_STREAMING_COMPRESS` defaults to 0 here, which by its own comment keeps ALL
+raw prefill K/V co-resident with the growing pool until the prefill boundary.
+MLX defaults this to 1. That is the first thing to try -- it is a known,
+documented divergence (§10r) and it targets exactly this symptom.
+
+### Where the 13.6x decode gap is NOT
+
+* Not the Triton fallback: `fallback_count: 0` at every point.
+* Not Path B: measured on Path A, the fused-kernel path.
+* Not prefill: separated out and reported independently.
+
+It IS eager mode: `decode kernel warmup failed (AssertionError)` x4 fires on
+every run, so the compiled decode path has NEVER executed in any measurement
+taken. MLX DKV does 38-42 tps; CUDA DKV does 7.9.
+
+### Next, in order
+
+1. `DKV_STREAMING_COMPRESS=1` -- targets the memory regression directly.
+2. `TORCHDYNAMO_VERBOSE=1` -- why Inductor fails on torch 2.11 + Blackwell;
+   the compiled decode path has never run.
+3. Profile the FUSED path through generate() (the existing profiler cannot) to
+   attribute the ~117 ms/token DKV adds over dense.
