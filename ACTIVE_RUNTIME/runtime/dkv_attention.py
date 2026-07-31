@@ -2429,8 +2429,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                     dtype=torch.long,
                                                     device=_dp2.device,
                                                 ))
-                                                _cos_flat = cos_all.reshape(-1, head_dim)
-                                                _sin_flat = sin_all.reshape(-1, head_dim)
+                                                # reshape by the table's OWN last dim, not
+                                                # head_dim. cos_all is [.., seq, rotary_dim]
+                                                # (64 on Qwen3.5, vs head_dim 256), so
+                                                # reshape(-1, head_dim) silently repacked FOUR
+                                                # positions into each row and then raised on the
+                                                # copy below (64 vs 256). reshape does not
+                                                # validate semantics, only element count, so this
+                                                # was invisible until a model had
+                                                # rotary_dim != head_dim.
+                                                _rope_w = cos_all.shape[-1]
+                                                _cos_flat = cos_all.reshape(-1, _rope_w)
+                                                _sin_flat = sin_all.reshape(-1, _rope_w)
                                                 _seq_lim = _cos_flat.shape[0]
                                                 _cos_d2[:, :, _s:_e].copy_(
                                                     _cos_flat[_dp2[_s:_e].clamp(min=0, max=_seq_lim - 1)].unsqueeze(0).unsqueeze(1)
@@ -2713,8 +2723,11 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             for blk in dense_blocks:
                                                 dense_positions_list.extend(blk.token_indices)
                                             dense_positions = torch.tensor(dense_positions_list, dtype=torch.long, device=query_states.device)
-                                            cos_flat = cos_all.reshape(-1, head_dim)
-                                            sin_flat = sin_all.reshape(-1, head_dim)
+                                            # Same rotary_dim-vs-head_dim reshape hazard as
+                                            # the cached dense-position path above.
+                                            _rope_w = cos_all.shape[-1]
+                                            cos_flat = cos_all.reshape(-1, _rope_w)
+                                            sin_flat = sin_all.reshape(-1, _rope_w)
                                             seq_limit = cos_flat.shape[0]
                                             cos_dense = cos_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
                                             sin_dense = sin_flat[dense_positions.clamp(min=0, max=seq_limit - 1)].unsqueeze(0).unsqueeze(1)
