@@ -4455,3 +4455,53 @@ should be attributed honestly when comparing against older numbers.
   attribute the ~63 ms/token DKV adds over dense.
 * `decode kernel warmup failed (AssertionError)` x4 -- Dynamo on torch 2.11 +
   Blackwell, so decode runs eager. TORCHDYNAMO_VERBOSE=1 for the real stack.
+
+## §10t — Long-context sweep: the VRAM win is CHUNKED PREFILL, not KV compression (2026-07-29)
+
+RTX PRO 4000 (7.81 GB), Qwen3.5-2B fp16, 64 decode tokens, preset mid, fused
+kernel confirmed running at every point (`triton fallback count: 0`).
+
+| ctx | DKV tps | dense tps | slower | DKV GB | dense GB | DKV pool | dense KV | pool/KV |
+|---|---|---|---|---|---|---|---|---|
+| 7,934 | 10.3 | 54.7 | 5.3x | 4.25 | 4.39 | 302 MB | 93 MB | 3.3x |
+| 15,823 | 9.6 | 34.6 | 3.6x | 4.66 | 5.26 | 595 MB | 185 MB | 3.2x |
+| 31,620 | 5.3 | 16.7 | 3.2x | 5.46 | 6.99 | 1180 MB | 371 MB | 3.2x |
+| 63,251 | 2.8 | **OOM** | — | 7.31 | OOM | 2342 MB | 741 MB | 3.2x |
+
+### The headline, and it is not the flattering reading
+
+**DKV's pool is 3.2x LARGER than the dense KV it replaces, at every length.**
+On this model DKV does not save KV memory at all -- it costs 3x more. The
+peak-VRAM column still favours DKV, and the 63k point still shows dense OOM
+while DKV completes, but neither is a KV-compression result:
+
+* The dense baseline is `model.generate()`, which prefills all 63k tokens in ONE
+  shot. DKV chunks prefill (prefill_chunk_size=1024 on CUDA).
+* The dense OOM traceback is in `torch_chunk_gated_delta_rule` --
+  `k_beta = key * beta.unsqueeze(-1)` -- i.e. **LINEAR-ATTENTION activations
+  during prefill**, not the KV cache.
+
+So the measured reach advantage is a prefill-chunking artifact. A dense baseline
+that chunked its prefill would very likely not OOM at 63k, since its KV there is
+only 741 MB. **Do not cite this sweep as evidence for the paper's OOM/reach
+claim** without a chunked dense baseline to compare against.
+
+### Speed
+
+DKV is slower at every context, but the ratio narrows with length: 5.3x -> 3.6x
+-> 3.2x. Extrapolating, it does not cross over anywhere this model can reach.
+MLX DKV runs 38-42 tps at 8k-64k; CUDA DKV is 10.3 tps at 8k. The gap is real
+and is not the fused kernel failing to engage.
+
+### Why this model cannot demonstrate the thesis
+
+Qwen3.5-2B is a hybrid: 6 of 24 layers full_attention, 2 KV heads, head_dim 256.
+Dense KV never exceeds ~741 MB even at 63k, against 4.55 GB of weights. There is
+not enough KV here for a KV-compression system to win, at any context length.
+The next measurement must be a KV-heavy model (Qwen2.5-14B, Llama-3.1-8B).
+
+### Owed
+
+* Chunked dense baseline, so the reach comparison is apples-to-apples.
+* Same sweep on a KV-heavy model.
+* Profile the fused path to attribute the ~63-80 ms/token DKV adds over dense.
