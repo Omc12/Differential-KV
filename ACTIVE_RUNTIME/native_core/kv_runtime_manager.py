@@ -861,11 +861,25 @@ class KVRuntimeManager:
         # eviction and corrupt output.
         #
         # Use MLX's bound plus ONE extra block of slack for the overshoot.
-        # Under-allocating is safe: assemble_dense_window_kv already trims the
-        # oldest blocks (with a one-time warning) when the content does not fit.
+        #
+        # The slack must be measured in the block size the DENSE WINDOW actually
+        # holds, which is the pool's effective block size -- NOT self.block_size.
+        # self.block_size is a legacy 64 that nothing on this path uses; real
+        # blocks are max(micro_block_size, 257). Sizing the workspace with 64
+        # gave 1024 + 128 = 1152 rows against a genuine 1267-token window, so
+        # assemble_dense_window_kv silently trimmed the oldest dense blocks on
+        # EVERY step -- losing real context, and only visible as a one-time
+        # warning ("dense window (1267) exceeds workspace (1152)").
+        #
+        # Under-allocating is "safe" only in the sense that it does not crash.
+        # It costs recall, which is the entire point of the dense window.
+        _dense_block_size = max(
+            self.micro_block_size if self.streaming_ingest else self.block_size,
+            257,
+        )
         self.max_dense_len = int(
             os.environ.get("DKV_MAX_DENSE_LEN",
-                           str(_recency_window + 2 * self.block_size))
+                           str(_recency_window + 2 * _dense_block_size))
         )
 
         self.max_residual = self.native_pool.max_residual_tokens
