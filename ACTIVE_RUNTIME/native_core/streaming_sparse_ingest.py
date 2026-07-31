@@ -129,6 +129,28 @@ _RE_ACRONYMS        = re.compile(r'\b[A-Z]{2,}\b')
 _RE_WORD_TOKENS     = re.compile(r'\b[a-z0-9]{2,}\b')
 
 
+def _new_metadata_tensor(rows: int) -> torch.Tensor:
+    """Allocate a block-metadata tensor that stays mutable outside InferenceMode.
+
+    These are plain CPU int32 bookkeeping rows (pool_idx, anchor_idx, token_count,
+    state) -- nothing autograd ever sees. But they are allocated lazily from
+    inside the model's forward, which transformers runs under
+    torch.inference_mode(). A tensor created there is an INFERENCE TENSOR
+    permanently, and mutating one outside that mode raises:
+
+        RuntimeError: Inplace update to inference tensor outside InferenceMode
+                      is not allowed.
+
+    Which is exactly what happened: prefill allocated the metadata inside
+    inference_mode, then compress_deferred_prefill_blocks -- called after the
+    forward returns, outside the mode -- tried to write pool_idx into it and
+    aborted. Forcing inference_mode(False) here makes the allocation independent
+    of whatever mode the caller happens to be in.
+    """
+    with torch.inference_mode(False):
+        return torch.full((rows, 4), -1, dtype=torch.int32)
+
+
 @dataclass
 class StreamingKVBlock:
     """
@@ -745,11 +767,11 @@ class StreamingSparseIngestManager:
         # Phase 29 Fix #3: metadata is a CPU tensor — all writes are pure CPU memory ops,
         # zero CUDA syncs (previously 4 GPU scalar writes = 4 CUDA syncs per call).
         metadata = self.session_metadata.setdefault(session_id, {}).setdefault(
-            layer_idx, torch.full((1024, 4), -1, dtype=torch.int32)  # CPU — no device=
+            layer_idx, _new_metadata_tensor(1024)  # CPU — no device=
         )
         if block_idx >= metadata.shape[0]:
             new_size = metadata.shape[0] * 2
-            new_meta = torch.full((new_size, 4), -1, dtype=torch.int32)  # CPU
+            new_meta = _new_metadata_tensor(new_size)  # CPU
             new_meta[:metadata.shape[0]] = metadata
             self.session_metadata[session_id][layer_idx] = new_meta
             metadata = new_meta
@@ -1300,11 +1322,11 @@ class StreamingSparseIngestManager:
 
                 # Ensure metadata tensor exists and is large enough
                 metadata = self.session_metadata.setdefault(session_id, {}).setdefault(
-                    layer_idx, torch.full((1024, 4), -1, dtype=torch.int32)
+                    layer_idx, _new_metadata_tensor(1024)
                 )
                 if base_block_idx + n_new > metadata.shape[0]:
                     new_size = max(metadata.shape[0] * 2, base_block_idx + n_new)
-                    new_meta = torch.full((new_size, 4), -1, dtype=torch.int32)
+                    new_meta = _new_metadata_tensor(new_size)
                     new_meta[:metadata.shape[0]] = metadata
                     self.session_metadata[session_id][layer_idx] = new_meta
                     metadata = new_meta
