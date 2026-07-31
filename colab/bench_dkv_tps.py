@@ -46,7 +46,13 @@ def build_prompt(tok, target_tokens):
         s = random.choice(pool)
         parts.append(s)
         n += len(tok(s).input_ids)
-    parts.append("Summarise the material above in one sentence.")
+    # NOT "summarise in one sentence" -- the model answers in ~20 tokens and
+    # hits EOS, so max_new_tokens is never reached and any tps computed from
+    # the REQUESTED count is wrong (that is how t(128) came out faster than
+    # t(64)). Ask for a long continuation instead, and still count what was
+    # actually produced.
+    parts.append("Now continue the narrative above at length, adding many "
+                 "new descriptive sentences. Do not stop early.")
     return " ".join(parts)
 
 
@@ -115,7 +121,7 @@ def main():
                             past_key_values=cache, use_cache=True)
                         nxt = int(out.logits[0, -1].argmax())
                         pos += 1
-                return ""
+                return max_new_tokens   # chunked loop always runs the full count
         w = _W()
     else:
         from ACTIVE_RUNTIME.serving.hf_dkv_wrapper import PyTorchDKVHFWrapper
@@ -146,22 +152,43 @@ def main():
     #
     # Backend-agnostic, so DKV and the dense baseline are measured identically.
     def timed(n):
+        """Returns (seconds, tokens ACTUALLY generated).
+
+        Counting matters: generation stops at EOS, so the requested
+        max_new_tokens is an upper bound, not the amount produced. Dividing by
+        the request is what made t(128) come out faster than t(64).
+        """
         torch.cuda.synchronize()
         t = time.perf_counter()
-        w.generate(prompt=prompt, max_new_tokens=n, temperature=0.0,
-                   top_p=1.0, repetition_penalty=1.0)
+        r = w.generate(prompt=prompt, max_new_tokens=n, temperature=0.0,
+                       top_p=1.0, repetition_penalty=1.0)
         torch.cuda.synchronize()
-        return time.perf_counter() - t
+        dt = time.perf_counter() - t
+        if isinstance(r, int):                       # dense chunked branch
+            got = r
+        else:
+            got = max(len(w.tokenizer(r).input_ids) - ntok, 0)
+        return dt, got
 
     N = args.steps
-    t1, t2 = timed(N), timed(2 * N)
-    d_s = max((t2 - t1) / N, 1e-9)          # seconds per decoded token
-    prefill_s = max(t1 - N * d_s, 0.0)
+    t1, g1 = timed(N)
+    t2, g2 = timed(2 * N)
+    if g2 <= g1:
+        # Both runs stopped at the same EOS, so the two points differ only by
+        # noise and prefill cannot be separated. Report that honestly rather
+        # than emitting a nonsense rate.
+        print(f"\n  !! EOS-LIMITED: {g1} and {g2} tokens generated for requests of "
+              f"{N} and {2*N}. Decode rate is NOT separable from prefill here.")
+        d_s = t1 / max(g1, 1)
+        prefill_s = float("nan")
+    else:
+        d_s = (t2 - t1) / (g2 - g1)
+        prefill_s = max(t1 - g1 * d_s, 0.0)
 
     mode = f"DENSE (DKV off{', chunked prefill ' + str(args.chunk) if args.chunk else ', single-shot prefill'})" if args.dense else f"DKV preset={args.preset}"
     print("\n" + "=" * 66)
     print(f"  {mode}   model={args.model}")
-    print(f"  prompt {ntok} tok   ({t1:.2f}s for {N} tok, {t2:.2f}s for {2*N} tok)")
+    print(f"  prompt {ntok} tok   ({t1:.2f}s/{g1} gen, {t2:.2f}s/{g2} gen; requested {N}/{2*N})")
     print(f"  PREFILL {prefill_s:7.2f} s   ({1000*prefill_s/max(ntok,1):.3f} ms/prompt-token)")
     print(f"  DECODE  {1/d_s:7.1f} tps ({1000*d_s:.1f} ms/token)   <-- prefill excluded")
     print(f"  peak VRAM {torch.cuda.max_memory_allocated()/2**30:.2f} GB")
