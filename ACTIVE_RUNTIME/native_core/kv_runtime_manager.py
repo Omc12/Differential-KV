@@ -760,15 +760,28 @@ class KVRuntimeManager:
 
         # ── Routing top-K default (block_size-derived, MLX-parity) ────────
         # A block router keeps K blocks; the routed TOKEN budget is K * block_size.
-        # MLX uses block_size=256 with K=16 → 4096 routed tokens. CUDA's routing
-        # block spans self.block_size (=64) tokens, so the equivalent K is
-        # 4096 // 64 = 64. The old flat default of 16 covered only 16*64=1024
-        # tokens — 4× less — so a distant needle's block fell outside the top-16
-        # and deep-context retrieval failed for any user who never set
-        # DKV_TOPK_BLOCKS. Deriving it from block_size makes the correct budget
-        # automatic (no env var required) and scales if block_size ever changes.
+        # MLX uses block_size=256 with K=16 → 4096 routed tokens.
+        #
+        # MUST divide by the EFFECTIVE block size, not self.block_size.
+        # self.block_size is a legacy 64 that no live path uses; real routing
+        # blocks span max(micro_block_size, 257) tokens. Dividing 4096 by 64 gave
+        # K=64 *intending* a 4096-token budget while actually routing
+        # 64 * 257 = 16,448 tokens — i.e. the whole context. Measured at 16k:
+        # N_sparse=57 of ~62 blocks, so 92% of all blocks were routed and DKV
+        # attended 102% of the context (routed + dense window) while ALSO paying
+        # low-rank reconstruction on every one of those tokens. That is the bulk
+        # of the 13.6x decode gap vs dense: the "sparse" path was not sparse.
+        #
+        # 4096 // 257 = 15 → clamped to 16, exactly MLX's K.
+        #
+        # Same root cause as the max_dense_len bug fixed alongside this: two
+        # different consumers both divided by the legacy self.block_size.
         # An explicit DKV_TOPK_BLOCKS still overrides this (see query_router.py).
-        self.native_pool.routing_topk_default = max(16, 4096 // max(1, self.block_size))
+        _routing_block_size = max(
+            self.micro_block_size if self.streaming_ingest else self.block_size,
+            257,
+        )
+        self.native_pool.routing_topk_default = max(16, 4096 // _routing_block_size)
 
         # ── SRL: Initialize random projection matrix W_proj ──────────────
         # Fixed at construction time — never updated.
