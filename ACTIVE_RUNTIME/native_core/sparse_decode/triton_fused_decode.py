@@ -630,8 +630,22 @@ def _reconstruct_and_score_compiled(
     K_unrot_rotated = torch.cat([-K_unrot_half2, K_unrot_half1], dim=-1)
     K_rot_full = K_unrot_full * cos_sliced + K_unrot_rotated * sin_sliced
     
-    q_expanded = q_sq.view(1, 1, H, D)
-    scores = torch.sum(q_expanded * K_rot_full, dim=-1) * inv_scale
+    # q.K as a CONTRACTION, not broadcast-multiply-then-reduce.
+    #
+    # The old form was `torch.sum(q.view(1,1,H,D) * K_rot_full, dim=-1)`, which
+    # materialises the entire [N, S+1, H, D] product before reducing it away --
+    # 86 MB per call at the real 16k shapes (N=57, S=257, H=12, D=128), every
+    # layer, every decoded token. In the decode profile that single line is the
+    # aten::mul (5.7%) and aten::sum (10.0%) entries, and it is a large part of
+    # why 66% of DKV's GPU time sits in elementwise+reduce while only 7.7% is in
+    # matmul. einsum contracts D directly and allocates only the [N, S+1, H]
+    # result.
+    #
+    # Verified numerically identical (max|diff| 7.6e-6, fp32) and 1.7x faster on
+    # CPU alone. The non-compiled sibling in this file already does this via
+    # torch.bmm(q_hqd, K_hnd.transpose(1, 2)); this brings the compiled variant
+    # in line with it.
+    scores = torch.einsum('nshd,hd->nsh', K_rot_full, q_sq) * inv_scale
     return scores
 
 def _attend_and_reconstruct_v_compiled(
@@ -658,7 +672,10 @@ def _attend_and_reconstruct_v_compiled(
         P_U = torch.bmm(P_comp_reshaped.float(), U.float())
 
         p_total_anchor = P_anchor.transpose(0, 1) + P_comp_reshaped.sum(dim=-1)
-        O_anchor_fused = torch.sum(p_total_anchor.unsqueeze(-1) * anchors_V.float(), dim=0)
+        # Same contraction-not-broadcast point as the score path above; the
+        # intermediate here is only ~0.3 MB, so this is for op-count and
+        # consistency rather than bandwidth. Verified identical (7.6e-6, fp32).
+        O_anchor_fused = torch.einsum('nh,nhd->hd', p_total_anchor, anchors_V.float())
         O_final = O_final + O_anchor_fused.to(P_anchor.dtype)
 
         P_U_flat = P_U.reshape(N * H_q, 1, R)
