@@ -108,6 +108,15 @@ measured before the routing and sync fixes.**
 
 ### Stage 1 — static ABI for the decode region
 
+**PARTIALLY IMPLEMENTED (opt-in, unvalidated).** `DKV_STATIC_GATHER=1` switches
+`_gather_routed_blocks_for_kernel` from advanced indexing (`pool.U[indices]`,
+which allocates) to `index_select(..., out=persistent_buffer)`. Verified on CPU:
+values identical, writes into the buffer, address stable across repeated gathers
+-- the graph precondition. Default OFF; refuses to reuse buffers whenever
+deferred batch dispatch is possible (fails closed, see `_batch_queue_active`).
+Still to do: q/out/lse buffers, `block_indices` itself, and the dense workspace.
+
+
 Pre-allocate, once per session, at fixed addresses:
 
 | buffer | shape | notes |

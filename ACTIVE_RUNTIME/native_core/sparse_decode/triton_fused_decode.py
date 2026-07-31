@@ -35,6 +35,65 @@ except ImportError:
 # severity so recurring failures are visible without flooding the log.
 _triton_fallback_count = 0
 
+# ── Stage 1 of docs/audits_and_reports/CUDA_GRAPH_DECODE_PLAN.md ─────────────
+# DKV_STATIC_GATHER — OPT-IN (default OFF), UNVALIDATED ON GPU.
+#
+# _gather_routed_blocks_for_kernel runs PER LAYER PER TOKEN and builds seven
+# tensors with advanced indexing (`pool.U[indices]` etc). Advanced indexing
+# ALLOCATES. At K=16 that is ~1 MB of fresh allocation and 7 launches per layer,
+# so ~28 MB and ~200 launches per decoded token on a 28-layer model -- pure
+# allocator and dispatch pressure, on a path measured to be ~90 ms/token of host
+# overhead.
+#
+# index_select(..., out=buf) writes into a pre-allocated buffer instead: same
+# values, no allocation, and -- the reason this is Stage 1 rather than a
+# micro-optimisation -- a FIXED ADDRESS, which is what CUDA-graph capture
+# requires. This is the same discipline vLLM/TensorRT-LLM/SGLang use for
+# paged-attention block tables.
+#
+# WHY IT IS OPT-IN: dkv_attention.py can QUEUE these dicts
+# (_triton_batch_queue.append) and dispatch them later. A reused buffer would be
+# overwritten by the next layer between queue and dispatch, silently corrupting
+# the earlier entry. The guard below refuses to reuse buffers when batching is
+# active, but that interaction has NOT been tested on hardware. Enable with
+# DKV_STATIC_GATHER=1 and A/B against the needle depth sweep before trusting it.
+_STATIC_GATHER = os.environ.get("DKV_STATIC_GATHER", "0") == "1"
+
+
+def _batch_queue_active() -> bool:
+    """True when dkv_attention.py may DEFER dispatch, so buffers cannot be reused.
+
+    dkv_attention.py gates its deferred queue on
+    `bsz > 1 and HAS_TRITON and cuda and DKV_BATCH_TRITON_DISPATCH != 0`
+    (dkv_attention.py:1040). Batch size is not visible from here, so this fails
+    CLOSED: if deferred dispatch is even POSSIBLE, buffer reuse is refused.
+
+    Getting this wrong is not a slowdown, it is silent cross-entry corruption --
+    a queued dict's tensors overwritten by the next layer before dispatch. A
+    conservative answer costs the optimisation on multi-sequence batches only;
+    single-sequence decode (the measured case) still gets it.
+    """
+    return os.environ.get("DKV_BATCH_TRITON_DISPATCH", "1") not in ("0", "false", "off")
+
+
+
+def _gather_into(src, indices, cache, name):
+    """index_select into a persistent per-(name, shape) buffer.
+
+    Falls back to plain advanced indexing when the buffer cannot be reused, so
+    the caller never has to branch.
+    """
+    n = indices.numel()
+    key = (name, n, tuple(src.shape[1:]), src.dtype)
+    buf = cache.get(key)
+    if buf is None:
+        buf = torch.empty((n,) + tuple(src.shape[1:]),
+                          dtype=src.dtype, device=src.device)
+        cache[key] = buf
+    return torch.index_select(src, 0, indices, out=buf)
+
+
+
 # Heat-update throttle. See the call sites for why.
 _heat_call_counter = 0
 
@@ -1188,14 +1247,34 @@ def _gather_routed_blocks_for_kernel(pool_for_kernel, block_indices, anchor_indi
     g = {}
     g["idx"] = torch.arange(N, device=device, dtype=block_indices.dtype)
 
-    anchors_K = pool_for_kernel.anchors_K[indices]      # [N, H_kv, D]
-    V_K       = pool_for_kernel.V_K[indices]            # [N, R, H_kv, D]
-    g["anchors_V"] = pool_for_kernel.anchors_V[indices]
-    g["V_V"]       = pool_for_kernel.V_V[indices]
-    g["U"]         = pool_for_kernel.U[indices]
-    g["U_scale"]   = pool_for_kernel.U_scale[indices]
-    g["scales"]    = pool_for_kernel.scales[indices]
-    g["seq_lens"]  = pool_for_kernel.seq_lens[indices]
+    # Persistent gather buffers (DKV_STATIC_GATHER, default off -- see the note
+    # at _gather_into). Disabled while the deferred batch queue is active,
+    # because a queued dict must own its tensors until dispatch.
+    _reuse = _STATIC_GATHER and not _batch_queue_active()
+    if _reuse:
+        _bufs = getattr(base_pool, "_dkv_gather_buffers", None)
+        if _bufs is None:
+            _bufs = {}
+            try:
+                base_pool._dkv_gather_buffers = _bufs
+            except Exception:                                    # noqa: BLE001
+                _reuse = False
+
+    if _reuse:
+        _G = lambda src, nm: _gather_into(src, indices, _bufs, nm)   # noqa: E731
+    else:
+        _G = lambda src, nm: src[indices]                            # noqa: E731
+
+    # anchors_K / V_K are ROTATED below, which produces new tensors anyway; the
+    # gather buffer only saves the pre-rotation copy.
+    anchors_K = _G(pool_for_kernel.anchors_K, "anchors_K")   # [N, H_kv, D]
+    V_K       = _G(pool_for_kernel.V_K,       "V_K")         # [N, R, H_kv, D]
+    g["anchors_V"] = _G(pool_for_kernel.anchors_V, "anchors_V")
+    g["V_V"]       = _G(pool_for_kernel.V_V,       "V_V")
+    g["U"]         = _G(pool_for_kernel.U,         "U")
+    g["U_scale"]   = _G(pool_for_kernel.U_scale,   "U_scale")
+    g["scales"]    = _G(pool_for_kernel.scales,    "scales")
+    g["seq_lens"]  = _G(pool_for_kernel.seq_lens,  "seq_lens")
 
     do_rot = (anchor_indices is not None and cos is not None and sin is not None)
     cos_anc = sin_anc = None
