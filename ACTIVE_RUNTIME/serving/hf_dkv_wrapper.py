@@ -555,7 +555,24 @@ class PyTorchDKVHFWrapper:
 
         # Clean Code Integration: AttentionInterface path (Mode A default)
         attn_impl_kwarg = {}
-        if os.environ.get("DKV_USE_ATTENTION_INTERFACE", "1") == "1" or config.get("use_attention_interface", False):
+        # DEFAULT "0" -- the MONKEYPATCH path (Path A).
+        #
+        # Path A runs the FUSED decode kernel (Triton on CUDA, the Metal shader
+        # on MPS), which is what MLX does (DKV_DECODE_FUSED=1 by default there).
+        # The AttentionInterface backend (dkv_backend.py, Path B) does NOT: it
+        # has no reference to fused_decode/triton anywhere and falls through to a
+        # plain F.scaled_dot_product_attention, so it pays DKV's Python-side
+        # block bookkeeping and gets none of its kernel.
+        #
+        # Measured on an RTX PRO 4000, Qwen3.5-2B, 13k ctx, preset mid:
+        #   Path B -> 4.3 tps (231.7 ms/token), of which only 33.4 ms/token is
+        #   GPU work -- 86%% of wall time is CPU dispatch -- and the profiler's
+        #   "dkv" bucket is 0.0 ms, i.e. the DKV kernel contributed nothing.
+        #
+        # This default used to be "1" here and in dkv_attention.py while
+        # dkv_backend.py's own header documented "0", so the effective default
+        # was the path without the kernel. Set =1 to opt back into Path B.
+        if os.environ.get("DKV_USE_ATTENTION_INTERFACE", "0") == "1" or config.get("use_attention_interface", False):
             register_dkv_backend()
             attn_impl_kwarg["attn_implementation"] = "dkv"
 

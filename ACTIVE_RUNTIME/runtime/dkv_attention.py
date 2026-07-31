@@ -431,7 +431,9 @@ def apply_dkv_attention_patch(model, kv_manager):
     fused_sparse_attention_decode().
     """
     # ── DKV_USE_ATTENTION_INTERFACE gate ──────────────────────────────────────
-    if os.environ.get("DKV_USE_ATTENTION_INTERFACE", "1") == "1":
+    # DEFAULT "0" (Path A, fused decode kernel) -- see the note at the matching
+    # gate in serving/hf_dkv_wrapper.py for the measurement that motivated it.
+    if os.environ.get("DKV_USE_ATTENTION_INTERFACE", "0") == "1":
         try:
             from runtime.dkv_backend import register_dkv_backend, bind_kv_manager
             register_dkv_backend(kv_manager=kv_manager, model_ref=model)

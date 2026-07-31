@@ -34,6 +34,16 @@ import sys
 
 # Must be set before DKV imports — both are read at import time.
 os.environ.setdefault("DKV_TRITON_STRICT", "1")      # no silent fallback
+
+# DKV_USE_ATTENTION_INTERFACE selects the RUNTIME, not a tuning knob:
+#   "0" = monkeypatch path (Path A) -- runs the fused Triton decode kernel
+#   "1" = AttentionInterface path (Path B, dkv_backend.py) -- plain SDPA, no
+#         fused kernel, ~4.3 tps with the profiler's "dkv" bucket at 0.0 ms
+#
+# This script used to hard-pin "0", so it validated Path A while the runtime
+# default was "1" -- every check passed on a path nobody was actually running.
+# Honour whatever the caller set, and PRINT it, so a run can never again be
+# misread as covering a path it did not touch.
 os.environ.setdefault("DKV_USE_ATTENTION_INTERFACE", "0")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,6 +76,12 @@ def test_1_environment():
     except Exception as e:                                    # noqa: BLE001
         check("triton importable", False, str(e))
     print(f"  torch {torch.__version__}", flush=True)
+    _ai = os.environ.get("DKV_USE_ATTENTION_INTERFACE", "0")
+    print(f"  DKV_USE_ATTENTION_INTERFACE={_ai} -> "
+          f"{'Path B / AttentionInterface (NO fused kernel)' if _ai == '1' else 'Path A / monkeypatch (fused decode kernel)'}",
+          flush=True)
+    check("running the fused-kernel path (set =1 to test Path B instead)",
+          _ai == "0", f"DKV_USE_ATTENTION_INTERFACE={_ai}")
 
 
 def test_2_exact_keys_default():
