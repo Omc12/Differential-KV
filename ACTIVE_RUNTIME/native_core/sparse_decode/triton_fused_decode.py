@@ -35,6 +35,36 @@ except ImportError:
 # severity so recurring failures are visible without flooding the log.
 _triton_fallback_count = 0
 
+# Heat-update throttle. See the call sites for why.
+_heat_call_counter = 0
+
+
+def _heat_update_due() -> bool:
+    """True on 1 call in DKV_HEAT_INTERVAL (default 32).
+
+    TieredBlockStore.update_heat needs block_indices ON THE HOST, so each call
+    is a `.cpu().tolist()` -- a device sync that drains the pipeline. It sits in
+    native_triton_sparse_attn_decode, which runs PER LAYER PER TOKEN: 28 forced
+    syncs per decoded token on a 28-layer model, so the GPU can never run ahead
+    of the CPU. The decode profile showed 89% of wall time outside GPU compute,
+    and this is one of the reasons.
+
+    Heat only drives EVICTION ordering (keep routed blocks warm), and eviction
+    only fires at 80% pool occupancy. It is a statistical signal, not state the
+    kernel reads, so sampling it every 32 calls (~1 per token at 28 layers)
+    preserves the ranking while removing 27 of every 28 syncs. Set
+    DKV_HEAT_INTERVAL=1 to restore per-call updates.
+    """
+    global _heat_call_counter
+    _heat_call_counter += 1
+    try:
+        n = int(os.environ.get("DKV_HEAT_INTERVAL", "32"))
+    except ValueError:
+        n = 32
+    return n <= 1 or (_heat_call_counter % n) == 0
+
+
+
 # DKV_DEBUG_NUMERICS — off by default.
 #
 # The NaN/Inf and large-LSE guards below are pure diagnostics, but each one
@@ -1588,7 +1618,7 @@ def _pytorch_vectorized_sparse_attn_decode(
         _mgr = getattr(pool, "_manager", None) if pool is not None else None
         if _mgr is not None:
             _tiered = getattr(_mgr, "_kt_tiered_store", None)
-            if _tiered is not None:
+            if _tiered is not None and _heat_update_due():
                 _slot_list = block_indices.cpu().tolist()
                 for _sid in _slot_list:
                     _tiered.update_heat(_sid, routing_score=1.0)
@@ -2029,7 +2059,7 @@ def native_triton_sparse_attn_decode(
         if _mgr is not None:
             # Feature 1: mark routed slots hot so eviction keeps them warm.
             _tiered = getattr(_mgr, "_kt_tiered_store", None)
-            if _tiered is not None:
+            if _tiered is not None and _heat_update_due():
                 _slot_list = block_indices.cpu().tolist()
                 for _sid in _slot_list:
                     _tiered.update_heat(_sid, routing_score=1.0)

@@ -169,12 +169,22 @@ def test_4_needle(quick=False):
         "The orchestra rehearsed late into the evening, perfecting the final movement.",
     ]
 
-    def build(n_filler):
-        parts = [f"Remember this important code: {NEEDLE}. "
-                 "This is the only code you need to remember."]
-        parts += [random.choice(pool) for _ in range(n_filler)]
-        parts.append("Question: What was the important code mentioned at the very "
-                     "beginning of this text? Reply with only the code.")
+    def build(n_filler, depth=0.0):
+        """Needle at a fractional DEPTH through the filler, not always at the start.
+
+        Depth matters for the routing top-K: the router keeps K blocks, so the
+        failure mode is a needle whose block ranks outside the top K. A needle
+        pinned at position 0 sits in the first block, which sinks/recency rules
+        tend to keep anyway -- it cannot detect a router that is dropping
+        mid-context blocks. Sweeping depth is what actually tests K.
+        """
+        filler = [random.choice(pool) for _ in range(n_filler)]
+        at = int(len(filler) * depth)
+        needle = (f"Remember this important code: {NEEDLE}. "
+                  "This is the only code you need to remember.")
+        parts = filler[:at] + [needle] + filler[at:]
+        parts.append("Question: What was the important code mentioned in this "
+                     "text? Reply with only the code.")
         return " ".join(parts)
 
     os.environ.setdefault("DKV_ENGAGE_THRESHOLD", "1024")
@@ -182,8 +192,12 @@ def test_4_needle(quick=False):
                             config={"mode": "fp16"}, device="cuda")
     w.ensure_loaded()
 
-    for label, n_filler in (("2k", 200),) + ((() if quick else (("8k", 800),))):
-        ctx = build(n_filler)
+    cases = [("2k", 200, 0.0), ("2k", 200, 0.5), ("2k", 200, 0.9)]
+    if not quick:
+        cases += [("8k", 800, 0.0), ("8k", 800, 0.5), ("8k", 800, 0.9)]
+    for label, n_filler, depth in cases:
+        label = f"{label}@depth{depth:.1f}"
+        ctx = build(n_filler, depth)
         prompt = w.tokenizer.apply_chat_template(
             [{"role": "user", "content": ctx}], tokenize=False,
             add_generation_prompt=True)
