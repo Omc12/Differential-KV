@@ -1760,12 +1760,22 @@ def apply_dkv_attention_patch(model, kv_manager):
                                 # Slice to dense_len for correct shapes (cos_dense has shape [dense_len, D])
                                 dense_k_valid = dense_k_assembled[:, :, :dense_len]
                                 dense_v_valid = dense_v_assembled[:, :, :dense_len]
-                                dense_k_half = torch.zeros_like(dense_k_valid)
-                                half_d = head_dim // 2
-                                dense_k_half[..., :half_d] = -dense_k_valid[..., half_d:]
+                                # Partial RoPE: cos_dense/sin_dense are rotary_dim wide,
+                                # which is < head_dim on Qwen3.5 (64 vs 256). Pair within
+                                # [0, rotary_dim) and pass the tail through unrotated;
+                                # head_dim//2 pairing here both picked the wrong partner
+                                # and raised on the cos multiply.
+                                rot_dim = cos_dense.shape[-1]
+                                half_d = rot_dim // 2
+                                dense_k_half = torch.zeros_like(dense_k_valid[..., :rot_dim])
+                                dense_k_half[..., :half_d] = -dense_k_valid[..., half_d:rot_dim]
                                 dense_k_half[..., half_d:] = dense_k_valid[..., :half_d]
-                                
-                                dense_k_rot = dense_k_valid * cos_dense + dense_k_half * sin_dense
+
+                                dense_k_rot = dense_k_valid.clone()
+                                dense_k_rot[..., :rot_dim] = (
+                                    dense_k_valid[..., :rot_dim] * cos_dense
+                                    + dense_k_half * sin_dense
+                                )
                                 
                                 k_rep = repeat_kv(dense_k_rot, num_key_value_groups)
                                 v_rep = repeat_kv(dense_v_valid, num_key_value_groups)
@@ -2479,7 +2489,13 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     )
                                     _lengths = tuple(item[1] for item in _layout_sig)
                                     _anchors = tuple(item[0] for item in _layout_sig)
-                                    _hd2 = dense_k_assembled.shape[-1] // 2
+                                    # Partial-RoPE geometry, shared by the full-rebuild
+                                    # and incremental-append branches below. half_r must
+                                    # be rotary_dim/2, never head_dim/2 -- see the note in
+                                    # the rebuild branch.
+                                    _rot_dim = _cos_d2.shape[-1]
+                                    _half_r = _rot_dim // 2
+                                    _head_dim_full = dense_k_assembled.shape[-1]
                                     _rot_valid = (
                                         _rot_state is not None
                                         and _rot_state.get("version") == current_version
@@ -2495,14 +2511,38 @@ def apply_dkv_attention_patch(model, kv_manager):
                                     )
 
                                     if not _rot_valid:
-                                        _dk_half2 = torch.empty_like(dense_k_assembled)
-                                        _dk_half2[..., :_hd2] = -dense_k_assembled[..., _hd2:]
-                                        _dk_half2[..., _hd2:] = dense_k_assembled[..., :_hd2]
+                                        # Partial RoPE (Qwen3.5-style partial_rotary_factor<1.0).
+                                        #
+                                        # This branch used to rotate the FULL head_dim: it paired
+                                        # dim d with d +/- head_dim/2 and multiplied the whole
+                                        # tensor by cos. On Qwen3.5 (head_dim 256, rotary_dim 64)
+                                        # that raised outright --
+                                        #   "size of tensor a (256) must match tensor b (64)" --
+                                        # because cos/sin are only rotary_dim wide. The MPS branch
+                                        # a few hundred lines up already did this correctly; this
+                                        # CUDA branch never got the port, so Qwen3.5 could not
+                                        # decode on CUDA at all.
+                                        #
+                                        # Rotate only [0, rotary_dim), pairing within that range
+                                        # (half_r = rotary_dim/2, NOT head_dim/2 -- that pulls the
+                                        # partner from an unrotated dimension), and pass the tail
+                                        # through unrotated. Reduces to the previous behaviour
+                                        # exactly when rotary_dim == head_dim.
+                                        _rot_dim = _cos_d2.shape[-1]
+                                        _half_r = _rot_dim // 2
                                         _cos_compute = _cos_d2.to(dense_k_assembled.dtype)
                                         _sin_compute = _sin_d2.to(dense_k_assembled.dtype)
+                                        _dk_half2 = torch.empty_like(
+                                            dense_k_assembled[..., :_rot_dim])
+                                        _dk_half2[..., :_half_r] = -dense_k_assembled[..., _half_r:_rot_dim]
+                                        _dk_half2[..., _half_r:] = dense_k_assembled[..., :_half_r]
                                         _rot = torch.empty_like(dense_k_assembled)
-                                        torch.mul(dense_k_assembled, _cos_compute, out=_rot)
-                                        _rot.addcmul_(_dk_half2, _sin_compute)
+                                        torch.mul(dense_k_assembled[..., :_rot_dim], _cos_compute,
+                                                  out=_rot[..., :_rot_dim])
+                                        _rot[..., :_rot_dim].addcmul_(_dk_half2, _sin_compute)
+                                        if _rot_dim < dense_k_assembled.shape[-1]:
+                                            _rot[..., _rot_dim:].copy_(
+                                                dense_k_assembled[..., _rot_dim:])
                                         _rot_state = {
                                             "version": current_version,
                                             "anchors": _anchors,
@@ -2526,9 +2566,12 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                 _s = _offset + _old_len
                                                 _e = _offset + _new_len
                                                 _raw_suffix = dense_k_assembled[:, :, _s:_e]
+                                                # Same partial-RoPE correction as the rebuild
+                                                # branch: _dk_half2 is rotary_dim wide and the
+                                                # pairing is within [0, rotary_dim).
                                                 _half_suffix = _dk_half2[:, :, _s:_e]
-                                                _half_suffix[..., :_hd2] = -_raw_suffix[..., _hd2:]
-                                                _half_suffix[..., _hd2:] = _raw_suffix[..., :_hd2]
+                                                _half_suffix[..., :_half_r] = -_raw_suffix[..., _half_r:_rot_dim]
+                                                _half_suffix[..., _half_r:] = _raw_suffix[..., :_half_r]
                                                 # Only the newly appended positions
                                                 # need dtype conversion; the cached
                                                 # prefix is already in compute dtype.
@@ -2539,14 +2582,18 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                     _sin_d2[:, :, _s:_e].to(_sin_compute.dtype)
                                                 )
                                                 torch.mul(
-                                                    _raw_suffix,
+                                                    _raw_suffix[..., :_rot_dim],
                                                     _cos_compute[:, :, _s:_e],
-                                                    out=_rot[:, :, _s:_e],
+                                                    out=_rot[:, :, _s:_e, :_rot_dim],
                                                 )
-                                                _rot[:, :, _s:_e].addcmul_(
+                                                _rot[:, :, _s:_e, :_rot_dim].addcmul_(
                                                     _half_suffix,
                                                     _sin_compute[:, :, _s:_e],
                                                 )
+                                                if _rot_dim < _head_dim_full:
+                                                    _rot[:, :, _s:_e, _rot_dim:].copy_(
+                                                        _raw_suffix[..., _rot_dim:]
+                                                    )
                                             _offset += _new_len
                                         _rot_state["lengths"] = _lengths
 
