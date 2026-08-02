@@ -65,11 +65,25 @@ def main():
     w.generate(prompt=prompt, max_new_tokens=8, temperature=0.0, top_p=1.0,
                repetition_penalty=1.0)
 
+    _sync_log = []
     if args.find_syncs:
+        # RECORD syncs rather than just printing them. set_sync_debug_mode emits a
+        # UserWarning per sync naming the call site; capturing them into a counter
+        # turns hundreds of duplicate lines into a ranked table of WHERE the syncs
+        # come from, which is the actionable form.
         import warnings
         warnings.simplefilter("always")
+        _orig_showwarning = warnings.showwarning
+
+        def _capture(message, category, filename, lineno, file=None, line=None):
+            if "synchronizing CUDA operation" in str(message):
+                _sync_log.append((filename, lineno, (line or "").strip()))
+            else:
+                _orig_showwarning(message, category, filename, lineno, file, line)
+
+        warnings.showwarning = _capture
         torch.cuda.set_sync_debug_mode("warn")
-        print("\n  SYNC DEBUG ON — every implicit sync below names its call site.\n")
+        print("\n  SYNC RECORDING ON — ranked table printed at the end.\n")
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -80,6 +94,8 @@ def main():
     torch.cuda.synchronize()
     if args.find_syncs:
         torch.cuda.set_sync_debug_mode("default")
+        import warnings as _w
+        _w.showwarning = _orig_showwarning
     wall = time.perf_counter() - t0
     gen = max(len(w.tokenizer(r).input_ids) - ntok, 1)
 
@@ -141,6 +157,22 @@ def main():
     print("\nRead the CPU column, not the CUDA one. Three optimisations aimed at")
     print("GPU-side work already returned ~0; the remaining cost is host-side.")
     _prefill_frac = ntok / max(ntok + gen, 1)
+    if args.find_syncs:
+        from collections import Counter
+        c = Counter((f, l, src) for f, l, src in _sync_log)
+        print(f"\n  RECORDED SYNCS: {len(_sync_log)} total, "
+              f"{len(_sync_log)/max(gen,1):.0f} per generated token")
+        print("  " + "-" * 74)
+        for (f, l, src), n in c.most_common(20):
+            short = f.split("/")[-1]
+            print(f"  {n:7d}x  {short}:{l}")
+            if src:
+                print(f"           {src[:66]}")
+        if not _sync_log:
+            print("  none captured — set_sync_debug_mode is a PROTOTYPE and misses")
+            print("  syncs inside C++/Triton dispatch. Use Nsight Systems for those.")
+        print("  " + "-" * 74)
+
     print(f"\nWINDOW COMPOSITION: {ntok} prefilled vs {gen} generated tokens.")
     if gen < 64:
         print("  !! PREFILL-DOMINATED. generate() re-prefills every call, so these")

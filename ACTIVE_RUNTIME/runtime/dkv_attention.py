@@ -2686,6 +2686,10 @@ def apply_dkv_attention_patch(model, kv_manager):
                                             RematCache as _RC, reconstruct_blocks as _rb,
                                             attend_with_remat as _awr,
                                         )
+                                        # Lives in triton_fused_decode, not this module.
+                                        from native_core.sparse_decode.triton_fused_decode import (
+                                            _gather_routed_blocks_for_kernel as _grb,
+                                        )
                                         _ws = kv_manager.decode_workspace.setdefault(sid, {})
                                         _rc = _ws.get("_remat_cache")
                                         if _rc is None:
@@ -2709,9 +2713,8 @@ def apply_dkv_attention_patch(model, kv_manager):
                                                              current_version, _poolgen, _step)
                                         _hit = _rc.get(_rkey)
                                         if _hit is None:
-                                            _g = _gather_routed_blocks_for_kernel(
-                                                pool, block_indices, anchor_indices,
-                                                cos_all, sin_all)
+                                            _g = _grb(pool, block_indices,
+                                                      anchor_indices, cos_all, sin_all)
                                             _Km, _Vm = _rb(
                                                 _g["U"], _g["V_K"], _g["V_V"],
                                                 _g["anchors_K"], _g["anchors_V"],
